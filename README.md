@@ -15,6 +15,9 @@ Fly.io with a webhook.
    ```bash
    export TELEGRAM_BOT_TOKEN=xxx
    export WEBHOOK_URL=https://your-app.fly.dev
+
+   export DB_PATH=/data/db.sqlite
+
    python main.py
    ```
 
@@ -30,6 +33,9 @@ Fly.io with a webhook.
    fly secrets set TELEGRAM_BOT_TOKEN=xxx
    fly secrets set WEBHOOK_URL=https://<app>.fly.dev
    fly secrets set FOUR_O_TOKEN=xxxxx
+
+   fly secrets set DB_PATH=/data/db.sqlite
+
    ```
 3. Deploy:
    ```bash

@@ -12,7 +12,9 @@ from sqlmodel import Field, SQLModel, select
 
 logging.basicConfig(level=logging.INFO)
 
-DB_PATH = os.getenv("DB_PATH", "data/db.sqlite")
+
+DB_PATH = os.getenv("DB_PATH", "/data/db.sqlite")
+
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
 
 
