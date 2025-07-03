@@ -12,6 +12,7 @@ from sqlmodel import Field, SQLModel, select
 
 logging.basicConfig(level=logging.INFO)
 
+
 DB_PATH = os.getenv("DB_PATH", "/data/db.sqlite")
 
 
@@ -65,6 +66,7 @@ async def set_tz_offset(db: Database, value: str):
             setting = Setting(key="tz_offset", value=value)
             session.add(setting)
         await session.commit()
+
 
 
 def validate_offset(value: str) -> bool:
@@ -135,6 +137,7 @@ async def handle_requests(message: types.Message, db: Database, bot: Bot):
         pending = result.scalars().all()
         if not pending:
             await bot.send_message(message.chat.id, "No pending users")
+
             return
         buttons = [
             [
@@ -159,6 +162,7 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
         if not p:
             await callback.answer("Not found", show_alert=True)
             return
+
         if callback.data.startswith("approve"):
             session.add(User(user_id=uid, username=p.username, is_superadmin=False))
             await bot.send_message(uid, "You are approved")
@@ -188,6 +192,7 @@ def create_app() -> web.Application:
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is missing")
+
 
     webhook = os.getenv("WEBHOOK_URL")
     if not webhook:
@@ -221,9 +226,11 @@ def create_app() -> web.Application:
     )
     dp.message.register(tz_wrapper, Command("tz"))
 
+
     app = web.Application()
     SimpleRequestHandler(dp, bot).register(app, path="/webhook")
     setup_application(app, dp, bot=bot)
+
 
     async def on_startup(app: web.Application):
         await db.init()
@@ -231,6 +238,7 @@ def create_app() -> web.Application:
 
     async def on_shutdown(app: web.Application):
         await bot.session.close()
+
 
     app.on_startup.append(on_startup)
     app.on_shutdown.append(on_shutdown)
