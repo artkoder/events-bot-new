@@ -51,6 +51,7 @@ class Database:
         return AsyncSession(self.engine)
 
 
+
 async def get_tz_offset(db: Database) -> str:
     async with db.get_session() as session:
         result = await session.get(Setting, "tz_offset")
@@ -226,11 +227,9 @@ def create_app() -> web.Application:
     )
     dp.message.register(tz_wrapper, Command("tz"))
 
-
     app = web.Application()
     SimpleRequestHandler(dp, bot).register(app, path="/webhook")
     setup_application(app, dp, bot=bot)
-
 
     async def on_startup(app: web.Application):
         await db.init()
@@ -239,10 +238,10 @@ def create_app() -> web.Application:
     async def on_shutdown(app: web.Application):
         await bot.session.close()
 
-
     app.on_startup.append(on_startup)
     app.on_shutdown.append(on_shutdown)
     return app
+
 
 
 if __name__ == "__main__":
