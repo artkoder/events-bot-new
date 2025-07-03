@@ -11,11 +11,13 @@ Fly.io with a webhook.
    ```bash
    pip install -r requirements.txt
    ```
+
 2. Run locally (set `WEBHOOK_URL` to the public HTTPS address you plan to use):
    ```bash
    export TELEGRAM_BOT_TOKEN=xxx
    export WEBHOOK_URL=https://your-app.fly.dev
    export DB_PATH=/data/db.sqlite
+
    python main.py
    ```
 
@@ -26,12 +28,16 @@ Fly.io with a webhook.
    fly launch
    fly volumes create data --size 1
    ```
+
 2. Set secrets (the bot requires `WEBHOOK_URL` for webhook registration):
+
    ```bash
    fly secrets set TELEGRAM_BOT_TOKEN=xxx
    fly secrets set WEBHOOK_URL=https://<app>.fly.dev
    fly secrets set FOUR_O_TOKEN=xxxxx
+
    fly secrets set DB_PATH=/data/db.sqlite
+
    ```
 3. Deploy:
    ```bash
