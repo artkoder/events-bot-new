@@ -13,6 +13,9 @@ from main import (
     PendingUser,
     Setting,
     User,
+
+    create_app,
+
     handle_register,
     handle_start,
     handle_tz,
@@ -112,3 +115,13 @@ async def test_start_superadmin(tmp_path: Path):
     async with db.get_session() as session:
         user = await session.get(User, 1)
     assert user and user.is_superadmin
+
+
+
+def test_create_app_requires_webhook_url(monkeypatch):
+    monkeypatch.delenv("WEBHOOK_URL", raising=False)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:abc")
+
+    with pytest.raises(RuntimeError, match="WEBHOOK_URL is missing"):
+        create_app()
+

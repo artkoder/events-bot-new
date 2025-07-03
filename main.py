@@ -15,8 +15,6 @@ logging.basicConfig(level=logging.INFO)
 
 DB_PATH = os.getenv("DB_PATH", "/data/db.sqlite")
 
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
-
 
 class User(SQLModel, table=True):
     user_id: int = Field(primary_key=True)
@@ -41,6 +39,7 @@ class Setting(SQLModel, table=True):
     value: str
 
 
+
 class Database:
     def __init__(self, path: str):
         self.engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
@@ -51,7 +50,6 @@ class Database:
 
     def get_session(self) -> AsyncSession:
         return AsyncSession(self.engine)
-
 
 async def get_tz_offset(db: Database) -> str:
     async with db.get_session() as session:
@@ -191,6 +189,12 @@ def create_app() -> web.Application:
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is missing")
+
+
+    webhook = os.getenv("WEBHOOK_URL")
+    if not webhook:
+        raise RuntimeError("WEBHOOK_URL is missing")
+
     bot = Bot(token)
     dp = Dispatcher()
     db = Database(DB_PATH)
@@ -204,13 +208,16 @@ def create_app() -> web.Application:
     )
     dp.message.register(lambda m: handle_tz(m, db, bot), Command("tz"))
 
+
     app = web.Application()
     SimpleRequestHandler(dp, bot).register(app, path="/webhook")
     setup_application(app, dp, bot=bot)
 
     async def on_startup(app: web.Application):
         await db.init()
-        await bot.set_webhook(WEBHOOK_URL.rstrip("/") + "/webhook")
+
+        await bot.set_webhook(webhook.rstrip("/") + "/webhook")
+
 
     async def on_shutdown(app: web.Application):
         await bot.session.close()
