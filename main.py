@@ -39,7 +39,6 @@ class Setting(SQLModel, table=True):
     value: str
 
 
-
 class Database:
     def __init__(self, path: str):
         self.engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
@@ -50,6 +49,7 @@ class Database:
 
     def get_session(self) -> AsyncSession:
         return AsyncSession(self.engine)
+
 
 async def get_tz_offset(db: Database) -> str:
     async with db.get_session() as session:
@@ -66,6 +66,7 @@ async def set_tz_offset(db: Database, value: str):
             setting = Setting(key="tz_offset", value=value)
             session.add(setting)
         await session.commit()
+
 
 
 def validate_offset(value: str) -> bool:
@@ -136,6 +137,7 @@ async def handle_requests(message: types.Message, db: Database, bot: Bot):
         pending = result.scalars().all()
         if not pending:
             await bot.send_message(message.chat.id, "No pending users")
+
             return
         buttons = [
             [
@@ -160,6 +162,7 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
         if not p:
             await callback.answer("Not found", show_alert=True)
             return
+
         if callback.data.startswith("approve"):
             session.add(User(user_id=uid, username=p.username, is_superadmin=False))
             await bot.send_message(uid, "You are approved")
@@ -199,28 +202,43 @@ def create_app() -> web.Application:
     dp = Dispatcher()
     db = Database(DB_PATH)
 
-    dp.message.register(lambda m: handle_start(m, db, bot), Command("start"))
-    dp.message.register(lambda m: handle_register(m, db, bot), Command("register"))
-    dp.message.register(lambda m: handle_requests(m, db, bot), Command("requests"))
+    async def start_wrapper(message: types.Message):
+        await handle_start(message, db, bot)
+
+    async def register_wrapper(message: types.Message):
+        await handle_register(message, db, bot)
+
+    async def requests_wrapper(message: types.Message):
+        await handle_requests(message, db, bot)
+
+    async def tz_wrapper(message: types.Message):
+        await handle_tz(message, db, bot)
+
+    async def callback_wrapper(callback: types.CallbackQuery):
+        await process_request(callback, db, bot)
+
+    dp.message.register(start_wrapper, Command("start"))
+    dp.message.register(register_wrapper, Command("register"))
+    dp.message.register(requests_wrapper, Command("requests"))
     dp.callback_query.register(
-        lambda c: process_request(c, db, bot),
+        callback_wrapper,
         lambda c: c.data.startswith("approve") or c.data.startswith("reject"),
     )
-    dp.message.register(lambda m: handle_tz(m, db, bot), Command("tz"))
+    dp.message.register(tz_wrapper, Command("tz"))
 
 
     app = web.Application()
     SimpleRequestHandler(dp, bot).register(app, path="/webhook")
     setup_application(app, dp, bot=bot)
 
+
     async def on_startup(app: web.Application):
         await db.init()
-
         await bot.set_webhook(webhook.rstrip("/") + "/webhook")
-
 
     async def on_shutdown(app: web.Application):
         await bot.session.close()
+
 
     app.on_startup.append(on_startup)
     app.on_shutdown.append(on_shutdown)
