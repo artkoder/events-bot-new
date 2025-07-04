@@ -13,13 +13,6 @@ import asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlmodel import Field, SQLModel, select
 
-import json
-from telegraph import Telegraph
-import asyncio
-
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlmodel import Field, SQLModel, select
-
 logging.basicConfig(level=logging.INFO)
 
 DB_PATH = os.getenv("DB_PATH", "/data/db.sqlite")
@@ -140,6 +133,10 @@ async def parse_event_via_4o(text: str) -> dict:
         .get("content", "{}")
         .strip()
     )
+    if content.startswith("```"):
+        content = content.strip("`\n")
+        if content.lower().startswith("json"):
+            content = content[4:].strip()
     try:
         return json.loads(content)
     except json.JSONDecodeError:
@@ -274,14 +271,18 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
             if event:
                 await session.delete(event)
                 await session.commit()
+        offset = await get_tz_offset(db)
+        tz = offset_to_timezone(offset)
         target = datetime.strptime(day, "%Y-%m-%d").date()
-        text, markup = await build_events_message(db, target)
+        text, markup = await build_events_message(db, target, tz)
         await callback.message.edit_text(text, reply_markup=markup)
         await callback.answer("Deleted")
     elif data.startswith("nav:"):
         _, day = data.split(":")
+        offset = await get_tz_offset(db)
+        tz = offset_to_timezone(offset)
         target = datetime.strptime(day, "%Y-%m-%d").date()
-        text, markup = await build_events_message(db, target)
+        text, markup = await build_events_message(db, target, tz)
         await callback.message.edit_text(text, reply_markup=markup)
         await callback.answer()
 
@@ -348,7 +349,13 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
     await bot.send_message(message.chat.id, f"Event '{title}' added")
 
 
-async def build_events_message(db: Database, target_date: date):
+def format_day(day: date, tz: timezone) -> str:
+    if day == datetime.now(tz).date():
+        return "Сегодня"
+    return day.strftime("%d.%m.%Y")
+
+
+async def build_events_message(db: Database, target_date: date, tz: timezone):
     async with db.get_session() as session:
         result = await session.execute(
             select(Event).where(Event.date == target_date.isoformat()).order_by(Event.time)
@@ -378,13 +385,16 @@ async def build_events_message(db: Database, target_date: date):
         ]
     )
 
-    text = f"Events on {target_date.isoformat()}\n" + "\n".join(lines)
+    text = f"Events on {format_day(target_date, tz)}\n" + "\n".join(lines)
     markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard)
     return text, markup
 
 
 async def handle_events(message: types.Message, db: Database, bot: Bot):
     parts = message.text.split(maxsplit=1)
+    offset = await get_tz_offset(db)
+    tz = offset_to_timezone(offset)
+
     if len(parts) == 2:
         try:
             day = datetime.strptime(parts[1], "%Y-%m-%d").date()
@@ -392,8 +402,6 @@ async def handle_events(message: types.Message, db: Database, bot: Bot):
             await bot.send_message(message.chat.id, "Usage: /events YYYY-MM-DD")
             return
     else:
-        offset = await get_tz_offset(db)
-        tz = offset_to_timezone(offset)
         day = datetime.now(tz).date()
 
     async with db.get_session() as session:
@@ -401,7 +409,7 @@ async def handle_events(message: types.Message, db: Database, bot: Bot):
             await bot.send_message(message.chat.id, "Not authorized")
             return
 
-    text, markup = await build_events_message(db, day)
+    text, markup = await build_events_message(db, day, tz)
     await bot.send_message(message.chat.id, text, reply_markup=markup)
 
 

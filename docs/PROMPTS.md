@@ -18,6 +18,12 @@ location_address  - street address if present
 city              - city name
 ```
 
+Guidelines:
+- If the event text does not specify a year, assume it happens in the current
+  year.
+- Respond with **plain JSON only** &mdash; do not wrap the output in code
+  fences.
+
 All fields must be present. No additional text.
 
 Edit this file to tweak how requests are sent to 4o.

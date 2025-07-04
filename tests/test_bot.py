@@ -199,7 +199,7 @@ async def test_events_list(tmp_path: Path):
 
     assert bot.messages
     text = bot.messages[-1][1]
-    assert "Events on 2025-01-01" in text
+    assert "Events on 01.01.2025" in text
     assert "Party" in text
 
 
