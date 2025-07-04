@@ -21,6 +21,7 @@ from main import (
     handle_add_event_raw,
     handle_ask_4o,
     handle_events,
+    parse_event_via_4o,
 )
 
 
@@ -265,3 +266,34 @@ async def test_ask4o_not_admin(tmp_path: Path, monkeypatch):
     await handle_ask_4o(msg, db, bot)
 
     assert called is False
+
+
+@pytest.mark.asyncio
+async def test_parse_event_includes_date(monkeypatch):
+    called = {}
+
+    class DummySession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            pass
+
+        async def post(self, url, json=None, headers=None):
+            called["payload"] = json
+
+            class Resp:
+                def raise_for_status(self):
+                    pass
+
+                async def json(self):
+                    return {"choices": [{"message": {"content": "{}"}}]}
+
+            return Resp()
+
+    monkeypatch.setenv("FOUR_O_TOKEN", "x")
+    monkeypatch.setattr("main.ClientSession", DummySession)
+
+    await parse_event_via_4o("text")
+
+    assert "Today is" in called["payload"]["messages"][1]["content"]

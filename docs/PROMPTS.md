@@ -18,6 +18,10 @@ location_address  - street address if present
 city              - city name
 ```
 
+The user message will start with the current date, e.g. "Today is
+2025-07-05." Use this information to resolve missing years so that parsed
+events are never in the past.
+
 Guidelines:
 - If the event text does not specify a year, assume it happens in the current
   year.

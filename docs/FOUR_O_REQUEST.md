@@ -13,12 +13,14 @@ Payload:
   "model": "gpt-4o",
   "messages": [
     {"role": "system", "content": "<contents of PROMPTS.md>"},
-    {"role": "user", "content": "<original event text>"}
+    {"role": "user", "content": "Today is YYYY-MM-DD. <original event text>"}
   ]
 }
 ```
 
 The response must be JSON with the fields listed in `docs/PROMPTS.md`.
+The prefix "Today is YYYY-MM-DD." helps the model infer the correct year for
+dates that omit it.
 Edit this file or `docs/PROMPTS.md` to fine‑tune the request details.
 
 The command `/ask4o <text>` sends an arbitrary user message to the same

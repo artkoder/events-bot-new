@@ -114,11 +114,12 @@ async def parse_event_via_4o(text: str) -> dict:
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
     }
+    today = date.today().isoformat()
     payload = {
         "model": "gpt-4o",
         "messages": [
             {"role": "system", "content": prompt},
-            {"role": "user", "content": text},
+            {"role": "user", "content": f"Today is {today}. {text}"},
         ],
         "temperature": 0,
     }

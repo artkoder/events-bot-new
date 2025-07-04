@@ -12,3 +12,6 @@
 
 ## v0.2.0 – Event listing
 - `/events` command lists events by day with inline delete buttons.
+
+## v0.2.1 – Fix 4o date parsing
+- Include the current date in LLM requests so events default to the correct year.
