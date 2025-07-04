@@ -325,7 +325,8 @@ async def handle_add_event(message: types.Message, db: Database, bot: Bot):
     async with db.get_session() as session:
         session.add(event)
         await session.commit()
-    await bot.send_message(message.chat.id, f"Event '{event.title}' added")
+        title = event.title
+    await bot.send_message(message.chat.id, f"Event '{title}' added")
 
 
 async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
