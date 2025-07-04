@@ -6,13 +6,16 @@ from typing import Optional
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+
 from aiohttp import web, ClientSession
 from telegraph import Telegraph
 import asyncio
+
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlmodel import Field, SQLModel, select
 
 logging.basicConfig(level=logging.INFO)
+
 
 DB_PATH = os.getenv("DB_PATH", "/data/db.sqlite")
 
@@ -71,6 +74,7 @@ async def get_tz_offset(db: Database) -> str:
         return result.value if result else "+00:00"
 
 
+
 async def set_tz_offset(db: Database, value: str):
     async with db.get_session() as session:
         setting = await session.get(Setting, "tz_offset")
@@ -82,6 +86,7 @@ async def set_tz_offset(db: Database, value: str):
         await session.commit()
 
 
+
 def validate_offset(value: str) -> bool:
     if len(value) != 6 or value[0] not in "+-" or value[3] != ":":
         return False
@@ -91,6 +96,7 @@ def validate_offset(value: str) -> bool:
         return 0 <= h <= 14 and 0 <= m < 60
     except ValueError:
         return False
+
 
 
 async def parse_event_via_4o(text: str) -> dict:
@@ -121,6 +127,7 @@ async def ask_4o(text: str) -> str:
         if isinstance(data, dict):
             return data.get("response") or str(data)
         return str(data)
+
 
 
 async def handle_start(message: types.Message, db: Database, bot: Bot):
@@ -180,6 +187,7 @@ async def handle_requests(message: types.Message, db: Database, bot: Bot):
         pending = result.scalars().all()
         if not pending:
             await bot.send_message(message.chat.id, "No pending users")
+
             return
         buttons = [
             [
@@ -204,6 +212,7 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
         if not p:
             await callback.answer("Not found", show_alert=True)
             return
+
         if callback.data.startswith("approve"):
             session.add(User(user_id=uid, username=p.username, is_superadmin=False))
             await bot.send_message(uid, "You are approved")
@@ -227,6 +236,7 @@ async def handle_tz(message: types.Message, db: Database, bot: Bot):
             return
     await set_tz_offset(db, parts[1])
     await bot.send_message(message.chat.id, f"Timezone set to {parts[1]}")
+
 
 
 async def handle_add_event(message: types.Message, db: Database, bot: Bot):
@@ -310,10 +320,12 @@ async def telegraph_test():
     logging.info("Edited %s", page["url"])
 
 
+
 def create_app() -> web.Application:
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is missing")
+
 
     webhook = os.getenv("WEBHOOK_URL")
     if not webhook:
@@ -375,6 +387,14 @@ def create_app() -> web.Application:
     return app
 
 
+    async def on_shutdown(app: web.Application):
+        await bot.session.close()
+
+    app.on_startup.append(on_startup)
+    app.on_shutdown.append(on_shutdown)
+    return app
+
+
 if __name__ == "__main__":
     import sys
 
@@ -382,3 +402,4 @@ if __name__ == "__main__":
         asyncio.run(telegraph_test())
     else:
         web.run_app(create_app(), port=int(os.getenv("PORT", 8080)))
+
