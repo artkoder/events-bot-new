@@ -5,7 +5,11 @@ Telegram bot for publishing event announcements.
 This is an MVP using **aiogram 3** and SQLite. It is designed for deployment on
 Fly.io with a webhook.
 
+
+See `docs/COMMANDS.md` for available bot commands.
+
 ## Quick start
+
 
 1. Install dependencies:
    ```bash
@@ -30,14 +34,11 @@ Fly.io with a webhook.
    ```
 
 2. Set secrets (the bot requires `WEBHOOK_URL` for webhook registration):
-
    ```bash
    fly secrets set TELEGRAM_BOT_TOKEN=xxx
    fly secrets set WEBHOOK_URL=https://<app>.fly.dev
    fly secrets set FOUR_O_TOKEN=xxxxx
-
    fly secrets set DB_PATH=/data/db.sqlite
-
    ```
 3. Deploy:
    ```bash
@@ -45,9 +46,16 @@ Fly.io with a webhook.
    ```
 
 ## Files
-- `docs/USER_STORIES.md` – full list of user stories.
+- `docs/COMMANDS.md` – full list of bot commands.
+- `docs/USER_STORIES.md` – user stories.
 - `docs/ARCHITECTURE.md` – system architecture.
-- `docs/PROMPTS.md` – prompt for model 4o.
+- `docs/PROMPTS.md` – base prompt for model 4o (edit this for parsing rules).
 - `docs/FOUR_O_REQUEST.md` – how requests to 4o are formed.
 - `CHANGELOG.md` – project history.
+
+To verify Telegraph access run:
+```bash
+python main.py test_telegraph
+```
+
 

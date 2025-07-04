@@ -6,7 +6,11 @@ from typing import Optional
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
-from aiohttp import web
+
+from aiohttp import web, ClientSession
+from telegraph import Telegraph
+import asyncio
+
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlmodel import Field, SQLModel, select
 
@@ -39,6 +43,19 @@ class Setting(SQLModel, table=True):
     value: str
 
 
+class Event(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    title: str
+    description: str
+    festival: Optional[str] = None
+    date: str
+    time: str
+    location_name: str
+    location_address: Optional[str] = None
+    city: Optional[str] = None
+    source_text: str
+
+
 class Database:
     def __init__(self, path: str):
         self.engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
@@ -51,11 +68,11 @@ class Database:
         return AsyncSession(self.engine)
 
 
-
 async def get_tz_offset(db: Database) -> str:
     async with db.get_session() as session:
         result = await session.get(Setting, "tz_offset")
         return result.value if result else "+00:00"
+
 
 
 async def set_tz_offset(db: Database, value: str):
@@ -79,6 +96,38 @@ def validate_offset(value: str) -> bool:
         return 0 <= h <= 14 and 0 <= m < 60
     except ValueError:
         return False
+
+
+
+async def parse_event_via_4o(text: str) -> dict:
+    token = os.getenv("FOUR_O_TOKEN")
+    if not token:
+        raise RuntimeError("FOUR_O_TOKEN is missing")
+    url = os.getenv("FOUR_O_URL", "https://api.example.com/parse")
+    prompt_path = os.path.join("docs", "PROMPTS.md")
+    with open(prompt_path, "r", encoding="utf-8") as f:
+        prompt = f.read()
+    headers = {"Authorization": f"Bearer {token}"}
+    async with ClientSession() as session:
+        resp = await session.post(url, json={"text": text, "prompt": prompt}, headers=headers)
+        resp.raise_for_status()
+        return await resp.json()
+
+
+async def ask_4o(text: str) -> str:
+    token = os.getenv("FOUR_O_TOKEN")
+    if not token:
+        raise RuntimeError("FOUR_O_TOKEN is missing")
+    url = os.getenv("FOUR_O_URL", "https://api.example.com/parse")
+    headers = {"Authorization": f"Bearer {token}"}
+    async with ClientSession() as session:
+        resp = await session.post(url, json={"text": text}, headers=headers)
+        resp.raise_for_status()
+        data = await resp.json()
+        if isinstance(data, dict):
+            return data.get("response") or str(data)
+        return str(data)
+
 
 
 async def handle_start(message: types.Message, db: Database, bot: Bot):
@@ -189,6 +238,89 @@ async def handle_tz(message: types.Message, db: Database, bot: Bot):
     await bot.send_message(message.chat.id, f"Timezone set to {parts[1]}")
 
 
+
+async def handle_add_event(message: types.Message, db: Database, bot: Bot):
+    text = message.text.split(maxsplit=1)
+    if len(text) != 2:
+        await bot.send_message(message.chat.id, "Usage: /addevent <text>")
+        return
+    try:
+        data = await parse_event_via_4o(text[1])
+    except Exception as e:
+        await bot.send_message(message.chat.id, f"LLM error: {e}")
+        return
+    event = Event(
+        title=data.get("title", ""),
+        description=data.get("short_description", ""),
+        festival=data.get("festival") or None,
+        date=data.get("date", ""),
+        time=data.get("time", ""),
+        location_name=data.get("location_name", ""),
+        location_address=data.get("location_address"),
+        city=data.get("city"),
+        source_text=text[1],
+    )
+    async with db.get_session() as session:
+        session.add(event)
+        await session.commit()
+    await bot.send_message(message.chat.id, f"Event '{event.title}' added")
+
+
+async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
+    parts = message.text.split(maxsplit=1)
+    if len(parts) != 2 or '|' not in parts[1]:
+        await bot.send_message(message.chat.id, "Usage: /addevent_raw title|date|time|location")
+        return
+    title, date, time, location = (p.strip() for p in parts[1].split('|', 3))
+    event = Event(
+        title=title,
+        description="",
+        festival=None,
+        date=date,
+        time=time,
+        location_name=location,
+        source_text=parts[1],
+    )
+    async with db.get_session() as session:
+        session.add(event)
+        await session.commit()
+    await bot.send_message(message.chat.id, f"Event '{title}' added")
+
+
+async def handle_ask_4o(message: types.Message, db: Database, bot: Bot):
+    parts = message.text.split(maxsplit=1)
+    if len(parts) != 2:
+        await bot.send_message(message.chat.id, "Usage: /ask4o <text>")
+        return
+    async with db.get_session() as session:
+        user = await session.get(User, message.from_user.id)
+        if not user or not user.is_superadmin:
+            await bot.send_message(message.chat.id, "Not authorized")
+            return
+    try:
+        answer = await ask_4o(parts[1])
+    except Exception as e:
+        await bot.send_message(message.chat.id, f"LLM error: {e}")
+        return
+    await bot.send_message(message.chat.id, answer)
+
+
+async def telegraph_test():
+    token = os.getenv("TELEGRAPH_TOKEN")
+    if not token:
+        logging.error("TELEGRAPH_TOKEN is missing")
+        return
+    tg = Telegraph()
+    tg.access_token = token
+    page = await asyncio.to_thread(tg.create_page, "Test Page", html="<p>test</p>")
+    logging.info("Created %s", page["url"])
+    await asyncio.to_thread(
+        tg.edit_page, page["path"], title="Test Page", html_content="<p>updated</p>"
+    )
+    logging.info("Edited %s", page["url"])
+
+
+
 def create_app() -> web.Application:
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
@@ -218,6 +350,15 @@ def create_app() -> web.Application:
     async def callback_wrapper(callback: types.CallbackQuery):
         await process_request(callback, db, bot)
 
+    async def add_event_wrapper(message: types.Message):
+        await handle_add_event(message, db, bot)
+
+    async def add_event_raw_wrapper(message: types.Message):
+        await handle_add_event_raw(message, db, bot)
+
+    async def ask_4o_wrapper(message: types.Message):
+        await handle_ask_4o(message, db, bot)
+
     dp.message.register(start_wrapper, Command("start"))
     dp.message.register(register_wrapper, Command("register"))
     dp.message.register(requests_wrapper, Command("requests"))
@@ -226,6 +367,9 @@ def create_app() -> web.Application:
         lambda c: c.data.startswith("approve") or c.data.startswith("reject"),
     )
     dp.message.register(tz_wrapper, Command("tz"))
+    dp.message.register(add_event_wrapper, Command("addevent"))
+    dp.message.register(add_event_raw_wrapper, Command("addevent_raw"))
+    dp.message.register(ask_4o_wrapper, Command("ask4o"))
 
     app = web.Application()
     SimpleRequestHandler(dp, bot).register(app, path="/webhook")
@@ -243,6 +387,19 @@ def create_app() -> web.Application:
     return app
 
 
+    async def on_shutdown(app: web.Application):
+        await bot.session.close()
+
+    app.on_startup.append(on_startup)
+    app.on_shutdown.append(on_shutdown)
+    return app
+
 
 if __name__ == "__main__":
-    web.run_app(create_app(), port=int(os.getenv("PORT", 8080)))
+    import sys
+
+    if len(sys.argv) > 1 and sys.argv[1] == "test_telegraph":
+        asyncio.run(telegraph_test())
+    else:
+        web.run_app(create_app(), port=int(os.getenv("PORT", 8080)))
+

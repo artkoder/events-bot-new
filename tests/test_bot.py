@@ -14,11 +14,14 @@ from main import (
     Setting,
     User,
 
+    Event,
     create_app,
-
     handle_register,
     handle_start,
     handle_tz,
+    handle_add_event_raw,
+    handle_ask_4o,
+
 )
 
 
@@ -124,4 +127,94 @@ def test_create_app_requires_webhook_url(monkeypatch):
 
     with pytest.raises(RuntimeError, match="WEBHOOK_URL is missing"):
         create_app()
+
+
+
+@pytest.mark.asyncio
+async def test_add_event_raw(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    msg = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "M"},
+            "text": "/addevent_raw Party|2025-01-01|18:00|Club",
+        }
+    )
+
+    await handle_add_event_raw(msg, db, bot)
+
+    async with db.get_session() as session:
+        events = (await session.execute(select(Event))).scalars().all()
+
+    assert len(events) == 1
+    assert events[0].title == "Party"
+
+
+@pytest.mark.asyncio
+async def test_ask4o_admin(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    start_msg = types.Message.model_validate({
+        "message_id": 1,
+        "date": 0,
+        "chat": {"id": 1, "type": "private"},
+        "from": {"id": 1, "is_bot": False, "first_name": "A"},
+        "text": "/start",
+    })
+    await handle_start(start_msg, db, bot)
+
+    called = {}
+
+    async def fake_ask(text: str) -> str:
+        called["text"] = text
+        return "ok"
+
+    monkeypatch.setattr("main.ask_4o", fake_ask)
+
+    msg = types.Message.model_validate({
+        "message_id": 2,
+        "date": 0,
+        "chat": {"id": 1, "type": "private"},
+        "from": {"id": 1, "is_bot": False, "first_name": "A"},
+        "text": "/ask4o hello",
+    })
+
+    await handle_ask_4o(msg, db, bot)
+
+    assert called.get("text") == "hello"
+
+
+@pytest.mark.asyncio
+async def test_ask4o_not_admin(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    called = False
+
+    async def fake_ask(text: str) -> str:
+        nonlocal called
+        called = True
+        return "ok"
+
+    monkeypatch.setattr("main.ask_4o", fake_ask)
+
+    msg = types.Message.model_validate({
+        "message_id": 1,
+        "date": 0,
+        "chat": {"id": 2, "type": "private"},
+        "from": {"id": 2, "is_bot": False, "first_name": "B"},
+        "text": "/ask4o hi",
+    })
+
+    await handle_ask_4o(msg, db, bot)
+
+    assert called is False
 

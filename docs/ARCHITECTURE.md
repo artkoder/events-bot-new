@@ -11,5 +11,7 @@ The bot is built with **aiogram 3** and runs on Fly.io using a webhook.
   `/data`.
 
 
-For PR-1 the bot implements registration queue and timezone setting. Future
-sprints will extend it with event parsing and Telegraph pages.
+For PR‑1 the bot implements registration queue and timezone setting. Basic event
+creation (`/addevent` and `/addevent_raw`) stores events in SQLite. A helper
+`python main.py test_telegraph` checks Telegraph access.
+
