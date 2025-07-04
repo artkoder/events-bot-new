@@ -326,8 +326,26 @@ async def handle_add_event(message: types.Message, db: Database, bot: Bot):
     async with db.get_session() as session:
         session.add(event)
         await session.commit()
-        title = event.title
-    await bot.send_message(message.chat.id, f"Event '{title}' added")
+        saved = event
+
+    lines = [
+        f"title: {saved.title}",
+        f"date: {saved.date}",
+        f"time: {saved.time}",
+        f"location_name: {saved.location_name}",
+    ]
+    if saved.location_address:
+        lines.append(f"location_address: {saved.location_address}")
+    if saved.city:
+        lines.append(f"city: {saved.city}")
+    if saved.festival:
+        lines.append(f"festival: {saved.festival}")
+    if saved.description:
+        lines.append(f"description: {saved.description}")
+    await bot.send_message(
+        message.chat.id,
+        "Event added\n" + "\n".join(lines),
+    )
 
 
 async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
@@ -348,7 +366,16 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
     async with db.get_session() as session:
         session.add(event)
         await session.commit()
-    await bot.send_message(message.chat.id, f"Event '{title}' added")
+    lines = [
+        f"title: {event.title}",
+        f"date: {event.date}",
+        f"time: {event.time}",
+        f"location_name: {event.location_name}",
+    ]
+    await bot.send_message(
+        message.chat.id,
+        "Event added\n" + "\n".join(lines),
+    )
 
 
 def format_day(day: date, tz: timezone) -> str:
@@ -398,9 +425,14 @@ async def handle_events(message: types.Message, db: Database, bot: Bot):
     tz = offset_to_timezone(offset)
 
     if len(parts) == 2:
-        try:
-            day = datetime.strptime(parts[1], "%Y-%m-%d").date()
-        except ValueError:
+        text = parts[1]
+        for fmt in ("%Y-%m-%d", "%d.%m.%Y"):
+            try:
+                day = datetime.strptime(text, fmt).date()
+                break
+            except ValueError:
+                day = None
+        if day is None:
             await bot.send_message(message.chat.id, "Usage: /events YYYY-MM-DD")
             return
     else:
