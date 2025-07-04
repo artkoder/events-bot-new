@@ -3,17 +3,22 @@ import os
 from datetime import datetime
 from typing import Optional
 
+
+
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web, ClientSession
+
 import json
 from telegraph import Telegraph
 import asyncio
+
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlmodel import Field, SQLModel, select
 
 logging.basicConfig(level=logging.INFO)
+
 
 DB_PATH = os.getenv("DB_PATH", "/data/db.sqlite")
 
@@ -199,6 +204,7 @@ async def handle_register(message: types.Message, db: Database, bot: Bot):
             await bot.send_message(
                 message.chat.id, "Registration queue full, try later"
             )
+
             return
         session.add(
             PendingUser(
@@ -207,6 +213,7 @@ async def handle_register(message: types.Message, db: Database, bot: Bot):
         )
         await session.commit()
         await bot.send_message(message.chat.id, "Registration pending approval")
+
 
 
 async def handle_requests(message: types.Message, db: Database, bot: Bot):
@@ -265,6 +272,7 @@ async def handle_tz(message: types.Message, db: Database, bot: Bot):
             return
     await set_tz_offset(db, parts[1])
     await bot.send_message(message.chat.id, f"Timezone set to {parts[1]}")
+
 
 
 async def handle_add_event(message: types.Message, db: Database, bot: Bot):
@@ -333,6 +341,7 @@ async def handle_ask_4o(message: types.Message, db: Database, bot: Bot):
     await bot.send_message(message.chat.id, answer)
 
 
+
 async def telegraph_test():
     token = os.getenv("TELEGRAPH_TOKEN")
     if not token:
@@ -348,10 +357,12 @@ async def telegraph_test():
     logging.info("Edited %s", page["url"])
 
 
+
 def create_app() -> web.Application:
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is missing")
+
 
     webhook = os.getenv("WEBHOOK_URL")
     if not webhook:
@@ -384,8 +395,10 @@ def create_app() -> web.Application:
     async def add_event_raw_wrapper(message: types.Message):
         await handle_add_event_raw(message, db, bot)
 
+
     async def ask_4o_wrapper(message: types.Message):
         await handle_ask_4o(message, db, bot)
+
 
     dp.message.register(start_wrapper, Command("start"))
     dp.message.register(register_wrapper, Command("register"))
@@ -409,6 +422,7 @@ def create_app() -> web.Application:
         hook = webhook.rstrip("/") + "/webhook"
         logging.info("Setting webhook to %s", hook)
         await bot.set_webhook(hook)
+
 
     async def on_shutdown(app: web.Application):
         await bot.session.close()

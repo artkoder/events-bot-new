@@ -5,7 +5,9 @@
 - Moderator registration queue with approve/reject.
 - Global timezone setting via `/tz`.
 
+
 ## v0.1.1 – Logging and 4o request updates
 - Added detailed logging for startup and 4o requests.
 - Switched default 4o endpoint to OpenAI chat completions.
 - Documentation now lists `FOUR_O_URL` secret.
+

@@ -13,6 +13,7 @@ from main import (
     PendingUser,
     Setting,
     User,
+
     Event,
     create_app,
     handle_register,
@@ -20,6 +21,7 @@ from main import (
     handle_tz,
     handle_add_event_raw,
     handle_ask_4o,
+
 )
 
 
@@ -118,12 +120,14 @@ async def test_start_superadmin(tmp_path: Path):
     assert user and user.is_superadmin
 
 
+
 def test_create_app_requires_webhook_url(monkeypatch):
     monkeypatch.delenv("WEBHOOK_URL", raising=False)
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:abc")
 
     with pytest.raises(RuntimeError, match="WEBHOOK_URL is missing"):
         create_app()
+
 
 
 @pytest.mark.asyncio
@@ -213,3 +217,4 @@ async def test_ask4o_not_admin(tmp_path: Path, monkeypatch):
     await handle_ask_4o(msg, db, bot)
 
     assert called is False
+
