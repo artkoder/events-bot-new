@@ -63,7 +63,8 @@ class Database:
             await conn.run_sync(SQLModel.metadata.create_all)
 
     def get_session(self) -> AsyncSession:
-        return AsyncSession(self.engine)
+        """Create a new session with attributes kept after commit."""
+        return AsyncSession(self.engine, expire_on_commit=False)
 
 
 async def get_tz_offset(db: Database) -> str:
