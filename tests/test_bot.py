@@ -13,7 +13,6 @@ from main import (
     PendingUser,
     Setting,
     User,
-
     Event,
     create_app,
     handle_register,
@@ -21,13 +20,17 @@ from main import (
     handle_tz,
     handle_add_event_raw,
     handle_ask_4o,
-
+    handle_events,
 )
 
 
 class DummyBot(Bot):
-    async def send_message(self, *args, **kwargs):
-        pass
+    def __init__(self, token: str):
+        super().__init__(token)
+        self.messages = []
+
+    async def send_message(self, chat_id, text, **kwargs):
+        self.messages.append((chat_id, text))
 
 
 @pytest.mark.asyncio
@@ -120,14 +123,12 @@ async def test_start_superadmin(tmp_path: Path):
     assert user and user.is_superadmin
 
 
-
 def test_create_app_requires_webhook_url(monkeypatch):
     monkeypatch.delenv("WEBHOOK_URL", raising=False)
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:abc")
 
     with pytest.raises(RuntimeError, match="WEBHOOK_URL is missing"):
         create_app()
-
 
 
 @pytest.mark.asyncio
@@ -153,6 +154,53 @@ async def test_add_event_raw(tmp_path: Path):
 
     assert len(events) == 1
     assert events[0].title == "Party"
+
+
+@pytest.mark.asyncio
+async def test_events_list(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    start_msg = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "/start",
+        }
+    )
+    await handle_start(start_msg, db, bot)
+
+    add_msg = types.Message.model_validate(
+        {
+            "message_id": 2,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "/addevent_raw Party|2025-01-01|18:00|Club",
+        }
+    )
+    await handle_add_event_raw(add_msg, db, bot)
+
+    bot.messages.clear()
+    list_msg = types.Message.model_validate(
+        {
+            "message_id": 3,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "/events 2025-01-01",
+        }
+    )
+
+    await handle_events(list_msg, db, bot)
+
+    assert bot.messages
+    text = bot.messages[-1][1]
+    assert "Events on 2025-01-01" in text
+    assert "Party" in text
 
 
 @pytest.mark.asyncio
@@ -217,4 +265,3 @@ async def test_ask4o_not_admin(tmp_path: Path, monkeypatch):
     await handle_ask_4o(msg, db, bot)
 
     assert called is False
-

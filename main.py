@@ -1,14 +1,17 @@
 import logging
 import os
-from datetime import datetime
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
-
-
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web, ClientSession
+import json
+from telegraph import Telegraph
+import asyncio
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlmodel import Field, SQLModel, select
 
 import json
 from telegraph import Telegraph
@@ -18,7 +21,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlmodel import Field, SQLModel, select
 
 logging.basicConfig(level=logging.INFO)
-
 
 DB_PATH = os.getenv("DB_PATH", "/data/db.sqlite")
 
@@ -97,6 +99,13 @@ def validate_offset(value: str) -> bool:
         return 0 <= h <= 14 and 0 <= m < 60
     except ValueError:
         return False
+
+
+def offset_to_timezone(value: str) -> timezone:
+    sign = 1 if value[0] == "+" else -1
+    hours = int(value[1:3])
+    minutes = int(value[4:6])
+    return timezone(sign * timedelta(hours=hours, minutes=minutes))
 
 
 async def parse_event_via_4o(text: str) -> dict:
@@ -204,7 +213,6 @@ async def handle_register(message: types.Message, db: Database, bot: Bot):
             await bot.send_message(
                 message.chat.id, "Registration queue full, try later"
             )
-
             return
         session.add(
             PendingUser(
@@ -213,7 +221,6 @@ async def handle_register(message: types.Message, db: Database, bot: Bot):
         )
         await session.commit()
         await bot.send_message(message.chat.id, "Registration pending approval")
-
 
 
 async def handle_requests(message: types.Message, db: Database, bot: Bot):
@@ -243,21 +250,40 @@ async def handle_requests(message: types.Message, db: Database, bot: Bot):
 
 
 async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot):
-    uid = int(callback.data.split(":", 1)[1])
-    async with db.get_session() as session:
-        p = await session.get(PendingUser, uid)
-        if not p:
-            await callback.answer("Not found", show_alert=True)
-            return
-        if callback.data.startswith("approve"):
-            session.add(User(user_id=uid, username=p.username, is_superadmin=False))
-            await bot.send_message(uid, "You are approved")
-        else:
-            session.add(RejectedUser(user_id=uid, username=p.username))
-            await bot.send_message(uid, "Your registration was rejected")
-        await session.delete(p)
-        await session.commit()
-        await callback.answer("Done")
+    data = callback.data
+    if data.startswith("approve") or data.startswith("reject"):
+        uid = int(data.split(":", 1)[1])
+        async with db.get_session() as session:
+            p = await session.get(PendingUser, uid)
+            if not p:
+                await callback.answer("Not found", show_alert=True)
+                return
+            if data.startswith("approve"):
+                session.add(User(user_id=uid, username=p.username, is_superadmin=False))
+                await bot.send_message(uid, "You are approved")
+            else:
+                session.add(RejectedUser(user_id=uid, username=p.username))
+                await bot.send_message(uid, "Your registration was rejected")
+            await session.delete(p)
+            await session.commit()
+            await callback.answer("Done")
+    elif data.startswith("del:"):
+        _, eid, day = data.split(":")
+        async with db.get_session() as session:
+            event = await session.get(Event, int(eid))
+            if event:
+                await session.delete(event)
+                await session.commit()
+        target = datetime.strptime(day, "%Y-%m-%d").date()
+        text, markup = await build_events_message(db, target)
+        await callback.message.edit_text(text, reply_markup=markup)
+        await callback.answer("Deleted")
+    elif data.startswith("nav:"):
+        _, day = data.split(":")
+        target = datetime.strptime(day, "%Y-%m-%d").date()
+        text, markup = await build_events_message(db, target)
+        await callback.message.edit_text(text, reply_markup=markup)
+        await callback.answer()
 
 
 async def handle_tz(message: types.Message, db: Database, bot: Bot):
@@ -272,7 +298,6 @@ async def handle_tz(message: types.Message, db: Database, bot: Bot):
             return
     await set_tz_offset(db, parts[1])
     await bot.send_message(message.chat.id, f"Timezone set to {parts[1]}")
-
 
 
 async def handle_add_event(message: types.Message, db: Database, bot: Bot):
@@ -323,6 +348,63 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
     await bot.send_message(message.chat.id, f"Event '{title}' added")
 
 
+async def build_events_message(db: Database, target_date: date):
+    async with db.get_session() as session:
+        result = await session.execute(
+            select(Event).where(Event.date == target_date.isoformat()).order_by(Event.time)
+        )
+        events = result.scalars().all()
+
+    lines = [
+        f"{e.id}. {e.title} {e.time} {e.location_name}"
+        for e in events
+    ] or ["No events"]
+
+    keyboard = [
+        [
+            types.InlineKeyboardButton(
+                text="\u274C", callback_data=f"del:{e.id}:{target_date.isoformat()}"
+            )
+        ]
+        for e in events
+    ]
+
+    prev_day = target_date - timedelta(days=1)
+    next_day = target_date + timedelta(days=1)
+    keyboard.append(
+        [
+            types.InlineKeyboardButton(text="\u25C0", callback_data=f"nav:{prev_day.isoformat()}"),
+            types.InlineKeyboardButton(text="\u25B6", callback_data=f"nav:{next_day.isoformat()}"),
+        ]
+    )
+
+    text = f"Events on {target_date.isoformat()}\n" + "\n".join(lines)
+    markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard)
+    return text, markup
+
+
+async def handle_events(message: types.Message, db: Database, bot: Bot):
+    parts = message.text.split(maxsplit=1)
+    if len(parts) == 2:
+        try:
+            day = datetime.strptime(parts[1], "%Y-%m-%d").date()
+        except ValueError:
+            await bot.send_message(message.chat.id, "Usage: /events YYYY-MM-DD")
+            return
+    else:
+        offset = await get_tz_offset(db)
+        tz = offset_to_timezone(offset)
+        day = datetime.now(tz).date()
+
+    async with db.get_session() as session:
+        if not await session.get(User, message.from_user.id):
+            await bot.send_message(message.chat.id, "Not authorized")
+            return
+
+    text, markup = await build_events_message(db, day)
+    await bot.send_message(message.chat.id, text, reply_markup=markup)
+
+
 async def handle_ask_4o(message: types.Message, db: Database, bot: Bot):
     parts = message.text.split(maxsplit=1)
     if len(parts) != 2:
@@ -341,7 +423,6 @@ async def handle_ask_4o(message: types.Message, db: Database, bot: Bot):
     await bot.send_message(message.chat.id, answer)
 
 
-
 async def telegraph_test():
     token = os.getenv("TELEGRAPH_TOKEN")
     if not token:
@@ -357,12 +438,10 @@ async def telegraph_test():
     logging.info("Edited %s", page["url"])
 
 
-
 def create_app() -> web.Application:
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is missing")
-
 
     webhook = os.getenv("WEBHOOK_URL")
     if not webhook:
@@ -395,22 +474,27 @@ def create_app() -> web.Application:
     async def add_event_raw_wrapper(message: types.Message):
         await handle_add_event_raw(message, db, bot)
 
-
     async def ask_4o_wrapper(message: types.Message):
         await handle_ask_4o(message, db, bot)
 
+    async def list_events_wrapper(message: types.Message):
+        await handle_events(message, db, bot)
 
     dp.message.register(start_wrapper, Command("start"))
     dp.message.register(register_wrapper, Command("register"))
     dp.message.register(requests_wrapper, Command("requests"))
     dp.callback_query.register(
         callback_wrapper,
-        lambda c: c.data.startswith("approve") or c.data.startswith("reject"),
+        lambda c: c.data.startswith("approve")
+        or c.data.startswith("reject")
+        or c.data.startswith("del:")
+        or c.data.startswith("nav:"),
     )
     dp.message.register(tz_wrapper, Command("tz"))
     dp.message.register(add_event_wrapper, Command("addevent"))
     dp.message.register(add_event_raw_wrapper, Command("addevent_raw"))
     dp.message.register(ask_4o_wrapper, Command("ask4o"))
+    dp.message.register(list_events_wrapper, Command("events"))
 
     app = web.Application()
     SimpleRequestHandler(dp, bot).register(app, path="/webhook")
@@ -422,7 +506,6 @@ def create_app() -> web.Application:
         hook = webhook.rstrip("/") + "/webhook"
         logging.info("Setting webhook to %s", hook)
         await bot.set_webhook(hook)
-
 
     async def on_shutdown(app: web.Application):
         await bot.session.close()

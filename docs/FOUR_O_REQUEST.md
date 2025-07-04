@@ -1,6 +1,5 @@
 # 4o Request Guide
 
-
 This document describes how the bot communicates with model **4o**.
 
 Requests are sent as HTTP `POST` to the URL stored in the environment variable
@@ -17,14 +16,11 @@ Payload:
     {"role": "user", "content": "<original event text>"}
   ]
 }
-
 ```
 
 The response must be JSON with the fields listed in `docs/PROMPTS.md`.
 Edit this file or `docs/PROMPTS.md` to fine‑tune the request details.
 
-
 The command `/ask4o <text>` sends an arbitrary user message to the same
 endpoint and returns the assistant reply. It is intended for quick diagnostics
 and available only to the superadmin.
-
