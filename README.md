@@ -6,6 +6,7 @@ This is an MVP using **aiogram 3** and SQLite. It is designed for deployment on
 Fly.io with a webhook.
 
 
+
 See `docs/COMMANDS.md` for available bot commands.
 
 ## Quick start
@@ -22,10 +23,14 @@ See `docs/COMMANDS.md` for available bot commands.
    export WEBHOOK_URL=https://your-app.fly.dev
    export DB_PATH=/data/db.sqlite
 
+   export FOUR_O_TOKEN=sk-...
+   export FOUR_O_URL=https://api.openai.com/v1/chat/completions
+
    python main.py
    ```
 
 ## Deployment on Fly.io
+
 
 1. Initialize app (once):
    ```bash
@@ -38,6 +43,8 @@ See `docs/COMMANDS.md` for available bot commands.
    fly secrets set TELEGRAM_BOT_TOKEN=xxx
    fly secrets set WEBHOOK_URL=https://<app>.fly.dev
    fly secrets set FOUR_O_TOKEN=xxxxx
+   fly secrets set FOUR_O_URL=https://api.openai.com/v1/chat/completions
+
    fly secrets set DB_PATH=/data/db.sqlite
    ```
 3. Deploy:

@@ -3,11 +3,14 @@ import os
 from datetime import datetime
 from typing import Optional
 
+
+
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
-
 from aiohttp import web, ClientSession
+
+import json
 from telegraph import Telegraph
 import asyncio
 
@@ -74,7 +77,6 @@ async def get_tz_offset(db: Database) -> str:
         return result.value if result else "+00:00"
 
 
-
 async def set_tz_offset(db: Database, value: str):
     async with db.get_session() as session:
         setting = await session.get(Setting, "tz_offset")
@@ -84,7 +86,6 @@ async def set_tz_offset(db: Database, value: str):
             setting = Setting(key="tz_offset", value=value)
             session.add(setting)
         await session.commit()
-
 
 
 def validate_offset(value: str) -> bool:
@@ -98,36 +99,71 @@ def validate_offset(value: str) -> bool:
         return False
 
 
-
 async def parse_event_via_4o(text: str) -> dict:
     token = os.getenv("FOUR_O_TOKEN")
     if not token:
         raise RuntimeError("FOUR_O_TOKEN is missing")
-    url = os.getenv("FOUR_O_URL", "https://api.example.com/parse")
+    url = os.getenv("FOUR_O_URL", "https://api.openai.com/v1/chat/completions")
     prompt_path = os.path.join("docs", "PROMPTS.md")
     with open(prompt_path, "r", encoding="utf-8") as f:
         prompt = f.read()
-    headers = {"Authorization": f"Bearer {token}"}
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": "gpt-4o",
+        "messages": [
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": text},
+        ],
+        "temperature": 0,
+    }
+    logging.info("Sending 4o parse request to %s", url)
     async with ClientSession() as session:
-        resp = await session.post(url, json={"text": text, "prompt": prompt}, headers=headers)
+        resp = await session.post(url, json=payload, headers=headers)
         resp.raise_for_status()
-        return await resp.json()
+        data = await resp.json()
+    logging.debug("4o response: %s", data)
+    content = (
+        data.get("choices", [{}])[0]
+        .get("message", {})
+        .get("content", "{}")
+        .strip()
+    )
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError:
+        logging.error("Invalid JSON from 4o: %s", content)
+        raise
 
 
 async def ask_4o(text: str) -> str:
     token = os.getenv("FOUR_O_TOKEN")
     if not token:
         raise RuntimeError("FOUR_O_TOKEN is missing")
-    url = os.getenv("FOUR_O_URL", "https://api.example.com/parse")
-    headers = {"Authorization": f"Bearer {token}"}
+    url = os.getenv("FOUR_O_URL", "https://api.openai.com/v1/chat/completions")
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": "gpt-4o",
+        "messages": [{"role": "user", "content": text}],
+        "temperature": 0,
+    }
+    logging.info("Sending 4o ask request to %s", url)
     async with ClientSession() as session:
-        resp = await session.post(url, json={"text": text}, headers=headers)
+        resp = await session.post(url, json=payload, headers=headers)
         resp.raise_for_status()
         data = await resp.json()
-        if isinstance(data, dict):
-            return data.get("response") or str(data)
-        return str(data)
-
+    logging.debug("4o response: %s", data)
+    return (
+        data.get("choices", [{}])[0]
+        .get("message", {})
+        .get("content", "")
+        .strip()
+    )
 
 
 async def handle_start(message: types.Message, db: Database, bot: Bot):
@@ -168,6 +204,7 @@ async def handle_register(message: types.Message, db: Database, bot: Bot):
             await bot.send_message(
                 message.chat.id, "Registration queue full, try later"
             )
+
             return
         session.add(
             PendingUser(
@@ -176,6 +213,7 @@ async def handle_register(message: types.Message, db: Database, bot: Bot):
         )
         await session.commit()
         await bot.send_message(message.chat.id, "Registration pending approval")
+
 
 
 async def handle_requests(message: types.Message, db: Database, bot: Bot):
@@ -187,7 +225,6 @@ async def handle_requests(message: types.Message, db: Database, bot: Bot):
         pending = result.scalars().all()
         if not pending:
             await bot.send_message(message.chat.id, "No pending users")
-
             return
         buttons = [
             [
@@ -212,7 +249,6 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
         if not p:
             await callback.answer("Not found", show_alert=True)
             return
-
         if callback.data.startswith("approve"):
             session.add(User(user_id=uid, username=p.username, is_superadmin=False))
             await bot.send_message(uid, "You are approved")
@@ -305,6 +341,7 @@ async def handle_ask_4o(message: types.Message, db: Database, bot: Bot):
     await bot.send_message(message.chat.id, answer)
 
 
+
 async def telegraph_test():
     token = os.getenv("TELEGRAPH_TOKEN")
     if not token:
@@ -332,6 +369,8 @@ def create_app() -> web.Application:
         raise RuntimeError("WEBHOOK_URL is missing")
 
     bot = Bot(token)
+    logging.info("DB_PATH=%s", DB_PATH)
+    logging.info("FOUR_O_TOKEN found: %s", bool(os.getenv("FOUR_O_TOKEN")))
     dp = Dispatcher()
     db = Database(DB_PATH)
 
@@ -356,8 +395,10 @@ def create_app() -> web.Application:
     async def add_event_raw_wrapper(message: types.Message):
         await handle_add_event_raw(message, db, bot)
 
+
     async def ask_4o_wrapper(message: types.Message):
         await handle_ask_4o(message, db, bot)
+
 
     dp.message.register(start_wrapper, Command("start"))
     dp.message.register(register_wrapper, Command("register"))
@@ -376,15 +417,11 @@ def create_app() -> web.Application:
     setup_application(app, dp, bot=bot)
 
     async def on_startup(app: web.Application):
+        logging.info("Initializing database")
         await db.init()
-        await bot.set_webhook(webhook.rstrip("/") + "/webhook")
-
-    async def on_shutdown(app: web.Application):
-        await bot.session.close()
-
-    app.on_startup.append(on_startup)
-    app.on_shutdown.append(on_shutdown)
-    return app
+        hook = webhook.rstrip("/") + "/webhook"
+        logging.info("Setting webhook to %s", hook)
+        await bot.set_webhook(hook)
 
 
     async def on_shutdown(app: web.Application):
@@ -402,4 +439,3 @@ if __name__ == "__main__":
         asyncio.run(telegraph_test())
     else:
         web.run_app(create_app(), port=int(os.getenv("PORT", 8080)))
-

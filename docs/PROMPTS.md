@@ -7,6 +7,7 @@ it can be refined over time.
 ```
 MASTER-PROMPT for Codex ― Telegram Event Bot
 
+
 You receive long multi-line text describing an event. Extract structured
 information and respond **only** with JSON using these keys:
 title             - name of the event
