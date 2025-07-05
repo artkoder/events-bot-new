@@ -10,9 +10,7 @@ from aiohttp import web, ClientSession
 from difflib import SequenceMatcher
 import json
 from telegraph import Telegraph
-
 from functools import partial
-
 import asyncio
 import html
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
@@ -887,8 +885,19 @@ async def handle_edit_message(message: types.Message, db: Database, bot: Bot):
     await show_edit_menu(message.from_user.id, event, bot)
 
 
+processed_media_groups: set[str] = set()
+
+
 async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
-    if not message.text:
+    text = message.text or message.caption
+    if message.media_group_id:
+        if message.media_group_id in processed_media_groups:
+            return
+        if not text:
+            # wait for the part of the album that contains the caption
+            return
+        processed_media_groups.add(message.media_group_id)
+    if not text:
         return
     async with db.get_session() as session:
         if not await session.get(User, message.from_user.id):
@@ -910,7 +919,7 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
                 else:
                     cid = cid.lstrip("-")
                 link = f"https://t.me/c/{cid}/{msg_id}"
-    result = await add_event_from_text(db, message.text, link)
+    result = await add_event_from_text(db, text, link)
     if result:
         saved, added, lines, status = result
         await bot.send_message(
@@ -1038,7 +1047,6 @@ def create_app() -> web.Application:
     dp.message.register(edit_message_wrapper, lambda m: m.from_user.id in editing_sessions)
     dp.message.register(forward_wrapper, lambda m: bool(m.forward_date))
     dp.my_chat_member.register(partial(handle_my_chat_member, db=db))
-
 
     app = web.Application()
     SimpleRequestHandler(dp, bot).register(app, path="/webhook")
