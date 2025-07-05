@@ -26,3 +26,10 @@ Edit this file or `docs/PROMPTS.md` to fine‑tune the request details.
 The command `/ask4o <text>` sends an arbitrary user message to the same
 endpoint and returns the assistant reply. It is intended for quick diagnostics
 and available only to the superadmin.
+
+When a new event might duplicate an existing one (same date/time/city but
+slightly different title or venue), the bot sends both versions to 4o asking if
+they describe the same event. The model replies with JSON
+`{"duplicate": true|false, "title": "", "short_description": ""}`. If
+`duplicate` is true the returned title and description replace the stored event
+fields.

@@ -19,3 +19,7 @@
 ## v0.2.2 – Telegraph token helper
 - Automatically create a Telegraph account if `TELEGRAPH_TOKEN` is not set and
   save the token to `/data/telegraph_token.txt`.
+## v0.3.0 - Edit events and ticket info
+- Added ticket price fields and purchase link
+- Inline edit via /events
+- Duplicate detection improved with 4o

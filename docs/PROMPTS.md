@@ -16,6 +16,9 @@ time              - start time or time range (HH:MM or HH:MM..HH:MM)
 location_name     - venue name, use standard directory form if known
 location_address  - street address if present
 city              - city name
+ticket_price_min  - minimum ticket price as integer or null
+ticket_price_max  - maximum ticket price as integer or null
+ticket_link       - URL for purchasing tickets if present
 ```
 
 The user message will start with the current date, e.g. "Today is

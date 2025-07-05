@@ -22,9 +22,11 @@ from main import (
     handle_add_event_raw,
     handle_ask_4o,
     handle_events,
+    handle_edit_message,
     parse_event_via_4o,
     telegraph_test,
     get_telegraph_token,
+    editing_sessions,
 )
 
 
@@ -164,6 +166,88 @@ async def test_add_event_raw(tmp_path: Path, monkeypatch):
     assert len(events) == 1
     assert events[0].title == "Party"
     assert events[0].telegraph_url == "https://t.me/test"
+
+
+@pytest.mark.asyncio
+async def test_add_event_raw_update(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async def fake_create(title, text):
+        return "https://t.me/test"
+
+    monkeypatch.setattr("main.create_source_page", fake_create)
+
+    msg1 = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "M"},
+            "text": "/addevent_raw Party|2025-01-01|18:00|Club",
+        }
+    )
+    await handle_add_event_raw(msg1, db, bot)
+
+    msg2 = types.Message.model_validate(
+        {
+            "message_id": 2,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "M"},
+            "text": "/addevent_raw Party show|2025-01-01|18:00|Club",
+        }
+    )
+    await handle_add_event_raw(msg2, db, bot)
+
+    async with db.get_session() as session:
+        events = (await session.execute(select(Event))).scalars().all()
+
+    assert len(events) == 1
+    assert events[0].title == "Party show"
+
+
+@pytest.mark.asyncio
+async def test_edit_event(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async def fake_create(title, text):
+        return "https://t.me/test"
+
+    monkeypatch.setattr("main.create_source_page", fake_create)
+
+    msg = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "M"},
+            "text": "/addevent_raw Party|2025-01-01|18:00|Club",
+        }
+    )
+    await handle_add_event_raw(msg, db, bot)
+
+    async with db.get_session() as session:
+        event = (await session.execute(select(Event))).scalars().first()
+
+    editing_sessions[1] = event.id
+    edit_msg = types.Message.model_validate(
+        {
+            "message_id": 2,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "M"},
+            "text": "title=New Title",
+        }
+    )
+    await handle_edit_message(edit_msg, db, bot)
+
+    async with db.get_session() as session:
+        updated = await session.get(Event, event.id)
+    assert updated.title == "New Title"
 
 
 @pytest.mark.asyncio

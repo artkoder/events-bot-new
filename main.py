@@ -1,12 +1,13 @@
 import logging
 import os
 from datetime import date, datetime, timedelta, timezone
-from typing import Optional
+from typing import Optional, Tuple
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web, ClientSession
+from difflib import SequenceMatcher
 import json
 from telegraph import Telegraph
 import asyncio
@@ -18,6 +19,9 @@ logging.basicConfig(level=logging.INFO)
 
 DB_PATH = os.getenv("DB_PATH", "/data/db.sqlite")
 TELEGRAPH_TOKEN_FILE = os.getenv("TELEGRAPH_TOKEN_FILE", "/data/telegraph_token.txt")
+
+# user_id -> event_id mapping for editing session
+editing_sessions: dict[int, int] = {}
 
 
 class User(SQLModel, table=True):
@@ -53,6 +57,9 @@ class Event(SQLModel, table=True):
     location_name: str
     location_address: Optional[str] = None
     city: Optional[str] = None
+    ticket_price_min: Optional[int] = None
+    ticket_price_max: Optional[int] = None
+    ticket_link: Optional[str] = None
     source_text: str
     telegraph_url: Optional[str] = None
 
@@ -69,6 +76,18 @@ class Database:
             if "telegraph_url" not in cols:
                 await conn.exec_driver_sql(
                     "ALTER TABLE event ADD COLUMN telegraph_url VARCHAR"
+                )
+            if "ticket_price_min" not in cols:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE event ADD COLUMN ticket_price_min INTEGER"
+                )
+            if "ticket_price_max" not in cols:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE event ADD COLUMN ticket_price_max INTEGER"
+                )
+            if "ticket_link" not in cols:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE event ADD COLUMN ticket_link VARCHAR"
                 )
 
     def get_session(self) -> AsyncSession:
@@ -181,6 +200,28 @@ async def ask_4o(text: str) -> str:
         .get("content", "")
         .strip()
     )
+
+
+async def check_duplicate_via_4o(ev: Event, new: Event) -> Tuple[bool, str, str]:
+    """Ask the LLM whether two events are duplicates."""
+    prompt = (
+        "Existing event:\n"
+        f"Title: {ev.title}\nDescription: {ev.description}\nLocation: {ev.location_name} {ev.location_address}\n"
+        "New event:\n"
+        f"Title: {new.title}\nDescription: {new.description}\nLocation: {new.location_name} {new.location_address}\n"
+        "Are these the same event? Respond with JSON {\"duplicate\": true|false, \"title\": \"\", \"short_description\": \"\"}."
+    )
+    try:
+        ans = await ask_4o(prompt)
+        data = json.loads(ans)
+        return (
+            bool(data.get("duplicate")),
+            data.get("title", ""),
+            data.get("short_description", ""),
+        )
+    except Exception as e:
+        logging.error("Duplicate check failed: %s", e)
+        return False, "", ""
 
 
 def get_telegraph_token() -> str | None:
@@ -311,6 +352,13 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
         text, markup = await build_events_message(db, target, tz)
         await callback.message.edit_text(text, reply_markup=markup)
         await callback.answer("Deleted")
+    elif data.startswith("edit:"):
+        eid = int(data.split(":")[1])
+        editing_sessions[callback.from_user.id] = eid
+        await callback.message.answer(
+            "Send <field>=<value> to update, or 'done' to finish"
+        )
+        await callback.answer()
     elif data.startswith("nav:"):
         _, day = data.split(":")
         offset = await get_tz_offset(db)
@@ -335,6 +383,55 @@ async def handle_tz(message: types.Message, db: Database, bot: Bot):
     await bot.send_message(message.chat.id, f"Timezone set to {parts[1]}")
 
 
+async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
+    """Insert or update an event if a similar one exists.
+
+    Returns (event, added_flag)."""
+    stmt = select(Event).where(
+        Event.date == new.date,
+        Event.time == new.time,
+        Event.city == new.city,
+    )
+    candidates = (await session.execute(stmt)).scalars().all()
+    for ev in candidates:
+        title_ratio = SequenceMatcher(None, ev.title.lower(), new.title.lower()).ratio()
+        loc_ratio = SequenceMatcher(None, ev.location_name.lower(), new.location_name.lower()).ratio()
+        if title_ratio >= 0.6 and loc_ratio >= 0.6:
+            ev.title = new.title
+            ev.description = new.description
+            ev.festival = new.festival
+            ev.source_text = new.source_text
+            ev.location_name = new.location_name
+            ev.location_address = new.location_address
+            ev.ticket_price_min = new.ticket_price_min
+            ev.ticket_price_max = new.ticket_price_max
+            ev.ticket_link = new.ticket_link
+            await session.commit()
+            return ev, False
+        if loc_ratio >= 0.4 or ev.location_address == new.location_address:
+            # uncertain, ask LLM
+            try:
+                dup, title, desc = await check_duplicate_via_4o(ev, new)
+            except Exception:
+                logging.exception("duplicate check failed")
+                dup = False
+            if dup:
+                ev.title = title or new.title
+                ev.description = desc or new.description
+                ev.festival = new.festival
+                ev.source_text = new.source_text
+                ev.location_name = new.location_name
+                ev.location_address = new.location_address
+                ev.ticket_price_min = new.ticket_price_min
+                ev.ticket_price_max = new.ticket_price_max
+                ev.ticket_link = new.ticket_link
+                await session.commit()
+                return ev, False
+    session.add(new)
+    await session.commit()
+    return new, True
+
+
 async def handle_add_event(message: types.Message, db: Database, bot: Bot):
     text = message.text.split(maxsplit=1)
     if len(text) != 2:
@@ -354,12 +451,13 @@ async def handle_add_event(message: types.Message, db: Database, bot: Bot):
         location_name=data.get("location_name", ""),
         location_address=data.get("location_address"),
         city=data.get("city"),
+        ticket_price_min=data.get("ticket_price_min"),
+        ticket_price_max=data.get("ticket_price_max"),
+        ticket_link=data.get("ticket_link"),
         source_text=text[1],
     )
     async with db.get_session() as session:
-        session.add(event)
-        await session.commit()
-        saved = event
+        saved, added = await upsert_event(session, event)
 
     url = await create_source_page(saved.title or "Event", saved.source_text)
     if url:
@@ -382,11 +480,18 @@ async def handle_add_event(message: types.Message, db: Database, bot: Bot):
         lines.append(f"festival: {saved.festival}")
     if saved.description:
         lines.append(f"description: {saved.description}")
+    if saved.ticket_price_min is not None:
+        lines.append(f"price_min: {saved.ticket_price_min}")
+    if saved.ticket_price_max is not None:
+        lines.append(f"price_max: {saved.ticket_price_max}")
+    if saved.ticket_link:
+        lines.append(f"ticket_link: {saved.ticket_link}")
     if saved.telegraph_url:
         lines.append(f"telegraph: {saved.telegraph_url}")
+    status = "added" if added else "updated"
     await bot.send_message(
         message.chat.id,
-        "Event added\n" + "\n".join(lines),
+        f"Event {status}\n" + "\n".join(lines),
     )
 
 
@@ -406,8 +511,7 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
         source_text=parts[1],
     )
     async with db.get_session() as session:
-        session.add(event)
-        await session.commit()
+        event, added = await upsert_event(session, event)
 
     url = await create_source_page(event.title or "Event", event.source_text)
     if url:
@@ -423,9 +527,10 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
     ]
     if event.telegraph_url:
         lines.append(f"telegraph: {event.telegraph_url}")
+    status = "added" if added else "updated"
     await bot.send_message(
         message.chat.id,
-        "Event added\n" + "\n".join(lines),
+        f"Event {status}\n" + "\n".join(lines),
     )
 
 
@@ -443,7 +548,10 @@ async def build_events_message(db: Database, target_date: date, tz: timezone):
         events = result.scalars().all()
 
     lines = [
-        f"{e.id}. {e.title} {e.time} {e.location_name} {e.telegraph_url or ''}".strip()
+        (
+            f"{e.id}. {e.title} {e.time} {e.location_name} "
+            f"{e.telegraph_url or ''}"
+        ).strip()
         for e in events
     ] or ["No events"]
 
@@ -451,7 +559,10 @@ async def build_events_message(db: Database, target_date: date, tz: timezone):
         [
             types.InlineKeyboardButton(
                 text="\u274C", callback_data=f"del:{e.id}:{target_date.isoformat()}"
-            )
+            ),
+            types.InlineKeyboardButton(
+                text="\u270E", callback_data=f"edit:{e.id}"
+            ),
         ]
         for e in events
     ]
@@ -514,6 +625,52 @@ async def handle_ask_4o(message: types.Message, db: Database, bot: Bot):
         await bot.send_message(message.chat.id, f"LLM error: {e}")
         return
     await bot.send_message(message.chat.id, answer)
+
+
+async def handle_edit_message(message: types.Message, db: Database, bot: Bot):
+    eid = editing_sessions.get(message.from_user.id)
+    if not eid:
+        return
+    text = message.text.strip()
+    if text.lower() in {"done", "cancel"}:
+        del editing_sessions[message.from_user.id]
+        await bot.send_message(message.chat.id, "Editing finished")
+        return
+    if "=" not in text:
+        await bot.send_message(message.chat.id, "Use field=value or 'done'")
+        return
+    field, value = [p.strip() for p in text.split("=", 1)]
+    if field not in {
+        "title",
+        "description",
+        "festival",
+        "date",
+        "time",
+        "location_name",
+        "location_address",
+        "city",
+        "ticket_price_min",
+        "ticket_price_max",
+        "ticket_link",
+    }:
+        await bot.send_message(message.chat.id, "Unknown field")
+        return
+    async with db.get_session() as session:
+        event = await session.get(Event, eid)
+        if not event:
+            await bot.send_message(message.chat.id, "Event not found")
+            del editing_sessions[message.from_user.id]
+            return
+        if field in {"ticket_price_min", "ticket_price_max"}:
+            try:
+                setattr(event, field, int(value))
+            except ValueError:
+                await bot.send_message(message.chat.id, "Invalid number")
+                return
+        else:
+            setattr(event, field, value)
+        await session.commit()
+    await bot.send_message(message.chat.id, f"Updated {field}")
 
 
 async def telegraph_test():
@@ -595,6 +752,9 @@ def create_app() -> web.Application:
     async def list_events_wrapper(message: types.Message):
         await handle_events(message, db, bot)
 
+    async def edit_message_wrapper(message: types.Message):
+        await handle_edit_message(message, db, bot)
+
     dp.message.register(start_wrapper, Command("start"))
     dp.message.register(register_wrapper, Command("register"))
     dp.message.register(requests_wrapper, Command("requests"))
@@ -603,13 +763,15 @@ def create_app() -> web.Application:
         lambda c: c.data.startswith("approve")
         or c.data.startswith("reject")
         or c.data.startswith("del:")
-        or c.data.startswith("nav:"),
+        or c.data.startswith("nav:")
+        or c.data.startswith("edit:"),
     )
     dp.message.register(tz_wrapper, Command("tz"))
     dp.message.register(add_event_wrapper, Command("addevent"))
     dp.message.register(add_event_raw_wrapper, Command("addevent_raw"))
     dp.message.register(ask_4o_wrapper, Command("ask4o"))
     dp.message.register(list_events_wrapper, Command("events"))
+    dp.message.register(edit_message_wrapper, lambda m: m.from_user.id in editing_sessions)
 
     app = web.Application()
     SimpleRequestHandler(dp, bot).register(app, path="/webhook")

@@ -58,7 +58,7 @@ browse upcoming announcements.
 - `docs/FOUR_O_REQUEST.md` – how requests to 4o are formed.
 - `CHANGELOG.md` – project history.
 
-Each added event stores the original announcement text in a Telegraph page. The link is shown when the event is added and in the `/events` listing.
+Each added event stores the original announcement text in a Telegraph page. The link is shown when the event is added and in the `/events` listing. Events may also contain ticket prices and a purchase link. Use the edit button in `/events` to change any field.
 
 To verify Telegraph access manually run:
 ```bash
