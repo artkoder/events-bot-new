@@ -21,7 +21,10 @@ browse upcoming announcements.
    export DB_PATH=/data/db.sqlite
    export FOUR_O_TOKEN=sk-...
    export FOUR_O_URL=https://api.openai.com/v1/chat/completions
-   python main.py
+  # Optional: provide Telegraph token. If omitted, the bot creates an account
+  # automatically and saves the token to /data/telegraph_token.txt.
+  export TELEGRAPH_TOKEN=your_telegraph_token
+  python main.py
    ```
 
 ## Deployment on Fly.io
@@ -38,6 +41,9 @@ browse upcoming announcements.
    fly secrets set FOUR_O_TOKEN=xxxxx
    fly secrets set FOUR_O_URL=https://api.openai.com/v1/chat/completions
    fly secrets set DB_PATH=/data/db.sqlite
+   # Optional: use your own Telegraph token. If not set, a new account will be
+   # created on first run and the token saved to the data volume.
+   fly secrets set TELEGRAPH_TOKEN=<token>
    ```
 3. Deploy:
    ```bash
@@ -52,8 +58,11 @@ browse upcoming announcements.
 - `docs/FOUR_O_REQUEST.md` – how requests to 4o are formed.
 - `CHANGELOG.md` – project history.
 
-To verify Telegraph access run:
+Each added event stores the original announcement text in a Telegraph page. The link is shown when the event is added and in the `/events` listing.
+
+To verify Telegraph access manually run:
 ```bash
 python main.py test_telegraph
 ```
+The command prints the created page URL and confirms that editing works.
 

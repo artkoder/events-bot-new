@@ -10,12 +10,14 @@ from aiohttp import web, ClientSession
 import json
 from telegraph import Telegraph
 import asyncio
+import html
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlmodel import Field, SQLModel, select
 
 logging.basicConfig(level=logging.INFO)
 
 DB_PATH = os.getenv("DB_PATH", "/data/db.sqlite")
+TELEGRAPH_TOKEN_FILE = os.getenv("TELEGRAPH_TOKEN_FILE", "/data/telegraph_token.txt")
 
 
 class User(SQLModel, table=True):
@@ -52,6 +54,7 @@ class Event(SQLModel, table=True):
     location_address: Optional[str] = None
     city: Optional[str] = None
     source_text: str
+    telegraph_url: Optional[str] = None
 
 
 class Database:
@@ -172,6 +175,29 @@ async def ask_4o(text: str) -> str:
         .get("content", "")
         .strip()
     )
+
+
+def get_telegraph_token() -> str | None:
+    token = os.getenv("TELEGRAPH_TOKEN")
+    if token:
+        return token
+    if os.path.exists(TELEGRAPH_TOKEN_FILE):
+        with open(TELEGRAPH_TOKEN_FILE, "r", encoding="utf-8") as f:
+            saved = f.read().strip()
+            if saved:
+                return saved
+    try:
+        tg = Telegraph()
+        data = tg.create_account(short_name="eventsbot")
+        token = data["access_token"]
+        os.makedirs(os.path.dirname(TELEGRAPH_TOKEN_FILE), exist_ok=True)
+        with open(TELEGRAPH_TOKEN_FILE, "w", encoding="utf-8") as f:
+            f.write(token)
+        logging.info("Created Telegraph account; token stored at %s", TELEGRAPH_TOKEN_FILE)
+        return token
+    except Exception as e:
+        logging.error("Failed to create Telegraph token: %s", e)
+        return None
 
 
 async def handle_start(message: types.Message, db: Database, bot: Bot):
@@ -329,6 +355,13 @@ async def handle_add_event(message: types.Message, db: Database, bot: Bot):
         await session.commit()
         saved = event
 
+    url = await create_source_page(saved.title or "Event", saved.source_text)
+    if url:
+        async with db.get_session() as session:
+            saved.telegraph_url = url
+            session.add(saved)
+            await session.commit()
+
     lines = [
         f"title: {saved.title}",
         f"date: {saved.date}",
@@ -343,6 +376,8 @@ async def handle_add_event(message: types.Message, db: Database, bot: Bot):
         lines.append(f"festival: {saved.festival}")
     if saved.description:
         lines.append(f"description: {saved.description}")
+    if saved.telegraph_url:
+        lines.append(f"telegraph: {saved.telegraph_url}")
     await bot.send_message(
         message.chat.id,
         "Event added\n" + "\n".join(lines),
@@ -367,12 +402,21 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
     async with db.get_session() as session:
         session.add(event)
         await session.commit()
+
+    url = await create_source_page(event.title or "Event", event.source_text)
+    if url:
+        async with db.get_session() as session:
+            event.telegraph_url = url
+            session.add(event)
+            await session.commit()
     lines = [
         f"title: {event.title}",
         f"date: {event.date}",
         f"time: {event.time}",
         f"location_name: {event.location_name}",
     ]
+    if event.telegraph_url:
+        lines.append(f"telegraph: {event.telegraph_url}")
     await bot.send_message(
         message.chat.id,
         "Event added\n" + "\n".join(lines),
@@ -393,7 +437,7 @@ async def build_events_message(db: Database, target_date: date, tz: timezone):
         events = result.scalars().all()
 
     lines = [
-        f"{e.id}. {e.title} {e.time} {e.location_name}"
+        f"{e.id}. {e.title} {e.time} {e.location_name} {e.telegraph_url or ''}".strip()
         for e in events
     ] or ["No events"]
 
@@ -467,18 +511,40 @@ async def handle_ask_4o(message: types.Message, db: Database, bot: Bot):
 
 
 async def telegraph_test():
-    token = os.getenv("TELEGRAPH_TOKEN")
+    token = get_telegraph_token()
     if not token:
-        logging.error("TELEGRAPH_TOKEN is missing")
+        print("Unable to obtain Telegraph token")
         return
     tg = Telegraph()
     tg.access_token = token
-    page = await asyncio.to_thread(tg.create_page, "Test Page", html="<p>test</p>")
+    page = await asyncio.to_thread(
+        tg.create_page, "Test Page", html="<p>test</p>"
+    )
     logging.info("Created %s", page["url"])
+    print("Created", page["url"])
     await asyncio.to_thread(
         tg.edit_page, page["path"], title="Test Page", html_content="<p>updated</p>"
     )
     logging.info("Edited %s", page["url"])
+    print("Edited", page["url"])
+
+
+async def create_source_page(title: str, text: str) -> str | None:
+    """Create a Telegraph page with the original event text."""
+    token = get_telegraph_token()
+    if not token:
+        logging.error("Telegraph token unavailable")
+        return None
+    tg = Telegraph()
+    tg.access_token = token
+    html_content = "<pre>" + html.escape(text) + "</pre>"
+    try:
+        page = await asyncio.to_thread(tg.create_page, title, html=html_content)
+    except Exception as e:
+        logging.error("Failed to create telegraph page: %s", e)
+        return None
+    logging.info("Created telegraph page %s", page.get("url"))
+    return page.get("url")
 
 
 def create_app() -> web.Application:

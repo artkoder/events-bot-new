@@ -15,3 +15,7 @@
 
 ## v0.2.1 – Fix 4o date parsing
 - Include the current date in LLM requests so events default to the correct year.
+
+## v0.2.2 – Telegraph token helper
+- Automatically create a Telegraph account if `TELEGRAPH_TOKEN` is not set and
+  save the token to `/data/telegraph_token.txt`.

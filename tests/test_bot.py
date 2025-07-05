@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from aiogram import Bot, types
 from sqlmodel import select
+import main
 
 from main import (
     Database,
@@ -22,6 +23,8 @@ from main import (
     handle_ask_4o,
     handle_events,
     parse_event_via_4o,
+    telegraph_test,
+    get_telegraph_token,
 )
 
 
@@ -133,10 +136,15 @@ def test_create_app_requires_webhook_url(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_add_event_raw(tmp_path: Path):
+async def test_add_event_raw(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
     bot = DummyBot("123:abc")
+
+    async def fake_create(title, text):
+        return "https://t.me/test"
+
+    monkeypatch.setattr("main.create_source_page", fake_create)
 
     msg = types.Message.model_validate(
         {
@@ -155,13 +163,19 @@ async def test_add_event_raw(tmp_path: Path):
 
     assert len(events) == 1
     assert events[0].title == "Party"
+    assert events[0].telegraph_url == "https://t.me/test"
 
 
 @pytest.mark.asyncio
-async def test_events_list(tmp_path: Path):
+async def test_events_list(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
     bot = DummyBot("123:abc")
+
+    async def fake_create(title, text):
+        return "https://t.me/test"
+
+    monkeypatch.setattr("main.create_source_page", fake_create)
 
     start_msg = types.Message.model_validate(
         {
@@ -202,6 +216,7 @@ async def test_events_list(tmp_path: Path):
     text = bot.messages[-1][1]
     assert "Events on 01.01.2025" in text
     assert "Party" in text
+    assert "https://t.me/test" in text
 
 
 @pytest.mark.asyncio
@@ -297,3 +312,45 @@ async def test_parse_event_includes_date(monkeypatch):
     await parse_event_via_4o("text")
 
     assert "Today is" in called["payload"]["messages"][1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_telegraph_test(monkeypatch, capsys):
+    class DummyTG:
+        def __init__(self):
+            self.access_token = None
+
+        def create_page(self, title, html):
+            return {"url": "https://telegra.ph/test", "path": "test"}
+
+        def edit_page(self, path, title, html_content):
+            pass
+
+    monkeypatch.setenv("TELEGRAPH_TOKEN", "t")
+    monkeypatch.setattr("main.Telegraph", lambda: DummyTG())
+
+    await telegraph_test()
+    captured = capsys.readouterr()
+    assert "Created https://telegra.ph/test" in captured.out
+    assert "Edited https://telegra.ph/test" in captured.out
+
+
+def test_get_telegraph_token_creates(tmp_path, monkeypatch):
+    class DummyTG:
+        def create_account(self, short_name):
+            return {"access_token": "abc"}
+
+    monkeypatch.delenv("TELEGRAPH_TOKEN", raising=False)
+    monkeypatch.setattr(main, "Telegraph", lambda: DummyTG())
+    monkeypatch.setattr(main, "TELEGRAPH_TOKEN_FILE", str(tmp_path / "token.txt"))
+
+    token = get_telegraph_token()
+    assert token == "abc"
+    assert (tmp_path / "token.txt").read_text() == "abc"
+
+
+def test_get_telegraph_token_env(monkeypatch):
+    monkeypatch.setenv("TELEGRAPH_TOKEN", "zzz")
+    token = get_telegraph_token()
+    assert token == "zzz"
+
