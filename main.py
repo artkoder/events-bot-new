@@ -42,6 +42,14 @@ class RejectedUser(SQLModel, table=True):
     rejected_at: datetime = Field(default_factory=datetime.utcnow)
 
 
+class Channel(SQLModel, table=True):
+    channel_id: int = Field(primary_key=True)
+    title: Optional[str] = None
+    username: Optional[str] = None
+    is_admin: bool = False
+    is_registered: bool = False
+
+
 class Setting(SQLModel, table=True):
     key: str = Field(primary_key=True)
     value: str
@@ -62,6 +70,7 @@ class Event(SQLModel, table=True):
     ticket_link: Optional[str] = None
     source_text: str
     telegraph_url: Optional[str] = None
+    source_post_url: Optional[str] = None
 
 
 class Database:
@@ -88,6 +97,10 @@ class Database:
             if "ticket_link" not in cols:
                 await conn.exec_driver_sql(
                     "ALTER TABLE event ADD COLUMN ticket_link VARCHAR"
+                )
+            if "source_post_url" not in cols:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE event ADD COLUMN source_post_url VARCHAR"
                 )
 
     def get_session(self) -> AsyncSession:
@@ -384,6 +397,15 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
         text, markup = await build_events_message(db, target, tz)
         await callback.message.edit_text(text, reply_markup=markup)
         await callback.answer()
+    elif data.startswith("unset:"):
+        cid = int(data.split(":")[1])
+        async with db.get_session() as session:
+            ch = await session.get(Channel, cid)
+            if ch:
+                ch.is_registered = False
+                await session.commit()
+        await send_channels_list(callback.message, db, bot, edit=True)
+        await callback.answer("Removed")
 
 
 async def handle_tz(message: types.Message, db: Database, bot: Bot):
@@ -398,6 +420,84 @@ async def handle_tz(message: types.Message, db: Database, bot: Bot):
             return
     await set_tz_offset(db, parts[1])
     await bot.send_message(message.chat.id, f"Timezone set to {parts[1]}")
+
+
+async def handle_my_chat_member(update: types.ChatMemberUpdated, db: Database):
+    if update.chat.type != "channel":
+        return
+    status = update.new_chat_member.status
+    is_admin = status in {"administrator", "creator"}
+    async with db.get_session() as session:
+        channel = await session.get(Channel, update.chat.id)
+        if not channel:
+            channel = Channel(
+                channel_id=update.chat.id,
+                title=update.chat.title,
+                username=getattr(update.chat, "username", None),
+                is_admin=is_admin,
+            )
+            session.add(channel)
+        else:
+            channel.title = update.chat.title
+            channel.username = getattr(update.chat, "username", None)
+            channel.is_admin = is_admin
+        await session.commit()
+
+
+async def send_channels_list(message: types.Message, db: Database, bot: Bot, edit: bool = False):
+    async with db.get_session() as session:
+        user = await session.get(User, message.from_user.id)
+        if not user or not user.is_superadmin:
+            if not edit:
+                await bot.send_message(message.chat.id, "Not authorized")
+            return
+        result = await session.execute(select(Channel).where(Channel.is_admin.is_(True)))
+        channels = result.scalars().all()
+    lines = []
+    keyboard = []
+    for ch in channels:
+        name = ch.title or ch.username or str(ch.channel_id)
+        if ch.is_registered:
+            lines.append(f"{name} ✅")
+            keyboard.append([
+                types.InlineKeyboardButton(text="Cancel", callback_data=f"unset:{ch.channel_id}")
+            ])
+        else:
+            lines.append(name)
+    if not lines:
+        lines.append("No channels")
+    markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard) if keyboard else None
+    if edit:
+        await message.edit_text("\n".join(lines), reply_markup=markup)
+    else:
+        await bot.send_message(message.chat.id, "\n".join(lines), reply_markup=markup)
+
+
+async def handle_set_channel(message: types.Message, db: Database, bot: Bot):
+    fwd = message
+    if not message.forward_from_chat and message.reply_to_message:
+        fwd = message.reply_to_message
+    chat = fwd.forward_from_chat if fwd and fwd.forward_from_chat else None
+    if not chat or chat.type != "channel":
+        await bot.send_message(message.chat.id, "Forward a channel post and send /setchannel")
+        return
+    async with db.get_session() as session:
+        user = await session.get(User, message.from_user.id)
+        if not user or not user.is_superadmin:
+            await bot.send_message(message.chat.id, "Not authorized")
+            return
+        ch = await session.get(Channel, chat.id)
+        if not ch or not ch.is_admin:
+            await bot.send_message(message.chat.id, "Bot is not admin in that channel")
+            return
+        ch.is_registered = True
+        session.add(ch)
+        await session.commit()
+    await bot.send_message(message.chat.id, f"Channel {chat.title} registered")
+
+
+async def handle_channels(message: types.Message, db: Database, bot: Bot):
+    await send_channels_list(message, db, bot, edit=False)
 
 
 async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
@@ -449,16 +549,12 @@ async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
     return new, True
 
 
-async def handle_add_event(message: types.Message, db: Database, bot: Bot):
-    text = message.text.split(maxsplit=1)
-    if len(text) != 2:
-        await bot.send_message(message.chat.id, "Usage: /addevent <text>")
-        return
+async def add_event_from_text(db: Database, text: str, source_link: str | None) -> tuple[Event, bool, list[str], str] | None:
     try:
-        data = await parse_event_via_4o(text[1])
+        data = await parse_event_via_4o(text)
     except Exception as e:
-        await bot.send_message(message.chat.id, f"LLM error: {e}")
-        return
+        logging.error("LLM error: %s", e)
+        return None
     event = Event(
         title=data.get("title", ""),
         description=data.get("short_description", ""),
@@ -471,12 +567,13 @@ async def handle_add_event(message: types.Message, db: Database, bot: Bot):
         ticket_price_min=data.get("ticket_price_min"),
         ticket_price_max=data.get("ticket_price_max"),
         ticket_link=data.get("ticket_link"),
-        source_text=text[1],
+        source_text=text,
+        source_post_url=source_link,
     )
     async with db.get_session() as session:
         saved, added = await upsert_event(session, event)
 
-    url = await create_source_page(saved.title or "Event", saved.source_text)
+    url = await create_source_page(saved.title or "Event", saved.source_text, source_link)
     if url:
         async with db.get_session() as session:
             saved.telegraph_url = url
@@ -506,6 +603,19 @@ async def handle_add_event(message: types.Message, db: Database, bot: Bot):
     if saved.telegraph_url:
         lines.append(f"telegraph: {saved.telegraph_url}")
     status = "added" if added else "updated"
+    return saved, added, lines, status
+
+
+async def handle_add_event(message: types.Message, db: Database, bot: Bot):
+    text = message.text.split(maxsplit=1)
+    if len(text) != 2:
+        await bot.send_message(message.chat.id, "Usage: /addevent <text>")
+        return
+    result = await add_event_from_text(db, text[1], None)
+    if not result:
+        await bot.send_message(message.chat.id, "LLM error")
+        return
+    saved, added, lines, status = result
     await bot.send_message(
         message.chat.id,
         f"Event {status}\n" + "\n".join(lines),
@@ -530,7 +640,7 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
     async with db.get_session() as session:
         event, added = await upsert_event(session, event)
 
-    url = await create_source_page(event.title or "Event", event.source_text)
+    url = await create_source_page(event.title or "Event", event.source_text, None)
     if url:
         async with db.get_session() as session:
             event.telegraph_url = url
@@ -557,6 +667,26 @@ def format_day(day: date, tz: timezone) -> str:
     return day.strftime("%d.%m.%Y")
 
 
+MONTHS = [
+    "января",
+    "февраля",
+    "марта",
+    "апреля",
+    "мая",
+    "июня",
+    "июля",
+    "августа",
+    "сентября",
+    "октября",
+    "ноября",
+    "декабря",
+]
+
+
+def format_day_pretty(day: date) -> str:
+    return f"{day.day} {MONTHS[day.month - 1]}"
+
+
 async def build_events_message(db: Database, target_date: date, tz: timezone):
     async with db.get_session() as session:
         result = await session.execute(
@@ -564,13 +694,18 @@ async def build_events_message(db: Database, target_date: date, tz: timezone):
         )
         events = result.scalars().all()
 
-    lines = [
-        (
-            f"{e.id}. {e.title} {e.time} {e.location_name} "
-            f"{e.telegraph_url or ''}"
-        ).strip()
-        for e in events
-    ] or ["No events"]
+    lines = []
+    for e in events:
+        lines.append(f"{e.id}. {e.title}")
+        loc = f"{e.time} {e.location_name}"
+        if e.city:
+            loc += f", {e.city}"
+        lines.append(loc)
+        if e.telegraph_url:
+            lines.append(f"исходное: {e.telegraph_url}")
+        lines.append("")
+    if not lines:
+        lines.append("No events")
 
     keyboard = [
         [
@@ -625,11 +760,22 @@ async def show_edit_menu(user_id: int, event: Event, bot: Bot):
         "ticket_price_max",
         "ticket_link",
     ]
-    keyboard = [
-        [types.InlineKeyboardButton(text=f, callback_data=f"editfield:{event.id}:{f}")]
-        for f in fields
-    ]
-    keyboard.append([types.InlineKeyboardButton(text="Done", callback_data=f"editdone:{event.id}")])
+    keyboard = []
+    row = []
+    for idx, field in enumerate(fields, 1):
+        row.append(
+            types.InlineKeyboardButton(
+                text=field, callback_data=f"editfield:{event.id}:{field}"
+            )
+        )
+        if idx % 3 == 0:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+    keyboard.append(
+        [types.InlineKeyboardButton(text="Done", callback_data=f"editdone:{event.id}")]
+    )
     markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard)
     await bot.send_message(user_id, "\n".join(lines), reply_markup=markup)
 
@@ -707,6 +853,38 @@ async def handle_edit_message(message: types.Message, db: Database, bot: Bot):
     await show_edit_menu(message.from_user.id, event, bot)
 
 
+async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
+    if not message.text:
+        return
+    async with db.get_session() as session:
+        if not await session.get(User, message.from_user.id):
+            return
+    link = None
+    if message.forward_from_chat and message.forward_from_message_id:
+        chat = message.forward_from_chat
+        msg_id = message.forward_from_message_id
+        async with db.get_session() as session:
+            ch = await session.get(Channel, chat.id)
+            allowed = ch.is_registered if ch else False
+        if allowed:
+            if chat.username:
+                link = f"https://t.me/{chat.username}/{msg_id}"
+            else:
+                cid = str(chat.id)
+                if cid.startswith("-100"):
+                    cid = cid[4:]
+                else:
+                    cid = cid.lstrip("-")
+                link = f"https://t.me/c/{cid}/{msg_id}"
+    result = await add_event_from_text(db, message.text, link)
+    if result:
+        saved, added, lines, status = result
+        await bot.send_message(
+            message.chat.id,
+            f"Event {status}\n" + "\n".join(lines),
+        )
+
+
 async def telegraph_test():
     token = get_telegraph_token()
     if not token:
@@ -725,14 +903,17 @@ async def telegraph_test():
     print("Edited", page["url"])
 
 
-async def create_source_page(title: str, text: str) -> str | None:
+async def create_source_page(title: str, text: str, source_url: str | None) -> str | None:
     """Create a Telegraph page with the original event text."""
     token = get_telegraph_token()
     if not token:
         logging.error("Telegraph token unavailable")
         return None
     tg = Telegraph(access_token=token)
-    html_content = "<pre>" + html.escape(text) + "</pre>"
+    html_content = ""
+    if source_url:
+        html_content += f'<p>Source: <a href="{html.escape(source_url)}">link</a></p>'
+    html_content += "<pre>" + html.escape(text) + "</pre>"
     try:
         page = await asyncio.to_thread(
             tg.create_page, title, html_content=html_content
@@ -786,8 +967,17 @@ def create_app() -> web.Application:
     async def list_events_wrapper(message: types.Message):
         await handle_events(message, db, bot)
 
+    async def set_channel_wrapper(message: types.Message):
+        await handle_set_channel(message, db, bot)
+
+    async def channels_wrapper(message: types.Message):
+        await handle_channels(message, db, bot)
+
     async def edit_message_wrapper(message: types.Message):
         await handle_edit_message(message, db, bot)
+
+    async def forward_wrapper(message: types.Message):
+        await handle_forwarded(message, db, bot)
 
     dp.message.register(start_wrapper, Command("start"))
     dp.message.register(register_wrapper, Command("register"))
@@ -800,14 +990,19 @@ def create_app() -> web.Application:
         or c.data.startswith("nav:")
         or c.data.startswith("edit:")
         or c.data.startswith("editfield:")
-        or c.data.startswith("editdone:"),
+        or c.data.startswith("editdone:")
+        or c.data.startswith("unset:"),
     )
     dp.message.register(tz_wrapper, Command("tz"))
     dp.message.register(add_event_wrapper, Command("addevent"))
     dp.message.register(add_event_raw_wrapper, Command("addevent_raw"))
     dp.message.register(ask_4o_wrapper, Command("ask4o"))
     dp.message.register(list_events_wrapper, Command("events"))
+    dp.message.register(set_channel_wrapper, Command("setchannel"))
+    dp.message.register(channels_wrapper, Command("channels"))
     dp.message.register(edit_message_wrapper, lambda m: m.from_user.id in editing_sessions)
+    dp.message.register(forward_wrapper, lambda m: bool(m.forward_date))
+    dp.my_chat_member.register(lambda upd: handle_my_chat_member(upd, db))
 
     app = web.Application()
     SimpleRequestHandler(dp, bot).register(app, path="/webhook")
@@ -827,6 +1022,8 @@ def create_app() -> web.Application:
     app.on_shutdown.append(on_shutdown)
     return app
 
+    async def on_shutdown(app: web.Application):
+        await bot.session.close()
 
 if __name__ == "__main__":
     import sys

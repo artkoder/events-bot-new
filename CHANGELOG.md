@@ -23,3 +23,12 @@
 - Added ticket price fields and purchase link
 - Inline edit via /events
 - Duplicate detection improved with 4o
+
+## v0.3.1 - Forwarded posts
+- Forwarded messages from moderators trigger event creation
+- Events keep `source_post_url` linking to the original announcement
+
+## v0.3.2 - Channel registration
+- `/setchannel` registers a forwarded channel for source links
+- `/channels` lists admin channels with removal buttons
+- Bot tracks admin status via `my_chat_member` updates

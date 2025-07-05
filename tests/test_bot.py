@@ -39,6 +39,25 @@ class DummyBot(Bot):
         self.messages.append((chat_id, text))
 
 
+class DummyChat:
+    def __init__(self, id, title, username=None, type="channel"):
+        self.id = id
+        self.title = title
+        self.username = username
+        self.type = type
+
+
+class DummyMember:
+    def __init__(self, status):
+        self.status = status
+
+
+class DummyUpdate:
+    def __init__(self, chat_id, title, status="administrator"):
+        self.chat = DummyChat(chat_id, title)
+        self.new_chat_member = DummyMember(status)
+
+
 @pytest.mark.asyncio
 async def test_registration_limit(tmp_path: Path):
     db = Database(str(tmp_path / "db.sqlite"))
@@ -143,7 +162,7 @@ async def test_add_event_raw(tmp_path: Path, monkeypatch):
     await db.init()
     bot = DummyBot("123:abc")
 
-    async def fake_create(title, text):
+    async def fake_create(title, text, source):
         return "https://t.me/test"
 
     monkeypatch.setattr("main.create_source_page", fake_create)
@@ -174,7 +193,7 @@ async def test_add_event_raw_update(tmp_path: Path, monkeypatch):
     await db.init()
     bot = DummyBot("123:abc")
 
-    async def fake_create(title, text):
+    async def fake_create(title, text, source):
         return "https://t.me/test"
 
     monkeypatch.setattr("main.create_source_page", fake_create)
@@ -214,7 +233,7 @@ async def test_edit_event(tmp_path: Path, monkeypatch):
     await db.init()
     bot = DummyBot("123:abc")
 
-    async def fake_create(title, text):
+    async def fake_create(title, text, source):
         return "https://t.me/test"
 
     monkeypatch.setattr("main.create_source_page", fake_create)
@@ -256,7 +275,7 @@ async def test_events_list(tmp_path: Path, monkeypatch):
     await db.init()
     bot = DummyBot("123:abc")
 
-    async def fake_create(title, text):
+    async def fake_create(title, text, source):
         return "https://t.me/test"
 
     monkeypatch.setattr("main.create_source_page", fake_create)
@@ -299,8 +318,9 @@ async def test_events_list(tmp_path: Path, monkeypatch):
     assert bot.messages
     text = bot.messages[-1][1]
     assert "Events on 01.01.2025" in text
-    assert "Party" in text
-    assert "https://t.me/test" in text
+    assert "1. Party" in text
+    assert "18:00 Club" in text
+    assert "исходное: https://t.me/test" in text
 
 
 @pytest.mark.asyncio
@@ -436,4 +456,126 @@ def test_get_telegraph_token_env(monkeypatch):
     monkeypatch.setenv("TELEGRAPH_TOKEN", "zzz")
     token = get_telegraph_token()
     assert token == "zzz"
+
+
+@pytest.mark.asyncio
+async def test_forward_add_event(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async def fake_parse(text: str) -> dict:
+        return {
+            "title": "Forwarded",
+            "short_description": "desc",
+            "date": "2025-01-01",
+            "time": "18:00",
+            "location_name": "Club",
+        }
+
+    async def fake_create(title, text, source):
+        return "https://t.me/page"
+
+    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.create_source_page", fake_create)
+
+    start_msg = types.Message.model_validate({
+        "message_id": 1,
+        "date": 0,
+        "chat": {"id": 1, "type": "private"},
+        "from": {"id": 1, "is_bot": False, "first_name": "A"},
+        "text": "/start",
+    })
+    await handle_start(start_msg, db, bot)
+
+    upd = DummyUpdate(-100123, "Chan")
+    await main.handle_my_chat_member(upd, db)
+
+    set_msg = types.Message.model_validate(
+        {
+            "message_id": 2,
+            "date": 0,
+            "forward_date": 0,
+            "forward_from_chat": {"id": -100123, "type": "channel", "title": "Chan"},
+            "forward_from_message_id": 5,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "/setchannel",
+        }
+    )
+    await main.handle_set_channel(set_msg, db, bot)
+
+    fwd_msg = types.Message.model_validate(
+        {
+            "message_id": 3,
+            "date": 0,
+            "forward_date": 0,
+            "forward_from_chat": {"id": -100123, "type": "channel", "username": "chan"},
+            "forward_from_message_id": 10,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "Some text",
+        }
+    )
+
+    await main.handle_forwarded(fwd_msg, db, bot)
+
+    async with db.get_session() as session:
+        ev = (await session.execute(select(Event))).scalars().first()
+
+    assert ev.source_post_url == "https://t.me/chan/10"
+
+
+@pytest.mark.asyncio
+async def test_forward_unregistered(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async def fake_parse(text: str) -> dict:
+        return {
+            "title": "Fwd",
+            "short_description": "d",
+            "date": "2025-01-01",
+            "time": "18:00",
+            "location_name": "Club",
+        }
+
+    async def fake_create(title, text, source):
+        return "https://t.me/page"
+
+    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.create_source_page", fake_create)
+
+    start_msg = types.Message.model_validate({
+        "message_id": 1,
+        "date": 0,
+        "chat": {"id": 1, "type": "private"},
+        "from": {"id": 1, "is_bot": False, "first_name": "A"},
+        "text": "/start",
+    })
+    await handle_start(start_msg, db, bot)
+
+    upd = DummyUpdate(-100123, "Chan")
+    await main.handle_my_chat_member(upd, db)
+
+    fwd_msg = types.Message.model_validate(
+        {
+            "message_id": 2,
+            "date": 0,
+            "forward_date": 0,
+            "forward_from_chat": {"id": -100123, "type": "channel", "username": "chan"},
+            "forward_from_message_id": 10,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "Some text",
+        }
+    )
+
+    await main.handle_forwarded(fwd_msg, db, bot)
+
+    async with db.get_session() as session:
+        ev = (await session.execute(select(Event))).scalars().first()
+
+    assert ev.source_post_url is None
 

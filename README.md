@@ -5,6 +5,15 @@ Telegram bot for publishing event announcements.
 This is an MVP using **aiogram 3** and SQLite. It is designed for deployment on
 Fly.io with a webhook.
 
+Forwarded posts from moderators or admins are treated the same as the `/addevent` command.
+Use `/setchannel` on a forwarded message to register an announcement channel. The `/channels` command lists channels where the bot is admin.
+
+Bot messages display dates in the format `DD.MM.YYYY`. Public pages such as
+Telegraph posts use the short form "D месяц" (e.g. `2 июля`).
+
+Dates are shown as `DD.MM.YYYY` in bot messages. Telegraph pages and other
+public posts use the format "D месяц" (for example, "2 июля").
+
 See `docs/COMMANDS.md` for available bot commands, including `/events` to
 browse upcoming announcements.
 
