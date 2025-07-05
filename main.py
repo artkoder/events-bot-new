@@ -1035,7 +1035,10 @@ def create_app() -> web.Application:
         await db.init()
         hook = webhook.rstrip("/") + "/webhook"
         logging.info("Setting webhook to %s", hook)
-        await bot.set_webhook(hook)
+        await bot.set_webhook(
+            hook,
+            allowed_updates=["message", "callback_query", "my_chat_member"],
+        )
 
     async def on_shutdown(app: web.Application):
         await bot.session.close()
