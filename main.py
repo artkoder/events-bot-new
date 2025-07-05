@@ -521,8 +521,7 @@ async def telegraph_test():
     if not token:
         print("Unable to obtain Telegraph token")
         return
-    tg = Telegraph()
-    tg.access_token = token
+    tg = Telegraph(access_token=token)
     page = await asyncio.to_thread(
         tg.create_page, "Test Page", html="<p>test</p>"
     )
@@ -541,8 +540,7 @@ async def create_source_page(title: str, text: str) -> str | None:
     if not token:
         logging.error("Telegraph token unavailable")
         return None
-    tg = Telegraph()
-    tg.access_token = token
+    tg = Telegraph(access_token=token)
     html_content = "<pre>" + html.escape(text) + "</pre>"
     try:
         page = await asyncio.to_thread(tg.create_page, title, html=html_content)

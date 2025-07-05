@@ -317,8 +317,8 @@ async def test_parse_event_includes_date(monkeypatch):
 @pytest.mark.asyncio
 async def test_telegraph_test(monkeypatch, capsys):
     class DummyTG:
-        def __init__(self):
-            self.access_token = None
+        def __init__(self, access_token=None):
+            self.access_token = access_token
 
         def create_page(self, title, html):
             return {"url": "https://telegra.ph/test", "path": "test"}
@@ -327,7 +327,7 @@ async def test_telegraph_test(monkeypatch, capsys):
             pass
 
     monkeypatch.setenv("TELEGRAPH_TOKEN", "t")
-    monkeypatch.setattr("main.Telegraph", lambda: DummyTG())
+    monkeypatch.setattr("main.Telegraph", lambda access_token=None: DummyTG(access_token))
 
     await telegraph_test()
     captured = capsys.readouterr()
