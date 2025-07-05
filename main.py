@@ -1,758 +1,1057 @@
-import asyncio
-import json
 import logging
 import os
-import sqlite3
-from datetime import datetime, date, timedelta, timezone
-import contextlib
+from datetime import date, datetime, timedelta, timezone
+from typing import Optional, Tuple
 
+from aiogram import Bot, Dispatcher, types
+from aiogram.filters import Command
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web, ClientSession
+from difflib import SequenceMatcher
+import json
+from telegraph import Telegraph
+import asyncio
+import html
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlmodel import Field, SQLModel, select
 
 logging.basicConfig(level=logging.INFO)
 
-DB_PATH = os.getenv("DB_PATH", "bot.db")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://events-bot-new.fly.dev")
-TZ_OFFSET = os.getenv("TZ_OFFSET", "+02:00")
-SCHED_INTERVAL_SEC = int(os.getenv("SCHED_INTERVAL_SEC", "30"))
+DB_PATH = os.getenv("DB_PATH", "/data/db.sqlite")
+TELEGRAPH_TOKEN_FILE = os.getenv("TELEGRAPH_TOKEN_FILE", "/data/telegraph_token.txt")
 
-CREATE_TABLES = [
-    """CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            username TEXT,
-            is_superadmin INTEGER DEFAULT 0,
-            tz_offset TEXT
-        )""",
-    """CREATE TABLE IF NOT EXISTS pending_users (
-            user_id INTEGER PRIMARY KEY,
-            username TEXT,
-            requested_at TEXT
-        )""",
-    """CREATE TABLE IF NOT EXISTS rejected_users (
-            user_id INTEGER PRIMARY KEY,
-            username TEXT,
-            rejected_at TEXT
-        )""",
-    """CREATE TABLE IF NOT EXISTS channels (
-            chat_id INTEGER PRIMARY KEY,
-            title TEXT
-        )""",
-    """CREATE TABLE IF NOT EXISTS schedule (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            from_chat_id INTEGER,
-            message_id INTEGER,
-            target_chat_id INTEGER,
-            publish_time TEXT,
-            sent INTEGER DEFAULT 0,
-            sent_at TEXT
-        )""",
+# user_id -> (event_id, field?) for editing session
+editing_sessions: dict[int, tuple[int, str | None]] = {}
+
+
+class User(SQLModel, table=True):
+    user_id: int = Field(primary_key=True)
+    username: Optional[str] = None
+    is_superadmin: bool = False
+
+
+class PendingUser(SQLModel, table=True):
+    user_id: int = Field(primary_key=True)
+    username: Optional[str] = None
+    requested_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class RejectedUser(SQLModel, table=True):
+    user_id: int = Field(primary_key=True)
+    username: Optional[str] = None
+    rejected_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class Channel(SQLModel, table=True):
+    channel_id: int = Field(primary_key=True)
+    title: Optional[str] = None
+    username: Optional[str] = None
+    is_admin: bool = False
+    is_registered: bool = False
+
+
+class Setting(SQLModel, table=True):
+    key: str = Field(primary_key=True)
+    value: str
+
+
+class Event(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    title: str
+    description: str
+    festival: Optional[str] = None
+    date: str
+    time: str
+    location_name: str
+    location_address: Optional[str] = None
+    city: Optional[str] = None
+    ticket_price_min: Optional[int] = None
+    ticket_price_max: Optional[int] = None
+    ticket_link: Optional[str] = None
+    source_text: str
+    telegraph_url: Optional[str] = None
+    source_post_url: Optional[str] = None
+
+
+class Database:
+    def __init__(self, path: str):
+        self.engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
+
+    async def init(self):
+        async with self.engine.begin() as conn:
+            await conn.run_sync(SQLModel.metadata.create_all)
+            result = await conn.exec_driver_sql("PRAGMA table_info(event)")
+            cols = [r[1] for r in result.fetchall()]
+            if "telegraph_url" not in cols:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE event ADD COLUMN telegraph_url VARCHAR"
+                )
+            if "ticket_price_min" not in cols:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE event ADD COLUMN ticket_price_min INTEGER"
+                )
+            if "ticket_price_max" not in cols:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE event ADD COLUMN ticket_price_max INTEGER"
+                )
+            if "ticket_link" not in cols:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE event ADD COLUMN ticket_link VARCHAR"
+                )
+            if "source_post_url" not in cols:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE event ADD COLUMN source_post_url VARCHAR"
+                )
+
+    def get_session(self) -> AsyncSession:
+        """Create a new session with attributes kept after commit."""
+        return AsyncSession(self.engine, expire_on_commit=False)
+
+
+async def get_tz_offset(db: Database) -> str:
+    async with db.get_session() as session:
+        result = await session.get(Setting, "tz_offset")
+        return result.value if result else "+00:00"
+
+
+async def set_tz_offset(db: Database, value: str):
+    async with db.get_session() as session:
+        setting = await session.get(Setting, "tz_offset")
+        if setting:
+            setting.value = value
+        else:
+            setting = Setting(key="tz_offset", value=value)
+            session.add(setting)
+        await session.commit()
+
+
+def validate_offset(value: str) -> bool:
+    if len(value) != 6 or value[0] not in "+-" or value[3] != ":":
+        return False
+    try:
+        h = int(value[1:3])
+        m = int(value[4:6])
+        return 0 <= h <= 14 and 0 <= m < 60
+    except ValueError:
+        return False
+
+
+def offset_to_timezone(value: str) -> timezone:
+    sign = 1 if value[0] == "+" else -1
+    hours = int(value[1:3])
+    minutes = int(value[4:6])
+    return timezone(sign * timedelta(hours=hours, minutes=minutes))
+
+
+async def parse_event_via_4o(text: str) -> dict:
+    token = os.getenv("FOUR_O_TOKEN")
+    if not token:
+        raise RuntimeError("FOUR_O_TOKEN is missing")
+    url = os.getenv("FOUR_O_URL", "https://api.openai.com/v1/chat/completions")
+    prompt_path = os.path.join("docs", "PROMPTS.md")
+    with open(prompt_path, "r", encoding="utf-8") as f:
+        prompt = f.read()
+    loc_path = os.path.join("docs", "LOCATIONS.md")
+    if os.path.exists(loc_path):
+        with open(loc_path, "r", encoding="utf-8") as f:
+            locations = [line.strip() for line in f if line.strip() and not line.startswith("#")]
+        if locations:
+            prompt += "\nKnown venues:\n" + "\n".join(locations)
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+    today = date.today().isoformat()
+    payload = {
+        "model": "gpt-4o",
+        "messages": [
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": f"Today is {today}. {text}"},
+        ],
+        "temperature": 0,
+    }
+    logging.info("Sending 4o parse request to %s", url)
+    async with ClientSession() as session:
+        resp = await session.post(url, json=payload, headers=headers)
+        resp.raise_for_status()
+        data = await resp.json()
+    logging.debug("4o response: %s", data)
+    content = (
+        data.get("choices", [{}])[0]
+        .get("message", {})
+        .get("content", "{}")
+        .strip()
+    )
+    if content.startswith("```"):
+        content = content.strip("`\n")
+        if content.lower().startswith("json"):
+            content = content[4:].strip()
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError:
+        logging.error("Invalid JSON from 4o: %s", content)
+        raise
+
+
+async def ask_4o(text: str) -> str:
+    token = os.getenv("FOUR_O_TOKEN")
+    if not token:
+        raise RuntimeError("FOUR_O_TOKEN is missing")
+    url = os.getenv("FOUR_O_URL", "https://api.openai.com/v1/chat/completions")
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": "gpt-4o",
+        "messages": [{"role": "user", "content": text}],
+        "temperature": 0,
+    }
+    logging.info("Sending 4o ask request to %s", url)
+    async with ClientSession() as session:
+        resp = await session.post(url, json=payload, headers=headers)
+        resp.raise_for_status()
+        data = await resp.json()
+    logging.debug("4o response: %s", data)
+    return (
+        data.get("choices", [{}])[0]
+        .get("message", {})
+        .get("content", "")
+        .strip()
+    )
+
+
+async def check_duplicate_via_4o(ev: Event, new: Event) -> Tuple[bool, str, str]:
+    """Ask the LLM whether two events are duplicates."""
+    prompt = (
+        "Existing event:\n"
+        f"Title: {ev.title}\nDescription: {ev.description}\nLocation: {ev.location_name} {ev.location_address}\n"
+        "New event:\n"
+        f"Title: {new.title}\nDescription: {new.description}\nLocation: {new.location_name} {new.location_address}\n"
+        "Are these the same event? Respond with JSON {\"duplicate\": true|false, \"title\": \"\", \"short_description\": \"\"}."
+    )
+    try:
+        ans = await ask_4o(prompt)
+        data = json.loads(ans)
+        return (
+            bool(data.get("duplicate")),
+            data.get("title", ""),
+            data.get("short_description", ""),
+        )
+    except Exception as e:
+        logging.error("Duplicate check failed: %s", e)
+        return False, "", ""
+
+
+def get_telegraph_token() -> str | None:
+    token = os.getenv("TELEGRAPH_TOKEN")
+    if token:
+        return token
+    if os.path.exists(TELEGRAPH_TOKEN_FILE):
+        with open(TELEGRAPH_TOKEN_FILE, "r", encoding="utf-8") as f:
+            saved = f.read().strip()
+            if saved:
+                return saved
+    try:
+        tg = Telegraph()
+        data = tg.create_account(short_name="eventsbot")
+        token = data["access_token"]
+        os.makedirs(os.path.dirname(TELEGRAPH_TOKEN_FILE), exist_ok=True)
+        with open(TELEGRAPH_TOKEN_FILE, "w", encoding="utf-8") as f:
+            f.write(token)
+        logging.info("Created Telegraph account; token stored at %s", TELEGRAPH_TOKEN_FILE)
+        return token
+    except Exception as e:
+        logging.error("Failed to create Telegraph token: %s", e)
+        return None
+
+
+async def handle_start(message: types.Message, db: Database, bot: Bot):
+    async with db.get_session() as session:
+        result = await session.execute(select(User))
+        user_count = len(result.scalars().all())
+        user = await session.get(User, message.from_user.id)
+        if user:
+            await bot.send_message(message.chat.id, "Bot is running")
+            return
+        if user_count == 0:
+            session.add(
+                User(
+                    user_id=message.from_user.id,
+                    username=message.from_user.username,
+                    is_superadmin=True,
+                )
+            )
+            await session.commit()
+            await bot.send_message(message.chat.id, "You are superadmin")
+        else:
+            await bot.send_message(message.chat.id, "Use /register to apply")
+
+
+async def handle_register(message: types.Message, db: Database, bot: Bot):
+    async with db.get_session() as session:
+        if await session.get(User, message.from_user.id):
+            await bot.send_message(message.chat.id, "Already registered")
+            return
+        if await session.get(RejectedUser, message.from_user.id):
+            await bot.send_message(message.chat.id, "Access denied by administrator")
+            return
+        if await session.get(PendingUser, message.from_user.id):
+            await bot.send_message(message.chat.id, "Awaiting approval")
+            return
+        result = await session.execute(select(PendingUser))
+        if len(result.scalars().all()) >= 10:
+            await bot.send_message(
+                message.chat.id, "Registration queue full, try later"
+            )
+            return
+        session.add(
+            PendingUser(
+                user_id=message.from_user.id, username=message.from_user.username
+            )
+        )
+        await session.commit()
+        await bot.send_message(message.chat.id, "Registration pending approval")
+
+
+async def handle_requests(message: types.Message, db: Database, bot: Bot):
+    async with db.get_session() as session:
+        user = await session.get(User, message.from_user.id)
+        if not user or not user.is_superadmin:
+            return
+        result = await session.execute(select(PendingUser))
+        pending = result.scalars().all()
+        if not pending:
+            await bot.send_message(message.chat.id, "No pending users")
+            return
+        buttons = [
+            [
+                types.InlineKeyboardButton(
+                    text="Approve", callback_data=f"approve:{p.user_id}"
+                ),
+                types.InlineKeyboardButton(
+                    text="Reject", callback_data=f"reject:{p.user_id}"
+                ),
+            ]
+            for p in pending
+        ]
+        keyboard = types.InlineKeyboardMarkup(inline_keyboard=buttons)
+        lines = [f"{p.user_id} {p.username or ''}" for p in pending]
+        await bot.send_message(message.chat.id, "\n".join(lines), reply_markup=keyboard)
+
+
+async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot):
+    data = callback.data
+    if data.startswith("approve") or data.startswith("reject"):
+        uid = int(data.split(":", 1)[1])
+        async with db.get_session() as session:
+            p = await session.get(PendingUser, uid)
+            if not p:
+                await callback.answer("Not found", show_alert=True)
+                return
+            if data.startswith("approve"):
+                session.add(User(user_id=uid, username=p.username, is_superadmin=False))
+                await bot.send_message(uid, "You are approved")
+            else:
+                session.add(RejectedUser(user_id=uid, username=p.username))
+                await bot.send_message(uid, "Your registration was rejected")
+            await session.delete(p)
+            await session.commit()
+            await callback.answer("Done")
+    elif data.startswith("del:"):
+        _, eid, day = data.split(":")
+        async with db.get_session() as session:
+            event = await session.get(Event, int(eid))
+            if event:
+                await session.delete(event)
+                await session.commit()
+        offset = await get_tz_offset(db)
+        tz = offset_to_timezone(offset)
+        target = datetime.strptime(day, "%Y-%m-%d").date()
+        text, markup = await build_events_message(db, target, tz)
+        await callback.message.edit_text(text, reply_markup=markup)
+        await callback.answer("Deleted")
+    elif data.startswith("edit:"):
+        eid = int(data.split(":")[1])
+        async with db.get_session() as session:
+            event = await session.get(Event, eid)
+        if event:
+            editing_sessions[callback.from_user.id] = (eid, None)
+            await show_edit_menu(callback.from_user.id, event, bot)
+        await callback.answer()
+    elif data.startswith("editfield:"):
+        _, eid, field = data.split(":")
+        editing_sessions[callback.from_user.id] = (int(eid), field)
+        await callback.message.answer(f"Send new value for {field}")
+        await callback.answer()
+    elif data.startswith("editdone:"):
+        if callback.from_user.id in editing_sessions:
+            del editing_sessions[callback.from_user.id]
+        await callback.message.answer("Editing finished")
+        await callback.answer()
+    elif data.startswith("nav:"):
+        _, day = data.split(":")
+        offset = await get_tz_offset(db)
+        tz = offset_to_timezone(offset)
+        target = datetime.strptime(day, "%Y-%m-%d").date()
+        text, markup = await build_events_message(db, target, tz)
+        await callback.message.edit_text(text, reply_markup=markup)
+        await callback.answer()
+    elif data.startswith("unset:"):
+        cid = int(data.split(":")[1])
+        async with db.get_session() as session:
+            ch = await session.get(Channel, cid)
+            if ch:
+                ch.is_registered = False
+                await session.commit()
+        await send_channels_list(callback.message, db, bot, edit=True)
+        await callback.answer("Removed")
+    elif data.startswith("set:"):
+        cid = int(data.split(":")[1])
+        async with db.get_session() as session:
+            ch = await session.get(Channel, cid)
+            if ch and ch.is_admin:
+                ch.is_registered = True
+                await session.commit()
+        await send_setchannel_list(callback.message, db, bot, edit=True)
+        await callback.answer("Registered")
+
+
+async def handle_tz(message: types.Message, db: Database, bot: Bot):
+    parts = message.text.split(maxsplit=1)
+    if len(parts) != 2 or not validate_offset(parts[1]):
+        await bot.send_message(message.chat.id, "Usage: /tz +02:00")
+        return
+    async with db.get_session() as session:
+        user = await session.get(User, message.from_user.id)
+        if not user or not user.is_superadmin:
+            await bot.send_message(message.chat.id, "Not authorized")
+            return
+    await set_tz_offset(db, parts[1])
+    await bot.send_message(message.chat.id, f"Timezone set to {parts[1]}")
+
+
+async def handle_my_chat_member(update: types.ChatMemberUpdated, db: Database):
+    if update.chat.type != "channel":
+        return
+    status = update.new_chat_member.status
+    is_admin = status in {"administrator", "creator"}
+    async with db.get_session() as session:
+        channel = await session.get(Channel, update.chat.id)
+        if not channel:
+            channel = Channel(
+                channel_id=update.chat.id,
+                title=update.chat.title,
+                username=getattr(update.chat, "username", None),
+                is_admin=is_admin,
+            )
+            session.add(channel)
+        else:
+            channel.title = update.chat.title
+            channel.username = getattr(update.chat, "username", None)
+            channel.is_admin = is_admin
+        await session.commit()
+
+
+async def send_channels_list(message: types.Message, db: Database, bot: Bot, edit: bool = False):
+    async with db.get_session() as session:
+        user = await session.get(User, message.from_user.id)
+        if not user or not user.is_superadmin:
+            if not edit:
+                await bot.send_message(message.chat.id, "Not authorized")
+            return
+        result = await session.execute(
+            select(Channel).where(Channel.is_admin.is_(True))
+        )
+        channels = result.scalars().all()
+    lines = []
+    keyboard = []
+    for ch in channels:
+        name = ch.title or ch.username or str(ch.channel_id)
+        if ch.is_registered:
+            lines.append(f"{name} ✅")
+            keyboard.append([
+                types.InlineKeyboardButton(text="Cancel", callback_data=f"unset:{ch.channel_id}")
+            ])
+        else:
+            lines.append(name)
+    if not lines:
+        lines.append("No channels")
+    markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard) if keyboard else None
+    if edit:
+        await message.edit_text("\n".join(lines), reply_markup=markup)
+    else:
+        await bot.send_message(message.chat.id, "\n".join(lines), reply_markup=markup)
+
+
+async def send_setchannel_list(message: types.Message, db: Database, bot: Bot, edit: bool = False):
+    async with db.get_session() as session:
+        user = await session.get(User, message.from_user.id)
+        if not user or not user.is_superadmin:
+            if not edit:
+                await bot.send_message(message.chat.id, "Not authorized")
+            return
+        result = await session.execute(
+            select(Channel).where(
+                Channel.is_admin.is_(True), Channel.is_registered.is_(False)
+            )
+        )
+        channels = result.scalars().all()
+    lines = []
+    keyboard = []
+    for ch in channels:
+        name = ch.title or ch.username or str(ch.channel_id)
+        lines.append(name)
+        keyboard.append([
+            types.InlineKeyboardButton(text=name, callback_data=f"set:{ch.channel_id}")
+        ])
+    if not lines:
+        lines.append("No channels")
+    markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard) if keyboard else None
+    if edit:
+        await message.edit_text("\n".join(lines), reply_markup=markup)
+    else:
+        await bot.send_message(message.chat.id, "\n".join(lines), reply_markup=markup)
+
+async def handle_set_channel(message: types.Message, db: Database, bot: Bot):
+    await send_setchannel_list(message, db, bot, edit=False)
+
+
+async def handle_channels(message: types.Message, db: Database, bot: Bot):
+    await send_channels_list(message, db, bot, edit=False)
+
+
+async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
+    """Insert or update an event if a similar one exists.
+
+    Returns (event, added_flag)."""
+    stmt = select(Event).where(
+        Event.date == new.date,
+        Event.time == new.time,
+        Event.city == new.city,
+    )
+    candidates = (await session.execute(stmt)).scalars().all()
+    for ev in candidates:
+        title_ratio = SequenceMatcher(None, ev.title.lower(), new.title.lower()).ratio()
+        loc_ratio = SequenceMatcher(None, ev.location_name.lower(), new.location_name.lower()).ratio()
+        if title_ratio >= 0.6 and loc_ratio >= 0.6:
+            ev.title = new.title
+            ev.description = new.description
+            ev.festival = new.festival
+            ev.source_text = new.source_text
+            ev.location_name = new.location_name
+            ev.location_address = new.location_address
+            ev.ticket_price_min = new.ticket_price_min
+            ev.ticket_price_max = new.ticket_price_max
+            ev.ticket_link = new.ticket_link
+            await session.commit()
+            return ev, False
+        if loc_ratio >= 0.4 or ev.location_address == new.location_address:
+            # uncertain, ask LLM
+            try:
+                dup, title, desc = await check_duplicate_via_4o(ev, new)
+            except Exception:
+                logging.exception("duplicate check failed")
+                dup = False
+            if dup:
+                ev.title = title or new.title
+                ev.description = desc or new.description
+                ev.festival = new.festival
+                ev.source_text = new.source_text
+                ev.location_name = new.location_name
+                ev.location_address = new.location_address
+                ev.ticket_price_min = new.ticket_price_min
+                ev.ticket_price_max = new.ticket_price_max
+                ev.ticket_link = new.ticket_link
+                await session.commit()
+                return ev, False
+    session.add(new)
+    await session.commit()
+    return new, True
+
+
+async def add_event_from_text(db: Database, text: str, source_link: str | None) -> tuple[Event, bool, list[str], str] | None:
+    try:
+        data = await parse_event_via_4o(text)
+    except Exception as e:
+        logging.error("LLM error: %s", e)
+        return None
+    event = Event(
+        title=data.get("title", ""),
+        description=data.get("short_description", ""),
+        festival=data.get("festival") or None,
+        date=data.get("date", ""),
+        time=data.get("time", ""),
+        location_name=data.get("location_name", ""),
+        location_address=data.get("location_address"),
+        city=data.get("city"),
+        ticket_price_min=data.get("ticket_price_min"),
+        ticket_price_max=data.get("ticket_price_max"),
+        ticket_link=data.get("ticket_link"),
+        source_text=text,
+        source_post_url=source_link,
+    )
+    async with db.get_session() as session:
+        saved, added = await upsert_event(session, event)
+
+    url = await create_source_page(saved.title or "Event", saved.source_text, source_link)
+    if url:
+        async with db.get_session() as session:
+            saved.telegraph_url = url
+            session.add(saved)
+            await session.commit()
+
+    lines = [
+        f"title: {saved.title}",
+        f"date: {saved.date}",
+        f"time: {saved.time}",
+        f"location_name: {saved.location_name}",
+    ]
+    if saved.location_address:
+        lines.append(f"location_address: {saved.location_address}")
+    if saved.city:
+        lines.append(f"city: {saved.city}")
+    if saved.festival:
+        lines.append(f"festival: {saved.festival}")
+    if saved.description:
+        lines.append(f"description: {saved.description}")
+    if saved.ticket_price_min is not None:
+        lines.append(f"price_min: {saved.ticket_price_min}")
+    if saved.ticket_price_max is not None:
+        lines.append(f"price_max: {saved.ticket_price_max}")
+    if saved.ticket_link:
+        lines.append(f"ticket_link: {saved.ticket_link}")
+    if saved.telegraph_url:
+        lines.append(f"telegraph: {saved.telegraph_url}")
+    status = "added" if added else "updated"
+    return saved, added, lines, status
+
+
+async def handle_add_event(message: types.Message, db: Database, bot: Bot):
+    text = message.text.split(maxsplit=1)
+    if len(text) != 2:
+        await bot.send_message(message.chat.id, "Usage: /addevent <text>")
+        return
+    result = await add_event_from_text(db, text[1], None)
+    if not result:
+        await bot.send_message(message.chat.id, "LLM error")
+        return
+    saved, added, lines, status = result
+    await bot.send_message(
+        message.chat.id,
+        f"Event {status}\n" + "\n".join(lines),
+    )
+
+
+async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
+    parts = message.text.split(maxsplit=1)
+    if len(parts) != 2 or '|' not in parts[1]:
+        await bot.send_message(message.chat.id, "Usage: /addevent_raw title|date|time|location")
+        return
+    title, date, time, location = (p.strip() for p in parts[1].split('|', 3))
+    event = Event(
+        title=title,
+        description="",
+        festival=None,
+        date=date,
+        time=time,
+        location_name=location,
+        source_text=parts[1],
+    )
+    async with db.get_session() as session:
+        event, added = await upsert_event(session, event)
+
+    url = await create_source_page(event.title or "Event", event.source_text, None)
+    if url:
+        async with db.get_session() as session:
+            event.telegraph_url = url
+            session.add(event)
+            await session.commit()
+    lines = [
+        f"title: {event.title}",
+        f"date: {event.date}",
+        f"time: {event.time}",
+        f"location_name: {event.location_name}",
+    ]
+    if event.telegraph_url:
+        lines.append(f"telegraph: {event.telegraph_url}")
+    status = "added" if added else "updated"
+    await bot.send_message(
+        message.chat.id,
+        f"Event {status}\n" + "\n".join(lines),
+    )
+
+
+def format_day(day: date, tz: timezone) -> str:
+    if day == datetime.now(tz).date():
+        return "Сегодня"
+    return day.strftime("%d.%m.%Y")
+
+
+MONTHS = [
+    "января",
+    "февраля",
+    "марта",
+    "апреля",
+    "мая",
+    "июня",
+    "июля",
+    "августа",
+    "сентября",
+    "октября",
+    "ноября",
+    "декабря",
 ]
 
 
-class Bot:
-    def __init__(self, token: str, db_path: str):
-        self.api_url = f"https://api.telegram.org/bot{token}"
-        self.db = sqlite3.connect(db_path)
-        self.db.row_factory = sqlite3.Row
-        for stmt in CREATE_TABLES:
-            self.db.execute(stmt)
-        self.db.commit()
-        # ensure new columns exist when upgrading
-        for table, column in (
-            ("users", "username"),
-            ("users", "tz_offset"),
-            ("pending_users", "username"),
-            ("rejected_users", "username"),
-        ):
-            cur = self.db.execute(f"PRAGMA table_info({table})")
-            names = [r[1] for r in cur.fetchall()]
-            if column not in names:
-                self.db.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT")
-        self.db.commit()
-        self.pending = {}
-        self.session: ClientSession | None = None
-        self.running = False
+def format_day_pretty(day: date) -> str:
+    return f"{day.day} {MONTHS[day.month - 1]}"
 
-    async def start(self):
-        self.session = ClientSession()
-        self.running = True
 
-    async def close(self):
-        self.running = False
-        if self.session:
-            await self.session.close()
-
-        self.db.close()
-
-    async def api_request(self, method: str, data: dict = None):
-        async with self.session.post(f"{self.api_url}/{method}", json=data) as resp:
-            text = await resp.text()
-            if resp.status != 200:
-                logging.error("API HTTP %s for %s: %s", resp.status, method, text)
-            try:
-                result = json.loads(text)
-            except Exception:
-                logging.exception("Invalid response for %s: %s", method, text)
-                return {}
-            if not result.get("ok"):
-                logging.error("API call %s failed: %s", method, result)
-            else:
-                logging.info("API call %s succeeded", method)
-            return result
-
-    async def handle_update(self, update):
-        if 'message' in update:
-            await self.handle_message(update['message'])
-        elif 'callback_query' in update:
-            await self.handle_callback(update['callback_query'])
-        elif 'my_chat_member' in update:
-            await self.handle_my_chat_member(update['my_chat_member'])
-
-    async def handle_my_chat_member(self, chat_update):
-        chat = chat_update['chat']
-        status = chat_update['new_chat_member']['status']
-        if status in {'administrator', 'creator'}:
-            self.db.execute(
-                'INSERT OR REPLACE INTO channels (chat_id, title) VALUES (?, ?)',
-                (chat['id'], chat.get('title', chat.get('username', '')))
-            )
-            self.db.commit()
-            logging.info("Added channel %s", chat['id'])
-        else:
-            self.db.execute('DELETE FROM channels WHERE chat_id=?', (chat['id'],))
-            self.db.commit()
-            logging.info("Removed channel %s", chat['id'])
-
-    def get_user(self, user_id):
-        cur = self.db.execute('SELECT * FROM users WHERE user_id=?', (user_id,))
-        return cur.fetchone()
-
-    def is_pending(self, user_id: int) -> bool:
-        cur = self.db.execute('SELECT 1 FROM pending_users WHERE user_id=?', (user_id,))
-        return cur.fetchone() is not None
-
-    def pending_count(self) -> int:
-        cur = self.db.execute('SELECT COUNT(*) FROM pending_users')
-        return cur.fetchone()[0]
-
-    def approve_user(self, uid: int) -> bool:
-        if not self.is_pending(uid):
-            return False
-        cur = self.db.execute('SELECT username FROM pending_users WHERE user_id=?', (uid,))
-        row = cur.fetchone()
-        username = row['username'] if row else None
-        self.db.execute('DELETE FROM pending_users WHERE user_id=?', (uid,))
-        self.db.execute(
-            'INSERT OR IGNORE INTO users (user_id, username, tz_offset) VALUES (?, ?, ?)',
-            (uid, username, TZ_OFFSET)
+async def build_events_message(db: Database, target_date: date, tz: timezone):
+    async with db.get_session() as session:
+        result = await session.execute(
+            select(Event).where(Event.date == target_date.isoformat()).order_by(Event.time)
         )
-        if username:
-            self.db.execute('UPDATE users SET username=? WHERE user_id=?', (username, uid))
-        self.db.execute('DELETE FROM rejected_users WHERE user_id=?', (uid,))
-        self.db.commit()
-        logging.info('Approved user %s', uid)
-        return True
+        events = result.scalars().all()
 
-    def reject_user(self, uid: int) -> bool:
-        if not self.is_pending(uid):
-            return False
-        cur = self.db.execute('SELECT username FROM pending_users WHERE user_id=?', (uid,))
-        row = cur.fetchone()
-        username = row['username'] if row else None
-        self.db.execute('DELETE FROM pending_users WHERE user_id=?', (uid,))
-        self.db.execute(
-            'INSERT OR REPLACE INTO rejected_users (user_id, username, rejected_at) VALUES (?, ?, ?)',
-            (uid, username, datetime.utcnow().isoformat()),
+    lines = []
+    for e in events:
+        lines.append(f"{e.id}. {e.title}")
+        loc = f"{e.time} {e.location_name}"
+        if e.city:
+            loc += f", {e.city}"
+        lines.append(loc)
+        if e.telegraph_url:
+            lines.append(f"исходное: {e.telegraph_url}")
+        lines.append("")
+    if not lines:
+        lines.append("No events")
+
+    keyboard = [
+        [
+            types.InlineKeyboardButton(
+                text="\u274C", callback_data=f"del:{e.id}:{target_date.isoformat()}"
+            ),
+            types.InlineKeyboardButton(
+                text="\u270E", callback_data=f"edit:{e.id}"
+            ),
+        ]
+        for e in events
+    ]
+
+    prev_day = target_date - timedelta(days=1)
+    next_day = target_date + timedelta(days=1)
+    keyboard.append(
+        [
+            types.InlineKeyboardButton(text="\u25C0", callback_data=f"nav:{prev_day.isoformat()}"),
+            types.InlineKeyboardButton(text="\u25B6", callback_data=f"nav:{next_day.isoformat()}"),
+        ]
+    )
+
+    text = f"Events on {format_day(target_date, tz)}\n" + "\n".join(lines)
+    markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard)
+    return text, markup
+
+
+async def show_edit_menu(user_id: int, event: Event, bot: Bot):
+    lines = [
+        f"title: {event.title}",
+        f"description: {event.description}",
+        f"festival: {event.festival or ''}",
+        f"date: {event.date}",
+        f"time: {event.time}",
+        f"location_name: {event.location_name}",
+        f"location_address: {event.location_address or ''}",
+        f"city: {event.city or ''}",
+        f"ticket_price_min: {event.ticket_price_min}",
+        f"ticket_price_max: {event.ticket_price_max}",
+        f"ticket_link: {event.ticket_link or ''}",
+    ]
+    fields = [
+        "title",
+        "description",
+        "festival",
+        "date",
+        "time",
+        "location_name",
+        "location_address",
+        "city",
+        "ticket_price_min",
+        "ticket_price_max",
+        "ticket_link",
+    ]
+    keyboard = []
+    row = []
+    for idx, field in enumerate(fields, 1):
+        row.append(
+            types.InlineKeyboardButton(
+                text=field, callback_data=f"editfield:{event.id}:{field}"
+            )
         )
-        self.db.commit()
-        logging.info('Rejected user %s', uid)
-        return True
+        if idx % 3 == 0:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+    keyboard.append(
+        [types.InlineKeyboardButton(text="Done", callback_data=f"editdone:{event.id}")]
+    )
+    markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard)
+    await bot.send_message(user_id, "\n".join(lines), reply_markup=markup)
 
-    def is_rejected(self, user_id: int) -> bool:
-        cur = self.db.execute('SELECT 1 FROM rejected_users WHERE user_id=?', (user_id,))
-        return cur.fetchone() is not None
 
-    def list_scheduled(self):
-        cur = self.db.execute(
-            'SELECT s.id, s.target_chat_id, c.title as target_title, '
-            's.publish_time, s.from_chat_id, s.message_id '
-            'FROM schedule s LEFT JOIN channels c ON s.target_chat_id=c.chat_id '
-            'WHERE s.sent=0 ORDER BY s.publish_time'
-        )
-        return cur.fetchall()
+async def handle_events(message: types.Message, db: Database, bot: Bot):
+    parts = message.text.split(maxsplit=1)
+    offset = await get_tz_offset(db)
+    tz = offset_to_timezone(offset)
 
-    def add_schedule(self, from_chat: int, msg_id: int, targets: set[int], pub_time: str):
-        for chat_id in targets:
-            self.db.execute(
-                'INSERT INTO schedule (from_chat_id, message_id, target_chat_id, publish_time) VALUES (?, ?, ?, ?)',
-                (from_chat, msg_id, chat_id, pub_time),
-            )
-        self.db.commit()
-        logging.info('Scheduled %s -> %s at %s', msg_id, list(targets), pub_time)
-
-    def remove_schedule(self, sid: int):
-        self.db.execute('DELETE FROM schedule WHERE id=?', (sid,))
-        self.db.commit()
-        logging.info('Cancelled schedule %s', sid)
-
-    def update_schedule_time(self, sid: int, pub_time: str):
-        self.db.execute('UPDATE schedule SET publish_time=? WHERE id=?', (pub_time, sid))
-        self.db.commit()
-        logging.info('Rescheduled %s to %s', sid, pub_time)
-
-    @staticmethod
-    def format_user(user_id: int, username: str | None) -> str:
-        label = f"@{username}" if username else str(user_id)
-        return f"[{label}](tg://user?id={user_id})"
-
-    @staticmethod
-    def parse_offset(offset: str) -> timedelta:
-        sign = -1 if offset.startswith('-') else 1
-        h, m = offset.lstrip('+-').split(':')
-        return timedelta(minutes=sign * (int(h) * 60 + int(m)))
-
-    def format_time(self, ts: str, offset: str) -> str:
-        dt = datetime.fromisoformat(ts)
-        dt += self.parse_offset(offset)
-        return dt.strftime('%H:%M %d.%m.%Y')
-
-    def get_tz_offset(self, user_id: int) -> str:
-        cur = self.db.execute('SELECT tz_offset FROM users WHERE user_id=?', (user_id,))
-        row = cur.fetchone()
-        return row['tz_offset'] if row and row['tz_offset'] else TZ_OFFSET
-
-    def is_authorized(self, user_id):
-        return self.get_user(user_id) is not None
-
-    def is_superadmin(self, user_id):
-        row = self.get_user(user_id)
-        return row and row['is_superadmin']
-
-    async def handle_message(self, message):
-        text = message.get('text', '')
-        user_id = message['from']['id']
-        username = message['from'].get('username')
-
-        # first /start registers superadmin or puts user in queue
-        if text.startswith('/start'):
-            if self.get_user(user_id):
-                await self.api_request('sendMessage', {
-                    'chat_id': user_id,
-                    'text': 'Bot is working'
-                })
-                return
-
-            if self.is_rejected(user_id):
-                await self.api_request('sendMessage', {
-                    'chat_id': user_id,
-                    'text': 'Access denied by administrator'
-                })
-                return
-
-            if self.is_pending(user_id):
-                await self.api_request('sendMessage', {
-                    'chat_id': user_id,
-                    'text': 'Awaiting approval'
-                })
-                return
-
-            cur = self.db.execute('SELECT COUNT(*) FROM users')
-            user_count = cur.fetchone()[0]
-            if user_count == 0:
-                self.db.execute('INSERT INTO users (user_id, username, is_superadmin, tz_offset) VALUES (?, ?, 1, ?)', (user_id, username, TZ_OFFSET))
-                self.db.commit()
-                logging.info('Registered %s as superadmin', user_id)
-                await self.api_request('sendMessage', {
-                    'chat_id': user_id,
-                    'text': 'You are superadmin'
-                })
-                return
-
-            if self.pending_count() >= 10:
-                await self.api_request('sendMessage', {
-                    'chat_id': user_id,
-                    'text': 'Registration queue full, try later'
-                })
-                logging.info('Registration rejected for %s due to full queue', user_id)
-                return
-
-            self.db.execute(
-                'INSERT OR IGNORE INTO pending_users (user_id, username, requested_at) VALUES (?, ?, ?)',
-                (user_id, username, datetime.utcnow().isoformat())
-            )
-            self.db.commit()
-            logging.info('User %s added to pending queue', user_id)
-            await self.api_request('sendMessage', {
-                'chat_id': user_id,
-                'text': 'Registration pending approval'
-            })
-            return
-
-        if text.startswith('/add_user') and self.is_superadmin(user_id):
-            parts = text.split()
-            if len(parts) == 2:
-                uid = int(parts[1])
-                if not self.get_user(uid):
-                    self.db.execute('INSERT INTO users (user_id) VALUES (?)', (uid,))
-                    self.db.commit()
-                await self.api_request('sendMessage', {
-                    'chat_id': user_id,
-                    'text': f'User {uid} added'
-                })
-            return
-
-        if text.startswith('/remove_user') and self.is_superadmin(user_id):
-            parts = text.split()
-            if len(parts) == 2:
-                uid = int(parts[1])
-                self.db.execute('DELETE FROM users WHERE user_id=?', (uid,))
-                self.db.commit()
-                await self.api_request('sendMessage', {
-                    'chat_id': user_id,
-                    'text': f'User {uid} removed'
-                })
-            return
-
-        if text.startswith('/tz'):
-            parts = text.split()
-            if not self.is_authorized(user_id):
-                await self.api_request('sendMessage', {'chat_id': user_id, 'text': 'Not authorized'})
-                return
-            if len(parts) != 2:
-                await self.api_request('sendMessage', {'chat_id': user_id, 'text': 'Usage: /tz +02:00'})
-                return
+    if len(parts) == 2:
+        text = parts[1]
+        for fmt in ("%Y-%m-%d", "%d.%m.%Y"):
             try:
-                self.parse_offset(parts[1])
-            except Exception:
-                await self.api_request('sendMessage', {'chat_id': user_id, 'text': 'Invalid offset'})
-                return
-            self.db.execute('UPDATE users SET tz_offset=? WHERE user_id=?', (parts[1], user_id))
-            self.db.commit()
-            await self.api_request('sendMessage', {'chat_id': user_id, 'text': f'Timezone set to {parts[1]}'})
-            return
-
-        if text.startswith('/list_users') and self.is_superadmin(user_id):
-            cur = self.db.execute('SELECT user_id, username, is_superadmin FROM users')
-            rows = cur.fetchall()
-            msg = '\n'.join(
-                f"{self.format_user(r['user_id'], r['username'])} {'(admin)' if r['is_superadmin'] else ''}"
-                for r in rows
-            )
-            await self.api_request('sendMessage', {
-                'chat_id': user_id,
-                'text': msg or 'No users',
-                'parse_mode': 'Markdown'
-            })
-            return
-
-        if text.startswith('/pending') and self.is_superadmin(user_id):
-            cur = self.db.execute('SELECT user_id, username, requested_at FROM pending_users')
-            rows = cur.fetchall()
-            if not rows:
-                await self.api_request('sendMessage', {'chat_id': user_id, 'text': 'No pending users'})
-                return
-
-            msg = '\n'.join(
-                f"{self.format_user(r['user_id'], r['username'])} requested {r['requested_at']}"
-                for r in rows
-            )
-            keyboard = {
-                'inline_keyboard': [
-                    [
-                        {'text': 'Approve', 'callback_data': f'approve:{r["user_id"]}'},
-                        {'text': 'Reject', 'callback_data': f'reject:{r["user_id"]}'}
-                    ]
-                    for r in rows
-                ]
-            }
-            await self.api_request('sendMessage', {
-                'chat_id': user_id,
-                'text': msg,
-                'parse_mode': 'Markdown',
-                'reply_markup': keyboard
-            })
-            return
-
-        if text.startswith('/approve') and self.is_superadmin(user_id):
-            parts = text.split()
-            if len(parts) == 2:
-                uid = int(parts[1])
-                if self.approve_user(uid):
-                    cur = self.db.execute('SELECT username FROM users WHERE user_id=?', (uid,))
-                    row = cur.fetchone()
-                    uname = row['username'] if row else None
-                    await self.api_request('sendMessage', {
-                        'chat_id': user_id,
-                        'text': f'{self.format_user(uid, uname)} approved',
-                        'parse_mode': 'Markdown'
-                    })
-                    await self.api_request('sendMessage', {'chat_id': uid, 'text': 'You are approved'})
-                else:
-                    await self.api_request('sendMessage', {'chat_id': user_id, 'text': 'User not in pending list'})
-            return
-
-        if text.startswith('/reject') and self.is_superadmin(user_id):
-            parts = text.split()
-            if len(parts) == 2:
-                uid = int(parts[1])
-                if self.reject_user(uid):
-                    cur = self.db.execute('SELECT username FROM rejected_users WHERE user_id=?', (uid,))
-                    row = cur.fetchone()
-                    uname = row['username'] if row else None
-                    await self.api_request('sendMessage', {
-                        'chat_id': user_id,
-                        'text': f'{self.format_user(uid, uname)} rejected',
-                        'parse_mode': 'Markdown'
-                    })
-                    await self.api_request('sendMessage', {'chat_id': uid, 'text': 'Your registration was rejected'})
-                else:
-                    await self.api_request('sendMessage', {'chat_id': user_id, 'text': 'User not in pending list'})
-            return
-
-        if text.startswith('/channels') and self.is_superadmin(user_id):
-            cur = self.db.execute('SELECT chat_id, title FROM channels')
-            rows = cur.fetchall()
-            msg = '\n'.join(f"{r['title']} ({r['chat_id']})" for r in rows)
-            await self.api_request('sendMessage', {'chat_id': user_id, 'text': msg or 'No channels'})
-            return
-
-        if text.startswith('/history'):
-            cur = self.db.execute(
-                'SELECT target_chat_id, sent_at FROM schedule WHERE sent=1 ORDER BY sent_at DESC LIMIT 10'
-            )
-            rows = cur.fetchall()
-            offset = self.get_tz_offset(user_id)
-            msg = '\n'.join(
-                f"{r['target_chat_id']} at {self.format_time(r['sent_at'], offset)}"
-                for r in rows
-            )
-            await self.api_request('sendMessage', {'chat_id': user_id, 'text': msg or 'No history'})
-            return
-
-        if text.startswith('/scheduled') and self.is_authorized(user_id):
-            rows = self.list_scheduled()
-            if not rows:
-                await self.api_request('sendMessage', {'chat_id': user_id, 'text': 'No scheduled posts'})
-                return
-            offset = self.get_tz_offset(user_id)
-            for r in rows:
-                ok = False
-                try:
-                    resp = await self.api_request('forwardMessage', {
-                        'chat_id': user_id,
-                        'from_chat_id': r['from_chat_id'],
-                        'message_id': r['message_id']
-                    })
-                    ok = resp.get('ok', False)
-                    if not ok and resp.get('error_code') == 400 and 'not' in resp.get('description', '').lower():
-                        resp = await self.api_request('copyMessage', {
-                            'chat_id': user_id,
-                            'from_chat_id': r['from_chat_id'],
-                            'message_id': r['message_id']
-                        })
-                        ok = resp.get('ok', False)
-                except Exception:
-                    logging.exception('Failed to forward message %s', r['id'])
-                if not ok:
-                    link = None
-                    if str(r['from_chat_id']).startswith('-100'):
-                        cid = str(r['from_chat_id'])[4:]
-                        link = f'https://t.me/c/{cid}/{r["message_id"]}'
-                    await self.api_request('sendMessage', {
-                        'chat_id': user_id,
-                        'text': link or f'Message {r["message_id"]} from {r["from_chat_id"]}'
-                    })
-                keyboard = {
-                    'inline_keyboard': [[
-                        {'text': 'Cancel', 'callback_data': f'cancel:{r["id"]}'},
-                        {'text': 'Reschedule', 'callback_data': f'resch:{r["id"]}'}
-                    ]]
-                }
-                target = (
-                    f"{r['target_title']} ({r['target_chat_id']})"
-                    if r['target_title'] else str(r['target_chat_id'])
-                )
-                await self.api_request('sendMessage', {
-                    'chat_id': user_id,
-                    'text': f"{r['id']}: {target} at {self.format_time(r['publish_time'], offset)}",
-                    'reply_markup': keyboard
-                })
-            return
-
-        # handle time input for scheduling
-        if user_id in self.pending and 'await_time' in self.pending[user_id]:
-            time_str = text.strip()
-            try:
-                if len(time_str.split()) == 1:
-                    dt = datetime.strptime(time_str, '%H:%M')
-                    pub_time = datetime.combine(date.today(), dt.time())
-                else:
-                    pub_time = datetime.strptime(time_str, '%d.%m.%Y %H:%M')
+                day = datetime.strptime(text, fmt).date()
+                break
             except ValueError:
-                await self.api_request('sendMessage', {
-                    'chat_id': user_id,
-                    'text': 'Invalid time format'
-                })
-                return
-            offset = self.get_tz_offset(user_id)
-            pub_time_utc = pub_time - self.parse_offset(offset)
-            if pub_time_utc <= datetime.utcnow():
-                await self.api_request('sendMessage', {
-                    'chat_id': user_id,
-                    'text': 'Time must be in future'
-                })
-                return
-            data = self.pending.pop(user_id)
-            if 'reschedule_id' in data:
-                self.update_schedule_time(data['reschedule_id'], pub_time_utc.isoformat())
-                await self.api_request('sendMessage', {
-                    'chat_id': user_id,
-                    'text': f'Rescheduled for {self.format_time(pub_time_utc.isoformat(), offset)}'
-                })
-            else:
-                test = await self.api_request(
-                    'forwardMessage',
-                    {
-                        'chat_id': user_id,
-                        'from_chat_id': data['from_chat_id'],
-                        'message_id': data['message_id']
-                    }
-                )
-                if not test.get('ok'):
-                    await self.api_request('sendMessage', {
-                        'chat_id': user_id,
-                        'text': f"Add the bot to channel {data['from_chat_id']} (reader role) first"
-                    })
-                    return
-                self.add_schedule(data['from_chat_id'], data['message_id'], data['selected'], pub_time_utc.isoformat())
-                await self.api_request('sendMessage', {
-                    'chat_id': user_id,
-                    'text': f"Scheduled to {len(data['selected'])} channels for {self.format_time(pub_time_utc.isoformat(), offset)}"
-                })
+                day = None
+        if day is None:
+            await bot.send_message(message.chat.id, "Usage: /events YYYY-MM-DD")
             return
-
-        # start scheduling on forwarded message
-        if 'forward_from_chat' in message and self.is_authorized(user_id):
-            from_chat = message['forward_from_chat']['id']
-            msg_id = message['forward_from_message_id']
-            cur = self.db.execute('SELECT chat_id, title FROM channels')
-            rows = cur.fetchall()
-            if not rows:
-                await self.api_request('sendMessage', {
-                    'chat_id': user_id,
-                    'text': 'No channels available'
-                })
-                return
-            keyboard = {
-                'inline_keyboard': [
-                    [{'text': r['title'], 'callback_data': f'addch:{r["chat_id"]}'}] for r in rows
-                ] + [[{'text': 'Done', 'callback_data': 'chdone'}]]
-            }
-            self.pending[user_id] = {
-                'from_chat_id': from_chat,
-                'message_id': msg_id,
-                'selected': set()
-            }
-            await self.api_request('sendMessage', {
-                'chat_id': user_id,
-                'text': 'Select channels',
-                'reply_markup': keyboard
-            })
-            return
-        else:
-            if not self.is_authorized(user_id):
-                await self.api_request('sendMessage', {
-                    'chat_id': user_id,
-                    'text': 'Not authorized'
-                })
-            else:
-                await self.api_request('sendMessage', {
-                    'chat_id': user_id,
-                    'text': 'Please forward a post from a channel'
-                })
-
-    async def handle_callback(self, query):
-        user_id = query['from']['id']
-        data = query['data']
-        if data.startswith('addch:') and user_id in self.pending:
-            chat_id = int(data.split(':')[1])
-            if 'selected' in self.pending[user_id]:
-                s = self.pending[user_id]['selected']
-                if chat_id in s:
-                    s.remove(chat_id)
-                else:
-                    s.add(chat_id)
-        elif data == 'chdone' and user_id in self.pending:
-            info = self.pending[user_id]
-            if not info.get('selected'):
-                await self.api_request('sendMessage', {'chat_id': user_id, 'text': 'Select at least one channel'})
-            else:
-                self.pending[user_id]['await_time'] = True
-                await self.api_request('sendMessage', {
-                    'chat_id': user_id,
-                    'text': 'Enter time (HH:MM or DD.MM.YYYY HH:MM)'
-                })
-        elif data.startswith('approve:') and self.is_superadmin(user_id):
-            uid = int(data.split(':')[1])
-            if self.approve_user(uid):
-                cur = self.db.execute('SELECT username FROM users WHERE user_id=?', (uid,))
-                row = cur.fetchone()
-                uname = row['username'] if row else None
-                await self.api_request('sendMessage', {
-                    'chat_id': user_id,
-                    'text': f'{self.format_user(uid, uname)} approved',
-                    'parse_mode': 'Markdown'
-                })
-                await self.api_request('sendMessage', {'chat_id': uid, 'text': 'You are approved'})
-            else:
-                await self.api_request('sendMessage', {'chat_id': user_id, 'text': 'User not in pending list'})
-        elif data.startswith('reject:') and self.is_superadmin(user_id):
-            uid = int(data.split(':')[1])
-            if self.reject_user(uid):
-                cur = self.db.execute('SELECT username FROM rejected_users WHERE user_id=?', (uid,))
-                row = cur.fetchone()
-                uname = row['username'] if row else None
-                await self.api_request('sendMessage', {
-                    'chat_id': user_id,
-                    'text': f'{self.format_user(uid, uname)} rejected',
-                    'parse_mode': 'Markdown'
-                })
-                await self.api_request('sendMessage', {'chat_id': uid, 'text': 'Your registration was rejected'})
-            else:
-                await self.api_request('sendMessage', {'chat_id': user_id, 'text': 'User not in pending list'})
-        elif data.startswith('cancel:') and self.is_authorized(user_id):
-            sid = int(data.split(':')[1])
-            self.remove_schedule(sid)
-            await self.api_request('sendMessage', {'chat_id': user_id, 'text': f'Schedule {sid} cancelled'})
-        elif data.startswith('resch:') and self.is_authorized(user_id):
-            sid = int(data.split(':')[1])
-            self.pending[user_id] = {'reschedule_id': sid, 'await_time': True}
-            await self.api_request('sendMessage', {'chat_id': user_id, 'text': 'Enter new time'})
-        await self.api_request('answerCallbackQuery', {'callback_query_id': query['id']})
-
-
-    async def process_due(self):
-        """Publish due scheduled messages."""
-        now = datetime.utcnow().isoformat()
-        logging.info("Scheduler check at %s", now)
-        cur = self.db.execute(
-            'SELECT * FROM schedule WHERE sent=0 AND publish_time<=? ORDER BY publish_time',
-            (now,),
-        )
-        rows = cur.fetchall()
-        logging.info("Due ids: %s", [r['id'] for r in rows])
-        for row in rows:
-            try:
-                resp = await self.api_request(
-                    'forwardMessage',
-                    {
-                        'chat_id': row['target_chat_id'],
-                        'from_chat_id': row['from_chat_id'],
-                        'message_id': row['message_id'],
-                    },
-                )
-                ok = resp.get('ok', False)
-                if not ok and resp.get('error_code') == 400 and 'not' in resp.get('description', '').lower():
-                    resp = await self.api_request(
-                        'copyMessage',
-                        {
-                            'chat_id': row['target_chat_id'],
-                            'from_chat_id': row['from_chat_id'],
-                            'message_id': row['message_id'],
-                        },
-                    )
-                    ok = resp.get('ok', False)
-                if ok:
-                    self.db.execute(
-                        'UPDATE schedule SET sent=1, sent_at=? WHERE id=?',
-                        (datetime.utcnow().isoformat(), row['id']),
-                    )
-                    self.db.commit()
-                    logging.info('Published schedule %s', row['id'])
-                else:
-                    logging.error('Failed to publish %s: %s', row['id'], resp)
-            except Exception:
-                logging.exception('Error publishing schedule %s', row['id'])
-
-    async def schedule_loop(self):
-        """Background scheduler running at configurable intervals."""
-
-        try:
-            logging.info("Scheduler loop started")
-            while self.running:
-                await self.process_due()
-                await asyncio.sleep(SCHED_INTERVAL_SEC)
-        except asyncio.CancelledError:
-            pass
-
-
-async def ensure_webhook(bot: Bot, base_url: str):
-    expected = base_url.rstrip('/') + '/webhook'
-    info = await bot.api_request('getWebhookInfo')
-    current = info.get('result', {}).get('url')
-    if current != expected:
-        logging.info('Registering webhook %s', expected)
-        resp = await bot.api_request('setWebhook', {'url': expected})
-        if not resp.get('ok'):
-            logging.error('Failed to register webhook: %s', resp)
-            raise RuntimeError(f"Webhook registration failed: {resp}")
-        logging.info('Webhook registered successfully')
     else:
-        logging.info('Webhook already registered at %s', current)
+        day = datetime.now(tz).date()
 
-async def handle_webhook(request):
-    bot: Bot = request.app['bot']
+    async with db.get_session() as session:
+        if not await session.get(User, message.from_user.id):
+            await bot.send_message(message.chat.id, "Not authorized")
+            return
+
+    text, markup = await build_events_message(db, day, tz)
+    await bot.send_message(message.chat.id, text, reply_markup=markup)
+
+
+async def handle_ask_4o(message: types.Message, db: Database, bot: Bot):
+    parts = message.text.split(maxsplit=1)
+    if len(parts) != 2:
+        await bot.send_message(message.chat.id, "Usage: /ask4o <text>")
+        return
+    async with db.get_session() as session:
+        user = await session.get(User, message.from_user.id)
+        if not user or not user.is_superadmin:
+            await bot.send_message(message.chat.id, "Not authorized")
+            return
     try:
-        data = await request.json()
-        logging.info("Received webhook: %s", data)
-    except Exception:
-        logging.exception("Invalid webhook payload")
-        return web.Response(text='bad request', status=400)
+        answer = await ask_4o(parts[1])
+    except Exception as e:
+        await bot.send_message(message.chat.id, f"LLM error: {e}")
+        return
+    await bot.send_message(message.chat.id, answer)
+
+
+async def handle_edit_message(message: types.Message, db: Database, bot: Bot):
+    state = editing_sessions.get(message.from_user.id)
+    if not state:
+        return
+    eid, field = state
+    if field is None:
+        return
+    value = message.text.strip()
+    async with db.get_session() as session:
+        event = await session.get(Event, eid)
+        if not event:
+            await bot.send_message(message.chat.id, "Event not found")
+            del editing_sessions[message.from_user.id]
+            return
+        if field in {"ticket_price_min", "ticket_price_max"}:
+            try:
+                setattr(event, field, int(value))
+            except ValueError:
+                await bot.send_message(message.chat.id, "Invalid number")
+                return
+        else:
+            setattr(event, field, value)
+        await session.commit()
+    editing_sessions[message.from_user.id] = (eid, None)
+    await show_edit_menu(message.from_user.id, event, bot)
+
+
+async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
+    if not message.text:
+        return
+    async with db.get_session() as session:
+        if not await session.get(User, message.from_user.id):
+            return
+    link = None
+    if message.forward_from_chat and message.forward_from_message_id:
+        chat = message.forward_from_chat
+        msg_id = message.forward_from_message_id
+        async with db.get_session() as session:
+            ch = await session.get(Channel, chat.id)
+            allowed = ch.is_registered if ch else False
+        if allowed:
+            if chat.username:
+                link = f"https://t.me/{chat.username}/{msg_id}"
+            else:
+                cid = str(chat.id)
+                if cid.startswith("-100"):
+                    cid = cid[4:]
+                else:
+                    cid = cid.lstrip("-")
+                link = f"https://t.me/c/{cid}/{msg_id}"
+    result = await add_event_from_text(db, message.text, link)
+    if result:
+        saved, added, lines, status = result
+        await bot.send_message(
+            message.chat.id,
+            f"Event {status}\n" + "\n".join(lines),
+        )
+
+
+async def telegraph_test():
+    token = get_telegraph_token()
+    if not token:
+        print("Unable to obtain Telegraph token")
+        return
+    tg = Telegraph(access_token=token)
+    page = await asyncio.to_thread(
+        tg.create_page, "Test Page", html_content="<p>test</p>"
+    )
+    logging.info("Created %s", page["url"])
+    print("Created", page["url"])
+    await asyncio.to_thread(
+        tg.edit_page, page["path"], title="Test Page", html_content="<p>updated</p>"
+    )
+    logging.info("Edited %s", page["url"])
+    print("Edited", page["url"])
+
+
+async def create_source_page(title: str, text: str, source_url: str | None) -> str | None:
+    """Create a Telegraph page with the original event text."""
+    token = get_telegraph_token()
+    if not token:
+        logging.error("Telegraph token unavailable")
+        return None
+    tg = Telegraph(access_token=token)
+    html_content = ""
+    if source_url:
+        html_content += f'<p>Source: <a href="{html.escape(source_url)}">link</a></p>'
+    html_content += "<pre>" + html.escape(text) + "</pre>"
     try:
-        await bot.handle_update(data)
-    except Exception:
-        logging.exception("Error handling update")
-        return web.Response(text='error', status=500)
-    return web.Response(text='ok')
+        page = await asyncio.to_thread(
+            tg.create_page, title, html_content=html_content
+        )
+    except Exception as e:
+        logging.error("Failed to create telegraph page: %s", e)
+        return None
+    logging.info("Created telegraph page %s", page.get("url"))
+    return page.get("url")
 
-def create_app():
-    app = web.Application()
 
+def create_app() -> web.Application:
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
-        raise RuntimeError("TELEGRAM_BOT_TOKEN not found in environment variables")
+        raise RuntimeError("TELEGRAM_BOT_TOKEN is missing")
 
-    bot = Bot(token, DB_PATH)
-    app['bot'] = bot
+    webhook = os.getenv("WEBHOOK_URL")
+    if not webhook:
+        raise RuntimeError("WEBHOOK_URL is missing")
 
-    app.router.add_post('/webhook', handle_webhook)
+    bot = Bot(token)
+    logging.info("DB_PATH=%s", DB_PATH)
+    logging.info("FOUR_O_TOKEN found: %s", bool(os.getenv("FOUR_O_TOKEN")))
+    dp = Dispatcher()
+    db = Database(DB_PATH)
 
-    webhook_base = WEBHOOK_URL
+    async def start_wrapper(message: types.Message):
+        await handle_start(message, db, bot)
 
-    async def start_background(app: web.Application):
-        logging.info("Application startup")
-        try:
-            await bot.start()
-            await ensure_webhook(bot, webhook_base)
-        except Exception:
-            logging.exception("Error during startup")
-            raise
-        app['schedule_task'] = asyncio.create_task(bot.schedule_loop())
+    async def register_wrapper(message: types.Message):
+        await handle_register(message, db, bot)
 
-    async def cleanup_background(app: web.Application):
-        await bot.close()
-        app['schedule_task'].cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await app['schedule_task']
+    async def requests_wrapper(message: types.Message):
+        await handle_requests(message, db, bot)
 
+    async def tz_wrapper(message: types.Message):
+        await handle_tz(message, db, bot)
 
-    app.on_startup.append(start_background)
-    app.on_cleanup.append(cleanup_background)
+    async def callback_wrapper(callback: types.CallbackQuery):
+        await process_request(callback, db, bot)
 
+    async def add_event_wrapper(message: types.Message):
+        await handle_add_event(message, db, bot)
+
+    async def add_event_raw_wrapper(message: types.Message):
+        await handle_add_event_raw(message, db, bot)
+
+    async def ask_4o_wrapper(message: types.Message):
+        await handle_ask_4o(message, db, bot)
+
+    async def list_events_wrapper(message: types.Message):
+        await handle_events(message, db, bot)
+
+    async def set_channel_wrapper(message: types.Message):
+        await handle_set_channel(message, db, bot)
+
+    async def channels_wrapper(message: types.Message):
+        await handle_channels(message, db, bot)
+
+    async def edit_message_wrapper(message: types.Message):
+        await handle_edit_message(message, db, bot)
+
+    async def forward_wrapper(message: types.Message):
+        await handle_forwarded(message, db, bot)
+
+    dp.message.register(start_wrapper, Command("start"))
+    dp.message.register(register_wrapper, Command("register"))
+    dp.message.register(requests_wrapper, Command("requests"))
+    dp.callback_query.register(
+        callback_wrapper,
+        lambda c: c.data.startswith("approve")
+        or c.data.startswith("reject")
+        or c.data.startswith("del:")
+        or c.data.startswith("nav:")
+        or c.data.startswith("edit:")
+        or c.data.startswith("editfield:")
+        or c.data.startswith("editdone:")
+        or c.data.startswith("unset:")
+        or c.data.startswith("set:"),
+    )
+    dp.message.register(tz_wrapper, Command("tz"))
+    dp.message.register(add_event_wrapper, Command("addevent"))
+    dp.message.register(add_event_raw_wrapper, Command("addevent_raw"))
+    dp.message.register(ask_4o_wrapper, Command("ask4o"))
+    dp.message.register(list_events_wrapper, Command("events"))
+    dp.message.register(set_channel_wrapper, Command("setchannel"))
+    dp.message.register(channels_wrapper, Command("channels"))
+    dp.message.register(edit_message_wrapper, lambda m: m.from_user.id in editing_sessions)
+    dp.message.register(forward_wrapper, lambda m: bool(m.forward_date))
+    dp.my_chat_member.register(lambda upd: handle_my_chat_member(upd, db))
+
+    app = web.Application()
+    SimpleRequestHandler(dp, bot).register(app, path="/webhook")
+    setup_application(app, dp, bot=bot)
+
+    async def on_startup(app: web.Application):
+        logging.info("Initializing database")
+        await db.init()
+        hook = webhook.rstrip("/") + "/webhook"
+        logging.info("Setting webhook to %s", hook)
+        await bot.set_webhook(
+            hook,
+            allowed_updates=["message", "callback_query", "my_chat_member"],
+        )
+
+    async def on_shutdown(app: web.Application):
+        await bot.session.close()
+
+    app.on_startup.append(on_startup)
+    app.on_shutdown.append(on_shutdown)
     return app
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
+    import sys
 
-    web.run_app(create_app(), port=int(os.getenv("PORT", 8080)))
-
-
+    if len(sys.argv) > 1 and sys.argv[1] == "test_telegraph":
+        asyncio.run(telegraph_test())
+    else:
+        web.run_app(create_app(), port=int(os.getenv("PORT", 8080)))
