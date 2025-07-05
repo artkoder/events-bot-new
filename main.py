@@ -523,7 +523,7 @@ async def telegraph_test():
         return
     tg = Telegraph(access_token=token)
     page = await asyncio.to_thread(
-        tg.create_page, "Test Page", html="<p>test</p>"
+        tg.create_page, "Test Page", html_content="<p>test</p>"
     )
     logging.info("Created %s", page["url"])
     print("Created", page["url"])
@@ -543,7 +543,9 @@ async def create_source_page(title: str, text: str) -> str | None:
     tg = Telegraph(access_token=token)
     html_content = "<pre>" + html.escape(text) + "</pre>"
     try:
-        page = await asyncio.to_thread(tg.create_page, title, html=html_content)
+        page = await asyncio.to_thread(
+            tg.create_page, title, html_content=html_content
+        )
     except Exception as e:
         logging.error("Failed to create telegraph page: %s", e)
         return None

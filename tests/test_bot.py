@@ -319,8 +319,7 @@ async def test_telegraph_test(monkeypatch, capsys):
     class DummyTG:
         def __init__(self, access_token=None):
             self.access_token = access_token
-
-        def create_page(self, title, html):
+        def create_page(self, title, html_content=None, **_):
             return {"url": "https://telegra.ph/test", "path": "test"}
 
         def edit_page(self, path, title, html_content):
