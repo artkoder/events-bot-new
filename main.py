@@ -403,6 +403,7 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
             ch = await session.get(Channel, cid)
             if ch:
                 ch.is_registered = False
+                logging.info("channel %s unset", cid)
                 await session.commit()
         await send_channels_list(callback.message, db, bot, edit=True)
         await callback.answer("Removed")
@@ -412,6 +413,7 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
             ch = await session.get(Channel, cid)
             if ch and ch.is_admin:
                 ch.is_registered = True
+                logging.info("channel %s registered", cid)
                 await session.commit()
         await send_setchannel_list(callback.message, db, bot, edit=True)
         await callback.answer("Registered")
@@ -436,6 +438,12 @@ async def handle_my_chat_member(update: types.ChatMemberUpdated, db: Database):
         return
     status = update.new_chat_member.status
     is_admin = status in {"administrator", "creator"}
+    logging.info(
+        "my_chat_member: %s -> %s (admin=%s)",
+        update.chat.id,
+        status,
+        is_admin,
+    )
     async with db.get_session() as session:
         channel = await session.get(Channel, update.chat.id)
         if not channel:
@@ -464,6 +472,7 @@ async def send_channels_list(message: types.Message, db: Database, bot: Bot, edi
             select(Channel).where(Channel.is_admin.is_(True))
         )
         channels = result.scalars().all()
+    logging.info("channels list: %s", [c.channel_id for c in channels])
     lines = []
     keyboard = []
     for ch in channels:
@@ -497,6 +506,7 @@ async def send_setchannel_list(message: types.Message, db: Database, bot: Bot, e
             )
         )
         channels = result.scalars().all()
+    logging.info("setchannel list: %s", [c.channel_id for c in channels])
     lines = []
     keyboard = []
     for ch in channels:
