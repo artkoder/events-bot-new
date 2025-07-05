@@ -18,6 +18,10 @@ Payload:
 }
 ```
 
+If `docs/LOCATIONS.md` exists, its lines are appended to the system prompt as a
+list of known venues. This helps the model normalise `location_name` to a
+standard form.
+
 The response must be JSON with the fields listed in `docs/PROMPTS.md`.
 The prefix "Today is YYYY-MM-DD." helps the model infer the correct year for
 dates that omit it.

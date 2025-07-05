@@ -20,8 +20,8 @@ logging.basicConfig(level=logging.INFO)
 DB_PATH = os.getenv("DB_PATH", "/data/db.sqlite")
 TELEGRAPH_TOKEN_FILE = os.getenv("TELEGRAPH_TOKEN_FILE", "/data/telegraph_token.txt")
 
-# user_id -> event_id mapping for editing session
-editing_sessions: dict[int, int] = {}
+# user_id -> (event_id, field?) for editing session
+editing_sessions: dict[int, tuple[int, str | None]] = {}
 
 
 class User(SQLModel, table=True):
@@ -138,6 +138,12 @@ async def parse_event_via_4o(text: str) -> dict:
     prompt_path = os.path.join("docs", "PROMPTS.md")
     with open(prompt_path, "r", encoding="utf-8") as f:
         prompt = f.read()
+    loc_path = os.path.join("docs", "LOCATIONS.md")
+    if os.path.exists(loc_path):
+        with open(loc_path, "r", encoding="utf-8") as f:
+            locations = [line.strip() for line in f if line.strip() and not line.startswith("#")]
+        if locations:
+            prompt += "\nKnown venues:\n" + "\n".join(locations)
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
@@ -354,10 +360,21 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
         await callback.answer("Deleted")
     elif data.startswith("edit:"):
         eid = int(data.split(":")[1])
-        editing_sessions[callback.from_user.id] = eid
-        await callback.message.answer(
-            "Send <field>=<value> to update, or 'done' to finish"
-        )
+        async with db.get_session() as session:
+            event = await session.get(Event, eid)
+        if event:
+            editing_sessions[callback.from_user.id] = (eid, None)
+            await show_edit_menu(callback.from_user.id, event, bot)
+        await callback.answer()
+    elif data.startswith("editfield:"):
+        _, eid, field = data.split(":")
+        editing_sessions[callback.from_user.id] = (int(eid), field)
+        await callback.message.answer(f"Send new value for {field}")
+        await callback.answer()
+    elif data.startswith("editdone:"):
+        if callback.from_user.id in editing_sessions:
+            del editing_sessions[callback.from_user.id]
+        await callback.message.answer("Editing finished")
         await callback.answer()
     elif data.startswith("nav:"):
         _, day = data.split(":")
@@ -581,6 +598,42 @@ async def build_events_message(db: Database, target_date: date, tz: timezone):
     return text, markup
 
 
+async def show_edit_menu(user_id: int, event: Event, bot: Bot):
+    lines = [
+        f"title: {event.title}",
+        f"description: {event.description}",
+        f"festival: {event.festival or ''}",
+        f"date: {event.date}",
+        f"time: {event.time}",
+        f"location_name: {event.location_name}",
+        f"location_address: {event.location_address or ''}",
+        f"city: {event.city or ''}",
+        f"ticket_price_min: {event.ticket_price_min}",
+        f"ticket_price_max: {event.ticket_price_max}",
+        f"ticket_link: {event.ticket_link or ''}",
+    ]
+    fields = [
+        "title",
+        "description",
+        "festival",
+        "date",
+        "time",
+        "location_name",
+        "location_address",
+        "city",
+        "ticket_price_min",
+        "ticket_price_max",
+        "ticket_link",
+    ]
+    keyboard = [
+        [types.InlineKeyboardButton(text=f, callback_data=f"editfield:{event.id}:{f}")]
+        for f in fields
+    ]
+    keyboard.append([types.InlineKeyboardButton(text="Done", callback_data=f"editdone:{event.id}")])
+    markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard)
+    await bot.send_message(user_id, "\n".join(lines), reply_markup=markup)
+
+
 async def handle_events(message: types.Message, db: Database, bot: Bot):
     parts = message.text.split(maxsplit=1)
     offset = await get_tz_offset(db)
@@ -628,33 +681,13 @@ async def handle_ask_4o(message: types.Message, db: Database, bot: Bot):
 
 
 async def handle_edit_message(message: types.Message, db: Database, bot: Bot):
-    eid = editing_sessions.get(message.from_user.id)
-    if not eid:
+    state = editing_sessions.get(message.from_user.id)
+    if not state:
         return
-    text = message.text.strip()
-    if text.lower() in {"done", "cancel"}:
-        del editing_sessions[message.from_user.id]
-        await bot.send_message(message.chat.id, "Editing finished")
+    eid, field = state
+    if field is None:
         return
-    if "=" not in text:
-        await bot.send_message(message.chat.id, "Use field=value or 'done'")
-        return
-    field, value = [p.strip() for p in text.split("=", 1)]
-    if field not in {
-        "title",
-        "description",
-        "festival",
-        "date",
-        "time",
-        "location_name",
-        "location_address",
-        "city",
-        "ticket_price_min",
-        "ticket_price_max",
-        "ticket_link",
-    }:
-        await bot.send_message(message.chat.id, "Unknown field")
-        return
+    value = message.text.strip()
     async with db.get_session() as session:
         event = await session.get(Event, eid)
         if not event:
@@ -670,7 +703,8 @@ async def handle_edit_message(message: types.Message, db: Database, bot: Bot):
         else:
             setattr(event, field, value)
         await session.commit()
-    await bot.send_message(message.chat.id, f"Updated {field}")
+    editing_sessions[message.from_user.id] = (eid, None)
+    await show_edit_menu(message.from_user.id, event, bot)
 
 
 async def telegraph_test():
@@ -764,7 +798,9 @@ def create_app() -> web.Application:
         or c.data.startswith("reject")
         or c.data.startswith("del:")
         or c.data.startswith("nav:")
-        or c.data.startswith("edit:"),
+        or c.data.startswith("edit:")
+        or c.data.startswith("editfield:")
+        or c.data.startswith("editdone:"),
     )
     dp.message.register(tz_wrapper, Command("tz"))
     dp.message.register(add_event_wrapper, Command("addevent"))

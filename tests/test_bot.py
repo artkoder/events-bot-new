@@ -233,14 +233,14 @@ async def test_edit_event(tmp_path: Path, monkeypatch):
     async with db.get_session() as session:
         event = (await session.execute(select(Event))).scalars().first()
 
-    editing_sessions[1] = event.id
+    editing_sessions[1] = (event.id, "title")
     edit_msg = types.Message.model_validate(
         {
             "message_id": 2,
             "date": 0,
             "chat": {"id": 1, "type": "private"},
             "from": {"id": 1, "is_bot": False, "first_name": "M"},
-            "text": "title=New Title",
+            "text": "New Title",
         }
     )
     await handle_edit_message(edit_msg, db, bot)

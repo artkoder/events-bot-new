@@ -21,6 +21,9 @@ ticket_price_max  - maximum ticket price as integer or null
 ticket_link       - URL for purchasing tickets if present
 ```
 
+Lines from `docs/LOCATIONS.md` are appended to the system prompt so the model
+can normalise venue names. Please keep that file up to date.
+
 The user message will start with the current date, e.g. "Today is
 2025-07-05." Use this information to resolve missing years so that parsed
 events are never in the past.
