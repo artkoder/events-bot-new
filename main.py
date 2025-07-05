@@ -64,6 +64,12 @@ class Database:
     async def init(self):
         async with self.engine.begin() as conn:
             await conn.run_sync(SQLModel.metadata.create_all)
+            result = await conn.exec_driver_sql("PRAGMA table_info(event)")
+            cols = [r[1] for r in result.fetchall()]
+            if "telegraph_url" not in cols:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE event ADD COLUMN telegraph_url VARCHAR"
+                )
 
     def get_session(self) -> AsyncSession:
         """Create a new session with attributes kept after commit."""
