@@ -491,19 +491,10 @@ async def test_forward_add_event(tmp_path: Path, monkeypatch):
     upd = DummyUpdate(-100123, "Chan")
     await main.handle_my_chat_member(upd, db)
 
-    set_msg = types.Message.model_validate(
-        {
-            "message_id": 2,
-            "date": 0,
-            "forward_date": 0,
-            "forward_from_chat": {"id": -100123, "type": "channel", "title": "Chan"},
-            "forward_from_message_id": 5,
-            "chat": {"id": 1, "type": "private"},
-            "from": {"id": 1, "is_bot": False, "first_name": "A"},
-            "text": "/setchannel",
-        }
-    )
-    await main.handle_set_channel(set_msg, db, bot)
+    async with db.get_session() as session:
+        ch = await session.get(main.Channel, -100123)
+        ch.is_registered = True
+        await session.commit()
 
     fwd_msg = types.Message.model_validate(
         {

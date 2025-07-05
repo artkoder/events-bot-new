@@ -406,6 +406,15 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                 await session.commit()
         await send_channels_list(callback.message, db, bot, edit=True)
         await callback.answer("Removed")
+    elif data.startswith("set:"):
+        cid = int(data.split(":")[1])
+        async with db.get_session() as session:
+            ch = await session.get(Channel, cid)
+            if ch and ch.is_admin:
+                ch.is_registered = True
+                await session.commit()
+        await send_setchannel_list(callback.message, db, bot, edit=True)
+        await callback.answer("Registered")
 
 
 async def handle_tz(message: types.Message, db: Database, bot: Bot):
@@ -451,7 +460,9 @@ async def send_channels_list(message: types.Message, db: Database, bot: Bot, edi
             if not edit:
                 await bot.send_message(message.chat.id, "Not authorized")
             return
-        result = await session.execute(select(Channel).where(Channel.is_admin.is_(True)))
+        result = await session.execute(
+            select(Channel).where(Channel.is_admin.is_(True))
+        )
         channels = result.scalars().all()
     lines = []
     keyboard = []
@@ -473,27 +484,37 @@ async def send_channels_list(message: types.Message, db: Database, bot: Bot, edi
         await bot.send_message(message.chat.id, "\n".join(lines), reply_markup=markup)
 
 
-async def handle_set_channel(message: types.Message, db: Database, bot: Bot):
-    fwd = message
-    if not message.forward_from_chat and message.reply_to_message:
-        fwd = message.reply_to_message
-    chat = fwd.forward_from_chat if fwd and fwd.forward_from_chat else None
-    if not chat or chat.type != "channel":
-        await bot.send_message(message.chat.id, "Forward a channel post and send /setchannel")
-        return
+async def send_setchannel_list(message: types.Message, db: Database, bot: Bot, edit: bool = False):
     async with db.get_session() as session:
         user = await session.get(User, message.from_user.id)
         if not user or not user.is_superadmin:
-            await bot.send_message(message.chat.id, "Not authorized")
+            if not edit:
+                await bot.send_message(message.chat.id, "Not authorized")
             return
-        ch = await session.get(Channel, chat.id)
-        if not ch or not ch.is_admin:
-            await bot.send_message(message.chat.id, "Bot is not admin in that channel")
-            return
-        ch.is_registered = True
-        session.add(ch)
-        await session.commit()
-    await bot.send_message(message.chat.id, f"Channel {chat.title} registered")
+        result = await session.execute(
+            select(Channel).where(
+                Channel.is_admin.is_(True), Channel.is_registered.is_(False)
+            )
+        )
+        channels = result.scalars().all()
+    lines = []
+    keyboard = []
+    for ch in channels:
+        name = ch.title or ch.username or str(ch.channel_id)
+        lines.append(name)
+        keyboard.append([
+            types.InlineKeyboardButton(text=name, callback_data=f"set:{ch.channel_id}")
+        ])
+    if not lines:
+        lines.append("No channels")
+    markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard) if keyboard else None
+    if edit:
+        await message.edit_text("\n".join(lines), reply_markup=markup)
+    else:
+        await bot.send_message(message.chat.id, "\n".join(lines), reply_markup=markup)
+
+async def handle_set_channel(message: types.Message, db: Database, bot: Bot):
+    await send_setchannel_list(message, db, bot, edit=False)
 
 
 async def handle_channels(message: types.Message, db: Database, bot: Bot):
@@ -991,7 +1012,8 @@ def create_app() -> web.Application:
         or c.data.startswith("edit:")
         or c.data.startswith("editfield:")
         or c.data.startswith("editdone:")
-        or c.data.startswith("unset:"),
+        or c.data.startswith("unset:")
+        or c.data.startswith("set:"),
     )
     dp.message.register(tz_wrapper, Command("tz"))
     dp.message.register(add_event_wrapper, Command("addevent"))

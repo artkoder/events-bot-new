@@ -10,7 +10,7 @@
 | `/addevent_raw <title>|<date>|<time>|<location>` | manual fields | Add event without LLM. The bot also creates a Telegraph page with the provided text. |
 | `/ask4o <text>` | any text | Send query to model 4o and show plain response (superadmin only). |
 | `/events [DATE]` | optional date `YYYY-MM-DD` or `DD.MM.YYYY` | List events for the day with delete and edit buttons. Dates are shown as `DD.MM.YYYY`. Choosing **Edit** lists all fields with inline buttons. |
-| `/setchannel` | forward a post | Register the channel as an announcement source if the bot is admin. |
+| `/setchannel` | - | Choose one of the admin channels to register as an announcement source. |
 | `/channels` | - | List channels where the bot is admin and mark registered ones with a cancel button. |
 | `python main.py test_telegraph` | - | Verify Telegraph API access. Automatically creates a token if needed and prints the page URL. |
 
