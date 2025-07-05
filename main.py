@@ -10,7 +10,9 @@ from aiohttp import web, ClientSession
 from difflib import SequenceMatcher
 import json
 from telegraph import Telegraph
+
 from functools import partial
+
 import asyncio
 import html
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
@@ -1037,6 +1039,7 @@ def create_app() -> web.Application:
     dp.message.register(forward_wrapper, lambda m: bool(m.forward_date))
     dp.my_chat_member.register(partial(handle_my_chat_member, db=db))
 
+
     app = web.Application()
     SimpleRequestHandler(dp, bot).register(app, path="/webhook")
     setup_application(app, dp, bot=bot)
@@ -1058,6 +1061,8 @@ def create_app() -> web.Application:
     app.on_shutdown.append(on_shutdown)
     return app
 
+    async def on_shutdown(app: web.Application):
+        await bot.session.close()
 
 if __name__ == "__main__":
     import sys
