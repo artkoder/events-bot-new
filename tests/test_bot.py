@@ -37,9 +37,15 @@ class DummyBot(Bot):
     def __init__(self, token: str):
         super().__init__(token)
         self.messages = []
+        self.edits = []
 
     async def send_message(self, chat_id, text, **kwargs):
         self.messages.append((chat_id, text))
+
+    async def edit_message_reply_markup(
+        self, chat_id: int | None = None, message_id: int | None = None, **kwargs
+    ):
+        self.edits.append((chat_id, message_id, kwargs))
 
 
 class DummyChat:
@@ -789,6 +795,9 @@ async def test_mark_free(tmp_path: Path, monkeypatch):
     async with db.get_session() as session:
         updated = await session.get(Event, event.id)
     assert updated.is_free is True
+    assert bot.edits
+    btn = bot.edits[-1][2]["reply_markup"].inline_keyboard[0][0]
+    assert btn.text == "\u2705 Бесплатное мероприятие"
 
 
 @pytest.mark.asyncio

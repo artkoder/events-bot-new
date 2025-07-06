@@ -438,6 +438,24 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                 event.is_free = True
                 await session.commit()
                 logging.info("markfree: event %s marked free", eid)
+        markup = types.InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    types.InlineKeyboardButton(
+                        text="\u2705 Бесплатное мероприятие",
+                        callback_data=f"togglefree:{eid}",
+                    )
+                ]
+            ]
+        )
+        try:
+            await bot.edit_message_reply_markup(
+                chat_id=callback.message.chat.id,
+                message_id=callback.message.message_id,
+                reply_markup=markup,
+            )
+        except Exception as e:
+            logging.error("failed to update free button: %s", e)
         await callback.answer("Marked")
     elif data.startswith("nav:"):
         _, day = data.split(":")
