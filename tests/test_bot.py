@@ -1068,3 +1068,11 @@ async def test_date_range_parsing(tmp_path: Path, monkeypatch):
 
     assert ev.date == "2025-07-01"
     assert ev.end_date == "2025-07-17"
+
+
+def test_md_to_html_sanitizes():
+    md = "# T\n<tg-emoji emoji-id='1'>R</tg-emoji>"
+    html = main.md_to_html(md)
+    assert "<h1>" not in html
+    assert "tg-emoji" not in html
+    assert "<h3>" in html

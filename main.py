@@ -933,7 +933,11 @@ def next_month(month: str) -> str:
 
 
 def md_to_html(text: str) -> str:
-    return markdown.markdown(text, extensions=["markdown.extensions.fenced_code"])
+    html_text = markdown.markdown(text, extensions=["markdown.extensions.fenced_code"])
+    # Telegraph API does not allow h1/h2 or Telegram-specific emoji tags
+    html_text = re.sub(r"<(\/?)h[12]>", r"<\1h3>", html_text)
+    html_text = re.sub(r"</?tg-emoji[^>]*>", "", html_text)
+    return html_text
 
 
 def format_event_md(e: Event) -> str:
@@ -1034,7 +1038,7 @@ async def build_month_page_markdown(db: Database, month: str) -> tuple[str, str]
         by_day.setdefault(d, []).append(e)
 
     lines = [
-        f"# События Калининграда в {month_name(month)}: полный анонс",
+        f"### События Калининграда в {month_name(month)}: полный анонс",
         "",
         f"Планируйте свой месяц заранее: интересные мероприятия Калининграда и 39 региона в {month_name(month)} — от лекций и концертов до культурных шоу.",
         "",
@@ -1055,7 +1059,7 @@ async def build_month_page_markdown(db: Database, month: str) -> tuple[str, str]
         lines.append(f"[Страница следующего месяца]({next_url})")
         lines.append("")
 
-    lines.append("## Выставки")
+    lines.append("### Выставки")
     lines.append("")
     for ev in exhibitions:
         lines.append(format_exhibition_md(ev))
