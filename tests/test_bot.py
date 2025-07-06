@@ -162,7 +162,7 @@ async def test_add_event_raw(tmp_path: Path, monkeypatch):
     await db.init()
     bot = DummyBot("123:abc")
 
-    async def fake_create(title, text, source, html_text=None):
+    async def fake_create(title, text, source, html_text=None, media=None):
         return "https://t.me/test", "path"
 
     monkeypatch.setattr("main.create_source_page", fake_create)
@@ -193,7 +193,7 @@ async def test_add_event_raw_update(tmp_path: Path, monkeypatch):
     await db.init()
     bot = DummyBot("123:abc")
 
-    async def fake_create(title, text, source, html_text=None):
+    async def fake_create(title, text, source, html_text=None, media=None):
         return "https://t.me/test", "path"
 
     monkeypatch.setattr("main.create_source_page", fake_create)
@@ -233,7 +233,7 @@ async def test_edit_event(tmp_path: Path, monkeypatch):
     await db.init()
     bot = DummyBot("123:abc")
 
-    async def fake_create(title, text, source, html_text=None):
+    async def fake_create(title, text, source, html_text=None, media=None):
         return "https://t.me/test", "path"
 
     monkeypatch.setattr("main.create_source_page", fake_create)
@@ -275,7 +275,7 @@ async def test_events_list(tmp_path: Path, monkeypatch):
     await db.init()
     bot = DummyBot("123:abc")
 
-    async def fake_create(title, text, source, html_text=None):
+    async def fake_create(title, text, source, html_text=None, media=None):
         return "https://t.me/test", "path"
 
     monkeypatch.setattr("main.create_source_page", fake_create)
@@ -438,6 +438,26 @@ async def test_telegraph_test(monkeypatch, capsys):
     assert "Edited https://telegra.ph/test" in captured.out
 
 
+@pytest.mark.asyncio
+async def test_create_source_page_photo(monkeypatch):
+    class DummyTG:
+        def __init__(self, access_token=None):
+            self.access_token = access_token
+        def upload_file(self, f):
+            data = f.read()
+            assert data == b"img"
+            return [{"src": "/file/x.jpg"}]
+        def create_page(self, title, html_content=None, **_):
+            assert '<img src="/file/x.jpg"' in html_content
+            return {"url": "https://telegra.ph/test", "path": "test"}
+
+    monkeypatch.setenv("TELEGRAPH_TOKEN", "t")
+    monkeypatch.setattr("main.Telegraph", lambda access_token=None: DummyTG(access_token))
+
+    res = await main.create_source_page("Title", "text", None, media=b"img")
+    assert res == ("https://telegra.ph/test", "test")
+
+
 def test_get_telegraph_token_creates(tmp_path, monkeypatch):
     class DummyTG:
         def create_account(self, short_name):
@@ -473,7 +493,7 @@ async def test_forward_add_event(tmp_path: Path, monkeypatch):
             "location_name": "Club",
         }
 
-    async def fake_create(title, text, source, html_text=None):
+    async def fake_create(title, text, source, html_text=None, media=None):
         return "https://t.me/page", "p"
 
     monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
@@ -532,7 +552,7 @@ async def test_forward_unregistered(tmp_path: Path, monkeypatch):
             "location_name": "Club",
         }
 
-    async def fake_create(title, text, source, html_text=None):
+    async def fake_create(title, text, source, html_text=None, media=None):
         return "https://t.me/page", "p"
 
     monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
@@ -586,7 +606,7 @@ async def test_media_group_caption_first(tmp_path: Path, monkeypatch):
             "location_name": "Club",
         }
 
-    async def fake_create(title, text, source, html_text=None):
+    async def fake_create(title, text, source, html_text=None, media=None):
         return "https://t.me/page", "p"
 
     monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
@@ -660,7 +680,7 @@ async def test_media_group_caption_last(tmp_path: Path, monkeypatch):
             "location_name": "Club",
         }
 
-    async def fake_create(title, text, source, html_text=None):
+    async def fake_create(title, text, source, html_text=None, media=None):
         return "https://t.me/page", "p"
 
     monkeypatch.setattr("main.parse_event_via_4o", fake_parse)

@@ -13,6 +13,7 @@ from telegraph import Telegraph
 from functools import partial
 import asyncio
 import html
+from io import BytesIO
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlmodel import Field, SQLModel, select
 
@@ -616,6 +617,7 @@ async def add_event_from_text(
     text: str,
     source_link: str | None,
     html_text: str | None = None,
+    media: bytes | None = None,
 ) -> tuple[Event, bool, list[str], str] | None:
     try:
         data = await parse_event_via_4o(text)
@@ -644,7 +646,13 @@ async def add_event_from_text(
     if saved.telegraph_url and saved.telegraph_path:
         await update_source_page(saved.telegraph_path, saved.title or "Event", html_text or text)
     else:
-        res = await create_source_page(saved.title or "Event", saved.source_text, source_link, html_text)
+        res = await create_source_page(
+            saved.title or "Event",
+            saved.source_text,
+            source_link,
+            html_text,
+            media,
+        )
         if res:
             url, path = res
             async with db.get_session() as session:
@@ -684,7 +692,21 @@ async def handle_add_event(message: types.Message, db: Database, bot: Bot):
     if len(text) != 2:
         await bot.send_message(message.chat.id, "Usage: /addevent <text>")
         return
-    result = await add_event_from_text(db, text[1], None, message.html_text)
+    media = None
+    if message.photo:
+        bio = BytesIO()
+        await bot.download(message.photo[-1].file_id, destination=bio)
+        media = bio.getvalue()
+    elif message.document and message.document.mime_type.startswith("image/"):
+        bio = BytesIO()
+        await bot.download(message.document.file_id, destination=bio)
+        media = bio.getvalue()
+    elif message.video:
+        bio = BytesIO()
+        await bot.download(message.video.file_id, destination=bio)
+        media = bio.getvalue()
+
+    result = await add_event_from_text(db, text[1], None, message.html_text, media)
     if not result:
         await bot.send_message(message.chat.id, "LLM error")
         return
@@ -715,6 +737,20 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
         await bot.send_message(message.chat.id, "Usage: /addevent_raw title|date|time|location")
         return
     title, date, time, location = (p.strip() for p in parts[1].split('|', 3))
+    media = None
+    if message.photo:
+        bio = BytesIO()
+        await bot.download(message.photo[-1].file_id, destination=bio)
+        media = bio.getvalue()
+    elif message.document and message.document.mime_type.startswith("image/"):
+        bio = BytesIO()
+        await bot.download(message.document.file_id, destination=bio)
+        media = bio.getvalue()
+    elif message.video:
+        bio = BytesIO()
+        await bot.download(message.video.file_id, destination=bio)
+        media = bio.getvalue()
+
     event = Event(
         title=title,
         description="",
@@ -727,7 +763,13 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
     async with db.get_session() as session:
         event, added = await upsert_event(session, event)
 
-    res = await create_source_page(event.title or "Event", event.source_text, None, event.source_text)
+    res = await create_source_page(
+        event.title or "Event",
+        event.source_text,
+        None,
+        event.source_text,
+        media,
+    )
     if res:
         url, path = res
         async with db.get_session() as session:
@@ -1002,7 +1044,27 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
                 else:
                     cid = cid.lstrip("-")
                 link = f"https://t.me/c/{cid}/{msg_id}"
-    result = await add_event_from_text(db, text, link, message.html_text or message.caption_html)
+    media = None
+    if message.photo:
+        bio = BytesIO()
+        await bot.download(message.photo[-1].file_id, destination=bio)
+        media = bio.getvalue()
+    elif message.document and message.document.mime_type.startswith("image/"):
+        bio = BytesIO()
+        await bot.download(message.document.file_id, destination=bio)
+        media = bio.getvalue()
+    elif message.video:
+        bio = BytesIO()
+        await bot.download(message.video.file_id, destination=bio)
+        media = bio.getvalue()
+
+    result = await add_event_from_text(
+        db,
+        text,
+        link,
+        message.html_text or message.caption_html,
+        media,
+    )
     if result:
         saved, added, lines, status = result
         markup = None
@@ -1065,7 +1127,11 @@ async def update_source_page(path: str, title: str, new_html: str):
 
 
 async def create_source_page(
-    title: str, text: str, source_url: str | None, html_text: str | None = None
+    title: str,
+    text: str,
+    source_url: str | None,
+    html_text: str | None = None,
+    media: bytes | None = None,
 ) -> tuple[str, str] | None:
     """Create a Telegraph page with the original event text."""
     token = get_telegraph_token()
@@ -1074,6 +1140,14 @@ async def create_source_page(
         return None
     tg = Telegraph(access_token=token)
     html_content = ""
+    if media:
+        try:
+            res = await asyncio.to_thread(tg.upload_file, BytesIO(media))
+            img_src = res[0]["src"]
+            html_content += f'<img src="{img_src}"/>'
+        except Exception as e:
+            logging.error("Failed to upload media: %s", e)
+
     if source_url:
         html_content += (
             f'<p><a href="{html.escape(source_url)}"><strong>'
