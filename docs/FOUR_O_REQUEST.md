@@ -22,7 +22,8 @@ If `docs/LOCATIONS.md` exists, its lines are appended to the system prompt as a
 list of known venues. This helps the model normalise `location_name` to a
 standard form.
 
-The response must be JSON with the fields listed in `docs/PROMPTS.md`.
+The response must be JSON with the fields listed in `docs/PROMPTS.md`. When the
+text describes multiple events, return an array of such objects.
 The prefix "Today is YYYY-MM-DD." helps the model infer the correct year for
 dates that omit it.
 Edit this file or `docs/PROMPTS.md` to fine‑tune the request details.

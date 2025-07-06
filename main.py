@@ -171,7 +171,7 @@ def offset_to_timezone(value: str) -> timezone:
     return timezone(sign * timedelta(hours=hours, minutes=minutes))
 
 
-async def parse_event_via_4o(text: str) -> dict:
+async def parse_event_via_4o(text: str) -> list[dict]:
     token = os.getenv("FOUR_O_TOKEN")
     if not token:
         raise RuntimeError("FOUR_O_TOKEN is missing")
@@ -215,10 +215,18 @@ async def parse_event_via_4o(text: str) -> dict:
         if content.lower().startswith("json"):
             content = content[4:].strip()
     try:
-        return json.loads(content)
+        data = json.loads(content)
     except json.JSONDecodeError:
         logging.error("Invalid JSON from 4o: %s", content)
         raise
+    if isinstance(data, dict):
+        if "events" in data and isinstance(data["events"], list):
+            return data["events"]
+        return [data]
+    if isinstance(data, list):
+        return data
+    logging.error("Unexpected 4o format: %s", data)
+    raise RuntimeError("bad 4o response")
 
 
 async def ask_4o(text: str) -> str:
@@ -622,6 +630,10 @@ async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
             ev.ticket_price_min = new.ticket_price_min
             ev.ticket_price_max = new.ticket_price_max
             ev.ticket_link = new.ticket_link
+            ev.event_type = new.event_type
+            ev.emoji = new.emoji
+            ev.end_date = new.end_date
+            ev.is_free = new.is_free
             await session.commit()
             return ev, False
         if loc_ratio >= 0.4 or ev.location_address == new.location_address:
@@ -641,6 +653,10 @@ async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
                 ev.ticket_price_min = new.ticket_price_min
                 ev.ticket_price_max = new.ticket_price_max
                 ev.ticket_link = new.ticket_link
+                ev.event_type = new.event_type
+                ev.emoji = new.emoji
+                ev.end_date = new.end_date
+                ev.is_free = new.is_free
                 await session.commit()
                 return ev, False
     session.add(new)
@@ -648,89 +664,98 @@ async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
     return new, True
 
 
-async def add_event_from_text(
+async def add_events_from_text(
     db: Database,
     text: str,
     source_link: str | None,
     html_text: str | None = None,
     media: tuple[bytes, str] | None = None,
-) -> tuple[Event, bool, list[str], str] | None:
+) -> list[tuple[Event, bool, list[str], str]]:
     try:
-        data = await parse_event_via_4o(text)
+        parsed = await parse_event_via_4o(text)
     except Exception as e:
         logging.error("LLM error: %s", e)
-        return None
-    date_str = data.get("date", "") or ""
-    end_date = data.get("end_date")
-    if ".." in date_str and not end_date:
-        start, end_date = [p.strip() for p in date_str.split("..", 1)]
-        date_str = start
-    event = Event(
-        title=data.get("title", ""),
-        description=data.get("short_description", ""),
-        festival=data.get("festival") or None,
-        date=date_str,
-        time=data.get("time", ""),
-        location_name=data.get("location_name", ""),
-        location_address=data.get("location_address"),
-        city=data.get("city"),
-        ticket_price_min=data.get("ticket_price_min"),
-        ticket_price_max=data.get("ticket_price_max"),
-        ticket_link=data.get("ticket_link"),
-        event_type=data.get("event_type"),
-        emoji=data.get("emoji"),
-        end_date=end_date,
-        is_free=bool(data.get("is_free")),
-        source_text=text,
-        source_post_url=source_link,
-    )
-    async with db.get_session() as session:
-        saved, added = await upsert_event(session, event)
+        return []
 
-    if saved.telegraph_url and saved.telegraph_path:
-        await update_source_page(saved.telegraph_path, saved.title or "Event", html_text or text)
-    else:
-        res = await create_source_page(
-            saved.title or "Event",
-            saved.source_text,
-            source_link,
-            html_text,
-            media,
+    results: list[tuple[Event, bool, list[str], str]] = []
+    first = True
+    for data in parsed:
+        date_str = data.get("date", "") or ""
+        end_date = data.get("end_date")
+        if ".." in date_str and not end_date:
+            start, end_date = [p.strip() for p in date_str.split("..", 1)]
+            date_str = start
+
+        event = Event(
+            title=data.get("title", ""),
+            description=data.get("short_description", ""),
+            festival=data.get("festival") or None,
+            date=date_str,
+            time=data.get("time", ""),
+            location_name=data.get("location_name", ""),
+            location_address=data.get("location_address"),
+            city=data.get("city"),
+            ticket_price_min=data.get("ticket_price_min"),
+            ticket_price_max=data.get("ticket_price_max"),
+            ticket_link=data.get("ticket_link"),
+            event_type=data.get("event_type"),
+            emoji=data.get("emoji"),
+            end_date=end_date,
+            is_free=bool(data.get("is_free")),
+            source_text=text,
+            source_post_url=source_link,
         )
-        if res:
-            url, path = res
-            async with db.get_session() as session:
-                saved.telegraph_url = url
-                saved.telegraph_path = path
-                session.add(saved)
-                await session.commit()
 
-    lines = [
-        f"title: {saved.title}",
-        f"date: {saved.date}",
-        f"time: {saved.time}",
-        f"location_name: {saved.location_name}",
-    ]
-    if saved.location_address:
-        lines.append(f"location_address: {saved.location_address}")
-    if saved.city:
-        lines.append(f"city: {saved.city}")
-    if saved.festival:
-        lines.append(f"festival: {saved.festival}")
-    if saved.description:
-        lines.append(f"description: {saved.description}")
-    if saved.event_type:
-        lines.append(f"type: {saved.event_type}")
-    if saved.ticket_price_min is not None:
-        lines.append(f"price_min: {saved.ticket_price_min}")
-    if saved.ticket_price_max is not None:
-        lines.append(f"price_max: {saved.ticket_price_max}")
-    if saved.ticket_link:
-        lines.append(f"ticket_link: {saved.ticket_link}")
-    if saved.telegraph_url:
-        lines.append(f"telegraph: {saved.telegraph_url}")
-    status = "added" if added else "updated"
-    return saved, added, lines, status
+        async with db.get_session() as session:
+            saved, added = await upsert_event(session, event)
+
+        media_arg = media if first else None
+        if saved.telegraph_url and saved.telegraph_path:
+            await update_source_page(saved.telegraph_path, saved.title or "Event", html_text or text)
+        else:
+            res = await create_source_page(
+                saved.title or "Event",
+                saved.source_text,
+                source_link,
+                html_text,
+                media_arg,
+            )
+            if res:
+                url, path = res
+                async with db.get_session() as session:
+                    saved.telegraph_url = url
+                    saved.telegraph_path = path
+                    session.add(saved)
+                    await session.commit()
+
+        lines = [
+            f"title: {saved.title}",
+            f"date: {saved.date}",
+            f"time: {saved.time}",
+            f"location_name: {saved.location_name}",
+        ]
+        if saved.location_address:
+            lines.append(f"location_address: {saved.location_address}")
+        if saved.city:
+            lines.append(f"city: {saved.city}")
+        if saved.festival:
+            lines.append(f"festival: {saved.festival}")
+        if saved.description:
+            lines.append(f"description: {saved.description}")
+        if saved.event_type:
+            lines.append(f"type: {saved.event_type}")
+        if saved.ticket_price_min is not None:
+            lines.append(f"price_min: {saved.ticket_price_min}")
+        if saved.ticket_price_max is not None:
+            lines.append(f"price_max: {saved.ticket_price_max}")
+        if saved.ticket_link:
+            lines.append(f"ticket_link: {saved.ticket_link}")
+        if saved.telegraph_url:
+            lines.append(f"telegraph: {saved.telegraph_url}")
+        status = "added" if added else "updated"
+        results.append((saved, added, lines, status))
+        first = False
+    return results
 
 
 async def handle_add_event(message: types.Message, db: Database, bot: Bot):
@@ -752,29 +777,29 @@ async def handle_add_event(message: types.Message, db: Database, bot: Bot):
         await bot.download(message.video.file_id, destination=bio)
         media = (bio.getvalue(), "video.mp4")
 
-    result = await add_event_from_text(db, text[1], None, message.html_text, media)
-    if not result:
+    results = await add_events_from_text(db, text[1], None, message.html_text, media)
+    if not results:
         await bot.send_message(message.chat.id, "LLM error")
         return
-    saved, added, lines, status = result
-    markup = None
-    if (
-        not saved.is_free
-        and saved.ticket_price_min is None
-        and saved.ticket_price_max is None
-    ):
-        markup = types.InlineKeyboardMarkup(
-            inline_keyboard=[[
-                types.InlineKeyboardButton(
-                    text="\u2753 Это бесплатное мероприятие", callback_data=f"markfree:{saved.id}"
-                )
-            ]]
+    for saved, added, lines, status in results:
+        markup = None
+        if (
+            not saved.is_free
+            and saved.ticket_price_min is None
+            and saved.ticket_price_max is None
+        ):
+            markup = types.InlineKeyboardMarkup(
+                inline_keyboard=[[
+                    types.InlineKeyboardButton(
+                        text="\u2753 Это бесплатное мероприятие", callback_data=f"markfree:{saved.id}"
+                    )
+                ]]
+            )
+        await bot.send_message(
+            message.chat.id,
+            f"Event {status}\n" + "\n".join(lines),
+            reply_markup=markup,
         )
-    await bot.send_message(
-        message.chat.id,
-        f"Event {status}\n" + "\n".join(lines),
-        reply_markup=markup,
-    )
 
 
 async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
@@ -943,7 +968,6 @@ async def build_exhibitions_message(db: Database, tz: timezone):
         result = await session.execute(
             select(Event)
             .where(
-                Event.event_type == "выставка",
                 Event.end_date.is_not(None),
                 Event.end_date >= today.isoformat(),
             )
@@ -1208,15 +1232,14 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
         await bot.download(message.video.file_id, destination=bio)
         media = (bio.getvalue(), "video.mp4")
 
-    result = await add_event_from_text(
+    results = await add_events_from_text(
         db,
         text,
         link,
         message.html_text or message.caption_html,
         media,
     )
-    if result:
-        saved, added, lines, status = result
+    for saved, added, lines, status in results:
         markup = None
         if (
             not saved.is_free

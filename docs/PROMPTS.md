@@ -6,8 +6,9 @@ it can be refined over time.
 
 ```
 MASTER-PROMPT for Codex ― Telegram Event Bot
-You receive long multi-line text describing an event. Extract structured
-information and respond **only** with JSON using these keys:
+You receive long multi-line text describing one **or several** events.
+Extract structured information and respond **only** with JSON.
+If multiple events are found, return an array of objects. Each object uses these keys:
 title             - name of the event
 short_description - one-sentence summary
 festival          - festival name or empty string
@@ -23,6 +24,7 @@ is_free           - true if explicitly stated the event is free
 event_type       - one of: спектакль, выставка, концерт, ярмарка, лекция, встреча
 emoji            - an optional emoji representing the event
 end_date         - end date for multi-day events or null
+When a range is provided, put the start date in `date` and the end date in `end_date`.
 ```
 
 Do **not** include words like "Открытие" or "Закрытие" in exhibition titles.

@@ -492,14 +492,14 @@ async def test_forward_add_event(tmp_path: Path, monkeypatch):
     await db.init()
     bot = DummyBot("123:abc")
 
-    async def fake_parse(text: str) -> dict:
-        return {
+    async def fake_parse(text: str) -> list[dict]:
+        return [{
             "title": "Forwarded",
             "short_description": "desc",
             "date": "2025-01-01",
             "time": "18:00",
             "location_name": "Club",
-        }
+        }]
 
     async def fake_create(title, text, source, html_text=None, media=None):
         return "https://t.me/page", "p"
@@ -551,14 +551,14 @@ async def test_forward_unregistered(tmp_path: Path, monkeypatch):
     await db.init()
     bot = DummyBot("123:abc")
 
-    async def fake_parse(text: str) -> dict:
-        return {
+    async def fake_parse(text: str) -> list[dict]:
+        return [{
             "title": "Fwd",
             "short_description": "d",
             "date": "2025-01-01",
             "time": "18:00",
             "location_name": "Club",
-        }
+        }]
 
     async def fake_create(title, text, source, html_text=None, media=None):
         return "https://t.me/page", "p"
@@ -605,14 +605,14 @@ async def test_media_group_caption_first(tmp_path: Path, monkeypatch):
     await db.init()
     bot = DummyBot("123:abc")
 
-    async def fake_parse(text: str) -> dict:
-        return {
+    async def fake_parse(text: str) -> list[dict]:
+        return [{
             "title": "MG",
             "short_description": "d",
             "date": "2025-01-01",
             "time": "18:00",
             "location_name": "Club",
-        }
+        }]
 
     async def fake_create(title, text, source, html_text=None, media=None):
         return "https://t.me/page", "p"
@@ -679,14 +679,14 @@ async def test_media_group_caption_last(tmp_path: Path, monkeypatch):
     await db.init()
     bot = DummyBot("123:abc")
 
-    async def fake_parse(text: str) -> dict:
-        return {
+    async def fake_parse(text: str) -> list[dict]:
+        return [{
             "title": "MG",
             "short_description": "d",
             "date": "2025-01-01",
             "time": "18:00",
             "location_name": "Club",
-        }
+        }]
 
     async def fake_create(title, text, source, html_text=None, media=None):
         return "https://t.me/page", "p"
@@ -817,8 +817,8 @@ async def test_exhibition_listing(tmp_path: Path, monkeypatch):
     )
     await handle_start(start_msg, db, bot)
 
-    async def fake_parse(text: str) -> dict:
-        return {
+    async def fake_parse(text: str) -> list[dict]:
+        return [{
             "title": "Expo",
             "short_description": "desc",
             "festival": "",
@@ -834,7 +834,7 @@ async def test_exhibition_listing(tmp_path: Path, monkeypatch):
             "event_type": "выставка",
             "emoji": None,
             "is_free": True,
-        }
+        }]
 
     monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
 
@@ -889,3 +889,63 @@ async def test_exhibition_listing(tmp_path: Path, monkeypatch):
     )
     await handle_exhibitions(exh_msg, db, bot)
     assert "c 10 июля по 20 июля" in bot.messages[-1][1]
+
+
+@pytest.mark.asyncio
+async def test_multiple_events(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    start_msg = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "/start",
+        }
+    )
+    await handle_start(start_msg, db, bot)
+
+    async def fake_parse(text: str) -> list[dict]:
+        return [
+            {
+                "title": "One",
+                "short_description": "d1",
+                "date": "2025-07-10",
+                "time": "18:00",
+                "location_name": "Hall",
+            },
+            {
+                "title": "Two",
+                "short_description": "d2",
+                "date": "2025-07-11",
+                "time": "20:00",
+                "location_name": "Hall",
+            },
+        ]
+
+    async def fake_create(title, text, source, html_text=None, media=None):
+        return f"url/{title}", title
+
+    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.create_source_page", fake_create)
+
+    add_msg = types.Message.model_validate(
+        {
+            "message_id": 2,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "/addevent multi",
+        }
+    )
+    await handle_add_event(add_msg, db, bot)
+
+    async with db.get_session() as session:
+        events = (await session.execute(select(Event))).scalars().all()
+
+    assert len(events) == 2
+    assert any(e.title == "One" for e in events)
+    assert any(e.title == "Two" for e in events)
