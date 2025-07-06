@@ -19,6 +19,7 @@ city              - city name
 ticket_price_min  - minimum ticket price as integer or null
 ticket_price_max  - maximum ticket price as integer or null
 ticket_link       - URL for purchasing tickets if present
+is_free           - true if explicitly stated the event is free
 ```
 
 Lines from `docs/LOCATIONS.md` are appended to the system prompt so the model

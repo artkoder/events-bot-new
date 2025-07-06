@@ -32,3 +32,8 @@
 - `/setchannel` registers a forwarded channel for source links
 - `/channels` lists admin channels with removal buttons
 - Bot tracks admin status via `my_chat_member` updates
+
+## v0.3.3 - Free events and telegraph updates
+- Added `is_free` field with inline toggle in the edit menu.
+- 4o parsing detects free events; if unclear a button appears to mark the event as free.
+- Telegraph pages keep original links and append new text when events are updated.

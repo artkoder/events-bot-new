@@ -69,6 +69,7 @@ browse upcoming announcements.
 - `CHANGELOG.md` – project history.
 
 Each added event stores the original announcement text in a Telegraph page. The link is shown when the event is added and in the `/events` listing. Events may also contain ticket prices and a purchase link. Use the edit button in `/events` to change any field.
+Links from the announcement text are preserved on the Telegraph page whenever possible so readers can follow the original sources.
 
 To verify Telegraph access manually run:
 ```bash

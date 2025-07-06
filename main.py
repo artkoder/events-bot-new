@@ -69,6 +69,8 @@ class Event(SQLModel, table=True):
     ticket_price_min: Optional[int] = None
     ticket_price_max: Optional[int] = None
     ticket_link: Optional[str] = None
+    is_free: bool = False
+    telegraph_path: Optional[str] = None
     source_text: str
     telegraph_url: Optional[str] = None
     source_post_url: Optional[str] = None
@@ -102,6 +104,14 @@ class Database:
             if "source_post_url" not in cols:
                 await conn.exec_driver_sql(
                     "ALTER TABLE event ADD COLUMN source_post_url VARCHAR"
+                )
+            if "is_free" not in cols:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE event ADD COLUMN is_free BOOLEAN DEFAULT 0"
+                )
+            if "telegraph_path" not in cols:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE event ADD COLUMN telegraph_path VARCHAR"
                 )
 
     def get_session(self) -> AsyncSession:
@@ -390,6 +400,26 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
             del editing_sessions[callback.from_user.id]
         await callback.message.answer("Editing finished")
         await callback.answer()
+    elif data.startswith("togglefree:"):
+        eid = int(data.split(":")[1])
+        async with db.get_session() as session:
+            event = await session.get(Event, eid)
+            if event:
+                event.is_free = not event.is_free
+                await session.commit()
+        async with db.get_session() as session:
+            event = await session.get(Event, eid)
+        if event:
+            await show_edit_menu(callback.from_user.id, event, bot)
+        await callback.answer()
+    elif data.startswith("markfree:"):
+        eid = int(data.split(":")[1])
+        async with db.get_session() as session:
+            event = await session.get(Event, eid)
+            if event:
+                event.is_free = True
+                await session.commit()
+        await callback.answer("Marked")
     elif data.startswith("nav:"):
         _, day = data.split(":")
         offset = await get_tz_offset(db)
@@ -581,7 +611,12 @@ async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
     return new, True
 
 
-async def add_event_from_text(db: Database, text: str, source_link: str | None) -> tuple[Event, bool, list[str], str] | None:
+async def add_event_from_text(
+    db: Database,
+    text: str,
+    source_link: str | None,
+    html_text: str | None = None,
+) -> tuple[Event, bool, list[str], str] | None:
     try:
         data = await parse_event_via_4o(text)
     except Exception as e:
@@ -599,18 +634,24 @@ async def add_event_from_text(db: Database, text: str, source_link: str | None) 
         ticket_price_min=data.get("ticket_price_min"),
         ticket_price_max=data.get("ticket_price_max"),
         ticket_link=data.get("ticket_link"),
+        is_free=bool(data.get("is_free")),
         source_text=text,
         source_post_url=source_link,
     )
     async with db.get_session() as session:
         saved, added = await upsert_event(session, event)
 
-    url = await create_source_page(saved.title or "Event", saved.source_text, source_link)
-    if url:
-        async with db.get_session() as session:
-            saved.telegraph_url = url
-            session.add(saved)
-            await session.commit()
+    if saved.telegraph_url and saved.telegraph_path:
+        await update_source_page(saved.telegraph_path, saved.title or "Event", html_text or text)
+    else:
+        res = await create_source_page(saved.title or "Event", saved.source_text, source_link, html_text)
+        if res:
+            url, path = res
+            async with db.get_session() as session:
+                saved.telegraph_url = url
+                saved.telegraph_path = path
+                session.add(saved)
+                await session.commit()
 
     lines = [
         f"title: {saved.title}",
@@ -643,14 +684,28 @@ async def handle_add_event(message: types.Message, db: Database, bot: Bot):
     if len(text) != 2:
         await bot.send_message(message.chat.id, "Usage: /addevent <text>")
         return
-    result = await add_event_from_text(db, text[1], None)
+    result = await add_event_from_text(db, text[1], None, message.html_text)
     if not result:
         await bot.send_message(message.chat.id, "LLM error")
         return
     saved, added, lines, status = result
+    markup = None
+    if (
+        not saved.is_free
+        and saved.ticket_price_min is None
+        and saved.ticket_price_max is None
+    ):
+        markup = types.InlineKeyboardMarkup(
+            inline_keyboard=[[
+                types.InlineKeyboardButton(
+                    text="\u2753 Это бесплатное мероприятие", callback_data=f"markfree:{saved.id}"
+                )
+            ]]
+        )
     await bot.send_message(
         message.chat.id,
         f"Event {status}\n" + "\n".join(lines),
+        reply_markup=markup,
     )
 
 
@@ -672,10 +727,12 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
     async with db.get_session() as session:
         event, added = await upsert_event(session, event)
 
-    url = await create_source_page(event.title or "Event", event.source_text, None)
-    if url:
+    res = await create_source_page(event.title or "Event", event.source_text, None, event.source_text)
+    if res:
+        url, path = res
         async with db.get_session() as session:
             event.telegraph_url = url
+            event.telegraph_path = path
             session.add(event)
             await session.commit()
     lines = [
@@ -687,9 +744,17 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
     if event.telegraph_url:
         lines.append(f"telegraph: {event.telegraph_url}")
     status = "added" if added else "updated"
+    markup = None
+    if not event.is_free and event.ticket_price_min is None and event.ticket_price_max is None:
+        markup = types.InlineKeyboardMarkup(
+            inline_keyboard=[[
+                types.InlineKeyboardButton(text="\u2753 Это бесплатное мероприятие", callback_data=f"markfree:{event.id}")
+            ]]
+        )
     await bot.send_message(
         message.chat.id,
         f"Event {status}\n" + "\n".join(lines),
+        reply_markup=markup,
     )
 
 
@@ -733,6 +798,16 @@ async def build_events_message(db: Database, target_date: date, tz: timezone):
         if e.city:
             loc += f", {e.city}"
         lines.append(loc)
+        if e.is_free:
+            lines.append("Бесплатно")
+        else:
+            price_parts = []
+            if e.ticket_price_min is not None:
+                price_parts.append(str(e.ticket_price_min))
+            if e.ticket_price_max is not None and e.ticket_price_max != e.ticket_price_min:
+                price_parts.append(str(e.ticket_price_max))
+            if price_parts:
+                lines.append("-".join(price_parts))
         if e.telegraph_url:
             lines.append(f"исходное: {e.telegraph_url}")
         lines.append("")
@@ -778,6 +853,7 @@ async def show_edit_menu(user_id: int, event: Event, bot: Bot):
         f"ticket_price_min: {event.ticket_price_min}",
         f"ticket_price_max: {event.ticket_price_max}",
         f"ticket_link: {event.ticket_link or ''}",
+        f"is_free: {event.is_free}",
     ]
     fields = [
         "title",
@@ -791,6 +867,7 @@ async def show_edit_menu(user_id: int, event: Event, bot: Bot):
         "ticket_price_min",
         "ticket_price_max",
         "ticket_link",
+        "is_free",
     ]
     keyboard = []
     row = []
@@ -805,6 +882,12 @@ async def show_edit_menu(user_id: int, event: Event, bot: Bot):
             row = []
     if row:
         keyboard.append(row)
+    keyboard.append([
+        types.InlineKeyboardButton(
+            text=("\u2705 Бесплатно" if event.is_free else "\u274C Бесплатно"),
+            callback_data=f"togglefree:{event.id}",
+        )
+    ])
     keyboard.append(
         [types.InlineKeyboardButton(text="Done", callback_data=f"editdone:{event.id}")]
     )
@@ -919,12 +1002,26 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
                 else:
                     cid = cid.lstrip("-")
                 link = f"https://t.me/c/{cid}/{msg_id}"
-    result = await add_event_from_text(db, text, link)
+    result = await add_event_from_text(db, text, link, message.html_text or message.caption_html)
     if result:
         saved, added, lines, status = result
+        markup = None
+        if (
+            not saved.is_free
+            and saved.ticket_price_min is None
+            and saved.ticket_price_max is None
+        ):
+            markup = types.InlineKeyboardMarkup(
+                inline_keyboard=[[
+                    types.InlineKeyboardButton(
+                        text="\u2753 Это бесплатное мероприятие", callback_data=f"markfree:{saved.id}"
+                    )
+                ]]
+            )
         await bot.send_message(
             message.chat.id,
             f"Event {status}\n" + "\n".join(lines),
+            reply_markup=markup,
         )
 
 
@@ -946,7 +1043,30 @@ async def telegraph_test():
     print("Edited", page["url"])
 
 
-async def create_source_page(title: str, text: str, source_url: str | None) -> str | None:
+async def update_source_page(path: str, title: str, new_html: str):
+    """Append text to an existing Telegraph page."""
+    token = get_telegraph_token()
+    if not token:
+        logging.error("Telegraph token unavailable")
+        return
+    tg = Telegraph(access_token=token)
+    try:
+        page = await asyncio.to_thread(
+            tg.get_page, path, return_content=True, return_html=True
+        )
+        html_content = page.get("content") or page.get("content_html") or ""
+        html_content += "<hr>" + "".join(f"<p>{line}</p>" for line in new_html.splitlines())
+        await asyncio.to_thread(
+            tg.edit_page, path, title=title, html_content=html_content
+        )
+        logging.info("Updated telegraph page %s", path)
+    except Exception as e:
+        logging.error("Failed to update telegraph page: %s", e)
+
+
+async def create_source_page(
+    title: str, text: str, source_url: str | None, html_text: str | None = None
+) -> tuple[str, str] | None:
     """Create a Telegraph page with the original event text."""
     token = get_telegraph_token()
     if not token:
@@ -962,7 +1082,10 @@ async def create_source_page(title: str, text: str, source_url: str | None) -> s
     else:
         html_content += f"<p><strong>{html.escape(title)}</strong></p>"
 
-    paragraphs = [f"<p>{html.escape(line)}</p>" for line in text.splitlines()]
+    if html_text:
+        paragraphs = [f"<p>{line}</p>" for line in html_text.splitlines()]
+    else:
+        paragraphs = [f"<p>{html.escape(line)}</p>" for line in text.splitlines()]
     html_content += "".join(paragraphs)
     try:
         page = await asyncio.to_thread(
@@ -972,7 +1095,7 @@ async def create_source_page(title: str, text: str, source_url: str | None) -> s
         logging.error("Failed to create telegraph page: %s", e)
         return None
     logging.info("Created telegraph page %s", page.get("url"))
-    return page.get("url")
+    return page.get("url"), page.get("path")
 
 
 def create_app() -> web.Application:

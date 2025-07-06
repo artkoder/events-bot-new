@@ -162,8 +162,8 @@ async def test_add_event_raw(tmp_path: Path, monkeypatch):
     await db.init()
     bot = DummyBot("123:abc")
 
-    async def fake_create(title, text, source):
-        return "https://t.me/test"
+    async def fake_create(title, text, source, html_text=None):
+        return "https://t.me/test", "path"
 
     monkeypatch.setattr("main.create_source_page", fake_create)
 
@@ -193,8 +193,8 @@ async def test_add_event_raw_update(tmp_path: Path, monkeypatch):
     await db.init()
     bot = DummyBot("123:abc")
 
-    async def fake_create(title, text, source):
-        return "https://t.me/test"
+    async def fake_create(title, text, source, html_text=None):
+        return "https://t.me/test", "path"
 
     monkeypatch.setattr("main.create_source_page", fake_create)
 
@@ -233,8 +233,8 @@ async def test_edit_event(tmp_path: Path, monkeypatch):
     await db.init()
     bot = DummyBot("123:abc")
 
-    async def fake_create(title, text, source):
-        return "https://t.me/test"
+    async def fake_create(title, text, source, html_text=None):
+        return "https://t.me/test", "path"
 
     monkeypatch.setattr("main.create_source_page", fake_create)
 
@@ -275,8 +275,8 @@ async def test_events_list(tmp_path: Path, monkeypatch):
     await db.init()
     bot = DummyBot("123:abc")
 
-    async def fake_create(title, text, source):
-        return "https://t.me/test"
+    async def fake_create(title, text, source, html_text=None):
+        return "https://t.me/test", "path"
 
     monkeypatch.setattr("main.create_source_page", fake_create)
 
@@ -473,8 +473,8 @@ async def test_forward_add_event(tmp_path: Path, monkeypatch):
             "location_name": "Club",
         }
 
-    async def fake_create(title, text, source):
-        return "https://t.me/page"
+    async def fake_create(title, text, source, html_text=None):
+        return "https://t.me/page", "p"
 
     monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
     monkeypatch.setattr("main.create_source_page", fake_create)
@@ -532,8 +532,8 @@ async def test_forward_unregistered(tmp_path: Path, monkeypatch):
             "location_name": "Club",
         }
 
-    async def fake_create(title, text, source):
-        return "https://t.me/page"
+    async def fake_create(title, text, source, html_text=None):
+        return "https://t.me/page", "p"
 
     monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
     monkeypatch.setattr("main.create_source_page", fake_create)
@@ -586,8 +586,8 @@ async def test_media_group_caption_first(tmp_path: Path, monkeypatch):
             "location_name": "Club",
         }
 
-    async def fake_create(title, text, source):
-        return "https://t.me/page"
+    async def fake_create(title, text, source, html_text=None):
+        return "https://t.me/page", "p"
 
     monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
     monkeypatch.setattr("main.create_source_page", fake_create)
@@ -660,8 +660,8 @@ async def test_media_group_caption_last(tmp_path: Path, monkeypatch):
             "location_name": "Club",
         }
 
-    async def fake_create(title, text, source):
-        return "https://t.me/page"
+    async def fake_create(title, text, source, html_text=None):
+        return "https://t.me/page", "p"
 
     monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
     monkeypatch.setattr("main.create_source_page", fake_create)

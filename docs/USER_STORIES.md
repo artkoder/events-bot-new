@@ -23,3 +23,4 @@
 |US-19|System|auto cleanup old events >60d|save DB|
 |US-20|Super/Admin|set timezone `/tz`|schedule correct|
 |US-21|Moderator|add event via `/addevent` or `/addevent_raw`|store new events|
+|US-22|Moderator|mark an event as free|hide price and show badge|
