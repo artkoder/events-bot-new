@@ -9,9 +9,7 @@ from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_applicati
 from aiohttp import web, ClientSession
 from difflib import SequenceMatcher
 import json
-
 import re
-
 from telegraph import Telegraph
 from functools import partial
 import asyncio
@@ -620,7 +618,7 @@ async def add_event_from_text(
     text: str,
     source_link: str | None,
     html_text: str | None = None,
-    media: bytes | None = None,
+    media: tuple[bytes, str] | None = None,
 ) -> tuple[Event, bool, list[str], str] | None:
     try:
         data = await parse_event_via_4o(text)
@@ -699,15 +697,15 @@ async def handle_add_event(message: types.Message, db: Database, bot: Bot):
     if message.photo:
         bio = BytesIO()
         await bot.download(message.photo[-1].file_id, destination=bio)
-        media = bio.getvalue()
+        media = (bio.getvalue(), "photo.jpg")
     elif message.document and message.document.mime_type.startswith("image/"):
         bio = BytesIO()
         await bot.download(message.document.file_id, destination=bio)
-        media = bio.getvalue()
+        media = (bio.getvalue(), "image.jpg")
     elif message.video:
         bio = BytesIO()
         await bot.download(message.video.file_id, destination=bio)
-        media = bio.getvalue()
+        media = (bio.getvalue(), "video.mp4")
 
     result = await add_event_from_text(db, text[1], None, message.html_text, media)
     if not result:
@@ -744,15 +742,15 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
     if message.photo:
         bio = BytesIO()
         await bot.download(message.photo[-1].file_id, destination=bio)
-        media = bio.getvalue()
+        media = (bio.getvalue(), "photo.jpg")
     elif message.document and message.document.mime_type.startswith("image/"):
         bio = BytesIO()
         await bot.download(message.document.file_id, destination=bio)
-        media = bio.getvalue()
+        media = (bio.getvalue(), "image.jpg")
     elif message.video:
         bio = BytesIO()
         await bot.download(message.video.file_id, destination=bio)
-        media = bio.getvalue()
+        media = (bio.getvalue(), "video.mp4")
 
     event = Event(
         title=title,
@@ -1134,7 +1132,7 @@ async def create_source_page(
     text: str,
     source_url: str | None,
     html_text: str | None = None,
-    media: bytes | None = None,
+    media: tuple[bytes, str] | None = None,
 ) -> tuple[str, str] | None:
     """Create a Telegraph page with the original event text."""
     token = get_telegraph_token()
@@ -1144,8 +1142,11 @@ async def create_source_page(
     tg = Telegraph(access_token=token)
     html_content = ""
     if media:
+        data, name = media
+        bio = BytesIO(data)
+        bio.name = name
         try:
-            res = await asyncio.to_thread(tg.upload_file, BytesIO(media))
+            res = await asyncio.to_thread(tg.upload_file, bio)
             img_src = res[0]["src"]
             html_content += f'<img src="{img_src}"/>'
         except Exception as e:
@@ -1162,7 +1163,6 @@ async def create_source_page(
     if html_text:
         cleaned = re.sub(r"</?tg-emoji[^>]*>", "", html_text)
         html_content += f"<p>{cleaned.replace('\n', '<br/>')}</p>"
-
     else:
         paragraphs = [f"<p>{html.escape(line)}</p>" for line in text.splitlines()]
         html_content += "".join(paragraphs)

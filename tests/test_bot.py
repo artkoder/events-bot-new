@@ -454,7 +454,7 @@ async def test_create_source_page_photo(monkeypatch):
     monkeypatch.setenv("TELEGRAPH_TOKEN", "t")
     monkeypatch.setattr("main.Telegraph", lambda access_token=None: DummyTG(access_token))
 
-    res = await main.create_source_page("Title", "text", None, media=b"img")
+    res = await main.create_source_page("Title", "text", None, media=(b"img", "photo.jpg"))
     assert res == ("https://telegra.ph/test", "test")
 
 
