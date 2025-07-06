@@ -10,7 +10,7 @@ app = "events-bot-new"
 
 
 [[mounts]]
-  source = "sched_db"
+  source = "data"
   destination = "/data"
 
 
