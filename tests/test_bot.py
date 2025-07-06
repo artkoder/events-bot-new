@@ -23,6 +23,9 @@ from main import (
     handle_ask_4o,
     handle_events,
     handle_edit_message,
+
+    process_request,
+
     parse_event_via_4o,
     telegraph_test,
     get_telegraph_token,
@@ -742,4 +745,55 @@ async def test_media_group_caption_last(tmp_path: Path, monkeypatch):
 
     assert len(evs) == 1
     assert evs[0].source_post_url == "https://t.me/chan/11"
+
+
+
+
+
+@pytest.mark.asyncio
+async def test_mark_free(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async def fake_create(title, text, source, html_text=None, media=None):
+        return "https://t.me/test", "path"
+
+    monkeypatch.setattr("main.create_source_page", fake_create)
+
+    msg = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "M"},
+            "text": "/addevent_raw Party|2025-01-01|18:00|Club",
+        }
+    )
+    await handle_add_event_raw(msg, db, bot)
+
+    async with db.get_session() as session:
+        event = (await session.execute(select(Event))).scalars().first()
+
+    cb = types.CallbackQuery.model_validate(
+        {
+            "id": "c1",
+            "from": {"id": 1, "is_bot": False, "first_name": "M"},
+            "chat_instance": "1",
+            "data": f"markfree:{event.id}",
+            "message": {
+                "message_id": 2,
+                "date": 0,
+                "chat": {"id": 1, "type": "private"},
+            },
+        }
+    ).as_(bot)
+    async def dummy_answer(*args, **kwargs):
+        return None
+    object.__setattr__(cb, "answer", dummy_answer)
+    await process_request(cb, db, bot)
+
+    async with db.get_session() as session:
+        updated = await session.get(Event, event.id)
+    assert updated.is_free is True
 
