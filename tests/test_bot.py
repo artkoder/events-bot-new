@@ -23,7 +23,9 @@ from main import (
     handle_ask_4o,
     handle_events,
     handle_edit_message,
+
     process_request,
+
     parse_event_via_4o,
     telegraph_test,
     get_telegraph_token,
@@ -445,10 +447,12 @@ async def test_create_source_page_photo(monkeypatch):
         def __init__(self, access_token=None):
             self.access_token = access_token
         def upload_file(self, f):
+
             assert isinstance(f, tuple)
             bio, name = f
             assert name == "photo.jpg"
             data = bio.read()
+
             assert data == b"img"
             return [{"src": "/file/x.jpg"}]
         def create_page(self, title, html_content=None, **_):
@@ -745,6 +749,7 @@ async def test_media_group_caption_last(tmp_path: Path, monkeypatch):
 
 
 
+
 @pytest.mark.asyncio
 async def test_mark_free(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
@@ -791,3 +796,4 @@ async def test_mark_free(tmp_path: Path, monkeypatch):
     async with db.get_session() as session:
         updated = await session.get(Event, event.id)
     assert updated.is_free is True
+

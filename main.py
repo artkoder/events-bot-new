@@ -1089,6 +1089,8 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
         )
 
 
+
+
 async def telegraph_test():
     token = get_telegraph_token()
     if not token:
@@ -1148,6 +1150,7 @@ async def create_source_page(
         try:
             # pass a tuple so Telegraph keeps the filename
             res = await asyncio.to_thread(tg.upload_file, (bio, name))
+
             img = res[0] if isinstance(res, list) else res
             if isinstance(img, dict):
                 img_src = img.get("src")
@@ -1157,6 +1160,7 @@ async def create_source_page(
                 html_content += f'<img src="{img_src}"/>'
             else:
                 raise ValueError(f"unexpected upload result: {img}")
+
         except Exception as e:
             logging.error("Failed to upload media: %s", e)
 
@@ -1286,6 +1290,8 @@ def create_app() -> web.Application:
     app.on_shutdown.append(on_shutdown)
     return app
 
+    async def on_shutdown(app: web.Application):
+        await bot.session.close()
 
 if __name__ == "__main__":
     import sys
