@@ -444,7 +444,12 @@ async def test_create_source_page_photo(monkeypatch):
         def __init__(self, access_token=None):
             self.access_token = access_token
         def upload_file(self, f):
-            data = f.read()
+
+            assert isinstance(f, tuple)
+            bio, name = f
+            assert name == "photo.jpg"
+            data = bio.read()
+
             assert data == b"img"
             return [{"src": "/file/x.jpg"}]
         def create_page(self, title, html_content=None, **_):

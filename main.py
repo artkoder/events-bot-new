@@ -1145,9 +1145,11 @@ async def create_source_page(
     if media:
         data, name = media
         bio = BytesIO(data)
-        bio.name = name
+
         try:
-            res = await asyncio.to_thread(tg.upload_file, bio)
+            # pass a tuple so Telegraph keeps the filename
+            res = await asyncio.to_thread(tg.upload_file, (bio, name))
+
             img_src = res[0]["src"]
             html_content += f'<img src="{img_src}"/>'
         except Exception as e:
