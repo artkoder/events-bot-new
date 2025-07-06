@@ -933,7 +933,10 @@ def next_month(month: str) -> str:
 
 
 def md_to_html(text: str) -> str:
-    html_text = markdown.markdown(text, extensions=["markdown.extensions.fenced_code"])
+    html_text = markdown.markdown(
+        text,
+        extensions=["markdown.extensions.fenced_code", "markdown.extensions.nl2br"],
+    )
     # Telegraph API does not allow h1/h2 or Telegram-specific emoji tags
     html_text = re.sub(r"<(\/?)h[12]>", r"<\1h3>", html_text)
     html_text = re.sub(r"</?tg-emoji[^>]*>", "", html_text)
