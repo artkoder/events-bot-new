@@ -1145,9 +1145,11 @@ async def create_source_page(
     if media:
         data, name = media
         bio = BytesIO(data)
+
         try:
             # pass a tuple so Telegraph keeps the filename
             res = await asyncio.to_thread(tg.upload_file, (bio, name))
+
             img_src = res[0]["src"]
             html_content += f'<img src="{img_src}"/>'
         except Exception as e:
@@ -1279,6 +1281,8 @@ def create_app() -> web.Application:
     app.on_shutdown.append(on_shutdown)
     return app
 
+    async def on_shutdown(app: web.Application):
+        await bot.session.close()
 
 if __name__ == "__main__":
     import sys
