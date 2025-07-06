@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from aiogram import Bot, types
 from sqlmodel import select
+from datetime import date, timedelta
 import main
 
 from main import (
@@ -32,6 +33,7 @@ from main import (
     editing_sessions,
 )
 
+FUTURE_DATE = (date.today() + timedelta(days=10)).isoformat()
 
 class DummyBot(Bot):
     def __init__(self, token: str):
@@ -182,7 +184,7 @@ async def test_add_event_raw(tmp_path: Path, monkeypatch):
             "date": 0,
             "chat": {"id": 1, "type": "private"},
             "from": {"id": 1, "is_bot": False, "first_name": "M"},
-            "text": "/addevent_raw Party|2025-01-01|18:00|Club",
+            "text": f"/addevent_raw Party|{FUTURE_DATE}|18:00|Club",
         }
     )
 
@@ -213,7 +215,7 @@ async def test_add_event_raw_update(tmp_path: Path, monkeypatch):
             "date": 0,
             "chat": {"id": 1, "type": "private"},
             "from": {"id": 1, "is_bot": False, "first_name": "M"},
-            "text": "/addevent_raw Party|2025-01-01|18:00|Club",
+            "text": "/addevent_raw Party|2025-07-16|18:00|Club",
         }
     )
     await handle_add_event_raw(msg1, db, bot)
@@ -224,7 +226,7 @@ async def test_add_event_raw_update(tmp_path: Path, monkeypatch):
             "date": 0,
             "chat": {"id": 1, "type": "private"},
             "from": {"id": 1, "is_bot": False, "first_name": "M"},
-            "text": "/addevent_raw Party show|2025-01-01|18:00|Club",
+            "text": "/addevent_raw Party show|2025-07-16|18:00|Club",
         }
     )
     await handle_add_event_raw(msg2, db, bot)
@@ -253,7 +255,7 @@ async def test_edit_event(tmp_path: Path, monkeypatch):
             "date": 0,
             "chat": {"id": 1, "type": "private"},
             "from": {"id": 1, "is_bot": False, "first_name": "M"},
-            "text": "/addevent_raw Party|2025-01-01|18:00|Club",
+            "text": "/addevent_raw Party|2025-07-16|18:00|Club",
         }
     )
     await handle_add_event_raw(msg, db, bot)
@@ -306,7 +308,7 @@ async def test_events_list(tmp_path: Path, monkeypatch):
             "date": 0,
             "chat": {"id": 1, "type": "private"},
             "from": {"id": 1, "is_bot": False, "first_name": "A"},
-            "text": "/addevent_raw Party|2025-01-01|18:00|Club",
+            "text": "/addevent_raw Party|2025-07-16|18:00|Club",
         }
     )
     await handle_add_event_raw(add_msg, db, bot)
@@ -318,7 +320,7 @@ async def test_events_list(tmp_path: Path, monkeypatch):
             "date": 0,
             "chat": {"id": 1, "type": "private"},
             "from": {"id": 1, "is_bot": False, "first_name": "A"},
-            "text": "/events 2025-01-01",
+            "text": f"/events {FUTURE_DATE}",
         }
     )
 
@@ -326,7 +328,8 @@ async def test_events_list(tmp_path: Path, monkeypatch):
 
     assert bot.messages
     text = bot.messages[-1][1]
-    assert "Events on 01.01.2025" in text
+    expected_date = date.fromisoformat(FUTURE_DATE).strftime("%d.%m.%Y")
+    assert f"Events on {expected_date}" in text
     assert "1. Party" in text
     assert "18:00 Club" in text  # location no city
     assert "исходное: https://t.me/test" in text
@@ -496,7 +499,7 @@ async def test_forward_add_event(tmp_path: Path, monkeypatch):
         return [{
             "title": "Forwarded",
             "short_description": "desc",
-            "date": "2025-01-01",
+            "date": "2025-07-16",
             "time": "18:00",
             "location_name": "Club",
         }]
@@ -555,7 +558,7 @@ async def test_forward_unregistered(tmp_path: Path, monkeypatch):
         return [{
             "title": "Fwd",
             "short_description": "d",
-            "date": "2025-01-01",
+            "date": "2025-07-16",
             "time": "18:00",
             "location_name": "Club",
         }]
@@ -609,7 +612,7 @@ async def test_media_group_caption_first(tmp_path: Path, monkeypatch):
         return [{
             "title": "MG",
             "short_description": "d",
-            "date": "2025-01-01",
+            "date": "2025-07-16",
             "time": "18:00",
             "location_name": "Club",
         }]
@@ -683,7 +686,7 @@ async def test_media_group_caption_last(tmp_path: Path, monkeypatch):
         return [{
             "title": "MG",
             "short_description": "d",
-            "date": "2025-01-01",
+            "date": "2025-07-16",
             "time": "18:00",
             "location_name": "Club",
         }]
@@ -766,7 +769,7 @@ async def test_mark_free(tmp_path: Path, monkeypatch):
             "date": 0,
             "chat": {"id": 1, "type": "private"},
             "from": {"id": 1, "is_bot": False, "first_name": "M"},
-            "text": "/addevent_raw Party|2025-01-01|18:00|Club",
+            "text": "/addevent_raw Party|2025-07-16|18:00|Club",
         }
     )
     await handle_add_event_raw(msg, db, bot)

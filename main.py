@@ -706,6 +706,17 @@ async def add_events_from_text(
             source_post_url=source_link,
         )
 
+        # skip events that have already finished
+        try:
+            start = date.fromisoformat(event.date)
+        except ValueError:
+            logging.error("Invalid date from LLM: %s", event.date)
+            continue
+        final = date.fromisoformat(event.end_date) if event.end_date else start
+        if final < date.today():
+            logging.info("Ignoring past event %s on %s", event.title, event.date)
+            continue
+
         async with db.get_session() as session:
             saved, added = await upsert_event(session, event)
 

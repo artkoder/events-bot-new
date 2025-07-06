@@ -25,7 +25,7 @@ standard form.
 The response must be JSON with the fields listed in `docs/PROMPTS.md`. When the
 text describes multiple events, return an array of such objects.
 The prefix "Today is YYYY-MM-DD." helps the model infer the correct year for
-dates that omit it.
+dates that omit it and lets the model ignore any events scheduled before today.
 Edit this file or `docs/PROMPTS.md` to fine‑tune the request details.
 
 The command `/ask4o <text>` sends an arbitrary user message to the same

@@ -34,12 +34,13 @@ Lines from `docs/LOCATIONS.md` are appended to the system prompt so the model
 can normalise venue names. Please keep that file up to date.
 
 The user message will start with the current date, e.g. "Today is
-2025-07-05." Use this information to resolve missing years so that parsed
-events are never in the past.
+2025-07-05." Use this information to resolve missing years. **Ignore and do not
+include any event whose date is earlier than today.**
 
 Guidelines:
 - If the event text does not specify a year, assume it happens in the current
   year.
+- Omit any events dated before today.
 - Respond with **plain JSON only** &mdash; do not wrap the output in code
   fences.
 
