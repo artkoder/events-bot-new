@@ -11,8 +11,10 @@ The bot is built with **aiogram 3** and runs on Fly.io using a webhook.
 
 The MVP includes moderator registration, timezone setting and simple event
 creation (`/addevent` and `/addevent_raw`). For each event the bot creates a
-Telegraph page with the raw announcement text. `/events` shows upcoming events by
-day (with links to these pages) and allows deletion or editing through inline buttons. A
+Telegraph page containing the original announcement text. When the event comes
+from a registered announcement channel the title on that page links to the
+source post. `/events` shows upcoming events by day (with links to these pages)
+and allows deletion or editing through inline buttons. A
 helper `python main.py test_telegraph` checks Telegraph access and creates a
 Telegraph token automatically if needed.
 

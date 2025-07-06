@@ -955,8 +955,15 @@ async def create_source_page(title: str, text: str, source_url: str | None) -> s
     tg = Telegraph(access_token=token)
     html_content = ""
     if source_url:
-        html_content += f'<p>Source: <a href="{html.escape(source_url)}">link</a></p>'
-    html_content += "<pre>" + html.escape(text) + "</pre>"
+        html_content += (
+            f'<p><a href="{html.escape(source_url)}"><strong>'
+            f"{html.escape(title)}</strong></a></p>"
+        )
+    else:
+        html_content += f"<p><strong>{html.escape(title)}</strong></p>"
+
+    paragraphs = [f"<p>{html.escape(line)}</p>" for line in text.splitlines()]
+    html_content += "".join(paragraphs)
     try:
         page = await asyncio.to_thread(
             tg.create_page, title, html_content=html_content
