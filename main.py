@@ -1049,15 +1049,16 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
     if message.photo:
         bio = BytesIO()
         await bot.download(message.photo[-1].file_id, destination=bio)
-        media = bio.getvalue()
+        media = (bio.getvalue(), "photo.jpg")
     elif message.document and message.document.mime_type.startswith("image/"):
         bio = BytesIO()
         await bot.download(message.document.file_id, destination=bio)
-        media = bio.getvalue()
+        name = message.document.file_name or "image.jpg"
+        media = (bio.getvalue(), name)
     elif message.video:
         bio = BytesIO()
         await bot.download(message.video.file_id, destination=bio)
-        media = bio.getvalue()
+        media = (bio.getvalue(), "video.mp4")
 
     result = await add_event_from_text(
         db,
