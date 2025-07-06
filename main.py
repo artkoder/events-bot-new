@@ -9,6 +9,9 @@ from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_applicati
 from aiohttp import web, ClientSession
 from difflib import SequenceMatcher
 import json
+
+import re
+
 from telegraph import Telegraph
 from functools import partial
 import asyncio
@@ -1157,7 +1160,9 @@ async def create_source_page(
         html_content += f"<p><strong>{html.escape(title)}</strong></p>"
 
     if html_text:
-        html_content += f"<p>{html_text.replace('\n', '<br/>')}</p>"
+        cleaned = re.sub(r"</?tg-emoji[^>]*>", "", html_text)
+        html_content += f"<p>{cleaned.replace('\n', '<br/>')}</p>"
+
     else:
         paragraphs = [f"<p>{html.escape(line)}</p>" for line in text.splitlines()]
         html_content += "".join(paragraphs)
