@@ -12,7 +12,7 @@
 | `/events [DATE]` | optional date `YYYY-MM-DD` or `DD.MM.YYYY` | List events for the day with delete and edit buttons. Dates are shown as `DD.MM.YYYY`. Choosing **Edit** lists all fields with inline buttons including a toggle for "Бесплатно". |
 | `/setchannel` | - | Choose one of the admin channels to register as an announcement source. |
 | `/channels` | - | List channels where the bot is admin and mark registered ones with a cancel button. |
-| `/exhibitions` | - | List upcoming exhibitions (events with a date range). |
+| `/exhibitions` | - | List active exhibitions similar to `/events`; each entry shows the period `c <start>` / `по <end>` and includes edit/delete buttons. |
 | `python main.py test_telegraph` | - | Verify Telegraph API access. Automatically creates a token if needed and prints the page URL. |
 
 Use `/addevent` to let model 4o extract fields. `/addevent_raw` lets you

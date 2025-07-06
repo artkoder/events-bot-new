@@ -879,4 +879,4 @@ async def test_exhibition_listing(tmp_path: Path, monkeypatch):
         }
     )
     await handle_exhibitions(exh_msg, db, bot)
-    assert "Expo" in bot.messages[-1][1]
+    assert "c 10 июля по 20 июля" in bot.messages[-1][1]

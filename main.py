@@ -919,6 +919,81 @@ async def build_events_message(db: Database, target_date: date, tz: timezone):
     return text, markup
 
 
+async def build_exhibitions_message(db: Database, tz: timezone):
+    today = datetime.now(tz).date()
+    async with db.get_session() as session:
+        result = await session.execute(
+            select(Event)
+            .where(
+                Event.event_type == "выставка",
+                Event.end_date.is_not(None),
+                Event.end_date >= today.isoformat(),
+            )
+            .order_by(Event.date)
+        )
+        events = result.scalars().all()
+
+    lines = []
+    for e in events:
+        try:
+            start = datetime.fromisoformat(e.date).date()
+        except ValueError:
+            if ".." in e.date:
+                start = datetime.fromisoformat(e.date.split("..", 1)[0]).date()
+            else:
+                logging.error("Bad start date %s for event %s", e.date, e.id)
+                continue
+        end = None
+        if e.end_date:
+            try:
+                end = datetime.fromisoformat(e.end_date).date()
+            except ValueError:
+                end = None
+
+        period = ""
+        if end:
+            if start <= today:
+                period = f"по {format_day_pretty(end)}"
+            else:
+                period = f"c {format_day_pretty(start)} по {format_day_pretty(end)}"
+        title = f"{e.emoji} {e.title}" if e.emoji else e.title
+        if period:
+            lines.append(f"{e.id}. {title} ({period})")
+        else:
+            lines.append(f"{e.id}. {title}")
+        loc = f"{e.time} {e.location_name}"
+        if e.city:
+            loc += f", #{e.city}"
+        lines.append(loc)
+        if e.is_free:
+            lines.append("Бесплатно")
+        else:
+            price_parts = []
+            if e.ticket_price_min is not None:
+                price_parts.append(str(e.ticket_price_min))
+            if e.ticket_price_max is not None and e.ticket_price_max != e.ticket_price_min:
+                price_parts.append(str(e.ticket_price_max))
+            if price_parts:
+                lines.append("-".join(price_parts))
+        if e.telegraph_url:
+            lines.append(f"исходное: {e.telegraph_url}")
+        lines.append("")
+
+    if not lines:
+        lines.append("No exhibitions")
+
+    keyboard = [
+        [
+            types.InlineKeyboardButton(text="\u274C", callback_data=f"del:{e.id}:exh"),
+            types.InlineKeyboardButton(text="\u270E", callback_data=f"edit:{e.id}"),
+        ]
+        for e in events
+    ]
+    markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard) if events else None
+    text = "Exhibitions\n" + "\n".join(lines)
+    return text, markup
+
+
 async def show_edit_menu(user_id: int, event: Event, bot: Bot):
     lines = [
         f"title: {event.title}",
@@ -1029,44 +1104,14 @@ async def handle_ask_4o(message: types.Message, db: Database, bot: Bot):
 async def handle_exhibitions(message: types.Message, db: Database, bot: Bot):
     offset = await get_tz_offset(db)
     tz = offset_to_timezone(offset)
-    today = datetime.now(tz).date()
+
     async with db.get_session() as session:
-        result = await session.execute(
-            select(Event).where(
-                Event.event_type == "выставка",
-                Event.end_date.is_not(None),
-                Event.end_date >= today.isoformat(),
-            ).order_by(Event.date)
-        )
-        events = result.scalars().all()
-    lines = []
-    for e in events:
-        try:
-            start_date = datetime.fromisoformat(e.date).date()
-        except ValueError:
-            if ".." in e.date:
-                start_date = datetime.fromisoformat(e.date.split("..", 1)[0]).date()
-            else:
-                logging.error("Bad start date %s for event %s", e.date, e.id)
-                continue
-        start = format_day_pretty(start_date)
-        if e.end_date:
-            try:
-                end_date_parsed = datetime.fromisoformat(e.end_date).date()
-                end = format_day_pretty(end_date_parsed)
-            except ValueError:
-                end = e.end_date
-        else:
-            end = ""
-        lines.append(f"{e.title} ({start} - {end})")
-        loc = e.location_name
-        if e.city:
-            loc += f", #{e.city}"
-        lines.append(loc)
-        lines.append("")
-    if not lines:
-        lines.append("No exhibitions")
-    await bot.send_message(message.chat.id, "\n".join(lines))
+        if not await session.get(User, message.from_user.id):
+            await bot.send_message(message.chat.id, "Not authorized")
+            return
+
+    text, markup = await build_exhibitions_message(db, tz)
+    await bot.send_message(message.chat.id, text, reply_markup=markup)
 
 
 async def handle_edit_message(message: types.Message, db: Database, bot: Bot):
