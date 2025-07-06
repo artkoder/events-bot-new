@@ -20,6 +20,9 @@ ticket_price_min  - minimum ticket price as integer or null
 ticket_price_max  - maximum ticket price as integer or null
 ticket_link       - URL for purchasing tickets if present
 is_free           - true if explicitly stated the event is free
+event_type       - one of: спектакль, выставка, концерт, ярмарка, лекция, встреча
+emoji            - an optional emoji representing the event
+end_date         - end date for multi-day events or null
 ```
 
 Lines from `docs/LOCATIONS.md` are appended to the system prompt so the model

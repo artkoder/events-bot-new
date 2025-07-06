@@ -24,3 +24,7 @@
 |US-20|Super/Admin|set timezone `/tz`|schedule correct|
 |US-21|Moderator|add event via `/addevent` or `/addevent_raw`|store new events|
 |US-22|Moderator|mark an event as free|hide price and show badge|
+|US-23|System|replace "🆓🆓🆓🆓" with "Бесплатно" on Telegraph pages|consistent text|
+|US-24|System|parse event type and emoji via 4o|categorise events|
+|US-25|System|store start and end dates for multi-day events|show opening and closing|
+|US-26|User|view exhibitions with `/exhibitions`|see ongoing exhibitions|

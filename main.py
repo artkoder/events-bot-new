@@ -71,6 +71,9 @@ class Event(SQLModel, table=True):
     ticket_price_min: Optional[int] = None
     ticket_price_max: Optional[int] = None
     ticket_link: Optional[str] = None
+    event_type: Optional[str] = None
+    emoji: Optional[str] = None
+    end_date: Optional[str] = None
     is_free: bool = False
     telegraph_path: Optional[str] = None
     source_text: str
@@ -114,6 +117,18 @@ class Database:
             if "telegraph_path" not in cols:
                 await conn.exec_driver_sql(
                     "ALTER TABLE event ADD COLUMN telegraph_path VARCHAR"
+                )
+            if "event_type" not in cols:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE event ADD COLUMN event_type VARCHAR"
+                )
+            if "emoji" not in cols:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE event ADD COLUMN emoji VARCHAR"
+                )
+            if "end_date" not in cols:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE event ADD COLUMN end_date VARCHAR"
                 )
 
     def get_session(self) -> AsyncSession:
@@ -637,6 +652,9 @@ async def add_event_from_text(
         ticket_price_min=data.get("ticket_price_min"),
         ticket_price_max=data.get("ticket_price_max"),
         ticket_link=data.get("ticket_link"),
+        event_type=data.get("event_type"),
+        emoji=data.get("emoji"),
+        end_date=data.get("end_date"),
         is_free=bool(data.get("is_free")),
         source_text=text,
         source_post_url=source_link,
@@ -676,6 +694,8 @@ async def add_event_from_text(
         lines.append(f"festival: {saved.festival}")
     if saved.description:
         lines.append(f"description: {saved.description}")
+    if saved.event_type:
+        lines.append(f"type: {saved.event_type}")
     if saved.ticket_price_min is not None:
         lines.append(f"price_min: {saved.ticket_price_min}")
     if saved.ticket_price_max is not None:
@@ -830,16 +850,25 @@ def format_day_pretty(day: date) -> str:
 async def build_events_message(db: Database, target_date: date, tz: timezone):
     async with db.get_session() as session:
         result = await session.execute(
-            select(Event).where(Event.date == target_date.isoformat()).order_by(Event.time)
+            select(Event).where(
+                (Event.date == target_date.isoformat())
+                | (Event.end_date == target_date.isoformat())
+            ).order_by(Event.time)
         )
         events = result.scalars().all()
 
     lines = []
     for e in events:
-        lines.append(f"{e.id}. {e.title}")
+        prefix = ""
+        if e.end_date and e.date == target_date.isoformat():
+            prefix = "(Открытие) "
+        elif e.end_date and e.end_date == target_date.isoformat() and e.end_date != e.date:
+            prefix = "(Закрытие) "
+        title = f"{e.emoji} {e.title}" if e.emoji else e.title
+        lines.append(f"{e.id}. {prefix}{title}")
         loc = f"{e.time} {e.location_name}"
         if e.city:
-            loc += f", {e.city}"
+            loc += f", #{e.city}"
         lines.append(loc)
         if e.is_free:
             lines.append("Бесплатно")
@@ -889,10 +918,13 @@ async def show_edit_menu(user_id: int, event: Event, bot: Bot):
         f"description: {event.description}",
         f"festival: {event.festival or ''}",
         f"date: {event.date}",
+        f"end_date: {event.end_date or ''}",
         f"time: {event.time}",
         f"location_name: {event.location_name}",
         f"location_address: {event.location_address or ''}",
         f"city: {event.city or ''}",
+        f"event_type: {event.event_type or ''}",
+        f"emoji: {event.emoji or ''}",
         f"ticket_price_min: {event.ticket_price_min}",
         f"ticket_price_max: {event.ticket_price_max}",
         f"ticket_link: {event.ticket_link or ''}",
@@ -903,10 +935,13 @@ async def show_edit_menu(user_id: int, event: Event, bot: Bot):
         "description",
         "festival",
         "date",
+        "end_date",
         "time",
         "location_name",
         "location_address",
         "city",
+        "event_type",
+        "emoji",
         "ticket_price_min",
         "ticket_price_max",
         "ticket_link",
@@ -982,6 +1017,34 @@ async def handle_ask_4o(message: types.Message, db: Database, bot: Bot):
         await bot.send_message(message.chat.id, f"LLM error: {e}")
         return
     await bot.send_message(message.chat.id, answer)
+
+
+async def handle_exhibitions(message: types.Message, db: Database, bot: Bot):
+    offset = await get_tz_offset(db)
+    tz = offset_to_timezone(offset)
+    today = datetime.now(tz).date()
+    async with db.get_session() as session:
+        result = await session.execute(
+            select(Event).where(
+                Event.event_type == "выставка",
+                Event.end_date.is_not(None),
+                Event.end_date >= today.isoformat(),
+            ).order_by(Event.date)
+        )
+        events = result.scalars().all()
+    lines = []
+    for e in events:
+        start = format_day_pretty(datetime.fromisoformat(e.date).date())
+        end = format_day_pretty(datetime.fromisoformat(e.end_date).date()) if e.end_date else ""
+        lines.append(f"{e.title} ({start} - {end})")
+        loc = e.location_name
+        if e.city:
+            loc += f", #{e.city}"
+        lines.append(loc)
+        lines.append("")
+    if not lines:
+        lines.append("No exhibitions")
+    await bot.send_message(message.chat.id, "\n".join(lines))
 
 
 async def handle_edit_message(message: types.Message, db: Database, bot: Bot):
@@ -1089,8 +1152,6 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
         )
 
 
-
-
 async def telegraph_test():
     token = get_telegraph_token()
     if not token:
@@ -1150,7 +1211,6 @@ async def create_source_page(
         try:
             # pass a tuple so Telegraph keeps the filename
             res = await asyncio.to_thread(tg.upload_file, (bio, name))
-
             img = res[0] if isinstance(res, list) else res
             if isinstance(img, dict):
                 img_src = img.get("src")
@@ -1160,7 +1220,6 @@ async def create_source_page(
                 html_content += f'<img src="{img_src}"/>'
             else:
                 raise ValueError(f"unexpected upload result: {img}")
-
         except Exception as e:
             logging.error("Failed to upload media: %s", e)
 
@@ -1174,9 +1233,11 @@ async def create_source_page(
 
     if html_text:
         cleaned = re.sub(r"</?tg-emoji[^>]*>", "", html_text)
+        cleaned = cleaned.replace("\U0001F193\U0001F193\U0001F193\U0001F193", "Бесплатно")
         html_content += f"<p>{cleaned.replace('\n', '<br/>')}</p>"
     else:
-        paragraphs = [f"<p>{html.escape(line)}</p>" for line in text.splitlines()]
+        clean_text = text.replace("\U0001F193\U0001F193\U0001F193\U0001F193", "Бесплатно")
+        paragraphs = [f"<p>{html.escape(line)}</p>" for line in clean_text.splitlines()]
         html_content += "".join(paragraphs)
     try:
         page = await asyncio.to_thread(
@@ -1237,6 +1298,9 @@ def create_app() -> web.Application:
     async def channels_wrapper(message: types.Message):
         await handle_channels(message, db, bot)
 
+    async def exhibitions_wrapper(message: types.Message):
+        await handle_exhibitions(message, db, bot)
+
     async def edit_message_wrapper(message: types.Message):
         await handle_edit_message(message, db, bot)
 
@@ -1265,6 +1329,7 @@ def create_app() -> web.Application:
     dp.message.register(list_events_wrapper, Command("events"))
     dp.message.register(set_channel_wrapper, Command("setchannel"))
     dp.message.register(channels_wrapper, Command("channels"))
+    dp.message.register(exhibitions_wrapper, Command("exhibitions"))
     dp.message.register(edit_message_wrapper, lambda m: m.from_user.id in editing_sessions)
     dp.message.register(forward_wrapper, lambda m: bool(m.forward_date))
     dp.my_chat_member.register(partial(handle_my_chat_member, db=db))
