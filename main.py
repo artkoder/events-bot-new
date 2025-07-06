@@ -424,6 +424,7 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
             if event:
                 event.is_free = not event.is_free
                 await session.commit()
+                logging.info("togglefree: event %s set to %s", eid, event.is_free)
         async with db.get_session() as session:
             event = await session.get(Event, eid)
         if event:
@@ -436,6 +437,7 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
             if event:
                 event.is_free = True
                 await session.commit()
+                logging.info("markfree: event %s marked free", eid)
         await callback.answer("Marked")
     elif data.startswith("nav:"):
         _, day = data.split(":")
@@ -640,11 +642,16 @@ async def add_event_from_text(
     except Exception as e:
         logging.error("LLM error: %s", e)
         return None
+    date_str = data.get("date", "") or ""
+    end_date = data.get("end_date")
+    if ".." in date_str and not end_date:
+        start, end_date = [p.strip() for p in date_str.split("..", 1)]
+        date_str = start
     event = Event(
         title=data.get("title", ""),
         description=data.get("short_description", ""),
         festival=data.get("festival") or None,
-        date=data.get("date", ""),
+        date=date_str,
         time=data.get("time", ""),
         location_name=data.get("location_name", ""),
         location_address=data.get("location_address"),
@@ -654,7 +661,7 @@ async def add_event_from_text(
         ticket_link=data.get("ticket_link"),
         event_type=data.get("event_type"),
         emoji=data.get("emoji"),
-        end_date=data.get("end_date"),
+        end_date=end_date,
         is_free=bool(data.get("is_free")),
         source_text=text,
         source_post_url=source_link,

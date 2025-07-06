@@ -20,8 +20,10 @@ from main import (
     handle_start,
     handle_tz,
     handle_add_event_raw,
+    handle_add_event,
     handle_ask_4o,
     handle_events,
+    handle_exhibitions,
     handle_edit_message,
     process_request,
     parse_event_via_4o,
@@ -791,3 +793,94 @@ async def test_mark_free(tmp_path: Path, monkeypatch):
     async with db.get_session() as session:
         updated = await session.get(Event, event.id)
     assert updated.is_free is True
+
+
+@pytest.mark.asyncio
+async def test_exhibition_listing(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    start_msg = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "/start",
+        }
+    )
+    await handle_start(start_msg, db, bot)
+
+    async def fake_parse(text: str) -> dict:
+        return {
+            "title": "Expo",
+            "short_description": "desc",
+            "festival": "",
+            "date": "2025-07-10",
+            "end_date": "2025-07-20",
+            "time": "",
+            "location_name": "Hall",
+            "location_address": "Addr",
+            "city": "Калининград",
+            "ticket_price_min": None,
+            "ticket_price_max": None,
+            "ticket_link": None,
+            "event_type": "выставка",
+            "emoji": None,
+            "is_free": True,
+        }
+
+    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+
+    async def fake_create(title, text, source, html_text=None, media=None):
+        return "url", "p"
+
+    monkeypatch.setattr("main.create_source_page", fake_create)
+
+    add_msg = types.Message.model_validate(
+        {
+            "message_id": 2,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "/addevent anything",
+        }
+    )
+    await handle_add_event(add_msg, db, bot)
+
+    evt_msg = types.Message.model_validate(
+        {
+            "message_id": 3,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "/events 2025-07-10",
+        }
+    )
+    await handle_events(evt_msg, db, bot)
+    assert "(Открытие) Expo" in bot.messages[-1][1]
+
+    evt_msg2 = types.Message.model_validate(
+        {
+            "message_id": 4,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "/events 2025-07-20",
+        }
+    )
+    await handle_events(evt_msg2, db, bot)
+    assert "(Закрытие) Expo" in bot.messages[-1][1]
+
+    exh_msg = types.Message.model_validate(
+        {
+            "message_id": 5,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "/exhibitions",
+        }
+    )
+    await handle_exhibitions(exh_msg, db, bot)
+    assert "Expo" in bot.messages[-1][1]
