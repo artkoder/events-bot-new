@@ -1020,3 +1020,51 @@ async def test_months_command(tmp_path: Path):
 
     await main.handle_months(msg, db, bot)
     assert "2025-07" in bot.messages[-1][1]
+
+
+@pytest.mark.asyncio
+async def test_date_range_parsing(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async def fake_parse(text: str) -> list[dict]:
+        return [
+            {
+                "title": "Expo",
+                "short_description": "desc",
+                "date": "2025-07-01..2025-07-17",
+                "time": "18:00",
+                "location_name": "Hall",
+                "event_type": "выставка",
+            }
+        ]
+
+    async def fake_create(title, text, source, html_text=None, media=None):
+        return "url", "p"
+
+    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.create_source_page", fake_create)
+
+    async def fake_sync(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr("main.sync_month_page", fake_sync)
+
+    msg = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "/addevent any",
+        }
+    )
+
+    await handle_add_event(msg, db, bot)
+
+    async with db.get_session() as session:
+        ev = (await session.execute(select(Event))).scalars().first()
+
+    assert ev.date == "2025-07-01"
+    assert ev.end_date == "2025-07-17"

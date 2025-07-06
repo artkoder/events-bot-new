@@ -688,10 +688,14 @@ async def add_events_from_text(
     first = True
     for data in parsed:
         date_str = data.get("date", "") or ""
-        end_date = data.get("end_date")
-        if ".." in date_str and not end_date:
-            start, end_date = [p.strip() for p in date_str.split("..", 1)]
+        end_date = data.get("end_date") or None
+        if end_date and ".." in end_date:
+            end_date = end_date.split("..", 1)[-1].strip()
+        if ".." in date_str:
+            start, maybe_end = [p.strip() for p in date_str.split("..", 1)]
             date_str = start
+            if not end_date:
+                end_date = maybe_end
 
         event = Event(
             title=data.get("title", ""),
@@ -960,7 +964,12 @@ def format_event_md(e: Event) -> str:
         loc += f", {e.location_address}"
     if e.city:
         loc += f", #{e.city}"
-    day = format_day_pretty(datetime.fromisoformat(e.date).date())
+    date_part = e.date.split("..", 1)[0]
+    try:
+        day = format_day_pretty(datetime.fromisoformat(date_part).date())
+    except ValueError:
+        logging.error("Invalid event date: %s", e.date)
+        day = e.date
     lines.append(f"_{day} {e.time} {loc}_")
     return "\n".join(lines)
 
@@ -979,7 +988,12 @@ def format_exhibition_md(e: Event) -> str:
     if e.city:
         loc += f", #{e.city}"
     if e.end_date:
-        end = format_day_pretty(datetime.fromisoformat(e.end_date).date())
+        end_part = e.end_date.split("..", 1)[0]
+        try:
+            end = format_day_pretty(datetime.fromisoformat(end_part).date())
+        except ValueError:
+            logging.error("Invalid end date: %s", e.end_date)
+            end = e.end_date
         lines.append(f"_по {end}, {loc}_")
     return "\n".join(lines)
 
@@ -1011,7 +1025,12 @@ async def build_month_page_markdown(db: Database, month: str) -> tuple[str, str]
 
     by_day: dict[date, list[Event]] = {}
     for e in events:
-        d = datetime.fromisoformat(e.date).date()
+        date_part = e.date.split("..", 1)[0]
+        try:
+            d = datetime.fromisoformat(date_part).date()
+        except ValueError:
+            logging.error("Invalid date for event %s: %s", e.id, e.date)
+            continue
         by_day.setdefault(d, []).append(e)
 
     lines = [
