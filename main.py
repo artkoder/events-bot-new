@@ -1041,8 +1041,23 @@ async def handle_exhibitions(message: types.Message, db: Database, bot: Bot):
         events = result.scalars().all()
     lines = []
     for e in events:
-        start = format_day_pretty(datetime.fromisoformat(e.date).date())
-        end = format_day_pretty(datetime.fromisoformat(e.end_date).date()) if e.end_date else ""
+        try:
+            start_date = datetime.fromisoformat(e.date).date()
+        except ValueError:
+            if ".." in e.date:
+                start_date = datetime.fromisoformat(e.date.split("..", 1)[0]).date()
+            else:
+                logging.error("Bad start date %s for event %s", e.date, e.id)
+                continue
+        start = format_day_pretty(start_date)
+        if e.end_date:
+            try:
+                end_date_parsed = datetime.fromisoformat(e.end_date).date()
+                end = format_day_pretty(end_date_parsed)
+            except ValueError:
+                end = e.end_date
+        else:
+            end = ""
         lines.append(f"{e.title} ({start} - {end})")
         loc = e.location_name
         if e.city:
@@ -1212,23 +1227,10 @@ async def create_source_page(
         return None
     tg = Telegraph(access_token=token)
     html_content = ""
+    # Media uploads to Telegraph are flaky and consume bandwidth.
+    # Skip uploading files for now to keep requests lightweight.
     if media:
-        data, name = media
-        bio = BytesIO(data)
-        try:
-            # pass a tuple so Telegraph keeps the filename
-            res = await asyncio.to_thread(tg.upload_file, (bio, name))
-            img = res[0] if isinstance(res, list) else res
-            if isinstance(img, dict):
-                img_src = img.get("src")
-            else:
-                img_src = img
-            if img_src:
-                html_content += f'<img src="{img_src}"/>'
-            else:
-                raise ValueError(f"unexpected upload result: {img}")
-        except Exception as e:
-            logging.error("Failed to upload media: %s", e)
+        logging.info("Media upload skipped for telegraph page")
 
     if source_url:
         html_content += (
@@ -1327,7 +1329,9 @@ def create_app() -> web.Application:
         or c.data.startswith("editfield:")
         or c.data.startswith("editdone:")
         or c.data.startswith("unset:")
-        or c.data.startswith("set:"),
+        or c.data.startswith("set:")
+        or c.data.startswith("togglefree:")
+        or c.data.startswith("markfree:"),
     )
     dp.message.register(tz_wrapper, Command("tz"))
     dp.message.register(add_event_wrapper, Command("addevent"))

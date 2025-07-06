@@ -25,6 +25,9 @@ emoji            - an optional emoji representing the event
 end_date         - end date for multi-day events or null
 ```
 
+Do **not** include words like "Открытие" or "Закрытие" in exhibition titles.
+The bot adds these markers automatically on the opening and closing dates.
+
 Lines from `docs/LOCATIONS.md` are appended to the system prompt so the model
 can normalise venue names. Please keep that file up to date.
 

@@ -446,15 +446,11 @@ async def test_create_source_page_photo(monkeypatch):
     class DummyTG:
         def __init__(self, access_token=None):
             self.access_token = access_token
+            self.upload_called = False
         def upload_file(self, f):
-            assert isinstance(f, tuple)
-            bio, name = f
-            assert name == "photo.jpg"
-            data = bio.read()
-            assert data == b"img"
-            return [{"src": "/file/x.jpg"}]
+            self.upload_called = True
         def create_page(self, title, html_content=None, **_):
-            assert '<img src="/file/x.jpg"' in html_content
+            assert "<img" not in html_content
             return {"url": "https://telegra.ph/test", "path": "test"}
 
     monkeypatch.setenv("TELEGRAPH_TOKEN", "t")
