@@ -1117,7 +1117,7 @@ async def update_source_page(path: str, title: str, new_html: str):
             tg.get_page, path, return_content=True, return_html=True
         )
         html_content = page.get("content") or page.get("content_html") or ""
-        html_content += "<hr>" + "".join(f"<p>{line}</p>" for line in new_html.splitlines())
+        html_content += "<hr><p>" + new_html.replace("\n", "<br/>") + "</p>"
         await asyncio.to_thread(
             tg.edit_page, path, title=title, html_content=html_content
         )
@@ -1157,10 +1157,10 @@ async def create_source_page(
         html_content += f"<p><strong>{html.escape(title)}</strong></p>"
 
     if html_text:
-        paragraphs = [f"<p>{line}</p>" for line in html_text.splitlines()]
+        html_content += f"<p>{html_text.replace('\n', '<br/>')}</p>"
     else:
         paragraphs = [f"<p>{html.escape(line)}</p>" for line in text.splitlines()]
-    html_content += "".join(paragraphs)
+        html_content += "".join(paragraphs)
     try:
         page = await asyncio.to_thread(
             tg.create_page, title, html_content=html_content
