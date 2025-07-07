@@ -747,6 +747,45 @@ async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
             return ev, False
 
         title_ratio = SequenceMatcher(None, ev.title.lower(), new.title.lower()).ratio()
+        if title_ratio >= 0.9:
+            ev.title = new.title
+            ev.description = new.description
+            ev.festival = new.festival
+            ev.source_text = new.source_text
+            ev.location_name = new.location_name
+            ev.location_address = new.location_address
+            ev.ticket_price_min = new.ticket_price_min
+            ev.ticket_price_max = new.ticket_price_max
+            ev.ticket_link = new.ticket_link
+            ev.event_type = new.event_type
+            ev.emoji = new.emoji
+            ev.end_date = new.end_date
+            ev.is_free = new.is_free
+            await session.commit()
+            return ev, False
+
+        if (
+            ev.location_name.strip().lower() == new.location_name.strip().lower()
+            and (ev.location_address or "").strip().lower()
+            == (new.location_address or "").strip().lower()
+        ):
+            ev.title = new.title
+            ev.description = new.description
+            ev.festival = new.festival
+            ev.source_text = new.source_text
+            ev.location_name = new.location_name
+            ev.location_address = new.location_address
+            ev.ticket_price_min = new.ticket_price_min
+            ev.ticket_price_max = new.ticket_price_max
+            ev.ticket_link = new.ticket_link
+            ev.event_type = new.event_type
+            ev.emoji = new.emoji
+            ev.end_date = new.end_date
+            ev.is_free = new.is_free
+            await session.commit()
+            return ev, False
+
+        title_ratio = SequenceMatcher(None, ev.title.lower(), new.title.lower()).ratio()
         loc_ratio = SequenceMatcher(None, ev.location_name.lower(), new.location_name.lower()).ratio()
         if title_ratio >= 0.6 and loc_ratio >= 0.6:
             ev.title = new.title
@@ -824,7 +863,7 @@ async def add_events_from_text(
             if not end_date:
                 end_date = maybe_end
 
-        event = Event(
+        base_event = Event(
             title=data.get("title", ""),
             description=data.get("short_description", ""),
             festival=data.get("festival") or None,
@@ -844,72 +883,93 @@ async def add_events_from_text(
             source_post_url=source_link,
         )
 
-        if not event.ticket_link and html_text:
-            extracted = extract_link_from_html(html_text)
-            if extracted:
-                event.ticket_link = extracted
+        events_to_add = [base_event]
+        if (
+            base_event.event_type != "выставка"
+            and base_event.end_date
+            and base_event.end_date != base_event.date
+        ):
+            try:
+                start_dt = date.fromisoformat(base_event.date)
+                end_dt = date.fromisoformat(base_event.end_date)
+            except ValueError:
+                start_dt = end_dt = None
+            if start_dt and end_dt and end_dt > start_dt:
+                events_to_add = []
+                for i in range((end_dt - start_dt).days + 1):
+                    day = start_dt + timedelta(days=i)
+                    copy_e = Event(**base_event.model_dump(exclude={"id", "added_at"}))
+                    copy_e.date = day.isoformat()
+                    copy_e.end_date = None
+                    events_to_add.append(copy_e)
 
-        # skip events that have already finished
-        try:
-            start = date.fromisoformat(event.date)
-        except ValueError:
-            logging.error("Invalid date from LLM: %s", event.date)
-            continue
-        final = date.fromisoformat(event.end_date) if event.end_date else start
-        if final < date.today():
-            logging.info("Ignoring past event %s on %s", event.title, event.date)
-            continue
+        for event in events_to_add:
+            if not event.ticket_link and html_text:
+                extracted = extract_link_from_html(html_text)
+                if extracted:
+                    event.ticket_link = extracted
 
-        async with db.get_session() as session:
-            saved, added = await upsert_event(session, event)
+            # skip events that have already finished
+            try:
+                start = date.fromisoformat(event.date)
+            except ValueError:
+                logging.error("Invalid date from LLM: %s", event.date)
+                continue
+            final = date.fromisoformat(event.end_date) if event.end_date else start
+            if final < date.today():
+                logging.info("Ignoring past event %s on %s", event.title, event.date)
+                continue
 
-        media_arg = media if first else None
-        if saved.telegraph_url and saved.telegraph_path:
-            await update_source_page(saved.telegraph_path, saved.title or "Event", html_text or text)
-        else:
-            res = await create_source_page(
-                saved.title or "Event",
-                saved.source_text,
-                source_link,
-                html_text,
-                media_arg,
-            )
-            if res:
-                url, path = res
-                async with db.get_session() as session:
-                    saved.telegraph_url = url
-                    saved.telegraph_path = path
-                    session.add(saved)
-                    await session.commit()
-        await sync_month_page(db, saved.date[:7])
+            async with db.get_session() as session:
+                saved, added = await upsert_event(session, event)
 
-        lines = [
-            f"title: {saved.title}",
-            f"date: {saved.date}",
-            f"time: {saved.time}",
-            f"location_name: {saved.location_name}",
-        ]
-        if saved.location_address:
-            lines.append(f"location_address: {saved.location_address}")
-        if saved.city:
-            lines.append(f"city: {saved.city}")
-        if saved.festival:
-            lines.append(f"festival: {saved.festival}")
-        if saved.description:
-            lines.append(f"description: {saved.description}")
-        if saved.event_type:
-            lines.append(f"type: {saved.event_type}")
-        if saved.ticket_price_min is not None:
-            lines.append(f"price_min: {saved.ticket_price_min}")
-        if saved.ticket_price_max is not None:
-            lines.append(f"price_max: {saved.ticket_price_max}")
-        if saved.ticket_link:
-            lines.append(f"ticket_link: {saved.ticket_link}")
-        if saved.telegraph_url:
-            lines.append(f"telegraph: {saved.telegraph_url}")
-        status = "added" if added else "updated"
-        results.append((saved, added, lines, status))
-        first = False
+            media_arg = media if first else None
+            if saved.telegraph_url and saved.telegraph_path:
+                await update_source_page(saved.telegraph_path, saved.title or "Event", html_text or text)
+            else:
+                res = await create_source_page(
+                    saved.title or "Event",
+                    saved.source_text,
+                    source_link,
+                    html_text,
+                    media_arg,
+                )
+                if res:
+                    url, path = res
+                    async with db.get_session() as session:
+                        saved.telegraph_url = url
+                        saved.telegraph_path = path
+                        session.add(saved)
+                        await session.commit()
+            await sync_month_page(db, saved.date[:7])
+
+            lines = [
+                f"title: {saved.title}",
+                f"date: {saved.date}",
+                f"time: {saved.time}",
+                f"location_name: {saved.location_name}",
+            ]
+            if saved.location_address:
+                lines.append(f"location_address: {saved.location_address}")
+            if saved.city:
+                lines.append(f"city: {saved.city}")
+            if saved.festival:
+                lines.append(f"festival: {saved.festival}")
+            if saved.description:
+                lines.append(f"description: {saved.description}")
+            if saved.event_type:
+                lines.append(f"type: {saved.event_type}")
+            if saved.ticket_price_min is not None:
+                lines.append(f"price_min: {saved.ticket_price_min}")
+            if saved.ticket_price_max is not None:
+                lines.append(f"price_max: {saved.ticket_price_max}")
+            if saved.ticket_link:
+                lines.append(f"ticket_link: {saved.ticket_link}")
+            if saved.telegraph_url:
+                lines.append(f"telegraph: {saved.telegraph_url}")
+            status = "added" if added else "updated"
+            results.append((saved, added, lines, status))
+            first = False
     return results
 
 
@@ -1073,10 +1133,35 @@ MONTHS_PREP = [
     "декабре",
 ]
 
+# month names in nominative case for navigation links
+MONTHS_NOM = [
+    "январь",
+    "февраль",
+    "март",
+    "апрель",
+    "май",
+    "июнь",
+    "июль",
+    "август",
+    "сентябрь",
+    "октябрь",
+    "ноябрь",
+    "декабрь",
+]
+
 
 def month_name_prepositional(month: str) -> str:
     y, m = month.split("-")
     return f"{MONTHS_PREP[int(m) - 1]} {y}"
+
+
+def month_name_nominative(month: str) -> str:
+    """Return month name in nominative case, add year if different from current."""
+    y, m = month.split("-")
+    name = MONTHS_NOM[int(m) - 1]
+    if int(y) != date.today().year:
+        return f"{name} {y}"
+    return name
 
 
 def next_month(month: str) -> str:
@@ -1293,13 +1378,14 @@ async def build_month_page_content(db: Database, month: str) -> tuple[str, list]
                 Event.end_date.is_not(None),
                 Event.end_date >= start.isoformat(),
                 Event.date <= next_start.isoformat(),
+                Event.event_type == "выставка",
             )
             .order_by(Event.date)
         )
         exhibitions = ex_result.scalars().all()
 
-        next_page = await session.get(MonthPage, next_month(month))
-        next_url = next_page.url if next_page else None
+        result_nav = await session.execute(select(MonthPage).order_by(MonthPage.month))
+        nav_pages = result_nav.scalars().all()
 
     today = date.today()
     events = [
@@ -1311,7 +1397,11 @@ async def build_month_page_content(db: Database, month: str) -> tuple[str, list]
         )
     ]
     exhibitions = [
-        e for e in exhibitions if e.end_date and e.end_date >= today.isoformat()
+        e
+        for e in exhibitions
+        if e.end_date
+        and e.end_date >= today.isoformat()
+        and e.date <= today.isoformat()
     ]
 
     by_day: dict[date, list[Event]] = {}
@@ -1342,8 +1432,20 @@ async def build_month_page_content(db: Database, month: str) -> tuple[str, list]
         for ev in by_day[day]:
             content.extend(event_to_nodes(ev))
 
-    if next_url:
-        content.append({"tag": "a", "attrs": {"href": next_url}, "children": ["Страница следующего месяца"]})
+    today_month = date.today().strftime("%Y-%m")
+    future_pages = [p for p in nav_pages if p.month >= today_month]
+    if future_pages:
+        nav_children = []
+        for idx, p in enumerate(future_pages):
+            name = month_name_nominative(p.month)
+            if p.month == month:
+                nav_children.append(name)
+            else:
+                nav_children.append({"tag": "a", "attrs": {"href": p.url}, "children": [name]})
+            if idx < len(future_pages) - 1:
+                nav_children.append(" ")
+        content.append({"tag": "br"})
+        content.append({"tag": "p", "children": nav_children})
 
     if exhibitions:
         content.append({"tag": "h3", "children": ["Постоянные выставки"]})

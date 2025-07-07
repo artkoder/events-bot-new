@@ -1146,10 +1146,11 @@ async def test_spacing_after_headers(tmp_path: Path):
                 title="Expo",
                 description="d",
                 source_text="s",
-                date="2025-07-12",
+                date=date.today().isoformat(),
                 time="20:00",
                 location_name="Hall",
-                end_date="2025-07-20",
+                end_date=(date.today() + timedelta(days=8)).isoformat(),
+                event_type="выставка",
             )
         )
         await session.commit()
@@ -1583,3 +1584,91 @@ async def test_extract_ticket_link_near_word(tmp_path: Path, monkeypatch):
     results = await main.add_events_from_text(db, "text", None, html, None)
     ev = results[0][0]
     assert ev.ticket_link == "https://reg2"
+
+
+@pytest.mark.asyncio
+async def test_festival_expands_dates(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async def fake_parse(text: str) -> list[dict]:
+        return [
+            {
+                "title": "Jazz",
+                "short_description": "desc",
+                "date": "2025-08-01..2025-08-03",
+                "time": "18:00",
+                "location_name": "Park",
+                "event_type": "концерт",
+            }
+        ]
+
+    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    async def fake_create(*args, **kwargs):
+        return "u", "p"
+    monkeypatch.setattr("main.create_source_page", fake_create)
+
+    results = await main.add_events_from_text(db, "text", None, None, None)
+    assert len(results) == 3
+    async with db.get_session() as session:
+        dates = sorted((await session.execute(select(Event))).scalars(), key=lambda e: e.date)
+        assert [e.date for e in dates] == ["2025-08-01", "2025-08-02", "2025-08-03"]
+
+
+@pytest.mark.asyncio
+async def test_exhibition_future_not_listed(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    future_start = (date.today() + timedelta(days=10)).isoformat()
+    future_end = (date.today() + timedelta(days=20)).isoformat()
+    async with db.get_session() as session:
+        session.add(
+            Event(
+                title="Expo",
+                description="d",
+                source_text="s",
+                date=future_start,
+                end_date=future_end,
+                time="10:00",
+                location_name="Hall",
+                event_type="выставка",
+            )
+        )
+        await session.commit()
+
+    _, content = await main.build_month_page_content(db, future_start[:7])
+    found_in_exh = False
+    exh_section = False
+    for n in content:
+        if n.get("tag") == "h3" and "Постоянные" in "".join(n.get("children", [])):
+            exh_section = True
+        elif exh_section and isinstance(n, dict) and n.get("tag") == "h4":
+            if any("Expo" in str(c) for c in n.get("children", [])):
+                found_in_exh = True
+    assert not found_in_exh
+
+
+@pytest.mark.asyncio
+async def test_month_links_future(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.get_session() as session:
+        session.add(MonthPage(month="2025-07", url="u1", path="p1"))
+        session.add(MonthPage(month="2025-08", url="u2", path="p2"))
+        session.add(MonthPage(month="2025-09", url="u3", path="p3"))
+        await session.commit()
+
+    class FakeDate(date):
+        @classmethod
+        def today(cls):
+            return date(2025, 7, 15)
+
+    monkeypatch.setattr(main, "date", FakeDate)
+    title, content = await main.build_month_page_content(db, "2025-07")
+    found = False
+    for n in content:
+        if isinstance(n, dict) and n.get("tag") == "p" and any("август" in str(c) for c in n.get("children", [])):
+            found = True
+    assert found

@@ -29,7 +29,9 @@ Recently added events (within the last 48 hours) are prefixed with the 🚩 emoj
 
 {events}
 
-{next_month_link}
+{month_links}
+
+`month_links` displays links to future month pages with the current month shown as plain text.
 
 ## Постоянные выставки
 
