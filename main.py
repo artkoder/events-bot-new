@@ -1121,7 +1121,9 @@ def event_to_nodes(e: Event) -> list[dict]:
     if body_md:
         html_text = md_to_html(body_md)
         nodes.extend(html_to_nodes(html_text))
+
     nodes.append({"tag": "p", "children": ["\u00A0"]})
+
     return nodes
 
 
@@ -1148,7 +1150,9 @@ def exhibition_to_nodes(e: Event) -> list[dict]:
     if body_md:
         html_text = md_to_html(body_md)
         nodes.extend(html_to_nodes(html_text))
+
     nodes.append({"tag": "p", "children": ["\u00A0"]})
+
     return nodes
 
 
@@ -1214,7 +1218,9 @@ async def build_month_page_content(db: Database, month: str) -> tuple[str, list]
             content.append({"tag": "h3", "children": ["🟥🟥 воскресенье 🟥🟥"]})
         content.append({"tag": "h3", "children": [f"🟥🟥🟥 {format_day_pretty(day)} 🟥🟥🟥"]})
         content.append({"tag": "br"})
+
         content.append({"tag": "p", "children": ["\u00A0"]})
+
         for ev in by_day[day]:
             content.extend(event_to_nodes(ev))
 
@@ -1224,7 +1230,9 @@ async def build_month_page_content(db: Database, month: str) -> tuple[str, list]
     if exhibitions:
         content.append({"tag": "h3", "children": ["Постоянные выставки"]})
         content.append({"tag": "br"})
+
         content.append({"tag": "p", "children": ["\u00A0"]})
+
         for ev in exhibitions:
             content.extend(exhibition_to_nodes(ev))
 
