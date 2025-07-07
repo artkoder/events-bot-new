@@ -13,8 +13,9 @@ _{date} {time} {venue}, {location}, #{city}_
 {more}
 ```
 
-`ticket_info` may be "Билеты в источнике" with a price range, "Бесплатно" or a
-registration link. `more` links to the individual Telegraph page.
+`ticket_info` may be "Билеты в источнике" with a price range, "Бесплатно", or
+"Бесплатно [по регистрации](URL)" если требуется предварительная запись.
+`more` links to the individual Telegraph page.
 
 The first line (`{title}`) becomes an `<h4>` heading on the Telegraph page.
 Recently added events (within the last 48 hours) are prefixed with the 🚩 emoji.

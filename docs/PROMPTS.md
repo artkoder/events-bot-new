@@ -19,7 +19,7 @@ location_address  - street address if present
 city              - city name
 ticket_price_min  - minimum ticket price as integer or null
 ticket_price_max  - maximum ticket price as integer or null
-ticket_link       - URL for purchasing tickets if present
+ticket_link       - URL for purchasing tickets **or** registration form if present
 is_free           - true if explicitly stated the event is free
 event_type       - one of: спектакль, выставка, концерт, ярмарка, лекция, встреча
 emoji            - an optional emoji representing the event

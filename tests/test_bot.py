@@ -1200,6 +1200,21 @@ async def test_event_spacing(tmp_path: Path):
     assert content[indices[0] + 1].get("tag") == "p"
 
 
+def test_registration_link_formatting():
+    e = Event(
+        title="T",
+        description="d",
+        source_text="s",
+        date="2025-07-10",
+        time="18:00",
+        location_name="Hall",
+        is_free=True,
+        ticket_link="https://reg",
+    )
+    md = main.format_event_md(e)
+    assert "Бесплатно [по регистрации](https://reg)" in md
+
+
 @pytest.mark.asyncio
 async def test_date_range_parsing(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
@@ -1415,3 +1430,43 @@ async def test_delete_event_updates_month(tmp_path: Path, monkeypatch):
     await process_request(cb, db, bot)
 
     assert called.get("month") == "2025-07"
+
+
+@pytest.mark.asyncio
+async def test_title_duplicate_update(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async def fake_create(title, text, source, html_text=None, media=None):
+        return "url", "p"
+
+    monkeypatch.setattr("main.create_source_page", fake_create)
+
+    msg1 = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "M"},
+            "text": "/addevent_raw Movie|2025-07-16|20:00|Hall",
+        }
+    )
+    await handle_add_event_raw(msg1, db, bot)
+
+    msg2 = types.Message.model_validate(
+        {
+            "message_id": 2,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "M"},
+            "text": "/addevent_raw Movie|2025-07-16|20:00|Another",
+        }
+    )
+    await handle_add_event_raw(msg2, db, bot)
+
+    async with db.get_session() as session:
+        events = (await session.execute(select(Event))).scalars().all()
+
+    assert len(events) == 1
+    assert events[0].location_name == "Another"

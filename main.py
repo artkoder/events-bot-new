@@ -669,6 +669,45 @@ async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
             return ev, False
 
         title_ratio = SequenceMatcher(None, ev.title.lower(), new.title.lower()).ratio()
+        if title_ratio >= 0.9:
+            ev.title = new.title
+            ev.description = new.description
+            ev.festival = new.festival
+            ev.source_text = new.source_text
+            ev.location_name = new.location_name
+            ev.location_address = new.location_address
+            ev.ticket_price_min = new.ticket_price_min
+            ev.ticket_price_max = new.ticket_price_max
+            ev.ticket_link = new.ticket_link
+            ev.event_type = new.event_type
+            ev.emoji = new.emoji
+            ev.end_date = new.end_date
+            ev.is_free = new.is_free
+            await session.commit()
+            return ev, False
+
+        if (
+            ev.location_name.strip().lower() == new.location_name.strip().lower()
+            and (ev.location_address or "").strip().lower()
+            == (new.location_address or "").strip().lower()
+        ):
+            ev.title = new.title
+            ev.description = new.description
+            ev.festival = new.festival
+            ev.source_text = new.source_text
+            ev.location_name = new.location_name
+            ev.location_address = new.location_address
+            ev.ticket_price_min = new.ticket_price_min
+            ev.ticket_price_max = new.ticket_price_max
+            ev.ticket_link = new.ticket_link
+            ev.event_type = new.event_type
+            ev.emoji = new.emoji
+            ev.end_date = new.end_date
+            ev.is_free = new.is_free
+            await session.commit()
+            return ev, False
+
+        title_ratio = SequenceMatcher(None, ev.title.lower(), new.title.lower()).ratio()
         loc_ratio = SequenceMatcher(None, ev.location_name.lower(), new.location_name.lower()).ratio()
         if title_ratio >= 0.6 and loc_ratio >= 0.6:
             ev.title = new.title
@@ -1025,7 +1064,10 @@ def format_event_md(e: Event) -> str:
         emoji_part = f"{e.emoji} "
     lines = [f"{prefix}{emoji_part}{e.title}".strip(), e.description.strip()]
     if e.is_free:
-        lines.append("🟡 Бесплатно")
+        txt = "🟡 Бесплатно"
+        if e.ticket_link:
+            txt += f" [по регистрации]({e.ticket_link})"
+        lines.append(txt)
     elif e.ticket_link and (e.ticket_price_min is not None or e.ticket_price_max is not None):
         if e.ticket_price_max is not None and e.ticket_price_max != e.ticket_price_min:
             price = f"от {e.ticket_price_min} до {e.ticket_price_max}"
@@ -1071,7 +1113,10 @@ def format_exhibition_md(e: Event) -> str:
         emoji_part = f"{e.emoji} "
     lines = [f"{prefix}{emoji_part}{e.title}".strip(), e.description.strip()]
     if e.is_free:
-        lines.append("🟡 Бесплатно")
+        txt = "🟡 Бесплатно"
+        if e.ticket_link:
+            txt += f" [по регистрации]({e.ticket_link})"
+        lines.append(txt)
     elif e.ticket_link:
         lines.append(f"[Билеты в источнике]({e.ticket_link})")
     elif e.ticket_price_min is not None and e.ticket_price_max is not None and e.ticket_price_min != e.ticket_price_max:
@@ -1121,9 +1166,7 @@ def event_to_nodes(e: Event) -> list[dict]:
     if body_md:
         html_text = md_to_html(body_md)
         nodes.extend(html_to_nodes(html_text))
-
     nodes.append({"tag": "p", "children": ["\u00A0"]})
-
     return nodes
 
 
@@ -1150,9 +1193,7 @@ def exhibition_to_nodes(e: Event) -> list[dict]:
     if body_md:
         html_text = md_to_html(body_md)
         nodes.extend(html_to_nodes(html_text))
-
     nodes.append({"tag": "p", "children": ["\u00A0"]})
-
     return nodes
 
 
@@ -1218,9 +1259,7 @@ async def build_month_page_content(db: Database, month: str) -> tuple[str, list]
             content.append({"tag": "h3", "children": ["🟥🟥 воскресенье 🟥🟥"]})
         content.append({"tag": "h3", "children": [f"🟥🟥🟥 {format_day_pretty(day)} 🟥🟥🟥"]})
         content.append({"tag": "br"})
-
         content.append({"tag": "p", "children": ["\u00A0"]})
-
         for ev in by_day[day]:
             content.extend(event_to_nodes(ev))
 
@@ -1230,9 +1269,7 @@ async def build_month_page_content(db: Database, month: str) -> tuple[str, list]
     if exhibitions:
         content.append({"tag": "h3", "children": ["Постоянные выставки"]})
         content.append({"tag": "br"})
-
         content.append({"tag": "p", "children": ["\u00A0"]})
-
         for ev in exhibitions:
             content.extend(exhibition_to_nodes(ev))
 
