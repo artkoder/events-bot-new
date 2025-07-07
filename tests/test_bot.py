@@ -1470,3 +1470,116 @@ async def test_title_duplicate_update(tmp_path: Path, monkeypatch):
 
     assert len(events) == 1
     assert events[0].location_name == "Another"
+
+
+@pytest.mark.asyncio
+async def test_llm_duplicate_check(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async def fake_create(title, text, source, html_text=None, media=None):
+        return "url", "p"
+
+    called = {"cnt": 0}
+
+    async def fake_check(ev, new):
+        called["cnt"] += 1
+        return True, "", ""
+
+    monkeypatch.setattr("main.create_source_page", fake_create)
+    monkeypatch.setattr("main.check_duplicate_via_4o", fake_check)
+
+    msg1 = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "M"},
+            "text": "/addevent_raw Movie|2025-07-16|20:00|Hall",
+        }
+    )
+    await handle_add_event_raw(msg1, db, bot)
+
+    msg2 = types.Message.model_validate(
+        {
+            "message_id": 2,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "M"},
+            "text": "/addevent_raw Premiere Movie|2025-07-16|20:00|Other",
+        }
+    )
+    await handle_add_event_raw(msg2, db, bot)
+
+    async with db.get_session() as session:
+        events = (await session.execute(select(Event))).scalars().all()
+
+    assert len(events) == 1
+    assert called["cnt"] == 1
+
+
+@pytest.mark.asyncio
+async def test_extract_ticket_link(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async def fake_parse(text: str) -> list[dict]:
+        return [
+            {
+                "title": "T",
+                "short_description": "d",
+                "date": FUTURE_DATE,
+                "time": "18:00",
+                "location_name": "Hall",
+                "ticket_link": None,
+                "event_type": "встреча",
+                "emoji": None,
+                "is_free": True,
+            }
+        ]
+
+    async def fake_create(title, text, source, html_text=None, media=None):
+        return "url", "p"
+
+    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.create_source_page", fake_create)
+
+    html = "Регистрация <a href='https://reg'>по ссылке</a>"
+    results = await main.add_events_from_text(db, "text", None, html, None)
+    ev = results[0][0]
+    assert ev.ticket_link == "https://reg"
+
+
+@pytest.mark.asyncio
+async def test_extract_ticket_link_near_word(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async def fake_parse(text: str) -> list[dict]:
+        return [
+            {
+                "title": "T",
+                "short_description": "d",
+                "date": FUTURE_DATE,
+                "time": "18:00",
+                "location_name": "Hall",
+                "ticket_link": None,
+                "event_type": "встреча",
+                "emoji": None,
+                "is_free": True,
+            }
+        ]
+
+    async def fake_create(title, text, source, html_text=None, media=None):
+        return "url", "p"
+
+    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.create_source_page", fake_create)
+
+    html = "Чтобы поучаствовать, нужна регистрация. <a href='https://reg2'>Жми</a>"
+    results = await main.add_events_from_text(db, "text", None, html, None)
+    ev = results[0][0]
+    assert ev.ticket_link == "https://reg2"

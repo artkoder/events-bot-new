@@ -708,6 +708,45 @@ async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
             return ev, False
 
         title_ratio = SequenceMatcher(None, ev.title.lower(), new.title.lower()).ratio()
+        if title_ratio >= 0.9:
+            ev.title = new.title
+            ev.description = new.description
+            ev.festival = new.festival
+            ev.source_text = new.source_text
+            ev.location_name = new.location_name
+            ev.location_address = new.location_address
+            ev.ticket_price_min = new.ticket_price_min
+            ev.ticket_price_max = new.ticket_price_max
+            ev.ticket_link = new.ticket_link
+            ev.event_type = new.event_type
+            ev.emoji = new.emoji
+            ev.end_date = new.end_date
+            ev.is_free = new.is_free
+            await session.commit()
+            return ev, False
+
+        if (
+            ev.location_name.strip().lower() == new.location_name.strip().lower()
+            and (ev.location_address or "").strip().lower()
+            == (new.location_address or "").strip().lower()
+        ):
+            ev.title = new.title
+            ev.description = new.description
+            ev.festival = new.festival
+            ev.source_text = new.source_text
+            ev.location_name = new.location_name
+            ev.location_address = new.location_address
+            ev.ticket_price_min = new.ticket_price_min
+            ev.ticket_price_max = new.ticket_price_max
+            ev.ticket_link = new.ticket_link
+            ev.event_type = new.event_type
+            ev.emoji = new.emoji
+            ev.end_date = new.end_date
+            ev.is_free = new.is_free
+            await session.commit()
+            return ev, False
+
+        title_ratio = SequenceMatcher(None, ev.title.lower(), new.title.lower()).ratio()
         loc_ratio = SequenceMatcher(None, ev.location_name.lower(), new.location_name.lower()).ratio()
         if title_ratio >= 0.6 and loc_ratio >= 0.6:
             ev.title = new.title
@@ -725,7 +764,12 @@ async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
             ev.is_free = new.is_free
             await session.commit()
             return ev, False
-        if loc_ratio >= 0.4 or ev.location_address == new.location_address:
+        should_check = False
+        if loc_ratio >= 0.4 or (ev.location_address or "") == (new.location_address or ""):
+            should_check = True
+        elif title_ratio >= 0.5:
+            should_check = True
+        if should_check:
             # uncertain, ask LLM
             try:
                 dup, title, desc = await check_duplicate_via_4o(ev, new)
@@ -799,6 +843,11 @@ async def add_events_from_text(
             source_text=text,
             source_post_url=source_link,
         )
+
+        if not event.ticket_link and html_text:
+            extracted = extract_link_from_html(html_text)
+            if extracted:
+                event.ticket_link = extracted
 
         # skip events that have already finished
         try:
@@ -1045,6 +1094,36 @@ def md_to_html(text: str) -> str:
     html_text = re.sub(r"<(\/?)h[12]>", r"<\1h3>", html_text)
     html_text = re.sub(r"</?tg-emoji[^>]*>", "", html_text)
     return html_text
+
+
+def extract_link_from_html(html_text: str) -> str | None:
+    """Return a registration or ticket link from HTML if present."""
+    pattern = re.compile(
+        r"<a[^>]+href=['\"]([^'\"]+)['\"][^>]*>(.*?)</a>",
+        re.IGNORECASE | re.DOTALL,
+    )
+    matches = list(pattern.finditer(html_text))
+
+    # prefer anchors whose text mentions registration or tickets
+    for m in matches:
+        href, label = m.group(1), m.group(2)
+        text = label.lower()
+        if any(word in text for word in ["регистра", "ticket", "билет"]):
+            return href
+
+    # otherwise look for anchors located near the word "регистрация"
+    lower_html = html_text.lower()
+    for m in matches:
+        href = m.group(1)
+        start, end = m.span()
+        context_before = lower_html[max(0, start - 60) : start]
+        context_after = lower_html[end : end + 60]
+        if "регистра" in context_before or "регистра" in context_after:
+            return href
+
+    if matches:
+        return matches[0].group(1)
+    return None
 
 
 def is_recent(e: Event) -> bool:
