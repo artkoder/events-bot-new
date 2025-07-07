@@ -1181,6 +1181,7 @@ async def test_nav_future_has_prev(tmp_path: Path):
     assert row[1].text == "\u25B6"
 
 
+
 @pytest.mark.asyncio
 async def test_delete_event_updates_month(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
@@ -1237,3 +1238,4 @@ async def test_delete_event_updates_month(tmp_path: Path, monkeypatch):
     await process_request(cb, db, bot)
 
     assert called.get("month") == "2025-07"
+
