@@ -44,7 +44,7 @@ class DummyBot(Bot):
         self.edits = []
 
     async def send_message(self, chat_id, text, **kwargs):
-        self.messages.append((chat_id, text))
+        self.messages.append((chat_id, text, kwargs))
 
     async def edit_message_reply_markup(
         self, chat_id: int | None = None, message_id: int | None = None, **kwargs
@@ -1839,6 +1839,40 @@ async def test_exhibition_future_not_listed(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_past_exhibition_not_listed_in_events(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    past_start = (date.today() - timedelta(days=6)).isoformat()
+    future_end = (date.today() + timedelta(days=6)).isoformat()
+    async with db.get_session() as session:
+        session.add(
+            Event(
+                title="PastExpo",
+                description="d",
+                source_text="s",
+                date=past_start,
+                end_date=future_end,
+                time="10:00",
+                location_name="Hall",
+                event_type="выставка",
+            )
+        )
+        await session.commit()
+
+    _, content = await main.build_month_page_content(db, past_start[:7])
+    before_exh = True
+    found = False
+    for n in content:
+        if n.get("tag") == "h3" and "Постоянные" in "".join(n.get("children", [])):
+            before_exh = False
+        if before_exh and isinstance(n, dict) and n.get("tag") == "h4":
+            if any("PastExpo" in str(c) for c in n.get("children", [])):
+                found = True
+    assert not found
+
+
+@pytest.mark.asyncio
 async def test_month_links_future(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
@@ -1891,3 +1925,31 @@ async def test_build_daily_posts(tmp_path: Path):
     text, markup = posts[0]
     assert "АНОНС" in text
     assert markup.inline_keyboard[0]
+    assert "\U0001F449" in text
+
+
+@pytest.mark.asyncio
+async def test_send_daily_preview_disabled(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async with db.get_session() as session:
+        session.add(
+            main.Channel(channel_id=1, title="ch", is_admin=True, daily_time="08:00")
+        )
+        session.add(
+            Event(
+                title="T",
+                description="d",
+                source_text="s",
+                date=date.today().isoformat(),
+                time="18:00",
+                location_name="Hall",
+            )
+        )
+        await session.commit()
+
+    await main.send_daily_announcement(db, bot, 1, timezone.utc)
+    assert bot.messages
+    assert bot.messages[-1][2].get("disable_web_page_preview") is True

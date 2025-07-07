@@ -1470,9 +1470,11 @@ def format_event_md(e: Event) -> str:
     return "\n".join(lines)
 
 
-def format_event_daily(e: Event) -> str:
+def format_event_daily(e: Event, highlight: bool = False) -> str:
     """Return HTML-formatted text for a daily announcement item."""
     prefix = ""
+    if highlight:
+        prefix += "\U0001F449 "
     if is_recent(e):
         prefix += "\U0001F6A9 "
     emoji_part = ""
@@ -1652,6 +1654,7 @@ async def build_month_page_content(db: Database, month: str) -> tuple[str, list]
             (e.end_date and e.end_date >= today.isoformat())
             or (not e.end_date and e.date >= today.isoformat())
         )
+        and not (e.event_type == "выставка" and e.date < today.isoformat())
     ]
     exhibitions = [
         e
@@ -1885,7 +1888,7 @@ async def build_daily_posts(db: Database, tz: timezone) -> list[tuple[str, types
     ]
     for e in events_today:
         lines1.append("")
-        lines1.append(format_event_daily(e))
+        lines1.append(format_event_daily(e, highlight=True))
     section1 = "\n".join(lines1)
 
     lines2 = ["<b><i>ДОБАВИЛИ В АНОНС</i></b>"]
@@ -1925,7 +1928,13 @@ async def build_daily_posts(db: Database, tz: timezone) -> list[tuple[str, types
 async def send_daily_announcement(db: Database, bot: Bot, channel_id: int, tz: timezone):
     posts = await build_daily_posts(db, tz)
     for text, markup in posts:
-        await bot.send_message(channel_id, text, reply_markup=markup, parse_mode="HTML")
+        await bot.send_message(
+            channel_id,
+            text,
+            reply_markup=markup,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
     async with db.get_session() as session:
         ch = await session.get(Channel, channel_id)
         if ch:
