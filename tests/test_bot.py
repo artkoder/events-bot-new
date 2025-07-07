@@ -1101,6 +1101,31 @@ async def test_event_title_link(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_emoji_not_duplicated(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.get_session() as session:
+        session.add(
+            Event(
+                title="🎉 Party",
+                description="d",
+                source_text="s",
+                date="2025-07-16",
+                time="18:00",
+                location_name="Hall",
+                emoji="🎉",
+            )
+        )
+        await session.commit()
+
+    _, content = await main.build_month_page_content(db, "2025-07")
+    h4 = next(n for n in content if n.get("tag") == "h4")
+    text = "".join(c if isinstance(c, str) else "".join(c.get("children", [])) for c in h4["children"])
+    assert text.count("🎉") == 1
+
+
+@pytest.mark.asyncio
 async def test_spacing_after_headers(tmp_path: Path):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
@@ -1140,6 +1165,39 @@ async def test_spacing_after_headers(tmp_path: Path):
         i for i, n in enumerate(content) if n.get("tag") == "h3" and "Постоянные" in "".join(n.get("children", []))
     )
     assert content[exh_idx + 1].get("tag") == "br"
+
+
+@pytest.mark.asyncio
+async def test_event_spacing(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.get_session() as session:
+        session.add(
+            Event(
+                title="One",
+                description="d",
+                source_text="s",
+                date="2025-07-10",
+                time="18:00",
+                location_name="Hall",
+            )
+        )
+        session.add(
+            Event(
+                title="Two",
+                description="d",
+                source_text="s",
+                date="2025-07-10",
+                time="19:00",
+                location_name="Hall",
+            )
+        )
+        await session.commit()
+
+    _, content = await main.build_month_page_content(db, "2025-07")
+    indices = [i for i, n in enumerate(content) if n.get("tag") == "h4"]
+    assert content[indices[0] + 1].get("tag") == "p"
 
 
 @pytest.mark.asyncio

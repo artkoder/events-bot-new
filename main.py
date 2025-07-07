@@ -1020,9 +1020,10 @@ def format_event_md(e: Event) -> str:
     prefix = ""
     if is_recent(e):
         prefix += "\U0001F6A9 "
-    if e.emoji:
-        prefix += f"{e.emoji} "
-    lines = [f"{prefix}{e.title}".strip(), e.description.strip()]
+    emoji_part = ""
+    if e.emoji and not e.title.strip().startswith(e.emoji):
+        emoji_part = f"{e.emoji} "
+    lines = [f"{prefix}{emoji_part}{e.title}".strip(), e.description.strip()]
     if e.is_free:
         lines.append("🟡 Бесплатно")
     elif e.ticket_link and (e.ticket_price_min is not None or e.ticket_price_max is not None):
@@ -1065,7 +1066,10 @@ def format_exhibition_md(e: Event) -> str:
     prefix = ""
     if is_recent(e):
         prefix += "\U0001F6A9 "
-    lines = [f"{prefix}{e.title}".strip(), e.description.strip()]
+    emoji_part = ""
+    if e.emoji and not e.title.strip().startswith(e.emoji):
+        emoji_part = f"{e.emoji} "
+    lines = [f"{prefix}{emoji_part}{e.title}".strip(), e.description.strip()]
     if e.is_free:
         lines.append("🟡 Бесплатно")
     elif e.ticket_link:
@@ -1098,7 +1102,7 @@ def event_title_nodes(e: Event) -> list:
     nodes: list = []
     if is_recent(e):
         nodes.append("\U0001F6A9 ")
-    if e.emoji:
+    if e.emoji and not e.title.strip().startswith(e.emoji):
         nodes.append(f"{e.emoji} ")
     title_text = e.title
     if e.source_post_url:
@@ -1117,7 +1121,7 @@ def event_to_nodes(e: Event) -> list[dict]:
     if body_md:
         html_text = md_to_html(body_md)
         nodes.extend(html_to_nodes(html_text))
-    nodes.append({"tag": "br"})
+    nodes.append({"tag": "p"})
     return nodes
 
 
@@ -1125,6 +1129,8 @@ def exhibition_title_nodes(e: Event) -> list:
     nodes: list = []
     if is_recent(e):
         nodes.append("\U0001F6A9 ")
+    if e.emoji and not e.title.strip().startswith(e.emoji):
+        nodes.append(f"{e.emoji} ")
     title_text = e.title
     if e.source_post_url:
         nodes.append({"tag": "a", "attrs": {"href": e.source_post_url}, "children": [title_text]})
@@ -1142,7 +1148,7 @@ def exhibition_to_nodes(e: Event) -> list[dict]:
     if body_md:
         html_text = md_to_html(body_md)
         nodes.extend(html_to_nodes(html_text))
-    nodes.append({"tag": "br"})
+    nodes.append({"tag": "p"})
     return nodes
 
 
@@ -1685,6 +1691,12 @@ async def create_source_page(
         return None
     tg = Telegraph(access_token=token)
     html_content = ""
+
+    def strip_title(line_text: str) -> str:
+        lines = line_text.splitlines()
+        if lines and lines[0].strip() == title.strip():
+            return "\n".join(lines[1:]).lstrip()
+        return line_text
     # Media uploads to Telegraph are flaky and consume bandwidth.
     # Skip uploading files for now to keep requests lightweight.
     if media:
@@ -1699,11 +1711,13 @@ async def create_source_page(
         html_content += f"<p><strong>{html.escape(title)}</strong></p>"
 
     if html_text:
+        html_text = strip_title(html_text)
         cleaned = re.sub(r"</?tg-emoji[^>]*>", "", html_text)
         cleaned = cleaned.replace("\U0001F193\U0001F193\U0001F193\U0001F193", "Бесплатно")
         html_content += f"<p>{cleaned.replace('\n', '<br/>')}</p>"
     else:
-        clean_text = text.replace("\U0001F193\U0001F193\U0001F193\U0001F193", "Бесплатно")
+        clean_text = strip_title(text)
+        clean_text = clean_text.replace("\U0001F193\U0001F193\U0001F193\U0001F193", "Бесплатно")
         paragraphs = [f"<p>{html.escape(line)}</p>" for line in clean_text.splitlines()]
         html_content += "".join(paragraphs)
     try:
