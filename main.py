@@ -15,6 +15,7 @@ from functools import partial
 import asyncio
 import html
 from io import BytesIO
+import markdown
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlmodel import Field, SQLModel, select
 
@@ -22,6 +23,9 @@ logging.basicConfig(level=logging.INFO)
 
 DB_PATH = os.getenv("DB_PATH", "/data/db.sqlite")
 TELEGRAPH_TOKEN_FILE = os.getenv("TELEGRAPH_TOKEN_FILE", "/data/telegraph_token.txt")
+
+# separator inserted between versions on Telegraph source pages
+CONTENT_SEPARATOR = "🔸" * 10
 
 # user_id -> (event_id, field?) for editing session
 editing_sessions: dict[int, tuple[int, str | None]] = {}
@@ -79,6 +83,12 @@ class Event(SQLModel, table=True):
     source_text: str
     telegraph_url: Optional[str] = None
     source_post_url: Optional[str] = None
+
+
+class MonthPage(SQLModel, table=True):
+    month: str = Field(primary_key=True)
+    url: str
+    path: str
 
 
 class Database:
@@ -611,13 +621,34 @@ async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
     """Insert or update an event if a similar one exists.
 
     Returns (event, added_flag)."""
+
     stmt = select(Event).where(
         Event.date == new.date,
         Event.time == new.time,
-        Event.city == new.city,
     )
     candidates = (await session.execute(stmt)).scalars().all()
     for ev in candidates:
+        if (
+            ev.location_name.strip().lower() == new.location_name.strip().lower()
+            and (ev.location_address or "").strip().lower()
+            == (new.location_address or "").strip().lower()
+        ):
+            ev.title = new.title
+            ev.description = new.description
+            ev.festival = new.festival
+            ev.source_text = new.source_text
+            ev.location_name = new.location_name
+            ev.location_address = new.location_address
+            ev.ticket_price_min = new.ticket_price_min
+            ev.ticket_price_max = new.ticket_price_max
+            ev.ticket_link = new.ticket_link
+            ev.event_type = new.event_type
+            ev.emoji = new.emoji
+            ev.end_date = new.end_date
+            ev.is_free = new.is_free
+            await session.commit()
+            return ev, False
+
         title_ratio = SequenceMatcher(None, ev.title.lower(), new.title.lower()).ratio()
         loc_ratio = SequenceMatcher(None, ev.location_name.lower(), new.location_name.lower()).ratio()
         if title_ratio >= 0.6 and loc_ratio >= 0.6:
@@ -681,10 +712,14 @@ async def add_events_from_text(
     first = True
     for data in parsed:
         date_str = data.get("date", "") or ""
-        end_date = data.get("end_date")
-        if ".." in date_str and not end_date:
-            start, end_date = [p.strip() for p in date_str.split("..", 1)]
+        end_date = data.get("end_date") or None
+        if end_date and ".." in end_date:
+            end_date = end_date.split("..", 1)[-1].strip()
+        if ".." in date_str:
+            start, maybe_end = [p.strip() for p in date_str.split("..", 1)]
             date_str = start
+            if not end_date:
+                end_date = maybe_end
 
         event = Event(
             title=data.get("title", ""),
@@ -738,6 +773,7 @@ async def add_events_from_text(
                     saved.telegraph_path = path
                     session.add(saved)
                     await session.commit()
+        await sync_month_page(db, saved.date[:7])
 
         lines = [
             f"title: {saved.title}",
@@ -859,6 +895,7 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
             event.telegraph_path = path
             session.add(event)
             await session.commit()
+    await sync_month_page(db, event.date[:7])
     lines = [
         f"title: {event.title}",
         f"date: {event.date}",
@@ -906,6 +943,187 @@ MONTHS = [
 
 def format_day_pretty(day: date) -> str:
     return f"{day.day} {MONTHS[day.month - 1]}"
+
+
+def month_name(month: str) -> str:
+    y, m = month.split("-")
+    return f"{MONTHS[int(m) - 1]} {y}"
+
+
+def next_month(month: str) -> str:
+    d = datetime.fromisoformat(month + "-01")
+    n = (d.replace(day=28) + timedelta(days=4)).replace(day=1)
+    return n.strftime("%Y-%m")
+
+
+def md_to_html(text: str) -> str:
+    html_text = markdown.markdown(
+        text,
+        extensions=["markdown.extensions.fenced_code", "markdown.extensions.nl2br"],
+    )
+    # Telegraph API does not allow h1/h2 or Telegram-specific emoji tags
+    html_text = re.sub(r"<(\/?)h[12]>", r"<\1h3>", html_text)
+    html_text = re.sub(r"</?tg-emoji[^>]*>", "", html_text)
+    return html_text
+
+
+def format_event_md(e: Event) -> str:
+    lines = [e.title, e.description]
+    if e.is_free:
+        lines.append("Бесплатно")
+    elif e.ticket_link and (e.ticket_price_min is not None or e.ticket_price_max is not None):
+        price = str(e.ticket_price_min or "")
+        if e.ticket_price_max is not None and e.ticket_price_max != e.ticket_price_min:
+            if price:
+                price += "-"
+            price += str(e.ticket_price_max)
+        lines.append(f"[Билеты в источнике]({e.ticket_link}) {price}".strip())
+    elif e.ticket_link:
+        lines.append(f"[по регистрации]({e.ticket_link})")
+    else:
+        price = []
+        if e.ticket_price_min is not None:
+            price.append(str(e.ticket_price_min))
+        if e.ticket_price_max is not None and e.ticket_price_max != e.ticket_price_min:
+            price.append(str(e.ticket_price_max))
+        if price:
+            lines.append("-".join(price))
+    if e.telegraph_url:
+        lines.append(f"[подробнее]({e.telegraph_url})")
+    loc = e.location_name
+    if e.location_address:
+        loc += f", {e.location_address}"
+    if e.city:
+        loc += f", #{e.city}"
+    date_part = e.date.split("..", 1)[0]
+    try:
+        day = format_day_pretty(datetime.fromisoformat(date_part).date())
+    except ValueError:
+        logging.error("Invalid event date: %s", e.date)
+        day = e.date
+    lines.append(f"_{day} {e.time} {loc}_")
+    return "\n".join(lines)
+
+
+def format_exhibition_md(e: Event) -> str:
+    lines = [e.title, e.description]
+    if e.is_free:
+        lines.append("Бесплатно")
+    elif e.ticket_link:
+        lines.append(f"[Билеты в источнике]({e.ticket_link})")
+    if e.telegraph_url:
+        lines.append(f"[подробнее]({e.telegraph_url})")
+    loc = e.location_name
+    if e.location_address:
+        loc += f", {e.location_address}"
+    if e.city:
+        loc += f", #{e.city}"
+    if e.end_date:
+        end_part = e.end_date.split("..", 1)[0]
+        try:
+            end = format_day_pretty(datetime.fromisoformat(end_part).date())
+        except ValueError:
+            logging.error("Invalid end date: %s", e.end_date)
+            end = e.end_date
+        lines.append(f"_по {end}, {loc}_")
+    return "\n".join(lines)
+
+
+async def build_month_page_markdown(db: Database, month: str) -> tuple[str, str]:
+    start = date.fromisoformat(month + "-01")
+    next_start = (start.replace(day=28) + timedelta(days=4)).replace(day=1)
+    async with db.get_session() as session:
+        result = await session.execute(
+            select(Event)
+            .where(Event.date >= start.isoformat(), Event.date < next_start.isoformat())
+            .order_by(Event.date, Event.time)
+        )
+        events = result.scalars().all()
+
+        ex_result = await session.execute(
+            select(Event)
+            .where(
+                Event.end_date.is_not(None),
+                Event.end_date >= start.isoformat(),
+                Event.date <= next_start.isoformat(),
+            )
+            .order_by(Event.date)
+        )
+        exhibitions = ex_result.scalars().all()
+
+        next_page = await session.get(MonthPage, next_month(month))
+        next_url = next_page.url if next_page else None
+
+    by_day: dict[date, list[Event]] = {}
+    for e in events:
+        date_part = e.date.split("..", 1)[0]
+        try:
+            d = datetime.fromisoformat(date_part).date()
+        except ValueError:
+            logging.error("Invalid date for event %s: %s", e.id, e.date)
+            continue
+        by_day.setdefault(d, []).append(e)
+
+    lines = [
+        f"### События Калининграда в {month_name(month)}: полный анонс",
+        "",
+        f"Планируйте свой месяц заранее: интересные мероприятия Калининграда и 39 региона в {month_name(month)} — от лекций и концертов до культурных шоу.",
+        "",
+    ]
+
+    for day in sorted(by_day):
+        if day.weekday() == 5:
+            lines.append("🟥🟥🟥 суббота 🟥🟥🟥")
+        elif day.weekday() == 6:
+            lines.append("🟥🟥 воскресенье 🟥🟥")
+        lines.append(f"🟥🟥🟥 {format_day_pretty(day)} 🟥🟥🟥")
+        lines.append("")
+        for ev in by_day[day]:
+            lines.append(format_event_md(ev))
+            lines.append("")
+
+    if next_url:
+        lines.append(f"[Страница следующего месяца]({next_url})")
+        lines.append("")
+
+    lines.append("### Выставки")
+    lines.append("")
+    for ev in exhibitions:
+        lines.append(format_exhibition_md(ev))
+        lines.append("")
+
+    title = f"События Калининграда в {month_name(month)}: полный анонс"
+    return title, "\n".join(lines)
+
+
+async def sync_month_page(db: Database, month: str):
+    title, md_text = await build_month_page_markdown(db, month)
+    html_text = md_to_html(md_text)
+    token = get_telegraph_token()
+    if not token:
+        logging.error("Telegraph token unavailable")
+        return
+    tg = Telegraph(access_token=token)
+    async with db.get_session() as session:
+        page = await session.get(MonthPage, month)
+        try:
+            if page:
+                await asyncio.to_thread(
+                    tg.edit_page, page.path, title=title, html_content=html_text
+                )
+                logging.info("Edited month page %s", month)
+            else:
+                data = await asyncio.to_thread(
+                    tg.create_page, title, html_content=html_text
+                )
+                page = MonthPage(
+                    month=month, url=data.get("url"), path=data.get("path")
+                )
+                session.add(page)
+                logging.info("Created month page %s", month)
+            await session.commit()
+        except Exception as e:
+            logging.error("Failed to sync month page %s: %s", month, e)
 
 
 async def build_events_message(db: Database, target_date: date, tz: timezone):
@@ -959,14 +1177,18 @@ async def build_events_message(db: Database, target_date: date, tz: timezone):
         for e in events
     ]
 
+    today = datetime.now(tz).date()
     prev_day = target_date - timedelta(days=1)
     next_day = target_date + timedelta(days=1)
-    keyboard.append(
-        [
-            types.InlineKeyboardButton(text="\u25C0", callback_data=f"nav:{prev_day.isoformat()}"),
-            types.InlineKeyboardButton(text="\u25B6", callback_data=f"nav:{next_day.isoformat()}"),
-        ]
+    row = []
+    if target_date > today:
+        row.append(
+            types.InlineKeyboardButton(text="\u25C0", callback_data=f"nav:{prev_day.isoformat()}")
+        )
+    row.append(
+        types.InlineKeyboardButton(text="\u25B6", callback_data=f"nav:{next_day.isoformat()}")
     )
+    keyboard.append(row)
 
     text = f"Events on {format_day(target_date, tz)}\n" + "\n".join(lines)
     markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard)
@@ -1167,6 +1389,19 @@ async def handle_exhibitions(message: types.Message, db: Database, bot: Bot):
     await bot.send_message(message.chat.id, text, reply_markup=markup)
 
 
+async def handle_months(message: types.Message, db: Database, bot: Bot):
+    async with db.get_session() as session:
+        if not await session.get(User, message.from_user.id):
+            await bot.send_message(message.chat.id, "Not authorized")
+            return
+        result = await session.execute(select(MonthPage).order_by(MonthPage.month))
+        pages = result.scalars().all()
+    lines = ["Months:"]
+    for p in pages:
+        lines.append(f"{p.month}: {p.url}")
+    await bot.send_message(message.chat.id, "\n".join(lines))
+
+
 async def handle_edit_message(message: types.Message, db: Database, bot: Bot):
     state = editing_sessions.get(message.from_user.id)
     if not state:
@@ -1297,11 +1532,15 @@ async def update_source_page(path: str, title: str, new_html: str):
         return
     tg = Telegraph(access_token=token)
     try:
+        logging.info("Fetching telegraph page %s", path)
         page = await asyncio.to_thread(
-            tg.get_page, path, return_content=True, return_html=True
+            tg.get_page, path, return_html=True
         )
         html_content = page.get("content") or page.get("content_html") or ""
-        html_content += "<hr><p>" + new_html.replace("\n", "<br/>") + "</p>"
+        cleaned = re.sub(r"</?tg-emoji[^>]*>", "", new_html)
+        cleaned = cleaned.replace("\U0001F193\U0001F193\U0001F193\U0001F193", "Бесплатно")
+        html_content += f"<p>{CONTENT_SEPARATOR}</p><p>" + cleaned.replace("\n", "<br/>") + "</p>"
+        logging.info("Editing telegraph page %s", path)
         await asyncio.to_thread(
             tg.edit_page, path, title=title, html_content=html_content
         )
@@ -1407,6 +1646,9 @@ def create_app() -> web.Application:
     async def exhibitions_wrapper(message: types.Message):
         await handle_exhibitions(message, db, bot)
 
+    async def months_wrapper(message: types.Message):
+        await handle_months(message, db, bot)
+
     async def edit_message_wrapper(message: types.Message):
         await handle_edit_message(message, db, bot)
 
@@ -1438,6 +1680,7 @@ def create_app() -> web.Application:
     dp.message.register(set_channel_wrapper, Command("setchannel"))
     dp.message.register(channels_wrapper, Command("channels"))
     dp.message.register(exhibitions_wrapper, Command("exhibitions"))
+    dp.message.register(months_wrapper, Command("months"))
     dp.message.register(edit_message_wrapper, lambda m: m.from_user.id in editing_sessions)
     dp.message.register(forward_wrapper, lambda m: bool(m.forward_date))
     dp.my_chat_member.register(partial(handle_my_chat_member, db=db))
