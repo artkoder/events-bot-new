@@ -1048,6 +1048,30 @@ async def test_build_month_page_content(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_missing_added_at(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.get_session() as session:
+        session.add(
+            Event(
+                title="T",
+                description="d",
+                source_text="s",
+                date="2025-07-16",
+                time="18:00",
+                location_name="Hall",
+                is_free=True,
+                added_at=None,
+            )
+        )
+        await session.commit()
+
+    title, content = await main.build_month_page_content(db, "2025-07")
+    assert any(n.get("tag") == "h4" for n in content)
+
+
+@pytest.mark.asyncio
 async def test_date_range_parsing(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()

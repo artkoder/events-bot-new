@@ -1009,6 +1009,8 @@ def md_to_html(text: str) -> str:
 
 
 def is_recent(e: Event) -> bool:
+    if e.added_at is None:
+        return False
     now = datetime.utcnow()
     start = datetime.combine(now.date() - timedelta(days=1), datetime.min.time())
     return e.added_at >= start
