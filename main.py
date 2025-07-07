@@ -1017,12 +1017,12 @@ def is_recent(e: Event) -> bool:
 
 
 def format_event_md(e: Event) -> str:
-    title = f"{e.emoji} {e.title}" if e.emoji else e.title
+    prefix = ""
     if is_recent(e):
-        title = f"\U0001F6A9 {title}"
-    if e.source_post_url:
-        title = f"[{title}]({e.source_post_url})"
-    lines = [title.strip(), e.description.strip()]
+        prefix += "\U0001F6A9 "
+    if e.emoji:
+        prefix += f"{e.emoji} "
+    lines = [f"{prefix}{e.title}".strip(), e.description.strip()]
     if e.is_free:
         lines.append("🟡 Бесплатно")
     elif e.ticket_link and (e.ticket_price_min is not None or e.ticket_price_max is not None):
@@ -1062,12 +1062,10 @@ def format_event_md(e: Event) -> str:
 
 
 def format_exhibition_md(e: Event) -> str:
-    title = e.title
+    prefix = ""
     if is_recent(e):
-        title = f"\U0001F6A9 {title}"
-    if e.source_post_url:
-        title = f"[{title}]({e.source_post_url})"
-    lines = [title.strip(), e.description.strip()]
+        prefix += "\U0001F6A9 "
+    lines = [f"{prefix}{e.title}".strip(), e.description.strip()]
     if e.is_free:
         lines.append("🟡 Бесплатно")
     elif e.ticket_link:
@@ -1096,13 +1094,26 @@ def format_exhibition_md(e: Event) -> str:
     return "\n".join(lines)
 
 
+def event_title_nodes(e: Event) -> list:
+    nodes: list = []
+    if is_recent(e):
+        nodes.append("\U0001F6A9 ")
+    if e.emoji:
+        nodes.append(f"{e.emoji} ")
+    title_text = e.title
+    if e.source_post_url:
+        nodes.append({"tag": "a", "attrs": {"href": e.source_post_url}, "children": [title_text]})
+    else:
+        nodes.append(title_text)
+    return nodes
+
+
 def event_to_nodes(e: Event) -> list[dict]:
     md = format_event_md(e)
     lines = md.split("\n")
-    title_line = lines[0]
     body_md = "\n".join(lines[1:]) if len(lines) > 1 else ""
     from telegraph.utils import html_to_nodes
-    nodes = [{"tag": "h4", "children": [title_line]}]
+    nodes = [{"tag": "h4", "children": event_title_nodes(e)}]
     if body_md:
         html_text = md_to_html(body_md)
         nodes.extend(html_to_nodes(html_text))
@@ -1110,13 +1121,24 @@ def event_to_nodes(e: Event) -> list[dict]:
     return nodes
 
 
+def exhibition_title_nodes(e: Event) -> list:
+    nodes: list = []
+    if is_recent(e):
+        nodes.append("\U0001F6A9 ")
+    title_text = e.title
+    if e.source_post_url:
+        nodes.append({"tag": "a", "attrs": {"href": e.source_post_url}, "children": [title_text]})
+    else:
+        nodes.append(title_text)
+    return nodes
+
+
 def exhibition_to_nodes(e: Event) -> list[dict]:
     md = format_exhibition_md(e)
     lines = md.split("\n")
-    title_line = lines[0]
     body_md = "\n".join(lines[1:]) if len(lines) > 1 else ""
     from telegraph.utils import html_to_nodes
-    nodes = [{"tag": "h4", "children": [title_line]}]
+    nodes = [{"tag": "h4", "children": exhibition_title_nodes(e)}]
     if body_md:
         html_text = md_to_html(body_md)
         nodes.extend(html_to_nodes(html_text))

@@ -1072,6 +1072,35 @@ async def test_missing_added_at(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_event_title_link(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.get_session() as session:
+        session.add(
+            Event(
+                title="Party",
+                description="d",
+                source_text="s",
+                date="2025-07-16",
+                time="18:00",
+                location_name="Hall",
+                source_post_url="https://t.me/chan/1",
+                emoji="🎉",
+            )
+        )
+        await session.commit()
+
+    _, content = await main.build_month_page_content(db, "2025-07")
+    h4 = next(n for n in content if n.get("tag") == "h4")
+    children = h4["children"]
+    assert any(isinstance(c, dict) and c.get("tag") == "a" for c in children)
+    anchor = next(c for c in children if isinstance(c, dict) and c.get("tag") == "a")
+    assert anchor["attrs"]["href"] == "https://t.me/chan/1"
+    assert anchor["children"] == ["Party"]
+
+
+@pytest.mark.asyncio
 async def test_date_range_parsing(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
