@@ -25,7 +25,7 @@ DB_PATH = os.getenv("DB_PATH", "/data/db.sqlite")
 TELEGRAPH_TOKEN_FILE = os.getenv("TELEGRAPH_TOKEN_FILE", "/data/telegraph_token.txt")
 
 # separator inserted between versions on Telegraph source pages
-CONTENT_SEPARATOR = "🔸" * 10
+CONTENT_SEPARATOR = "🟧" * 10
 
 # user_id -> (event_id, field?) for editing session
 editing_sessions: dict[int, tuple[int, str | None]] = {}
@@ -981,7 +981,10 @@ def md_to_html(text: str) -> str:
 
 
 def format_event_md(e: Event) -> str:
-    lines = [e.title, e.description]
+    title = f"{e.emoji} {e.title}" if e.emoji else e.title
+    if e.source_post_url:
+        title = f"[{title}]({e.source_post_url})"
+    lines = [title, e.description]
     if e.is_free:
         lines.append("Бесплатно")
     elif e.ticket_link and (e.ticket_price_min is not None or e.ticket_price_max is not None):
@@ -1042,7 +1045,22 @@ def format_exhibition_md(e: Event) -> str:
     return "\n".join(lines)
 
 
-async def build_month_page_markdown(db: Database, month: str) -> tuple[str, str]:
+def event_to_nodes(e: Event) -> list[dict]:
+    md = format_event_md(e)
+    html_text = md_to_html(md)
+    # convert html to nodes via telegraph utility
+    from telegraph.utils import html_to_nodes
+    return html_to_nodes(html_text)
+
+
+def exhibition_to_nodes(e: Event) -> list[dict]:
+    md = format_exhibition_md(e)
+    html_text = md_to_html(md)
+    from telegraph.utils import html_to_nodes
+    return html_to_nodes(html_text)
+
+
+async def build_month_page_content(db: Database, month: str) -> tuple[str, list]:
     start = date.fromisoformat(month + "-01")
     next_start = (start.replace(day=28) + timedelta(days=4)).replace(day=1)
     async with db.get_session() as session:
@@ -1077,41 +1095,33 @@ async def build_month_page_markdown(db: Database, month: str) -> tuple[str, str]
             continue
         by_day.setdefault(d, []).append(e)
 
-    lines = [
-        f"### События Калининграда в {month_name(month)}: полный анонс",
-        "",
-        f"Планируйте свой месяц заранее: интересные мероприятия Калининграда и 39 региона в {month_name(month)} — от лекций и концертов до культурных шоу.",
-        "",
-    ]
+    content: list[dict] = []
+    intro = f"Планируйте свой месяц заранее: интересные мероприятия Калининграда и 39 региона в {month_name(month)} — от лекций и концертов до культурных шоу."
+    content.append({"tag": "p", "children": [intro]})
 
     for day in sorted(by_day):
         if day.weekday() == 5:
-            lines.append("🟥🟥🟥 суббота 🟥🟥🟥")
+            content.append({"tag": "h3", "children": ["🟥🟥🟥 суббота 🟥🟥🟥"]})
         elif day.weekday() == 6:
-            lines.append("🟥🟥 воскресенье 🟥🟥")
-        lines.append(f"🟥🟥🟥 {format_day_pretty(day)} 🟥🟥🟥")
-        lines.append("")
+            content.append({"tag": "h3", "children": ["🟥🟥 воскресенье 🟥🟥"]})
+        content.append({"tag": "h3", "children": [f"🟥🟥🟥 {format_day_pretty(day)} 🟥🟥🟥"]})
         for ev in by_day[day]:
-            lines.append(format_event_md(ev))
-            lines.append("")
+            content.extend(event_to_nodes(ev))
 
     if next_url:
-        lines.append(f"[Страница следующего месяца]({next_url})")
-        lines.append("")
+        content.append({"tag": "a", "attrs": {"href": next_url}, "children": ["Страница следующего месяца"]})
 
-    lines.append("### Выставки")
-    lines.append("")
-    for ev in exhibitions:
-        lines.append(format_exhibition_md(ev))
-        lines.append("")
+    if exhibitions:
+        content.append({"tag": "h3", "children": ["Выставки"]})
+        for ev in exhibitions:
+            content.extend(exhibition_to_nodes(ev))
 
     title = f"События Калининграда в {month_name(month)}: полный анонс"
-    return title, "\n".join(lines)
+    return title, content
 
 
 async def sync_month_page(db: Database, month: str):
-    title, md_text = await build_month_page_markdown(db, month)
-    html_text = md_to_html(md_text)
+    title, content = await build_month_page_content(db, month)
     token = get_telegraph_token()
     if not token:
         logging.error("Telegraph token unavailable")
@@ -1122,12 +1132,12 @@ async def sync_month_page(db: Database, month: str):
         try:
             if page:
                 await asyncio.to_thread(
-                    tg.edit_page, page.path, title=title, html_content=html_text
+                    tg.edit_page, page.path, title=title, content=content
                 )
                 logging.info("Edited month page %s", month)
             else:
                 data = await asyncio.to_thread(
-                    tg.create_page, title, html_content=html_text
+                    tg.create_page, title, content=content
                 )
                 page = MonthPage(
                     month=month, url=data.get("url"), path=data.get("path")
