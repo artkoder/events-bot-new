@@ -1947,11 +1947,18 @@ async def daily_scheduler(db: Database, bot: Bot):
         offset = await get_tz_offset(db)
         tz = offset_to_timezone(offset)
         now = datetime.now(tz)
+        now_time = now.time().replace(second=0, microsecond=0)
         async with db.get_session() as session:
             result = await session.execute(select(Channel).where(Channel.daily_time.is_not(None)))
             channels = result.scalars().all()
         for ch in channels:
-            if ch.daily_time and (ch.last_daily or "") != now.date().isoformat() and now.strftime("%H:%M") >= ch.daily_time:
+            if not ch.daily_time:
+                continue
+            try:
+                target_time = datetime.strptime(ch.daily_time, "%H:%M").time()
+            except ValueError:
+                continue
+            if (ch.last_daily or "") != now.date().isoformat() and now_time >= target_time:
                 try:
                     await send_daily_announcement(db, bot, ch.channel_id, tz)
                 except Exception as e:
@@ -2260,7 +2267,9 @@ async def handle_edit_message(message: types.Message, db: Database, bot: Bot):
     if field is None:
         return
     value = (message.text or message.caption or "").strip()
-    if not value:
+    if field == "ticket_link" and value in {"", "-"}:
+        value = ""
+    if not value and field != "ticket_link":
         await bot.send_message(message.chat.id, "No text supplied")
         return
     async with db.get_session() as session:
@@ -2278,7 +2287,10 @@ async def handle_edit_message(message: types.Message, db: Database, bot: Bot):
                 await bot.send_message(message.chat.id, "Invalid number")
                 return
         else:
-            setattr(event, field, value)
+            if field == "ticket_link" and value == "":
+                setattr(event, field, None)
+            else:
+                setattr(event, field, value)
         await session.commit()
         new_date = event.date.split("..", 1)[0]
         new_month = new_date[:7]
