@@ -1207,6 +1207,7 @@ async def build_month_page_content(db: Database, month: str) -> tuple[str, list]
         elif day.weekday() == 6:
             content.append({"tag": "h3", "children": ["🟥🟥 воскресенье 🟥🟥"]})
         content.append({"tag": "h3", "children": [f"🟥🟥🟥 {format_day_pretty(day)} 🟥🟥🟥"]})
+        content.append({"tag": "br"})
         for ev in by_day[day]:
             content.extend(event_to_nodes(ev))
 
@@ -1215,6 +1216,7 @@ async def build_month_page_content(db: Database, month: str) -> tuple[str, list]
 
     if exhibitions:
         content.append({"tag": "h3", "children": ["Постоянные выставки"]})
+        content.append({"tag": "br"})
         for ev in exhibitions:
             content.extend(exhibition_to_nodes(ev))
 

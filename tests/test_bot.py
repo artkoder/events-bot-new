@@ -1101,6 +1101,48 @@ async def test_event_title_link(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_spacing_after_headers(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.get_session() as session:
+        session.add(
+            Event(
+                title="Weekend",
+                description="d",
+                source_text="s",
+                date="2025-07-12",
+                time="18:00",
+                location_name="Hall",
+            )
+        )
+        session.add(
+            Event(
+                title="Expo",
+                description="d",
+                source_text="s",
+                date="2025-07-12",
+                time="20:00",
+                location_name="Hall",
+                end_date="2025-07-20",
+            )
+        )
+        await session.commit()
+
+    _, content = await main.build_month_page_content(db, "2025-07")
+    idx = next(
+        i
+        for i, n in enumerate(content)
+        if n.get("tag") == "h3" and "12 июля" in "".join(n.get("children", []))
+    )
+    assert content[idx + 1].get("tag") == "br"
+    exh_idx = next(
+        i for i, n in enumerate(content) if n.get("tag") == "h3" and "Постоянные" in "".join(n.get("children", []))
+    )
+    assert content[exh_idx + 1].get("tag") == "br"
+
+
+@pytest.mark.asyncio
 async def test_date_range_parsing(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
