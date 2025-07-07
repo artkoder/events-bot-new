@@ -79,6 +79,7 @@ class Event(SQLModel, table=True):
     emoji: Optional[str] = None
     end_date: Optional[str] = None
     is_free: bool = False
+    silent: bool = False
     telegraph_path: Optional[str] = None
     source_text: str
     telegraph_url: Optional[str] = None
@@ -132,6 +133,10 @@ class Database:
             if "is_free" not in cols:
                 await conn.exec_driver_sql(
                     "ALTER TABLE event ADD COLUMN is_free BOOLEAN DEFAULT 0"
+                )
+            if "silent" not in cols:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE event ADD COLUMN silent BOOLEAN DEFAULT 0"
                 )
             if "telegraph_path" not in cols:
                 await conn.exec_driver_sql(
@@ -477,6 +482,41 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
         if event:
             await show_edit_menu(callback.from_user.id, event, bot)
         await callback.answer()
+    elif data.startswith("togglesilent:"):
+        eid = int(data.split(":")[1])
+        async with db.get_session() as session:
+            event = await session.get(Event, eid)
+            if event:
+                event.silent = not event.silent
+                await session.commit()
+                logging.info("togglesilent: event %s set to %s", eid, event.silent)
+                month = event.date.split("..", 1)[0][:7]
+        if event:
+            await sync_month_page(db, month)
+            w_start = weekend_start_for_date(datetime.fromisoformat(event.date).date())
+            if w_start:
+                await sync_weekend_page(db, w_start.isoformat())
+        markup = types.InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    types.InlineKeyboardButton(
+                        text=(
+                            "\U0001F910 Тихий режим" if event and event.silent else "\U0001F6A9 Переключить на тихий режим"
+                        ),
+                        callback_data=f"togglesilent:{eid}",
+                    )
+                ]
+            ]
+        )
+        try:
+            await bot.edit_message_reply_markup(
+                chat_id=callback.message.chat.id,
+                message_id=callback.message.message_id,
+                reply_markup=markup,
+            )
+        except Exception as e:
+            logging.error("failed to update silent button: %s", e)
+        await callback.answer("Toggled")
     elif data.startswith("markfree:"):
         eid = int(data.split(":")[1])
         async with db.get_session() as session:
@@ -497,7 +537,11 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                     types.InlineKeyboardButton(
                         text="\u2705 Бесплатное мероприятие",
                         callback_data=f"togglefree:{eid}",
-                    )
+                    ),
+                    types.InlineKeyboardButton(
+                        text="\U0001F6A9 Переключить на тихий режим",
+                        callback_data=f"togglesilent:{eid}",
+                    ),
                 ]
             ]
         )
@@ -1016,19 +1060,24 @@ async def handle_add_event(message: types.Message, db: Database, bot: Bot):
         await bot.send_message(message.chat.id, "LLM error")
         return
     for saved, added, lines, status in results:
-        markup = None
+        btns = []
         if (
             not saved.is_free
             and saved.ticket_price_min is None
             and saved.ticket_price_max is None
         ):
-            markup = types.InlineKeyboardMarkup(
-                inline_keyboard=[[
-                    types.InlineKeyboardButton(
-                        text="\u2753 Это бесплатное мероприятие", callback_data=f"markfree:{saved.id}"
-                    )
-                ]]
+            btns.append(
+                types.InlineKeyboardButton(
+                    text="\u2753 Это бесплатное мероприятие", callback_data=f"markfree:{saved.id}"
+                )
             )
+        btns.append(
+            types.InlineKeyboardButton(
+                text="\U0001F6A9 Переключить на тихий режим",
+                callback_data=f"togglesilent:{saved.id}",
+            )
+        )
+        markup = types.InlineKeyboardMarkup(inline_keyboard=[btns])
         await bot.send_message(
             message.chat.id,
             f"Event {status}\n" + "\n".join(lines),
@@ -1095,13 +1144,18 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
     if event.telegraph_url:
         lines.append(f"telegraph: {event.telegraph_url}")
     status = "added" if added else "updated"
-    markup = None
+    btns = []
     if not event.is_free and event.ticket_price_min is None and event.ticket_price_max is None:
-        markup = types.InlineKeyboardMarkup(
-            inline_keyboard=[[
-                types.InlineKeyboardButton(text="\u2753 Это бесплатное мероприятие", callback_data=f"markfree:{event.id}")
-            ]]
+        btns.append(
+            types.InlineKeyboardButton(text="\u2753 Это бесплатное мероприятие", callback_data=f"markfree:{event.id}")
         )
+    btns.append(
+        types.InlineKeyboardButton(
+            text="\U0001F6A9 Переключить на тихий режим",
+            callback_data=f"togglesilent:{event.id}",
+        )
+    )
+    markup = types.InlineKeyboardMarkup(inline_keyboard=[btns])
     await bot.send_message(
         message.chat.id,
         f"Event {status}\n" + "\n".join(lines),
@@ -1238,7 +1292,7 @@ def is_recent(e: Event) -> bool:
         return False
     now = datetime.utcnow()
     start = datetime.combine(now.date() - timedelta(days=1), datetime.min.time())
-    return e.added_at >= start
+    return e.added_at >= start and not e.silent
 
 
 def format_event_md(e: Event) -> str:
@@ -1799,6 +1853,16 @@ async def show_edit_menu(user_id: int, event: Event, bot: Bot):
         keyboard.append(row)
     keyboard.append([
         types.InlineKeyboardButton(
+            text=(
+                "\U0001F6A9 Переключить на тихий режим"
+                if not event.silent
+                else "\U0001F910 Тихий режим"
+            ),
+            callback_data=f"togglesilent:{event.id}",
+        )
+    ])
+    keyboard.append([
+        types.InlineKeyboardButton(
             text=("\u2705 Бесплатно" if event.is_free else "\u274C Бесплатно"),
             callback_data=f"togglefree:{event.id}",
         )
@@ -2166,7 +2230,8 @@ def create_app() -> web.Application:
         or c.data.startswith("unset:")
         or c.data.startswith("set:")
         or c.data.startswith("togglefree:")
-        or c.data.startswith("markfree:"),
+        or c.data.startswith("markfree:")
+        or c.data.startswith("togglesilent:"),
     )
     dp.message.register(tz_wrapper, Command("tz"))
     dp.message.register(add_event_wrapper, Command("addevent"))
