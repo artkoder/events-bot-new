@@ -963,6 +963,27 @@ def month_name(month: str) -> str:
     return f"{MONTHS[int(m) - 1]} {y}"
 
 
+MONTHS_PREP = [
+    "январе",
+    "феврале",
+    "марте",
+    "апреле",
+    "мае",
+    "июне",
+    "июле",
+    "августе",
+    "сентябре",
+    "октябре",
+    "ноябре",
+    "декабре",
+]
+
+
+def month_name_prepositional(month: str) -> str:
+    y, m = month.split("-")
+    return f"{MONTHS_PREP[int(m) - 1]} {y}"
+
+
 def next_month(month: str) -> str:
     d = datetime.fromisoformat(month + "-01")
     n = (d.replace(day=28) + timedelta(days=4)).replace(day=1)
@@ -984,26 +1005,28 @@ def format_event_md(e: Event) -> str:
     title = f"{e.emoji} {e.title}" if e.emoji else e.title
     if e.source_post_url:
         title = f"[{title}]({e.source_post_url})"
-    lines = [title, e.description]
+    lines = [title.strip(), e.description.strip()]
     if e.is_free:
-        lines.append("Бесплатно")
+        lines.append("🟡 Бесплатно")
     elif e.ticket_link and (e.ticket_price_min is not None or e.ticket_price_max is not None):
-        price = str(e.ticket_price_min or "")
         if e.ticket_price_max is not None and e.ticket_price_max != e.ticket_price_min:
-            if price:
-                price += "-"
-            price += str(e.ticket_price_max)
+            price = f"от {e.ticket_price_min} до {e.ticket_price_max}"
+        else:
+            price = str(e.ticket_price_min or e.ticket_price_max or "")
         lines.append(f"[Билеты в источнике]({e.ticket_link}) {price}".strip())
     elif e.ticket_link:
         lines.append(f"[по регистрации]({e.ticket_link})")
     else:
-        price = []
-        if e.ticket_price_min is not None:
-            price.append(str(e.ticket_price_min))
-        if e.ticket_price_max is not None and e.ticket_price_max != e.ticket_price_min:
-            price.append(str(e.ticket_price_max))
+        if e.ticket_price_min is not None and e.ticket_price_max is not None and e.ticket_price_min != e.ticket_price_max:
+            price = f"от {e.ticket_price_min} до {e.ticket_price_max}"
+        elif e.ticket_price_min is not None:
+            price = str(e.ticket_price_min)
+        elif e.ticket_price_max is not None:
+            price = str(e.ticket_price_max)
+        else:
+            price = ""
         if price:
-            lines.append("-".join(price))
+            lines.append(f"Билеты {price}")
     if e.telegraph_url:
         lines.append(f"[подробнее]({e.telegraph_url})")
     loc = e.location_name
@@ -1022,11 +1045,20 @@ def format_event_md(e: Event) -> str:
 
 
 def format_exhibition_md(e: Event) -> str:
-    lines = [e.title, e.description]
+    title = e.title
+    if e.source_post_url:
+        title = f"[{title}]({e.source_post_url})"
+    lines = [title.strip(), e.description.strip()]
     if e.is_free:
-        lines.append("Бесплатно")
+        lines.append("🟡 Бесплатно")
     elif e.ticket_link:
         lines.append(f"[Билеты в источнике]({e.ticket_link})")
+    elif e.ticket_price_min is not None and e.ticket_price_max is not None and e.ticket_price_min != e.ticket_price_max:
+        lines.append(f"Билеты от {e.ticket_price_min} до {e.ticket_price_max}")
+    elif e.ticket_price_min is not None:
+        lines.append(f"Билеты {e.ticket_price_min}")
+    elif e.ticket_price_max is not None:
+        lines.append(f"Билеты {e.ticket_price_max}")
     if e.telegraph_url:
         lines.append(f"[подробнее]({e.telegraph_url})")
     loc = e.location_name
@@ -1050,14 +1082,18 @@ def event_to_nodes(e: Event) -> list[dict]:
     html_text = md_to_html(md)
     # convert html to nodes via telegraph utility
     from telegraph.utils import html_to_nodes
-    return html_to_nodes(html_text)
+    nodes = html_to_nodes(html_text)
+    nodes.append({"tag": "br"})
+    return nodes
 
 
 def exhibition_to_nodes(e: Event) -> list[dict]:
     md = format_exhibition_md(e)
     html_text = md_to_html(md)
     from telegraph.utils import html_to_nodes
-    return html_to_nodes(html_text)
+    nodes = html_to_nodes(html_text)
+    nodes.append({"tag": "br"})
+    return nodes
 
 
 async def build_month_page_content(db: Database, month: str) -> tuple[str, list]:
@@ -1096,7 +1132,14 @@ async def build_month_page_content(db: Database, month: str) -> tuple[str, list]
         by_day.setdefault(d, []).append(e)
 
     content: list[dict] = []
-    intro = f"Планируйте свой месяц заранее: интересные мероприятия Калининграда и 39 региона в {month_name(month)} — от лекций и концертов до культурных шоу."
+    heading = [
+        f"События Калининграда в {month_name_prepositional(month)}: полный анонс от ",
+        {"tag": "a", "attrs": {"href": "https://t.me/kenigevents"}, "children": ["Полюбить Калининград Анонсы"]},
+    ]
+    content.append({"tag": "h3", "children": heading})
+    intro = (
+        f"Планируйте свой месяц заранее: интересные мероприятия Калининграда и 39 региона в {month_name_prepositional(month)} — от лекций и концертов до культурных шоу."
+    )
     content.append({"tag": "p", "children": [intro]})
 
     for day in sorted(by_day):
@@ -1112,11 +1155,13 @@ async def build_month_page_content(db: Database, month: str) -> tuple[str, list]
         content.append({"tag": "a", "attrs": {"href": next_url}, "children": ["Страница следующего месяца"]})
 
     if exhibitions:
-        content.append({"tag": "h3", "children": ["Выставки"]})
+        content.append({"tag": "h3", "children": ["Постоянные выставки"]})
         for ev in exhibitions:
             content.extend(exhibition_to_nodes(ev))
 
-    title = f"События Калининграда в {month_name(month)}: полный анонс"
+    title = (
+        f"События Калининграда в {month_name_prepositional(month)}: полный анонс от Полюбить Калининград Анонсы"
+    )
     return title, content
 
 

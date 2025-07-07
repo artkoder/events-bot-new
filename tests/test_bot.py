@@ -1023,6 +1023,31 @@ async def test_months_command(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_build_month_page_content(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.get_session() as session:
+        session.add(
+            Event(
+                title="T",
+                description="d",
+                source_text="s",
+                date="2025-07-16",
+                time="18:00",
+                location_name="Hall",
+                is_free=True,
+            )
+        )
+        await session.commit()
+
+    title, content = await main.build_month_page_content(db, "2025-07")
+    assert "июле 2025" in title
+    assert "Полюбить Калининград Анонсы" in title
+    assert any(n.get("tag") == "br" for n in content)
+
+
+@pytest.mark.asyncio
 async def test_date_range_parsing(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
