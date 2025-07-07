@@ -83,6 +83,13 @@ class Event(SQLModel, table=True):
     source_text: str
     telegraph_url: Optional[str] = None
     source_post_url: Optional[str] = None
+    added_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class MonthPage(SQLModel, table=True):
+    month: str = Field(primary_key=True)
+    url: str
+    path: str
 
 
 class MonthPage(SQLModel, table=True):
@@ -139,6 +146,10 @@ class Database:
             if "end_date" not in cols:
                 await conn.exec_driver_sql(
                     "ALTER TABLE event ADD COLUMN end_date VARCHAR"
+                )
+            if "added_at" not in cols:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE event ADD COLUMN added_at VARCHAR"
                 )
 
     def get_session(self) -> AsyncSession:
@@ -703,6 +714,7 @@ async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
                 ev.is_free = new.is_free
                 await session.commit()
                 return ev, False
+    new.added_at = datetime.utcnow()
     session.add(new)
     await session.commit()
     return new, True
@@ -1001,8 +1013,16 @@ def md_to_html(text: str) -> str:
     return html_text
 
 
+def is_recent(e: Event) -> bool:
+    now = datetime.utcnow()
+    start = datetime.combine(now.date() - timedelta(days=1), datetime.min.time())
+    return e.added_at >= start
+
+
 def format_event_md(e: Event) -> str:
     title = f"{e.emoji} {e.title}" if e.emoji else e.title
+    if is_recent(e):
+        title = f"\U0001F6A9 {title}"
     if e.source_post_url:
         title = f"[{title}]({e.source_post_url})"
     lines = [title.strip(), e.description.strip()]
@@ -1046,6 +1066,8 @@ def format_event_md(e: Event) -> str:
 
 def format_exhibition_md(e: Event) -> str:
     title = e.title
+    if is_recent(e):
+        title = f"\U0001F6A9 {title}"
     if e.source_post_url:
         title = f"[{title}]({e.source_post_url})"
     lines = [title.strip(), e.description.strip()]
@@ -1079,19 +1101,28 @@ def format_exhibition_md(e: Event) -> str:
 
 def event_to_nodes(e: Event) -> list[dict]:
     md = format_event_md(e)
-    html_text = md_to_html(md)
-    # convert html to nodes via telegraph utility
+    lines = md.split("\n")
+    title_line = lines[0]
+    body_md = "\n".join(lines[1:]) if len(lines) > 1 else ""
     from telegraph.utils import html_to_nodes
-    nodes = html_to_nodes(html_text)
+    nodes = [{"tag": "h4", "children": [title_line]}]
+    if body_md:
+        html_text = md_to_html(body_md)
+        nodes.extend(html_to_nodes(html_text))
     nodes.append({"tag": "br"})
     return nodes
 
 
 def exhibition_to_nodes(e: Event) -> list[dict]:
     md = format_exhibition_md(e)
-    html_text = md_to_html(md)
+    lines = md.split("\n")
+    title_line = lines[0]
+    body_md = "\n".join(lines[1:]) if len(lines) > 1 else ""
     from telegraph.utils import html_to_nodes
-    nodes = html_to_nodes(html_text)
+    nodes = [{"tag": "h4", "children": [title_line]}]
+    if body_md:
+        html_text = md_to_html(body_md)
+        nodes.extend(html_to_nodes(html_text))
     nodes.append({"tag": "br"})
     return nodes
 
@@ -1121,6 +1152,19 @@ async def build_month_page_content(db: Database, month: str) -> tuple[str, list]
         next_page = await session.get(MonthPage, next_month(month))
         next_url = next_page.url if next_page else None
 
+    today = date.today()
+    events = [
+        e
+        for e in events
+        if (
+            (e.end_date and e.end_date >= today.isoformat())
+            or (not e.end_date and e.date >= today.isoformat())
+        )
+    ]
+    exhibitions = [
+        e for e in exhibitions if e.end_date and e.end_date >= today.isoformat()
+    ]
+
     by_day: dict[date, list[Event]] = {}
     for e in events:
         date_part = e.date.split("..", 1)[0]
@@ -1132,15 +1176,11 @@ async def build_month_page_content(db: Database, month: str) -> tuple[str, list]
         by_day.setdefault(d, []).append(e)
 
     content: list[dict] = []
-    heading = [
-        f"События Калининграда в {month_name_prepositional(month)}: полный анонс от ",
-        {"tag": "a", "attrs": {"href": "https://t.me/kenigevents"}, "children": ["Полюбить Калининград Анонсы"]},
-    ]
-    content.append({"tag": "h3", "children": heading})
     intro = (
-        f"Планируйте свой месяц заранее: интересные мероприятия Калининграда и 39 региона в {month_name_prepositional(month)} — от лекций и концертов до культурных шоу."
+        f"Планируйте свой месяц заранее: интересные мероприятия Калининграда и 39 региона в {month_name_prepositional(month)} — от лекций и концертов до культурных шоу. "
     )
-    content.append({"tag": "p", "children": [intro]})
+    intro_nodes = [intro, {"tag": "a", "attrs": {"href": "https://t.me/kenigevents"}, "children": ["Полюбить Калининград Анонсы"]}]
+    content.append({"tag": "p", "children": intro_nodes})
 
     for day in sorted(by_day):
         if day.weekday() == 5:

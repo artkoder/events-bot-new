@@ -16,12 +16,15 @@ _{date} {time} {venue}, {location}, #{city}_
 `ticket_info` may be "Билеты в источнике" with a price range, "Бесплатно" or a
 registration link. `more` links to the individual Telegraph page.
 
+The first line (`{title}`) becomes an `<h4>` heading on the Telegraph page.
+Recently added events (within the last 48 hours) are prefixed with the 🚩 emoji.
+
 ## Page layout
 
 ```
-# События Калининграда в {month_year_prep}: полный анонс от [Полюбить Калининград Анонсы](https://t.me/kenigevents)
+# События Калининграда в {month_year_prep}: полный анонс
 
-Планируйте свой месяц заранее: интересные мероприятия Калининграда и 39 региона в {month_year_prep} — от лекций и концертов до культурных шоу.
+Планируйте свой месяц заранее: интересные мероприятия Калининграда и 39 региона в {month_year_prep} — от лекций и концертов до культурных шоу. [Полюбить Калининград Анонсы](https://t.me/kenigevents)
 
 {events}
 
@@ -32,6 +35,7 @@ registration link. `more` links to the individual Telegraph page.
 {exhibitions}
 ```
 
+Day headers are formatted as `<h3>` elements and event titles as `<h4>`.
 Day headers are formatted as:
 
 ```
