@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from aiogram import Bot, types
 from sqlmodel import select
-from datetime import date, timedelta
+from datetime import date, timedelta, timezone
 import main
 
 from main import (
@@ -16,6 +16,7 @@ from main import (
     Setting,
     User,
     Event,
+    MonthPage,
     create_app,
     handle_register,
     handle_start,
@@ -199,6 +200,38 @@ async def test_add_event_raw(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_month_page_sync(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async def fake_create(title, text, source, html_text=None, media=None):
+        return "https://t.me/test", "path"
+
+    called = {}
+
+    async def fake_sync(db_obj, month):
+        called["month"] = month
+
+    monkeypatch.setattr("main.create_source_page", fake_create)
+    monkeypatch.setattr("main.sync_month_page", fake_sync)
+
+    msg = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "M"},
+            "text": "/addevent_raw Party|2025-07-16|18:00|Club",
+        }
+    )
+
+    await handle_add_event_raw(msg, db, bot)
+
+    assert called.get("month") == "2025-07"
+
+
+@pytest.mark.asyncio
 async def test_add_event_raw_update(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
@@ -308,7 +341,7 @@ async def test_events_list(tmp_path: Path, monkeypatch):
             "date": 0,
             "chat": {"id": 1, "type": "private"},
             "from": {"id": 1, "is_bot": False, "first_name": "A"},
-            "text": "/addevent_raw Party|2025-07-16|18:00|Club",
+            "text": f"/addevent_raw Party|{FUTURE_DATE}|18:00|Club",
         }
     )
     await handle_add_event_raw(add_msg, db, bot)
@@ -952,3 +985,433 @@ async def test_multiple_events(tmp_path: Path, monkeypatch):
     assert len(events) == 2
     assert any(e.title == "One" for e in events)
     assert any(e.title == "Two" for e in events)
+
+
+@pytest.mark.asyncio
+async def test_months_command(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async with db.get_session() as session:
+        session.add(main.MonthPage(month="2025-07", url="https://t.me/p", path="p"))
+        await session.commit()
+
+    start_msg = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "/start",
+        }
+    )
+    await handle_start(start_msg, db, bot)
+
+    msg = types.Message.model_validate(
+        {
+            "message_id": 2,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "/months",
+        }
+    )
+
+    await main.handle_months(msg, db, bot)
+    assert "2025-07" in bot.messages[-1][1]
+
+
+@pytest.mark.asyncio
+async def test_build_month_page_content(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.get_session() as session:
+        session.add(
+            Event(
+                title="T",
+                description="d",
+                source_text="s",
+                date="2025-07-16",
+                time="18:00",
+                location_name="Hall",
+                is_free=True,
+            )
+        )
+        await session.commit()
+
+    title, content = await main.build_month_page_content(db, "2025-07")
+    assert "июле 2025" in title
+    assert "Полюбить Калининград Анонсы" in title
+    assert any(n.get("tag") == "br" for n in content)
+
+
+@pytest.mark.asyncio
+async def test_missing_added_at(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.get_session() as session:
+        session.add(
+            Event(
+                title="T",
+                description="d",
+                source_text="s",
+                date="2025-07-16",
+                time="18:00",
+                location_name="Hall",
+                is_free=True,
+                added_at=None,
+            )
+        )
+        await session.commit()
+
+    title, content = await main.build_month_page_content(db, "2025-07")
+    assert any(n.get("tag") == "h4" for n in content)
+
+
+@pytest.mark.asyncio
+async def test_event_title_link(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.get_session() as session:
+        session.add(
+            Event(
+                title="Party",
+                description="d",
+                source_text="s",
+                date="2025-07-16",
+                time="18:00",
+                location_name="Hall",
+                source_post_url="https://t.me/chan/1",
+                emoji="🎉",
+            )
+        )
+        await session.commit()
+
+    _, content = await main.build_month_page_content(db, "2025-07")
+    h4 = next(n for n in content if n.get("tag") == "h4")
+    children = h4["children"]
+    assert any(isinstance(c, dict) and c.get("tag") == "a" for c in children)
+    anchor = next(c for c in children if isinstance(c, dict) and c.get("tag") == "a")
+    assert anchor["attrs"]["href"] == "https://t.me/chan/1"
+    assert anchor["children"] == ["Party"]
+
+
+@pytest.mark.asyncio
+async def test_emoji_not_duplicated(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.get_session() as session:
+        session.add(
+            Event(
+                title="🎉 Party",
+                description="d",
+                source_text="s",
+                date="2025-07-16",
+                time="18:00",
+                location_name="Hall",
+                emoji="🎉",
+            )
+        )
+        await session.commit()
+
+    _, content = await main.build_month_page_content(db, "2025-07")
+    h4 = next(n for n in content if n.get("tag") == "h4")
+    text = "".join(c if isinstance(c, str) else "".join(c.get("children", [])) for c in h4["children"])
+    assert text.count("🎉") == 1
+
+
+@pytest.mark.asyncio
+async def test_spacing_after_headers(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.get_session() as session:
+        session.add(
+            Event(
+                title="Weekend",
+                description="d",
+                source_text="s",
+                date="2025-07-12",
+                time="18:00",
+                location_name="Hall",
+            )
+        )
+        session.add(
+            Event(
+                title="Expo",
+                description="d",
+                source_text="s",
+                date="2025-07-12",
+                time="20:00",
+                location_name="Hall",
+                end_date="2025-07-20",
+            )
+        )
+        await session.commit()
+
+    _, content = await main.build_month_page_content(db, "2025-07")
+    idx = next(
+        i
+        for i, n in enumerate(content)
+        if n.get("tag") == "h3" and "12 июля" in "".join(n.get("children", []))
+    )
+    assert content[idx + 1].get("tag") == "br"
+    exh_idx = next(
+        i for i, n in enumerate(content) if n.get("tag") == "h3" and "Постоянные" in "".join(n.get("children", []))
+    )
+    assert content[exh_idx + 1].get("tag") == "br"
+
+
+@pytest.mark.asyncio
+async def test_event_spacing(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.get_session() as session:
+        session.add(
+            Event(
+                title="One",
+                description="d",
+                source_text="s",
+                date="2025-07-10",
+                time="18:00",
+                location_name="Hall",
+            )
+        )
+        session.add(
+            Event(
+                title="Two",
+                description="d",
+                source_text="s",
+                date="2025-07-10",
+                time="19:00",
+                location_name="Hall",
+            )
+        )
+        await session.commit()
+
+    _, content = await main.build_month_page_content(db, "2025-07")
+    indices = [i for i, n in enumerate(content) if n.get("tag") == "h4"]
+    assert content[indices[0] + 1].get("tag") == "p"
+
+
+@pytest.mark.asyncio
+async def test_date_range_parsing(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async def fake_parse(text: str) -> list[dict]:
+        return [
+            {
+                "title": "Expo",
+                "short_description": "desc",
+                "date": "2025-07-01..2025-07-17",
+                "time": "18:00",
+                "location_name": "Hall",
+                "event_type": "выставка",
+            }
+        ]
+
+    async def fake_create(title, text, source, html_text=None, media=None):
+        return "url", "p"
+
+    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.create_source_page", fake_create)
+
+    async def fake_sync(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr("main.sync_month_page", fake_sync)
+
+    msg = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "/addevent any",
+        }
+    )
+
+    await handle_add_event(msg, db, bot)
+
+    async with db.get_session() as session:
+        ev = (await session.execute(select(Event))).scalars().first()
+
+    assert ev.date == "2025-07-01"
+    assert ev.end_date == "2025-07-17"
+
+
+def test_md_to_html_sanitizes():
+    md = "# T\nline\n<tg-emoji emoji-id='1'>R</tg-emoji>"
+    html = main.md_to_html(md)
+    assert "<h1>" not in html
+    assert "tg-emoji" not in html
+    assert "<h3>" in html
+    assert "<br" in html
+
+
+@pytest.mark.asyncio
+async def test_sync_month_page_error(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.get_session() as session:
+        session.add(
+            Event(
+                title="Party",
+                description="desc",
+                source_text="t",
+                date="2025-07-16",
+                time="18:00",
+                location_name="Club",
+            )
+        )
+        session.add(main.MonthPage(month="2025-07", url="u", path="p"))
+        await session.commit()
+
+    class DummyTG:
+        def edit_page(self, *args, **kwargs):
+            raise Exception("fail")
+
+    monkeypatch.setattr("main.get_telegraph_token", lambda: "t")
+    monkeypatch.setattr("main.Telegraph", lambda access_token=None: DummyTG())
+
+    # Should not raise
+    await main.sync_month_page(db, "2025-07")
+
+
+@pytest.mark.asyncio
+async def test_update_source_page_uses_content(monkeypatch):
+    events = {}
+
+    class DummyTG:
+        def get_page(self, path, return_html=True):
+            return {"content": "<p>old</p>"}
+        def edit_page(self, path, title, html_content):
+            events["html"] = html_content
+
+    monkeypatch.setattr("main.get_telegraph_token", lambda: "t")
+    monkeypatch.setattr("main.Telegraph", lambda access_token=None: DummyTG())
+
+    await main.update_source_page("path", "Title", "new")
+    html = events.get("html", "")
+    assert "<p>old</p>" in html
+    assert "new" in html
+    assert main.CONTENT_SEPARATOR in html
+
+
+@pytest.mark.asyncio
+async def test_nav_limits_past(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    today = date.today()
+    async with db.get_session() as session:
+        session.add(
+            Event(
+                title="T",
+                description="d",
+                source_text="t",
+                date=today.isoformat(),
+                time="10:00",
+                location_name="Hall",
+            )
+        )
+        await session.commit()
+
+    text, markup = await main.build_events_message(db, today, timezone.utc)
+    row = markup.inline_keyboard[-1]
+    assert len(row) == 1
+    assert row[0].text == "\u25B6"
+
+
+@pytest.mark.asyncio
+async def test_nav_future_has_prev(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    today = date.today()
+    future = today + timedelta(days=1)
+    async with db.get_session() as session:
+        session.add(
+            Event(
+                title="T",
+                description="d",
+                source_text="t",
+                date=future.isoformat(),
+                time="10:00",
+                location_name="Hall",
+            )
+        )
+        await session.commit()
+
+    text, markup = await main.build_events_message(db, future, timezone.utc)
+    row = markup.inline_keyboard[-1]
+    assert len(row) == 2
+    assert row[0].text == "\u25C0"
+    assert row[1].text == "\u25B6"
+
+
+@pytest.mark.asyncio
+async def test_delete_event_updates_month(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async def fake_create(title, text, source, html_text=None, media=None):
+        return "url", "p"
+
+    called = {}
+
+    async def fake_sync(db_obj, month):
+        called["month"] = month
+
+    monkeypatch.setattr("main.create_source_page", fake_create)
+    monkeypatch.setattr("main.sync_month_page", fake_sync)
+
+    add_msg = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "/addevent_raw Party|2025-07-16|18:00|Club",
+        }
+    )
+
+    await handle_add_event_raw(add_msg, db, bot)
+
+    async with db.get_session() as session:
+        event = (await session.execute(select(Event))).scalars().first()
+
+    cb = types.CallbackQuery.model_validate(
+        {
+            "id": "c1",
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "chat_instance": "1",
+            "data": f"del:{event.id}:{event.date}",
+            "message": {
+                "message_id": 2,
+                "date": 0,
+                "chat": {"id": 1, "type": "private"},
+            },
+        }
+    ).as_(bot)
+    object.__setattr__(cb.message, "_bot", bot)
+    async def dummy_edit(*args, **kwargs):
+        return None
+    object.__setattr__(cb.message, "edit_text", dummy_edit)
+    async def dummy_answer(*args, **kwargs):
+        return None
+    object.__setattr__(cb, "answer", dummy_answer)
+
+    await process_request(cb, db, bot)
+
+    assert called.get("month") == "2025-07"

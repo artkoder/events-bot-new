@@ -25,6 +25,7 @@ event_type       - one of: спектакль, выставка, концерт,
 emoji            - an optional emoji representing the event
 end_date         - end date for multi-day events or null
 When a range is provided, put the start date in `date` and the end date in `end_date`.
+Always put the emoji at the start of `title` so headings are easily scannable.
 ```
 
 Do **not** include words like "Открытие" or "Закрытие" in exhibition titles.
