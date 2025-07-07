@@ -1960,7 +1960,10 @@ async def handle_edit_message(message: types.Message, db: Database, bot: Bot):
     eid, field = state
     if field is None:
         return
-    value = message.text.strip()
+    value = (message.text or message.caption or "").strip()
+    if not value:
+        await bot.send_message(message.chat.id, "No text supplied")
+        return
     async with db.get_session() as session:
         event = await session.get(Event, eid)
         if not event:
