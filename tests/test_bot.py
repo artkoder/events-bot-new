@@ -1123,8 +1123,10 @@ async def test_update_source_page_uses_content(monkeypatch):
     monkeypatch.setattr("main.Telegraph", lambda access_token=None: DummyTG())
 
     await main.update_source_page("path", "Title", "new")
-    assert "<p>old</p>" in events.get("html", "")
-    assert "new" in events.get("html", "")
+    html = events.get("html", "")
+    assert "<p>old</p>" in html
+    assert "new" in html
+    assert main.CONTENT_SEPARATOR in html
 
 
 @pytest.mark.asyncio

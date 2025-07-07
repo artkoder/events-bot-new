@@ -24,6 +24,9 @@ logging.basicConfig(level=logging.INFO)
 DB_PATH = os.getenv("DB_PATH", "/data/db.sqlite")
 TELEGRAPH_TOKEN_FILE = os.getenv("TELEGRAPH_TOKEN_FILE", "/data/telegraph_token.txt")
 
+# separator inserted between versions on Telegraph source pages
+CONTENT_SEPARATOR = "🔸" * 10
+
 # user_id -> (event_id, field?) for editing session
 editing_sessions: dict[int, tuple[int, str | None]] = {}
 
@@ -1536,7 +1539,7 @@ async def update_source_page(path: str, title: str, new_html: str):
         html_content = page.get("content") or page.get("content_html") or ""
         cleaned = re.sub(r"</?tg-emoji[^>]*>", "", new_html)
         cleaned = cleaned.replace("\U0001F193\U0001F193\U0001F193\U0001F193", "Бесплатно")
-        html_content += "<hr><p>" + cleaned.replace("\n", "<br/>") + "</p>"
+        html_content += f"<p>{CONTENT_SEPARATOR}</p><p>" + cleaned.replace("\n", "<br/>") + "</p>"
         logging.info("Editing telegraph page %s", path)
         await asyncio.to_thread(
             tg.edit_page, path, title=title, html_content=html_content
