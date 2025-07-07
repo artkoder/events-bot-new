@@ -79,6 +79,7 @@ class Event(SQLModel, table=True):
     emoji: Optional[str] = None
     end_date: Optional[str] = None
     is_free: bool = False
+    silent: bool = False
     telegraph_path: Optional[str] = None
     source_text: str
     telegraph_url: Optional[str] = None
@@ -89,6 +90,13 @@ class Event(SQLModel, table=True):
 class MonthPage(SQLModel, table=True):
     __table_args__ = {"extend_existing": True}
     month: str = Field(primary_key=True)
+    url: str
+    path: str
+
+
+class WeekendPage(SQLModel, table=True):
+    __table_args__ = {"extend_existing": True}
+    start: str = Field(primary_key=True)
     url: str
     path: str
 
@@ -125,6 +133,10 @@ class Database:
             if "is_free" not in cols:
                 await conn.exec_driver_sql(
                     "ALTER TABLE event ADD COLUMN is_free BOOLEAN DEFAULT 0"
+                )
+            if "silent" not in cols:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE event ADD COLUMN silent BOOLEAN DEFAULT 0"
                 )
             if "telegraph_path" not in cols:
                 await conn.exec_driver_sql(
@@ -421,6 +433,9 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                 await session.commit()
         if month:
             await sync_month_page(db, month)
+            w_start = weekend_start_for_date(datetime.fromisoformat(event.date).date()) if event else None
+            if w_start:
+                await sync_weekend_page(db, w_start.isoformat())
         offset = await get_tz_offset(db)
         tz = offset_to_timezone(offset)
         if marker == "exh":
@@ -459,11 +474,49 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                 month = event.date.split("..", 1)[0][:7]
         if event:
             await sync_month_page(db, month)
+            w_start = weekend_start_for_date(datetime.fromisoformat(event.date).date())
+            if w_start:
+                await sync_weekend_page(db, w_start.isoformat())
         async with db.get_session() as session:
             event = await session.get(Event, eid)
         if event:
             await show_edit_menu(callback.from_user.id, event, bot)
         await callback.answer()
+    elif data.startswith("togglesilent:"):
+        eid = int(data.split(":")[1])
+        async with db.get_session() as session:
+            event = await session.get(Event, eid)
+            if event:
+                event.silent = not event.silent
+                await session.commit()
+                logging.info("togglesilent: event %s set to %s", eid, event.silent)
+                month = event.date.split("..", 1)[0][:7]
+        if event:
+            await sync_month_page(db, month)
+            w_start = weekend_start_for_date(datetime.fromisoformat(event.date).date())
+            if w_start:
+                await sync_weekend_page(db, w_start.isoformat())
+        markup = types.InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    types.InlineKeyboardButton(
+                        text=(
+                            "\U0001F910 Тихий режим" if event and event.silent else "\U0001F6A9 Переключить на тихий режим"
+                        ),
+                        callback_data=f"togglesilent:{eid}",
+                    )
+                ]
+            ]
+        )
+        try:
+            await bot.edit_message_reply_markup(
+                chat_id=callback.message.chat.id,
+                message_id=callback.message.message_id,
+                reply_markup=markup,
+            )
+        except Exception as e:
+            logging.error("failed to update silent button: %s", e)
+        await callback.answer("Toggled")
     elif data.startswith("markfree:"):
         eid = int(data.split(":")[1])
         async with db.get_session() as session:
@@ -475,13 +528,20 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                 month = event.date.split("..", 1)[0][:7]
         if event:
             await sync_month_page(db, month)
+            w_start = weekend_start_for_date(datetime.fromisoformat(event.date).date())
+            if w_start:
+                await sync_weekend_page(db, w_start.isoformat())
         markup = types.InlineKeyboardMarkup(
             inline_keyboard=[
                 [
                     types.InlineKeyboardButton(
                         text="\u2705 Бесплатное мероприятие",
                         callback_data=f"togglefree:{eid}",
-                    )
+                    ),
+                    types.InlineKeyboardButton(
+                        text="\U0001F6A9 Переключить на тихий режим",
+                        callback_data=f"togglesilent:{eid}",
+                    ),
                 ]
             ]
         )
@@ -942,6 +1002,9 @@ async def add_events_from_text(
                         session.add(saved)
                         await session.commit()
             await sync_month_page(db, saved.date[:7])
+            w_start = weekend_start_for_date(datetime.fromisoformat(saved.date).date())
+            if w_start:
+                await sync_weekend_page(db, w_start.isoformat())
 
             lines = [
                 f"title: {saved.title}",
@@ -997,19 +1060,24 @@ async def handle_add_event(message: types.Message, db: Database, bot: Bot):
         await bot.send_message(message.chat.id, "LLM error")
         return
     for saved, added, lines, status in results:
-        markup = None
+        btns = []
         if (
             not saved.is_free
             and saved.ticket_price_min is None
             and saved.ticket_price_max is None
         ):
-            markup = types.InlineKeyboardMarkup(
-                inline_keyboard=[[
-                    types.InlineKeyboardButton(
-                        text="\u2753 Это бесплатное мероприятие", callback_data=f"markfree:{saved.id}"
-                    )
-                ]]
+            btns.append(
+                types.InlineKeyboardButton(
+                    text="\u2753 Это бесплатное мероприятие", callback_data=f"markfree:{saved.id}"
+                )
             )
+        btns.append(
+            types.InlineKeyboardButton(
+                text="\U0001F6A9 Переключить на тихий режим",
+                callback_data=f"togglesilent:{saved.id}",
+            )
+        )
+        markup = types.InlineKeyboardMarkup(inline_keyboard=[btns])
         await bot.send_message(
             message.chat.id,
             f"Event {status}\n" + "\n".join(lines),
@@ -1064,6 +1132,9 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
             session.add(event)
             await session.commit()
     await sync_month_page(db, event.date[:7])
+    w_start = weekend_start_for_date(datetime.fromisoformat(event.date).date())
+    if w_start:
+        await sync_weekend_page(db, w_start.isoformat())
     lines = [
         f"title: {event.title}",
         f"date: {event.date}",
@@ -1073,13 +1144,18 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
     if event.telegraph_url:
         lines.append(f"telegraph: {event.telegraph_url}")
     status = "added" if added else "updated"
-    markup = None
+    btns = []
     if not event.is_free and event.ticket_price_min is None and event.ticket_price_max is None:
-        markup = types.InlineKeyboardMarkup(
-            inline_keyboard=[[
-                types.InlineKeyboardButton(text="\u2753 Это бесплатное мероприятие", callback_data=f"markfree:{event.id}")
-            ]]
+        btns.append(
+            types.InlineKeyboardButton(text="\u2753 Это бесплатное мероприятие", callback_data=f"markfree:{event.id}")
         )
+    btns.append(
+        types.InlineKeyboardButton(
+            text="\U0001F6A9 Переключить на тихий режим",
+            callback_data=f"togglesilent:{event.id}",
+        )
+    )
+    markup = types.InlineKeyboardMarkup(inline_keyboard=[btns])
     await bot.send_message(
         message.chat.id,
         f"Event {status}\n" + "\n".join(lines),
@@ -1216,7 +1292,7 @@ def is_recent(e: Event) -> bool:
         return False
     now = datetime.utcnow()
     start = datetime.combine(now.date() - timedelta(days=1), datetime.min.time())
-    return e.added_at >= start
+    return e.added_at >= start and not e.silent
 
 
 def format_event_md(e: Event) -> str:
@@ -1445,7 +1521,7 @@ async def build_month_page_content(db: Database, month: str) -> tuple[str, list]
             if idx < len(future_pages) - 1:
                 nav_children.append(" ")
         content.append({"tag": "br"})
-        content.append({"tag": "p", "children": nav_children})
+        content.append({"tag": "h4", "children": nav_children})
 
     if exhibitions:
         content.append({"tag": "h3", "children": ["Постоянные выставки"]})
@@ -1460,7 +1536,7 @@ async def build_month_page_content(db: Database, month: str) -> tuple[str, list]
     return title, content
 
 
-async def sync_month_page(db: Database, month: str):
+async def sync_month_page(db: Database, month: str, update_links: bool = True):
     title, content = await build_month_page_content(db, month)
     token = get_telegraph_token()
     if not token:
@@ -1487,6 +1563,101 @@ async def sync_month_page(db: Database, month: str):
             await session.commit()
         except Exception as e:
             logging.error("Failed to sync month page %s: %s", month, e)
+
+    if update_links:
+        async with db.get_session() as session:
+            result = await session.execute(select(MonthPage).order_by(MonthPage.month))
+            months = result.scalars().all()
+        for p in months:
+            if p.month != month:
+                await sync_month_page(db, p.month, update_links=False)
+
+
+def weekend_start_for_date(d: date) -> date | None:
+    if d.weekday() == 5:
+        return d
+    if d.weekday() == 6:
+        return d - timedelta(days=1)
+    return None
+
+
+async def build_weekend_page_content(db: Database, start: str) -> tuple[str, list]:
+    saturday = date.fromisoformat(start)
+    sunday = saturday + timedelta(days=1)
+    days = [saturday, sunday]
+    async with db.get_session() as session:
+        result = await session.execute(
+            select(Event)
+            .where(Event.date.in_([d.isoformat() for d in days]))
+            .order_by(Event.date, Event.time)
+        )
+        events = result.scalars().all()
+
+    today = date.today()
+    events = [
+        e
+        for e in events
+        if (
+            (e.end_date and e.end_date >= today.isoformat())
+            or (not e.end_date and e.date >= today.isoformat())
+        )
+    ]
+
+    by_day: dict[date, list[Event]] = {}
+    for e in events:
+        d = date.fromisoformat(e.date)
+        by_day.setdefault(d, []).append(e)
+
+    content: list[dict] = []
+    content.append(
+        {
+            "tag": "p",
+            "children": [
+                "Проведите выходные ярко: все события Калининградской области и 39 региона — концерты, кино под открытым небом и гастрономические фестивали."
+            ],
+        }
+    )
+
+    for d in days:
+        if d not in by_day:
+            continue
+        if d.weekday() == 5:
+            content.append({"tag": "h3", "children": ["🟥🟥🟥 суббота 🟥🟥🟥"]})
+        elif d.weekday() == 6:
+            content.append({"tag": "h3", "children": ["🟥🟥 воскресенье 🟥🟥"]})
+        content.append({"tag": "h3", "children": [f"🟥🟥🟥 {format_day_pretty(d)} 🟥🟥🟥"]})
+        content.append({"tag": "br"})
+        content.append({"tag": "p", "children": ["\u00A0"]})
+        for ev in by_day[d]:
+            content.extend(event_to_nodes(ev))
+
+    title = (
+        f"Чем заняться на выходных в Калининградской области {format_day_pretty(saturday)}–{format_day_pretty(sunday)}"
+    )
+    return title, content
+
+
+async def sync_weekend_page(db: Database, start: str):
+    title, content = await build_weekend_page_content(db, start)
+    token = get_telegraph_token()
+    if not token:
+        logging.error("Telegraph token unavailable")
+        return
+    tg = Telegraph(access_token=token)
+    async with db.get_session() as session:
+        page = await session.get(WeekendPage, start)
+        try:
+            if page:
+                await asyncio.to_thread(tg.edit_page, page.path, title=title, content=content)
+                logging.info("Edited weekend page %s", start)
+            else:
+                data = await asyncio.to_thread(tg.create_page, title, content=content)
+                page = WeekendPage(start=start, url=data.get("url"), path=data.get("path"))
+                session.add(page)
+                logging.info("Created weekend page %s", start)
+            await session.commit()
+        except Exception as e:
+            logging.error("Failed to sync weekend page %s: %s", start, e)
 
 
 async def build_events_message(db: Database, target_date: date, tz: timezone):
@@ -1682,6 +1853,16 @@ async def show_edit_menu(user_id: int, event: Event, bot: Bot):
         keyboard.append(row)
     keyboard.append([
         types.InlineKeyboardButton(
+            text=(
+                "\U0001F6A9 Переключить на тихий режим"
+                if not event.silent
+                else "\U0001F910 Тихий режим"
+            ),
+            callback_data=f"togglesilent:{event.id}",
+        )
+    ])
+    keyboard.append([
+        types.InlineKeyboardButton(
             text=("\u2705 Бесплатно" if event.is_free else "\u274C Бесплатно"),
             callback_data=f"togglefree:{event.id}",
         )
@@ -1752,16 +1933,23 @@ async def handle_exhibitions(message: types.Message, db: Database, bot: Bot):
     await bot.send_message(message.chat.id, text, reply_markup=markup)
 
 
-async def handle_months(message: types.Message, db: Database, bot: Bot):
+async def handle_pages(message: types.Message, db: Database, bot: Bot):
     async with db.get_session() as session:
         if not await session.get(User, message.from_user.id):
             await bot.send_message(message.chat.id, "Not authorized")
             return
         result = await session.execute(select(MonthPage).order_by(MonthPage.month))
-        pages = result.scalars().all()
+        months = result.scalars().all()
+        res_w = await session.execute(select(WeekendPage).order_by(WeekendPage.start))
+        weekends = res_w.scalars().all()
     lines = ["Months:"]
-    for p in pages:
+    for p in months:
         lines.append(f"{p.month}: {p.url}")
+    if weekends:
+        lines.append("")
+        lines.append("Weekends:")
+        for w in weekends:
+            lines.append(f"{w.start}: {w.url}")
     await bot.send_message(message.chat.id, "\n".join(lines))
 
 
@@ -1772,14 +1960,18 @@ async def handle_edit_message(message: types.Message, db: Database, bot: Bot):
     eid, field = state
     if field is None:
         return
-    value = message.text.strip()
+    value = (message.text or message.caption or "").strip()
+    if not value:
+        await bot.send_message(message.chat.id, "No text supplied")
+        return
     async with db.get_session() as session:
         event = await session.get(Event, eid)
         if not event:
             await bot.send_message(message.chat.id, "Event not found")
             del editing_sessions[message.from_user.id]
             return
-        old_month = event.date.split("..", 1)[0][:7]
+        old_date = event.date.split("..", 1)[0]
+        old_month = old_date[:7]
         if field in {"ticket_price_min", "ticket_price_max"}:
             try:
                 setattr(event, field, int(value))
@@ -1789,10 +1981,17 @@ async def handle_edit_message(message: types.Message, db: Database, bot: Bot):
         else:
             setattr(event, field, value)
         await session.commit()
-        new_month = event.date.split("..", 1)[0][:7]
+        new_date = event.date.split("..", 1)[0]
+        new_month = new_date[:7]
     await sync_month_page(db, old_month)
+    old_w = weekend_start_for_date(datetime.fromisoformat(old_date).date())
+    if old_w:
+        await sync_weekend_page(db, old_w.isoformat())
     if new_month != old_month:
         await sync_month_page(db, new_month)
+    new_w = weekend_start_for_date(datetime.fromisoformat(new_date).date())
+    if new_w and new_w != old_w:
+        await sync_weekend_page(db, new_w.isoformat())
     editing_sessions[message.from_user.id] = (eid, None)
     await show_edit_menu(message.from_user.id, event, bot)
 
@@ -2010,8 +2209,8 @@ def create_app() -> web.Application:
     async def exhibitions_wrapper(message: types.Message):
         await handle_exhibitions(message, db, bot)
 
-    async def months_wrapper(message: types.Message):
-        await handle_months(message, db, bot)
+    async def pages_wrapper(message: types.Message):
+        await handle_pages(message, db, bot)
 
     async def edit_message_wrapper(message: types.Message):
         await handle_edit_message(message, db, bot)
@@ -2034,7 +2233,8 @@ def create_app() -> web.Application:
         or c.data.startswith("unset:")
         or c.data.startswith("set:")
         or c.data.startswith("togglefree:")
-        or c.data.startswith("markfree:"),
+        or c.data.startswith("markfree:")
+        or c.data.startswith("togglesilent:"),
     )
     dp.message.register(tz_wrapper, Command("tz"))
     dp.message.register(add_event_wrapper, Command("addevent"))
@@ -2044,7 +2244,7 @@ def create_app() -> web.Application:
     dp.message.register(set_channel_wrapper, Command("setchannel"))
     dp.message.register(channels_wrapper, Command("channels"))
     dp.message.register(exhibitions_wrapper, Command("exhibitions"))
-    dp.message.register(months_wrapper, Command("months"))
+    dp.message.register(pages_wrapper, Command("pages"))
     dp.message.register(edit_message_wrapper, lambda m: m.from_user.id in editing_sessions)
     dp.message.register(forward_wrapper, lambda m: bool(m.forward_date))
     dp.my_chat_member.register(partial(handle_my_chat_member, db=db))
