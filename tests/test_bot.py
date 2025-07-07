@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from aiogram import Bot, types
 from sqlmodel import select
-from datetime import date, timedelta
+from datetime import date, timedelta, timezone
 import main
 
 from main import (
@@ -1107,3 +1107,73 @@ async def test_sync_month_page_error(tmp_path: Path, monkeypatch):
 
     # Should not raise
     await main.sync_month_page(db, "2025-07")
+
+
+@pytest.mark.asyncio
+async def test_update_source_page_uses_content(monkeypatch):
+    events = {}
+
+    class DummyTG:
+        def get_page(self, path, return_html=True):
+            return {"content": "<p>old</p>"}
+        def edit_page(self, path, title, html_content):
+            events["html"] = html_content
+
+    monkeypatch.setattr("main.get_telegraph_token", lambda: "t")
+    monkeypatch.setattr("main.Telegraph", lambda access_token=None: DummyTG())
+
+    await main.update_source_page("path", "Title", "new")
+    assert "<p>old</p>" in events.get("html", "")
+    assert "new" in events.get("html", "")
+
+
+@pytest.mark.asyncio
+async def test_nav_limits_past(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    today = date.today()
+    async with db.get_session() as session:
+        session.add(
+            Event(
+                title="T",
+                description="d",
+                source_text="t",
+                date=today.isoformat(),
+                time="10:00",
+                location_name="Hall",
+            )
+        )
+        await session.commit()
+
+    text, markup = await main.build_events_message(db, today, timezone.utc)
+    row = markup.inline_keyboard[-1]
+    assert len(row) == 1
+    assert row[0].text == "\u25B6"
+
+
+@pytest.mark.asyncio
+async def test_nav_future_has_prev(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    today = date.today()
+    future = today + timedelta(days=1)
+    async with db.get_session() as session:
+        session.add(
+            Event(
+                title="T",
+                description="d",
+                source_text="t",
+                date=future.isoformat(),
+                time="10:00",
+                location_name="Hall",
+            )
+        )
+        await session.commit()
+
+    text, markup = await main.build_events_message(db, future, timezone.utc)
+    row = markup.inline_keyboard[-1]
+    assert len(row) == 2
+    assert row[0].text == "\u25C0"
+    assert row[1].text == "\u25B6"

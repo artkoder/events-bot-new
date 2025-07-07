@@ -1174,14 +1174,18 @@ async def build_events_message(db: Database, target_date: date, tz: timezone):
         for e in events
     ]
 
+    today = datetime.now(tz).date()
     prev_day = target_date - timedelta(days=1)
     next_day = target_date + timedelta(days=1)
-    keyboard.append(
-        [
-            types.InlineKeyboardButton(text="\u25C0", callback_data=f"nav:{prev_day.isoformat()}"),
-            types.InlineKeyboardButton(text="\u25B6", callback_data=f"nav:{next_day.isoformat()}"),
-        ]
+    row = []
+    if target_date > today:
+        row.append(
+            types.InlineKeyboardButton(text="\u25C0", callback_data=f"nav:{prev_day.isoformat()}")
+        )
+    row.append(
+        types.InlineKeyboardButton(text="\u25B6", callback_data=f"nav:{next_day.isoformat()}")
     )
+    keyboard.append(row)
 
     text = f"Events on {format_day(target_date, tz)}\n" + "\n".join(lines)
     markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard)
@@ -1529,7 +1533,7 @@ async def update_source_page(path: str, title: str, new_html: str):
         page = await asyncio.to_thread(
             tg.get_page, path, return_html=True
         )
-        html_content = page.get("content_html") or ""
+        html_content = page.get("content") or page.get("content_html") or ""
         cleaned = re.sub(r"</?tg-emoji[^>]*>", "", new_html)
         cleaned = cleaned.replace("\U0001F193\U0001F193\U0001F193\U0001F193", "Бесплатно")
         html_content += "<hr><p>" + cleaned.replace("\n", "<br/>") + "</p>"
