@@ -87,12 +87,7 @@ class Event(SQLModel, table=True):
 
 
 class MonthPage(SQLModel, table=True):
-    month: str = Field(primary_key=True)
-    url: str
-    path: str
-
-
-class MonthPage(SQLModel, table=True):
+    __table_args__ = {"extend_existing": True}
     month: str = Field(primary_key=True)
     url: str
     path: str
@@ -1818,9 +1813,6 @@ def create_app() -> web.Application:
     app.on_startup.append(on_startup)
     app.on_shutdown.append(on_shutdown)
     return app
-
-    async def on_shutdown(app: web.Application):
-        await bot.session.close()
 
 if __name__ == "__main__":
     import sys
