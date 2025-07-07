@@ -17,6 +17,7 @@ from main import (
     User,
     Event,
     MonthPage,
+    WeekendPage,
     create_app,
     handle_register,
     handle_start,
@@ -229,6 +230,42 @@ async def test_month_page_sync(tmp_path: Path, monkeypatch):
     await handle_add_event_raw(msg, db, bot)
 
     assert called.get("month") == "2025-07"
+
+
+@pytest.mark.asyncio
+async def test_weekend_page_sync(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async def fake_create(title, text, source, html_text=None, media=None):
+        return "url", "p"
+
+    called = {}
+
+    async def fake_month(db_obj, month):
+        called["month"] = month
+
+    async def fake_weekend(db_obj, start):
+        called["weekend"] = start
+
+    monkeypatch.setattr("main.create_source_page", fake_create)
+    monkeypatch.setattr("main.sync_month_page", fake_month)
+    monkeypatch.setattr("main.sync_weekend_page", fake_weekend)
+
+    msg = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "M"},
+            "text": "/addevent_raw Party|2025-07-12|18:00|Club",
+        }
+    )
+
+    await handle_add_event_raw(msg, db, bot)
+
+    assert called.get("weekend") == "2025-07-12"
 
 
 @pytest.mark.asyncio
@@ -1014,11 +1051,11 @@ async def test_months_command(tmp_path: Path):
             "date": 0,
             "chat": {"id": 1, "type": "private"},
             "from": {"id": 1, "is_bot": False, "first_name": "A"},
-            "text": "/months",
+            "text": "/pages",
         }
     )
 
-    await main.handle_months(msg, db, bot)
+    await main.handle_pages(msg, db, bot)
     assert "2025-07" in bot.messages[-1][1]
 
 
@@ -1045,6 +1082,30 @@ async def test_build_month_page_content(tmp_path: Path):
     assert "июле 2025" in title
     assert "Полюбить Калининград Анонсы" in title
     assert any(n.get("tag") == "br" for n in content)
+
+
+@pytest.mark.asyncio
+async def test_build_weekend_page_content(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    saturday = date(2025, 7, 12)
+    async with db.get_session() as session:
+        session.add(
+            Event(
+                title="W",
+                description="d",
+                source_text="s",
+                date=saturday.isoformat(),
+                time="18:00",
+                location_name="Hall",
+            )
+        )
+        await session.commit()
+
+    title, content = await main.build_weekend_page_content(db, saturday.isoformat())
+    assert "выходных" in title
+    assert any(n.get("tag") == "h4" for n in content)
 
 
 @pytest.mark.asyncio
@@ -1669,6 +1730,6 @@ async def test_month_links_future(tmp_path: Path, monkeypatch):
     title, content = await main.build_month_page_content(db, "2025-07")
     found = False
     for n in content:
-        if isinstance(n, dict) and n.get("tag") == "p" and any("август" in str(c) for c in n.get("children", [])):
+        if isinstance(n, dict) and n.get("tag") == "h4" and any("август" in str(c) for c in n.get("children", [])):
             found = True
     assert found
