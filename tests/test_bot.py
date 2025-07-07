@@ -1743,6 +1743,39 @@ async def test_extract_ticket_link_near_word(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_ticket_link_overrides_invalid(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async def fake_parse(text: str) -> list[dict]:
+        return [
+            {
+                "title": "T",
+                "short_description": "d",
+                "date": FUTURE_DATE,
+                "time": "18:00",
+                "location_name": "Hall",
+                "ticket_link": "Регистрация по ссылке",
+                "event_type": "встреча",
+                "emoji": None,
+                "is_free": True,
+            }
+        ]
+
+    async def fake_create(title, text, source, html_text=None, media=None):
+        return "url", "p"
+
+    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.create_source_page", fake_create)
+
+    html = "Регистрация <a href='https://real'>по ссылке</a>"
+    results = await main.add_events_from_text(db, "text", None, html, None)
+    ev = results[0][0]
+    assert ev.ticket_link == "https://real"
+
+
+@pytest.mark.asyncio
 async def test_festival_expands_dates(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
@@ -1828,3 +1861,33 @@ async def test_month_links_future(tmp_path: Path, monkeypatch):
         if isinstance(n, dict) and n.get("tag") == "h4" and any("август" in str(c) for c in n.get("children", [])):
             found = True
     assert found
+
+
+@pytest.mark.asyncio
+async def test_build_daily_posts(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    today = date.today()
+    start = main.next_weekend_start(today)
+    async with db.get_session() as session:
+        session.add(
+            Event(
+                title="T",
+                description="d",
+                source_text="s",
+                date=today.isoformat(),
+                time="18:00",
+                location_name="Hall",
+            )
+        )
+        session.add(MonthPage(month=today.strftime("%Y-%m"), url="m1", path="p1"))
+        session.add(MonthPage(month=main.next_month(today.strftime("%Y-%m")), url="m2", path="p2"))
+        session.add(WeekendPage(start=start.isoformat(), url="w", path="wp"))
+        await session.commit()
+
+    posts = await main.build_daily_posts(db, timezone.utc)
+    assert posts
+    text, markup = posts[0]
+    assert "АНОНС" in text
+    assert markup.inline_keyboard[0]
