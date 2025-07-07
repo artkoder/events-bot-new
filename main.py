@@ -618,13 +618,34 @@ async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
     """Insert or update an event if a similar one exists.
 
     Returns (event, added_flag)."""
+
     stmt = select(Event).where(
         Event.date == new.date,
         Event.time == new.time,
-        Event.city == new.city,
     )
     candidates = (await session.execute(stmt)).scalars().all()
     for ev in candidates:
+        if (
+            ev.location_name.strip().lower() == new.location_name.strip().lower()
+            and (ev.location_address or "").strip().lower()
+            == (new.location_address or "").strip().lower()
+        ):
+            ev.title = new.title
+            ev.description = new.description
+            ev.festival = new.festival
+            ev.source_text = new.source_text
+            ev.location_name = new.location_name
+            ev.location_address = new.location_address
+            ev.ticket_price_min = new.ticket_price_min
+            ev.ticket_price_max = new.ticket_price_max
+            ev.ticket_link = new.ticket_link
+            ev.event_type = new.event_type
+            ev.emoji = new.emoji
+            ev.end_date = new.end_date
+            ev.is_free = new.is_free
+            await session.commit()
+            return ev, False
+
         title_ratio = SequenceMatcher(None, ev.title.lower(), new.title.lower()).ratio()
         loc_ratio = SequenceMatcher(None, ev.location_name.lower(), new.location_name.lower()).ratio()
         if title_ratio >= 0.6 and loc_ratio >= 0.6:
@@ -1504,11 +1525,15 @@ async def update_source_page(path: str, title: str, new_html: str):
         return
     tg = Telegraph(access_token=token)
     try:
+        logging.info("Fetching telegraph page %s", path)
         page = await asyncio.to_thread(
-            tg.get_page, path, return_content=True, return_html=True
+            tg.get_page, path, return_html=True
         )
-        html_content = page.get("content") or page.get("content_html") or ""
-        html_content += "<hr><p>" + new_html.replace("\n", "<br/>") + "</p>"
+        html_content = page.get("content_html") or ""
+        cleaned = re.sub(r"</?tg-emoji[^>]*>", "", new_html)
+        cleaned = cleaned.replace("\U0001F193\U0001F193\U0001F193\U0001F193", "Бесплатно")
+        html_content += "<hr><p>" + cleaned.replace("\n", "<br/>") + "</p>"
+        logging.info("Editing telegraph page %s", path)
         await asyncio.to_thread(
             tg.edit_page, path, title=title, html_content=html_content
         )

@@ -341,7 +341,7 @@ async def test_events_list(tmp_path: Path, monkeypatch):
             "date": 0,
             "chat": {"id": 1, "type": "private"},
             "from": {"id": 1, "is_bot": False, "first_name": "A"},
-            "text": "/addevent_raw Party|2025-07-16|18:00|Club",
+            "text": f"/addevent_raw Party|{FUTURE_DATE}|18:00|Club",
         }
     )
     await handle_add_event_raw(add_msg, db, bot)
