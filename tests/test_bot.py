@@ -1828,3 +1828,33 @@ async def test_month_links_future(tmp_path: Path, monkeypatch):
         if isinstance(n, dict) and n.get("tag") == "h4" and any("август" in str(c) for c in n.get("children", [])):
             found = True
     assert found
+
+
+@pytest.mark.asyncio
+async def test_build_daily_posts(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    today = date.today()
+    start = main.next_weekend_start(today)
+    async with db.get_session() as session:
+        session.add(
+            Event(
+                title="T",
+                description="d",
+                source_text="s",
+                date=today.isoformat(),
+                time="18:00",
+                location_name="Hall",
+            )
+        )
+        session.add(MonthPage(month=today.strftime("%Y-%m"), url="m1", path="p1"))
+        session.add(MonthPage(month=main.next_month(today.strftime("%Y-%m")), url="m2", path="p2"))
+        session.add(WeekendPage(start=start.isoformat(), url="w", path="wp"))
+        await session.commit()
+
+    posts = await main.build_daily_posts(db, timezone.utc)
+    assert posts
+    text, markup = posts[0]
+    assert "АНОНС" in text
+    assert markup.inline_keyboard[0]
