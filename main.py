@@ -1471,26 +1471,33 @@ def format_event_md(e: Event) -> str:
 
 
 def format_event_daily(e: Event) -> str:
+    """Return HTML-formatted text for a daily announcement item."""
     prefix = ""
     if is_recent(e):
         prefix += "\U0001F6A9 "
     emoji_part = ""
     if e.emoji and not e.title.strip().startswith(e.emoji):
         emoji_part = f"{e.emoji} "
-    lines = [f"{prefix}{emoji_part}{e.title}".strip(), e.description.strip()]
+
+    title = html.escape(e.title)
+    if e.source_post_url:
+        title = f'<a href="{html.escape(e.source_post_url)}">{title}</a>'
+    title = f"<b>{prefix}{emoji_part}{title}</b>".strip()
+    lines = [title, html.escape(e.description.strip())]
+
     if e.is_free:
         txt = "🟡 Бесплатно"
         if e.ticket_link:
-            txt += f" [по регистрации]({e.ticket_link})"
+            txt += f" <a href=\"{html.escape(e.ticket_link)}\">по регистрации</a>"
         lines.append(txt)
     elif e.ticket_link and (e.ticket_price_min is not None or e.ticket_price_max is not None):
         if e.ticket_price_max is not None and e.ticket_price_max != e.ticket_price_min:
             price = f"от {e.ticket_price_min} до {e.ticket_price_max}"
         else:
             price = str(e.ticket_price_min or e.ticket_price_max or "")
-        lines.append(f"[Билеты в источнике]({e.ticket_link}) {price}".strip())
+        lines.append(f'<a href="{html.escape(e.ticket_link)}">Билеты в источнике</a> {price}'.strip())
     elif e.ticket_link:
-        lines.append(f"[по регистрации]({e.ticket_link})")
+        lines.append(f'<a href="{html.escape(e.ticket_link)}">по регистрации</a>')
     else:
         price = ""
         if e.ticket_price_min is not None and e.ticket_price_max is not None and e.ticket_price_min != e.ticket_price_max:
@@ -1501,18 +1508,20 @@ def format_event_daily(e: Event) -> str:
             price = str(e.ticket_price_max)
         if price:
             lines.append(f"Билеты {price}")
-    loc = e.location_name
+
+    loc = html.escape(e.location_name)
     if e.location_address:
-        loc += f", {e.location_address}"
+        loc += f", {html.escape(e.location_address)}"
     if e.city:
-        loc += f", #{e.city}"
+        loc += f", #{html.escape(e.city)}"
     date_part = e.date.split("..", 1)[0]
     try:
         day = format_day_pretty(datetime.fromisoformat(date_part).date())
     except ValueError:
         logging.error("Invalid event date: %s", e.date)
         day = e.date
-    lines.append(f"_{day} {e.time} {loc}_")
+    lines.append(f"<i>{day} {e.time} {loc}</i>")
+
     return "\n".join(lines)
 
 
@@ -1869,17 +1878,17 @@ async def build_daily_posts(db: Database, tz: timezone) -> list[tuple[str, types
         mp_next = await session.get(MonthPage, next_month(cur_month))
 
     lines1 = [
-        f"АНОНС на {format_day_pretty(today)} {today.year} #ежедневныйанонс",
+        f"<b>АНОНС на {format_day_pretty(today)} {today.year} #ежедневныйанонс</b>",
         DAYS_OF_WEEK[today.weekday()],
         "",
-        "*_НЕ ПРОПУСТИТЕ СЕГОДНЯ_*",
+        "<b><i>НЕ ПРОПУСТИТЕ СЕГОДНЯ</i></b>",
     ]
     for e in events_today:
         lines1.append("")
         lines1.append(format_event_daily(e))
     section1 = "\n".join(lines1)
 
-    lines2 = ["*_ДОБАВИЛИ В АНОНС_*"]
+    lines2 = ["<b><i>ДОБАВИЛИ В АНОНС</i></b>"]
     for e in events_new:
         lines2.append("")
         lines2.append(format_event_daily(e))
@@ -1903,7 +1912,9 @@ async def build_daily_posts(db: Database, tz: timezone) -> list[tuple[str, types
                 url=mp_next.url,
             )
         )
-    markup = types.InlineKeyboardMarkup(inline_keyboard=[buttons]) if buttons else None
+    markup = None
+    if buttons:
+        markup = types.InlineKeyboardMarkup(inline_keyboard=[[b] for b in buttons])
 
     combined = section1 + "\n\n" + section2
     if len(combined) <= 4096:
@@ -1914,7 +1925,7 @@ async def build_daily_posts(db: Database, tz: timezone) -> list[tuple[str, types
 async def send_daily_announcement(db: Database, bot: Bot, channel_id: int, tz: timezone):
     posts = await build_daily_posts(db, tz)
     for text, markup in posts:
-        await bot.send_message(channel_id, text, reply_markup=markup, parse_mode="Markdown")
+        await bot.send_message(channel_id, text, reply_markup=markup, parse_mode="HTML")
     async with db.get_session() as session:
         ch = await session.get(Channel, channel_id)
         if ch:
