@@ -1179,3 +1179,63 @@ async def test_nav_future_has_prev(tmp_path: Path):
     assert len(row) == 2
     assert row[0].text == "\u25C0"
     assert row[1].text == "\u25B6"
+
+
+
+@pytest.mark.asyncio
+async def test_delete_event_updates_month(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async def fake_create(title, text, source, html_text=None, media=None):
+        return "url", "p"
+
+    called = {}
+
+    async def fake_sync(db_obj, month):
+        called["month"] = month
+
+    monkeypatch.setattr("main.create_source_page", fake_create)
+    monkeypatch.setattr("main.sync_month_page", fake_sync)
+
+    add_msg = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "/addevent_raw Party|2025-07-16|18:00|Club",
+        }
+    )
+
+    await handle_add_event_raw(add_msg, db, bot)
+
+    async with db.get_session() as session:
+        event = (await session.execute(select(Event))).scalars().first()
+
+    cb = types.CallbackQuery.model_validate(
+        {
+            "id": "c1",
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "chat_instance": "1",
+            "data": f"del:{event.id}:{event.date}",
+            "message": {
+                "message_id": 2,
+                "date": 0,
+                "chat": {"id": 1, "type": "private"},
+            },
+        }
+    ).as_(bot)
+    object.__setattr__(cb.message, "_bot", bot)
+    async def dummy_edit(*args, **kwargs):
+        return None
+    object.__setattr__(cb.message, "edit_text", dummy_edit)
+    async def dummy_answer(*args, **kwargs):
+        return None
+    object.__setattr__(cb, "answer", dummy_answer)
+
+    await process_request(cb, db, bot)
+
+    assert called.get("month") == "2025-07"
+

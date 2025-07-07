@@ -405,16 +405,23 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
             await session.commit()
             await callback.answer("Done")
     elif data.startswith("del:"):
-        _, eid, day = data.split(":")
+        _, eid, marker = data.split(":")
+        month = None
         async with db.get_session() as session:
             event = await session.get(Event, int(eid))
             if event:
+                month = event.date.split("..", 1)[0][:7]
                 await session.delete(event)
                 await session.commit()
+        if month:
+            await sync_month_page(db, month)
         offset = await get_tz_offset(db)
         tz = offset_to_timezone(offset)
-        target = datetime.strptime(day, "%Y-%m-%d").date()
-        text, markup = await build_events_message(db, target, tz)
+        if marker == "exh":
+            text, markup = await build_exhibitions_message(db, tz)
+        else:
+            target = datetime.strptime(marker, "%Y-%m-%d").date()
+            text, markup = await build_events_message(db, target, tz)
         await callback.message.edit_text(text, reply_markup=markup)
         await callback.answer("Deleted")
     elif data.startswith("edit:"):
@@ -443,6 +450,9 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                 event.is_free = not event.is_free
                 await session.commit()
                 logging.info("togglefree: event %s set to %s", eid, event.is_free)
+                month = event.date.split("..", 1)[0][:7]
+        if event:
+            await sync_month_page(db, month)
         async with db.get_session() as session:
             event = await session.get(Event, eid)
         if event:
@@ -456,6 +466,9 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                 event.is_free = True
                 await session.commit()
                 logging.info("markfree: event %s marked free", eid)
+                month = event.date.split("..", 1)[0][:7]
+        if event:
+            await sync_month_page(db, month)
         markup = types.InlineKeyboardMarkup(
             inline_keyboard=[
                 [
@@ -1416,6 +1429,7 @@ async def handle_edit_message(message: types.Message, db: Database, bot: Bot):
             await bot.send_message(message.chat.id, "Event not found")
             del editing_sessions[message.from_user.id]
             return
+        old_month = event.date.split("..", 1)[0][:7]
         if field in {"ticket_price_min", "ticket_price_max"}:
             try:
                 setattr(event, field, int(value))
@@ -1425,6 +1439,10 @@ async def handle_edit_message(message: types.Message, db: Database, bot: Bot):
         else:
             setattr(event, field, value)
         await session.commit()
+        new_month = event.date.split("..", 1)[0][:7]
+    await sync_month_page(db, old_month)
+    if new_month != old_month:
+        await sync_month_page(db, new_month)
     editing_sessions[message.from_user.id] = (eid, None)
     await show_edit_menu(message.from_user.id, event, bot)
 
