@@ -1997,3 +1997,22 @@ async def test_send_daily_preview_disabled(tmp_path: Path):
     await main.send_daily_announcement(db, bot, 1, timezone.utc)
     assert bot.messages
     assert bot.messages[-1][2].get("disable_web_page_preview") is True
+    async with db.get_session() as session:
+        ch = await session.get(main.Channel, 1)
+    assert ch.last_daily == date.today().isoformat()
+
+
+@pytest.mark.asyncio
+async def test_daily_test_send_no_record(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async with db.get_session() as session:
+        session.add(main.Channel(channel_id=1, title="ch", is_admin=True, daily_time="08:00"))
+        await session.commit()
+
+    await main.send_daily_announcement(db, bot, 1, timezone.utc, record=False)
+    async with db.get_session() as session:
+        ch = await session.get(main.Channel, 1)
+    assert ch.last_daily is None

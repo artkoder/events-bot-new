@@ -625,7 +625,7 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
         cid = int(data.split(":")[1])
         offset = await get_tz_offset(db)
         tz = offset_to_timezone(offset)
-        await send_daily_announcement(db, bot, cid, tz)
+        await send_daily_announcement(db, bot, cid, tz, record=False)
         await callback.answer("Sent")
 
 
@@ -1925,7 +1925,14 @@ async def build_daily_posts(db: Database, tz: timezone) -> list[tuple[str, types
     return [(section1, None), (section2, markup)]
 
 
-async def send_daily_announcement(db: Database, bot: Bot, channel_id: int, tz: timezone):
+async def send_daily_announcement(
+    db: Database,
+    bot: Bot,
+    channel_id: int,
+    tz: timezone,
+    *,
+    record: bool = True,
+):
     posts = await build_daily_posts(db, tz)
     for text, markup in posts:
         await bot.send_message(
@@ -1935,11 +1942,12 @@ async def send_daily_announcement(db: Database, bot: Bot, channel_id: int, tz: t
             parse_mode="HTML",
             disable_web_page_preview=True,
         )
-    async with db.get_session() as session:
-        ch = await session.get(Channel, channel_id)
-        if ch:
-            ch.last_daily = datetime.now(tz).date().isoformat()
-            await session.commit()
+    if record:
+        async with db.get_session() as session:
+            ch = await session.get(Channel, channel_id)
+            if ch:
+                ch.last_daily = datetime.now(tz).date().isoformat()
+                await session.commit()
 
 
 async def daily_scheduler(db: Database, bot: Bot):
