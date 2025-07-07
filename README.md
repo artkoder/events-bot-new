@@ -79,3 +79,10 @@ python main.py test_telegraph
 ```
 The command prints the created page URL and confirms that editing works.
 
+## Telegraph caching
+
+Telegram desktop may cache the first version of a Telegraph page and ignore
+edits. Opening the link in a browser or the mobile client shows the latest
+content. There is no reliable API to refresh the cached preview without creating
+a new page.
+
