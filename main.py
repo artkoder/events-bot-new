@@ -2527,6 +2527,12 @@ def create_app() -> web.Application:
     async def forward_wrapper(message: types.Message):
         await handle_forwarded(message, db, bot)
 
+    async def reg_dailychannels_wrapper(message: types.Message):
+        await handle_regdailychannels(message, db, bot)
+
+    async def dailychannels_wrapper(message: types.Message):
+        await handle_dailychannels(message, db, bot)
+
     dp.message.register(start_wrapper, Command("start"))
     dp.message.register(register_wrapper, Command("register"))
     dp.message.register(requests_wrapper, Command("requests"))
@@ -2556,8 +2562,8 @@ def create_app() -> web.Application:
     dp.message.register(list_events_wrapper, Command("events"))
     dp.message.register(set_channel_wrapper, Command("setchannel"))
     dp.message.register(channels_wrapper, Command("channels"))
-    dp.message.register(handle_regdailychannels, Command("regdailychannels"))
-    dp.message.register(handle_dailychannels, Command("dailychannels"))
+    dp.message.register(reg_dailychannels_wrapper, Command("regdailychannels"))
+    dp.message.register(dailychannels_wrapper, Command("dailychannels"))
     dp.message.register(exhibitions_wrapper, Command("exhibitions"))
     dp.message.register(pages_wrapper, Command("pages"))
     dp.message.register(edit_message_wrapper, lambda m: m.from_user.id in editing_sessions)
