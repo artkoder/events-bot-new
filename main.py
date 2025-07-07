@@ -1074,7 +1074,7 @@ async def add_events_from_text(
                     events_to_add.append(copy_e)
 
         for event in events_to_add:
-            if not event.ticket_link and html_text:
+            if (not is_valid_url(event.ticket_link)) and html_text:
                 extracted = extract_link_from_html(html_text)
                 if extracted:
                     event.ticket_link = extracted
@@ -1405,6 +1405,12 @@ def extract_link_from_html(html_text: str) -> str | None:
     if matches:
         return matches[0].group(1)
     return None
+
+
+def is_valid_url(text: str | None) -> bool:
+    if not text:
+        return False
+    return bool(re.match(r"https?://", text))
 
 
 def is_recent(e: Event) -> bool:
@@ -2333,19 +2339,27 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
         media,
     )
     for saved, added, lines, status in results:
-        markup = None
+        buttons = []
         if (
             not saved.is_free
             and saved.ticket_price_min is None
             and saved.ticket_price_max is None
         ):
-            markup = types.InlineKeyboardMarkup(
-                inline_keyboard=[[
-                    types.InlineKeyboardButton(
-                        text="\u2753 Это бесплатное мероприятие", callback_data=f"markfree:{saved.id}"
-                    )
-                ]]
+            buttons.append(
+                types.InlineKeyboardButton(
+                    text="\u2753 Это бесплатное мероприятие",
+                    callback_data=f"markfree:{saved.id}",
+                )
             )
+        buttons.append(
+            types.InlineKeyboardButton(
+                text="\U0001F6A9 Переключить на тихий режим",
+                callback_data=f"togglesilent:{saved.id}",
+            )
+        )
+        markup = (
+            types.InlineKeyboardMarkup(inline_keyboard=[buttons]) if buttons else None
+        )
         await bot.send_message(
             message.chat.id,
             f"Event {status}\n" + "\n".join(lines),
