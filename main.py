@@ -1596,19 +1596,7 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
                     cid = cid.lstrip("-")
                 link = f"https://t.me/c/{cid}/{msg_id}"
     media = None
-    if message.photo:
-        bio = BytesIO()
-        await bot.download(message.photo[-1].file_id, destination=bio)
-        media = (bio.getvalue(), "photo.jpg")
-    elif message.document and message.document.mime_type.startswith("image/"):
-        bio = BytesIO()
-        await bot.download(message.document.file_id, destination=bio)
-        name = message.document.file_name or "image.jpg"
-        media = (bio.getvalue(), name)
-    elif message.video:
-        bio = BytesIO()
-        await bot.download(message.video.file_id, destination=bio)
-        media = (bio.getvalue(), "video.mp4")
+    # Skip downloading attachments to avoid large file transfers
 
     results = await add_events_from_text(
         db,
