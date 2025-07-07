@@ -13,6 +13,7 @@ import re
 from telegraph import Telegraph
 from functools import partial
 import asyncio
+import contextlib
 import html
 from io import BytesIO
 import markdown
@@ -29,6 +30,8 @@ CONTENT_SEPARATOR = "🟧" * 10
 
 # user_id -> (event_id, field?) for editing session
 editing_sessions: dict[int, tuple[int, str | None]] = {}
+# user_id -> channel_id for daily time editing
+daily_time_sessions: dict[int, int] = {}
 
 
 class User(SQLModel, table=True):
@@ -55,6 +58,8 @@ class Channel(SQLModel, table=True):
     username: Optional[str] = None
     is_admin: bool = False
     is_registered: bool = False
+    daily_time: Optional[str] = None
+    last_daily: Optional[str] = None
 
 
 class Setting(SQLModel, table=True):
@@ -157,6 +162,17 @@ class Database:
             if "added_at" not in cols:
                 await conn.exec_driver_sql(
                     "ALTER TABLE event ADD COLUMN added_at VARCHAR"
+                )
+
+            result = await conn.exec_driver_sql("PRAGMA table_info(channel)")
+            cols = [r[1] for r in result.fetchall()]
+            if "daily_time" not in cols:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE channel ADD COLUMN daily_time VARCHAR"
+                )
+            if "last_daily" not in cols:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE channel ADD COLUMN last_daily VARCHAR"
                 )
 
     def get_session(self) -> AsyncSession:
@@ -582,6 +598,35 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                 await session.commit()
         await send_setchannel_list(callback.message, db, bot, edit=True)
         await callback.answer("Registered")
+    elif data.startswith("dailyset:"):
+        cid = int(data.split(":")[1])
+        async with db.get_session() as session:
+            ch = await session.get(Channel, cid)
+            if ch and ch.is_admin:
+                ch.daily_time = "08:00"
+                await session.commit()
+        await send_regdaily_list(callback.message, db, bot, edit=True)
+        await callback.answer("Registered")
+    elif data.startswith("dailyunset:"):
+        cid = int(data.split(":")[1])
+        async with db.get_session() as session:
+            ch = await session.get(Channel, cid)
+            if ch:
+                ch.daily_time = None
+                await session.commit()
+        await send_dailychannels_list(callback.message, db, bot, edit=True)
+        await callback.answer("Removed")
+    elif data.startswith("dailytime:"):
+        cid = int(data.split(":")[1])
+        daily_time_sessions[callback.from_user.id] = cid
+        await callback.message.answer("Send new time HH:MM")
+        await callback.answer()
+    elif data.startswith("dailysend:"):
+        cid = int(data.split(":")[1])
+        offset = await get_tz_offset(db)
+        tz = offset_to_timezone(offset)
+        await send_daily_announcement(db, bot, cid, tz)
+        await callback.answer("Sent")
 
 
 async def handle_tz(message: types.Message, db: Database, bot: Bot):
@@ -688,12 +733,77 @@ async def send_setchannel_list(message: types.Message, db: Database, bot: Bot, e
     else:
         await bot.send_message(message.chat.id, "\n".join(lines), reply_markup=markup)
 
+
+async def send_regdaily_list(message: types.Message, db: Database, bot: Bot, edit: bool = False):
+    async with db.get_session() as session:
+        user = await session.get(User, message.from_user.id)
+        if not user or not user.is_superadmin:
+            if not edit:
+                await bot.send_message(message.chat.id, "Not authorized")
+            return
+        result = await session.execute(
+            select(Channel).where(Channel.is_admin.is_(True), Channel.daily_time.is_(None))
+        )
+        channels = result.scalars().all()
+    lines = []
+    keyboard = []
+    for ch in channels:
+        name = ch.title or ch.username or str(ch.channel_id)
+        lines.append(name)
+        keyboard.append([
+            types.InlineKeyboardButton(text=name, callback_data=f"dailyset:{ch.channel_id}")
+        ])
+    if not lines:
+        lines.append("No channels")
+    markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard) if keyboard else None
+    if edit:
+        await message.edit_text("\n".join(lines), reply_markup=markup)
+    else:
+        await bot.send_message(message.chat.id, "\n".join(lines), reply_markup=markup)
+
+
+async def send_dailychannels_list(message: types.Message, db: Database, bot: Bot, edit: bool = False):
+    async with db.get_session() as session:
+        user = await session.get(User, message.from_user.id)
+        if not user or not user.is_superadmin:
+            if not edit:
+                await bot.send_message(message.chat.id, "Not authorized")
+            return
+        result = await session.execute(select(Channel).where(Channel.daily_time.is_not(None)))
+        channels = result.scalars().all()
+    lines = []
+    keyboard = []
+    for ch in channels:
+        name = ch.title or ch.username or str(ch.channel_id)
+        t = ch.daily_time or "?"
+        lines.append(f"{name} {t}")
+        keyboard.append([
+            types.InlineKeyboardButton(text="Cancel", callback_data=f"dailyunset:{ch.channel_id}"),
+            types.InlineKeyboardButton(text="Time", callback_data=f"dailytime:{ch.channel_id}"),
+            types.InlineKeyboardButton(text="Test", callback_data=f"dailysend:{ch.channel_id}"),
+        ])
+    if not lines:
+        lines.append("No channels")
+    markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard) if keyboard else None
+    if edit:
+        await message.edit_text("\n".join(lines), reply_markup=markup)
+    else:
+        await bot.send_message(message.chat.id, "\n".join(lines), reply_markup=markup)
+
 async def handle_set_channel(message: types.Message, db: Database, bot: Bot):
     await send_setchannel_list(message, db, bot, edit=False)
 
 
 async def handle_channels(message: types.Message, db: Database, bot: Bot):
     await send_channels_list(message, db, bot, edit=False)
+
+
+async def handle_regdailychannels(message: types.Message, db: Database, bot: Bot):
+    await send_regdaily_list(message, db, bot, edit=False)
+
+
+async def handle_dailychannels(message: types.Message, db: Database, bot: Bot):
+    await send_dailychannels_list(message, db, bot, edit=False)
 
 
 async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
@@ -964,7 +1074,7 @@ async def add_events_from_text(
                     events_to_add.append(copy_e)
 
         for event in events_to_add:
-            if not event.ticket_link and html_text:
+            if (not is_valid_url(event.ticket_link)) and html_text:
                 extracted = extract_link_from_html(html_text)
                 if extracted:
                     event.ticket_link = extracted
@@ -1184,6 +1294,16 @@ MONTHS = [
     "декабря",
 ]
 
+DAYS_OF_WEEK = [
+    "понедельник",
+    "вторник",
+    "среда",
+    "четверг",
+    "пятница",
+    "суббота",
+    "воскресенье",
+]
+
 
 def format_day_pretty(day: date) -> str:
     return f"{day.day} {MONTHS[day.month - 1]}"
@@ -1287,6 +1407,12 @@ def extract_link_from_html(html_text: str) -> str | None:
     return None
 
 
+def is_valid_url(text: str | None) -> bool:
+    if not text:
+        return False
+    return bool(re.match(r"https?://", text))
+
+
 def is_recent(e: Event) -> bool:
     if e.added_at is None:
         return False
@@ -1341,6 +1467,63 @@ def format_event_md(e: Event) -> str:
         logging.error("Invalid event date: %s", e.date)
         day = e.date
     lines.append(f"_{day} {e.time} {loc}_")
+    return "\n".join(lines)
+
+
+def format_event_daily(e: Event, highlight: bool = False) -> str:
+    """Return HTML-formatted text for a daily announcement item."""
+    prefix = ""
+    if highlight:
+        prefix += "\U0001F449 "
+    if is_recent(e):
+        prefix += "\U0001F6A9 "
+    emoji_part = ""
+    if e.emoji and not e.title.strip().startswith(e.emoji):
+        emoji_part = f"{e.emoji} "
+
+    title = html.escape(e.title)
+    if e.source_post_url:
+        title = f'<a href="{html.escape(e.source_post_url)}">{title}</a>'
+    title = f"<b>{prefix}{emoji_part}{title}</b>".strip()
+    lines = [title, html.escape(e.description.strip())]
+
+    if e.is_free:
+        txt = "🟡 Бесплатно"
+        if e.ticket_link:
+            txt += f" <a href=\"{html.escape(e.ticket_link)}\">по регистрации</a>"
+        lines.append(txt)
+    elif e.ticket_link and (e.ticket_price_min is not None or e.ticket_price_max is not None):
+        if e.ticket_price_max is not None and e.ticket_price_max != e.ticket_price_min:
+            price = f"от {e.ticket_price_min} до {e.ticket_price_max}"
+        else:
+            price = str(e.ticket_price_min or e.ticket_price_max or "")
+        lines.append(f'<a href="{html.escape(e.ticket_link)}">Билеты в источнике</a> {price}'.strip())
+    elif e.ticket_link:
+        lines.append(f'<a href="{html.escape(e.ticket_link)}">по регистрации</a>')
+    else:
+        price = ""
+        if e.ticket_price_min is not None and e.ticket_price_max is not None and e.ticket_price_min != e.ticket_price_max:
+            price = f"от {e.ticket_price_min} до {e.ticket_price_max}"
+        elif e.ticket_price_min is not None:
+            price = str(e.ticket_price_min)
+        elif e.ticket_price_max is not None:
+            price = str(e.ticket_price_max)
+        if price:
+            lines.append(f"Билеты {price}")
+
+    loc = html.escape(e.location_name)
+    if e.location_address:
+        loc += f", {html.escape(e.location_address)}"
+    if e.city:
+        loc += f", #{html.escape(e.city)}"
+    date_part = e.date.split("..", 1)[0]
+    try:
+        day = format_day_pretty(datetime.fromisoformat(date_part).date())
+    except ValueError:
+        logging.error("Invalid event date: %s", e.date)
+        day = e.date
+    lines.append(f"<i>{day} {e.time} {loc}</i>")
+
     return "\n".join(lines)
 
 
@@ -1471,6 +1654,7 @@ async def build_month_page_content(db: Database, month: str) -> tuple[str, list]
             (e.end_date and e.end_date >= today.isoformat())
             or (not e.end_date and e.date >= today.isoformat())
         )
+        and not (e.event_type == "выставка" and e.date < today.isoformat())
     ]
     exhibitions = [
         e
@@ -1581,6 +1765,16 @@ def weekend_start_for_date(d: date) -> date | None:
     return None
 
 
+def next_weekend_start(d: date) -> date:
+    w = weekend_start_for_date(d)
+    if w and d <= w:
+        return w
+    days_ahead = (5 - d.weekday()) % 7
+    if days_ahead == 0:
+        days_ahead = 7
+    return d + timedelta(days=days_ahead)
+
+
 async def build_weekend_page_content(db: Database, start: str) -> tuple[str, list]:
     saturday = date.fromisoformat(start)
     sunday = saturday + timedelta(days=1)
@@ -1658,6 +1852,111 @@ async def sync_weekend_page(db: Database, start: str):
             await session.commit()
         except Exception as e:
             logging.error("Failed to sync weekend page %s: %s", start, e)
+
+
+async def build_daily_posts(db: Database, tz: timezone) -> list[tuple[str, types.InlineKeyboardMarkup | None]]:
+    today = datetime.now(tz).date()
+    yesterday_utc = datetime.utcnow() - timedelta(days=1)
+    async with db.get_session() as session:
+        res_today = await session.execute(
+            select(Event).where(Event.date == today.isoformat(), Event.silent.is_(False)).order_by(Event.time)
+        )
+        events_today = res_today.scalars().all()
+        res_new = await session.execute(
+            select(Event)
+            .where(
+                Event.date > today.isoformat(),
+                Event.added_at.is_not(None),
+                Event.added_at >= yesterday_utc,
+                Event.silent.is_(False),
+            )
+            .order_by(Event.date, Event.time)
+        )
+        events_new = res_new.scalars().all()
+
+        w_start = next_weekend_start(today)
+        wpage = await session.get(WeekendPage, w_start.isoformat())
+        cur_month = today.strftime("%Y-%m")
+        mp_cur = await session.get(MonthPage, cur_month)
+        mp_next = await session.get(MonthPage, next_month(cur_month))
+
+    lines1 = [
+        f"<b>АНОНС на {format_day_pretty(today)} {today.year} #ежедневныйанонс</b>",
+        DAYS_OF_WEEK[today.weekday()],
+        "",
+        "<b><i>НЕ ПРОПУСТИТЕ СЕГОДНЯ</i></b>",
+    ]
+    for e in events_today:
+        lines1.append("")
+        lines1.append(format_event_daily(e, highlight=True))
+    section1 = "\n".join(lines1)
+
+    lines2 = ["<b><i>ДОБАВИЛИ В АНОНС</i></b>"]
+    for e in events_new:
+        lines2.append("")
+        lines2.append(format_event_daily(e))
+    section2 = "\n".join(lines2)
+
+    buttons = []
+    if wpage:
+        sunday = w_start + timedelta(days=1)
+        text = f"Мероприятия на выходные {w_start.day} {sunday.day} {MONTHS[w_start.month - 1]}"
+        buttons.append(types.InlineKeyboardButton(text=text, url=wpage.url))
+    if mp_cur:
+        buttons.append(
+            types.InlineKeyboardButton(
+                text=f"Мероприятия на {month_name_nominative(cur_month)}", url=mp_cur.url
+            )
+        )
+    if mp_next:
+        buttons.append(
+            types.InlineKeyboardButton(
+                text=f"Мероприятия на {month_name_nominative(next_month(cur_month))}",
+                url=mp_next.url,
+            )
+        )
+    markup = None
+    if buttons:
+        markup = types.InlineKeyboardMarkup(inline_keyboard=[[b] for b in buttons])
+
+    combined = section1 + "\n\n" + section2
+    if len(combined) <= 4096:
+        return [(combined, markup)]
+    return [(section1, None), (section2, markup)]
+
+
+async def send_daily_announcement(db: Database, bot: Bot, channel_id: int, tz: timezone):
+    posts = await build_daily_posts(db, tz)
+    for text, markup in posts:
+        await bot.send_message(
+            channel_id,
+            text,
+            reply_markup=markup,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+    async with db.get_session() as session:
+        ch = await session.get(Channel, channel_id)
+        if ch:
+            ch.last_daily = datetime.now(tz).date().isoformat()
+            await session.commit()
+
+
+async def daily_scheduler(db: Database, bot: Bot):
+    while True:
+        offset = await get_tz_offset(db)
+        tz = offset_to_timezone(offset)
+        now = datetime.now(tz)
+        async with db.get_session() as session:
+            result = await session.execute(select(Channel).where(Channel.daily_time.is_not(None)))
+            channels = result.scalars().all()
+        for ch in channels:
+            if ch.daily_time and (ch.last_daily or "") != now.date().isoformat() and now.strftime("%H:%M") >= ch.daily_time:
+                try:
+                    await send_daily_announcement(db, bot, ch.channel_id, tz)
+                except Exception as e:
+                    logging.error("daily send failed for %s: %s", ch.channel_id, e)
+        await asyncio.sleep(60)
 
 
 async def build_events_message(db: Database, target_date: date, tz: timezone):
@@ -1996,6 +2295,25 @@ async def handle_edit_message(message: types.Message, db: Database, bot: Bot):
     await show_edit_menu(message.from_user.id, event, bot)
 
 
+async def handle_daily_time_message(message: types.Message, db: Database, bot: Bot):
+    cid = daily_time_sessions.get(message.from_user.id)
+    if not cid:
+        return
+    value = (message.text or "").strip()
+    if not re.match(r"^\d{1,2}:\d{2}$", value):
+        await bot.send_message(message.chat.id, "Invalid time")
+        return
+    if len(value.split(":")[0]) == 1:
+        value = f"0{value}"
+    async with db.get_session() as session:
+        ch = await session.get(Channel, cid)
+        if ch:
+            ch.daily_time = value
+            await session.commit()
+    del daily_time_sessions[message.from_user.id]
+    await bot.send_message(message.chat.id, f"Time set to {value}")
+
+
 processed_media_groups: set[str] = set()
 
 
@@ -2041,19 +2359,27 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
         media,
     )
     for saved, added, lines, status in results:
-        markup = None
+        buttons = []
         if (
             not saved.is_free
             and saved.ticket_price_min is None
             and saved.ticket_price_max is None
         ):
-            markup = types.InlineKeyboardMarkup(
-                inline_keyboard=[[
-                    types.InlineKeyboardButton(
-                        text="\u2753 Это бесплатное мероприятие", callback_data=f"markfree:{saved.id}"
-                    )
-                ]]
+            buttons.append(
+                types.InlineKeyboardButton(
+                    text="\u2753 Это бесплатное мероприятие",
+                    callback_data=f"markfree:{saved.id}",
+                )
             )
+        buttons.append(
+            types.InlineKeyboardButton(
+                text="\U0001F6A9 Переключить на тихий режим",
+                callback_data=f"togglesilent:{saved.id}",
+            )
+        )
+        markup = (
+            types.InlineKeyboardMarkup(inline_keyboard=[buttons]) if buttons else None
+        )
         await bot.send_message(
             message.chat.id,
             f"Event {status}\n" + "\n".join(lines),
@@ -2215,8 +2541,17 @@ def create_app() -> web.Application:
     async def edit_message_wrapper(message: types.Message):
         await handle_edit_message(message, db, bot)
 
+    async def daily_time_wrapper(message: types.Message):
+        await handle_daily_time_message(message, db, bot)
+
     async def forward_wrapper(message: types.Message):
         await handle_forwarded(message, db, bot)
+
+    async def reg_dailychannels_wrapper(message: types.Message):
+        await handle_regdailychannels(message, db, bot)
+
+    async def dailychannels_wrapper(message: types.Message):
+        await handle_dailychannels(message, db, bot)
 
     dp.message.register(start_wrapper, Command("start"))
     dp.message.register(register_wrapper, Command("register"))
@@ -2232,6 +2567,10 @@ def create_app() -> web.Application:
         or c.data.startswith("editdone:")
         or c.data.startswith("unset:")
         or c.data.startswith("set:")
+        or c.data.startswith("dailyset:")
+        or c.data.startswith("dailyunset:")
+        or c.data.startswith("dailytime:")
+        or c.data.startswith("dailysend:")
         or c.data.startswith("togglefree:")
         or c.data.startswith("markfree:")
         or c.data.startswith("togglesilent:"),
@@ -2243,9 +2582,12 @@ def create_app() -> web.Application:
     dp.message.register(list_events_wrapper, Command("events"))
     dp.message.register(set_channel_wrapper, Command("setchannel"))
     dp.message.register(channels_wrapper, Command("channels"))
+    dp.message.register(reg_dailychannels_wrapper, Command("regdailychannels"))
+    dp.message.register(dailychannels_wrapper, Command("dailychannels"))
     dp.message.register(exhibitions_wrapper, Command("exhibitions"))
     dp.message.register(pages_wrapper, Command("pages"))
     dp.message.register(edit_message_wrapper, lambda m: m.from_user.id in editing_sessions)
+    dp.message.register(daily_time_wrapper, lambda m: m.from_user.id in daily_time_sessions)
     dp.message.register(forward_wrapper, lambda m: bool(m.forward_date))
     dp.my_chat_member.register(partial(handle_my_chat_member, db=db))
 
@@ -2262,9 +2604,14 @@ def create_app() -> web.Application:
             hook,
             allowed_updates=["message", "callback_query", "my_chat_member"],
         )
+        app['daily_task'] = asyncio.create_task(daily_scheduler(db, bot))
 
     async def on_shutdown(app: web.Application):
         await bot.session.close()
+        if 'daily_task' in app:
+            app['daily_task'].cancel()
+            with contextlib.suppress(Exception):
+                await app['daily_task']
 
     app.on_startup.append(on_startup)
     app.on_shutdown.append(on_shutdown)
