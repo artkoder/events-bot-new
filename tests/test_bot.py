@@ -1077,3 +1077,33 @@ def test_md_to_html_sanitizes():
     assert "tg-emoji" not in html
     assert "<h3>" in html
     assert "<br" in html
+
+
+@pytest.mark.asyncio
+async def test_sync_month_page_error(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.get_session() as session:
+        session.add(
+            Event(
+                title="Party",
+                description="desc",
+                source_text="t",
+                date="2025-07-16",
+                time="18:00",
+                location_name="Club",
+            )
+        )
+        session.add(main.MonthPage(month="2025-07", url="u", path="p"))
+        await session.commit()
+
+    class DummyTG:
+        def edit_page(self, *args, **kwargs):
+            raise Exception("fail")
+
+    monkeypatch.setattr("main.get_telegraph_token", lambda: "t")
+    monkeypatch.setattr("main.Telegraph", lambda access_token=None: DummyTG())
+
+    # Should not raise
+    await main.sync_month_page(db, "2025-07")

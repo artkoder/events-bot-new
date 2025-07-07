@@ -1082,13 +1082,24 @@ async def sync_month_page(db: Database, month: str):
     tg = Telegraph(access_token=token)
     async with db.get_session() as session:
         page = await session.get(MonthPage, month)
-        if page:
-            await asyncio.to_thread(tg.edit_page, page.path, title=title, html_content=html_text)
-        else:
-            data = await asyncio.to_thread(tg.create_page, title, html_content=html_text)
-            page = MonthPage(month=month, url=data.get("url"), path=data.get("path"))
-            session.add(page)
-        await session.commit()
+        try:
+            if page:
+                await asyncio.to_thread(
+                    tg.edit_page, page.path, title=title, html_content=html_text
+                )
+                logging.info("Edited month page %s", month)
+            else:
+                data = await asyncio.to_thread(
+                    tg.create_page, title, html_content=html_text
+                )
+                page = MonthPage(
+                    month=month, url=data.get("url"), path=data.get("path")
+                )
+                session.add(page)
+                logging.info("Created month page %s", month)
+            await session.commit()
+        except Exception as e:
+            logging.error("Failed to sync month page %s: %s", month, e)
 
 
 async def build_events_message(db: Database, target_date: date, tz: timezone):
