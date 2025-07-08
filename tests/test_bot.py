@@ -641,7 +641,57 @@ async def test_create_source_page_photo(monkeypatch):
     res = await main.create_source_page(
         "Title", "text", None, media=(b"img", "photo.jpg")
     )
-    assert res == ("https://telegra.ph/test", "test")
+    assert res == ("https://telegra.ph/test", "test", "disabled")
+
+
+@pytest.mark.asyncio
+async def test_create_source_page_photo_catbox(monkeypatch):
+    class DummyTG:
+        def __init__(self, access_token=None):
+            self.access_token = access_token
+
+        def create_page(self, title, html_content=None, **_):
+            assert "<img" in html_content
+            return {"url": "https://telegra.ph/test", "path": "test"}
+
+    class DummyResp:
+        status = 200
+
+        async def text(self):
+            return "https://files.catbox.moe/img.jpg"
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class DummySession:
+        def __init__(self, *_, **__):
+            self.post_called = False
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def post(self, url, data=None):
+            self.post_called = True
+            return DummyResp()
+
+    monkeypatch.setenv("TELEGRAPH_TOKEN", "t")
+    monkeypatch.setattr(
+        "main.Telegraph", lambda access_token=None: DummyTG(access_token)
+    )
+    monkeypatch.setattr(main, "ClientSession", DummySession)
+    monkeypatch.setattr(main, "CATBOX_ENABLED", True)
+    monkeypatch.setattr(main, "imghdr", type("X", (), {"what": lambda *a, **k: "jpeg"}))
+
+    res = await main.create_source_page(
+        "Title", "text", None, media=(b"img", "photo.jpg")
+    )
+    assert res == ("https://telegra.ph/test", "test", "ok")
 
 
 def test_get_telegraph_token_creates(tmp_path, monkeypatch):
