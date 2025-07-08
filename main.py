@@ -1118,6 +1118,7 @@ async def add_events_from_text(
 
     results: list[tuple[Event, bool, list[str], str]] = []
     first = True
+    links_iter = iter(extract_links_from_html(html_text) if html_text else [])
     for data in parsed:
         date_str = data.get("date", "") or ""
         end_date = data.get("end_date") or None
@@ -1170,8 +1171,11 @@ async def add_events_from_text(
                     events_to_add.append(copy_e)
 
         for event in events_to_add:
-            if (not is_valid_url(event.ticket_link)) and html_text:
-                extracted = extract_link_from_html(html_text)
+            if not is_valid_url(event.ticket_link):
+                try:
+                    extracted = next(links_iter)
+                except StopIteration:
+                    extracted = None
                 if extracted:
                     event.ticket_link = extracted
 
@@ -1542,6 +1546,39 @@ def extract_link_from_html(html_text: str) -> str | None:
     if matches:
         return matches[0].group(1)
     return None
+
+
+def extract_links_from_html(html_text: str) -> list[str]:
+    """Return all registration or ticket links in order of appearance."""
+    pattern = re.compile(
+        r"<a[^>]+href=['\"]([^'\"]+)['\"][^>]*>(.*?)</a>",
+        re.IGNORECASE | re.DOTALL,
+    )
+    matches = list(pattern.finditer(html_text))
+    lower_html = html_text.lower()
+
+    def qualifies(label: str, start: int, end: int) -> bool:
+        text = label.lower()
+        if any(word in text for word in ["регистра", "ticket", "билет"]):
+            return True
+        context_before = lower_html[max(0, start - 60) : start]
+        context_after = lower_html[end : end + 60]
+        return "регистра" in context_before or "регистра" in context_after or "билет" in context_before or "билет" in context_after
+
+    prioritized: list[tuple[int, str]] = []
+    others: list[tuple[int, str]] = []
+    for m in matches:
+        href, label = m.group(1), m.group(2)
+        if qualifies(label, *m.span()):
+            prioritized.append((m.start(), href))
+        else:
+            others.append((m.start(), href))
+
+    prioritized.sort(key=lambda x: x[0])
+    others.sort(key=lambda x: x[0])
+    links = [h for _, h in prioritized]
+    links.extend(h for _, h in others)
+    return links
 
 
 def is_valid_url(text: str | None) -> bool:
@@ -2197,24 +2234,24 @@ async def build_daily_posts(
     buttons = []
     if wpage:
         sunday = w_start + timedelta(days=1)
-        extra = f" +{weekend_count}" if weekend_count else ""
+        prefix = f"(+{weekend_count}) " if weekend_count else ""
         text = (
-            f"Мероприятия на выходные {w_start.day} {sunday.day} {MONTHS[w_start.month - 1]}{extra}"
+            f"{prefix}Мероприятия на выходные {w_start.day} {sunday.day} {MONTHS[w_start.month - 1]}"
         )
         buttons.append(types.InlineKeyboardButton(text=text, url=wpage.url))
     if mp_cur:
-        extra = f" +{cur_count}" if cur_count else ""
+        prefix = f"(+{cur_count}) " if cur_count else ""
         buttons.append(
             types.InlineKeyboardButton(
-                text=f"Мероприятия на {month_name_nominative(cur_month)}{extra}",
+                text=f"{prefix}Мероприятия на {month_name_nominative(cur_month)}",
                 url=mp_cur.url,
             )
         )
     if mp_next:
-        extra = f" +{next_count}" if next_count else ""
+        prefix = f"(+{next_count}) " if next_count else ""
         buttons.append(
             types.InlineKeyboardButton(
-                text=f"Мероприятия на {month_name_nominative(next_month(cur_month))}{extra}",
+                text=f"{prefix}Мероприятия на {month_name_nominative(next_month(cur_month))}",
                 url=mp_next.url,
             )
         )

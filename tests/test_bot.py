@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from aiogram import Bot, types
 from sqlmodel import select
-from datetime import date, timedelta, timezone
+from datetime import date, timedelta, timezone, datetime
 from typing import Any
 import main
 
@@ -2208,6 +2208,54 @@ async def test_ticket_link_overrides_invalid(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_multiple_ticket_links(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async def fake_parse(text: str) -> list[dict]:
+        return [
+            {
+                "title": "A",
+                "short_description": "d1",
+                "date": FUTURE_DATE,
+                "time": "18:00",
+                "location_name": "Hall",
+                "ticket_link": None,
+                "event_type": "концерт",
+                "emoji": None,
+                "is_free": True,
+            },
+            {
+                "title": "B",
+                "short_description": "d2",
+                "date": FUTURE_DATE,
+                "time": "19:00",
+                "location_name": "Hall",
+                "ticket_link": None,
+                "event_type": "концерт",
+                "emoji": None,
+                "is_free": True,
+            },
+        ]
+
+    async def fake_create(title, text, source, html_text=None, media=None):
+        return "url", "p"
+
+    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.create_source_page", fake_create)
+
+    html = (
+        "Билеты <a href='https://l1'>купить</a>" 
+        " и ещё один концерт. Билеты <a href='https://l2'>здесь</a>"
+    )
+
+    results = await main.add_events_from_text(db, "text", None, html, None)
+    assert results[0][0].ticket_link == "https://l1"
+    assert results[1][0].ticket_link == "https://l2"
+
+
+@pytest.mark.asyncio
 async def test_festival_expands_dates(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
@@ -2366,6 +2414,17 @@ async def test_build_daily_posts(tmp_path: Path):
                 silent=True,
             )
         )
+        session.add(
+            Event(
+                title="W",
+                description="weekend",
+                source_text="s3",
+                date=start.isoformat(),
+                time="12:00",
+                location_name="Hall",
+                added_at=datetime.utcnow(),
+            )
+        )
         session.add(MonthPage(month=today.strftime("%Y-%m"), url="m1", path="p1"))
         session.add(
             MonthPage(
@@ -2381,6 +2440,8 @@ async def test_build_daily_posts(tmp_path: Path):
     assert "АНОНС" in text
     assert markup.inline_keyboard[0]
     assert text.count("\U0001f449") == 2
+    first_btn = markup.inline_keyboard[0][0].text
+    assert first_btn.startswith("(+1)")
 
 
 @pytest.mark.asyncio
