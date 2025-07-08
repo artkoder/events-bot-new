@@ -53,6 +53,9 @@ class DummyBot(Bot):
     ):
         self.edits.append((chat_id, message_id, kwargs))
 
+    async def download(self, file_id, destination):
+        destination.write(b"img")
+
 
 class DummyChat:
     def __init__(self, id, title, username=None, type="channel"):
@@ -641,7 +644,57 @@ async def test_create_source_page_photo(monkeypatch):
     res = await main.create_source_page(
         "Title", "text", None, media=(b"img", "photo.jpg")
     )
-    assert res == ("https://telegra.ph/test", "test")
+    assert res == ("https://telegra.ph/test", "test", "disabled")
+
+
+@pytest.mark.asyncio
+async def test_create_source_page_photo_catbox(monkeypatch):
+    class DummyTG:
+        def __init__(self, access_token=None):
+            self.access_token = access_token
+
+        def create_page(self, title, html_content=None, **_):
+            assert "<img" in html_content
+            return {"url": "https://telegra.ph/test", "path": "test"}
+
+    class DummyResp:
+        status = 200
+
+        async def text(self):
+            return "https://files.catbox.moe/img.jpg"
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class DummySession:
+        def __init__(self, *_, **__):
+            self.post_called = False
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def post(self, url, data=None):
+            self.post_called = True
+            return DummyResp()
+
+    monkeypatch.setenv("TELEGRAPH_TOKEN", "t")
+    monkeypatch.setattr(
+        "main.Telegraph", lambda access_token=None: DummyTG(access_token)
+    )
+    monkeypatch.setattr(main, "ClientSession", DummySession)
+    monkeypatch.setattr(main, "CATBOX_ENABLED", True)
+    monkeypatch.setattr(main, "imghdr", type("X", (), {"what": lambda *a, **k: "jpeg"}))
+
+    res = await main.create_source_page(
+        "Title", "text", None, media=(b"img", "photo.jpg")
+    )
+    assert res == ("https://telegra.ph/test", "test", "ok")
 
 
 def test_get_telegraph_token_creates(tmp_path, monkeypatch):
@@ -662,6 +715,55 @@ def test_get_telegraph_token_env(monkeypatch):
     monkeypatch.setenv("TELEGRAPH_TOKEN", "zzz")
     token = get_telegraph_token()
     assert token == "zzz"
+
+
+@pytest.mark.asyncio
+async def test_addevent_caption_photo(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async def fake_parse(text: str) -> list[dict]:
+        return [
+            {
+                "title": "T",
+                "short_description": "d",
+                "date": FUTURE_DATE,
+                "time": "18:00",
+                "location_name": "Hall",
+            }
+        ]
+
+    captured = {}
+
+    async def fake_create(title, text, source, html_text=None, media=None):
+        captured["media"] = media
+        return "u", "p"
+
+    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.create_source_page", fake_create)
+
+    msg = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "caption": "/addevent text",
+            "photo": [
+                {
+                    "file_id": "f1",
+                    "file_unique_id": "u1",
+                    "width": 100,
+                    "height": 100,
+                }
+            ],
+        }
+    )
+
+    await handle_add_event(msg, db, bot)
+
+    assert captured["media"] == [(b"img", "photo.jpg")]
 
 
 @pytest.mark.asyncio
@@ -725,6 +827,77 @@ async def test_forward_add_event(tmp_path: Path, monkeypatch):
         ev = (await session.execute(select(Event))).scalars().first()
 
     assert ev.source_post_url == "https://t.me/chan/10"
+
+
+@pytest.mark.asyncio
+async def test_forward_add_event_photo(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async def fake_parse(text: str) -> list[dict]:
+        return [
+            {
+                "title": "Forwarded",
+                "short_description": "desc",
+                "date": FUTURE_DATE,
+                "time": "18:00",
+                "location_name": "Club",
+            }
+        ]
+
+    captured = {}
+
+    async def fake_add(db2, text, source_link, html_text=None, media=None):
+        captured["media"] = media
+        return []
+
+    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.add_events_from_text", fake_add)
+
+    start_msg = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "/start",
+        }
+    )
+    await handle_start(start_msg, db, bot)
+
+    upd = DummyUpdate(-100123, "Chan")
+    await main.handle_my_chat_member(upd, db)
+
+    async with db.get_session() as session:
+        ch = await session.get(main.Channel, -100123)
+        ch.is_registered = True
+        await session.commit()
+
+    fwd_msg = types.Message.model_validate(
+        {
+            "message_id": 3,
+            "date": 0,
+            "forward_date": 0,
+            "forward_from_chat": {"id": -100123, "type": "channel", "username": "chan"},
+            "forward_from_message_id": 10,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "Some text",
+            "photo": [
+                {
+                    "file_id": "f2",
+                    "file_unique_id": "u2",
+                    "width": 50,
+                    "height": 50,
+                }
+            ],
+        }
+    )
+
+    await main.handle_forwarded(fwd_msg, db, bot)
+
+    assert captured["media"] == [(b"img", "photo.jpg")]
 
 
 @pytest.mark.asyncio
