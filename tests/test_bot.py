@@ -2610,6 +2610,46 @@ async def test_past_exhibition_not_listed_in_events(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_exhibition_auto_year_end(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async def fake_parse(text: str) -> list[dict]:
+        return [
+            {
+                "title": "AutoExpo",
+                "short_description": "d",
+                "location_name": "Hall",
+                "event_type": "выставка",
+            }
+        ]
+
+    async def fake_create(*args, **kwargs):
+        return "u", "p"
+
+    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.create_source_page", fake_create)
+
+    results = await main.add_events_from_text(db, "text", None, None, None)
+    assert results
+    ev = results[0][0]
+    today = date.today()
+    assert ev.date == today.isoformat()
+    assert ev.end_date == date(today.year, 12, 31).isoformat()
+
+    _, content = await main.build_month_page_content(db, today.strftime("%Y-%m"))
+    found = False
+    exh_section = False
+    for n in content:
+        if n.get("tag") == "h3" and "Постоянные" in "".join(n.get("children", [])):
+            exh_section = True
+        elif exh_section and isinstance(n, dict) and n.get("tag") == "h4":
+            if any("AutoExpo" in str(c) for c in n.get("children", [])):
+                found = True
+    assert found
+
+
+@pytest.mark.asyncio
 async def test_month_links_future(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()

@@ -1205,6 +1205,14 @@ async def add_events_from_text(
             source_post_url=source_link,
         )
 
+        if base_event.event_type == "выставка" and not base_event.end_date:
+            try:
+                start_dt = date.fromisoformat(base_event.date)
+            except ValueError:
+                start_dt = date.today()
+                base_event.date = start_dt.isoformat()
+            base_event.end_date = date(start_dt.year, 12, 31).isoformat()
+
         events_to_add = [base_event]
         if (
             base_event.event_type != "выставка"
