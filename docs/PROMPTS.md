@@ -15,7 +15,7 @@ festival          - festival name or empty string
 date              - single date or range (YYYY-MM-DD or YYYY-MM-DD..YYYY-MM-DD)
 time              - start time or time range (HH:MM or HH:MM..HH:MM)
 location_name     - venue name, use standard directory form if known
-location_address  - street address if present
+location_address  - street address if present (omit the city name)
 city              - city name
 ticket_price_min  - minimum ticket price as integer or null
 ticket_price_max  - maximum ticket price as integer or null
