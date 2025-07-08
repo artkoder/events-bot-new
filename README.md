@@ -70,7 +70,7 @@ browse upcoming announcements.
 
 Each added event stores the original announcement text in a Telegraph page. The link is shown when the event is added and in the `/events` listing. Events may also contain ticket prices and a purchase link. Use the edit button in `/events` to change any field.
 Links from the announcement text are preserved on the Telegraph page whenever possible so readers can follow the original sources.
-If the original message contains a photo or video, the first media file is uploaded to Telegraph and shown at the top of the page.
+If the original message contains photos (under 5&nbsp;MB), they are uploaded to Catbox and displayed on the Telegraph page.
 Run `/exhibitions` to see all ongoing exhibitions (events with a start and end date).
 
 To verify Telegraph access manually run:
