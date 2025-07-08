@@ -1943,7 +1943,12 @@ async def build_weekend_page_content(db: Database, start: str) -> tuple[str, lis
         for idx, w in enumerate(future_weekends):
             s = date.fromisoformat(w.start)
             label = format_weekend_range(s)
-            nav_children.append({"tag": "a", "attrs": {"href": w.url}, "children": [label]})
+            if w.start == start:
+                nav_children.append(label)
+            else:
+                nav_children.append(
+                    {"tag": "a", "attrs": {"href": w.url}, "children": [label]}
+                )
             if idx < len(future_weekends) - 1:
                 nav_children.append(" ")
         weekend_nav = [{"tag": "br"}, {"tag": "h4", "children": nav_children}]

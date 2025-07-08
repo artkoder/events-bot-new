@@ -1329,7 +1329,7 @@ async def test_weekend_nav_and_exhibitions(tmp_path: Path):
         await session.commit()
 
     _, content = await main.build_weekend_page_content(db, saturday.isoformat())
-    nav_links = [
+    nav_blocks = [
         n
         for n in content
         if n.get("tag") == "h4"
@@ -1338,7 +1338,9 @@ async def test_weekend_nav_and_exhibitions(tmp_path: Path):
             for c in n.get("children", [])
         )
     ]
-    assert len(nav_links) == 2
+    assert len(nav_blocks) == 2
+    first_block_children = nav_blocks[0]["children"]
+    assert not isinstance(first_block_children[0], dict)
 
     month_link_present = any(
         n.get("tag") == "h4"
@@ -1357,138 +1359,6 @@ async def test_weekend_nav_and_exhibitions(tmp_path: Path):
     )
     assert content[idx_exh - 1].get("tag") == "p"
     assert content[idx_exh - 2].get("tag") == "br"
-
-
-@pytest.mark.asyncio
-async def test_sync_weekend_page_first_creation_includes_nav(
-    tmp_path: Path, monkeypatch
-):
-    db = Database(str(tmp_path / "db.sqlite"))
-    await db.init()
-
-    saturday = date(2025, 7, 12)
-    next_sat = saturday + timedelta(days=7)
-    updates: list[list[dict]] = []
-
-    class DummyTG:
-        def create_page(self, title, content):
-            return {"url": "u1", "path": "p1"}
-
-        def edit_page(self, path, title=None, content=None):
-            updates.append(content)
-
-    monkeypatch.setattr("main.get_telegraph_token", lambda: "t")
-    monkeypatch.setattr("main.Telegraph", lambda access_token=None: DummyTG())
-
-    async with db.get_session() as session:
-        session.add(WeekendPage(start=next_sat.isoformat(), url="u2", path="p2"))
-        session.add(MonthPage(month="2025-07", url="m1", path="mp1"))
-        session.add(MonthPage(month="2025-08", url="m2", path="mp2"))
-        session.add(
-            Event(
-                title="Expo",
-                description="d",
-                source_text="s",
-                date=(saturday - timedelta(days=1)).isoformat(),
-                end_date=(saturday + timedelta(days=10)).isoformat(),
-                time="10:00",
-                location_name="Hall",
-                event_type="выставка",
-            )
-        )
-        await session.commit()
-
-    await main.sync_weekend_page(db, saturday.isoformat())
-    assert updates
-    content = updates[0]
-    found_weekend = any(
-        isinstance(n, dict)
-        and n.get("tag") == "h4"
-        and any(
-            isinstance(c, dict) and c.get("attrs", {}).get("href") == "u2"
-            for c in n.get("children", [])
-        )
-        for n in content
-    )
-    found_exh = any(
-        isinstance(n, dict)
-        and n.get("tag") == "h3"
-        and "Постоянные" in "".join(n.get("children", []))
-        for n in content
-    )
-    assert found_weekend
-    assert found_exh
-
-
-@pytest.mark.asyncio
-async def test_sync_weekend_page_updates_other_pages(tmp_path: Path, monkeypatch):
-    db = Database(str(tmp_path / "db.sqlite"))
-    await db.init()
-
-    saturday = date(2025, 7, 12)
-    next_sat = saturday + timedelta(days=7)
-
-    edits: list[tuple[str, str]] = []
-
-    class DummyTG:
-        def create_page(self, title, content):
-            edits.append(("create", "p1"))
-            return {"url": "u1", "path": "p1"}
-
-        def edit_page(self, path, title=None, content=None):
-            edits.append(("edit", path))
-
-    monkeypatch.setattr("main.get_telegraph_token", lambda: "t")
-    monkeypatch.setattr("main.Telegraph", lambda access_token=None: DummyTG())
-
-    async with db.get_session() as session:
-        session.add(WeekendPage(start=next_sat.isoformat(), url="u2", path="p2"))
-        await session.commit()
-
-    await main.sync_weekend_page(db, saturday.isoformat())
-
-    assert ("edit", "p2") in edits
-
-
-@pytest.mark.asyncio
-async def test_weekend_nav_and_exhibitions(tmp_path: Path):
-    db = Database(str(tmp_path / "db.sqlite"))
-    await db.init()
-
-    saturday = date(2025, 7, 12)
-    next_sat = saturday + timedelta(days=7)
-    async with db.get_session() as session:
-        session.add(WeekendPage(start=saturday.isoformat(), url="u1", path="p1"))
-        session.add(WeekendPage(start=next_sat.isoformat(), url="u2", path="p2"))
-        session.add(MonthPage(month="2025-07", url="m1", path="mp1"))
-        session.add(MonthPage(month="2025-08", url="m2", path="mp2"))
-        session.add(
-            Event(
-                title="Expo",
-                description="d",
-                source_text="s",
-                date=(saturday - timedelta(days=1)).isoformat(),
-                end_date=(saturday + timedelta(days=10)).isoformat(),
-                time="10:00",
-                location_name="Hall",
-                event_type="выставка",
-            )
-        )
-        await session.commit()
-
-    _, content = await main.build_weekend_page_content(db, saturday.isoformat())
-    found_weekend = False
-    found_exh = False
-    for n in content:
-        if n.get("tag") == "h4" and any(
-            isinstance(c, dict) and c.get("attrs", {}).get("href") == "u2"
-            for c in n.get("children", [])
-        ):
-            found_weekend = True
-        if n.get("tag") == "h3" and "Постоянные" in "".join(n.get("children", [])):
-            found_exh = True
-    assert found_weekend
-    assert found_exh
 
 
 @pytest.mark.asyncio
