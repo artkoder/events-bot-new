@@ -787,6 +787,49 @@ async def test_addevent_caption_photo(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_addevent_strips_command(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async def fake_parse(text: str) -> list[dict]:
+        return [
+            {
+                "title": "T",
+                "short_description": "d",
+                "date": FUTURE_DATE,
+                "time": "18:00",
+                "location_name": "Hall",
+            }
+        ]
+
+    captured = {}
+
+    async def fake_create(title, text, source, html_text=None, media=None):
+        captured["text"] = text
+        captured["html"] = html_text
+        return "u", "p"
+
+    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.create_source_page", fake_create)
+
+    msg = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "/addevent\nSome info",
+        }
+    )
+
+    await handle_add_event(msg, db, bot)
+
+    assert captured["text"] == "Some info"
+    assert captured["html"] == "Some info"
+
+
+@pytest.mark.asyncio
 async def test_forward_add_event(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()

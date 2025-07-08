@@ -1301,11 +1301,14 @@ async def handle_add_event(message: types.Message, db: Database, bot: Bot):
         return
     images = await extract_images(message, bot)
     media = images if images else None
+    html_text = message.html_text or message.caption_html
+    if html_text and html_text.startswith("/addevent"):
+        html_text = html_text[len("/addevent") :].lstrip()
     results = await add_events_from_text(
         db,
         parts[1],
         None,
-        message.html_text or message.caption_html,
+        html_text,
         media,
     )
     if not results:
@@ -1361,11 +1364,14 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
     async with db.get_session() as session:
         event, added = await upsert_event(session, event)
 
+    html_text = message.html_text or message.caption_html
+    if html_text and html_text.startswith("/addevent_raw"):
+        html_text = html_text[len("/addevent_raw") :].lstrip()
     res = await create_source_page(
         event.title or "Event",
         event.source_text,
         None,
-        message.html_text or message.caption_html or event.source_text,
+        html_text or event.source_text,
         media,
     )
     upload_info = ""
