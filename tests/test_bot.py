@@ -8,6 +8,7 @@ import pytest
 from aiogram import Bot, types
 from sqlmodel import select
 from datetime import date, timedelta, timezone
+from typing import Any
 import main
 
 from main import (
@@ -44,7 +45,7 @@ class DummyBot(Bot):
         self.edits = []
 
     async def send_message(self, chat_id, text, **kwargs):
-        self.messages.append((chat_id, text))
+        self.messages.append((chat_id, text, kwargs))
 
     async def edit_message_reply_markup(
         self, chat_id: int | None = None, message_id: int | None = None, **kwargs
@@ -348,6 +349,50 @@ async def test_edit_event(tmp_path: Path, monkeypatch):
     async with db.get_session() as session:
         updated = await session.get(Event, event.id)
     assert updated.title == "New Title"
+
+
+@pytest.mark.asyncio
+async def test_edit_remove_ticket_link(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async def fake_create(title, text, source, html_text=None, media=None):
+        return "https://t.me/test", "path"
+
+    monkeypatch.setattr("main.create_source_page", fake_create)
+
+    msg = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "M"},
+            "text": "/addevent_raw Party|2025-07-16|18:00|Club",
+        }
+    )
+    await handle_add_event_raw(msg, db, bot)
+
+    async with db.get_session() as session:
+        event = (await session.execute(select(Event))).scalars().first()
+        event.ticket_link = "https://reg"
+        await session.commit()
+
+    editing_sessions[1] = (event.id, "ticket_link")
+    edit_msg = types.Message.model_validate(
+        {
+            "message_id": 2,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "M"},
+            "text": "-",
+        }
+    )
+    await handle_edit_message(edit_msg, db, bot)
+
+    async with db.get_session() as session:
+        updated = await session.get(Event, event.id)
+    assert updated.ticket_link is None
 
 
 @pytest.mark.asyncio
@@ -1204,6 +1249,105 @@ async def test_build_weekend_page_content(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_weekend_nav_and_exhibitions(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    saturday = date(2025, 7, 12)
+    next_sat = saturday + timedelta(days=7)
+    async with db.get_session() as session:
+        session.add(WeekendPage(start=saturday.isoformat(), url="u1", path="p1"))
+        session.add(WeekendPage(start=next_sat.isoformat(), url="u2", path="p2"))
+        session.add(MonthPage(month="2025-07", url="m1", path="mp1"))
+        session.add(MonthPage(month="2025-08", url="m2", path="mp2"))
+        session.add(
+            Event(
+                title="Expo",
+                description="d",
+                source_text="s",
+                date=(saturday - timedelta(days=1)).isoformat(),
+                end_date=(saturday + timedelta(days=10)).isoformat(),
+                time="10:00",
+                location_name="Hall",
+                event_type="выставка",
+            )
+        )
+        await session.commit()
+
+    _, content = await main.build_weekend_page_content(db, saturday.isoformat())
+    found_weekend = False
+    found_exh = False
+    for n in content:
+        if n.get("tag") == "h4" and any(
+            isinstance(c, dict) and c.get("attrs", {}).get("href") == "u2" for c in n.get("children", [])
+        ):
+            found_weekend = True
+        if n.get("tag") == "h3" and "Постоянные" in "".join(n.get("children", [])):
+            found_exh = True
+    assert found_weekend
+    assert found_exh
+
+
+@pytest.mark.asyncio
+async def test_sync_weekend_page_first_creation_includes_nav(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    saturday = date(2025, 7, 12)
+    next_sat = saturday + timedelta(days=7)
+    updates: dict[str, Any] = {}
+
+    class DummyTG:
+        def create_page(self, title, content):
+            updates["create"] = content
+            return {"url": "u1", "path": "p1"}
+
+        def edit_page(self, path, title=None, content=None):
+            updates["edit"] = content
+
+    monkeypatch.setattr("main.get_telegraph_token", lambda: "t")
+    monkeypatch.setattr("main.Telegraph", lambda access_token=None: DummyTG())
+
+    async with db.get_session() as session:
+        session.add(WeekendPage(start=next_sat.isoformat(), url="u2", path="p2"))
+        session.add(MonthPage(month="2025-07", url="m1", path="mp1"))
+        session.add(MonthPage(month="2025-08", url="m2", path="mp2"))
+        session.add(
+            Event(
+                title="Expo",
+                description="d",
+                source_text="s",
+                date=(saturday - timedelta(days=1)).isoformat(),
+                end_date=(saturday + timedelta(days=10)).isoformat(),
+                time="10:00",
+                location_name="Hall",
+                event_type="выставка",
+            )
+        )
+        await session.commit()
+
+    await main.sync_weekend_page(db, saturday.isoformat())
+    content = updates.get("edit")
+    assert content is not None
+    found_weekend = any(
+        isinstance(n, dict)
+        and n.get("tag") == "h4"
+        and any(
+            isinstance(c, dict) and c.get("attrs", {}).get("href") == "u2" for c in n.get("children", [])
+        )
+        for n in content
+    )
+    found_exh = any(
+        isinstance(n, dict)
+        and n.get("tag") == "h3"
+        and "Постоянные" in "".join(n.get("children", []))
+        for n in content
+    )
+    assert found_weekend
+    assert found_exh
+
+
+@pytest.mark.asyncio
 async def test_missing_added_at(tmp_path: Path):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
@@ -1743,6 +1887,39 @@ async def test_extract_ticket_link_near_word(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_ticket_link_overrides_invalid(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async def fake_parse(text: str) -> list[dict]:
+        return [
+            {
+                "title": "T",
+                "short_description": "d",
+                "date": FUTURE_DATE,
+                "time": "18:00",
+                "location_name": "Hall",
+                "ticket_link": "Регистрация по ссылке",
+                "event_type": "встреча",
+                "emoji": None,
+                "is_free": True,
+            }
+        ]
+
+    async def fake_create(title, text, source, html_text=None, media=None):
+        return "url", "p"
+
+    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.create_source_page", fake_create)
+
+    html = "Регистрация <a href='https://real'>по ссылке</a>"
+    results = await main.add_events_from_text(db, "text", None, html, None)
+    ev = results[0][0]
+    assert ev.ticket_link == "https://real"
+
+
+@pytest.mark.asyncio
 async def test_festival_expands_dates(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
@@ -1806,6 +1983,40 @@ async def test_exhibition_future_not_listed(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_past_exhibition_not_listed_in_events(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    past_start = (date.today() - timedelta(days=6)).isoformat()
+    future_end = (date.today() + timedelta(days=6)).isoformat()
+    async with db.get_session() as session:
+        session.add(
+            Event(
+                title="PastExpo",
+                description="d",
+                source_text="s",
+                date=past_start,
+                end_date=future_end,
+                time="10:00",
+                location_name="Hall",
+                event_type="выставка",
+            )
+        )
+        await session.commit()
+
+    _, content = await main.build_month_page_content(db, past_start[:7])
+    before_exh = True
+    found = False
+    for n in content:
+        if n.get("tag") == "h3" and "Постоянные" in "".join(n.get("children", [])):
+            before_exh = False
+        if before_exh and isinstance(n, dict) and n.get("tag") == "h4":
+            if any("PastExpo" in str(c) for c in n.get("children", [])):
+                found = True
+    assert not found
+
+
+@pytest.mark.asyncio
 async def test_month_links_future(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
@@ -1828,3 +2039,91 @@ async def test_month_links_future(tmp_path: Path, monkeypatch):
         if isinstance(n, dict) and n.get("tag") == "h4" and any("август" in str(c) for c in n.get("children", [])):
             found = True
     assert found
+
+
+@pytest.mark.asyncio
+async def test_build_daily_posts(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    today = date.today()
+    start = main.next_weekend_start(today)
+    async with db.get_session() as session:
+        session.add(
+            Event(
+                title="T",
+                description="d",
+                source_text="s",
+                date=today.isoformat(),
+                time="18:00",
+                location_name="Hall",
+            )
+        )
+        session.add(
+            Event(
+                title="S",
+                description="d2",
+                source_text="s2",
+                date=today.isoformat(),
+                time="19:00",
+                location_name="Hall",
+                silent=True,
+            )
+        )
+        session.add(MonthPage(month=today.strftime("%Y-%m"), url="m1", path="p1"))
+        session.add(MonthPage(month=main.next_month(today.strftime("%Y-%m")), url="m2", path="p2"))
+        session.add(WeekendPage(start=start.isoformat(), url="w", path="wp"))
+        await session.commit()
+
+    posts = await main.build_daily_posts(db, timezone.utc)
+    assert posts
+    text, markup = posts[0]
+    assert "АНОНС" in text
+    assert markup.inline_keyboard[0]
+    assert text.count("\U0001F449") == 2
+
+
+@pytest.mark.asyncio
+async def test_send_daily_preview_disabled(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async with db.get_session() as session:
+        session.add(
+            main.Channel(channel_id=1, title="ch", is_admin=True, daily_time="08:00")
+        )
+        session.add(
+            Event(
+                title="T",
+                description="d",
+                source_text="s",
+                date=date.today().isoformat(),
+                time="18:00",
+                location_name="Hall",
+            )
+        )
+        await session.commit()
+
+    await main.send_daily_announcement(db, bot, 1, timezone.utc)
+    assert bot.messages
+    assert bot.messages[-1][2].get("disable_web_page_preview") is True
+    async with db.get_session() as session:
+        ch = await session.get(main.Channel, 1)
+    assert ch.last_daily == date.today().isoformat()
+
+
+@pytest.mark.asyncio
+async def test_daily_test_send_no_record(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async with db.get_session() as session:
+        session.add(main.Channel(channel_id=1, title="ch", is_admin=True, daily_time="08:00"))
+        await session.commit()
+
+    await main.send_daily_announcement(db, bot, 1, timezone.utc, record=False)
+    async with db.get_session() as session:
+        ch = await session.get(main.Channel, 1)
+    assert ch.last_daily is None
