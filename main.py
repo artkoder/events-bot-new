@@ -268,6 +268,18 @@ def normalize_hashtag_dates(text: str) -> str:
     return re.sub(pattern, lambda m: f"{m.group(1)} {m.group(2)}", text)
 
 
+def strip_city_from_address(address: str | None, city: str | None) -> str | None:
+    """Remove the city name from the end of the address if duplicated."""
+    if not address or not city:
+        return address
+    city_clean = city.lstrip("#").strip().lower()
+    addr = address.strip()
+    if addr.lower().endswith(city_clean):
+        addr = re.sub(r",?\s*#?%s$" % re.escape(city_clean), "", addr, flags=re.IGNORECASE)
+        addr = addr.rstrip(", ")
+    return addr
+
+
 async def parse_event_via_4o(text: str) -> list[dict]:
     token = os.getenv("FOUR_O_TOKEN")
     if not token:
@@ -1138,6 +1150,10 @@ async def add_events_from_text(
             if not end_date:
                 end_date = maybe_end
 
+        addr = data.get("location_address")
+        city = data.get("city")
+        addr = strip_city_from_address(addr, city)
+
         base_event = Event(
             title=data.get("title", ""),
             description=data.get("short_description", ""),
@@ -1145,8 +1161,8 @@ async def add_events_from_text(
             date=date_str,
             time=data.get("time", ""),
             location_name=data.get("location_name", ""),
-            location_address=data.get("location_address"),
-            city=data.get("city"),
+            location_address=addr,
+            city=city,
             ticket_price_min=data.get("ticket_price_min"),
             ticket_price_max=data.get("ticket_price_max"),
             ticket_link=data.get("ticket_link"),
@@ -1646,8 +1662,11 @@ def format_event_md(e: Event) -> str:
         prefix = f"{cam} " if cam else ""
         lines.append(f"{prefix}[подробнее]({e.telegraph_url})")
     loc = e.location_name
-    if e.location_address:
-        loc += f", {e.location_address}"
+    addr = e.location_address
+    if addr and e.city:
+        addr = strip_city_from_address(addr, e.city)
+    if addr:
+        loc += f", {addr}"
     if e.city:
         loc += f", #{e.city}"
     date_part = e.date.split("..", 1)[0]
@@ -1710,8 +1729,11 @@ def format_event_daily(e: Event, highlight: bool = False) -> str:
             lines.append(f"Билеты {price}")
 
     loc = html.escape(e.location_name)
-    if e.location_address:
-        loc += f", {html.escape(e.location_address)}"
+    addr = e.location_address
+    if addr and e.city:
+        addr = strip_city_from_address(addr, e.city)
+    if addr:
+        loc += f", {html.escape(addr)}"
     if e.city:
         loc += f", #{html.escape(e.city)}"
     date_part = e.date.split("..", 1)[0]
@@ -1755,8 +1777,11 @@ def format_exhibition_md(e: Event) -> str:
         prefix = f"{cam} " if cam else ""
         lines.append(f"{prefix}[подробнее]({e.telegraph_url})")
     loc = e.location_name
-    if e.location_address:
-        loc += f", {e.location_address}"
+    addr = e.location_address
+    if addr and e.city:
+        addr = strip_city_from_address(addr, e.city)
+    if addr:
+        loc += f", {addr}"
     if e.city:
         loc += f", #{e.city}"
     if e.end_date:

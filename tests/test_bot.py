@@ -1819,6 +1819,21 @@ def test_registration_link_formatting():
     assert "Бесплатно [по регистрации](https://reg)" in md
 
 
+def test_format_event_no_city_dup():
+    e = Event(
+        title="T",
+        description="d",
+        source_text="s",
+        date="2025-07-10",
+        time="18:00",
+        location_name="Hall",
+        location_address="Addr, Калининград",
+        city="Калининград",
+    )
+    md = main.format_event_md(e)
+    assert md.count("Калининград") == 1
+
+
 @pytest.mark.asyncio
 async def test_date_range_parsing(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
@@ -2289,6 +2304,37 @@ async def test_multiple_ticket_links(tmp_path: Path, monkeypatch):
     results = await main.add_events_from_text(db, "text", None, html, None)
     assert results[0][0].ticket_link == "https://l1"
     assert results[1][0].ticket_link == "https://l2"
+
+
+@pytest.mark.asyncio
+async def test_add_event_strips_city_from_address(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async def fake_parse(text: str) -> list[dict]:
+        return [
+            {
+                "title": "Show",
+                "short_description": "d",
+                "date": FUTURE_DATE,
+                "time": "18:00",
+                "location_name": "Hall",
+                "location_address": "Addr, Калининград",
+                "city": "Калининград",
+            }
+        ]
+
+    async def fake_create(*args, **kwargs):
+        return "u", "p"
+
+    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.create_source_page", fake_create)
+
+    results = await main.add_events_from_text(db, "t", None, None, None)
+    ev = results[0][0]
+    assert ev.location_address == "Addr"
+    md = main.format_event_md(ev)
+    assert md.count("Калининград") == 1
 
 
 @pytest.mark.asyncio
