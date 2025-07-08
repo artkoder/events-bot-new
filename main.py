@@ -285,6 +285,16 @@ def strip_city_from_address(address: str | None, city: str | None) -> str | None
     return addr
 
 
+def parse_bool_text(value: str) -> bool | None:
+    """Convert text to boolean if possible."""
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "y", "да", "д", "ok", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "n", "нет", "off"}:
+        return False
+    return None
+
+
 def parse_events_date(text: str, tz: timezone) -> date | None:
     """Parse a date argument for /events allowing '2 августа [2025]'."""
     text = text.strip().lower()
@@ -2591,6 +2601,7 @@ async def show_edit_menu(user_id: int, event: Event, bot: Bot):
         f"ticket_price_max: {event.ticket_price_max}",
         f"ticket_link: {event.ticket_link or ''}",
         f"is_free: {event.is_free}",
+        f"pushkin_card: {event.pushkin_card}",
     ]
     fields = [
         "title",
@@ -2751,7 +2762,13 @@ async def handle_edit_message(message: types.Message, db: Database, bot: Bot):
                 await bot.send_message(message.chat.id, "Invalid number")
                 return
         else:
-            if field == "ticket_link" and value == "":
+            if field in {"is_free", "pushkin_card", "silent"}:
+                bool_val = parse_bool_text(value)
+                if bool_val is None:
+                    await bot.send_message(message.chat.id, "Invalid boolean")
+                    return
+                setattr(event, field, bool_val)
+            elif field == "ticket_link" and value == "":
                 setattr(event, field, None)
             else:
                 setattr(event, field, value)
