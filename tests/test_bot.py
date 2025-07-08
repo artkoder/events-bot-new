@@ -8,6 +8,7 @@ import pytest
 from aiogram import Bot, types
 from sqlmodel import select
 from datetime import date, timedelta, timezone
+from typing import Any
 import main
 
 from main import (
@@ -1283,6 +1284,65 @@ async def test_weekend_nav_and_exhibitions(tmp_path: Path):
             found_weekend = True
         if n.get("tag") == "h3" and "Постоянные" in "".join(n.get("children", [])):
             found_exh = True
+    assert found_weekend
+    assert found_exh
+
+
+@pytest.mark.asyncio
+async def test_sync_weekend_page_first_creation_includes_nav(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    saturday = date(2025, 7, 12)
+    next_sat = saturday + timedelta(days=7)
+    updates: dict[str, Any] = {}
+
+    class DummyTG:
+        def create_page(self, title, content):
+            updates["create"] = content
+            return {"url": "u1", "path": "p1"}
+
+        def edit_page(self, path, title=None, content=None):
+            updates["edit"] = content
+
+    monkeypatch.setattr("main.get_telegraph_token", lambda: "t")
+    monkeypatch.setattr("main.Telegraph", lambda access_token=None: DummyTG())
+
+    async with db.get_session() as session:
+        session.add(WeekendPage(start=next_sat.isoformat(), url="u2", path="p2"))
+        session.add(MonthPage(month="2025-07", url="m1", path="mp1"))
+        session.add(MonthPage(month="2025-08", url="m2", path="mp2"))
+        session.add(
+            Event(
+                title="Expo",
+                description="d",
+                source_text="s",
+                date=(saturday - timedelta(days=1)).isoformat(),
+                end_date=(saturday + timedelta(days=10)).isoformat(),
+                time="10:00",
+                location_name="Hall",
+                event_type="выставка",
+            )
+        )
+        await session.commit()
+
+    await main.sync_weekend_page(db, saturday.isoformat())
+    content = updates.get("edit")
+    assert content is not None
+    found_weekend = any(
+        isinstance(n, dict)
+        and n.get("tag") == "h4"
+        and any(
+            isinstance(c, dict) and c.get("attrs", {}).get("href") == "u2" for c in n.get("children", [])
+        )
+        for n in content
+    )
+    found_exh = any(
+        isinstance(n, dict)
+        and n.get("tag") == "h3"
+        and "Постоянные" in "".join(n.get("children", []))
+        for n in content
+    )
     assert found_weekend
     assert found_exh
 
