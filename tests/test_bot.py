@@ -1959,6 +1959,17 @@ async def test_build_daily_posts(tmp_path: Path):
                 location_name="Hall",
             )
         )
+        session.add(
+            Event(
+                title="S",
+                description="d2",
+                source_text="s2",
+                date=today.isoformat(),
+                time="19:00",
+                location_name="Hall",
+                silent=True,
+            )
+        )
         session.add(MonthPage(month=today.strftime("%Y-%m"), url="m1", path="p1"))
         session.add(MonthPage(month=main.next_month(today.strftime("%Y-%m")), url="m2", path="p2"))
         session.add(WeekendPage(start=start.isoformat(), url="w", path="wp"))
@@ -1969,7 +1980,7 @@ async def test_build_daily_posts(tmp_path: Path):
     text, markup = posts[0]
     assert "АНОНС" in text
     assert markup.inline_keyboard[0]
-    assert "\U0001F449" in text
+    assert text.count("\U0001F449") == 2
 
 
 @pytest.mark.asyncio

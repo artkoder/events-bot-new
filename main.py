@@ -1859,7 +1859,7 @@ async def build_daily_posts(db: Database, tz: timezone) -> list[tuple[str, types
     yesterday_utc = datetime.utcnow() - timedelta(days=1)
     async with db.get_session() as session:
         res_today = await session.execute(
-            select(Event).where(Event.date == today.isoformat(), Event.silent.is_(False)).order_by(Event.time)
+            select(Event).where(Event.date == today.isoformat()).order_by(Event.time)
         )
         events_today = res_today.scalars().all()
         res_new = await session.execute(
