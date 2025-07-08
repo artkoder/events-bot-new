@@ -6,7 +6,8 @@ from typing import Optional, Tuple
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
-from aiohttp import web, ClientSession
+from aiohttp import web, ClientSession, FormData
+import imghdr
 from difflib import SequenceMatcher
 import json
 import re
@@ -32,6 +33,9 @@ CONTENT_SEPARATOR = "🟧" * 10
 editing_sessions: dict[int, tuple[int, str | None]] = {}
 # user_id -> channel_id for daily time editing
 daily_time_sessions: dict[int, int] = {}
+
+# toggle for uploading images to catbox
+CATBOX_ENABLED: bool = False
 
 
 class User(SQLModel, table=True):
@@ -193,6 +197,25 @@ async def set_tz_offset(db: Database, value: str):
             setting = Setting(key="tz_offset", value=value)
             session.add(setting)
         await session.commit()
+
+
+async def get_catbox_enabled(db: Database) -> bool:
+    async with db.get_session() as session:
+        setting = await session.get(Setting, "catbox_enabled")
+        return setting.value == "1" if setting else False
+
+
+async def set_catbox_enabled(db: Database, value: bool):
+    async with db.get_session() as session:
+        setting = await session.get(Setting, "catbox_enabled")
+        if setting:
+            setting.value = "1" if value else "0"
+        else:
+            setting = Setting(key="catbox_enabled", value="1" if value else "0")
+            session.add(setting)
+        await session.commit()
+    global CATBOX_ENABLED
+    CATBOX_ENABLED = value
 
 
 def validate_offset(value: str) -> bool:
@@ -641,6 +664,18 @@ async def handle_tz(message: types.Message, db: Database, bot: Bot):
             return
     await set_tz_offset(db, parts[1])
     await bot.send_message(message.chat.id, f"Timezone set to {parts[1]}")
+
+
+async def handle_images(message: types.Message, db: Database, bot: Bot):
+    async with db.get_session() as session:
+        user = await session.get(User, message.from_user.id)
+        if not user or not user.is_superadmin:
+            await bot.send_message(message.chat.id, "Not authorized")
+            return
+    new_value = not CATBOX_ENABLED
+    await set_catbox_enabled(db, new_value)
+    status = "enabled" if new_value else "disabled"
+    await bot.send_message(message.chat.id, f"Image uploads {status}")
 
 
 async def handle_my_chat_member(update: types.ChatMemberUpdated, db: Database):
@@ -1131,9 +1166,13 @@ async def add_events_from_text(
                 saved, added = await upsert_event(session, event)
 
             media_arg = media if first else None
+            upload_info = ""
             if saved.telegraph_url and saved.telegraph_path:
-                await update_source_page(
-                    saved.telegraph_path, saved.title or "Event", html_text or text
+                upload_info = await update_source_page(
+                    saved.telegraph_path,
+                    saved.title or "Event",
+                    html_text or text,
+                    media_arg,
                 )
             else:
                 res = await create_source_page(
@@ -1144,7 +1183,11 @@ async def add_events_from_text(
                     media_arg,
                 )
                 if res:
-                    url, path = res
+                    if len(res) == 2:
+                        url, path = res
+                        upload_info = ""
+                    else:
+                        url, path, upload_info = res
                     async with db.get_session() as session:
                         saved.telegraph_url = url
                         saved.telegraph_path = path
@@ -1179,6 +1222,8 @@ async def add_events_from_text(
                 lines.append(f"ticket_link: {saved.ticket_link}")
             if saved.telegraph_url:
                 lines.append(f"telegraph: {saved.telegraph_url}")
+            if upload_info:
+                lines.append(f"catbox: {upload_info}")
             status = "added" if added else "updated"
             results.append((saved, added, lines, status))
             first = False
@@ -1276,8 +1321,12 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
         event.source_text,
         media,
     )
+    upload_info = ""
     if res:
-        url, path = res
+        if len(res) == 2:
+            url, path = res
+        else:
+            url, path, upload_info = res
         async with db.get_session() as session:
             event.telegraph_url = url
             event.telegraph_path = path
@@ -1295,6 +1344,8 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
     ]
     if event.telegraph_url:
         lines.append(f"telegraph: {event.telegraph_url}")
+    if upload_info:
+        lines.append(f"catbox: {upload_info}")
     status = "added" if added else "updated"
     btns = []
     if (
@@ -2630,17 +2681,67 @@ async def telegraph_test():
     print("Edited", page["url"])
 
 
-async def update_source_page(path: str, title: str, new_html: str):
+async def update_source_page(
+    path: str,
+    title: str,
+    new_html: str,
+    media: list[tuple[bytes, str]] | tuple[bytes, str] | None = None,
+) -> str:
     """Append text to an existing Telegraph page."""
     token = get_telegraph_token()
     if not token:
         logging.error("Telegraph token unavailable")
-        return
+        return "token missing"
     tg = Telegraph(access_token=token)
     try:
         logging.info("Fetching telegraph page %s", path)
         page = await asyncio.to_thread(tg.get_page, path, return_html=True)
         html_content = page.get("content") or page.get("content_html") or ""
+        catbox_msg = ""
+        images: list[tuple[bytes, str]] = []
+        if media:
+            images = [media] if isinstance(media, tuple) else list(media)
+        catbox_urls: list[str] = []
+        if CATBOX_ENABLED and images:
+            async with ClientSession() as session:
+                for data, name in images[:3]:
+                    if len(data) > 5 * 1024 * 1024:
+                        logging.warning("catbox skip %s: too large", name)
+                        catbox_msg += f"{name}: too large; "
+                        continue
+                    if not imghdr.what(None, data):
+                        logging.warning("catbox skip %s: not image", name)
+                        catbox_msg += f"{name}: not image; "
+                        continue
+                    try:
+                        form = FormData()
+                        form.add_field("reqtype", "fileupload")
+                        form.add_field("fileToUpload", data, filename=name)
+                        async with session.post(
+                            "https://catbox.moe/user/api.php", data=form
+                        ) as resp:
+                            text = await resp.text()
+                            if resp.status == 200 and text.startswith("http"):
+                                url = text.strip()
+                                catbox_urls.append(url)
+                                catbox_msg += "ok; "
+                                logging.info("catbox uploaded %s", url)
+                            else:
+                                catbox_msg += f"{name}: err {resp.status}; "
+                                logging.error(
+                                    "catbox upload failed %s: %s %s",
+                                    name,
+                                    resp.status,
+                                    text,
+                                )
+                    except Exception as e:
+                        catbox_msg += f"{name}: {e}; "
+                        logging.error("catbox error %s: %s", name, e)
+            catbox_msg = catbox_msg.strip("; ")
+        elif images:
+            catbox_msg = "disabled"
+        for url in catbox_urls:
+            html_content += f'<img src="{html.escape(url)}"/><p></p>'
         cleaned = re.sub(r"</?tg-emoji[^>]*>", "", new_html)
         cleaned = cleaned.replace(
             "\U0001f193\U0001f193\U0001f193\U0001f193", "Бесплатно"
@@ -2653,8 +2754,10 @@ async def update_source_page(path: str, title: str, new_html: str):
             tg.edit_page, path, title=title, html_content=html_content
         )
         logging.info("Updated telegraph page %s", path)
+        return catbox_msg
     except Exception as e:
         logging.error("Failed to update telegraph page: %s", e)
+        return f"error: {e}"
 
 
 async def create_source_page(
@@ -2662,8 +2765,8 @@ async def create_source_page(
     text: str,
     source_url: str | None,
     html_text: str | None = None,
-    media: tuple[bytes, str] | None = None,
-) -> tuple[str, str] | None:
+    media: list[tuple[bytes, str]] | tuple[bytes, str] | None = None,
+) -> tuple[str, str, str] | None:
     """Create a Telegraph page with the original event text."""
     token = get_telegraph_token()
     if not token:
@@ -2678,10 +2781,49 @@ async def create_source_page(
             return "\n".join(lines[1:]).lstrip()
         return line_text
 
-    # Media uploads to Telegraph are flaky and consume bandwidth.
-    # Skip uploading files for now to keep requests lightweight.
+    images: list[tuple[bytes, str]] = []
     if media:
-        logging.info("Media upload skipped for telegraph page")
+        images = [media] if isinstance(media, tuple) else list(media)
+    catbox_urls: list[str] = []
+    catbox_msg = ""
+    if CATBOX_ENABLED and images:
+        async with ClientSession() as session:
+            for data, name in images[:3]:
+                if len(data) > 5 * 1024 * 1024:
+                    logging.warning("catbox skip %s: too large", name)
+                    catbox_msg += f"{name}: too large; "
+                    continue
+                if not imghdr.what(None, data):
+                    logging.warning("catbox skip %s: not image", name)
+                    catbox_msg += f"{name}: not image; "
+                    continue
+                try:
+                    form = FormData()
+                    form.add_field("reqtype", "fileupload")
+                    form.add_field("fileToUpload", data, filename=name)
+                    async with session.post(
+                        "https://catbox.moe/user/api.php", data=form
+                    ) as resp:
+                        text_r = await resp.text()
+                        if resp.status == 200 and text_r.startswith("http"):
+                            url = text_r.strip()
+                            catbox_urls.append(url)
+                            catbox_msg += "ok; "
+                            logging.info("catbox uploaded %s", url)
+                        else:
+                            catbox_msg += f"{name}: err {resp.status}; "
+                            logging.error(
+                                "catbox upload failed %s: %s %s",
+                                name,
+                                resp.status,
+                                text_r,
+                            )
+                except Exception as e:
+                    catbox_msg += f"{name}: {e}; "
+                    logging.error("catbox error %s: %s", name, e)
+        catbox_msg = catbox_msg.strip("; ")
+    elif images:
+        catbox_msg = "disabled"
 
     if source_url:
         html_content += (
@@ -2690,6 +2832,9 @@ async def create_source_page(
         )
     else:
         html_content += f"<p><strong>{html.escape(title)}</strong></p>"
+
+    for url in catbox_urls:
+        html_content += f'<img src="{html.escape(url)}"/><p></p>'
 
     if html_text:
         html_text = strip_title(html_text)
@@ -2711,7 +2856,7 @@ async def create_source_page(
         logging.error("Failed to create telegraph page: %s", e)
         return None
     logging.info("Created telegraph page %s", page.get("url"))
-    return page.get("url"), page.get("path")
+    return page.get("url"), page.get("path"), catbox_msg
 
 
 def create_app() -> web.Application:
@@ -2783,6 +2928,9 @@ def create_app() -> web.Application:
     async def daily_wrapper(message: types.Message):
         await handle_daily(message, db, bot)
 
+    async def images_wrapper(message: types.Message):
+        await handle_images(message, db, bot)
+
     dp.message.register(start_wrapper, Command("start"))
     dp.message.register(register_wrapper, Command("register"))
     dp.message.register(requests_wrapper, Command("requests"))
@@ -2811,6 +2959,7 @@ def create_app() -> web.Application:
     dp.message.register(ask_4o_wrapper, Command("ask4o"))
     dp.message.register(list_events_wrapper, Command("events"))
     dp.message.register(set_channel_wrapper, Command("setchannel"))
+    dp.message.register(images_wrapper, Command("images"))
     dp.message.register(channels_wrapper, Command("channels"))
     dp.message.register(reg_daily_wrapper, Command("regdailychannels"))
     dp.message.register(daily_wrapper, Command("daily"))
@@ -2832,6 +2981,8 @@ def create_app() -> web.Application:
     async def on_startup(app: web.Application):
         logging.info("Initializing database")
         await db.init()
+        global CATBOX_ENABLED
+        CATBOX_ENABLED = await get_catbox_enabled(db)
         hook = webhook.rstrip("/") + "/webhook"
         logging.info("Setting webhook to %s", hook)
         await bot.set_webhook(
