@@ -1,6 +1,6 @@
 import logging
 import os
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone, time
 from typing import Optional, Tuple, Iterable
 
 from aiogram import Bot, Dispatcher, types
@@ -93,6 +93,7 @@ class Event(SQLModel, table=True):
     source_text: str
     telegraph_url: Optional[str] = None
     source_post_url: Optional[str] = None
+    photo_count: int = 0
     added_at: datetime = Field(default_factory=datetime.utcnow)
 
 
@@ -164,6 +165,10 @@ class Database:
             if "added_at" not in cols:
                 await conn.exec_driver_sql(
                     "ALTER TABLE event ADD COLUMN added_at VARCHAR"
+                )
+            if "photo_count" not in cols:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE event ADD COLUMN photo_count INTEGER DEFAULT 0"
                 )
 
             result = await conn.exec_driver_sql("PRAGMA table_info(channel)")
@@ -1186,13 +1191,20 @@ async def add_events_from_text(
 
             media_arg = media if first else None
             upload_info = ""
+            photo_count = saved.photo_count
             if saved.telegraph_url and saved.telegraph_path:
-                upload_info = await update_source_page(
+                upload_info, added_count = await update_source_page(
                     saved.telegraph_path,
                     saved.title or "Event",
                     html_text or text,
                     media_arg,
                 )
+                if added_count:
+                    photo_count += added_count
+                    async with db.get_session() as session:
+                        saved.photo_count = photo_count
+                        session.add(saved)
+                        await session.commit()
             else:
                 res = await create_source_page(
                     saved.title or "Event",
@@ -1202,14 +1214,19 @@ async def add_events_from_text(
                     media_arg,
                 )
                 if res:
-                    if len(res) == 2:
+                    if len(res) == 4:
+                        url, path, upload_info, photo_count = res
+                    elif len(res) == 3:
+                        url, path, upload_info = res
+                        photo_count = 0
+                    else:
                         url, path = res
                         upload_info = ""
-                    else:
-                        url, path, upload_info = res
+                        photo_count = 0
                     async with db.get_session() as session:
                         saved.telegraph_url = url
                         saved.telegraph_path = path
+                        saved.photo_count = photo_count
                         session.add(saved)
                         await session.commit()
             await sync_month_page(db, saved.date[:7])
@@ -1324,14 +1341,21 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
         media,
     )
     upload_info = ""
+    photo_count = 0
     if res:
-        if len(res) == 2:
-            url, path = res
-        else:
+        if len(res) == 4:
+            url, path, upload_info, photo_count = res
+        elif len(res) == 3:
             url, path, upload_info = res
+            photo_count = 0
+        else:
+            url, path = res
+            upload_info = ""
+            photo_count = 0
         async with db.get_session() as session:
             event.telegraph_url = url
             event.telegraph_path = path
+            event.photo_count = photo_count
             session.add(event)
             await session.commit()
     await sync_month_page(db, event.date[:7])
@@ -1573,7 +1597,9 @@ def format_event_md(e: Event) -> str:
         if price:
             lines.append(f"Билеты {price}")
     if e.telegraph_url:
-        lines.append(f"[подробнее]({e.telegraph_url})")
+        cam = "\U0001f4f8" * max(0, e.photo_count)
+        prefix = f"{cam} " if cam else ""
+        lines.append(f"{prefix}[подробнее]({e.telegraph_url})")
     loc = e.location_name
     if e.location_address:
         loc += f", {e.location_address}"
@@ -1680,7 +1706,9 @@ def format_exhibition_md(e: Event) -> str:
     elif e.ticket_price_max is not None:
         lines.append(f"Билеты {e.ticket_price_max}")
     if e.telegraph_url:
-        lines.append(f"[подробнее]({e.telegraph_url})")
+        cam = "\U0001f4f8" * max(0, e.photo_count)
+        prefix = f"{cam} " if cam else ""
+        lines.append(f"{prefix}[подробнее]({e.telegraph_url})")
     loc = e.location_name
     if e.location_address:
         loc += f", {e.location_address}"
@@ -2091,7 +2119,10 @@ async def build_daily_posts(
     db: Database, tz: timezone
 ) -> list[tuple[str, types.InlineKeyboardMarkup | None]]:
     today = datetime.now(tz).date()
-    yesterday_utc = datetime.utcnow() - timedelta(days=1)
+    yesterday_start_local = datetime.combine(
+        today - timedelta(days=1), time(0, 0), tz
+    )
+    yesterday_utc = yesterday_start_local.astimezone(timezone.utc)
     async with db.get_session() as session:
         res_today = await session.execute(
             select(Event).where(Event.date == today.isoformat()).order_by(Event.time)
@@ -2115,6 +2146,37 @@ async def build_daily_posts(
         mp_cur = await session.get(MonthPage, cur_month)
         mp_next = await session.get(MonthPage, next_month(cur_month))
 
+        new_events = (
+            await session.execute(
+                select(Event).where(
+                    Event.added_at.is_not(None),
+                    Event.added_at >= yesterday_utc,
+                )
+            )
+        ).scalars().all()
+
+        weekend_count = 0
+        if wpage:
+            sat = w_start
+            sun = w_start + timedelta(days=1)
+            for e in new_events:
+                if e.date in {sat.isoformat(), sun.isoformat()} or (
+                    e.event_type == "выставка"
+                    and e.end_date
+                    and e.end_date >= sat.isoformat()
+                    and e.date <= sun.isoformat()
+                ):
+                    weekend_count += 1
+
+        cur_count = 0
+        next_count = 0
+        for e in new_events:
+            m = e.date[:7]
+            if m == cur_month:
+                cur_count += 1
+            elif m == next_month(cur_month):
+                next_count += 1
+
     lines1 = [
         f"<b>АНОНС на {format_day_pretty(today)} {today.year} #ежедневныйанонс</b>",
         DAYS_OF_WEEK[today.weekday()],
@@ -2135,19 +2197,24 @@ async def build_daily_posts(
     buttons = []
     if wpage:
         sunday = w_start + timedelta(days=1)
-        text = f"Мероприятия на выходные {w_start.day} {sunday.day} {MONTHS[w_start.month - 1]}"
+        extra = f" +{weekend_count}" if weekend_count else ""
+        text = (
+            f"Мероприятия на выходные {w_start.day} {sunday.day} {MONTHS[w_start.month - 1]}{extra}"
+        )
         buttons.append(types.InlineKeyboardButton(text=text, url=wpage.url))
     if mp_cur:
+        extra = f" +{cur_count}" if cur_count else ""
         buttons.append(
             types.InlineKeyboardButton(
-                text=f"Мероприятия на {month_name_nominative(cur_month)}",
+                text=f"Мероприятия на {month_name_nominative(cur_month)}{extra}",
                 url=mp_cur.url,
             )
         )
     if mp_next:
+        extra = f" +{next_count}" if next_count else ""
         buttons.append(
             types.InlineKeyboardButton(
-                text=f"Мероприятия на {month_name_nominative(next_month(cur_month))}",
+                text=f"Мероприятия на {month_name_nominative(next_month(cur_month))}{extra}",
                 url=mp_next.url,
             )
         )
@@ -2688,7 +2755,7 @@ async def update_source_page(
     title: str,
     new_html: str,
     media: list[tuple[bytes, str]] | tuple[bytes, str] | None = None,
-) -> str:
+) -> tuple[str, int]:
     """Append text to an existing Telegraph page."""
     token = get_telegraph_token()
     if not token:
@@ -2756,10 +2823,10 @@ async def update_source_page(
             tg.edit_page, path, title=title, html_content=html_content
         )
         logging.info("Updated telegraph page %s", path)
-        return catbox_msg
+        return catbox_msg, len(catbox_urls)
     except Exception as e:
         logging.error("Failed to update telegraph page: %s", e)
-        return f"error: {e}"
+        return f"error: {e}", 0
 
 
 async def create_source_page(
@@ -2768,7 +2835,7 @@ async def create_source_page(
     source_url: str | None,
     html_text: str | None = None,
     media: list[tuple[bytes, str]] | tuple[bytes, str] | None = None,
-) -> tuple[str, str, str] | None:
+) -> tuple[str, str, str, int] | None:
     """Create a Telegraph page with the original event text."""
     token = get_telegraph_token()
     if not token:
@@ -2858,7 +2925,7 @@ async def create_source_page(
         logging.error("Failed to create telegraph page: %s", e)
         return None
     logging.info("Created telegraph page %s", page.get("url"))
-    return page.get("url"), page.get("path"), catbox_msg
+    return page.get("url"), page.get("path"), catbox_msg, len(catbox_urls)
 
 
 def create_app() -> web.Application:

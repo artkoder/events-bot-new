@@ -644,7 +644,7 @@ async def test_create_source_page_photo(monkeypatch):
     res = await main.create_source_page(
         "Title", "text", None, media=(b"img", "photo.jpg")
     )
-    assert res == ("https://telegra.ph/test", "test", "disabled")
+    assert res == ("https://telegra.ph/test", "test", "disabled", 0)
 
 
 @pytest.mark.asyncio
@@ -694,7 +694,7 @@ async def test_create_source_page_photo_catbox(monkeypatch):
     res = await main.create_source_page(
         "Title", "text", None, media=(b"img", "photo.jpg")
     )
-    assert res == ("https://telegra.ph/test", "test", "ok")
+    assert res == ("https://telegra.ph/test", "test", "ok", 1)
 
 
 def test_get_telegraph_token_creates(tmp_path, monkeypatch):
