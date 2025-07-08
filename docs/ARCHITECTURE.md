@@ -19,7 +19,7 @@ helper `python main.py test_telegraph` checks Telegraph access and creates a
 Telegraph token automatically if needed.
 
 Each event stores optional ticket information (`ticket_price_min`, `ticket_price_max`, `ticket_link`). If the event was forwarded from a channel, the link to that post is saved in `source_post_url`.
-Free events are marked with `is_free`. Telegraph pages are stored with both URL and path so they can be updated when the event description changes. If a message includes an image or short video, that media is uploaded to Telegraph and displayed at the start of the source page.
+Free events are marked with `is_free`. Telegraph pages are stored with both URL and path so they can be updated when the event description changes. If a message includes images (under 5&nbsp;MB each), they are uploaded to Catbox and embedded at the start of the source page.
 Events also keep `event_type` (one of six categories) and an `emoji` suggested by the LLM. Multi-day events store `end_date` and appear with "Открытие" or "Закрытие" on the respective days. `/exhibitions` lists active exhibitions.
 If a text describes several events at once the LLM returns an array of event objects and the bot creates separate entries and Telegraph pages for each of them.
 Channels where the bot is admin are tracked in the `channel` table. Use `/setchannel` to choose an admin channel and mark it as an announcement source. The `/channels` command lists all admin channels and shows which ones are registered.
