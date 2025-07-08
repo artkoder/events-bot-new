@@ -152,9 +152,7 @@ class Database:
                     "ALTER TABLE event ADD COLUMN event_type VARCHAR"
                 )
             if "emoji" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE event ADD COLUMN emoji VARCHAR"
-                )
+                await conn.exec_driver_sql("ALTER TABLE event ADD COLUMN emoji VARCHAR")
             if "end_date" not in cols:
                 await conn.exec_driver_sql(
                     "ALTER TABLE event ADD COLUMN end_date VARCHAR"
@@ -226,7 +224,9 @@ async def parse_event_via_4o(text: str) -> list[dict]:
     loc_path = os.path.join("docs", "LOCATIONS.md")
     if os.path.exists(loc_path):
         with open(loc_path, "r", encoding="utf-8") as f:
-            locations = [line.strip() for line in f if line.strip() and not line.startswith("#")]
+            locations = [
+                line.strip() for line in f if line.strip() and not line.startswith("#")
+            ]
         if locations:
             prompt += "\nKnown venues:\n" + "\n".join(locations)
     headers = {
@@ -249,10 +249,7 @@ async def parse_event_via_4o(text: str) -> list[dict]:
         data = await resp.json()
     logging.debug("4o response: %s", data)
     content = (
-        data.get("choices", [{}])[0]
-        .get("message", {})
-        .get("content", "{}")
-        .strip()
+        data.get("choices", [{}])[0].get("message", {}).get("content", "{}").strip()
     )
     if content.startswith("```"):
         content = content.strip("`\n")
@@ -293,12 +290,7 @@ async def ask_4o(text: str) -> str:
         resp.raise_for_status()
         data = await resp.json()
     logging.debug("4o response: %s", data)
-    return (
-        data.get("choices", [{}])[0]
-        .get("message", {})
-        .get("content", "")
-        .strip()
-    )
+    return data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
 
 
 async def check_duplicate_via_4o(ev: Event, new: Event) -> Tuple[bool, str, str]:
@@ -308,7 +300,7 @@ async def check_duplicate_via_4o(ev: Event, new: Event) -> Tuple[bool, str, str]
         f"Title: {ev.title}\nDescription: {ev.description}\nLocation: {ev.location_name} {ev.location_address}\n"
         "New event:\n"
         f"Title: {new.title}\nDescription: {new.description}\nLocation: {new.location_name} {new.location_address}\n"
-        "Are these the same event? Respond with JSON {\"duplicate\": true|false, \"title\": \"\", \"short_description\": \"\"}."
+        'Are these the same event? Respond with JSON {"duplicate": true|false, "title": "", "short_description": ""}.'
     )
     try:
         ans = await ask_4o(prompt)
@@ -339,7 +331,9 @@ def get_telegraph_token() -> str | None:
         os.makedirs(os.path.dirname(TELEGRAPH_TOKEN_FILE), exist_ok=True)
         with open(TELEGRAPH_TOKEN_FILE, "w", encoding="utf-8") as f:
             f.write(token)
-        logging.info("Created Telegraph account; token stored at %s", TELEGRAPH_TOKEN_FILE)
+        logging.info(
+            "Created Telegraph account; token stored at %s", TELEGRAPH_TOKEN_FILE
+        )
         return token
     except Exception as e:
         logging.error("Failed to create Telegraph token: %s", e)
@@ -449,7 +443,11 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                 await session.commit()
         if month:
             await sync_month_page(db, month)
-            w_start = weekend_start_for_date(datetime.fromisoformat(event.date).date()) if event else None
+            w_start = (
+                weekend_start_for_date(datetime.fromisoformat(event.date).date())
+                if event
+                else None
+            )
             if w_start:
                 await sync_weekend_page(db, w_start.isoformat())
         offset = await get_tz_offset(db)
@@ -517,7 +515,9 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                 [
                     types.InlineKeyboardButton(
                         text=(
-                            "\U0001F910 Тихий режим" if event and event.silent else "\U0001F6A9 Переключить на тихий режим"
+                            "\U0001f910 Тихий режим"
+                            if event and event.silent
+                            else "\U0001f6a9 Переключить на тихий режим"
                         ),
                         callback_data=f"togglesilent:{eid}",
                     )
@@ -555,7 +555,7 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                         callback_data=f"togglefree:{eid}",
                     ),
                     types.InlineKeyboardButton(
-                        text="\U0001F6A9 Переключить на тихий режим",
+                        text="\U0001f6a9 Переключить на тихий режим",
                         callback_data=f"togglesilent:{eid}",
                     ),
                 ]
@@ -671,7 +671,9 @@ async def handle_my_chat_member(update: types.ChatMemberUpdated, db: Database):
         await session.commit()
 
 
-async def send_channels_list(message: types.Message, db: Database, bot: Bot, edit: bool = False):
+async def send_channels_list(
+    message: types.Message, db: Database, bot: Bot, edit: bool = False
+):
     async with db.get_session() as session:
         user = await session.get(User, message.from_user.id)
         if not user or not user.is_superadmin:
@@ -689,9 +691,13 @@ async def send_channels_list(message: types.Message, db: Database, bot: Bot, edi
         name = ch.title or ch.username or str(ch.channel_id)
         if ch.is_registered:
             lines.append(f"{name} ✅")
-            keyboard.append([
-                types.InlineKeyboardButton(text="Cancel", callback_data=f"unset:{ch.channel_id}")
-            ])
+            keyboard.append(
+                [
+                    types.InlineKeyboardButton(
+                        text="Cancel", callback_data=f"unset:{ch.channel_id}"
+                    )
+                ]
+            )
         else:
             lines.append(name)
     if not lines:
@@ -703,7 +709,9 @@ async def send_channels_list(message: types.Message, db: Database, bot: Bot, edi
         await bot.send_message(message.chat.id, "\n".join(lines), reply_markup=markup)
 
 
-async def send_setchannel_list(message: types.Message, db: Database, bot: Bot, edit: bool = False):
+async def send_setchannel_list(
+    message: types.Message, db: Database, bot: Bot, edit: bool = False
+):
     async with db.get_session() as session:
         user = await session.get(User, message.from_user.id)
         if not user or not user.is_superadmin:
@@ -722,9 +730,13 @@ async def send_setchannel_list(message: types.Message, db: Database, bot: Bot, e
     for ch in channels:
         name = ch.title or ch.username or str(ch.channel_id)
         lines.append(name)
-        keyboard.append([
-            types.InlineKeyboardButton(text=name, callback_data=f"set:{ch.channel_id}")
-        ])
+        keyboard.append(
+            [
+                types.InlineKeyboardButton(
+                    text=name, callback_data=f"set:{ch.channel_id}"
+                )
+            ]
+        )
     if not lines:
         lines.append("No channels")
     markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard) if keyboard else None
@@ -734,7 +746,9 @@ async def send_setchannel_list(message: types.Message, db: Database, bot: Bot, e
         await bot.send_message(message.chat.id, "\n".join(lines), reply_markup=markup)
 
 
-async def send_regdaily_list(message: types.Message, db: Database, bot: Bot, edit: bool = False):
+async def send_regdaily_list(
+    message: types.Message, db: Database, bot: Bot, edit: bool = False
+):
     async with db.get_session() as session:
         user = await session.get(User, message.from_user.id)
         if not user or not user.is_superadmin:
@@ -742,7 +756,9 @@ async def send_regdaily_list(message: types.Message, db: Database, bot: Bot, edi
                 await bot.send_message(message.chat.id, "Not authorized")
             return
         result = await session.execute(
-            select(Channel).where(Channel.is_admin.is_(True), Channel.daily_time.is_(None))
+            select(Channel).where(
+                Channel.is_admin.is_(True), Channel.daily_time.is_(None)
+            )
         )
         channels = result.scalars().all()
     lines = []
@@ -750,9 +766,13 @@ async def send_regdaily_list(message: types.Message, db: Database, bot: Bot, edi
     for ch in channels:
         name = ch.title or ch.username or str(ch.channel_id)
         lines.append(name)
-        keyboard.append([
-            types.InlineKeyboardButton(text=name, callback_data=f"dailyset:{ch.channel_id}")
-        ])
+        keyboard.append(
+            [
+                types.InlineKeyboardButton(
+                    text=name, callback_data=f"dailyset:{ch.channel_id}"
+                )
+            ]
+        )
     if not lines:
         lines.append("No channels")
     markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard) if keyboard else None
@@ -762,14 +782,18 @@ async def send_regdaily_list(message: types.Message, db: Database, bot: Bot, edi
         await bot.send_message(message.chat.id, "\n".join(lines), reply_markup=markup)
 
 
-async def send_daily_list(message: types.Message, db: Database, bot: Bot, edit: bool = False):
+async def send_daily_list(
+    message: types.Message, db: Database, bot: Bot, edit: bool = False
+):
     async with db.get_session() as session:
         user = await session.get(User, message.from_user.id)
         if not user or not user.is_superadmin:
             if not edit:
                 await bot.send_message(message.chat.id, "Not authorized")
             return
-        result = await session.execute(select(Channel).where(Channel.daily_time.is_not(None)))
+        result = await session.execute(
+            select(Channel).where(Channel.daily_time.is_not(None))
+        )
         channels = result.scalars().all()
     lines = []
     keyboard = []
@@ -777,11 +801,19 @@ async def send_daily_list(message: types.Message, db: Database, bot: Bot, edit: 
         name = ch.title or ch.username or str(ch.channel_id)
         t = ch.daily_time or "?"
         lines.append(f"{name} {t}")
-        keyboard.append([
-            types.InlineKeyboardButton(text="Cancel", callback_data=f"dailyunset:{ch.channel_id}"),
-            types.InlineKeyboardButton(text="Time", callback_data=f"dailytime:{ch.channel_id}"),
-            types.InlineKeyboardButton(text="Test", callback_data=f"dailysend:{ch.channel_id}"),
-        ])
+        keyboard.append(
+            [
+                types.InlineKeyboardButton(
+                    text="Cancel", callback_data=f"dailyunset:{ch.channel_id}"
+                ),
+                types.InlineKeyboardButton(
+                    text="Time", callback_data=f"dailytime:{ch.channel_id}"
+                ),
+                types.InlineKeyboardButton(
+                    text="Test", callback_data=f"dailysend:{ch.channel_id}"
+                ),
+            ]
+        )
     if not lines:
         lines.append("No channels")
     markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard) if keyboard else None
@@ -789,6 +821,7 @@ async def send_daily_list(message: types.Message, db: Database, bot: Bot, edit: 
         await message.edit_text("\n".join(lines), reply_markup=markup)
     else:
         await bot.send_message(message.chat.id, "\n".join(lines), reply_markup=markup)
+
 
 async def handle_set_channel(message: types.Message, db: Database, bot: Bot):
     await send_setchannel_list(message, db, bot, edit=False)
@@ -956,7 +989,9 @@ async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
             return ev, False
 
         title_ratio = SequenceMatcher(None, ev.title.lower(), new.title.lower()).ratio()
-        loc_ratio = SequenceMatcher(None, ev.location_name.lower(), new.location_name.lower()).ratio()
+        loc_ratio = SequenceMatcher(
+            None, ev.location_name.lower(), new.location_name.lower()
+        ).ratio()
         if title_ratio >= 0.6 and loc_ratio >= 0.6:
             ev.title = new.title
             ev.description = new.description
@@ -974,7 +1009,9 @@ async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
             await session.commit()
             return ev, False
         should_check = False
-        if loc_ratio >= 0.4 or (ev.location_address or "") == (new.location_address or ""):
+        if loc_ratio >= 0.4 or (ev.location_address or "") == (
+            new.location_address or ""
+        ):
             should_check = True
         elif title_ratio >= 0.5:
             should_check = True
@@ -1095,7 +1132,9 @@ async def add_events_from_text(
 
             media_arg = media if first else None
             if saved.telegraph_url and saved.telegraph_path:
-                await update_source_page(saved.telegraph_path, saved.title or "Event", html_text or text)
+                await update_source_page(
+                    saved.telegraph_path, saved.title or "Event", html_text or text
+                )
             else:
                 res = await create_source_page(
                     saved.title or "Event",
@@ -1178,12 +1217,13 @@ async def handle_add_event(message: types.Message, db: Database, bot: Bot):
         ):
             btns.append(
                 types.InlineKeyboardButton(
-                    text="\u2753 Это бесплатное мероприятие", callback_data=f"markfree:{saved.id}"
+                    text="\u2753 Это бесплатное мероприятие",
+                    callback_data=f"markfree:{saved.id}",
                 )
             )
         btns.append(
             types.InlineKeyboardButton(
-                text="\U0001F6A9 Переключить на тихий режим",
+                text="\U0001f6a9 Переключить на тихий режим",
                 callback_data=f"togglesilent:{saved.id}",
             )
         )
@@ -1197,10 +1237,12 @@ async def handle_add_event(message: types.Message, db: Database, bot: Bot):
 
 async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
     parts = message.text.split(maxsplit=1)
-    if len(parts) != 2 or '|' not in parts[1]:
-        await bot.send_message(message.chat.id, "Usage: /addevent_raw title|date|time|location")
+    if len(parts) != 2 or "|" not in parts[1]:
+        await bot.send_message(
+            message.chat.id, "Usage: /addevent_raw title|date|time|location"
+        )
         return
-    title, date, time, location = (p.strip() for p in parts[1].split('|', 3))
+    title, date, time, location = (p.strip() for p in parts[1].split("|", 3))
     media = None
     if message.photo:
         bio = BytesIO()
@@ -1255,13 +1297,20 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
         lines.append(f"telegraph: {event.telegraph_url}")
     status = "added" if added else "updated"
     btns = []
-    if not event.is_free and event.ticket_price_min is None and event.ticket_price_max is None:
+    if (
+        not event.is_free
+        and event.ticket_price_min is None
+        and event.ticket_price_max is None
+    ):
         btns.append(
-            types.InlineKeyboardButton(text="\u2753 Это бесплатное мероприятие", callback_data=f"markfree:{event.id}")
+            types.InlineKeyboardButton(
+                text="\u2753 Это бесплатное мероприятие",
+                callback_data=f"markfree:{event.id}",
+            )
         )
     btns.append(
         types.InlineKeyboardButton(
-            text="\U0001F6A9 Переключить на тихий режим",
+            text="\U0001f6a9 Переключить на тихий режим",
             callback_data=f"togglesilent:{event.id}",
         )
     )
@@ -1424,7 +1473,7 @@ def is_recent(e: Event) -> bool:
 def format_event_md(e: Event) -> str:
     prefix = ""
     if is_recent(e):
-        prefix += "\U0001F6A9 "
+        prefix += "\U0001f6a9 "
     emoji_part = ""
     if e.emoji and not e.title.strip().startswith(e.emoji):
         emoji_part = f"{e.emoji} "
@@ -1434,7 +1483,9 @@ def format_event_md(e: Event) -> str:
         if e.ticket_link:
             txt += f" [по регистрации]({e.ticket_link})"
         lines.append(txt)
-    elif e.ticket_link and (e.ticket_price_min is not None or e.ticket_price_max is not None):
+    elif e.ticket_link and (
+        e.ticket_price_min is not None or e.ticket_price_max is not None
+    ):
         if e.ticket_price_max is not None and e.ticket_price_max != e.ticket_price_min:
             price = f"от {e.ticket_price_min} до {e.ticket_price_max}"
         else:
@@ -1443,7 +1494,11 @@ def format_event_md(e: Event) -> str:
     elif e.ticket_link:
         lines.append(f"[по регистрации]({e.ticket_link})")
     else:
-        if e.ticket_price_min is not None and e.ticket_price_max is not None and e.ticket_price_min != e.ticket_price_max:
+        if (
+            e.ticket_price_min is not None
+            and e.ticket_price_max is not None
+            and e.ticket_price_min != e.ticket_price_max
+        ):
             price = f"от {e.ticket_price_min} до {e.ticket_price_max}"
         elif e.ticket_price_min is not None:
             price = str(e.ticket_price_min)
@@ -1474,9 +1529,9 @@ def format_event_daily(e: Event, highlight: bool = False) -> str:
     """Return HTML-formatted text for a daily announcement item."""
     prefix = ""
     if highlight:
-        prefix += "\U0001F449 "
+        prefix += "\U0001f449 "
     if is_recent(e):
-        prefix += "\U0001F6A9 "
+        prefix += "\U0001f6a9 "
     emoji_part = ""
     if e.emoji and not e.title.strip().startswith(e.emoji):
         emoji_part = f"{e.emoji} "
@@ -1490,19 +1545,27 @@ def format_event_daily(e: Event, highlight: bool = False) -> str:
     if e.is_free:
         txt = "🟡 Бесплатно"
         if e.ticket_link:
-            txt += f" <a href=\"{html.escape(e.ticket_link)}\">по регистрации</a>"
+            txt += f' <a href="{html.escape(e.ticket_link)}">по регистрации</a>'
         lines.append(txt)
-    elif e.ticket_link and (e.ticket_price_min is not None or e.ticket_price_max is not None):
+    elif e.ticket_link and (
+        e.ticket_price_min is not None or e.ticket_price_max is not None
+    ):
         if e.ticket_price_max is not None and e.ticket_price_max != e.ticket_price_min:
             price = f"от {e.ticket_price_min} до {e.ticket_price_max}"
         else:
             price = str(e.ticket_price_min or e.ticket_price_max or "")
-        lines.append(f'<a href="{html.escape(e.ticket_link)}">Билеты в источнике</a> {price}'.strip())
+        lines.append(
+            f'<a href="{html.escape(e.ticket_link)}">Билеты в источнике</a> {price}'.strip()
+        )
     elif e.ticket_link:
         lines.append(f'<a href="{html.escape(e.ticket_link)}">по регистрации</a>')
     else:
         price = ""
-        if e.ticket_price_min is not None and e.ticket_price_max is not None and e.ticket_price_min != e.ticket_price_max:
+        if (
+            e.ticket_price_min is not None
+            and e.ticket_price_max is not None
+            and e.ticket_price_min != e.ticket_price_max
+        ):
             price = f"от {e.ticket_price_min} до {e.ticket_price_max}"
         elif e.ticket_price_min is not None:
             price = str(e.ticket_price_min)
@@ -1530,7 +1593,7 @@ def format_event_daily(e: Event, highlight: bool = False) -> str:
 def format_exhibition_md(e: Event) -> str:
     prefix = ""
     if is_recent(e):
-        prefix += "\U0001F6A9 "
+        prefix += "\U0001f6a9 "
     emoji_part = ""
     if e.emoji and not e.title.strip().startswith(e.emoji):
         emoji_part = f"{e.emoji} "
@@ -1542,7 +1605,11 @@ def format_exhibition_md(e: Event) -> str:
         lines.append(txt)
     elif e.ticket_link:
         lines.append(f"[Билеты в источнике]({e.ticket_link})")
-    elif e.ticket_price_min is not None and e.ticket_price_max is not None and e.ticket_price_min != e.ticket_price_max:
+    elif (
+        e.ticket_price_min is not None
+        and e.ticket_price_max is not None
+        and e.ticket_price_min != e.ticket_price_max
+    ):
         lines.append(f"Билеты от {e.ticket_price_min} до {e.ticket_price_max}")
     elif e.ticket_price_min is not None:
         lines.append(f"Билеты {e.ticket_price_min}")
@@ -1569,12 +1636,14 @@ def format_exhibition_md(e: Event) -> str:
 def event_title_nodes(e: Event) -> list:
     nodes: list = []
     if is_recent(e):
-        nodes.append("\U0001F6A9 ")
+        nodes.append("\U0001f6a9 ")
     if e.emoji and not e.title.strip().startswith(e.emoji):
         nodes.append(f"{e.emoji} ")
     title_text = e.title
     if e.source_post_url:
-        nodes.append({"tag": "a", "attrs": {"href": e.source_post_url}, "children": [title_text]})
+        nodes.append(
+            {"tag": "a", "attrs": {"href": e.source_post_url}, "children": [title_text]}
+        )
     else:
         nodes.append(title_text)
     return nodes
@@ -1585,23 +1654,26 @@ def event_to_nodes(e: Event) -> list[dict]:
     lines = md.split("\n")
     body_md = "\n".join(lines[1:]) if len(lines) > 1 else ""
     from telegraph.utils import html_to_nodes
+
     nodes = [{"tag": "h4", "children": event_title_nodes(e)}]
     if body_md:
         html_text = md_to_html(body_md)
         nodes.extend(html_to_nodes(html_text))
-    nodes.append({"tag": "p", "children": ["\u00A0"]})
+    nodes.append({"tag": "p", "children": ["\u00a0"]})
     return nodes
 
 
 def exhibition_title_nodes(e: Event) -> list:
     nodes: list = []
     if is_recent(e):
-        nodes.append("\U0001F6A9 ")
+        nodes.append("\U0001f6a9 ")
     if e.emoji and not e.title.strip().startswith(e.emoji):
         nodes.append(f"{e.emoji} ")
     title_text = e.title
     if e.source_post_url:
-        nodes.append({"tag": "a", "attrs": {"href": e.source_post_url}, "children": [title_text]})
+        nodes.append(
+            {"tag": "a", "attrs": {"href": e.source_post_url}, "children": [title_text]}
+        )
     else:
         nodes.append(title_text)
     return nodes
@@ -1612,11 +1684,12 @@ def exhibition_to_nodes(e: Event) -> list[dict]:
     lines = md.split("\n")
     body_md = "\n".join(lines[1:]) if len(lines) > 1 else ""
     from telegraph.utils import html_to_nodes
+
     nodes = [{"tag": "h4", "children": exhibition_title_nodes(e)}]
     if body_md:
         html_text = md_to_html(body_md)
         nodes.extend(html_to_nodes(html_text))
-    nodes.append({"tag": "p", "children": ["\u00A0"]})
+    nodes.append({"tag": "p", "children": ["\u00a0"]})
     return nodes
 
 
@@ -1675,10 +1748,15 @@ async def build_month_page_content(db: Database, month: str) -> tuple[str, list]
         by_day.setdefault(d, []).append(e)
 
     content: list[dict] = []
-    intro = (
-        f"Планируйте свой месяц заранее: интересные мероприятия Калининграда и 39 региона в {month_name_prepositional(month)} — от лекций и концертов до культурных шоу. "
-    )
-    intro_nodes = [intro, {"tag": "a", "attrs": {"href": "https://t.me/kenigevents"}, "children": ["Полюбить Калининград Анонсы"]}]
+    intro = f"Планируйте свой месяц заранее: интересные мероприятия Калининграда и 39 региона в {month_name_prepositional(month)} — от лекций и концертов до культурных шоу. "
+    intro_nodes = [
+        intro,
+        {
+            "tag": "a",
+            "attrs": {"href": "https://t.me/kenigevents"},
+            "children": ["Полюбить Калининград Анонсы"],
+        },
+    ]
     content.append({"tag": "p", "children": intro_nodes})
 
     for day in sorted(by_day):
@@ -1686,9 +1764,11 @@ async def build_month_page_content(db: Database, month: str) -> tuple[str, list]
             content.append({"tag": "h3", "children": ["🟥🟥🟥 суббота 🟥🟥🟥"]})
         elif day.weekday() == 6:
             content.append({"tag": "h3", "children": ["🟥🟥 воскресенье 🟥🟥"]})
-        content.append({"tag": "h3", "children": [f"🟥🟥🟥 {format_day_pretty(day)} 🟥🟥🟥"]})
+        content.append(
+            {"tag": "h3", "children": [f"🟥🟥🟥 {format_day_pretty(day)} 🟥🟥🟥"]}
+        )
         content.append({"tag": "br"})
-        content.append({"tag": "p", "children": ["\u00A0"]})
+        content.append({"tag": "p", "children": ["\u00a0"]})
         for ev in by_day[day]:
             content.extend(event_to_nodes(ev))
 
@@ -1701,7 +1781,9 @@ async def build_month_page_content(db: Database, month: str) -> tuple[str, list]
             if p.month == month:
                 nav_children.append(name)
             else:
-                nav_children.append({"tag": "a", "attrs": {"href": p.url}, "children": [name]})
+                nav_children.append(
+                    {"tag": "a", "attrs": {"href": p.url}, "children": [name]}
+                )
             if idx < len(future_pages) - 1:
                 nav_children.append(" ")
         content.append({"tag": "br"})
@@ -1710,13 +1792,11 @@ async def build_month_page_content(db: Database, month: str) -> tuple[str, list]
     if exhibitions:
         content.append({"tag": "h3", "children": ["Постоянные выставки"]})
         content.append({"tag": "br"})
-        content.append({"tag": "p", "children": ["\u00A0"]})
+        content.append({"tag": "p", "children": ["\u00a0"]})
         for ev in exhibitions:
             content.extend(exhibition_to_nodes(ev))
 
-    title = (
-        f"События Калининграда в {month_name_prepositional(month)}: полный анонс от Полюбить Калининград Анонсы"
-    )
+    title = f"События Калининграда в {month_name_prepositional(month)}: полный анонс от Полюбить Калининград Анонсы"
     return title, content
 
 
@@ -1732,9 +1812,7 @@ async def sync_month_page(db: Database, month: str, update_links: bool = True):
             created = False
             if not page:
                 title, content = await build_month_page_content(db, month)
-                data = await asyncio.to_thread(
-                    tg.create_page, title, content=content
-                )
+                data = await asyncio.to_thread(tg.create_page, title, content=content)
                 page = MonthPage(
                     month=month, url=data.get("url"), path=data.get("path")
                 )
@@ -1746,9 +1824,7 @@ async def sync_month_page(db: Database, month: str, update_links: bool = True):
             await asyncio.to_thread(
                 tg.edit_page, page.path, title=title, content=content
             )
-            logging.info(
-                "%s month page %s", "Created" if created else "Edited", month
-            )
+            logging.info("%s month page %s", "Created" if created else "Edited", month)
             await session.commit()
         except Exception as e:
             logging.error("Failed to sync month page %s: %s", month, e)
@@ -1841,9 +1917,11 @@ async def build_weekend_page_content(db: Database, start: str) -> tuple[str, lis
             content.append({"tag": "h3", "children": ["🟥🟥🟥 суббота 🟥🟥🟥"]})
         elif d.weekday() == 6:
             content.append({"tag": "h3", "children": ["🟥🟥 воскресенье 🟥🟥"]})
-        content.append({"tag": "h3", "children": [f"🟥🟥🟥 {format_day_pretty(d)} 🟥🟥🟥"]})
+        content.append(
+            {"tag": "h3", "children": [f"🟥🟥🟥 {format_day_pretty(d)} 🟥🟥🟥"]}
+        )
         content.append({"tag": "br"})
-        content.append({"tag": "p", "children": ["\u00A0"]})
+        content.append({"tag": "p", "children": ["\u00a0"]})
         for ev in by_day[d]:
             content.extend(event_to_nodes(ev))
 
@@ -1856,7 +1934,9 @@ async def build_weekend_page_content(db: Database, start: str) -> tuple[str, lis
             if w.start == start:
                 nav_children.append(label)
             else:
-                nav_children.append({"tag": "a", "attrs": {"href": w.url}, "children": [label]})
+                nav_children.append(
+                    {"tag": "a", "attrs": {"href": w.url}, "children": [label]}
+                )
             if idx < len(future_weekends) - 1:
                 nav_children.append(" ")
         content.append({"tag": "br"})
@@ -1872,7 +1952,9 @@ async def build_weekend_page_content(db: Database, start: str) -> tuple[str, lis
             if p.month == cur_month:
                 nav_children.append(name)
             else:
-                nav_children.append({"tag": "a", "attrs": {"href": p.url}, "children": [name]})
+                nav_children.append(
+                    {"tag": "a", "attrs": {"href": p.url}, "children": [name]}
+                )
             if idx < len(future_months) - 1:
                 nav_children.append(" ")
         content.append({"tag": "br"})
@@ -1881,17 +1963,15 @@ async def build_weekend_page_content(db: Database, start: str) -> tuple[str, lis
     if exhibitions:
         content.append({"tag": "h3", "children": ["Постоянные выставки"]})
         content.append({"tag": "br"})
-        content.append({"tag": "p", "children": ["\u00A0"]})
+        content.append({"tag": "p", "children": ["\u00a0"]})
         for ev in exhibitions:
             content.extend(exhibition_to_nodes(ev))
 
-    title = (
-        f"Чем заняться на выходных в Калининградской области {format_day_pretty(saturday)}–{format_day_pretty(sunday)}"
-    )
+    title = f"Чем заняться на выходных в Калининградской области {format_day_pretty(saturday)}–{format_day_pretty(sunday)}"
     return title, content
 
 
-async def sync_weekend_page(db: Database, start: str):
+async def sync_weekend_page(db: Database, start: str, update_links: bool = True):
     token = get_telegraph_token()
     if not token:
         logging.error("Telegraph token unavailable")
@@ -1905,18 +1985,161 @@ async def sync_weekend_page(db: Database, start: str):
                 # Create a placeholder page to obtain path and URL
                 title, content = await build_weekend_page_content(db, start)
                 data = await asyncio.to_thread(tg.create_page, title, content=content)
-                page = WeekendPage(start=start, url=data.get("url"), path=data.get("path"))
+                page = WeekendPage(
+                    start=start, url=data.get("url"), path=data.get("path")
+                )
                 session.add(page)
                 await session.commit()
                 created = True
 
             # Rebuild content including this page in navigation
             title, content = await build_weekend_page_content(db, start)
-            await asyncio.to_thread(tg.edit_page, page.path, title=title, content=content)
-            logging.info("%s weekend page %s", "Created" if created else "Edited", start)
+            await asyncio.to_thread(
+                tg.edit_page, page.path, title=title, content=content
+            )
+            logging.info(
+                "%s weekend page %s", "Created" if created else "Edited", start
+            )
             await session.commit()
         except Exception as e:
             logging.error("Failed to sync weekend page %s: %s", start, e)
+
+    if update_links:
+        async with db.get_session() as session:
+            result = await session.execute(
+                select(WeekendPage).order_by(WeekendPage.start)
+            )
+            weekends = result.scalars().all()
+        for w in weekends:
+            if w.start != start:
+                await sync_weekend_page(db, w.start, update_links=False)
+
+
+async def build_daily_posts(
+    db: Database, tz: timezone
+) -> list[tuple[str, types.InlineKeyboardMarkup | None]]:
+    today = datetime.now(tz).date()
+    yesterday_utc = datetime.utcnow() - timedelta(days=1)
+    async with db.get_session() as session:
+        res_today = await session.execute(
+            select(Event).where(Event.date == today.isoformat()).order_by(Event.time)
+        )
+        events_today = res_today.scalars().all()
+        res_new = await session.execute(
+            select(Event)
+            .where(
+                Event.date > today.isoformat(),
+                Event.added_at.is_not(None),
+                Event.added_at >= yesterday_utc,
+                Event.silent.is_(False),
+            )
+            .order_by(Event.date, Event.time)
+        )
+        events_new = res_new.scalars().all()
+
+        w_start = next_weekend_start(today)
+        wpage = await session.get(WeekendPage, w_start.isoformat())
+        cur_month = today.strftime("%Y-%m")
+        mp_cur = await session.get(MonthPage, cur_month)
+        mp_next = await session.get(MonthPage, next_month(cur_month))
+
+    lines1 = [
+        f"<b>АНОНС на {format_day_pretty(today)} {today.year} #ежедневныйанонс</b>",
+        DAYS_OF_WEEK[today.weekday()],
+        "",
+        "<b><i>НЕ ПРОПУСТИТЕ СЕГОДНЯ</i></b>",
+    ]
+    for e in events_today:
+        lines1.append("")
+        lines1.append(format_event_daily(e, highlight=True))
+    section1 = "\n".join(lines1)
+
+    lines2 = ["<b><i>ДОБАВИЛИ В АНОНС</i></b>"]
+    for e in events_new:
+        lines2.append("")
+        lines2.append(format_event_daily(e))
+    section2 = "\n".join(lines2)
+
+    buttons = []
+    if wpage:
+        sunday = w_start + timedelta(days=1)
+        text = f"Мероприятия на выходные {w_start.day} {sunday.day} {MONTHS[w_start.month - 1]}"
+        buttons.append(types.InlineKeyboardButton(text=text, url=wpage.url))
+    if mp_cur:
+        buttons.append(
+            types.InlineKeyboardButton(
+                text=f"Мероприятия на {month_name_nominative(cur_month)}",
+                url=mp_cur.url,
+            )
+        )
+    if mp_next:
+        buttons.append(
+            types.InlineKeyboardButton(
+                text=f"Мероприятия на {month_name_nominative(next_month(cur_month))}",
+                url=mp_next.url,
+            )
+        )
+    markup = None
+    if buttons:
+        markup = types.InlineKeyboardMarkup(inline_keyboard=[[b] for b in buttons])
+
+    combined = section1 + "\n\n\n" + section2
+    if len(combined) <= 4096:
+        return [(combined, markup)]
+    return [(section1, None), (section2, markup)]
+
+
+async def send_daily_announcement(
+    db: Database,
+    bot: Bot,
+    channel_id: int,
+    tz: timezone,
+    *,
+    record: bool = True,
+):
+    posts = await build_daily_posts(db, tz)
+    for text, markup in posts:
+        await bot.send_message(
+            channel_id,
+            text,
+            reply_markup=markup,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+    if record:
+        async with db.get_session() as session:
+            ch = await session.get(Channel, channel_id)
+            if ch:
+                ch.last_daily = datetime.now(tz).date().isoformat()
+                await session.commit()
+
+
+async def daily_scheduler(db: Database, bot: Bot):
+    while True:
+        offset = await get_tz_offset(db)
+        tz = offset_to_timezone(offset)
+        now = datetime.now(tz)
+        now_time = now.time().replace(second=0, microsecond=0)
+        async with db.get_session() as session:
+            result = await session.execute(
+                select(Channel).where(Channel.daily_time.is_not(None))
+            )
+            channels = result.scalars().all()
+        for ch in channels:
+            if not ch.daily_time:
+                continue
+            try:
+                target_time = datetime.strptime(ch.daily_time, "%H:%M").time()
+            except ValueError:
+                continue
+            if (
+                ch.last_daily or ""
+            ) != now.date().isoformat() and now_time >= target_time:
+                try:
+                    await send_daily_announcement(db, bot, ch.channel_id, tz)
+                except Exception as e:
+                    logging.error("daily send failed for %s: %s", ch.channel_id, e)
+        await asyncio.sleep(60)
 
 
 async def build_daily_posts(db: Database, tz: timezone) -> list[tuple[str, types.InlineKeyboardMarkup | None]]:
@@ -2042,10 +2265,12 @@ async def daily_scheduler(db: Database, bot: Bot):
 async def build_events_message(db: Database, target_date: date, tz: timezone):
     async with db.get_session() as session:
         result = await session.execute(
-            select(Event).where(
+            select(Event)
+            .where(
                 (Event.date == target_date.isoformat())
                 | (Event.end_date == target_date.isoformat())
-            ).order_by(Event.time)
+            )
+            .order_by(Event.time)
         )
         events = result.scalars().all()
 
@@ -2054,7 +2279,11 @@ async def build_events_message(db: Database, target_date: date, tz: timezone):
         prefix = ""
         if e.end_date and e.date == target_date.isoformat():
             prefix = "(Открытие) "
-        elif e.end_date and e.end_date == target_date.isoformat() and e.end_date != e.date:
+        elif (
+            e.end_date
+            and e.end_date == target_date.isoformat()
+            and e.end_date != e.date
+        ):
             prefix = "(Закрытие) "
         title = f"{e.emoji} {e.title}" if e.emoji else e.title
         lines.append(f"{e.id}. {prefix}{title}")
@@ -2068,7 +2297,10 @@ async def build_events_message(db: Database, target_date: date, tz: timezone):
             price_parts = []
             if e.ticket_price_min is not None:
                 price_parts.append(str(e.ticket_price_min))
-            if e.ticket_price_max is not None and e.ticket_price_max != e.ticket_price_min:
+            if (
+                e.ticket_price_max is not None
+                and e.ticket_price_max != e.ticket_price_min
+            ):
                 price_parts.append(str(e.ticket_price_max))
             if price_parts:
                 lines.append("-".join(price_parts))
@@ -2081,11 +2313,9 @@ async def build_events_message(db: Database, target_date: date, tz: timezone):
     keyboard = [
         [
             types.InlineKeyboardButton(
-                text="\u274C", callback_data=f"del:{e.id}:{target_date.isoformat()}"
+                text="\u274c", callback_data=f"del:{e.id}:{target_date.isoformat()}"
             ),
-            types.InlineKeyboardButton(
-                text="\u270E", callback_data=f"edit:{e.id}"
-            ),
+            types.InlineKeyboardButton(text="\u270e", callback_data=f"edit:{e.id}"),
         ]
         for e in events
     ]
@@ -2096,10 +2326,14 @@ async def build_events_message(db: Database, target_date: date, tz: timezone):
     row = []
     if target_date > today:
         row.append(
-            types.InlineKeyboardButton(text="\u25C0", callback_data=f"nav:{prev_day.isoformat()}")
+            types.InlineKeyboardButton(
+                text="\u25c0", callback_data=f"nav:{prev_day.isoformat()}"
+            )
         )
     row.append(
-        types.InlineKeyboardButton(text="\u25B6", callback_data=f"nav:{next_day.isoformat()}")
+        types.InlineKeyboardButton(
+            text="\u25b6", callback_data=f"nav:{next_day.isoformat()}"
+        )
     )
     keyboard.append(row)
 
@@ -2159,7 +2393,10 @@ async def build_exhibitions_message(db: Database, tz: timezone):
             price_parts = []
             if e.ticket_price_min is not None:
                 price_parts.append(str(e.ticket_price_min))
-            if e.ticket_price_max is not None and e.ticket_price_max != e.ticket_price_min:
+            if (
+                e.ticket_price_max is not None
+                and e.ticket_price_max != e.ticket_price_min
+            ):
                 price_parts.append(str(e.ticket_price_max))
             if price_parts:
                 lines.append("-".join(price_parts))
@@ -2172,8 +2409,8 @@ async def build_exhibitions_message(db: Database, tz: timezone):
 
     keyboard = [
         [
-            types.InlineKeyboardButton(text="\u274C", callback_data=f"del:{e.id}:exh"),
-            types.InlineKeyboardButton(text="\u270E", callback_data=f"edit:{e.id}"),
+            types.InlineKeyboardButton(text="\u274c", callback_data=f"del:{e.id}:exh"),
+            types.InlineKeyboardButton(text="\u270e", callback_data=f"edit:{e.id}"),
         ]
         for e in events
     ]
@@ -2230,22 +2467,26 @@ async def show_edit_menu(user_id: int, event: Event, bot: Bot):
             row = []
     if row:
         keyboard.append(row)
-    keyboard.append([
-        types.InlineKeyboardButton(
-            text=(
-                "\U0001F6A9 Переключить на тихий режим"
-                if not event.silent
-                else "\U0001F910 Тихий режим"
-            ),
-            callback_data=f"togglesilent:{event.id}",
-        )
-    ])
-    keyboard.append([
-        types.InlineKeyboardButton(
-            text=("\u2705 Бесплатно" if event.is_free else "\u274C Бесплатно"),
-            callback_data=f"togglefree:{event.id}",
-        )
-    ])
+    keyboard.append(
+        [
+            types.InlineKeyboardButton(
+                text=(
+                    "\U0001f6a9 Переключить на тихий режим"
+                    if not event.silent
+                    else "\U0001f910 Тихий режим"
+                ),
+                callback_data=f"togglesilent:{event.id}",
+            )
+        ]
+    )
+    keyboard.append(
+        [
+            types.InlineKeyboardButton(
+                text=("\u2705 Бесплатно" if event.is_free else "\u274c Бесплатно"),
+                callback_data=f"togglefree:{event.id}",
+            )
+        ]
+    )
     keyboard.append(
         [types.InlineKeyboardButton(text="Done", callback_data=f"editdone:{event.id}")]
     )
@@ -2458,7 +2699,7 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
             )
         buttons.append(
             types.InlineKeyboardButton(
-                text="\U0001F6A9 Переключить на тихий режим",
+                text="\U0001f6a9 Переключить на тихий режим",
                 callback_data=f"togglesilent:{saved.id}",
             )
         )
@@ -2499,13 +2740,15 @@ async def update_source_page(path: str, title: str, new_html: str):
     tg = Telegraph(access_token=token)
     try:
         logging.info("Fetching telegraph page %s", path)
-        page = await asyncio.to_thread(
-            tg.get_page, path, return_html=True
-        )
+        page = await asyncio.to_thread(tg.get_page, path, return_html=True)
         html_content = page.get("content") or page.get("content_html") or ""
         cleaned = re.sub(r"</?tg-emoji[^>]*>", "", new_html)
-        cleaned = cleaned.replace("\U0001F193\U0001F193\U0001F193\U0001F193", "Бесплатно")
-        html_content += f"<p>{CONTENT_SEPARATOR}</p><p>" + cleaned.replace("\n", "<br/>") + "</p>"
+        cleaned = cleaned.replace(
+            "\U0001f193\U0001f193\U0001f193\U0001f193", "Бесплатно"
+        )
+        html_content += (
+            f"<p>{CONTENT_SEPARATOR}</p><p>" + cleaned.replace("\n", "<br/>") + "</p>"
+        )
         logging.info("Editing telegraph page %s", path)
         await asyncio.to_thread(
             tg.edit_page, path, title=title, html_content=html_content
@@ -2535,6 +2778,7 @@ async def create_source_page(
         if lines and lines[0].strip() == title.strip():
             return "\n".join(lines[1:]).lstrip()
         return line_text
+
     # Media uploads to Telegraph are flaky and consume bandwidth.
     # Skip uploading files for now to keep requests lightweight.
     if media:
@@ -2551,17 +2795,19 @@ async def create_source_page(
     if html_text:
         html_text = strip_title(html_text)
         cleaned = re.sub(r"</?tg-emoji[^>]*>", "", html_text)
-        cleaned = cleaned.replace("\U0001F193\U0001F193\U0001F193\U0001F193", "Бесплатно")
+        cleaned = cleaned.replace(
+            "\U0001f193\U0001f193\U0001f193\U0001f193", "Бесплатно"
+        )
         html_content += f"<p>{cleaned.replace('\n', '<br/>')}</p>"
     else:
         clean_text = strip_title(text)
-        clean_text = clean_text.replace("\U0001F193\U0001F193\U0001F193\U0001F193", "Бесплатно")
+        clean_text = clean_text.replace(
+            "\U0001f193\U0001f193\U0001f193\U0001f193", "Бесплатно"
+        )
         paragraphs = [f"<p>{html.escape(line)}</p>" for line in clean_text.splitlines()]
         html_content += "".join(paragraphs)
     try:
-        page = await asyncio.to_thread(
-            tg.create_page, title, html_content=html_content
-        )
+        page = await asyncio.to_thread(tg.create_page, title, html_content=html_content)
     except Exception as e:
         logging.error("Failed to create telegraph page: %s", e)
         return None
@@ -2671,8 +2917,12 @@ def create_app() -> web.Application:
     dp.message.register(daily_wrapper, Command("daily"))
     dp.message.register(exhibitions_wrapper, Command("exhibitions"))
     dp.message.register(pages_wrapper, Command("pages"))
-    dp.message.register(edit_message_wrapper, lambda m: m.from_user.id in editing_sessions)
-    dp.message.register(daily_time_wrapper, lambda m: m.from_user.id in daily_time_sessions)
+    dp.message.register(
+        edit_message_wrapper, lambda m: m.from_user.id in editing_sessions
+    )
+    dp.message.register(
+        daily_time_wrapper, lambda m: m.from_user.id in daily_time_sessions
+    )
     dp.message.register(forward_wrapper, lambda m: bool(m.forward_date))
     dp.my_chat_member.register(partial(handle_my_chat_member, db=db))
 
@@ -2689,18 +2939,19 @@ def create_app() -> web.Application:
             hook,
             allowed_updates=["message", "callback_query", "my_chat_member"],
         )
-        app['daily_task'] = asyncio.create_task(daily_scheduler(db, bot))
+        app["daily_task"] = asyncio.create_task(daily_scheduler(db, bot))
 
     async def on_shutdown(app: web.Application):
         await bot.session.close()
-        if 'daily_task' in app:
-            app['daily_task'].cancel()
+        if "daily_task" in app:
+            app["daily_task"].cancel()
             with contextlib.suppress(Exception):
-                await app['daily_task']
+                await app["daily_task"]
 
     app.on_startup.append(on_startup)
     app.on_shutdown.append(on_shutdown)
     return app
+
 
 if __name__ == "__main__":
     import sys
