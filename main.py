@@ -260,6 +260,14 @@ async def extract_images(message: types.Message, bot: Bot) -> list[tuple[bytes, 
     return images[:3]
 
 
+def normalize_hashtag_dates(text: str) -> str:
+    """Replace hashtags like '#1_августа' with '1 августа'."""
+    pattern = re.compile(
+        r"#(\d{1,2})_(%s)" % "|".join(MONTHS)
+    )
+    return re.sub(pattern, lambda m: f"{m.group(1)} {m.group(2)}", text)
+
+
 async def parse_event_via_4o(text: str) -> list[dict]:
     token = os.getenv("FOUR_O_TOKEN")
     if not token:
@@ -2848,6 +2856,7 @@ async def update_source_page(
             catbox_msg = "disabled"
         for url in catbox_urls:
             html_content += f'<img src="{html.escape(url)}"/><p></p>'
+        new_html = normalize_hashtag_dates(new_html)
         cleaned = re.sub(r"</?tg-emoji[^>]*>", "", new_html)
         cleaned = cleaned.replace(
             "\U0001f193\U0001f193\U0001f193\U0001f193", "Бесплатно"
@@ -2944,6 +2953,7 @@ async def create_source_page(
 
     if html_text:
         html_text = strip_title(html_text)
+        html_text = normalize_hashtag_dates(html_text)
         cleaned = re.sub(r"</?tg-emoji[^>]*>", "", html_text)
         cleaned = cleaned.replace(
             "\U0001f193\U0001f193\U0001f193\U0001f193", "Бесплатно"
@@ -2951,6 +2961,7 @@ async def create_source_page(
         html_content += f"<p>{cleaned.replace('\n', '<br/>')}</p>"
     else:
         clean_text = strip_title(text)
+        clean_text = normalize_hashtag_dates(clean_text)
         clean_text = clean_text.replace(
             "\U0001f193\U0001f193\U0001f193\U0001f193", "Бесплатно"
         )

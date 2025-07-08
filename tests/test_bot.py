@@ -697,6 +697,26 @@ async def test_create_source_page_photo_catbox(monkeypatch):
     assert res == ("https://telegra.ph/test", "test", "ok", 1)
 
 
+@pytest.mark.asyncio
+async def test_create_source_page_normalizes_hashtags(monkeypatch):
+    class DummyTG:
+        def __init__(self, access_token=None):
+            self.access_token = access_token
+
+        def create_page(self, title, html_content=None, **_):
+            assert "#1_августа" not in html_content
+            assert "1 августа" in html_content
+            return {"url": "https://telegra.ph/test", "path": "test"}
+
+    monkeypatch.setenv("TELEGRAPH_TOKEN", "t")
+    monkeypatch.setattr(
+        "main.Telegraph", lambda access_token=None: DummyTG(access_token)
+    )
+
+    res = await main.create_source_page("Title", "#1_августа text", None)
+    assert res == ("https://telegra.ph/test", "test", "", 0)
+
+
 def test_get_telegraph_token_creates(tmp_path, monkeypatch):
     class DummyTG:
         def create_account(self, short_name):
@@ -1905,6 +1925,22 @@ async def test_update_source_page_uses_content(monkeypatch):
     assert "<p>old</p>" in html
     assert "new" in html
     assert main.CONTENT_SEPARATOR in html
+
+
+@pytest.mark.asyncio
+async def test_update_source_page_normalizes_hashtags(monkeypatch):
+    class DummyTG:
+        def get_page(self, path, return_html=True):
+            return {"content": ""}
+
+        def edit_page(self, path, title, html_content):
+            assert "#1_августа" not in html_content
+            assert "1 августа" in html_content
+
+    monkeypatch.setattr("main.get_telegraph_token", lambda: "t")
+    monkeypatch.setattr("main.Telegraph", lambda access_token=None: DummyTG())
+
+    await main.update_source_page("p", "T", "#1_августа event")
 
 
 @pytest.mark.asyncio
