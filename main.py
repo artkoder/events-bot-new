@@ -1,12 +1,13 @@
 import logging
 import os
-from datetime import date, datetime, timedelta, timezone
-from typing import Optional, Tuple
+from datetime import date, datetime, timedelta, timezone, time
+from typing import Optional, Tuple, Iterable
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
-from aiohttp import web, ClientSession
+from aiohttp import web, ClientSession, FormData
+import imghdr
 from difflib import SequenceMatcher
 import json
 import re
@@ -32,6 +33,9 @@ CONTENT_SEPARATOR = "🟧" * 10
 editing_sessions: dict[int, tuple[int, str | None]] = {}
 # user_id -> channel_id for daily time editing
 daily_time_sessions: dict[int, int] = {}
+
+# toggle for uploading images to catbox
+CATBOX_ENABLED: bool = False
 
 
 class User(SQLModel, table=True):
@@ -84,11 +88,13 @@ class Event(SQLModel, table=True):
     emoji: Optional[str] = None
     end_date: Optional[str] = None
     is_free: bool = False
+    pushkin_card: bool = False
     silent: bool = False
     telegraph_path: Optional[str] = None
     source_text: str
     telegraph_url: Optional[str] = None
     source_post_url: Optional[str] = None
+    photo_count: int = 0
     added_at: datetime = Field(default_factory=datetime.utcnow)
 
 
@@ -161,6 +167,14 @@ class Database:
                 await conn.exec_driver_sql(
                     "ALTER TABLE event ADD COLUMN added_at VARCHAR"
                 )
+            if "photo_count" not in cols:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE event ADD COLUMN photo_count INTEGER DEFAULT 0"
+                )
+            if "pushkin_card" not in cols:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE event ADD COLUMN pushkin_card BOOLEAN DEFAULT 0"
+                )
 
             result = await conn.exec_driver_sql("PRAGMA table_info(channel)")
             cols = [r[1] for r in result.fetchall()]
@@ -195,6 +209,25 @@ async def set_tz_offset(db: Database, value: str):
         await session.commit()
 
 
+async def get_catbox_enabled(db: Database) -> bool:
+    async with db.get_session() as session:
+        setting = await session.get(Setting, "catbox_enabled")
+        return setting.value == "1" if setting else False
+
+
+async def set_catbox_enabled(db: Database, value: bool):
+    async with db.get_session() as session:
+        setting = await session.get(Setting, "catbox_enabled")
+        if setting:
+            setting.value = "1" if value else "0"
+        else:
+            setting = Setting(key="catbox_enabled", value="1" if value else "0")
+            session.add(setting)
+        await session.commit()
+    global CATBOX_ENABLED
+    CATBOX_ENABLED = value
+
+
 def validate_offset(value: str) -> bool:
     if len(value) != 6 or value[0] not in "+-" or value[3] != ":":
         return False
@@ -211,6 +244,86 @@ def offset_to_timezone(value: str) -> timezone:
     hours = int(value[1:3])
     minutes = int(value[4:6])
     return timezone(sign * timedelta(hours=hours, minutes=minutes))
+
+
+async def extract_images(message: types.Message, bot: Bot) -> list[tuple[bytes, str]]:
+    """Download up to three images from the message."""
+    images: list[tuple[bytes, str]] = []
+    if message.photo:
+        bio = BytesIO()
+        await bot.download(message.photo[-1].file_id, destination=bio)
+        images.append((bio.getvalue(), "photo.jpg"))
+    if (
+        message.document
+        and message.document.mime_type
+        and message.document.mime_type.startswith("image/")
+    ):
+        bio = BytesIO()
+        await bot.download(message.document.file_id, destination=bio)
+        name = message.document.file_name or "image.jpg"
+        images.append((bio.getvalue(), name))
+    return images[:3]
+
+
+def normalize_hashtag_dates(text: str) -> str:
+    """Replace hashtags like '#1_августа' with '1 августа'."""
+    pattern = re.compile(
+        r"#(\d{1,2})_(%s)" % "|".join(MONTHS)
+    )
+    return re.sub(pattern, lambda m: f"{m.group(1)} {m.group(2)}", text)
+
+
+def strip_city_from_address(address: str | None, city: str | None) -> str | None:
+    """Remove the city name from the end of the address if duplicated."""
+    if not address or not city:
+        return address
+    city_clean = city.lstrip("#").strip().lower()
+    addr = address.strip()
+    if addr.lower().endswith(city_clean):
+        addr = re.sub(r",?\s*#?%s$" % re.escape(city_clean), "", addr, flags=re.IGNORECASE)
+    addr = addr.rstrip(", ")
+    return addr
+
+
+def parse_bool_text(value: str) -> bool | None:
+    """Convert text to boolean if possible."""
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "y", "да", "д", "ok", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "n", "нет", "off"}:
+        return False
+    return None
+
+
+def parse_events_date(text: str, tz: timezone) -> date | None:
+    """Parse a date argument for /events allowing '2 августа [2025]'."""
+    text = text.strip().lower()
+    for fmt in ("%Y-%m-%d", "%d.%m.%Y"):
+        try:
+            return datetime.strptime(text, fmt).date()
+        except ValueError:
+            pass
+
+    m = re.match(r"(\d{1,2})\s+([а-яё]+)(?:\s+(\d{4}))?", text)
+    if not m:
+        return None
+    day = int(m.group(1))
+    month_name = m.group(2)
+    year_part = m.group(3)
+    month = {name: i + 1 for i, name in enumerate(MONTHS)}.get(month_name)
+    if not month:
+        return None
+    if year_part:
+        year = int(year_part)
+    else:
+        today = datetime.now(tz).date()
+        year = today.year
+        if month < today.month or (month == today.month and day < today.day):
+            year += 1
+    try:
+        return date(year, month, day)
+    except ValueError:
+        return None
 
 
 async def parse_event_via_4o(text: str) -> list[dict]:
@@ -643,6 +756,18 @@ async def handle_tz(message: types.Message, db: Database, bot: Bot):
     await bot.send_message(message.chat.id, f"Timezone set to {parts[1]}")
 
 
+async def handle_images(message: types.Message, db: Database, bot: Bot):
+    async with db.get_session() as session:
+        user = await session.get(User, message.from_user.id)
+        if not user or not user.is_superadmin:
+            await bot.send_message(message.chat.id, "Not authorized")
+            return
+    new_value = not CATBOX_ENABLED
+    await set_catbox_enabled(db, new_value)
+    status = "enabled" if new_value else "disabled"
+    await bot.send_message(message.chat.id, f"Image uploads {status}")
+
+
 async def handle_my_chat_member(update: types.ChatMemberUpdated, db: Database):
     if update.chat.type != "channel":
         return
@@ -868,6 +993,7 @@ async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
             ev.emoji = new.emoji
             ev.end_date = new.end_date
             ev.is_free = new.is_free
+            ev.pushkin_card = new.pushkin_card
             await session.commit()
             return ev, False
 
@@ -886,6 +1012,7 @@ async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
             ev.emoji = new.emoji
             ev.end_date = new.end_date
             ev.is_free = new.is_free
+            ev.pushkin_card = new.pushkin_card
             await session.commit()
             return ev, False
 
@@ -907,6 +1034,7 @@ async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
             ev.emoji = new.emoji
             ev.end_date = new.end_date
             ev.is_free = new.is_free
+            ev.pushkin_card = new.pushkin_card
             await session.commit()
             return ev, False
 
@@ -925,6 +1053,7 @@ async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
             ev.emoji = new.emoji
             ev.end_date = new.end_date
             ev.is_free = new.is_free
+            ev.pushkin_card = new.pushkin_card
             await session.commit()
             return ev, False
 
@@ -946,6 +1075,7 @@ async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
             ev.emoji = new.emoji
             ev.end_date = new.end_date
             ev.is_free = new.is_free
+            ev.pushkin_card = new.pushkin_card
             await session.commit()
             return ev, False
 
@@ -964,6 +1094,7 @@ async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
             ev.emoji = new.emoji
             ev.end_date = new.end_date
             ev.is_free = new.is_free
+            ev.pushkin_card = new.pushkin_card
             await session.commit()
             return ev, False
 
@@ -985,6 +1116,7 @@ async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
             ev.emoji = new.emoji
             ev.end_date = new.end_date
             ev.is_free = new.is_free
+            ev.pushkin_card = new.pushkin_card
             await session.commit()
             return ev, False
 
@@ -1006,6 +1138,7 @@ async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
             ev.emoji = new.emoji
             ev.end_date = new.end_date
             ev.is_free = new.is_free
+            ev.pushkin_card = new.pushkin_card
             await session.commit()
             return ev, False
         should_check = False
@@ -1036,6 +1169,7 @@ async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
                 ev.emoji = new.emoji
                 ev.end_date = new.end_date
                 ev.is_free = new.is_free
+                ev.pushkin_card = new.pushkin_card
                 await session.commit()
                 return ev, False
     new.added_at = datetime.utcnow()
@@ -1049,7 +1183,7 @@ async def add_events_from_text(
     text: str,
     source_link: str | None,
     html_text: str | None = None,
-    media: tuple[bytes, str] | None = None,
+    media: list[tuple[bytes, str]] | tuple[bytes, str] | None = None,
 ) -> list[tuple[Event, bool, list[str], str]]:
     try:
         parsed = await parse_event_via_4o(text)
@@ -1059,6 +1193,7 @@ async def add_events_from_text(
 
     results: list[tuple[Event, bool, list[str], str]] = []
     first = True
+    links_iter = iter(extract_links_from_html(html_text) if html_text else [])
     for data in parsed:
         date_str = data.get("date", "") or ""
         end_date = data.get("end_date") or None
@@ -1070,6 +1205,10 @@ async def add_events_from_text(
             if not end_date:
                 end_date = maybe_end
 
+        addr = data.get("location_address")
+        city = data.get("city")
+        addr = strip_city_from_address(addr, city)
+
         base_event = Event(
             title=data.get("title", ""),
             description=data.get("short_description", ""),
@@ -1077,8 +1216,8 @@ async def add_events_from_text(
             date=date_str,
             time=data.get("time", ""),
             location_name=data.get("location_name", ""),
-            location_address=data.get("location_address"),
-            city=data.get("city"),
+            location_address=addr,
+            city=city,
             ticket_price_min=data.get("ticket_price_min"),
             ticket_price_max=data.get("ticket_price_max"),
             ticket_link=data.get("ticket_link"),
@@ -1086,9 +1225,18 @@ async def add_events_from_text(
             emoji=data.get("emoji"),
             end_date=end_date,
             is_free=bool(data.get("is_free")),
+            pushkin_card=bool(data.get("pushkin_card")),
             source_text=text,
             source_post_url=source_link,
         )
+
+        if base_event.event_type == "выставка" and not base_event.end_date:
+            try:
+                start_dt = date.fromisoformat(base_event.date)
+            except ValueError:
+                start_dt = date.today()
+                base_event.date = start_dt.isoformat()
+            base_event.end_date = date(start_dt.year, 12, 31).isoformat()
 
         events_to_add = [base_event]
         if (
@@ -1111,8 +1259,11 @@ async def add_events_from_text(
                     events_to_add.append(copy_e)
 
         for event in events_to_add:
-            if (not is_valid_url(event.ticket_link)) and html_text:
-                extracted = extract_link_from_html(html_text)
+            if not is_valid_url(event.ticket_link):
+                try:
+                    extracted = next(links_iter)
+                except StopIteration:
+                    extracted = None
                 if extracted:
                     event.ticket_link = extracted
 
@@ -1131,10 +1282,21 @@ async def add_events_from_text(
                 saved, added = await upsert_event(session, event)
 
             media_arg = media if first else None
+            upload_info = ""
+            photo_count = saved.photo_count
             if saved.telegraph_url and saved.telegraph_path:
-                await update_source_page(
-                    saved.telegraph_path, saved.title or "Event", html_text or text
+                upload_info, added_count = await update_source_page(
+                    saved.telegraph_path,
+                    saved.title or "Event",
+                    html_text or text,
+                    media_arg,
                 )
+                if added_count:
+                    photo_count += added_count
+                    async with db.get_session() as session:
+                        saved.photo_count = photo_count
+                        session.add(saved)
+                        await session.commit()
             else:
                 res = await create_source_page(
                     saved.title or "Event",
@@ -1144,10 +1306,19 @@ async def add_events_from_text(
                     media_arg,
                 )
                 if res:
-                    url, path = res
+                    if len(res) == 4:
+                        url, path, upload_info, photo_count = res
+                    elif len(res) == 3:
+                        url, path, upload_info = res
+                        photo_count = 0
+                    else:
+                        url, path = res
+                        upload_info = ""
+                        photo_count = 0
                     async with db.get_session() as session:
                         saved.telegraph_url = url
                         saved.telegraph_path = path
+                        saved.photo_count = photo_count
                         session.add(saved)
                         await session.commit()
             await sync_month_page(db, saved.date[:7])
@@ -1179,6 +1350,8 @@ async def add_events_from_text(
                 lines.append(f"ticket_link: {saved.ticket_link}")
             if saved.telegraph_url:
                 lines.append(f"telegraph: {saved.telegraph_url}")
+            if upload_info:
+                lines.append(f"catbox: {upload_info}")
             status = "added" if added else "updated"
             results.append((saved, added, lines, status))
             first = False
@@ -1186,25 +1359,22 @@ async def add_events_from_text(
 
 
 async def handle_add_event(message: types.Message, db: Database, bot: Bot):
-    text = message.text.split(maxsplit=1)
-    if len(text) != 2:
+    parts = (message.text or message.caption or "").split(maxsplit=1)
+    if len(parts) != 2:
         await bot.send_message(message.chat.id, "Usage: /addevent <text>")
         return
-    media = None
-    if message.photo:
-        bio = BytesIO()
-        await bot.download(message.photo[-1].file_id, destination=bio)
-        media = (bio.getvalue(), "photo.jpg")
-    elif message.document and message.document.mime_type.startswith("image/"):
-        bio = BytesIO()
-        await bot.download(message.document.file_id, destination=bio)
-        media = (bio.getvalue(), "image.jpg")
-    elif message.video:
-        bio = BytesIO()
-        await bot.download(message.video.file_id, destination=bio)
-        media = (bio.getvalue(), "video.mp4")
-
-    results = await add_events_from_text(db, text[1], None, message.html_text, media)
+    images = await extract_images(message, bot)
+    media = images if images else None
+    html_text = message.html_text or message.caption_html
+    if html_text and html_text.startswith("/addevent"):
+        html_text = html_text[len("/addevent") :].lstrip()
+    results = await add_events_from_text(
+        db,
+        parts[1],
+        None,
+        html_text,
+        media,
+    )
     if not results:
         await bot.send_message(message.chat.id, "LLM error")
         return
@@ -1236,26 +1406,15 @@ async def handle_add_event(message: types.Message, db: Database, bot: Bot):
 
 
 async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
-    parts = message.text.split(maxsplit=1)
+    parts = (message.text or message.caption or "").split(maxsplit=1)
     if len(parts) != 2 or "|" not in parts[1]:
         await bot.send_message(
             message.chat.id, "Usage: /addevent_raw title|date|time|location"
         )
         return
     title, date, time, location = (p.strip() for p in parts[1].split("|", 3))
-    media = None
-    if message.photo:
-        bio = BytesIO()
-        await bot.download(message.photo[-1].file_id, destination=bio)
-        media = (bio.getvalue(), "photo.jpg")
-    elif message.document and message.document.mime_type.startswith("image/"):
-        bio = BytesIO()
-        await bot.download(message.document.file_id, destination=bio)
-        media = (bio.getvalue(), "image.jpg")
-    elif message.video:
-        bio = BytesIO()
-        await bot.download(message.video.file_id, destination=bio)
-        media = (bio.getvalue(), "video.mp4")
+    images = await extract_images(message, bot)
+    media = images if images else None
 
     event = Event(
         title=title,
@@ -1269,18 +1428,32 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
     async with db.get_session() as session:
         event, added = await upsert_event(session, event)
 
+    html_text = message.html_text or message.caption_html
+    if html_text and html_text.startswith("/addevent_raw"):
+        html_text = html_text[len("/addevent_raw") :].lstrip()
     res = await create_source_page(
         event.title or "Event",
         event.source_text,
         None,
-        event.source_text,
+        html_text or event.source_text,
         media,
     )
+    upload_info = ""
+    photo_count = 0
     if res:
-        url, path = res
+        if len(res) == 4:
+            url, path, upload_info, photo_count = res
+        elif len(res) == 3:
+            url, path, upload_info = res
+            photo_count = 0
+        else:
+            url, path = res
+            upload_info = ""
+            photo_count = 0
         async with db.get_session() as session:
             event.telegraph_url = url
             event.telegraph_path = path
+            event.photo_count = photo_count
             session.add(event)
             await session.commit()
     await sync_month_page(db, event.date[:7])
@@ -1295,6 +1468,8 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
     ]
     if event.telegraph_url:
         lines.append(f"telegraph: {event.telegraph_url}")
+    if upload_info:
+        lines.append(f"catbox: {upload_info}")
     status = "added" if added else "updated"
     btns = []
     if (
@@ -1467,6 +1642,39 @@ def extract_link_from_html(html_text: str) -> str | None:
     return None
 
 
+def extract_links_from_html(html_text: str) -> list[str]:
+    """Return all registration or ticket links in order of appearance."""
+    pattern = re.compile(
+        r"<a[^>]+href=['\"]([^'\"]+)['\"][^>]*>(.*?)</a>",
+        re.IGNORECASE | re.DOTALL,
+    )
+    matches = list(pattern.finditer(html_text))
+    lower_html = html_text.lower()
+
+    def qualifies(label: str, start: int, end: int) -> bool:
+        text = label.lower()
+        if any(word in text for word in ["регистра", "ticket", "билет"]):
+            return True
+        context_before = lower_html[max(0, start - 60) : start]
+        context_after = lower_html[end : end + 60]
+        return "регистра" in context_before or "регистра" in context_after or "билет" in context_before or "билет" in context_after
+
+    prioritized: list[tuple[int, str]] = []
+    others: list[tuple[int, str]] = []
+    for m in matches:
+        href, label = m.group(1), m.group(2)
+        if qualifies(label, *m.span()):
+            prioritized.append((m.start(), href))
+        else:
+            others.append((m.start(), href))
+
+    prioritized.sort(key=lambda x: x[0])
+    others.sort(key=lambda x: x[0])
+    links = [h for _, h in prioritized]
+    links.extend(h for _, h in others)
+    return links
+
+
 def is_valid_url(text: str | None) -> bool:
     if not text:
         return False
@@ -1489,6 +1697,8 @@ def format_event_md(e: Event) -> str:
     if e.emoji and not e.title.strip().startswith(e.emoji):
         emoji_part = f"{e.emoji} "
     lines = [f"{prefix}{emoji_part}{e.title}".strip(), e.description.strip()]
+    if e.pushkin_card:
+        lines.append("\u2705 Пушкинская карта")
     if e.is_free:
         txt = "🟡 Бесплатно"
         if e.ticket_link:
@@ -1520,10 +1730,15 @@ def format_event_md(e: Event) -> str:
         if price:
             lines.append(f"Билеты {price}")
     if e.telegraph_url:
-        lines.append(f"[подробнее]({e.telegraph_url})")
+        cam = "\U0001f4f8" * max(0, e.photo_count)
+        prefix = f"{cam} " if cam else ""
+        lines.append(f"{prefix}[подробнее]({e.telegraph_url})")
     loc = e.location_name
-    if e.location_address:
-        loc += f", {e.location_address}"
+    addr = e.location_address
+    if addr and e.city:
+        addr = strip_city_from_address(addr, e.city)
+    if addr:
+        loc += f", {addr}"
     if e.city:
         loc += f", #{e.city}"
     date_part = e.date.split("..", 1)[0]
@@ -1552,6 +1767,8 @@ def format_event_daily(e: Event, highlight: bool = False) -> str:
         title = f'<a href="{html.escape(e.source_post_url)}">{title}</a>'
     title = f"<b>{prefix}{emoji_part}{title}</b>".strip()
     lines = [title, html.escape(e.description.strip())]
+    if e.pushkin_card:
+        lines.append("\u2705 Пушкинская карта")
 
     if e.is_free:
         txt = "🟡 Бесплатно"
@@ -1586,8 +1803,11 @@ def format_event_daily(e: Event, highlight: bool = False) -> str:
             lines.append(f"Билеты {price}")
 
     loc = html.escape(e.location_name)
-    if e.location_address:
-        loc += f", {html.escape(e.location_address)}"
+    addr = e.location_address
+    if addr and e.city:
+        addr = strip_city_from_address(addr, e.city)
+    if addr:
+        loc += f", {html.escape(addr)}"
     if e.city:
         loc += f", #{html.escape(e.city)}"
     date_part = e.date.split("..", 1)[0]
@@ -1609,6 +1829,8 @@ def format_exhibition_md(e: Event) -> str:
     if e.emoji and not e.title.strip().startswith(e.emoji):
         emoji_part = f"{e.emoji} "
     lines = [f"{prefix}{emoji_part}{e.title}".strip(), e.description.strip()]
+    if e.pushkin_card:
+        lines.append("\u2705 Пушкинская карта")
     if e.is_free:
         txt = "🟡 Бесплатно"
         if e.ticket_link:
@@ -1627,10 +1849,15 @@ def format_exhibition_md(e: Event) -> str:
     elif e.ticket_price_max is not None:
         lines.append(f"Билеты {e.ticket_price_max}")
     if e.telegraph_url:
-        lines.append(f"[подробнее]({e.telegraph_url})")
+        cam = "\U0001f4f8" * max(0, e.photo_count)
+        prefix = f"{cam} " if cam else ""
+        lines.append(f"{prefix}[подробнее]({e.telegraph_url})")
     loc = e.location_name
-    if e.location_address:
-        loc += f", {e.location_address}"
+    addr = e.location_address
+    if addr and e.city:
+        addr = strip_city_from_address(addr, e.city)
+    if addr:
+        loc += f", {addr}"
     if e.city:
         loc += f", #{e.city}"
     if e.end_date:
@@ -2038,7 +2265,10 @@ async def build_daily_posts(
     db: Database, tz: timezone
 ) -> list[tuple[str, types.InlineKeyboardMarkup | None]]:
     today = datetime.now(tz).date()
-    yesterday_utc = datetime.utcnow() - timedelta(days=1)
+    yesterday_start_local = datetime.combine(
+        today - timedelta(days=1), time(0, 0), tz
+    )
+    yesterday_utc = yesterday_start_local.astimezone(timezone.utc)
     async with db.get_session() as session:
         res_today = await session.execute(
             select(Event).where(Event.date == today.isoformat()).order_by(Event.time)
@@ -2062,6 +2292,37 @@ async def build_daily_posts(
         mp_cur = await session.get(MonthPage, cur_month)
         mp_next = await session.get(MonthPage, next_month(cur_month))
 
+        new_events = (
+            await session.execute(
+                select(Event).where(
+                    Event.added_at.is_not(None),
+                    Event.added_at >= yesterday_utc,
+                )
+            )
+        ).scalars().all()
+
+        weekend_count = 0
+        if wpage:
+            sat = w_start
+            sun = w_start + timedelta(days=1)
+            for e in new_events:
+                if e.date in {sat.isoformat(), sun.isoformat()} or (
+                    e.event_type == "выставка"
+                    and e.end_date
+                    and e.end_date >= sat.isoformat()
+                    and e.date <= sun.isoformat()
+                ):
+                    weekend_count += 1
+
+        cur_count = 0
+        next_count = 0
+        for e in new_events:
+            m = e.date[:7]
+            if m == cur_month:
+                cur_count += 1
+            elif m == next_month(cur_month):
+                next_count += 1
+
     lines1 = [
         f"<b>АНОНС на {format_day_pretty(today)} {today.year} #ежедневныйанонс</b>",
         DAYS_OF_WEEK[today.weekday()],
@@ -2082,19 +2343,24 @@ async def build_daily_posts(
     buttons = []
     if wpage:
         sunday = w_start + timedelta(days=1)
-        text = f"Мероприятия на выходные {w_start.day} {sunday.day} {MONTHS[w_start.month - 1]}"
+        prefix = f"(+{weekend_count}) " if weekend_count else ""
+        text = (
+            f"{prefix}Мероприятия на выходные {w_start.day} {sunday.day} {MONTHS[w_start.month - 1]}"
+        )
         buttons.append(types.InlineKeyboardButton(text=text, url=wpage.url))
     if mp_cur:
+        prefix = f"(+{cur_count}) " if cur_count else ""
         buttons.append(
             types.InlineKeyboardButton(
-                text=f"Мероприятия на {month_name_nominative(cur_month)}",
+                text=f"{prefix}Мероприятия на {month_name_nominative(cur_month)}",
                 url=mp_cur.url,
             )
         )
     if mp_next:
+        prefix = f"(+{next_count}) " if next_count else ""
         buttons.append(
             types.InlineKeyboardButton(
-                text=f"Мероприятия на {month_name_nominative(next_month(cur_month))}",
+                text=f"{prefix}Мероприятия на {month_name_nominative(next_month(cur_month))}",
                 url=mp_next.url,
             )
         )
@@ -2335,6 +2601,7 @@ async def show_edit_menu(user_id: int, event: Event, bot: Bot):
         f"ticket_price_max: {event.ticket_price_max}",
         f"ticket_link: {event.ticket_link or ''}",
         f"is_free: {event.is_free}",
+        f"pushkin_card: {event.pushkin_card}",
     ]
     fields = [
         "title",
@@ -2352,6 +2619,7 @@ async def show_edit_menu(user_id: int, event: Event, bot: Bot):
         "ticket_price_max",
         "ticket_link",
         "is_free",
+        "pushkin_card",
     ]
     keyboard = []
     row = []
@@ -2399,15 +2667,9 @@ async def handle_events(message: types.Message, db: Database, bot: Bot):
     tz = offset_to_timezone(offset)
 
     if len(parts) == 2:
-        text = parts[1]
-        for fmt in ("%Y-%m-%d", "%d.%m.%Y"):
-            try:
-                day = datetime.strptime(text, fmt).date()
-                break
-            except ValueError:
-                day = None
-        if day is None:
-            await bot.send_message(message.chat.id, "Usage: /events YYYY-MM-DD")
+        day = parse_events_date(parts[1], tz)
+        if not day:
+            await bot.send_message(message.chat.id, "Usage: /events <date>")
             return
     else:
         day = datetime.now(tz).date()
@@ -2500,7 +2762,13 @@ async def handle_edit_message(message: types.Message, db: Database, bot: Bot):
                 await bot.send_message(message.chat.id, "Invalid number")
                 return
         else:
-            if field == "ticket_link" and value == "":
+            if field in {"is_free", "pushkin_card", "silent"}:
+                bool_val = parse_bool_text(value)
+                if bool_val is None:
+                    await bot.send_message(message.chat.id, "Invalid boolean")
+                    return
+                setattr(event, field, bool_val)
+            elif field == "ticket_link" and value == "":
                 setattr(event, field, None)
             else:
                 setattr(event, field, value)
@@ -2573,8 +2841,8 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
                 else:
                     cid = cid.lstrip("-")
                 link = f"https://t.me/c/{cid}/{msg_id}"
-    media = None
-    # Skip downloading attachments to avoid large file transfers
+    images = await extract_images(message, bot)
+    media = images if images else None
 
     results = await add_events_from_text(
         db,
@@ -2630,17 +2898,68 @@ async def telegraph_test():
     print("Edited", page["url"])
 
 
-async def update_source_page(path: str, title: str, new_html: str):
+async def update_source_page(
+    path: str,
+    title: str,
+    new_html: str,
+    media: list[tuple[bytes, str]] | tuple[bytes, str] | None = None,
+) -> tuple[str, int]:
     """Append text to an existing Telegraph page."""
     token = get_telegraph_token()
     if not token:
         logging.error("Telegraph token unavailable")
-        return
+        return "token missing"
     tg = Telegraph(access_token=token)
     try:
         logging.info("Fetching telegraph page %s", path)
         page = await asyncio.to_thread(tg.get_page, path, return_html=True)
         html_content = page.get("content") or page.get("content_html") or ""
+        catbox_msg = ""
+        images: list[tuple[bytes, str]] = []
+        if media:
+            images = [media] if isinstance(media, tuple) else list(media)
+        catbox_urls: list[str] = []
+        if CATBOX_ENABLED and images:
+            async with ClientSession() as session:
+                for data, name in images[:3]:
+                    if len(data) > 5 * 1024 * 1024:
+                        logging.warning("catbox skip %s: too large", name)
+                        catbox_msg += f"{name}: too large; "
+                        continue
+                    if not imghdr.what(None, data):
+                        logging.warning("catbox skip %s: not image", name)
+                        catbox_msg += f"{name}: not image; "
+                        continue
+                    try:
+                        form = FormData()
+                        form.add_field("reqtype", "fileupload")
+                        form.add_field("fileToUpload", data, filename=name)
+                        async with session.post(
+                            "https://catbox.moe/user/api.php", data=form
+                        ) as resp:
+                            text = await resp.text()
+                            if resp.status == 200 and text.startswith("http"):
+                                url = text.strip()
+                                catbox_urls.append(url)
+                                catbox_msg += "ok; "
+                                logging.info("catbox uploaded %s", url)
+                            else:
+                                catbox_msg += f"{name}: err {resp.status}; "
+                                logging.error(
+                                    "catbox upload failed %s: %s %s",
+                                    name,
+                                    resp.status,
+                                    text,
+                                )
+                    except Exception as e:
+                        catbox_msg += f"{name}: {e}; "
+                        logging.error("catbox error %s: %s", name, e)
+            catbox_msg = catbox_msg.strip("; ")
+        elif images:
+            catbox_msg = "disabled"
+        for url in catbox_urls:
+            html_content += f'<img src="{html.escape(url)}"/><p></p>'
+        new_html = normalize_hashtag_dates(new_html)
         cleaned = re.sub(r"</?tg-emoji[^>]*>", "", new_html)
         cleaned = cleaned.replace(
             "\U0001f193\U0001f193\U0001f193\U0001f193", "Бесплатно"
@@ -2653,8 +2972,10 @@ async def update_source_page(path: str, title: str, new_html: str):
             tg.edit_page, path, title=title, html_content=html_content
         )
         logging.info("Updated telegraph page %s", path)
+        return catbox_msg, len(catbox_urls)
     except Exception as e:
         logging.error("Failed to update telegraph page: %s", e)
+        return f"error: {e}", 0
 
 
 async def create_source_page(
@@ -2662,8 +2983,8 @@ async def create_source_page(
     text: str,
     source_url: str | None,
     html_text: str | None = None,
-    media: tuple[bytes, str] | None = None,
-) -> tuple[str, str] | None:
+    media: list[tuple[bytes, str]] | tuple[bytes, str] | None = None,
+) -> tuple[str, str, str, int] | None:
     """Create a Telegraph page with the original event text."""
     token = get_telegraph_token()
     if not token:
@@ -2678,10 +2999,49 @@ async def create_source_page(
             return "\n".join(lines[1:]).lstrip()
         return line_text
 
-    # Media uploads to Telegraph are flaky and consume bandwidth.
-    # Skip uploading files for now to keep requests lightweight.
+    images: list[tuple[bytes, str]] = []
     if media:
-        logging.info("Media upload skipped for telegraph page")
+        images = [media] if isinstance(media, tuple) else list(media)
+    catbox_urls: list[str] = []
+    catbox_msg = ""
+    if CATBOX_ENABLED and images:
+        async with ClientSession() as session:
+            for data, name in images[:3]:
+                if len(data) > 5 * 1024 * 1024:
+                    logging.warning("catbox skip %s: too large", name)
+                    catbox_msg += f"{name}: too large; "
+                    continue
+                if not imghdr.what(None, data):
+                    logging.warning("catbox skip %s: not image", name)
+                    catbox_msg += f"{name}: not image; "
+                    continue
+                try:
+                    form = FormData()
+                    form.add_field("reqtype", "fileupload")
+                    form.add_field("fileToUpload", data, filename=name)
+                    async with session.post(
+                        "https://catbox.moe/user/api.php", data=form
+                    ) as resp:
+                        text_r = await resp.text()
+                        if resp.status == 200 and text_r.startswith("http"):
+                            url = text_r.strip()
+                            catbox_urls.append(url)
+                            catbox_msg += "ok; "
+                            logging.info("catbox uploaded %s", url)
+                        else:
+                            catbox_msg += f"{name}: err {resp.status}; "
+                            logging.error(
+                                "catbox upload failed %s: %s %s",
+                                name,
+                                resp.status,
+                                text_r,
+                            )
+                except Exception as e:
+                    catbox_msg += f"{name}: {e}; "
+                    logging.error("catbox error %s: %s", name, e)
+        catbox_msg = catbox_msg.strip("; ")
+    elif images:
+        catbox_msg = "disabled"
 
     if source_url:
         html_content += (
@@ -2691,8 +3051,12 @@ async def create_source_page(
     else:
         html_content += f"<p><strong>{html.escape(title)}</strong></p>"
 
+    for url in catbox_urls:
+        html_content += f'<img src="{html.escape(url)}"/><p></p>'
+
     if html_text:
         html_text = strip_title(html_text)
+        html_text = normalize_hashtag_dates(html_text)
         cleaned = re.sub(r"</?tg-emoji[^>]*>", "", html_text)
         cleaned = cleaned.replace(
             "\U0001f193\U0001f193\U0001f193\U0001f193", "Бесплатно"
@@ -2700,6 +3064,7 @@ async def create_source_page(
         html_content += f"<p>{cleaned.replace('\n', '<br/>')}</p>"
     else:
         clean_text = strip_title(text)
+        clean_text = normalize_hashtag_dates(clean_text)
         clean_text = clean_text.replace(
             "\U0001f193\U0001f193\U0001f193\U0001f193", "Бесплатно"
         )
@@ -2711,7 +3076,7 @@ async def create_source_page(
         logging.error("Failed to create telegraph page: %s", e)
         return None
     logging.info("Created telegraph page %s", page.get("url"))
-    return page.get("url"), page.get("path")
+    return page.get("url"), page.get("path"), catbox_msg, len(catbox_urls)
 
 
 def create_app() -> web.Application:
@@ -2783,6 +3148,9 @@ def create_app() -> web.Application:
     async def daily_wrapper(message: types.Message):
         await handle_daily(message, db, bot)
 
+    async def images_wrapper(message: types.Message):
+        await handle_images(message, db, bot)
+
     dp.message.register(start_wrapper, Command("start"))
     dp.message.register(register_wrapper, Command("register"))
     dp.message.register(requests_wrapper, Command("requests"))
@@ -2811,6 +3179,7 @@ def create_app() -> web.Application:
     dp.message.register(ask_4o_wrapper, Command("ask4o"))
     dp.message.register(list_events_wrapper, Command("events"))
     dp.message.register(set_channel_wrapper, Command("setchannel"))
+    dp.message.register(images_wrapper, Command("images"))
     dp.message.register(channels_wrapper, Command("channels"))
     dp.message.register(reg_daily_wrapper, Command("regdailychannels"))
     dp.message.register(daily_wrapper, Command("daily"))
@@ -2832,6 +3201,8 @@ def create_app() -> web.Application:
     async def on_startup(app: web.Application):
         logging.info("Initializing database")
         await db.init()
+        global CATBOX_ENABLED
+        CATBOX_ENABLED = await get_catbox_enabled(db)
         hook = webhook.rstrip("/") + "/webhook"
         logging.info("Setting webhook to %s", hook)
         await bot.set_webhook(
