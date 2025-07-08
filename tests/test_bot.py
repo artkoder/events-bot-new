@@ -2005,6 +2005,24 @@ def test_format_event_no_city_dup():
     assert md.count("Калининград") == 1
 
 
+def test_pushkin_card_formatting():
+    e = Event(
+        title="T",
+        description="d",
+        source_text="s",
+        date="2025-07-10",
+        time="18:00",
+        location_name="Hall",
+        ticket_link="https://reg",
+        pushkin_card=True,
+    )
+    md = main.format_event_md(e)
+    lines = md.split("\n")
+    assert "\u2705 Пушкинская карта" in lines
+    # next line should mention tickets or registration
+    assert any("Билеты" in l or "регистра" in l for l in lines[lines.index("\u2705 Пушкинская карта") + 1:])
+
+
 @pytest.mark.asyncio
 async def test_date_range_parsing(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))

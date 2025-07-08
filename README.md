@@ -72,6 +72,7 @@ browse upcoming announcements. The command accepts dates like `2025-07-10`,
 Each added event stores the original announcement text in a Telegraph page. The link is shown when the event is added and in the `/events` listing. Events may also contain ticket prices and a purchase link. Use the edit button in `/events` to change any field.
 Links from the announcement text are preserved on the Telegraph page whenever possible so readers can follow the original sources.
 If the original message contains photos (under 5&nbsp;MB), they are uploaded to Catbox and displayed on the Telegraph page.
+Events may note support for the Пушкинская карта, shown as a separate line in postings.
 Run `/exhibitions` to see all ongoing exhibitions (events with a start and end date).
 
 To verify Telegraph access manually run:

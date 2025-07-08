@@ -88,6 +88,7 @@ class Event(SQLModel, table=True):
     emoji: Optional[str] = None
     end_date: Optional[str] = None
     is_free: bool = False
+    pushkin_card: bool = False
     silent: bool = False
     telegraph_path: Optional[str] = None
     source_text: str
@@ -169,6 +170,10 @@ class Database:
             if "photo_count" not in cols:
                 await conn.exec_driver_sql(
                     "ALTER TABLE event ADD COLUMN photo_count INTEGER DEFAULT 0"
+                )
+            if "pushkin_card" not in cols:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE event ADD COLUMN pushkin_card BOOLEAN DEFAULT 0"
                 )
 
             result = await conn.exec_driver_sql("PRAGMA table_info(channel)")
@@ -978,6 +983,7 @@ async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
             ev.emoji = new.emoji
             ev.end_date = new.end_date
             ev.is_free = new.is_free
+            ev.pushkin_card = new.pushkin_card
             await session.commit()
             return ev, False
 
@@ -996,6 +1002,7 @@ async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
             ev.emoji = new.emoji
             ev.end_date = new.end_date
             ev.is_free = new.is_free
+            ev.pushkin_card = new.pushkin_card
             await session.commit()
             return ev, False
 
@@ -1017,6 +1024,7 @@ async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
             ev.emoji = new.emoji
             ev.end_date = new.end_date
             ev.is_free = new.is_free
+            ev.pushkin_card = new.pushkin_card
             await session.commit()
             return ev, False
 
@@ -1035,6 +1043,7 @@ async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
             ev.emoji = new.emoji
             ev.end_date = new.end_date
             ev.is_free = new.is_free
+            ev.pushkin_card = new.pushkin_card
             await session.commit()
             return ev, False
 
@@ -1056,6 +1065,7 @@ async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
             ev.emoji = new.emoji
             ev.end_date = new.end_date
             ev.is_free = new.is_free
+            ev.pushkin_card = new.pushkin_card
             await session.commit()
             return ev, False
 
@@ -1074,6 +1084,7 @@ async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
             ev.emoji = new.emoji
             ev.end_date = new.end_date
             ev.is_free = new.is_free
+            ev.pushkin_card = new.pushkin_card
             await session.commit()
             return ev, False
 
@@ -1095,6 +1106,7 @@ async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
             ev.emoji = new.emoji
             ev.end_date = new.end_date
             ev.is_free = new.is_free
+            ev.pushkin_card = new.pushkin_card
             await session.commit()
             return ev, False
 
@@ -1116,6 +1128,7 @@ async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
             ev.emoji = new.emoji
             ev.end_date = new.end_date
             ev.is_free = new.is_free
+            ev.pushkin_card = new.pushkin_card
             await session.commit()
             return ev, False
         should_check = False
@@ -1146,6 +1159,7 @@ async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
                 ev.emoji = new.emoji
                 ev.end_date = new.end_date
                 ev.is_free = new.is_free
+                ev.pushkin_card = new.pushkin_card
                 await session.commit()
                 return ev, False
     new.added_at = datetime.utcnow()
@@ -1201,6 +1215,7 @@ async def add_events_from_text(
             emoji=data.get("emoji"),
             end_date=end_date,
             is_free=bool(data.get("is_free")),
+            pushkin_card=bool(data.get("pushkin_card")),
             source_text=text,
             source_post_url=source_link,
         )
@@ -1672,6 +1687,8 @@ def format_event_md(e: Event) -> str:
     if e.emoji and not e.title.strip().startswith(e.emoji):
         emoji_part = f"{e.emoji} "
     lines = [f"{prefix}{emoji_part}{e.title}".strip(), e.description.strip()]
+    if e.pushkin_card:
+        lines.append("\u2705 Пушкинская карта")
     if e.is_free:
         txt = "🟡 Бесплатно"
         if e.ticket_link:
@@ -1740,6 +1757,8 @@ def format_event_daily(e: Event, highlight: bool = False) -> str:
         title = f'<a href="{html.escape(e.source_post_url)}">{title}</a>'
     title = f"<b>{prefix}{emoji_part}{title}</b>".strip()
     lines = [title, html.escape(e.description.strip())]
+    if e.pushkin_card:
+        lines.append("\u2705 Пушкинская карта")
 
     if e.is_free:
         txt = "🟡 Бесплатно"
@@ -1800,6 +1819,8 @@ def format_exhibition_md(e: Event) -> str:
     if e.emoji and not e.title.strip().startswith(e.emoji):
         emoji_part = f"{e.emoji} "
     lines = [f"{prefix}{emoji_part}{e.title}".strip(), e.description.strip()]
+    if e.pushkin_card:
+        lines.append("\u2705 Пушкинская карта")
     if e.is_free:
         txt = "🟡 Бесплатно"
         if e.ticket_link:
@@ -2587,6 +2608,7 @@ async def show_edit_menu(user_id: int, event: Event, bot: Bot):
         "ticket_price_max",
         "ticket_link",
         "is_free",
+        "pushkin_card",
     ]
     keyboard = []
     row = []
