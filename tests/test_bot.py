@@ -499,6 +499,134 @@ async def test_events_list(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_events_russian_date_current_year(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async def fake_create(title, text, source, html_text=None, media=None):
+        return "u", "p"
+
+    monkeypatch.setattr("main.create_source_page", fake_create)
+
+    start_msg = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "/start",
+        }
+    )
+    await handle_start(start_msg, db, bot)
+
+    add_msg = types.Message.model_validate(
+        {
+            "message_id": 2,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "/addevent_raw Party|2025-08-02|18:00|Club",
+        }
+    )
+    await handle_add_event_raw(add_msg, db, bot)
+
+    class FakeDate(date):
+        @classmethod
+        def today(cls):
+            return date(2025, 7, 15)
+
+    class FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2025, 7, 15, 12, 0, tzinfo=tz)
+
+    monkeypatch.setattr(main, "date", FakeDate)
+    monkeypatch.setattr(main, "datetime", FakeDatetime)
+
+    bot.messages.clear()
+    list_msg = types.Message.model_validate(
+        {
+            "message_id": 3,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "/events 2 августа",
+        }
+    )
+
+    await handle_events(list_msg, db, bot)
+
+    assert bot.messages
+    text = bot.messages[-1][1]
+    assert "02.08.2025" in text
+
+
+@pytest.mark.asyncio
+async def test_events_russian_date_next_year(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async def fake_create(title, text, source, html_text=None, media=None):
+        return "u", "p"
+
+    monkeypatch.setattr("main.create_source_page", fake_create)
+
+    start_msg = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "/start",
+        }
+    )
+    await handle_start(start_msg, db, bot)
+
+    add_msg = types.Message.model_validate(
+        {
+            "message_id": 2,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "/addevent_raw Party|2026-09-05|18:00|Club",
+        }
+    )
+    await handle_add_event_raw(add_msg, db, bot)
+
+    class FakeDate(date):
+        @classmethod
+        def today(cls):
+            return date(2025, 10, 10)
+
+    class FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2025, 10, 10, 12, 0, tzinfo=tz)
+
+    monkeypatch.setattr(main, "date", FakeDate)
+    monkeypatch.setattr(main, "datetime", FakeDatetime)
+
+    bot.messages.clear()
+    list_msg = types.Message.model_validate(
+        {
+            "message_id": 3,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "/events 5 сентября",
+        }
+    )
+
+    await handle_events(list_msg, db, bot)
+
+    assert bot.messages
+    text = bot.messages[-1][1]
+    assert "05.09.2026" in text
+
+
+@pytest.mark.asyncio
 async def test_ask4o_admin(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()

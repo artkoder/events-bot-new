@@ -276,8 +276,39 @@ def strip_city_from_address(address: str | None, city: str | None) -> str | None
     addr = address.strip()
     if addr.lower().endswith(city_clean):
         addr = re.sub(r",?\s*#?%s$" % re.escape(city_clean), "", addr, flags=re.IGNORECASE)
-        addr = addr.rstrip(", ")
+    addr = addr.rstrip(", ")
     return addr
+
+
+def parse_events_date(text: str, tz: timezone) -> date | None:
+    """Parse a date argument for /events allowing '2 августа [2025]'."""
+    text = text.strip().lower()
+    for fmt in ("%Y-%m-%d", "%d.%m.%Y"):
+        try:
+            return datetime.strptime(text, fmt).date()
+        except ValueError:
+            pass
+
+    m = re.match(r"(\d{1,2})\s+([а-яё]+)(?:\s+(\d{4}))?", text)
+    if not m:
+        return None
+    day = int(m.group(1))
+    month_name = m.group(2)
+    year_part = m.group(3)
+    month = {name: i + 1 for i, name in enumerate(MONTHS)}.get(month_name)
+    if not month:
+        return None
+    if year_part:
+        year = int(year_part)
+    else:
+        today = datetime.now(tz).date()
+        year = today.year
+        if month < today.month or (month == today.month and day < today.day):
+            year += 1
+    try:
+        return date(year, month, day)
+    except ValueError:
+        return None
 
 
 async def parse_event_via_4o(text: str) -> list[dict]:
@@ -2595,15 +2626,9 @@ async def handle_events(message: types.Message, db: Database, bot: Bot):
     tz = offset_to_timezone(offset)
 
     if len(parts) == 2:
-        text = parts[1]
-        for fmt in ("%Y-%m-%d", "%d.%m.%Y"):
-            try:
-                day = datetime.strptime(text, fmt).date()
-                break
-            except ValueError:
-                day = None
-        if day is None:
-            await bot.send_message(message.chat.id, "Usage: /events YYYY-MM-DD")
+        day = parse_events_date(parts[1], tz)
+        if not day:
+            await bot.send_message(message.chat.id, "Usage: /events <date>")
             return
     else:
         day = datetime.now(tz).date()

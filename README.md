@@ -15,7 +15,8 @@ Dates are shown as `DD.MM.YYYY` in bot messages. Telegraph pages and other
 public posts use the format "D месяц" (for example, "2 июля").
 
 See `docs/COMMANDS.md` for available bot commands, including `/events` to
-browse upcoming announcements.
+browse upcoming announcements. The command accepts dates like `2025-07-10`,
+`10.07.2025` or `2 августа`.
 
 ## Quick start
 
