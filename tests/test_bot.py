@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from aiogram import Bot, types
 from sqlmodel import select
-from datetime import date, timedelta, timezone
+from datetime import date, timedelta, timezone, datetime
 from typing import Any
 import main
 
@@ -52,6 +52,9 @@ class DummyBot(Bot):
         self, chat_id: int | None = None, message_id: int | None = None, **kwargs
     ):
         self.edits.append((chat_id, message_id, kwargs))
+
+    async def download(self, file_id, destination):
+        destination.write(b"img")
 
 
 class DummyChat:
@@ -641,7 +644,77 @@ async def test_create_source_page_photo(monkeypatch):
     res = await main.create_source_page(
         "Title", "text", None, media=(b"img", "photo.jpg")
     )
-    assert res == ("https://telegra.ph/test", "test")
+    assert res == ("https://telegra.ph/test", "test", "disabled", 0)
+
+
+@pytest.mark.asyncio
+async def test_create_source_page_photo_catbox(monkeypatch):
+    class DummyTG:
+        def __init__(self, access_token=None):
+            self.access_token = access_token
+
+        def create_page(self, title, html_content=None, **_):
+            assert "<img" in html_content
+            return {"url": "https://telegra.ph/test", "path": "test"}
+
+    class DummyResp:
+        status = 200
+
+        async def text(self):
+            return "https://files.catbox.moe/img.jpg"
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class DummySession:
+        def __init__(self, *_, **__):
+            self.post_called = False
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def post(self, url, data=None):
+            self.post_called = True
+            return DummyResp()
+
+    monkeypatch.setenv("TELEGRAPH_TOKEN", "t")
+    monkeypatch.setattr(
+        "main.Telegraph", lambda access_token=None: DummyTG(access_token)
+    )
+    monkeypatch.setattr(main, "ClientSession", DummySession)
+    monkeypatch.setattr(main, "CATBOX_ENABLED", True)
+    monkeypatch.setattr(main, "imghdr", type("X", (), {"what": lambda *a, **k: "jpeg"}))
+
+    res = await main.create_source_page(
+        "Title", "text", None, media=(b"img", "photo.jpg")
+    )
+    assert res == ("https://telegra.ph/test", "test", "ok", 1)
+
+
+@pytest.mark.asyncio
+async def test_create_source_page_normalizes_hashtags(monkeypatch):
+    class DummyTG:
+        def __init__(self, access_token=None):
+            self.access_token = access_token
+
+        def create_page(self, title, html_content=None, **_):
+            assert "#1_августа" not in html_content
+            assert "1 августа" in html_content
+            return {"url": "https://telegra.ph/test", "path": "test"}
+
+    monkeypatch.setenv("TELEGRAPH_TOKEN", "t")
+    monkeypatch.setattr(
+        "main.Telegraph", lambda access_token=None: DummyTG(access_token)
+    )
+
+    res = await main.create_source_page("Title", "#1_августа text", None)
+    assert res == ("https://telegra.ph/test", "test", "", 0)
 
 
 def test_get_telegraph_token_creates(tmp_path, monkeypatch):
@@ -662,6 +735,55 @@ def test_get_telegraph_token_env(monkeypatch):
     monkeypatch.setenv("TELEGRAPH_TOKEN", "zzz")
     token = get_telegraph_token()
     assert token == "zzz"
+
+
+@pytest.mark.asyncio
+async def test_addevent_caption_photo(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async def fake_parse(text: str) -> list[dict]:
+        return [
+            {
+                "title": "T",
+                "short_description": "d",
+                "date": FUTURE_DATE,
+                "time": "18:00",
+                "location_name": "Hall",
+            }
+        ]
+
+    captured = {}
+
+    async def fake_create(title, text, source, html_text=None, media=None):
+        captured["media"] = media
+        return "u", "p"
+
+    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.create_source_page", fake_create)
+
+    msg = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "caption": "/addevent text",
+            "photo": [
+                {
+                    "file_id": "f1",
+                    "file_unique_id": "u1",
+                    "width": 100,
+                    "height": 100,
+                }
+            ],
+        }
+    )
+
+    await handle_add_event(msg, db, bot)
+
+    assert captured["media"] == [(b"img", "photo.jpg")]
 
 
 @pytest.mark.asyncio
@@ -725,6 +847,77 @@ async def test_forward_add_event(tmp_path: Path, monkeypatch):
         ev = (await session.execute(select(Event))).scalars().first()
 
     assert ev.source_post_url == "https://t.me/chan/10"
+
+
+@pytest.mark.asyncio
+async def test_forward_add_event_photo(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async def fake_parse(text: str) -> list[dict]:
+        return [
+            {
+                "title": "Forwarded",
+                "short_description": "desc",
+                "date": FUTURE_DATE,
+                "time": "18:00",
+                "location_name": "Club",
+            }
+        ]
+
+    captured = {}
+
+    async def fake_add(db2, text, source_link, html_text=None, media=None):
+        captured["media"] = media
+        return []
+
+    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.add_events_from_text", fake_add)
+
+    start_msg = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "/start",
+        }
+    )
+    await handle_start(start_msg, db, bot)
+
+    upd = DummyUpdate(-100123, "Chan")
+    await main.handle_my_chat_member(upd, db)
+
+    async with db.get_session() as session:
+        ch = await session.get(main.Channel, -100123)
+        ch.is_registered = True
+        await session.commit()
+
+    fwd_msg = types.Message.model_validate(
+        {
+            "message_id": 3,
+            "date": 0,
+            "forward_date": 0,
+            "forward_from_chat": {"id": -100123, "type": "channel", "username": "chan"},
+            "forward_from_message_id": 10,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "Some text",
+            "photo": [
+                {
+                    "file_id": "f2",
+                    "file_unique_id": "u2",
+                    "width": 50,
+                    "height": 50,
+                }
+            ],
+        }
+    )
+
+    await main.handle_forwarded(fwd_msg, db, bot)
+
+    assert captured["media"] == [(b"img", "photo.jpg")]
 
 
 @pytest.mark.asyncio
@@ -1626,6 +1819,21 @@ def test_registration_link_formatting():
     assert "Бесплатно [по регистрации](https://reg)" in md
 
 
+def test_format_event_no_city_dup():
+    e = Event(
+        title="T",
+        description="d",
+        source_text="s",
+        date="2025-07-10",
+        time="18:00",
+        location_name="Hall",
+        location_address="Addr, Калининград",
+        city="Калининград",
+    )
+    md = main.format_event_md(e)
+    assert md.count("Калининград") == 1
+
+
 @pytest.mark.asyncio
 async def test_date_range_parsing(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
@@ -1732,6 +1940,22 @@ async def test_update_source_page_uses_content(monkeypatch):
     assert "<p>old</p>" in html
     assert "new" in html
     assert main.CONTENT_SEPARATOR in html
+
+
+@pytest.mark.asyncio
+async def test_update_source_page_normalizes_hashtags(monkeypatch):
+    class DummyTG:
+        def get_page(self, path, return_html=True):
+            return {"content": ""}
+
+        def edit_page(self, path, title, html_content):
+            assert "#1_августа" not in html_content
+            assert "1 августа" in html_content
+
+    monkeypatch.setattr("main.get_telegraph_token", lambda: "t")
+    monkeypatch.setattr("main.Telegraph", lambda access_token=None: DummyTG())
+
+    await main.update_source_page("p", "T", "#1_августа event")
 
 
 @pytest.mark.asyncio
@@ -2035,6 +2259,85 @@ async def test_ticket_link_overrides_invalid(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_multiple_ticket_links(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async def fake_parse(text: str) -> list[dict]:
+        return [
+            {
+                "title": "A",
+                "short_description": "d1",
+                "date": FUTURE_DATE,
+                "time": "18:00",
+                "location_name": "Hall",
+                "ticket_link": None,
+                "event_type": "концерт",
+                "emoji": None,
+                "is_free": True,
+            },
+            {
+                "title": "B",
+                "short_description": "d2",
+                "date": FUTURE_DATE,
+                "time": "19:00",
+                "location_name": "Hall",
+                "ticket_link": None,
+                "event_type": "концерт",
+                "emoji": None,
+                "is_free": True,
+            },
+        ]
+
+    async def fake_create(title, text, source, html_text=None, media=None):
+        return "url", "p"
+
+    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.create_source_page", fake_create)
+
+    html = (
+        "Билеты <a href='https://l1'>купить</a>" 
+        " и ещё один концерт. Билеты <a href='https://l2'>здесь</a>"
+    )
+
+    results = await main.add_events_from_text(db, "text", None, html, None)
+    assert results[0][0].ticket_link == "https://l1"
+    assert results[1][0].ticket_link == "https://l2"
+
+
+@pytest.mark.asyncio
+async def test_add_event_strips_city_from_address(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async def fake_parse(text: str) -> list[dict]:
+        return [
+            {
+                "title": "Show",
+                "short_description": "d",
+                "date": FUTURE_DATE,
+                "time": "18:00",
+                "location_name": "Hall",
+                "location_address": "Addr, Калининград",
+                "city": "Калининград",
+            }
+        ]
+
+    async def fake_create(*args, **kwargs):
+        return "u", "p"
+
+    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.create_source_page", fake_create)
+
+    results = await main.add_events_from_text(db, "t", None, None, None)
+    ev = results[0][0]
+    assert ev.location_address == "Addr"
+    md = main.format_event_md(ev)
+    assert md.count("Калининград") == 1
+
+
+@pytest.mark.asyncio
 async def test_festival_expands_dates(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
@@ -2193,6 +2496,17 @@ async def test_build_daily_posts(tmp_path: Path):
                 silent=True,
             )
         )
+        session.add(
+            Event(
+                title="W",
+                description="weekend",
+                source_text="s3",
+                date=start.isoformat(),
+                time="12:00",
+                location_name="Hall",
+                added_at=datetime.utcnow(),
+            )
+        )
         session.add(MonthPage(month=today.strftime("%Y-%m"), url="m1", path="p1"))
         session.add(
             MonthPage(
@@ -2208,6 +2522,8 @@ async def test_build_daily_posts(tmp_path: Path):
     assert "АНОНС" in text
     assert markup.inline_keyboard[0]
     assert text.count("\U0001f449") == 2
+    first_btn = markup.inline_keyboard[0][0].text
+    assert first_btn.startswith("(+1)")
 
 
 @pytest.mark.asyncio
