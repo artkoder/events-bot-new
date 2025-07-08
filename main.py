@@ -614,7 +614,9 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
             if ch:
                 ch.daily_time = None
                 await session.commit()
+
         await send_daily_list(callback.message, db, bot, edit=True)
+
         await callback.answer("Removed")
     elif data.startswith("dailytime:"):
         cid = int(data.split(":")[1])
@@ -762,7 +764,9 @@ async def send_regdaily_list(message: types.Message, db: Database, bot: Bot, edi
         await bot.send_message(message.chat.id, "\n".join(lines), reply_markup=markup)
 
 
+
 async def send_daily_list(message: types.Message, db: Database, bot: Bot, edit: bool = False):
+
     async with db.get_session() as session:
         user = await session.get(User, message.from_user.id)
         if not user or not user.is_superadmin:
@@ -802,8 +806,10 @@ async def handle_regdailychannels(message: types.Message, db: Database, bot: Bot
     await send_regdaily_list(message, db, bot, edit=False)
 
 
+
 async def handle_daily(message: types.Message, db: Database, bot: Bot):
     await send_daily_list(message, db, bot, edit=False)
+
 
 
 async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
@@ -1974,7 +1980,9 @@ async def build_daily_posts(db: Database, tz: timezone) -> list[tuple[str, types
     if buttons:
         markup = types.InlineKeyboardMarkup(inline_keyboard=[[b] for b in buttons])
 
+
     combined = section1 + "\n\n\n" + section2
+
     if len(combined) <= 4096:
         return [(combined, markup)]
     return [(section1, None), (section2, markup)]
@@ -2445,12 +2453,14 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
                     text="\u2753 Это бесплатное мероприятие",
                     callback_data=f"markfree:{saved.id}",
                 )
+
             )
         buttons.append(
             types.InlineKeyboardButton(
                 text="\U0001F6A9 Переключить на тихий режим",
                 callback_data=f"togglesilent:{saved.id}",
             )
+
         )
         markup = (
             types.InlineKeyboardMarkup(inline_keyboard=[buttons]) if buttons else None
@@ -2622,11 +2632,13 @@ def create_app() -> web.Application:
     async def forward_wrapper(message: types.Message):
         await handle_forwarded(message, db, bot)
 
+
     async def reg_daily_wrapper(message: types.Message):
         await handle_regdailychannels(message, db, bot)
 
     async def daily_wrapper(message: types.Message):
         await handle_daily(message, db, bot)
+
 
     dp.message.register(start_wrapper, Command("start"))
     dp.message.register(register_wrapper, Command("register"))
@@ -2657,8 +2669,10 @@ def create_app() -> web.Application:
     dp.message.register(list_events_wrapper, Command("events"))
     dp.message.register(set_channel_wrapper, Command("setchannel"))
     dp.message.register(channels_wrapper, Command("channels"))
+
     dp.message.register(reg_daily_wrapper, Command("regdailychannels"))
     dp.message.register(daily_wrapper, Command("daily"))
+
     dp.message.register(exhibitions_wrapper, Command("exhibitions"))
     dp.message.register(pages_wrapper, Command("pages"))
     dp.message.register(edit_message_wrapper, lambda m: m.from_user.id in editing_sessions)
