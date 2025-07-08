@@ -1,7 +1,7 @@
 import logging
 import os
 from datetime import date, datetime, timedelta, timezone
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Iterable
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
@@ -234,6 +234,25 @@ def offset_to_timezone(value: str) -> timezone:
     hours = int(value[1:3])
     minutes = int(value[4:6])
     return timezone(sign * timedelta(hours=hours, minutes=minutes))
+
+
+async def extract_images(message: types.Message, bot: Bot) -> list[tuple[bytes, str]]:
+    """Download up to three images from the message."""
+    images: list[tuple[bytes, str]] = []
+    if message.photo:
+        bio = BytesIO()
+        await bot.download(message.photo[-1].file_id, destination=bio)
+        images.append((bio.getvalue(), "photo.jpg"))
+    if (
+        message.document
+        and message.document.mime_type
+        and message.document.mime_type.startswith("image/")
+    ):
+        bio = BytesIO()
+        await bot.download(message.document.file_id, destination=bio)
+        name = message.document.file_name or "image.jpg"
+        images.append((bio.getvalue(), name))
+    return images[:3]
 
 
 async def parse_event_via_4o(text: str) -> list[dict]:
@@ -1084,7 +1103,7 @@ async def add_events_from_text(
     text: str,
     source_link: str | None,
     html_text: str | None = None,
-    media: tuple[bytes, str] | None = None,
+    media: list[tuple[bytes, str]] | tuple[bytes, str] | None = None,
 ) -> list[tuple[Event, bool, list[str], str]]:
     try:
         parsed = await parse_event_via_4o(text)
@@ -1231,25 +1250,19 @@ async def add_events_from_text(
 
 
 async def handle_add_event(message: types.Message, db: Database, bot: Bot):
-    text = message.text.split(maxsplit=1)
-    if len(text) != 2:
+    parts = (message.text or message.caption or "").split(maxsplit=1)
+    if len(parts) != 2:
         await bot.send_message(message.chat.id, "Usage: /addevent <text>")
         return
-    media = None
-    if message.photo:
-        bio = BytesIO()
-        await bot.download(message.photo[-1].file_id, destination=bio)
-        media = (bio.getvalue(), "photo.jpg")
-    elif message.document and message.document.mime_type.startswith("image/"):
-        bio = BytesIO()
-        await bot.download(message.document.file_id, destination=bio)
-        media = (bio.getvalue(), "image.jpg")
-    elif message.video:
-        bio = BytesIO()
-        await bot.download(message.video.file_id, destination=bio)
-        media = (bio.getvalue(), "video.mp4")
-
-    results = await add_events_from_text(db, text[1], None, message.html_text, media)
+    images = await extract_images(message, bot)
+    media = images if images else None
+    results = await add_events_from_text(
+        db,
+        parts[1],
+        None,
+        message.html_text or message.caption_html,
+        media,
+    )
     if not results:
         await bot.send_message(message.chat.id, "LLM error")
         return
@@ -1281,26 +1294,15 @@ async def handle_add_event(message: types.Message, db: Database, bot: Bot):
 
 
 async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
-    parts = message.text.split(maxsplit=1)
+    parts = (message.text or message.caption or "").split(maxsplit=1)
     if len(parts) != 2 or "|" not in parts[1]:
         await bot.send_message(
             message.chat.id, "Usage: /addevent_raw title|date|time|location"
         )
         return
     title, date, time, location = (p.strip() for p in parts[1].split("|", 3))
-    media = None
-    if message.photo:
-        bio = BytesIO()
-        await bot.download(message.photo[-1].file_id, destination=bio)
-        media = (bio.getvalue(), "photo.jpg")
-    elif message.document and message.document.mime_type.startswith("image/"):
-        bio = BytesIO()
-        await bot.download(message.document.file_id, destination=bio)
-        media = (bio.getvalue(), "image.jpg")
-    elif message.video:
-        bio = BytesIO()
-        await bot.download(message.video.file_id, destination=bio)
-        media = (bio.getvalue(), "video.mp4")
+    images = await extract_images(message, bot)
+    media = images if images else None
 
     event = Event(
         title=title,
@@ -1318,7 +1320,7 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
         event.title or "Event",
         event.source_text,
         None,
-        event.source_text,
+        message.html_text or message.caption_html or event.source_text,
         media,
     )
     upload_info = ""
@@ -2624,8 +2626,8 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
                 else:
                     cid = cid.lstrip("-")
                 link = f"https://t.me/c/{cid}/{msg_id}"
-    media = None
-    # Skip downloading attachments to avoid large file transfers
+    images = await extract_images(message, bot)
+    media = images if images else None
 
     results = await add_events_from_text(
         db,
