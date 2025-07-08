@@ -1358,6 +1358,17 @@ def format_day_pretty(day: date) -> str:
     return f"{day.day} {MONTHS[day.month - 1]}"
 
 
+def format_weekend_range(saturday: date) -> str:
+    """Return human-friendly weekend range like '12–13 июля'."""
+    sunday = saturday + timedelta(days=1)
+    if saturday.month == sunday.month:
+        return f"{saturday.day}\u2013{sunday.day} {MONTHS[saturday.month - 1]}"
+    return (
+        f"{saturday.day} {MONTHS[saturday.month - 1]} \u2013 "
+        f"{sunday.day} {MONTHS[sunday.month - 1]}"
+    )
+
+
 def month_name(month: str) -> str:
     y, m = month.split("-")
     return f"{MONTHS[int(m) - 1]} {y}"
@@ -1925,23 +1936,20 @@ async def build_weekend_page_content(db: Database, start: str) -> tuple[str, lis
         for ev in by_day[d]:
             content.extend(event_to_nodes(ev))
 
+    weekend_nav: list[dict] = []
     future_weekends = [w for w in weekend_pages if w.start >= start]
     if future_weekends:
         nav_children = []
         for idx, w in enumerate(future_weekends):
             s = date.fromisoformat(w.start)
-            label = f"{s.day}\u2013{(s + timedelta(days=1)).day} {MONTHS[s.month - 1]}"
-            if w.start == start:
-                nav_children.append(label)
-            else:
-                nav_children.append(
-                    {"tag": "a", "attrs": {"href": w.url}, "children": [label]}
-                )
+            label = format_weekend_range(s)
+            nav_children.append({"tag": "a", "attrs": {"href": w.url}, "children": [label]})
             if idx < len(future_weekends) - 1:
                 nav_children.append(" ")
-        content.append({"tag": "br"})
-        content.append({"tag": "h4", "children": nav_children})
+        weekend_nav = [{"tag": "br"}, {"tag": "h4", "children": nav_children}]
+        content.extend(weekend_nav)
 
+    month_nav: list[dict] = []
     cur_month = start[:7]
     today_month = date.today().strftime("%Y-%m")
     future_months = [m for m in month_pages if m.month >= today_month]
@@ -1949,25 +1957,31 @@ async def build_weekend_page_content(db: Database, start: str) -> tuple[str, lis
         nav_children = []
         for idx, p in enumerate(future_months):
             name = month_name_nominative(p.month)
-            if p.month == cur_month:
-                nav_children.append(name)
-            else:
-                nav_children.append(
-                    {"tag": "a", "attrs": {"href": p.url}, "children": [name]}
-                )
+            nav_children.append({"tag": "a", "attrs": {"href": p.url}, "children": [name]})
             if idx < len(future_months) - 1:
                 nav_children.append(" ")
-        content.append({"tag": "br"})
-        content.append({"tag": "h4", "children": nav_children})
+        month_nav = [{"tag": "br"}, {"tag": "h4", "children": nav_children}]
+        content.extend(month_nav)
 
     if exhibitions:
+        if weekend_nav or month_nav:
+            content.append({"tag": "br"})
+            content.append({"tag": "p", "children": ["\u00a0"]})
         content.append({"tag": "h3", "children": ["Постоянные выставки"]})
         content.append({"tag": "br"})
         content.append({"tag": "p", "children": ["\u00a0"]})
         for ev in exhibitions:
             content.extend(exhibition_to_nodes(ev))
 
-    title = f"Чем заняться на выходных в Калининградской области {format_day_pretty(saturday)}–{format_day_pretty(sunday)}"
+    if weekend_nav:
+        content.extend(weekend_nav)
+    if month_nav:
+        content.extend(month_nav)
+
+    title = (
+        "Чем заняться на выходных в Калининградской области "
+        f"{format_weekend_range(saturday)}"
+    )
     return title, content
 
 
@@ -2135,126 +2149,6 @@ async def daily_scheduler(db: Database, bot: Bot):
             if (
                 ch.last_daily or ""
             ) != now.date().isoformat() and now_time >= target_time:
-                try:
-                    await send_daily_announcement(db, bot, ch.channel_id, tz)
-                except Exception as e:
-                    logging.error("daily send failed for %s: %s", ch.channel_id, e)
-        await asyncio.sleep(60)
-
-
-async def build_daily_posts(db: Database, tz: timezone) -> list[tuple[str, types.InlineKeyboardMarkup | None]]:
-    today = datetime.now(tz).date()
-    yesterday_utc = datetime.utcnow() - timedelta(days=1)
-    async with db.get_session() as session:
-        res_today = await session.execute(
-            select(Event).where(Event.date == today.isoformat()).order_by(Event.time)
-        )
-        events_today = res_today.scalars().all()
-        res_new = await session.execute(
-            select(Event)
-            .where(
-                Event.date > today.isoformat(),
-                Event.added_at.is_not(None),
-                Event.added_at >= yesterday_utc,
-                Event.silent.is_(False),
-            )
-            .order_by(Event.date, Event.time)
-        )
-        events_new = res_new.scalars().all()
-
-        w_start = next_weekend_start(today)
-        wpage = await session.get(WeekendPage, w_start.isoformat())
-        cur_month = today.strftime("%Y-%m")
-        mp_cur = await session.get(MonthPage, cur_month)
-        mp_next = await session.get(MonthPage, next_month(cur_month))
-
-    lines1 = [
-        f"<b>АНОНС на {format_day_pretty(today)} {today.year} #ежедневныйанонс</b>",
-        DAYS_OF_WEEK[today.weekday()],
-        "",
-        "<b><i>НЕ ПРОПУСТИТЕ СЕГОДНЯ</i></b>",
-    ]
-    for e in events_today:
-        lines1.append("")
-        lines1.append(format_event_daily(e, highlight=True))
-    section1 = "\n".join(lines1)
-
-    lines2 = ["<b><i>ДОБАВИЛИ В АНОНС</i></b>"]
-    for e in events_new:
-        lines2.append("")
-        lines2.append(format_event_daily(e))
-    section2 = "\n".join(lines2)
-
-    buttons = []
-    if wpage:
-        sunday = w_start + timedelta(days=1)
-        text = f"Мероприятия на выходные {w_start.day} {sunday.day} {MONTHS[w_start.month - 1]}"
-        buttons.append(types.InlineKeyboardButton(text=text, url=wpage.url))
-    if mp_cur:
-        buttons.append(
-            types.InlineKeyboardButton(
-                text=f"Мероприятия на {month_name_nominative(cur_month)}", url=mp_cur.url
-            )
-        )
-    if mp_next:
-        buttons.append(
-            types.InlineKeyboardButton(
-                text=f"Мероприятия на {month_name_nominative(next_month(cur_month))}",
-                url=mp_next.url,
-            )
-        )
-    markup = None
-    if buttons:
-        markup = types.InlineKeyboardMarkup(inline_keyboard=[[b] for b in buttons])
-
-    combined = section1 + "\n\n\n" + section2
-    if len(combined) <= 4096:
-        return [(combined, markup)]
-    return [(section1, None), (section2, markup)]
-
-
-async def send_daily_announcement(
-    db: Database,
-    bot: Bot,
-    channel_id: int,
-    tz: timezone,
-    *,
-    record: bool = True,
-):
-    posts = await build_daily_posts(db, tz)
-    for text, markup in posts:
-        await bot.send_message(
-            channel_id,
-            text,
-            reply_markup=markup,
-            parse_mode="HTML",
-            disable_web_page_preview=True,
-        )
-    if record:
-        async with db.get_session() as session:
-            ch = await session.get(Channel, channel_id)
-            if ch:
-                ch.last_daily = datetime.now(tz).date().isoformat()
-                await session.commit()
-
-
-async def daily_scheduler(db: Database, bot: Bot):
-    while True:
-        offset = await get_tz_offset(db)
-        tz = offset_to_timezone(offset)
-        now = datetime.now(tz)
-        now_time = now.time().replace(second=0, microsecond=0)
-        async with db.get_session() as session:
-            result = await session.execute(select(Channel).where(Channel.daily_time.is_not(None)))
-            channels = result.scalars().all()
-        for ch in channels:
-            if not ch.daily_time:
-                continue
-            try:
-                target_time = datetime.strptime(ch.daily_time, "%H:%M").time()
-            except ValueError:
-                continue
-            if (ch.last_daily or "") != now.date().isoformat() and now_time >= target_time:
                 try:
                     await send_daily_announcement(db, bot, ch.channel_id, tz)
                 except Exception as e:
