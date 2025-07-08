@@ -1248,6 +1248,46 @@ async def test_build_weekend_page_content(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_weekend_nav_and_exhibitions(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    saturday = date(2025, 7, 12)
+    next_sat = saturday + timedelta(days=7)
+    async with db.get_session() as session:
+        session.add(WeekendPage(start=saturday.isoformat(), url="u1", path="p1"))
+        session.add(WeekendPage(start=next_sat.isoformat(), url="u2", path="p2"))
+        session.add(MonthPage(month="2025-07", url="m1", path="mp1"))
+        session.add(MonthPage(month="2025-08", url="m2", path="mp2"))
+        session.add(
+            Event(
+                title="Expo",
+                description="d",
+                source_text="s",
+                date=(saturday - timedelta(days=1)).isoformat(),
+                end_date=(saturday + timedelta(days=10)).isoformat(),
+                time="10:00",
+                location_name="Hall",
+                event_type="выставка",
+            )
+        )
+        await session.commit()
+
+    _, content = await main.build_weekend_page_content(db, saturday.isoformat())
+    found_weekend = False
+    found_exh = False
+    for n in content:
+        if n.get("tag") == "h4" and any(
+            isinstance(c, dict) and c.get("attrs", {}).get("href") == "u2" for c in n.get("children", [])
+        ):
+            found_weekend = True
+        if n.get("tag") == "h3" and "Постоянные" in "".join(n.get("children", [])):
+            found_exh = True
+    assert found_weekend
+    assert found_exh
+
+
+@pytest.mark.asyncio
 async def test_missing_added_at(tmp_path: Path):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()

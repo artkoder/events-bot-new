@@ -614,7 +614,9 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
             if ch:
                 ch.daily_time = None
                 await session.commit()
-        await send_dailychannels_list(callback.message, db, bot, edit=True)
+
+        await send_daily_list(callback.message, db, bot, edit=True)
+
         await callback.answer("Removed")
     elif data.startswith("dailytime:"):
         cid = int(data.split(":")[1])
@@ -762,7 +764,9 @@ async def send_regdaily_list(message: types.Message, db: Database, bot: Bot, edi
         await bot.send_message(message.chat.id, "\n".join(lines), reply_markup=markup)
 
 
-async def send_dailychannels_list(message: types.Message, db: Database, bot: Bot, edit: bool = False):
+
+async def send_daily_list(message: types.Message, db: Database, bot: Bot, edit: bool = False):
+
     async with db.get_session() as session:
         user = await session.get(User, message.from_user.id)
         if not user or not user.is_superadmin:
@@ -802,8 +806,10 @@ async def handle_regdailychannels(message: types.Message, db: Database, bot: Bot
     await send_regdaily_list(message, db, bot, edit=False)
 
 
-async def handle_dailychannels(message: types.Message, db: Database, bot: Bot):
-    await send_dailychannels_list(message, db, bot, edit=False)
+
+async def handle_daily(message: types.Message, db: Database, bot: Bot):
+    await send_daily_list(message, db, bot, edit=False)
+
 
 
 async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
@@ -1787,6 +1793,23 @@ async def build_weekend_page_content(db: Database, start: str) -> tuple[str, lis
         )
         events = result.scalars().all()
 
+        ex_res = await session.execute(
+            select(Event)
+            .where(
+                Event.event_type == "выставка",
+                Event.end_date.is_not(None),
+                Event.date <= sunday.isoformat(),
+                Event.end_date >= saturday.isoformat(),
+            )
+            .order_by(Event.date)
+        )
+        exhibitions = ex_res.scalars().all()
+
+        res_w = await session.execute(select(WeekendPage).order_by(WeekendPage.start))
+        weekend_pages = res_w.scalars().all()
+        res_m = await session.execute(select(MonthPage).order_by(MonthPage.month))
+        month_pages = res_m.scalars().all()
+
     today = date.today()
     events = [
         e
@@ -1824,6 +1847,44 @@ async def build_weekend_page_content(db: Database, start: str) -> tuple[str, lis
         content.append({"tag": "p", "children": ["\u00A0"]})
         for ev in by_day[d]:
             content.extend(event_to_nodes(ev))
+
+    future_weekends = [w for w in weekend_pages if w.start >= start]
+    if future_weekends:
+        nav_children = []
+        for idx, w in enumerate(future_weekends):
+            s = date.fromisoformat(w.start)
+            label = f"{s.day}\u2013{(s + timedelta(days=1)).day} {MONTHS[s.month - 1]}"
+            if w.start == start:
+                nav_children.append(label)
+            else:
+                nav_children.append({"tag": "a", "attrs": {"href": w.url}, "children": [label]})
+            if idx < len(future_weekends) - 1:
+                nav_children.append(" ")
+        content.append({"tag": "br"})
+        content.append({"tag": "h4", "children": nav_children})
+
+    cur_month = start[:7]
+    today_month = date.today().strftime("%Y-%m")
+    future_months = [m for m in month_pages if m.month >= today_month]
+    if future_months:
+        nav_children = []
+        for idx, p in enumerate(future_months):
+            name = month_name_nominative(p.month)
+            if p.month == cur_month:
+                nav_children.append(name)
+            else:
+                nav_children.append({"tag": "a", "attrs": {"href": p.url}, "children": [name]})
+            if idx < len(future_months) - 1:
+                nav_children.append(" ")
+        content.append({"tag": "br"})
+        content.append({"tag": "h4", "children": nav_children})
+
+    if exhibitions:
+        content.append({"tag": "h3", "children": ["Постоянные выставки"]})
+        content.append({"tag": "br"})
+        content.append({"tag": "p", "children": ["\u00A0"]})
+        for ev in exhibitions:
+            content.extend(exhibition_to_nodes(ev))
 
     title = (
         f"Чем заняться на выходных в Калининградской области {format_day_pretty(saturday)}–{format_day_pretty(sunday)}"
@@ -1919,7 +1980,9 @@ async def build_daily_posts(db: Database, tz: timezone) -> list[tuple[str, types
     if buttons:
         markup = types.InlineKeyboardMarkup(inline_keyboard=[[b] for b in buttons])
 
-    combined = section1 + "\n\n" + section2
+
+    combined = section1 + "\n\n\n" + section2
+
     if len(combined) <= 4096:
         return [(combined, markup)]
     return [(section1, None), (section2, markup)]
@@ -2390,12 +2453,14 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
                     text="\u2753 Это бесплатное мероприятие",
                     callback_data=f"markfree:{saved.id}",
                 )
+
             )
         buttons.append(
             types.InlineKeyboardButton(
                 text="\U0001F6A9 Переключить на тихий режим",
                 callback_data=f"togglesilent:{saved.id}",
             )
+
         )
         markup = (
             types.InlineKeyboardMarkup(inline_keyboard=[buttons]) if buttons else None
@@ -2567,11 +2632,13 @@ def create_app() -> web.Application:
     async def forward_wrapper(message: types.Message):
         await handle_forwarded(message, db, bot)
 
-    async def reg_dailychannels_wrapper(message: types.Message):
+
+    async def reg_daily_wrapper(message: types.Message):
         await handle_regdailychannels(message, db, bot)
 
-    async def dailychannels_wrapper(message: types.Message):
-        await handle_dailychannels(message, db, bot)
+    async def daily_wrapper(message: types.Message):
+        await handle_daily(message, db, bot)
+
 
     dp.message.register(start_wrapper, Command("start"))
     dp.message.register(register_wrapper, Command("register"))
@@ -2602,8 +2669,10 @@ def create_app() -> web.Application:
     dp.message.register(list_events_wrapper, Command("events"))
     dp.message.register(set_channel_wrapper, Command("setchannel"))
     dp.message.register(channels_wrapper, Command("channels"))
-    dp.message.register(reg_dailychannels_wrapper, Command("regdailychannels"))
-    dp.message.register(dailychannels_wrapper, Command("dailychannels"))
+
+    dp.message.register(reg_daily_wrapper, Command("regdailychannels"))
+    dp.message.register(daily_wrapper, Command("daily"))
+
     dp.message.register(exhibitions_wrapper, Command("exhibitions"))
     dp.message.register(pages_wrapper, Command("pages"))
     dp.message.register(edit_message_wrapper, lambda m: m.from_user.id in editing_sessions)

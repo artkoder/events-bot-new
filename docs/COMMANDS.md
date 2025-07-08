@@ -13,7 +13,9 @@
 | `/setchannel` | - | Choose one of the admin channels to register as an announcement source. |
 | `/channels` | - | List channels where the bot is admin and mark registered ones with a cancel button. |
 | `/regdailychannels` | - | Choose admin channels for daily announcements (default 08:00). |
-| `/dailychannels` | - | Manage daily announcement channels: cancel, change time, test send. |
+
+| `/daily` | - | Manage daily announcement channels: cancel, change time, test send. |
+
 | `/exhibitions` | - | List active exhibitions similar to `/events`; each entry shows the period `c <start>` / `по <end>` and includes edit/delete buttons. |
 | `/pages` | - | Show links to Telegraph month and weekend pages. |
 | `python main.py test_telegraph` | - | Verify Telegraph API access. Automatically creates a token if needed and prints the page URL. |
