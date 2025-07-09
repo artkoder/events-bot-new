@@ -2811,6 +2811,35 @@ async def test_build_daily_posts(tmp_path: Path):
     assert first_btn.startswith("(+1)")
 
 
+
+@pytest.mark.asyncio
+async def test_daily_weekend_date_link(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    today = date.today()
+    saturday = main.next_weekend_start(today)
+    async with db.get_session() as session:
+        session.add(
+            Event(
+                title="W",
+                description="weekend",
+                source_text="s",
+                date=saturday.isoformat(),
+                time="12:00",
+                location_name="Hall",
+                added_at=datetime.utcnow(),
+            )
+        )
+        session.add(WeekendPage(start=saturday.isoformat(), url="w", path="wp"))
+        await session.commit()
+
+    posts = await main.build_daily_posts(db, timezone.utc)
+    text = posts[0][0]
+    assert f'<a href="w">' in text
+
+
+
 @pytest.mark.asyncio
 async def test_send_daily_preview_disabled(tmp_path: Path):
     db = Database(str(tmp_path / "db.sqlite"))

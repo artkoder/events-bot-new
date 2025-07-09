@@ -1751,7 +1751,9 @@ def format_event_md(e: Event) -> str:
     return "\n".join(lines)
 
 
-def format_event_daily(e: Event, highlight: bool = False) -> str:
+def format_event_daily(
+    e: Event, highlight: bool = False, weekend_url: str | None = None
+) -> str:
     """Return HTML-formatted text for a daily announcement item."""
     prefix = ""
     if highlight:
@@ -1816,7 +1818,11 @@ def format_event_daily(e: Event, highlight: bool = False) -> str:
     except ValueError:
         logging.error("Invalid event date: %s", e.date)
         day = e.date
-    lines.append(f"<i>{day} {e.time} {loc}</i>")
+    if weekend_url and datetime.fromisoformat(date_part).weekday() == 5:
+        day_fmt = f'<a href="{html.escape(weekend_url)}">{day}</a>'
+    else:
+        day_fmt = day
+    lines.append(f"<i>{day_fmt} {e.time} {loc}</i>")
 
     return "\n".join(lines)
 
@@ -2288,6 +2294,8 @@ async def build_daily_posts(
 
         w_start = next_weekend_start(today)
         wpage = await session.get(WeekendPage, w_start.isoformat())
+        res_w_all = await session.execute(select(WeekendPage))
+        weekend_map = {w.start: w for w in res_w_all.scalars().all()}
         cur_month = today.strftime("%Y-%m")
         mp_cur = await session.get(MonthPage, cur_month)
         mp_next = await session.get(MonthPage, next_month(cur_month))
@@ -2330,14 +2338,32 @@ async def build_daily_posts(
         "<b><i>НЕ ПРОПУСТИТЕ СЕГОДНЯ</i></b>",
     ]
     for e in events_today:
+        w_url = None
+        try:
+            d = date.fromisoformat(e.date)
+        except ValueError:
+            d = None
+        if d and d.weekday() == 5:
+            w = weekend_map.get(d.isoformat())
+            if w:
+                w_url = w.url
         lines1.append("")
-        lines1.append(format_event_daily(e, highlight=True))
+        lines1.append(format_event_daily(e, highlight=True, weekend_url=w_url))
     section1 = "\n".join(lines1)
 
     lines2 = ["<b><i>ДОБАВИЛИ В АНОНС</i></b>"]
     for e in events_new:
+        w_url = None
+        try:
+            d = date.fromisoformat(e.date)
+        except ValueError:
+            d = None
+        if d and d.weekday() == 5:
+            w = weekend_map.get(d.isoformat())
+            if w:
+                w_url = w.url
         lines2.append("")
-        lines2.append(format_event_daily(e))
+        lines2.append(format_event_daily(e, weekend_url=w_url))
     section2 = "\n".join(lines2)
 
     buttons = []
