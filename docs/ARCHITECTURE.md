@@ -22,6 +22,8 @@ Each event stores optional ticket information (`ticket_price_min`, `ticket_price
 Free events are marked with `is_free`. Telegraph pages are stored with both URL and path so they can be updated when the event description changes. If a message includes images (under 5&nbsp;MB each), they are uploaded to Catbox and embedded at the start of the source page.
 Events also keep `event_type` (one of six categories) and an `emoji` suggested by the LLM. Multi-day events store `end_date` and appear with "Открытие" or "Закрытие" on the respective days. `/exhibitions` lists active exhibitions.
 `pushkin_card` marks events that accept the Пушкинская карта.
+`ics_url` stores a link to a calendar file uploaded to Supabase. Moderators can generate or remove this file when editing an event. Calendar files are named `Event-<id>-dd-mm-yyyy.ics` and include a link back to the event page.
+When present the link is inserted into the Telegraph source page below the title image so readers can quickly add the event to their phone calendar.
 If a text describes several events at once the LLM returns an array of event objects and the bot creates separate entries and Telegraph pages for each of them.
 Channels where the bot is admin are tracked in the `channel` table. Use `/setchannel` to choose an admin channel and mark it as an announcement source. The `/channels` command lists all admin channels and shows which ones are registered.
 `docs/LOCATIONS.md` contains standard venue names; its contents are appended to the 4o prompt so events use consistent `location_name` values.
