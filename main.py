@@ -303,6 +303,49 @@ def strip_city_from_address(address: str | None, city: str | None) -> str | None
     return addr
 
 
+ICS_LABEL = "Добавить в календарь на телефоне (ICS)"
+
+
+def parse_time_range(value: str) -> tuple[time, time | None] | None:
+    """Return start and optional end time from text like '10:00' or '10:00-12:00'."""
+    value = value.strip()
+    parts = [p.strip() for p in value.split("-", 1)]
+    try:
+        start = datetime.strptime(parts[0], "%H:%M").time()
+    except ValueError:
+        return None
+    end: time | None = None
+    if len(parts) == 2:
+        try:
+            end = datetime.strptime(parts[1], "%H:%M").time()
+        except ValueError:
+            end = None
+    return start, end
+
+
+def apply_ics_link(html_content: str, url: str | None) -> str:
+    """Insert or remove the ICS link block in Telegraph HTML."""
+    idx = html_content.find(ICS_LABEL)
+    if idx != -1:
+        start = html_content.rfind("<p", 0, idx)
+        end = html_content.find("</p>", idx)
+        if start != -1 and end != -1:
+            html_content = html_content[:start] + html_content[end + 4 :]
+    if not url:
+        return html_content
+    link_html = (
+        f'<p>\U0001f4c5 <a href="{html.escape(url)}">{ICS_LABEL}</a></p>'
+    )
+    idx = html_content.find("</p>")
+    if idx == -1:
+        return link_html + html_content
+    pos = idx + 4
+    img_pattern = re.compile(r"<img[^>]+><p></p>")
+    for m in img_pattern.finditer(html_content, pos):
+        pos = m.end()
+    return html_content[:pos] + link_html + html_content[pos:]
+
+
 def parse_bool_text(value: str) -> bool | None:
     """Convert text to boolean if possible."""
     normalized = value.strip().lower()
@@ -347,12 +390,19 @@ def parse_events_date(text: str, tz: timezone) -> date | None:
 async def build_ics_content(db: Database, event: Event) -> str:
     offset = await get_tz_offset(db)
     tz = offset_to_timezone(offset)
+    time_range = parse_time_range(event.time)
+    if not time_range:
+        raise ValueError("bad time")
+    start_t, end_t = time_range
     start_dt = datetime.combine(
         datetime.fromisoformat(event.date),
-        datetime.strptime(event.time, "%H:%M").time(),
+        start_t,
         tzinfo=tz,
     )
-    end_dt = start_dt + timedelta(hours=1)
+    if end_t:
+        end_dt = datetime.combine(datetime.fromisoformat(event.date), end_t, tzinfo=tz)
+    else:
+        end_dt = start_dt + timedelta(hours=1)
     start = start_dt.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     end = end_dt.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     cal = Calendar()
@@ -383,6 +433,12 @@ async def upload_ics(event: Event, db: Database) -> str | None:
     client = get_supabase_client()
     if not client:
         logging.error("Supabase client not configured")
+        return None
+    if event.end_date:
+        logging.info("skip ics for multi-day event %s", event.id)
+        return None
+    if not parse_time_range(event.time):
+        logging.info("skip ics for unclear time %s", event.id)
         return None
     content = await build_ics_content(db, event)
     try:
@@ -743,6 +799,10 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                 if url:
                     event.ics_url = url
                     await session.commit()
+                    if event.telegraph_path:
+                        await update_source_page_ics(
+                            event.telegraph_path, event.title or "Event", url
+                        )
         if event:
             await show_edit_menu(callback.from_user.id, event, bot)
         await callback.answer("Created")
@@ -754,6 +814,10 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                 await delete_ics(event)
                 event.ics_url = None
                 await session.commit()
+                if event.telegraph_path:
+                    await update_source_page_ics(
+                        event.telegraph_path, event.title or "Event", None
+                    )
         if event:
             await show_edit_menu(callback.from_user.id, event, bot)
         await callback.answer("Deleted")
@@ -1415,6 +1479,7 @@ async def add_events_from_text(
                     source_link,
                     html_text,
                     media_arg,
+                    saved.ics_url,
                 )
                 if res:
                     if len(res) == 4:
@@ -1548,6 +1613,7 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
         None,
         html_text or event.source_text,
         media,
+        event.ics_url,
     )
     upload_info = ""
     photo_count = 0
@@ -3140,12 +3206,32 @@ async def update_source_page(
         return f"error: {e}", 0
 
 
+async def update_source_page_ics(path: str, title: str, url: str | None):
+    """Insert or remove the ICS link in a Telegraph page."""
+    token = get_telegraph_token()
+    if not token:
+        logging.error("Telegraph token unavailable")
+        return
+    tg = Telegraph(access_token=token)
+    try:
+        logging.info("Editing telegraph ICS for %s", path)
+        page = await asyncio.to_thread(tg.get_page, path, return_html=True)
+        html_content = page.get("content") or page.get("content_html") or ""
+        html_content = apply_ics_link(html_content, url)
+        await asyncio.to_thread(
+            tg.edit_page, path, title=title, html_content=html_content
+        )
+    except Exception as e:
+        logging.error("Failed to update ICS link: %s", e)
+
+
 async def create_source_page(
     title: str,
     text: str,
     source_url: str | None,
     html_text: str | None = None,
     media: list[tuple[bytes, str]] | tuple[bytes, str] | None = None,
+    ics_url: str | None = None,
 ) -> tuple[str, str, str, int] | None:
     """Create a Telegraph page with the original event text."""
     token = get_telegraph_token()
@@ -3215,6 +3301,8 @@ async def create_source_page(
 
     for url in catbox_urls:
         html_content += f'<img src="{html.escape(url)}"/><p></p>'
+
+    html_content = apply_ics_link(html_content, ics_url)
 
     if html_text:
         html_text = strip_title(html_text)
