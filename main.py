@@ -5,10 +5,6 @@ from typing import Optional, Tuple, Iterable
 from ics import Calendar, Event as IcsEvent
 from supabase import create_client, Client
 
-
-from ics import Calendar, Event as IcsEvent
-from supabase import create_client, Client
-
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
@@ -361,11 +357,24 @@ async def build_ics_content(db: Database, event: Event) -> str:
     end = end_dt.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     cal = Calendar()
     ics_event = IcsEvent()
-    ics_event.name = event.title
+    title = event.title
+    if event.location_name:
+        title = f"{title} в {event.location_name}"
+    ics_event.name = title
     ics_event.begin = start
     ics_event.end = end
-    ics_event.description = event.description
-    ics_event.location = event.location_name
+    desc = event.description
+    link = event.source_post_url or event.telegraph_url
+    if link:
+        desc = f"{desc}\n\n{link}"
+    ics_event.description = desc
+    loc_parts = []
+    if event.location_address:
+        loc_parts.append(event.location_address)
+    if event.city:
+        loc_parts.append(event.city)
+    ics_event.location = ", ".join(loc_parts)
+    ics_event.url = event.source_post_url or event.telegraph_url
     cal.events.add(ics_event)
     return cal.serialize()
 
@@ -376,14 +385,16 @@ async def upload_ics(event: Event, db: Database) -> str | None:
         logging.error("Supabase client not configured")
         return None
     content = await build_ics_content(db, event)
-    path = f"{event.id}.ics"
+    try:
+        d = datetime.fromisoformat(event.date)
+        path = f"Event-{event.id}-{d.day:02d}-{d.month:02d}-{d.year}.ics"
+    except Exception:
+        path = f"Event-{event.id}.ics"
     try:
         client.storage.from_(SUPABASE_BUCKET).upload(
             path,
-
             content.encode("utf-8"),
             {"content-type": "text/calendar", "upsert": "true"},
-
         )
         url = client.storage.from_(SUPABASE_BUCKET).get_public_url(path)
     except Exception as e:
@@ -392,16 +403,13 @@ async def upload_ics(event: Event, db: Database) -> str | None:
     return url
 
 
-
 async def delete_ics(event: Event):
     client = get_supabase_client()
     if not client or not event.ics_url:
         return
     path = event.ics_url.split("/")[-1]
     try:
-
         client.storage.from_(SUPABASE_BUCKET).remove([path])
-
     except Exception as e:
         logging.error("Failed to delete ics: %s", e)
 

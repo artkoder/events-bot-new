@@ -42,4 +42,4 @@
 - Events can upload an ICS file to Supabase during editing.
 - Added `ics_url` column and buttons to create or delete the file.
 - Use `SUPABASE_BUCKET` to configure the storage bucket (defaults to `events-ics`).
-
+- Calendar files include a link back to the event and are saved as `Event-<id>-dd-mm-yyyy.ics`.
