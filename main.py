@@ -447,14 +447,18 @@ async def upload_ics(event: Event, db: Database) -> str | None:
     except Exception:
         path = f"Event-{event.id}.ics"
     try:
+
         logging.info("Uploading ICS to %s/%s", SUPABASE_BUCKET, path)
+
         client.storage.from_(SUPABASE_BUCKET).upload(
             path,
             content.encode("utf-8"),
             {"content-type": "text/calendar", "upsert": "true"},
         )
         url = client.storage.from_(SUPABASE_BUCKET).get_public_url(path)
+
         logging.info("ICS uploaded: %s", url)
+
     except Exception as e:
         logging.error("Failed to upload ics: %s", e)
         return None
@@ -467,7 +471,9 @@ async def delete_ics(event: Event):
         return
     path = event.ics_url.split("/")[-1]
     try:
+
         logging.info("Deleting ICS %s from %s", path, SUPABASE_BUCKET)
+
         client.storage.from_(SUPABASE_BUCKET).remove([path])
     except Exception as e:
         logging.error("Failed to delete ics: %s", e)
@@ -802,13 +808,17 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                 if url:
                     event.ics_url = url
                     await session.commit()
+
                     logging.info("ICS saved for event %s: %s", eid, url)
+
                     if event.telegraph_path:
                         await update_source_page_ics(
                             event.telegraph_path, event.title or "Event", url
                         )
+
                 else:
                     logging.warning("ICS creation failed for event %s", eid)
+
         if event:
             await show_edit_menu(callback.from_user.id, event, bot)
         await callback.answer("Created")
@@ -820,13 +830,17 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                 await delete_ics(event)
                 event.ics_url = None
                 await session.commit()
+
                 logging.info("ICS removed for event %s", eid)
+
                 if event.telegraph_path:
                     await update_source_page_ics(
                         event.telegraph_path, event.title or "Event", None
                     )
+
             elif event:
                 logging.debug("deleteics: no file for event %s", eid)
+
         if event:
             await show_edit_menu(callback.from_user.id, event, bot)
         await callback.answer("Deleted")
