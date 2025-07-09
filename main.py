@@ -447,12 +447,18 @@ async def upload_ics(event: Event, db: Database) -> str | None:
     except Exception:
         path = f"Event-{event.id}.ics"
     try:
+
+        logging.info("Uploading ICS to %s/%s", SUPABASE_BUCKET, path)
+
         client.storage.from_(SUPABASE_BUCKET).upload(
             path,
             content.encode("utf-8"),
             {"content-type": "text/calendar", "upsert": "true"},
         )
         url = client.storage.from_(SUPABASE_BUCKET).get_public_url(path)
+
+        logging.info("ICS uploaded: %s", url)
+
     except Exception as e:
         logging.error("Failed to upload ics: %s", e)
         return None
@@ -465,6 +471,9 @@ async def delete_ics(event: Event):
         return
     path = event.ics_url.split("/")[-1]
     try:
+
+        logging.info("Deleting ICS %s from %s", path, SUPABASE_BUCKET)
+
         client.storage.from_(SUPABASE_BUCKET).remove([path])
     except Exception as e:
         logging.error("Failed to delete ics: %s", e)
@@ -799,10 +808,17 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                 if url:
                     event.ics_url = url
                     await session.commit()
+
+                    logging.info("ICS saved for event %s: %s", eid, url)
+
                     if event.telegraph_path:
                         await update_source_page_ics(
                             event.telegraph_path, event.title or "Event", url
                         )
+
+                else:
+                    logging.warning("ICS creation failed for event %s", eid)
+
         if event:
             await show_edit_menu(callback.from_user.id, event, bot)
         await callback.answer("Created")
@@ -814,10 +830,17 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                 await delete_ics(event)
                 event.ics_url = None
                 await session.commit()
+
+                logging.info("ICS removed for event %s", eid)
+
                 if event.telegraph_path:
                     await update_source_page_ics(
                         event.telegraph_path, event.title or "Event", None
                     )
+
+            elif event:
+                logging.debug("deleteics: no file for event %s", eid)
+
         if event:
             await show_edit_menu(callback.from_user.id, event, bot)
         await callback.answer("Deleted")
@@ -3039,18 +3062,23 @@ processed_media_groups: set[str] = set()
 
 
 async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
+    logging.info("forwarded message from %s", message.from_user.id)
     text = message.text or message.caption
     if message.media_group_id:
         if message.media_group_id in processed_media_groups:
+            logging.debug("skip already processed album %s", message.media_group_id)
             return
         if not text:
             # wait for the part of the album that contains the caption
+            logging.debug("waiting for caption in album %s", message.media_group_id)
             return
         processed_media_groups.add(message.media_group_id)
     if not text:
+        logging.debug("forwarded message has no text")
         return
     async with db.get_session() as session:
         if not await session.get(User, message.from_user.id):
+            logging.debug("user %s not registered", message.from_user.id)
             return
     link = None
     if message.forward_from_chat and message.forward_from_message_id:
@@ -3059,6 +3087,7 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
         async with db.get_session() as session:
             ch = await session.get(Channel, chat.id)
             allowed = ch.is_registered if ch else False
+        logging.debug("forward from chat %s allowed=%s", chat.id, allowed)
         if allowed:
             if chat.username:
                 link = f"https://t.me/{chat.username}/{msg_id}"
@@ -3079,6 +3108,7 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
         message.html_text or message.caption_html,
         media,
     )
+    logging.info("forward parsed %d events", len(results))
     for saved, added, lines, status in results:
         buttons = []
         if (
