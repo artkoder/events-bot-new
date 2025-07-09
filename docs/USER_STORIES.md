@@ -28,3 +28,5 @@
 |US-24|System|parse event type and emoji via 4o|categorise events|
 |US-25|System|store start and end dates for multi-day events|show opening and closing|
 |US-26|User|view exhibitions with `/exhibitions`|see ongoing exhibitions|
+|US-27|User/Admin|add event to calendar via ICS|quick calendar save|
+|US-28|User|follow the calendar link on a Telegraph page|ICS download on phone|
