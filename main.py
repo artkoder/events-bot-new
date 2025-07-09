@@ -305,6 +305,10 @@ def strip_city_from_address(address: str | None, city: str | None) -> str | None
 
 ICS_LABEL = "Добавить в календарь на телефоне (ICS)"
 
+MONTH_NAV_START = "<!--month-nav-start-->"
+MONTH_NAV_END = "<!--month-nav-end-->"
+
+
 
 def parse_time_range(value: str) -> tuple[time, time | None] | None:
     """Return start and optional end time from text like '10:00' or '10:00-12:00'."""
@@ -344,6 +348,37 @@ def apply_ics_link(html_content: str, url: str | None) -> str:
     for m in img_pattern.finditer(html_content, pos):
         pos = m.end()
     return html_content[:pos] + link_html + html_content[pos:]
+
+
+
+def apply_month_nav(html_content: str, html_block: str | None) -> str:
+    """Insert or replace the month navigation block."""
+    start = html_content.find(MONTH_NAV_START)
+    if start != -1:
+        end = html_content.find(MONTH_NAV_END, start)
+        if end != -1:
+            html_content = html_content[:start] + html_content[end + len(MONTH_NAV_END) :]
+    if html_block:
+        html_content += f"{MONTH_NAV_START}{html_block}{MONTH_NAV_END}"
+    return html_content
+
+
+async def build_month_nav_html(db: Database) -> str:
+    async with db.get_session() as session:
+        result = await session.execute(select(MonthPage).order_by(MonthPage.month))
+        months = result.scalars().all()
+    today_month = date.today().strftime("%Y-%m")
+    future_months = [m for m in months if m.month >= today_month]
+    if not future_months:
+        return ""
+    links: list[str] = []
+    for idx, p in enumerate(future_months):
+        name = month_name_nominative(p.month)
+        links.append(f'<a href="{html.escape(p.url)}">{name}</a>')
+        if idx < len(future_months) - 1:
+            links.append(" ")
+    return "<br/><h4>" + "".join(links) + "</h4>"
+
 
 
 def parse_bool_text(value: str) -> bool | None:
@@ -1488,6 +1523,7 @@ async def add_events_from_text(
                     saved.title or "Event",
                     html_text or text,
                     media_arg,
+                    db,
                 )
                 if added_count:
                     photo_count += added_count
@@ -1503,6 +1539,9 @@ async def add_events_from_text(
                     html_text,
                     media_arg,
                     saved.ics_url,
+
+                    db,
+
                 )
                 if res:
                     if len(res) == 4:
@@ -1637,6 +1676,9 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
         html_text or event.source_text,
         media,
         event.ics_url,
+
+        db,
+
     )
     upload_info = ""
     photo_count = 0
@@ -3161,6 +3203,7 @@ async def update_source_page(
     title: str,
     new_html: str,
     media: list[tuple[bytes, str]] | tuple[bytes, str] | None = None,
+    db: Database | None = None,
 ) -> tuple[str, int]:
     """Append text to an existing Telegraph page."""
     token = get_telegraph_token()
@@ -3225,6 +3268,9 @@ async def update_source_page(
         html_content += (
             f"<p>{CONTENT_SEPARATOR}</p><p>" + cleaned.replace("\n", "<br/>") + "</p>"
         )
+        if db:
+            nav_html = await build_month_nav_html(db)
+            html_content = apply_month_nav(html_content, nav_html)
         logging.info("Editing telegraph page %s", path)
         await asyncio.to_thread(
             tg.edit_page, path, title=title, html_content=html_content
@@ -3262,6 +3308,9 @@ async def create_source_page(
     html_text: str | None = None,
     media: list[tuple[bytes, str]] | tuple[bytes, str] | None = None,
     ics_url: str | None = None,
+
+    db: Database | None = None,
+
 ) -> tuple[str, str, str, int] | None:
     """Create a Telegraph page with the original event text."""
     token = get_telegraph_token()
@@ -3350,6 +3399,10 @@ async def create_source_page(
         )
         paragraphs = [f"<p>{html.escape(line)}</p>" for line in clean_text.splitlines()]
         html_content += "".join(paragraphs)
+
+    if db:
+        nav_html = await build_month_nav_html(db)
+        html_content = apply_month_nav(html_content, nav_html)
     try:
         page = await asyncio.to_thread(tg.create_page, title, html_content=html_content)
     except Exception as e:
