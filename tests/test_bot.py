@@ -2819,6 +2819,7 @@ async def test_build_daily_posts(tmp_path: Path):
     assert first_btn.startswith("(+1)")
 
 
+
 @pytest.mark.asyncio
 async def test_daily_weekend_date_link(tmp_path: Path):
     db = Database(str(tmp_path / "db.sqlite"))
@@ -2844,6 +2845,7 @@ async def test_daily_weekend_date_link(tmp_path: Path):
     posts = await main.build_daily_posts(db, timezone.utc)
     text = posts[0][0]
     assert f'<a href="w">' in text
+
 
 
 @pytest.mark.asyncio
