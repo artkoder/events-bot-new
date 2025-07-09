@@ -1702,6 +1702,14 @@ async def test_build_weekend_page_content(tmp_path: Path):
     title, content = await main.build_weekend_page_content(db, saturday.isoformat())
     assert "выходных" in title
     assert any(n.get("tag") == "h4" for n in content)
+    intro = content[0]
+    assert intro.get("tag") == "p"
+    link = next(
+        c
+        for c in intro["children"]
+        if isinstance(c, dict) and c.get("tag") == "a"
+    )
+    assert link.get("attrs", {}).get("href") == "https://t.me/kenigevents"
     assert "12\u201313 июля" in title
 
     cross = date(2025, 1, 31)
