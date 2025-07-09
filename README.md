@@ -53,8 +53,11 @@ browse upcoming announcements. The command accepts dates like `2025-07-10`,
    fly secrets set TELEGRAM_BOT_TOKEN=xxx
    fly secrets set WEBHOOK_URL=https://<app>.fly.dev
    fly secrets set FOUR_O_TOKEN=xxxxx
-   fly secrets set FOUR_O_URL=https://api.openai.com/v1/chat/completions
-   fly secrets set DB_PATH=/data/db.sqlite
+    fly secrets set FOUR_O_URL=https://api.openai.com/v1/chat/completions
+    fly secrets set DB_PATH=/data/db.sqlite
+    # Optional: enable calendar files
+    fly secrets set SUPABASE_URL=https://<project>.supabase.co
+    fly secrets set SUPABASE_KEY=service_role_key
    # Optional: use your own Telegraph token. If not set, a new account will be
    # created on first run and the token saved to the data volume.
    fly secrets set TELEGRAPH_TOKEN=<token>
