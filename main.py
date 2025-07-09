@@ -2,6 +2,8 @@ import logging
 import os
 from datetime import date, datetime, timedelta, timezone, time
 from typing import Optional, Tuple, Iterable
+from ics import Calendar, Event as IcsEvent
+from supabase import create_client, Client
 
 
 from ics import Calendar, Event as IcsEvent
@@ -380,7 +382,8 @@ async def upload_ics(event: Event, db: Database) -> str | None:
             path,
 
             content.encode("utf-8"),
-            {"content-type": "text/calendar", "upsert": True},
+            {"content-type": "text/calendar", "upsert": "true"},
+
         )
         url = client.storage.from_(SUPABASE_BUCKET).get_public_url(path)
     except Exception as e:
