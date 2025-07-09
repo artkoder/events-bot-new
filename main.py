@@ -2,6 +2,10 @@ import logging
 import os
 from datetime import date, datetime, timedelta, timezone, time
 from typing import Optional, Tuple, Iterable
+import uuid
+
+from ics import Calendar, Event as IcsEvent
+from supabase import create_client, Client
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
@@ -25,6 +29,9 @@ logging.basicConfig(level=logging.INFO)
 
 DB_PATH = os.getenv("DB_PATH", "/data/db.sqlite")
 TELEGRAPH_TOKEN_FILE = os.getenv("TELEGRAPH_TOKEN_FILE", "/data/telegraph_token.txt")
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "events-ics")
 
 # separator inserted between versions on Telegraph source pages
 CONTENT_SEPARATOR = "🟧" * 10
@@ -36,6 +43,7 @@ daily_time_sessions: dict[int, int] = {}
 
 # toggle for uploading images to catbox
 CATBOX_ENABLED: bool = False
+_supabase_client: Client | None = None
 
 
 class User(SQLModel, table=True):
@@ -93,6 +101,7 @@ class Event(SQLModel, table=True):
     telegraph_path: Optional[str] = None
     source_text: str
     telegraph_url: Optional[str] = None
+    ics_url: Optional[str] = None
     source_post_url: Optional[str] = None
     photo_count: int = 0
     added_at: datetime = Field(default_factory=datetime.utcnow)
@@ -175,6 +184,10 @@ class Database:
                 await conn.exec_driver_sql(
                     "ALTER TABLE event ADD COLUMN pushkin_card BOOLEAN DEFAULT 0"
                 )
+            if "ics_url" not in cols:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE event ADD COLUMN ics_url VARCHAR"
+                )
 
             result = await conn.exec_driver_sql("PRAGMA table_info(channel)")
             cols = [r[1] for r in result.fetchall()]
@@ -226,6 +239,13 @@ async def set_catbox_enabled(db: Database, value: bool):
         await session.commit()
     global CATBOX_ENABLED
     CATBOX_ENABLED = value
+
+
+def get_supabase_client() -> Client | None:
+    global _supabase_client
+    if _supabase_client is None and SUPABASE_URL and SUPABASE_KEY:
+        _supabase_client = create_client(SUPABASE_URL, SUPABASE_KEY)
+    return _supabase_client
 
 
 def validate_offset(value: str) -> bool:
@@ -324,6 +344,58 @@ def parse_events_date(text: str, tz: timezone) -> date | None:
         return date(year, month, day)
     except ValueError:
         return None
+
+
+async def build_ics_content(db: Database, event: Event) -> str:
+    offset = await get_tz_offset(db)
+    tz = offset_to_timezone(offset)
+    start_dt = datetime.combine(
+        datetime.fromisoformat(event.date),
+        datetime.strptime(event.time, "%H:%M").time(),
+        tzinfo=tz,
+    )
+    end_dt = start_dt + timedelta(hours=1)
+    start = start_dt.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    end = end_dt.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    cal = Calendar()
+    ics_event = IcsEvent()
+    ics_event.name = event.title
+    ics_event.begin = start
+    ics_event.end = end
+    ics_event.description = event.description
+    ics_event.location = event.location_name
+    cal.events.add(ics_event)
+    return cal.serialize()
+
+
+async def upload_ics(event: Event, db: Database) -> str | None:
+    client = get_supabase_client()
+    if not client:
+        logging.error("Supabase client not configured")
+        return None
+    content = await build_ics_content(db, event)
+    path = f"{event.id}.ics"
+    try:
+        client.storage.from_(SUPABASE_BUCKET).upload(
+            path,
+            content,
+            {"content-type": "text/calendar", "upsert": True},
+        )
+    except Exception as e:
+        logging.error("Failed to upload ics: %s", e)
+        return None
+    return f"{SUPABASE_URL}/storage/v1/object/public/{SUPABASE_BUCKET}/{path}"
+
+
+async def delete_ics(event: Event):
+    client = get_supabase_client()
+    if not client or not event.ics_url:
+        return
+    path = event.ics_url.split("/")[-1]
+    try:
+        client.storage.from_(SUPABASE_BUCKET).remove(path)
+    except Exception as e:
+        logging.error("Failed to delete ics: %s", e)
 
 
 async def parse_event_via_4o(text: str) -> list[dict]:
@@ -646,6 +718,29 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
         except Exception as e:
             logging.error("failed to update silent button: %s", e)
         await callback.answer("Toggled")
+    elif data.startswith("createics:"):
+        eid = int(data.split(":")[1])
+        async with db.get_session() as session:
+            event = await session.get(Event, eid)
+            if event:
+                url = await upload_ics(event, db)
+                if url:
+                    event.ics_url = url
+                    await session.commit()
+        if event:
+            await show_edit_menu(callback.from_user.id, event, bot)
+        await callback.answer("Created")
+    elif data.startswith("delics:"):
+        eid = int(data.split(":")[1])
+        async with db.get_session() as session:
+            event = await session.get(Event, eid)
+            if event and event.ics_url:
+                await delete_ics(event)
+                event.ics_url = None
+                await session.commit()
+        if event:
+            await show_edit_menu(callback.from_user.id, event, bot)
+        await callback.answer("Deleted")
     elif data.startswith("markfree:"):
         eid = int(data.split(":")[1])
         async with db.get_session() as session:
@@ -2634,6 +2729,7 @@ async def show_edit_menu(user_id: int, event: Event, bot: Bot):
         f"ticket_link: {event.ticket_link or ''}",
         f"is_free: {event.is_free}",
         f"pushkin_card: {event.pushkin_card}",
+        f"ics_url: {event.ics_url or ''}",
     ]
     fields = [
         "title",
@@ -2686,6 +2782,24 @@ async def show_edit_menu(user_id: int, event: Event, bot: Bot):
             )
         ]
     )
+    if event.ics_url:
+        keyboard.append(
+            [
+                types.InlineKeyboardButton(
+                    text="Delete ICS",
+                    callback_data=f"delics:{event.id}",
+                )
+            ]
+        )
+    else:
+        keyboard.append(
+            [
+                types.InlineKeyboardButton(
+                    text="Create ICS",
+                    callback_data=f"createics:{event.id}",
+                )
+            ]
+        )
     keyboard.append(
         [types.InlineKeyboardButton(text="Done", callback_data=f"editdone:{event.id}")]
     )
@@ -3203,7 +3317,9 @@ def create_app() -> web.Application:
         or c.data.startswith("dailysend:")
         or c.data.startswith("togglefree:")
         or c.data.startswith("markfree:")
-        or c.data.startswith("togglesilent:"),
+        or c.data.startswith("togglesilent:")
+        or c.data.startswith("createics:")
+        or c.data.startswith("delics:"),
     )
     dp.message.register(tz_wrapper, Command("tz"))
     dp.message.register(add_event_wrapper, Command("addevent"))

@@ -37,3 +37,7 @@
 - Added `is_free` field with inline toggle in the edit menu.
 - 4o parsing detects free events; if unclear a button appears to mark the event as free.
 - Telegraph pages keep original links and append new text when events are updated.
+
+## v0.3.4 - Calendar files
+- Events can upload an ICS file to Supabase during editing.
+- Added `ics_url` column and buttons to create or delete the file.
