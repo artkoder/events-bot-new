@@ -5,6 +5,10 @@ from typing import Optional, Tuple, Iterable
 from ics import Calendar, Event as IcsEvent
 from supabase import create_client, Client
 
+
+from ics import Calendar, Event as IcsEvent
+from supabase import create_client, Client
+
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
@@ -376,8 +380,10 @@ async def upload_ics(event: Event, db: Database) -> str | None:
     try:
         client.storage.from_(SUPABASE_BUCKET).upload(
             path,
+
             content.encode("utf-8"),
             {"content-type": "text/calendar", "upsert": "true"},
+
         )
         url = client.storage.from_(SUPABASE_BUCKET).get_public_url(path)
     except Exception as e:
@@ -386,13 +392,16 @@ async def upload_ics(event: Event, db: Database) -> str | None:
     return url
 
 
+
 async def delete_ics(event: Event):
     client = get_supabase_client()
     if not client or not event.ics_url:
         return
     path = event.ics_url.split("/")[-1]
     try:
+
         client.storage.from_(SUPABASE_BUCKET).remove([path])
+
     except Exception as e:
         logging.error("Failed to delete ics: %s", e)
 
