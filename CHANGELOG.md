@@ -42,3 +42,4 @@
 - Events can upload an ICS file to Supabase during editing.
 - Added `ics_url` column and buttons to create or delete the file.
 - Use `SUPABASE_BUCKET` to configure the storage bucket (defaults to `events-ics`).
+
