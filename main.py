@@ -304,10 +304,8 @@ def strip_city_from_address(address: str | None, city: str | None) -> str | None
 
 
 ICS_LABEL = "Добавить в календарь на телефоне (ICS)"
-
 MONTH_NAV_START = "<!--month-nav-start-->"
 MONTH_NAV_END = "<!--month-nav-end-->"
-
 
 
 def parse_time_range(value: str) -> tuple[time, time | None] | None:
@@ -350,7 +348,6 @@ def apply_ics_link(html_content: str, url: str | None) -> str:
     return html_content[:pos] + link_html + html_content[pos:]
 
 
-
 def apply_month_nav(html_content: str, html_block: str | None) -> str:
     """Insert or replace the month navigation block."""
     start = html_content.find(MONTH_NAV_START)
@@ -378,7 +375,6 @@ async def build_month_nav_html(db: Database) -> str:
         if idx < len(future_months) - 1:
             links.append(" ")
     return "<br/><h4>" + "".join(links) + "</h4>"
-
 
 
 def parse_bool_text(value: str) -> bool | None:
@@ -482,18 +478,14 @@ async def upload_ics(event: Event, db: Database) -> str | None:
     except Exception:
         path = f"Event-{event.id}.ics"
     try:
-
         logging.info("Uploading ICS to %s/%s", SUPABASE_BUCKET, path)
-
         client.storage.from_(SUPABASE_BUCKET).upload(
             path,
             content.encode("utf-8"),
             {"content-type": "text/calendar", "upsert": "true"},
         )
         url = client.storage.from_(SUPABASE_BUCKET).get_public_url(path)
-
         logging.info("ICS uploaded: %s", url)
-
     except Exception as e:
         logging.error("Failed to upload ics: %s", e)
         return None
@@ -506,9 +498,7 @@ async def delete_ics(event: Event):
         return
     path = event.ics_url.split("/")[-1]
     try:
-
         logging.info("Deleting ICS %s from %s", path, SUPABASE_BUCKET)
-
         client.storage.from_(SUPABASE_BUCKET).remove([path])
     except Exception as e:
         logging.error("Failed to delete ics: %s", e)
@@ -843,17 +833,13 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                 if url:
                     event.ics_url = url
                     await session.commit()
-
                     logging.info("ICS saved for event %s: %s", eid, url)
-
                     if event.telegraph_path:
                         await update_source_page_ics(
                             event.telegraph_path, event.title or "Event", url
                         )
-
                 else:
                     logging.warning("ICS creation failed for event %s", eid)
-
         if event:
             await show_edit_menu(callback.from_user.id, event, bot)
         await callback.answer("Created")
@@ -865,17 +851,13 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                 await delete_ics(event)
                 event.ics_url = None
                 await session.commit()
-
                 logging.info("ICS removed for event %s", eid)
-
                 if event.telegraph_path:
                     await update_source_page_ics(
                         event.telegraph_path, event.title or "Event", None
                     )
-
             elif event:
                 logging.debug("deleteics: no file for event %s", eid)
-
         if event:
             await show_edit_menu(callback.from_user.id, event, bot)
         await callback.answer("Deleted")
@@ -1539,9 +1521,7 @@ async def add_events_from_text(
                     html_text,
                     media_arg,
                     saved.ics_url,
-
                     db,
-
                 )
                 if res:
                     if len(res) == 4:
@@ -1676,9 +1656,7 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
         html_text or event.source_text,
         media,
         event.ics_url,
-
         db,
-
     )
     upload_info = ""
     photo_count = 0
@@ -3308,9 +3286,7 @@ async def create_source_page(
     html_text: str | None = None,
     media: list[tuple[bytes, str]] | tuple[bytes, str] | None = None,
     ics_url: str | None = None,
-
     db: Database | None = None,
-
 ) -> tuple[str, str, str, int] | None:
     """Create a Telegraph page with the original event text."""
     token = get_telegraph_token()
@@ -3540,10 +3516,13 @@ def create_app() -> web.Application:
         CATBOX_ENABLED = await get_catbox_enabled(db)
         hook = webhook.rstrip("/") + "/webhook"
         logging.info("Setting webhook to %s", hook)
-        await bot.set_webhook(
-            hook,
-            allowed_updates=["message", "callback_query", "my_chat_member"],
-        )
+        try:
+            await bot.set_webhook(
+                hook,
+                allowed_updates=["message", "callback_query", "my_chat_member"],
+            )
+        except Exception as e:
+            logging.error("Failed to set webhook: %s", e)
         app["daily_task"] = asyncio.create_task(daily_scheduler(db, bot))
 
     async def on_shutdown(app: web.Application):
