@@ -30,7 +30,11 @@ browse upcoming announcements. The command accepts dates like `2025-07-10`,
    export WEBHOOK_URL=https://your-app.fly.dev
    export DB_PATH=/data/db.sqlite
    export FOUR_O_TOKEN=sk-...
-   export FOUR_O_URL=https://api.openai.com/v1/chat/completions
+  export FOUR_O_URL=https://api.openai.com/v1/chat/completions
+  export SUPABASE_URL=https://<project>.supabase.co
+  export SUPABASE_KEY=service_role_key
+  # Optional: custom bucket name (defaults to events-ics)
+  export SUPABASE_BUCKET=events-ics
   # Optional: provide Telegraph token. If omitted, the bot creates an account
   # automatically and saves the token to /data/telegraph_token.txt.
   export TELEGRAPH_TOKEN=your_telegraph_token
@@ -72,6 +76,8 @@ browse upcoming announcements. The command accepts dates like `2025-07-10`,
 Each added event stores the original announcement text in a Telegraph page. The link is shown when the event is added and in the `/events` listing. Events may also contain ticket prices and a purchase link. Use the edit button in `/events` to change any field.
 Links from the announcement text are preserved on the Telegraph page whenever possible so readers can follow the original sources.
 If the original message contains photos (under 5&nbsp;MB), they are uploaded to Catbox and displayed on the Telegraph page.
+Editing an event lets you create or delete an ICS file for calendars. The file is uploaded to Supabase when `SUPABASE_URL` and `SUPABASE_KEY` are set. Files are named `Event-<id>-dd-mm-yyyy.ics` and include a link back to the event. Set `SUPABASE_BUCKET` if you use a bucket name other than `events-ics`.
+When a calendar file exists the Telegraph page shows a link right under the title image: "📅 Добавить в календарь на телефоне (ICS)".
 Events may note support for the Пушкинская карта, shown as a separate line in postings.
 Run `/exhibitions` to see all ongoing exhibitions (events with a start and end date).
 
