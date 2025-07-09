@@ -2,7 +2,7 @@ import logging
 import os
 from datetime import date, datetime, timedelta, timezone, time
 from typing import Optional, Tuple, Iterable
-import uuid
+
 
 from ics import Calendar, Event as IcsEvent
 from supabase import create_client, Client
@@ -378,13 +378,16 @@ async def upload_ics(event: Event, db: Database) -> str | None:
     try:
         client.storage.from_(SUPABASE_BUCKET).upload(
             path,
-            content,
+
+            content.encode("utf-8"),
             {"content-type": "text/calendar", "upsert": True},
         )
+        url = client.storage.from_(SUPABASE_BUCKET).get_public_url(path)
     except Exception as e:
         logging.error("Failed to upload ics: %s", e)
         return None
-    return f"{SUPABASE_URL}/storage/v1/object/public/{SUPABASE_BUCKET}/{path}"
+    return url
+
 
 
 async def delete_ics(event: Event):
@@ -393,7 +396,9 @@ async def delete_ics(event: Event):
         return
     path = event.ics_url.split("/")[-1]
     try:
-        client.storage.from_(SUPABASE_BUCKET).remove(path)
+
+        client.storage.from_(SUPABASE_BUCKET).remove([path])
+
     except Exception as e:
         logging.error("Failed to delete ics: %s", e)
 
