@@ -3047,5 +3047,7 @@ async def test_build_ics_content_headers(tmp_path: Path):
     assert lines[2].startswith("PRODID:")
     assert lines[3] == "CALSCALE:GREGORIAN"
     assert lines[4] == "METHOD:PUBLISH"
+
+    assert lines[5].startswith("X-WR-CALNAME:")
     assert any(l.startswith("DTSTAMP:") for l in lines)
 

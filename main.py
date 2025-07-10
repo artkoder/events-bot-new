@@ -6,6 +6,7 @@ import uuid
 import textwrap
 
 from supabase import create_client, Client
+from icalendar import Calendar, Event as IcsEvent
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
@@ -458,8 +459,7 @@ def parse_events_date(text: str, tz: timezone) -> date | None:
 
 
 async def build_ics_content(db: Database, event: Event) -> str:
-    offset = await get_tz_offset(db)
-    tz = offset_to_timezone(offset)
+    """Build an RFC 5545 compliant ICS string for an event."""
     time_range = parse_time_range(event.time)
     if not time_range:
         raise ValueError("bad time")
@@ -467,16 +467,13 @@ async def build_ics_content(db: Database, event: Event) -> str:
     start_dt = datetime.combine(
         datetime.fromisoformat(event.date),
         start_t,
-        tzinfo=tz,
     )
     if end_t:
-        end_dt = datetime.combine(datetime.fromisoformat(event.date), end_t, tzinfo=tz)
+        end_dt = datetime.combine(datetime.fromisoformat(event.date), end_t)
     else:
         end_dt = start_dt + timedelta(hours=1)
 
 
-    def fmt(dt: datetime) -> str:
-        return dt.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
     title = event.title
     if event.location_name:
@@ -495,41 +492,44 @@ async def build_ics_content(db: Database, event: Event) -> str:
         loc_parts.append(event.city)
     location = ", ".join(loc_parts)
 
-    uid = f"{uuid.uuid4()}@{event.id}.ics"
-    dtstamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
 
-    lines = [
+    cal = Calendar()
+    cal.add("VERSION", "2.0")
+    cal.add("PRODID", "-//events-bot//RU")
+    cal.add("CALSCALE", "GREGORIAN")
+    cal.add("METHOD", "PUBLISH")
+    cal.add("X-WR-CALNAME", ICS_CALNAME)
+
+    vevent = IcsEvent()
+    vevent.add("UID", f"{uuid.uuid4()}@{event.id}")
+    vevent.add("DTSTAMP", datetime.now(timezone.utc))
+    vevent.add("DTSTART", start_dt)
+    vevent.add("DTEND", end_dt)
+    vevent.add("SUMMARY", title)
+    vevent.add("DESCRIPTION", desc)
+    if location:
+        vevent.add("LOCATION", location)
+    if link:
+        vevent.add("URL", link)
+    cal.add_component(vevent)
+
+    raw = cal.to_ical().decode("utf-8")
+    lines = [l for l in raw.split("\r\n") if l]
+    idx = lines.index("BEGIN:VEVENT")
+    body = lines[idx:]
+    headers = [
+
         "BEGIN:VCALENDAR",
         "VERSION:2.0",
         "PRODID:-//events-bot//RU",
         "CALSCALE:GREGORIAN",
         "METHOD:PUBLISH",
         f"X-WR-CALNAME:{ICS_CALNAME}",
-        "BEGIN:VEVENT",
-        f"UID:{uid}",
-        f"DTSTAMP:{dtstamp}",
-        f"DTSTART:{fmt(start_dt)}",
-        f"DTEND:{fmt(end_dt)}",
-        f"SUMMARY:{title}",
-        f"DESCRIPTION:{desc}",
-    ]
-    if location:
-        lines.append(f"LOCATION:{location}")
-    if link:
-        lines.append(f"URL:{link}")
-    lines += [
-        "END:VEVENT",
-        "END:VCALENDAR",
-    ]
 
-    def fold(s: str) -> str:
-        if len(s) <= 75:
-            return s
-        parts = textwrap.wrap(s, 73)
-        return "\r\n ".join(parts)
+    ]
+    final = headers + body + ["END:VCALENDAR", ""]
+    return "\r\n".join(final)
 
-    lines = [fold(l) for l in lines]
-    return "\r\n".join(lines) + "\r\n"
 
 
 async def upload_ics(event: Event, db: Database) -> str | None:
