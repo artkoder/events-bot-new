@@ -8,7 +8,9 @@ from supabase import create_client, Client
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
-from aiohttp import web, ClientSession, FormData
+from aiohttp import web, FormData, ClientSession, TCPConnector
+from aiogram.client.session.aiohttp import AiohttpSession
+import socket
 import imghdr
 from difflib import SequenceMatcher
 import json
@@ -45,6 +47,24 @@ daily_time_sessions: dict[int, int] = {}
 # toggle for uploading images to catbox
 CATBOX_ENABLED: bool = False
 _supabase_client: Client | None = None
+
+
+class IPv4AiohttpSession(AiohttpSession):
+    """Aiohttp session that forces IPv4 connections."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._connector_init["family"] = socket.AF_INET
+
+
+def create_ipv4_session(session_cls: type[ClientSession] = ClientSession) -> ClientSession:
+    """Return ClientSession that forces IPv4 connections."""
+    connector = TCPConnector(family=socket.AF_INET)
+    try:
+        return session_cls(connector=connector)
+    except TypeError:
+        return session_cls()
+
 
 
 class User(SQLModel, table=True):
@@ -542,7 +562,7 @@ async def parse_event_via_4o(text: str) -> list[dict]:
         "temperature": 0,
     }
     logging.info("Sending 4o parse request to %s", url)
-    async with ClientSession() as session:
+    async with create_ipv4_session(ClientSession) as session:
         resp = await session.post(url, json=payload, headers=headers)
         resp.raise_for_status()
         data = await resp.json()
@@ -584,7 +604,7 @@ async def ask_4o(text: str) -> str:
         "temperature": 0,
     }
     logging.info("Sending 4o ask request to %s", url)
-    async with ClientSession() as session:
+    async with create_ipv4_session(ClientSession) as session:
         resp = await session.post(url, json=payload, headers=headers)
         resp.raise_for_status()
         data = await resp.json()
@@ -963,6 +983,13 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
         tz = offset_to_timezone(offset)
         await send_daily_announcement(db, bot, cid, tz, record=False)
         await callback.answer("Sent")
+    elif data.startswith("dailysendtom:"):
+        cid = int(data.split(":")[1])
+        offset = await get_tz_offset(db)
+        tz = offset_to_timezone(offset)
+        now = datetime.now(tz) + timedelta(days=1)
+        await send_daily_announcement(db, bot, cid, tz, record=False, now=now)
+        await callback.answer("Sent")
 
 
 async def handle_tz(message: types.Message, db: Database, bot: Bot):
@@ -1159,6 +1186,10 @@ async def send_daily_list(
                 ),
                 types.InlineKeyboardButton(
                     text="Test", callback_data=f"dailysend:{ch.channel_id}"
+                ),
+                types.InlineKeyboardButton(
+                    text="Test tomorrow",
+                    callback_data=f"dailysendtom:{ch.channel_id}",
                 ),
             ]
         )
@@ -1407,11 +1438,15 @@ async def add_events_from_text(
     source_link: str | None,
     html_text: str | None = None,
     media: list[tuple[bytes, str]] | tuple[bytes, str] | None = None,
+    *,
+    raise_exc: bool = False,
 ) -> list[tuple[Event, bool, list[str], str]]:
     try:
         parsed = await parse_event_via_4o(text)
     except Exception as e:
         logging.error("LLM error: %s", e)
+        if raise_exc:
+            raise
         return []
 
     results: list[tuple[Event, bool, list[str], str]] = []
@@ -1522,6 +1557,15 @@ async def add_events_from_text(
                         session.add(saved)
                         await session.commit()
             else:
+                if not saved.ics_url:
+                    ics = await upload_ics(saved, db)
+                    if ics:
+                        async with db.get_session() as session:
+                            obj = await session.get(Event, saved.id)
+                            if obj:
+                                obj.ics_url = ics
+                                await session.commit()
+                                saved.ics_url = ics
                 res = await create_source_page(
                     saved.title or "Event",
                     saved.source_text,
@@ -1594,13 +1638,18 @@ async def handle_add_event(message: types.Message, db: Database, bot: Bot):
     html_text = message.html_text or message.caption_html
     if html_text and html_text.startswith("/addevent"):
         html_text = html_text[len("/addevent") :].lstrip()
-    results = await add_events_from_text(
-        db,
-        parts[1],
-        None,
-        html_text,
-        media,
-    )
+    try:
+        results = await add_events_from_text(
+            db,
+            parts[1],
+            None,
+            html_text,
+            media,
+            raise_exc=True,
+        )
+    except Exception as e:
+        await bot.send_message(message.chat.id, f"LLM error: {e}")
+        return
     if not results:
         await bot.send_message(message.chat.id, "LLM error")
         return
@@ -1653,6 +1702,16 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
     )
     async with db.get_session() as session:
         event, added = await upsert_event(session, event)
+
+    if not event.ics_url:
+        ics = await upload_ics(event, db)
+        if ics:
+            async with db.get_session() as session:
+                obj = await session.get(Event, event.id)
+                if obj:
+                    obj.ics_url = ics
+                    await session.commit()
+                    event.ics_url = ics
 
     html_text = message.html_text or message.caption_html
     if html_text and html_text.startswith("/addevent_raw"):
@@ -1909,21 +1968,24 @@ def is_valid_url(text: str | None) -> bool:
     return bool(re.match(r"https?://", text))
 
 
-def recent_cutoff(tz: timezone) -> datetime:
+def recent_cutoff(tz: timezone, now: datetime | None = None) -> datetime:
+    """Return UTC datetime for the start of the previous day in the given tz."""
+    if now is None:
+        now = datetime.now(tz)
     start_local = datetime.combine(
-        datetime.now(tz).date() - timedelta(days=1),
+        now.date() - timedelta(days=1),
         time(0, 0),
         tz,
     )
     return start_local.astimezone(timezone.utc).replace(tzinfo=None)
 
 
-def is_recent(e: Event, tz: timezone | None = None) -> bool:
+def is_recent(e: Event, tz: timezone | None = None, now: datetime | None = None) -> bool:
     if e.added_at is None or e.silent:
         return False
     if tz is None:
         tz = LOCAL_TZ
-    start = recent_cutoff(tz)
+    start = recent_cutoff(tz, now)
     return e.added_at >= start
 
 
@@ -2512,10 +2574,14 @@ async def sync_weekend_page(db: Database, start: str, update_links: bool = True)
 
 
 async def build_daily_posts(
-    db: Database, tz: timezone
+    db: Database,
+    tz: timezone,
+    now: datetime | None = None,
 ) -> list[tuple[str, types.InlineKeyboardMarkup | None]]:
-    today = datetime.now(tz).date()
-    yesterday_utc = recent_cutoff(tz)
+    if now is None:
+        now = datetime.now(tz)
+    today = now.date()
+    yesterday_utc = recent_cutoff(tz, now)
     async with db.get_session() as session:
         res_today = await session.execute(
             select(Event).where(Event.date == today.isoformat()).order_by(Event.time)
@@ -2648,8 +2714,9 @@ async def send_daily_announcement(
     tz: timezone,
     *,
     record: bool = True,
+    now: datetime | None = None,
 ):
-    posts = await build_daily_posts(db, tz)
+    posts = await build_daily_posts(db, tz, now)
     for text, markup in posts:
         await bot.send_message(
             channel_id,
@@ -2658,11 +2725,11 @@ async def send_daily_announcement(
             parse_mode="HTML",
             disable_web_page_preview=True,
         )
-    if record:
+    if record and now is None:
         async with db.get_session() as session:
             ch = await session.get(Channel, channel_id)
             if ch:
-                ch.last_daily = datetime.now(tz).date().isoformat()
+                ch.last_daily = (now or datetime.now(tz)).date().isoformat()
                 await session.commit()
 
 
@@ -3412,7 +3479,8 @@ def create_app() -> web.Application:
     if not webhook:
         raise RuntimeError("WEBHOOK_URL is missing")
 
-    bot = Bot(token)
+    session = IPv4AiohttpSession()
+    bot = Bot(token, session=session)
     logging.info("DB_PATH=%s", DB_PATH)
     logging.info("FOUR_O_TOKEN found: %s", bool(os.getenv("FOUR_O_TOKEN")))
     dp = Dispatcher()
@@ -3493,6 +3561,7 @@ def create_app() -> web.Application:
         or c.data.startswith("dailyunset:")
         or c.data.startswith("dailytime:")
         or c.data.startswith("dailysend:")
+        or c.data.startswith("dailysendtom:")
         or c.data.startswith("togglefree:")
         or c.data.startswith("markfree:")
         or c.data.startswith("togglesilent:")

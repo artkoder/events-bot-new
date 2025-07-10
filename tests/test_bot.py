@@ -2871,6 +2871,31 @@ async def test_build_daily_posts(tmp_path: Path):
     assert first_btn.startswith("(+1)")
 
 
+@pytest.mark.asyncio
+async def test_build_daily_posts_tomorrow(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    today = date.today()
+    tomorrow = today + timedelta(days=1)
+    async with db.get_session() as session:
+        session.add(
+            Event(
+                title="T",
+                description="d",
+                source_text="s",
+                date=tomorrow.isoformat(),
+                time="18:00",
+                location_name="Hall",
+            )
+        )
+        await session.commit()
+
+    now = datetime.now(timezone.utc) + timedelta(days=1)
+    posts = await main.build_daily_posts(db, timezone.utc, now)
+    assert posts and tomorrow.strftime("%d") in posts[0][0]
+
+
 
 @pytest.mark.asyncio
 async def test_daily_weekend_date_link(tmp_path: Path):
