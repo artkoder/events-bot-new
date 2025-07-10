@@ -3,6 +3,7 @@ import os
 from datetime import date, datetime, timedelta, timezone, time
 from typing import Optional, Tuple, Iterable
 from ics import Calendar, Event as IcsEvent
+from ics.grammar.parse import ContentLine
 from supabase import create_client, Client
 
 from aiogram import Bot, Dispatcher, types
@@ -35,6 +36,8 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "events-ics")
 ICS_CONTENT_TYPE = "text/calendar; charset=utf-8"
+ICS_CONTENT_DISP_TEMPLATE = 'inline; filename="{name}"'
+
 
 # currently active timezone offset for date calculations
 LOCAL_TZ = timezone.utc
@@ -470,6 +473,8 @@ async def build_ics_content(db: Database, event: Event) -> str:
     start = start_dt.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     end = end_dt.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     cal = Calendar()
+    cal.extra.append(ContentLine(name="CALSCALE", value="GREGORIAN"))
+    cal.extra.append(ContentLine(name="METHOD", value="PUBLISH"))
     ics_event = IcsEvent()
     title = event.title
     if event.location_name:
@@ -477,6 +482,7 @@ async def build_ics_content(db: Database, event: Event) -> str:
     ics_event.name = title
     ics_event.begin = start
     ics_event.end = end
+    ics_event.created = datetime.utcnow()
     desc = event.description
     link = event.source_post_url or event.telegraph_url
     if link:
@@ -515,7 +521,13 @@ async def upload_ics(event: Event, db: Database) -> str | None:
         client.storage.from_(SUPABASE_BUCKET).upload(
             path,
             content.encode("utf-8"),
-            {"content-type": ICS_CONTENT_TYPE, "upsert": "true"},
+
+            {
+                "content-type": ICS_CONTENT_TYPE,
+                "content-disposition": ICS_CONTENT_DISP_TEMPLATE.format(name=path),
+                "upsert": "true",
+            },
+
         )
         url = client.storage.from_(SUPABASE_BUCKET).get_public_url(path)
         logging.info("ICS uploaded: %s", url)

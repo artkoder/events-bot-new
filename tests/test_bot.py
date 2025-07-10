@@ -3019,3 +3019,27 @@ async def test_upload_ics_content_type(tmp_path: Path, monkeypatch):
     assert url.endswith(".ics")
     opts = dummy.storage.bucket.upload_args[2]
     assert opts["content-type"] == main.ICS_CONTENT_TYPE
+
+    assert opts["content-disposition"].startswith("inline;")
+    assert "filename=\"" in opts["content-disposition"]
+
+
+@pytest.mark.asyncio
+async def test_build_ics_content_headers(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    event = Event(
+        id=1,
+        title="T",
+        description="d",
+        source_text="s",
+        date=date.today().isoformat(),
+        time="10:00",
+        location_name="Hall",
+    )
+
+    content = await main.build_ics_content(db, event)
+    assert "DTSTAMP:" in content
+    assert "CALSCALE:GREGORIAN" in content
+    assert "METHOD:PUBLISH" in content
+
