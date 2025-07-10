@@ -3414,7 +3414,10 @@ def create_app() -> web.Application:
         raise RuntimeError("WEBHOOK_URL is missing")
 
     connector = TCPConnector(family=socket.AF_INET)
-    bot = Bot(token, connector=connector)
+
+    session = ClientSession(connector=connector)
+    bot = Bot(token, session=session)
+
     logging.info("DB_PATH=%s", DB_PATH)
     logging.info("FOUR_O_TOKEN found: %s", bool(os.getenv("FOUR_O_TOKEN")))
     dp = Dispatcher()
