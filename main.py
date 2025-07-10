@@ -8,8 +8,10 @@ from supabase import create_client, Client
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+
 from aiohttp import web, FormData, ClientSession, TCPConnector
 from aiogram.client.session.aiohttp import AiohttpSession
+
 import socket
 import imghdr
 from difflib import SequenceMatcher
@@ -57,6 +59,8 @@ class IPv4AiohttpSession(AiohttpSession):
         self._connector_init["family"] = socket.AF_INET
 
 
+
+
 def create_ipv4_session(session_cls: type[ClientSession] = ClientSession) -> ClientSession:
     """Return ClientSession that forces IPv4 connections."""
     connector = TCPConnector(family=socket.AF_INET)
@@ -64,6 +68,7 @@ def create_ipv4_session(session_cls: type[ClientSession] = ClientSession) -> Cli
         return session_cls(connector=connector)
     except TypeError:
         return session_cls()
+
 
 
 
@@ -3441,8 +3446,10 @@ def create_app() -> web.Application:
     if not webhook:
         raise RuntimeError("WEBHOOK_URL is missing")
 
+
     session = IPv4AiohttpSession()
     bot = Bot(token, session=session)
+
     logging.info("DB_PATH=%s", DB_PATH)
     logging.info("FOUR_O_TOKEN found: %s", bool(os.getenv("FOUR_O_TOKEN")))
     dp = Dispatcher()
