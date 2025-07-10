@@ -2971,3 +2971,51 @@ async def test_daily_test_send_no_record(tmp_path: Path):
     async with db.get_session() as session:
         ch = await session.get(main.Channel, 1)
     assert ch.last_daily is None
+
+
+@pytest.mark.asyncio
+async def test_upload_ics_content_type(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    event = Event(
+        id=1,
+        title="T",
+        description="d",
+        source_text="s",
+        date=date.today().isoformat(),
+        time="10:00",
+        location_name="Hall",
+    )
+
+    class DummyBucket:
+        def __init__(self):
+            self.upload_args = None
+
+        def upload(self, path, data, options):
+            self.upload_args = (path, data, options)
+
+        def get_public_url(self, path):
+            return f"https://test/{path}"
+
+        def remove(self, paths):
+            pass
+
+    class DummyStorage:
+        def __init__(self):
+            self.bucket = DummyBucket()
+
+        def from_(self, bucket):
+            return self.bucket
+
+    class DummyClient:
+        def __init__(self):
+            self.storage = DummyStorage()
+
+    dummy = DummyClient()
+    monkeypatch.setattr(main, "get_supabase_client", lambda: dummy)
+
+    url = await main.upload_ics(event, db)
+    assert url.endswith(".ics")
+    opts = dummy.storage.bucket.upload_args[2]
+    assert opts["content-type"] == main.ICS_CONTENT_TYPE

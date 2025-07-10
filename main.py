@@ -34,6 +34,7 @@ TELEGRAPH_TOKEN_FILE = os.getenv("TELEGRAPH_TOKEN_FILE", "/data/telegraph_token.
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "events-ics")
+ICS_CONTENT_TYPE = "text/calendar; charset=utf-8"
 
 # currently active timezone offset for date calculations
 LOCAL_TZ = timezone.utc
@@ -514,7 +515,7 @@ async def upload_ics(event: Event, db: Database) -> str | None:
         client.storage.from_(SUPABASE_BUCKET).upload(
             path,
             content.encode("utf-8"),
-            {"content-type": "text/calendar", "upsert": "true"},
+            {"content-type": ICS_CONTENT_TYPE, "upsert": "true"},
         )
         url = client.storage.from_(SUPABASE_BUCKET).get_public_url(path)
         logging.info("ICS uploaded: %s", url)
