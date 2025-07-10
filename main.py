@@ -60,6 +60,7 @@ class IPv4AiohttpSession(AiohttpSession):
 
 
 
+
 def create_ipv4_session(session_cls: type[ClientSession] = ClientSession) -> ClientSession:
     """Return ClientSession that forces IPv4 connections."""
     connector = TCPConnector(family=socket.AF_INET)
@@ -1431,11 +1432,15 @@ async def add_events_from_text(
     source_link: str | None,
     html_text: str | None = None,
     media: list[tuple[bytes, str]] | tuple[bytes, str] | None = None,
+    *,
+    raise_exc: bool = False,
 ) -> list[tuple[Event, bool, list[str], str]]:
     try:
         parsed = await parse_event_via_4o(text)
     except Exception as e:
         logging.error("LLM error: %s", e)
+        if raise_exc:
+            raise
         return []
 
     results: list[tuple[Event, bool, list[str], str]] = []
@@ -1618,13 +1623,18 @@ async def handle_add_event(message: types.Message, db: Database, bot: Bot):
     html_text = message.html_text or message.caption_html
     if html_text and html_text.startswith("/addevent"):
         html_text = html_text[len("/addevent") :].lstrip()
-    results = await add_events_from_text(
-        db,
-        parts[1],
-        None,
-        html_text,
-        media,
-    )
+    try:
+        results = await add_events_from_text(
+            db,
+            parts[1],
+            None,
+            html_text,
+            media,
+            raise_exc=True,
+        )
+    except Exception as e:
+        await bot.send_message(message.chat.id, f"LLM error: {e}")
+        return
     if not results:
         await bot.send_message(message.chat.id, "LLM error")
         return
