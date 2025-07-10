@@ -8,7 +8,9 @@ from supabase import create_client, Client
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
-from aiohttp import web, ClientSession, FormData
+from aiohttp import web, FormData, ClientSession
+from aiogram.client.session.aiohttp import AiohttpSession
+import socket
 import imghdr
 from difflib import SequenceMatcher
 import json
@@ -45,6 +47,15 @@ daily_time_sessions: dict[int, int] = {}
 # toggle for uploading images to catbox
 CATBOX_ENABLED: bool = False
 _supabase_client: Client | None = None
+
+
+class IPv4AiohttpSession(AiohttpSession):
+    """Aiohttp session that forces IPv4 connections."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._connector_init["family"] = socket.AF_INET
+
 
 
 class User(SQLModel, table=True):
@@ -3412,7 +3423,8 @@ def create_app() -> web.Application:
     if not webhook:
         raise RuntimeError("WEBHOOK_URL is missing")
 
-    bot = Bot(token)
+    session = IPv4AiohttpSession()
+    bot = Bot(token, session=session)
     logging.info("DB_PATH=%s", DB_PATH)
     logging.info("FOUR_O_TOKEN found: %s", bool(os.getenv("FOUR_O_TOKEN")))
     dp = Dispatcher()
