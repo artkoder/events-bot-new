@@ -3019,6 +3019,7 @@ async def test_upload_ics_content_type(tmp_path: Path, monkeypatch):
     assert url.endswith(".ics")
     opts = dummy.storage.bucket.upload_args[2]
     assert opts["content-type"] == main.ICS_CONTENT_TYPE
+
     assert opts["content-disposition"].startswith("inline;")
     assert "filename=\"" in opts["content-disposition"]
 
@@ -3038,6 +3039,7 @@ async def test_build_ics_content_headers(tmp_path: Path):
     )
 
     content = await main.build_ics_content(db, event)
+
     assert content.endswith("\r\n")
     lines = content.split("\r\n")
     assert lines[0] == "BEGIN:VCALENDAR"
@@ -3045,5 +3047,7 @@ async def test_build_ics_content_headers(tmp_path: Path):
     assert lines[2].startswith("PRODID:")
     assert lines[3] == "CALSCALE:GREGORIAN"
     assert lines[4] == "METHOD:PUBLISH"
+
     assert lines[5].startswith("X-WR-CALNAME:")
     assert any(l.startswith("DTSTAMP:") for l in lines)
+
