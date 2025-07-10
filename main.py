@@ -60,7 +60,6 @@ class IPv4AiohttpSession(AiohttpSession):
 
 
 
-
 def create_ipv4_session(session_cls: type[ClientSession] = ClientSession) -> ClientSession:
     """Return ClientSession that forces IPv4 connections."""
     connector = TCPConnector(family=socket.AF_INET)
@@ -988,6 +987,13 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
         tz = offset_to_timezone(offset)
         await send_daily_announcement(db, bot, cid, tz, record=False)
         await callback.answer("Sent")
+    elif data.startswith("dailysendtom:"):
+        cid = int(data.split(":")[1])
+        offset = await get_tz_offset(db)
+        tz = offset_to_timezone(offset)
+        now = datetime.now(tz) + timedelta(days=1)
+        await send_daily_announcement(db, bot, cid, tz, record=False, now=now)
+        await callback.answer("Sent")
 
 
 async def handle_tz(message: types.Message, db: Database, bot: Bot):
@@ -1184,6 +1190,10 @@ async def send_daily_list(
                 ),
                 types.InlineKeyboardButton(
                     text="Test", callback_data=f"dailysend:{ch.channel_id}"
+                ),
+                types.InlineKeyboardButton(
+                    text="Test tomorrow",
+                    callback_data=f"dailysendtom:{ch.channel_id}",
                 ),
             ]
         )
@@ -1551,6 +1561,15 @@ async def add_events_from_text(
                         session.add(saved)
                         await session.commit()
             else:
+                if not saved.ics_url:
+                    ics = await upload_ics(saved, db)
+                    if ics:
+                        async with db.get_session() as session:
+                            obj = await session.get(Event, saved.id)
+                            if obj:
+                                obj.ics_url = ics
+                                await session.commit()
+                                saved.ics_url = ics
                 res = await create_source_page(
                     saved.title or "Event",
                     saved.source_text,
@@ -1687,6 +1706,16 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
     )
     async with db.get_session() as session:
         event, added = await upsert_event(session, event)
+
+    if not event.ics_url:
+        ics = await upload_ics(event, db)
+        if ics:
+            async with db.get_session() as session:
+                obj = await session.get(Event, event.id)
+                if obj:
+                    obj.ics_url = ics
+                    await session.commit()
+                    event.ics_url = ics
 
     html_text = message.html_text or message.caption_html
     if html_text and html_text.startswith("/addevent_raw"):
@@ -1943,21 +1972,24 @@ def is_valid_url(text: str | None) -> bool:
     return bool(re.match(r"https?://", text))
 
 
-def recent_cutoff(tz: timezone) -> datetime:
+def recent_cutoff(tz: timezone, now: datetime | None = None) -> datetime:
+    """Return UTC datetime for the start of the previous day in the given tz."""
+    if now is None:
+        now = datetime.now(tz)
     start_local = datetime.combine(
-        datetime.now(tz).date() - timedelta(days=1),
+        now.date() - timedelta(days=1),
         time(0, 0),
         tz,
     )
     return start_local.astimezone(timezone.utc).replace(tzinfo=None)
 
 
-def is_recent(e: Event, tz: timezone | None = None) -> bool:
+def is_recent(e: Event, tz: timezone | None = None, now: datetime | None = None) -> bool:
     if e.added_at is None or e.silent:
         return False
     if tz is None:
         tz = LOCAL_TZ
-    start = recent_cutoff(tz)
+    start = recent_cutoff(tz, now)
     return e.added_at >= start
 
 
@@ -2546,10 +2578,14 @@ async def sync_weekend_page(db: Database, start: str, update_links: bool = True)
 
 
 async def build_daily_posts(
-    db: Database, tz: timezone
+    db: Database,
+    tz: timezone,
+    now: datetime | None = None,
 ) -> list[tuple[str, types.InlineKeyboardMarkup | None]]:
-    today = datetime.now(tz).date()
-    yesterday_utc = recent_cutoff(tz)
+    if now is None:
+        now = datetime.now(tz)
+    today = now.date()
+    yesterday_utc = recent_cutoff(tz, now)
     async with db.get_session() as session:
         res_today = await session.execute(
             select(Event).where(Event.date == today.isoformat()).order_by(Event.time)
@@ -2682,8 +2718,9 @@ async def send_daily_announcement(
     tz: timezone,
     *,
     record: bool = True,
+    now: datetime | None = None,
 ):
-    posts = await build_daily_posts(db, tz)
+    posts = await build_daily_posts(db, tz, now)
     for text, markup in posts:
         await bot.send_message(
             channel_id,
@@ -2692,11 +2729,11 @@ async def send_daily_announcement(
             parse_mode="HTML",
             disable_web_page_preview=True,
         )
-    if record:
+    if record and now is None:
         async with db.get_session() as session:
             ch = await session.get(Channel, channel_id)
             if ch:
-                ch.last_daily = datetime.now(tz).date().isoformat()
+                ch.last_daily = (now or datetime.now(tz)).date().isoformat()
                 await session.commit()
 
 
@@ -3530,6 +3567,7 @@ def create_app() -> web.Application:
         or c.data.startswith("dailyunset:")
         or c.data.startswith("dailytime:")
         or c.data.startswith("dailysend:")
+        or c.data.startswith("dailysendtom:")
         or c.data.startswith("togglefree:")
         or c.data.startswith("markfree:")
         or c.data.startswith("togglesilent:")
