@@ -2,8 +2,9 @@ import logging
 import os
 from datetime import date, datetime, timedelta, timezone, time
 from typing import Optional, Tuple, Iterable
-from ics import Calendar, Event as IcsEvent
-from ics.grammar.parse import ContentLine
+import uuid
+import textwrap
+
 from supabase import create_client, Client
 
 from aiogram import Bot, Dispatcher, types
@@ -37,6 +38,8 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "events-ics")
 ICS_CONTENT_TYPE = "text/calendar; charset=utf-8"
 ICS_CONTENT_DISP_TEMPLATE = 'inline; filename="{name}"'
+
+ICS_CALNAME = "kenigevents"
 
 
 # currently active timezone offset for date calculations
@@ -470,33 +473,63 @@ async def build_ics_content(db: Database, event: Event) -> str:
         end_dt = datetime.combine(datetime.fromisoformat(event.date), end_t, tzinfo=tz)
     else:
         end_dt = start_dt + timedelta(hours=1)
-    start = start_dt.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    end = end_dt.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    cal = Calendar()
-    cal.extra.append(ContentLine(name="CALSCALE", value="GREGORIAN"))
-    cal.extra.append(ContentLine(name="METHOD", value="PUBLISH"))
-    ics_event = IcsEvent()
+
+
+    def fmt(dt: datetime) -> str:
+        return dt.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
     title = event.title
     if event.location_name:
         title = f"{title} в {event.location_name}"
-    ics_event.name = title
-    ics_event.begin = start
-    ics_event.end = end
-    ics_event.created = datetime.utcnow()
-    desc = event.description
+
+    desc = event.description or ""
+
     link = event.source_post_url or event.telegraph_url
     if link:
-        desc = f"{desc}\n\n{link}"
-    ics_event.description = desc
+        desc = f"{desc}\n\n{link}" if desc else link
+
     loc_parts = []
     if event.location_address:
         loc_parts.append(event.location_address)
     if event.city:
         loc_parts.append(event.city)
-    ics_event.location = ", ".join(loc_parts)
-    ics_event.url = event.source_post_url or event.telegraph_url
-    cal.events.add(ics_event)
-    return cal.serialize()
+    location = ", ".join(loc_parts)
+
+    uid = f"{uuid.uuid4()}@{event.id}.ics"
+    dtstamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+
+    lines = [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "PRODID:-//events-bot//RU",
+        "CALSCALE:GREGORIAN",
+        "METHOD:PUBLISH",
+        f"X-WR-CALNAME:{ICS_CALNAME}",
+        "BEGIN:VEVENT",
+        f"UID:{uid}",
+        f"DTSTAMP:{dtstamp}",
+        f"DTSTART:{fmt(start_dt)}",
+        f"DTEND:{fmt(end_dt)}",
+        f"SUMMARY:{title}",
+        f"DESCRIPTION:{desc}",
+    ]
+    if location:
+        lines.append(f"LOCATION:{location}")
+    if link:
+        lines.append(f"URL:{link}")
+    lines += [
+        "END:VEVENT",
+        "END:VCALENDAR",
+    ]
+
+    def fold(s: str) -> str:
+        if len(s) <= 75:
+            return s
+        parts = textwrap.wrap(s, 73)
+        return "\r\n ".join(parts)
+
+    lines = [fold(l) for l in lines]
+    return "\r\n".join(lines) + "\r\n"
 
 
 async def upload_ics(event: Event, db: Database) -> str | None:

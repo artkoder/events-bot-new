@@ -3039,7 +3039,13 @@ async def test_build_ics_content_headers(tmp_path: Path):
     )
 
     content = await main.build_ics_content(db, event)
-    assert "DTSTAMP:" in content
-    assert "CALSCALE:GREGORIAN" in content
-    assert "METHOD:PUBLISH" in content
+
+    assert content.endswith("\r\n")
+    lines = content.split("\r\n")
+    assert lines[0] == "BEGIN:VCALENDAR"
+    assert lines[1] == "VERSION:2.0"
+    assert lines[2].startswith("PRODID:")
+    assert lines[3] == "CALSCALE:GREGORIAN"
+    assert lines[4] == "METHOD:PUBLISH"
+    assert any(l.startswith("DTSTAMP:") for l in lines)
 
