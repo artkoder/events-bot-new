@@ -9,7 +9,7 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
-from aiohttp import web, FormData, ClientSession
+from aiohttp import web, FormData, ClientSession, TCPConnector
 from aiogram.client.session.aiohttp import AiohttpSession
 
 import socket
@@ -57,6 +57,17 @@ class IPv4AiohttpSession(AiohttpSession):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._connector_init["family"] = socket.AF_INET
+
+
+
+def create_ipv4_session(session_cls: type[ClientSession] = ClientSession) -> ClientSession:
+    """Return ClientSession that forces IPv4 connections."""
+    connector = TCPConnector(family=socket.AF_INET)
+    try:
+        return session_cls(connector=connector)
+    except TypeError:
+        return session_cls()
+
 
 
 
@@ -555,7 +566,7 @@ async def parse_event_via_4o(text: str) -> list[dict]:
         "temperature": 0,
     }
     logging.info("Sending 4o parse request to %s", url)
-    async with ClientSession() as session:
+    async with create_ipv4_session(ClientSession) as session:
         resp = await session.post(url, json=payload, headers=headers)
         resp.raise_for_status()
         data = await resp.json()
@@ -597,7 +608,7 @@ async def ask_4o(text: str) -> str:
         "temperature": 0,
     }
     logging.info("Sending 4o ask request to %s", url)
-    async with ClientSession() as session:
+    async with create_ipv4_session(ClientSession) as session:
         resp = await session.post(url, json=payload, headers=headers)
         resp.raise_for_status()
         data = await resp.json()
