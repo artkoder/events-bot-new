@@ -2871,6 +2871,31 @@ async def test_build_daily_posts(tmp_path: Path):
     assert first_btn.startswith("(+1)")
 
 
+@pytest.mark.asyncio
+async def test_build_daily_posts_tomorrow(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    today = date.today()
+    tomorrow = today + timedelta(days=1)
+    async with db.get_session() as session:
+        session.add(
+            Event(
+                title="T",
+                description="d",
+                source_text="s",
+                date=tomorrow.isoformat(),
+                time="18:00",
+                location_name="Hall",
+            )
+        )
+        await session.commit()
+
+    now = datetime.now(timezone.utc) + timedelta(days=1)
+    posts = await main.build_daily_posts(db, timezone.utc, now)
+    assert posts and tomorrow.strftime("%d") in posts[0][0]
+
+
 
 @pytest.mark.asyncio
 async def test_daily_weekend_date_link(tmp_path: Path):
@@ -2946,3 +2971,73 @@ async def test_daily_test_send_no_record(tmp_path: Path):
     async with db.get_session() as session:
         ch = await session.get(main.Channel, 1)
     assert ch.last_daily is None
+
+
+@pytest.mark.asyncio
+async def test_upload_ics_content_type(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    event = Event(
+        id=1,
+        title="T",
+        description="d",
+        source_text="s",
+        date=date.today().isoformat(),
+        time="10:00",
+        location_name="Hall",
+    )
+
+    class DummyBucket:
+        def __init__(self):
+            self.upload_args = None
+
+        def upload(self, path, data, options):
+            self.upload_args = (path, data, options)
+
+        def get_public_url(self, path):
+            return f"https://test/{path}"
+
+        def remove(self, paths):
+            pass
+
+    class DummyStorage:
+        def __init__(self):
+            self.bucket = DummyBucket()
+
+        def from_(self, bucket):
+            return self.bucket
+
+    class DummyClient:
+        def __init__(self):
+            self.storage = DummyStorage()
+
+    dummy = DummyClient()
+    monkeypatch.setattr(main, "get_supabase_client", lambda: dummy)
+
+    url = await main.upload_ics(event, db)
+    assert url.endswith(".ics")
+    opts = dummy.storage.bucket.upload_args[2]
+    assert opts["content-type"] == main.ICS_CONTENT_TYPE
+    assert opts["content-disposition"].startswith("inline;")
+    assert "filename=\"" in opts["content-disposition"]
+
+
+@pytest.mark.asyncio
+async def test_build_ics_content_headers(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    event = Event(
+        id=1,
+        title="T",
+        description="d",
+        source_text="s",
+        date=date.today().isoformat(),
+        time="10:00",
+        location_name="Hall",
+    )
+
+    content = await main.build_ics_content(db, event)
+    assert "DTSTAMP:" in content
+    assert "CALSCALE:GREGORIAN" in content
+    assert "METHOD:PUBLISH" in content
