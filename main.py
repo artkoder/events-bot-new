@@ -8,7 +8,8 @@ from supabase import create_client, Client
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
-from aiohttp import web, ClientSession, FormData
+from aiohttp import web, ClientSession, FormData, TCPConnector
+import socket
 import imghdr
 from difflib import SequenceMatcher
 import json
@@ -3412,7 +3413,9 @@ def create_app() -> web.Application:
     if not webhook:
         raise RuntimeError("WEBHOOK_URL is missing")
 
-    bot = Bot(token)
+    connector = TCPConnector(family=socket.AF_INET)
+    session = ClientSession(connector=connector)
+    bot = Bot(token, session=session)
     logging.info("DB_PATH=%s", DB_PATH)
     logging.info("FOUR_O_TOKEN found: %s", bool(os.getenv("FOUR_O_TOKEN")))
     dp = Dispatcher()
