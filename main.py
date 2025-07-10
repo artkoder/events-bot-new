@@ -31,6 +31,9 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "events-ics")
 
+# currently active timezone offset for date calculations
+LOCAL_TZ = timezone.utc
+
 # separator inserted between versions on Telegraph source pages
 CONTENT_SEPARATOR = "🟧" * 10
 
@@ -206,7 +209,10 @@ class Database:
 async def get_tz_offset(db: Database) -> str:
     async with db.get_session() as session:
         result = await session.get(Setting, "tz_offset")
-        return result.value if result else "+00:00"
+        offset = result.value if result else "+00:00"
+    global LOCAL_TZ
+    LOCAL_TZ = offset_to_timezone(offset)
+    return offset
 
 
 async def set_tz_offset(db: Database, value: str):
@@ -218,6 +224,8 @@ async def set_tz_offset(db: Database, value: str):
             setting = Setting(key="tz_offset", value=value)
             session.add(setting)
         await session.commit()
+    global LOCAL_TZ
+    LOCAL_TZ = offset_to_timezone(value)
 
 
 async def get_catbox_enabled(db: Database) -> bool:
@@ -1901,12 +1909,22 @@ def is_valid_url(text: str | None) -> bool:
     return bool(re.match(r"https?://", text))
 
 
-def is_recent(e: Event) -> bool:
-    if e.added_at is None:
+def recent_cutoff(tz: timezone) -> datetime:
+    start_local = datetime.combine(
+        datetime.now(tz).date() - timedelta(days=1),
+        time(0, 0),
+        tz,
+    )
+    return start_local.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def is_recent(e: Event, tz: timezone | None = None) -> bool:
+    if e.added_at is None or e.silent:
         return False
-    now = datetime.utcnow()
-    start = datetime.combine(now.date() - timedelta(days=1), datetime.min.time())
-    return e.added_at >= start and not e.silent
+    if tz is None:
+        tz = LOCAL_TZ
+    start = recent_cutoff(tz)
+    return e.added_at >= start
 
 
 def format_event_md(e: Event) -> str:
@@ -2497,10 +2515,7 @@ async def build_daily_posts(
     db: Database, tz: timezone
 ) -> list[tuple[str, types.InlineKeyboardMarkup | None]]:
     today = datetime.now(tz).date()
-    yesterday_start_local = datetime.combine(
-        today - timedelta(days=1), time(0, 0), tz
-    )
-    yesterday_utc = yesterday_start_local.astimezone(timezone.utc)
+    yesterday_utc = recent_cutoff(tz)
     async with db.get_session() as session:
         res_today = await session.execute(
             select(Event).where(Event.date == today.isoformat()).order_by(Event.time)
@@ -2791,7 +2806,7 @@ async def build_exhibitions_message(db: Database, tz: timezone):
 
         period = ""
         if end:
-            if start <= today:
+            if start < today:
                 period = f"по {format_day_pretty(end)}"
             else:
                 period = f"c {format_day_pretty(start)} по {format_day_pretty(end)}"
@@ -3512,6 +3527,7 @@ def create_app() -> web.Application:
     async def on_startup(app: web.Application):
         logging.info("Initializing database")
         await db.init()
+        await get_tz_offset(db)
         global CATBOX_ENABLED
         CATBOX_ENABLED = await get_catbox_enabled(db)
         hook = webhook.rstrip("/") + "/webhook"
