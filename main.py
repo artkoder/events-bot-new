@@ -4,17 +4,14 @@ from datetime import date, datetime, timedelta, timezone, time
 from typing import Optional, Tuple, Iterable
 import uuid
 import textwrap
-
 from supabase import create_client, Client
 from icalendar import Calendar, Event as IcsEvent
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
-
 from aiohttp import web, FormData, ClientSession, TCPConnector
 from aiogram.client.session.aiohttp import AiohttpSession
-
 import socket
 import imghdr
 from difflib import SequenceMatcher
@@ -39,9 +36,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "events-ics")
 ICS_CONTENT_TYPE = "text/calendar; charset=utf-8"
 ICS_CONTENT_DISP_TEMPLATE = 'inline; filename="{name}"'
-
 ICS_CALNAME = "kenigevents"
-
 
 # currently active timezone offset for date calculations
 LOCAL_TZ = timezone.utc
@@ -67,7 +62,6 @@ class IPv4AiohttpSession(AiohttpSession):
         self._connector_init["family"] = socket.AF_INET
 
 
-
 def create_ipv4_session(session_cls: type[ClientSession] = ClientSession) -> ClientSession:
     """Return ClientSession that forces IPv4 connections."""
     connector = TCPConnector(family=socket.AF_INET)
@@ -75,7 +69,6 @@ def create_ipv4_session(session_cls: type[ClientSession] = ClientSession) -> Cli
         return session_cls(connector=connector)
     except TypeError:
         return session_cls()
-
 
 
 
@@ -473,14 +466,11 @@ async def build_ics_content(db: Database, event: Event) -> str:
     else:
         end_dt = start_dt + timedelta(hours=1)
 
-
-
     title = event.title
     if event.location_name:
         title = f"{title} в {event.location_name}"
 
     desc = event.description or ""
-
     link = event.source_post_url or event.telegraph_url
     if link:
         desc = f"{desc}\n\n{link}" if desc else link
@@ -491,7 +481,6 @@ async def build_ics_content(db: Database, event: Event) -> str:
     if event.city:
         loc_parts.append(event.city)
     location = ", ".join(loc_parts)
-
 
     cal = Calendar()
     cal.add("VERSION", "2.0")
@@ -514,22 +503,21 @@ async def build_ics_content(db: Database, event: Event) -> str:
     cal.add_component(vevent)
 
     raw = cal.to_ical().decode("utf-8")
-    lines = [l for l in raw.split("\r\n") if l]
+    lines = raw.split("\r\n")
+    if lines and lines[-1] == "":
+        lines.pop()
     idx = lines.index("BEGIN:VEVENT")
-    body = lines[idx:]
+    body = lines[idx:-1]  # exclude trailing END:VCALENDAR
     headers = [
-
         "BEGIN:VCALENDAR",
         "VERSION:2.0",
         "PRODID:-//events-bot//RU",
         "CALSCALE:GREGORIAN",
         "METHOD:PUBLISH",
         f"X-WR-CALNAME:{ICS_CALNAME}",
-
     ]
     final = headers + body + ["END:VCALENDAR", ""]
     return "\r\n".join(final)
-
 
 
 async def upload_ics(event: Event, db: Database) -> str | None:
@@ -554,13 +542,11 @@ async def upload_ics(event: Event, db: Database) -> str | None:
         client.storage.from_(SUPABASE_BUCKET).upload(
             path,
             content.encode("utf-8"),
-
             {
                 "content-type": ICS_CONTENT_TYPE,
                 "content-disposition": ICS_CONTENT_DISP_TEMPLATE.format(name=path),
                 "upsert": "true",
             },
-
         )
         url = client.storage.from_(SUPABASE_BUCKET).get_public_url(path)
         logging.info("ICS uploaded: %s", url)
@@ -3529,10 +3515,8 @@ def create_app() -> web.Application:
     if not webhook:
         raise RuntimeError("WEBHOOK_URL is missing")
 
-
     session = IPv4AiohttpSession()
     bot = Bot(token, session=session)
-
     logging.info("DB_PATH=%s", DB_PATH)
     logging.info("FOUR_O_TOKEN found: %s", bool(os.getenv("FOUR_O_TOKEN")))
     dp = Dispatcher()
