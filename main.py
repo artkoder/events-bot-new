@@ -3197,23 +3197,34 @@ async def handle_daily_time_message(message: types.Message, db: Database, bot: B
 
 
 processed_media_groups: set[str] = set()
+# store images for albums until the caption arrives
+pending_media_groups: dict[str, list[tuple[bytes, str]]] = {}
 
 
 async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
     logging.info("forwarded message from %s", message.from_user.id)
     text = message.text or message.caption
+    images = await extract_images(message, bot)
+    media: list[tuple[bytes, str]] | None = None
     if message.media_group_id:
-        if message.media_group_id in processed_media_groups:
-            logging.debug("skip already processed album %s", message.media_group_id)
+        gid = message.media_group_id
+        if gid in processed_media_groups:
+            logging.debug("skip already processed album %s", gid)
             return
         if not text:
-            # wait for the part of the album that contains the caption
-            logging.debug("waiting for caption in album %s", message.media_group_id)
+            if images:
+                pending_media_groups.setdefault(gid, []).extend(images)
+            logging.debug("waiting for caption in album %s", gid)
             return
-        processed_media_groups.add(message.media_group_id)
-    if not text:
-        logging.debug("forwarded message has no text")
-        return
+        stored = pending_media_groups.pop(gid, [])
+        stored.extend(images)
+        media = stored[:3]
+        processed_media_groups.add(gid)
+    else:
+        if not text:
+            logging.debug("forwarded message has no text")
+            return
+        media = images[:3] if images else None
     async with db.get_session() as session:
         if not await session.get(User, message.from_user.id):
             logging.debug("user %s not registered", message.from_user.id)
@@ -3236,9 +3247,6 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
                 else:
                     cid = cid.lstrip("-")
                 link = f"https://t.me/c/{cid}/{msg_id}"
-    images = await extract_images(message, bot)
-    media = images if images else None
-
     results = await add_events_from_text(
         db,
         text,
