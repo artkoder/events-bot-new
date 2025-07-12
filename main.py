@@ -38,6 +38,20 @@ ICS_CONTENT_TYPE = "text/calendar; charset=utf-8"
 ICS_CONTENT_DISP_TEMPLATE = 'inline; filename="{name}"'
 ICS_CALNAME = "kenigevents"
 
+
+def fold_unicode_line(line: str, limit: int = 74) -> str:
+    """Return a folded iCalendar line without splitting UTF-8 code points."""
+    encoded = line.encode("utf-8")
+    parts: list[str] = []
+    while len(encoded) > limit:
+        cut = limit
+        while cut > 0 and (encoded[cut] & 0xC0) == 0x80:
+            cut -= 1
+        parts.append(encoded[:cut].decode("utf-8"))
+        encoded = encoded[cut:]
+    parts.append(encoded.decode("utf-8"))
+    return "\r\n ".join(parts)
+
 # currently active timezone offset for date calculations
 LOCAL_TZ = timezone.utc
 
@@ -340,6 +354,11 @@ ICS_LABEL = "Добавить в календарь на телефоне (ICS)"
 MONTH_NAV_START = "<!--month-nav-start-->"
 MONTH_NAV_END = "<!--month-nav-end-->"
 
+FOOTER_LINK_HTML = (
+    '<p><a href="https://t.me/kenigevents">Полюбить Калининград Анонсы</a></p>'
+    '<p>&nbsp;</p>'
+)
+
 
 def parse_time_range(value: str) -> tuple[time, time | None] | None:
     """Return start and optional end time from text like '10:00' or '10:00-12:00'."""
@@ -391,6 +410,15 @@ def apply_month_nav(html_content: str, html_block: str | None) -> str:
     if html_block:
         html_content += f"{MONTH_NAV_START}{html_block}{MONTH_NAV_END}"
     return html_content
+
+
+def apply_footer_link(html_content: str) -> str:
+    """Ensure the Telegram channel link footer is present once."""
+    pattern = re.compile(
+        r'<p><a href="https://t\.me/kenigevents">[^<]+</a></p><p>&nbsp;</p>'
+    )
+    html_content = pattern.sub("", html_content).rstrip()
+    return html_content + FOOTER_LINK_HTML
 
 
 async def build_month_nav_html(db: Database) -> str:
@@ -480,7 +508,8 @@ async def build_ics_content(db: Database, event: Event) -> str:
         loc_parts.append(event.location_address)
     if event.city:
         loc_parts.append(event.city)
-    location = ", ".join(loc_parts)
+    # Join without a space after comma to avoid iOS parsing issues
+    location = ",".join(loc_parts)
 
     cal = Calendar()
     cal.add("VERSION", "2.0")
@@ -506,8 +535,31 @@ async def build_ics_content(db: Database, event: Event) -> str:
     lines = raw.split("\r\n")
     if lines and lines[-1] == "":
         lines.pop()
-    idx = lines.index("BEGIN:VEVENT")
-    body = lines[idx:-1]  # exclude trailing END:VCALENDAR
+
+    # unfold lines first
+    unfolded: list[str] = []
+    for line in lines:
+        if line.startswith(" ") and unfolded:
+            unfolded[-1] += line[1:]
+        else:
+            unfolded.append(line)
+
+    for i, line in enumerate(unfolded):
+        if line.startswith("LOCATION:") or line.startswith("LOCATION;"):
+            unfolded[i] = line.replace("\\, ", "\\,\\ ")
+
+    idx = unfolded.index("BEGIN:VEVENT")
+    vbody = unfolded[idx + 1 : -2]  # between BEGIN:VEVENT and END:VEVENT
+    order = ["UID", "DTSTAMP", "DTSTART", "DTEND"]
+    props: list[str] = []
+    for key in order:
+        for l in list(vbody):
+            if l.startswith(key + ":") or l.startswith(key + ";"):
+                props.append(l)
+                vbody.remove(l)
+    props.extend(vbody)
+
+    body = ["BEGIN:VEVENT"] + props + ["END:VEVENT"]
     headers = [
         "BEGIN:VCALENDAR",
         "VERSION:2.0",
@@ -516,8 +568,9 @@ async def build_ics_content(db: Database, event: Event) -> str:
         "METHOD:PUBLISH",
         f"X-WR-CALNAME:{ICS_CALNAME}",
     ]
-    final = headers + body + ["END:VCALENDAR", ""]
-    return "\r\n".join(final)
+    final_lines = headers + body + ["END:VCALENDAR"]
+    folded = [fold_unicode_line(l) for l in final_lines]
+    return "\r\n".join(folded) + "\r\n"
 
 
 async def upload_ics(event: Event, db: Database) -> str | None:
@@ -3381,6 +3434,7 @@ async def update_source_page(
         if db:
             nav_html = await build_month_nav_html(db)
             html_content = apply_month_nav(html_content, nav_html)
+        html_content = apply_footer_link(html_content)
         logging.info("Editing telegraph page %s", path)
         await asyncio.to_thread(
             tg.edit_page, path, title=title, html_content=html_content
@@ -3404,6 +3458,7 @@ async def update_source_page_ics(path: str, title: str, url: str | None):
         page = await asyncio.to_thread(tg.get_page, path, return_html=True)
         html_content = page.get("content") or page.get("content_html") or ""
         html_content = apply_ics_link(html_content, url)
+        html_content = apply_footer_link(html_content)
         await asyncio.to_thread(
             tg.edit_page, path, title=title, html_content=html_content
         )
@@ -3511,6 +3566,7 @@ async def create_source_page(
     if db:
         nav_html = await build_month_nav_html(db)
         html_content = apply_month_nav(html_content, nav_html)
+    html_content = apply_footer_link(html_content)
     try:
         page = await asyncio.to_thread(tg.create_page, title, html_content=html_content)
     except Exception as e:
