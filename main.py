@@ -1882,25 +1882,31 @@ async def add_events_from_text(
                                 await session.commit()
                                 saved.ics_url = ics
 
-                        if bot:
-                            posted = await post_ics_asset(saved, db, bot)
-                            if posted:
-                                url_p, msg_id = posted
-                                logging.info(
-                                    "asset post %s for event %s", url_p, saved.id
-                                )
-                                async with db.get_session() as session:
-                                    obj = await session.get(Event, saved.id)
-                                    if obj:
-                                        obj.ics_post_url = url_p
-                                        obj.ics_post_id = msg_id
-                                        await session.commit()
-                                        saved.ics_post_url = url_p
-                                        saved.ics_post_id = msg_id
-                                await add_calendar_button(saved, bot)
-                                logging.info(
-                                    "calendar button added for event %s", saved.id
-                                )
+                if bot and saved.ics_url and not saved.ics_post_url:
+                    posted = await post_ics_asset(saved, db, bot)
+                    if posted:
+                        url_p, msg_id = posted
+                        logging.info(
+                            "asset post %s for event %s", url_p, saved.id
+                        )
+                        async with db.get_session() as session:
+                            obj = await session.get(Event, saved.id)
+                            if obj:
+                                obj.ics_post_url = url_p
+                                obj.ics_post_id = msg_id
+                                await session.commit()
+                                saved.ics_post_url = url_p
+                                saved.ics_post_id = msg_id
+                        await add_calendar_button(saved, bot)
+                        logging.info(
+                            "calendar button added for event %s", saved.id
+                        )
+                        if saved.telegraph_path:
+                            await update_source_page_ics(
+                                saved.telegraph_path,
+                                saved.title or "Event",
+                                saved.ics_url,
+                            )
 
                 res = await create_source_page(
                     saved.title or "Event",
