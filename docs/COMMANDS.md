@@ -11,8 +11,8 @@
 | `/images` | - | Toggle uploading photos to Catbox. |
 | `/ask4o <text>` | any text | Send query to model 4o and show plain response (superadmin only). |
 | `/events [DATE]` | optional date `YYYY-MM-DD`, `DD.MM.YYYY` or `D месяц [YYYY]` | List events for the day with delete and edit buttons. Dates are shown as `DD.MM.YYYY`. Choosing **Edit** lists all fields with inline buttons including a toggle for "Бесплатно". |
-| `/setchannel` | - | Choose one of the admin channels to register as an announcement source. |
-| `/channels` | - | List channels where the bot is admin and mark registered ones with a cancel button. |
+| `/setchannel` | - | Choose an admin channel and register it as an announcement or calendar asset source. |
+| `/channels` | - | List admin channels showing registered and asset ones with disable buttons. |
 | `/regdailychannels` | - | Choose admin channels for daily announcements (default 08:00). |
 | `/daily` | - | Manage daily announcement channels: cancel, change time, test send. |
 | `/exhibitions` | - | List active exhibitions similar to `/events`; each entry shows the period `c <start>` / `по <end>` and includes edit/delete buttons. |
