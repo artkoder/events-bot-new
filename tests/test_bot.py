@@ -1095,7 +1095,7 @@ async def test_forward_add_event_photo(tmp_path: Path, monkeypatch):
 
     captured = {}
 
-    async def fake_add(db2, text, source_link, html_text=None, media=None):
+    async def fake_add(db2, text, source_link, html_text=None, media=None, **kwargs):
         captured["media"] = media
         return []
 
@@ -3104,3 +3104,140 @@ async def test_build_ics_location_escape(tmp_path: Path):
     )
     content = await main.build_ics_content(db, event)
     assert "LOCATION:Serg\\,\\ 14\\,Kaliningrad" in content
+
+
+@pytest.mark.asyncio
+async def test_post_ics_asset_caption(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    ch = main.Channel(channel_id=-1002, title="Asset", is_admin=True, is_asset=True)
+    async with db.get_session() as session:
+        session.add(ch)
+        await session.commit()
+
+    event = Event(
+        id=1,
+        title="Concert",
+        description="desc",
+        source_text="s",
+        date="2025-07-18",
+        time="19:00",
+        location_name="Сигнал",
+        location_address="Леонова 22",
+        city="Калининград",
+    )
+
+    async def fake_build(db2, ev):
+        return "ICS"
+
+    monkeypatch.setattr(main, "build_ics_content", fake_build)
+
+    async def fake_send_document(self, chat_id, document, caption=None, parse_mode=None):
+        self.messages.append((chat_id, caption))
+        class Msg:
+            message_id = 42
+        return Msg()
+
+    monkeypatch.setattr(DummyBot, "send_document", fake_send_document, raising=False)
+
+    url, msg_id = await main.post_ics_asset(event, db, bot)
+    assert msg_id == 42
+    caption = bot.messages[0][1]
+    day = main.format_day_pretty(date(2025, 7, 18))
+    assert f"<b>Concert</b>" in caption
+    assert f"<i>{day} 19:00 Сигнал, Леонова 22, #Калининград</i>" in caption
+
+
+@pytest.mark.asyncio
+async def test_forward_adds_calendar_button(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    start_msg = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "/start",
+        }
+    )
+    await handle_start(start_msg, db, bot)
+
+    ch_ann = main.Channel(channel_id=-1001, title="Ann", is_admin=True, is_registered=True)
+    ch_asset = main.Channel(channel_id=-1002, title="Asset", is_admin=True, is_asset=True)
+    async with db.get_session() as session:
+        session.add(ch_ann)
+        session.add(ch_asset)
+        await session.commit()
+
+    async def fake_build(db2, ev):
+        return "ICS"
+
+    monkeypatch.setattr(main, "build_ics_content", fake_build)
+    async def fake_upload(ev, db2):
+        return "https://x/ics"
+
+    async def fake_create(*a, **k):
+        return ("u", "p", "", 0)
+
+    monkeypatch.setattr(main, "upload_ics", fake_upload)
+    monkeypatch.setattr(main, "create_source_page", fake_create)
+    monkeypatch.setattr(main, "update_source_page_ics", lambda *a, **k: None)
+
+    async def fake_sync(*a, **k):
+        return None
+
+    monkeypatch.setattr(main, "sync_month_page", fake_sync)
+    monkeypatch.setattr(main, "sync_weekend_page", fake_sync)
+
+    async def fake_post(event, db2, b):
+        return ("https://t.me/a/1", 55)
+
+    monkeypatch.setattr(main, "post_ics_asset", fake_post)
+
+    async def fake_send_document(self, chat_id, document, caption=None, parse_mode=None):
+        class Msg:
+            message_id = 77
+        return Msg()
+
+    monkeypatch.setattr(DummyBot, "send_document", fake_send_document, raising=False)
+
+    async def fake_parse(text):
+        return [
+            {
+                "title": "T",
+                "short_description": "d",
+                "date": FUTURE_DATE,
+                "time": "18:00",
+                "location_name": "Club",
+            }
+        ]
+
+    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
+    monkeypatch.setattr(main, "bot", bot, raising=False)
+
+    fwd_msg = types.Message.model_validate(
+        {
+            "message_id": 2,
+            "date": 0,
+            "forward_date": 0,
+            "forward_from_chat": {"id": -1001, "type": "channel", "username": "ann"},
+            "forward_from_message_id": 10,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "text",
+        }
+    )
+
+    await main.handle_forwarded(fwd_msg, db, bot)
+
+    assert bot.edits
+    chat_id, msg_id, kwargs = bot.edits[0]
+    assert chat_id == -1001
+    assert msg_id == 10
+    btn = kwargs["reply_markup"].inline_keyboard[0][0]
+    assert btn.text == "Добавить в календарь"
