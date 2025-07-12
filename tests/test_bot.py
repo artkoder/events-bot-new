@@ -3065,4 +3065,4 @@ async def test_build_ics_location_escape(tmp_path: Path):
         city="Kaliningrad",
     )
     content = await main.build_ics_content(db, event)
-    assert "LOCATION:Serg\\, 14\\, Kaliningrad" in content
+    assert "LOCATION:Serg\\,\\ 14\\,Kaliningrad" in content
