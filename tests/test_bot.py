@@ -1095,7 +1095,7 @@ async def test_forward_add_event_photo(tmp_path: Path, monkeypatch):
 
     captured = {}
 
-    async def fake_add(db2, text, source_link, html_text=None, media=None):
+    async def fake_add(db2, text, source_link, html_text=None, media=None, **kwargs):
         captured["media"] = media
         return []
 

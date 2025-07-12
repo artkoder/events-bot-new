@@ -45,3 +45,8 @@
 - Calendar files include a link back to the event and are saved as `Event-<id>-dd-mm-yyyy.ics`.
 - Telegraph pages show a calendar link under the main image when an ICS file exists.
 - Startup no longer fails when setting the webhook times out.
+
+## v0.3.5 - Calendar asset channel
+- `/setchannel` lets you mark a channel as the calendar asset source.
+- `/channels` shows the asset channel with a disable button.
+- Calendar files are posted to this channel and linked from month and weekend pages.
