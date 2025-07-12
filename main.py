@@ -1738,6 +1738,9 @@ async def add_events_from_text(
     raise_exc: bool = False,
     source_chat_id: int | None = None,
     source_message_id: int | None = None,
+
+    bot: Bot | None = None,
+
 ) -> list[tuple[Event, bool, list[str], str]]:
     try:
         logging.info("LLM parse start (%d chars)", len(text))
@@ -1878,22 +1881,27 @@ async def add_events_from_text(
                                 obj.ics_url = ics
                                 await session.commit()
                                 saved.ics_url = ics
-                        posted = await post_ics_asset(saved, db, bot)
-                        if posted:
-                            url_p, msg_id = posted
-                            logging.info(
-                                "asset post %s for event %s", url_p, saved.id
-                            )
-                            async with db.get_session() as session:
-                                obj = await session.get(Event, saved.id)
-                                if obj:
-                                    obj.ics_post_url = url_p
-                                    obj.ics_post_id = msg_id
-                                    await session.commit()
-                                    saved.ics_post_url = url_p
-                                    saved.ics_post_id = msg_id
-                            await add_calendar_button(saved, bot)
-                            logging.info("calendar button added for event %s", saved.id)
+
+                        if bot:
+                            posted = await post_ics_asset(saved, db, bot)
+                            if posted:
+                                url_p, msg_id = posted
+                                logging.info(
+                                    "asset post %s for event %s", url_p, saved.id
+                                )
+                                async with db.get_session() as session:
+                                    obj = await session.get(Event, saved.id)
+                                    if obj:
+                                        obj.ics_post_url = url_p
+                                        obj.ics_post_id = msg_id
+                                        await session.commit()
+                                        saved.ics_post_url = url_p
+                                        saved.ics_post_id = msg_id
+                                await add_calendar_button(saved, bot)
+                                logging.info(
+                                    "calendar button added for event %s", saved.id
+                                )
+
                 res = await create_source_page(
                     saved.title or "Event",
                     saved.source_text,
@@ -1977,6 +1985,7 @@ async def handle_add_event(message: types.Message, db: Database, bot: Bot):
             html_text,
             media,
             raise_exc=True,
+            bot=bot,
         )
     except Exception as e:
         await bot.send_message(message.chat.id, f"LLM error: {e}")
@@ -3595,6 +3604,9 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
         media,
         source_chat_id=chat.id if link else None,
         source_message_id=msg_id if link else None,
+
+        bot=bot,
+
     )
     logging.info("forward parsed %d events", len(results))
     for saved, added, lines, status in results:
