@@ -2670,6 +2670,7 @@ async def build_month_page_content(db: Database, month: str) -> tuple[str, list]
 
     today_month = date.today().strftime("%Y-%m")
     future_pages = [p for p in nav_pages if p.month >= today_month]
+    month_nav: list[dict] = []
     if future_pages:
         nav_children = []
         for idx, p in enumerate(future_pages):
@@ -2682,15 +2683,21 @@ async def build_month_page_content(db: Database, month: str) -> tuple[str, list]
                 )
             if idx < len(future_pages) - 1:
                 nav_children.append(" ")
-        content.append({"tag": "br"})
-        content.append({"tag": "h4", "children": nav_children})
+        month_nav = [{"tag": "br"}, {"tag": "h4", "children": nav_children}]
+        content.extend(month_nav)
 
     if exhibitions:
+        if month_nav:
+            content.append({"tag": "br"})
+            content.append({"tag": "p", "children": ["\u00a0"]})
         content.append({"tag": "h3", "children": ["Постоянные выставки"]})
         content.append({"tag": "br"})
         content.append({"tag": "p", "children": ["\u00a0"]})
         for ev in exhibitions:
             content.extend(exhibition_to_nodes(ev))
+
+    if month_nav:
+        content.extend(month_nav)
 
     title = f"События Калининграда в {month_name_prepositional(month)}: полный анонс от Полюбить Калининград Анонсы"
     return title, content

@@ -1790,6 +1790,51 @@ async def test_weekend_nav_and_exhibitions(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_month_nav_and_exhibitions(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.get_session() as session:
+        session.add(MonthPage(month="2025-07", url="m1", path="p1"))
+        session.add(MonthPage(month="2025-08", url="m2", path="p2"))
+        session.add(
+            Event(
+                title="Expo",
+                description="d",
+                source_text="s",
+                date="2025-07-05",
+                end_date="2025-07-20",
+                time="10:00",
+                location_name="Hall",
+                event_type="выставка",
+            )
+        )
+        await session.commit()
+
+    _, content = await main.build_month_page_content(db, "2025-07")
+    nav_blocks = [
+        n
+        for n in content
+        if n.get("tag") == "h4"
+        and any(
+            isinstance(c, dict) and c.get("attrs", {}).get("href") == "m2"
+            for c in n.get("children", [])
+        )
+    ]
+    assert len(nav_blocks) == 2
+    first_block_children = nav_blocks[0]["children"]
+    assert not isinstance(first_block_children[0], dict)
+
+    idx_exh = next(
+        i
+        for i, n in enumerate(content)
+        if n.get("tag") == "h3" and "Постоянные" in "".join(n.get("children", []))
+    )
+    assert content[idx_exh - 1].get("tag") == "p"
+    assert content[idx_exh - 2].get("tag") == "br"
+
+
+@pytest.mark.asyncio
 async def test_sync_weekend_page_first_creation_includes_nav(
     tmp_path: Path, monkeypatch
 ):
