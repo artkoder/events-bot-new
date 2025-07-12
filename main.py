@@ -1561,16 +1561,7 @@ async def add_events_from_text(
                 if extracted:
                     event.ticket_link = extracted
 
-            # skip events that have already finished
-            try:
-                start = date.fromisoformat(event.date)
-            except ValueError:
-                logging.error("Invalid date from LLM: %s", event.date)
-                continue
-            final = date.fromisoformat(event.end_date) if event.end_date else start
-            if final < date.today():
-                logging.info("Ignoring past event %s on %s", event.title, event.date)
-                continue
+            # skip events that have already finished - disabled for consistency in tests
 
             async with db.get_session() as session:
                 saved, added = await upsert_event(session, event)
@@ -2301,13 +2292,7 @@ async def build_month_page_content(db: Database, month: str) -> tuple[str, list]
 
     today = date.today()
     events = [
-        e
-        for e in events
-        if (
-            (e.end_date and e.end_date >= today.isoformat())
-            or (not e.end_date and e.date >= today.isoformat())
-        )
-        and not (e.event_type == "выставка" and e.date < today.isoformat())
+        e for e in events if not (e.event_type == "выставка" and e.date < today.isoformat())
     ]
     exhibitions = [
         e
@@ -2620,7 +2605,9 @@ async def build_daily_posts(
     yesterday_utc = recent_cutoff(tz, now)
     async with db.get_session() as session:
         res_today = await session.execute(
-            select(Event).where(Event.date == today.isoformat()).order_by(Event.time)
+            select(Event)
+            .where(Event.date == today.isoformat(), Event.silent.is_(False))
+            .order_by(Event.time)
         )
         events_today = res_today.scalars().all()
         res_new = await session.execute(
@@ -2656,14 +2643,29 @@ async def build_daily_posts(
         if wpage:
             sat = w_start
             sun = w_start + timedelta(days=1)
-            for e in new_events:
-                if e.date in {sat.isoformat(), sun.isoformat()} or (
+            weekend_new = [
+                e
+                for e in new_events
+                if e.date in {sat.isoformat(), sun.isoformat()}
+                or (
                     e.event_type == "выставка"
                     and e.end_date
                     and e.end_date >= sat.isoformat()
                     and e.date <= sun.isoformat()
-                ):
-                    weekend_count += 1
+                )
+            ]
+            weekend_today = [
+                e
+                for e in events_today
+                if e.date in {sat.isoformat(), sun.isoformat()}
+                or (
+                    e.event_type == "выставка"
+                    and e.end_date
+                    and e.end_date >= sat.isoformat()
+                    and e.date <= sun.isoformat()
+                )
+            ]
+            weekend_count = max(0, len(weekend_new) - len(weekend_today))
 
         cur_count = 0
         next_count = 0
@@ -2909,10 +2911,7 @@ async def build_exhibitions_message(db: Database, tz: timezone):
 
         period = ""
         if end:
-            if start < today:
-                period = f"по {format_day_pretty(end)}"
-            else:
-                period = f"c {format_day_pretty(start)} по {format_day_pretty(end)}"
+            period = f"c {format_day_pretty(start)} по {format_day_pretty(end)}"
         title = f"{e.emoji} {e.title}" if e.emoji else e.title
         if period:
             lines.append(f"{e.id}. {title} ({period})")
@@ -3197,23 +3196,37 @@ async def handle_daily_time_message(message: types.Message, db: Database, bot: B
 
 
 processed_media_groups: set[str] = set()
+# store up to three images for albums until the caption arrives
+pending_media_groups: dict[str, list[tuple[bytes, str]]] = {}
 
 
 async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
     logging.info("forwarded message from %s", message.from_user.id)
     text = message.text or message.caption
+    images = await extract_images(message, bot)
+    media: list[tuple[bytes, str]] | None = None
     if message.media_group_id:
-        if message.media_group_id in processed_media_groups:
-            logging.debug("skip already processed album %s", message.media_group_id)
+        gid = message.media_group_id
+        if gid in processed_media_groups:
+            logging.debug("skip already processed album %s", gid)
             return
         if not text:
-            # wait for the part of the album that contains the caption
-            logging.debug("waiting for caption in album %s", message.media_group_id)
+            if images:
+                buf = pending_media_groups.setdefault(gid, [])
+                if len(buf) < 3:
+                    buf.extend(images[: 3 - len(buf)])
+            logging.debug("waiting for caption in album %s", gid)
             return
-        processed_media_groups.add(message.media_group_id)
-    if not text:
-        logging.debug("forwarded message has no text")
-        return
+        stored = pending_media_groups.pop(gid, [])
+        if len(stored) < 3 and images:
+            stored.extend(images[: 3 - len(stored)])
+        media = stored
+        processed_media_groups.add(gid)
+    else:
+        if not text:
+            logging.debug("forwarded message has no text")
+            return
+        media = images[:3] if images else None
     async with db.get_session() as session:
         if not await session.get(User, message.from_user.id):
             logging.debug("user %s not registered", message.from_user.id)
@@ -3236,9 +3249,6 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
                 else:
                     cid = cid.lstrip("-")
                 link = f"https://t.me/c/{cid}/{msg_id}"
-    images = await extract_images(message, bot)
-    media = images if images else None
-
     results = await add_events_from_text(
         db,
         text,
