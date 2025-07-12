@@ -2576,15 +2576,24 @@ async def build_month_page_content(db: Database, month: str) -> tuple[str, list]
         nav_pages = result_nav.scalars().all()
 
     today = date.today()
+    today_str = today.isoformat()
     events = [
-        e for e in events if not (e.event_type == "выставка" and e.date < today.isoformat())
+        e
+        for e in events
+        if (
+            (e.end_date and e.end_date >= today_str)
+            or (not e.end_date and e.date >= today_str)
+        )
+    ]
+    events = [
+        e for e in events if not (e.event_type == "выставка" and e.date < today_str)
     ]
     exhibitions = [
         e
         for e in exhibitions
         if e.end_date
-        and e.end_date >= today.isoformat()
-        and e.date <= today.isoformat()
+        and e.end_date >= today_str
+        and e.date <= today_str
     ]
 
     by_day: dict[date, list[Event]] = {}
