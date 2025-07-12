@@ -2196,6 +2196,26 @@ async def test_update_source_page_uses_content(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_update_source_page_footer(monkeypatch):
+    edited = {}
+
+    class DummyTG:
+        def get_page(self, path, return_html=True):
+            return {"content": "<p>old</p>"}
+
+        def edit_page(self, path, title, html_content):
+            edited["html"] = html_content
+
+    monkeypatch.setattr("main.get_telegraph_token", lambda: "t")
+    monkeypatch.setattr("main.Telegraph", lambda access_token=None: DummyTG())
+
+    await main.update_source_page("p", "T", "text")
+    html = edited.get("html", "")
+    assert "Полюбить Калининград Анонсы" in html
+    assert "&nbsp;" in html
+
+
+@pytest.mark.asyncio
 async def test_update_source_page_normalizes_hashtags(monkeypatch):
     class DummyTG:
         def get_page(self, path, return_html=True):
@@ -2261,6 +2281,24 @@ async def test_create_source_page_adds_nav(tmp_path: Path, monkeypatch):
     res = await main.create_source_page("T", "text", None, db=db)
     assert "u1" in captured.get("html", "")
     assert res[0] == "https://telegra.ph/test"
+
+
+@pytest.mark.asyncio
+async def test_create_source_page_footer(monkeypatch):
+    captured = {}
+
+    class DummyTG:
+        def create_page(self, title, html_content=None, **_):
+            captured["html"] = html_content
+            return {"url": "https://telegra.ph/test", "path": "p"}
+
+    monkeypatch.setenv("TELEGRAPH_TOKEN", "t")
+    monkeypatch.setattr("main.Telegraph", lambda access_token=None: DummyTG())
+
+    await main.create_source_page("T", "text", None)
+    html = captured.get("html", "")
+    assert "Полюбить Калининград Анонсы" in html
+    assert "&nbsp;" in html
 
 
 @pytest.mark.asyncio

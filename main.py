@@ -354,6 +354,11 @@ ICS_LABEL = "Добавить в календарь на телефоне (ICS)"
 MONTH_NAV_START = "<!--month-nav-start-->"
 MONTH_NAV_END = "<!--month-nav-end-->"
 
+FOOTER_LINK_HTML = (
+    '<p><a href="https://t.me/kenigevents">Полюбить Калининград Анонсы</a></p>'
+    '<p>&nbsp;</p>'
+)
+
 
 def parse_time_range(value: str) -> tuple[time, time | None] | None:
     """Return start and optional end time from text like '10:00' or '10:00-12:00'."""
@@ -405,6 +410,15 @@ def apply_month_nav(html_content: str, html_block: str | None) -> str:
     if html_block:
         html_content += f"{MONTH_NAV_START}{html_block}{MONTH_NAV_END}"
     return html_content
+
+
+def apply_footer_link(html_content: str) -> str:
+    """Ensure the Telegram channel link footer is present once."""
+    pattern = re.compile(
+        r'<p><a href="https://t\.me/kenigevents">[^<]+</a></p><p>&nbsp;</p>'
+    )
+    html_content = pattern.sub("", html_content).rstrip()
+    return html_content + FOOTER_LINK_HTML
 
 
 async def build_month_nav_html(db: Database) -> str:
@@ -3420,6 +3434,7 @@ async def update_source_page(
         if db:
             nav_html = await build_month_nav_html(db)
             html_content = apply_month_nav(html_content, nav_html)
+        html_content = apply_footer_link(html_content)
         logging.info("Editing telegraph page %s", path)
         await asyncio.to_thread(
             tg.edit_page, path, title=title, html_content=html_content
@@ -3443,6 +3458,7 @@ async def update_source_page_ics(path: str, title: str, url: str | None):
         page = await asyncio.to_thread(tg.get_page, path, return_html=True)
         html_content = page.get("content") or page.get("content_html") or ""
         html_content = apply_ics_link(html_content, url)
+        html_content = apply_footer_link(html_content)
         await asyncio.to_thread(
             tg.edit_page, path, title=title, html_content=html_content
         )
@@ -3550,6 +3566,7 @@ async def create_source_page(
     if db:
         nav_html = await build_month_nav_html(db)
         html_content = apply_month_nav(html_content, nav_html)
+    html_content = apply_footer_link(html_content)
     try:
         page = await asyncio.to_thread(tg.create_page, title, html_content=html_content)
     except Exception as e:
