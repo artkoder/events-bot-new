@@ -1738,7 +1738,9 @@ async def add_events_from_text(
     raise_exc: bool = False,
     source_chat_id: int | None = None,
     source_message_id: int | None = None,
+
     bot: Bot | None = None,
+
 ) -> list[tuple[Event, bool, list[str], str]]:
     try:
         logging.info("LLM parse start (%d chars)", len(text))
@@ -1879,6 +1881,7 @@ async def add_events_from_text(
                                 obj.ics_url = ics
                                 await session.commit()
                                 saved.ics_url = ics
+
                 if bot and saved.ics_url and not saved.ics_post_url:
                     posted = await post_ics_asset(saved, db, bot)
                     if posted:
@@ -1904,6 +1907,7 @@ async def add_events_from_text(
                                 saved.title or "Event",
                                 saved.ics_url,
                             )
+
                 res = await create_source_page(
                     saved.title or "Event",
                     saved.source_text,
@@ -3606,7 +3610,9 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
         media,
         source_chat_id=chat.id if link else None,
         source_message_id=msg_id if link else None,
+
         bot=bot,
+
     )
     logging.info("forward parsed %d events", len(results))
     for saved, added, lines, status in results:
