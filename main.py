@@ -340,6 +340,7 @@ async def get_asset_channel(db: Database) -> Channel | None:
         return result.scalars().first()
 
 
+
 def build_asset_caption(event: Event, day: date) -> str:
     """Return HTML caption for a calendar asset post."""
     loc = html.escape(event.location_name or "")
@@ -354,6 +355,7 @@ def build_asset_caption(event: Event, day: date) -> str:
         f"<b>{html.escape(event.title)}</b>\n"
         f"<i>{format_day_pretty(day)} {event.time} {loc}</i>"
     )
+
 
 
 def validate_offset(value: str) -> bool:
@@ -689,7 +691,9 @@ async def post_ics_asset(event: Event, db: Database, bot: Bot) -> tuple[str, int
         d = date.today()
         name = f"Event-{event.id}.ics"
     file = types.BufferedInputFile(content.encode("utf-8"), filename=name)
+
     caption = build_asset_caption(event, d)
+
     try:
         msg = await bot.send_document(
             channel.channel_id,
