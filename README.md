@@ -6,7 +6,7 @@ This is an MVP using **aiogram 3** and SQLite. It is designed for deployment on
 Fly.io with a webhook.
 
 Forwarded posts from moderators or admins are treated the same as the `/addevent` command.
-Use `/setchannel` to pick one of the channels where the bot has admin rights and mark it as a source for announcement posts. `/channels` lists all admin channels and lets you cancel registration.
+Use `/setchannel` to pick one of the channels where the bot has admin rights and register it either as an announcement source or as the calendar asset channel. `/channels` lists all admin channels and lets you disable these roles.
 
 Bot messages display dates in the format `DD.MM.YYYY`. Public pages such as
 Telegraph posts use the short form "D месяц" (e.g. `2 июля`).
