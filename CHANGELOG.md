@@ -50,3 +50,4 @@
 - `/setchannel` lets you mark a channel as the calendar asset source.
 - `/channels` shows the asset channel with a disable button.
 - Calendar files are posted to this channel and linked from month and weekend pages.
+- Forwarded posts from the asset channel show a calendar button.

@@ -688,6 +688,29 @@ async def post_ics_asset(event: Event, db: Database, bot: Bot) -> tuple[str, int
         return None
 
 
+async def add_calendar_button(event: Event, bot: Bot):
+    """Attach calendar link button to the original channel post."""
+    if not (
+        event.source_chat_id
+        and event.source_message_id
+        and event.ics_post_url
+    ):
+        return
+    markup = types.InlineKeyboardMarkup(
+        inline_keyboard=[
+            [types.InlineKeyboardButton(text="Добавить в календарь", url=event.ics_post_url)]
+        ]
+    )
+    try:
+        await bot.edit_message_reply_markup(
+            chat_id=event.source_chat_id,
+            message_id=event.source_message_id,
+            reply_markup=markup,
+        )
+    except Exception as e:
+        logging.error("failed to set calendar button: %s", e)
+
+
 async def delete_ics(event: Event):
     client = get_supabase_client()
     if not client or not event.ics_url:
@@ -710,6 +733,20 @@ async def delete_asset_post(event: Event, db: Database, bot: Bot):
         await bot.delete_message(channel.channel_id, event.ics_post_id)
     except Exception as e:
         logging.error("failed to delete asset message: %s", e)
+
+
+async def remove_calendar_button(event: Event, bot: Bot):
+    """Remove calendar button from the original channel post."""
+    if not (event.source_chat_id and event.source_message_id):
+        return
+    try:
+        await bot.edit_message_reply_markup(
+            chat_id=event.source_chat_id,
+            message_id=event.source_message_id,
+            reply_markup=None,
+        )
+    except Exception as e:
+        logging.error("failed to remove calendar button: %s", e)
 
 
 async def parse_event_via_4o(text: str) -> list[dict]:
@@ -1048,6 +1085,7 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                         event.ics_post_url = url_p
                         event.ics_post_id = msg_id
                         await session.commit()
+                        await add_calendar_button(event, bot)
                     if event.telegraph_path:
                         await update_source_page_ics(
                             event.telegraph_path, event.title or "Event", url
@@ -1075,6 +1113,7 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                 event.ics_post_url = None
                 event.ics_post_id = None
                 await session.commit()
+                await remove_calendar_button(event, bot)
                 if event.telegraph_path:
                     await update_source_page_ics(
                         event.telegraph_path, event.title or "Event", None
@@ -1819,6 +1858,7 @@ async def add_events_from_text(
                                     await session.commit()
                                     saved.ics_post_url = url_p
                                     saved.ics_post_id = msg_id
+                            await add_calendar_button(saved, bot)
                 res = await create_source_page(
                     saved.title or "Event",
                     saved.source_text,
@@ -2287,7 +2327,7 @@ def format_event_md(e: Event) -> str:
         prefix = f"{cam} " if cam else ""
         more_line = f"{prefix}[подробнее]({e.telegraph_url})"
         if e.ics_post_url:
-            more_line += f"  [календарь]({e.ics_post_url})"
+            more_line += f" \U0001f4c5 [добавить в календарь]({e.ics_post_url})"
         lines.append(more_line)
     loc = e.location_name
     addr = e.location_address
