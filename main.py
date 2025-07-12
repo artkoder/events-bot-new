@@ -340,7 +340,6 @@ async def get_asset_channel(db: Database) -> Channel | None:
         return result.scalars().first()
 
 
-
 def build_asset_caption(event: Event, day: date) -> str:
     """Return HTML caption for a calendar asset post."""
     loc = html.escape(event.location_name or "")
@@ -355,7 +354,6 @@ def build_asset_caption(event: Event, day: date) -> str:
         f"<b>{html.escape(event.title)}</b>\n"
         f"<i>{format_day_pretty(day)} {event.time} {loc}</i>"
     )
-
 
 
 def validate_offset(value: str) -> bool:
@@ -691,9 +689,7 @@ async def post_ics_asset(event: Event, db: Database, bot: Bot) -> tuple[str, int
         d = date.today()
         name = f"Event-{event.id}.ics"
     file = types.BufferedInputFile(content.encode("utf-8"), filename=name)
-
     caption = build_asset_caption(event, d)
-
     try:
         msg = await bot.send_document(
             channel.channel_id,
@@ -3139,9 +3135,11 @@ async def build_events_message(db: Database, target_date: date, tz: timezone):
     keyboard = [
         [
             types.InlineKeyboardButton(
-                text="\u274c", callback_data=f"del:{e.id}:{target_date.isoformat()}"
+                text=f"\u274c {e.id}", callback_data=f"del:{e.id}:{target_date.isoformat()}"
             ),
-            types.InlineKeyboardButton(text="\u270e", callback_data=f"edit:{e.id}"),
+            types.InlineKeyboardButton(
+                text=f"\u270e {e.id}", callback_data=f"edit:{e.id}"
+            ),
         ]
         for e in events
     ]
@@ -3232,8 +3230,12 @@ async def build_exhibitions_message(db: Database, tz: timezone):
 
     keyboard = [
         [
-            types.InlineKeyboardButton(text="\u274c", callback_data=f"del:{e.id}:exh"),
-            types.InlineKeyboardButton(text="\u270e", callback_data=f"edit:{e.id}"),
+            types.InlineKeyboardButton(
+                text=f"\u274c {e.id}", callback_data=f"del:{e.id}:exh"
+            ),
+            types.InlineKeyboardButton(
+                text=f"\u270e {e.id}", callback_data=f"edit:{e.id}"
+            ),
         ]
         for e in events
     ]
