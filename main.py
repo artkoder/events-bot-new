@@ -3196,7 +3196,9 @@ async def handle_daily_time_message(message: types.Message, db: Database, bot: B
 
 
 processed_media_groups: set[str] = set()
+
 # store up to three images for albums until the caption arrives
+
 pending_media_groups: dict[str, list[tuple[bytes, str]]] = {}
 
 
@@ -3212,6 +3214,7 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
             return
         if not text:
             if images:
+
                 buf = pending_media_groups.setdefault(gid, [])
                 if len(buf) < 3:
                     buf.extend(images[: 3 - len(buf)])
@@ -3221,6 +3224,7 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
         if len(stored) < 3 and images:
             stored.extend(images[: 3 - len(stored)])
         media = stored
+
         processed_media_groups.add(gid)
     else:
         if not text:
