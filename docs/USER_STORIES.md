@@ -31,3 +31,4 @@
 |US-27|User/Admin|add event to calendar via ICS|quick calendar save|
 |US-28|User|follow the calendar link on a Telegraph page|ICS download on phone|
 |US-29|Moderator|manage recurring events|confirm regular schedule|
+|US-30|Admin|register calendar asset channel|ICS files available in Telegram|
