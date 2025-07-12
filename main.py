@@ -355,6 +355,7 @@ MONTH_NAV_START = "<!--month-nav-start-->"
 MONTH_NAV_END = "<!--month-nav-end-->"
 
 FOOTER_LINK_HTML = (
+    '<p>&nbsp;</p>'
     '<p><a href="https://t.me/kenigevents">Полюбить Калининград Анонсы</a></p>'
     '<p>&nbsp;</p>'
 )
