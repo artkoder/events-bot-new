@@ -74,6 +74,7 @@ browse upcoming announcements. The command accepts dates like `2025-07-10`,
 - `docs/PROMPTS.md` – base prompt for model 4o (edit this for parsing rules).
 - `docs/FOUR_O_REQUEST.md` – how requests to 4o are formed.
 - `docs/LOCATIONS.md` – list of standard venues used when parsing events.
+- `docs/RECURRING_EVENTS.md` – design notes for repeating events.
 - `CHANGELOG.md` – project history.
 
 Each added event stores the original announcement text in a Telegraph page. The link is shown when the event is added and in the `/events` listing. Events may also contain ticket prices and a purchase link. Use the edit button in `/events` to change any field.
