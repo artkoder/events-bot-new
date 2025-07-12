@@ -676,6 +676,7 @@ async def upload_ics(event: Event, db: Database) -> str | None:
 async def post_ics_asset(event: Event, db: Database, bot: Bot) -> tuple[str, int] | None:
     channel = await get_asset_channel(db)
     if not channel:
+        logging.info("no asset channel configured")
         return None
     try:
         content = await build_ics_content(db, event)
@@ -698,6 +699,7 @@ async def post_ics_asset(event: Event, db: Database, bot: Bot) -> tuple[str, int
             parse_mode="HTML",
         )
         url = build_channel_post_url(channel, msg.message_id)
+        logging.info("posted ics to asset channel: %s", url)
         return url, msg.message_id
     except Exception as e:
         logging.error("failed to post ics to asset channel: %s", e)
@@ -723,6 +725,7 @@ async def add_calendar_button(event: Event, bot: Bot):
             message_id=event.source_message_id,
             reply_markup=markup,
         )
+        logging.info("calendar button set for post %s", event.source_post_url)
     except Exception as e:
         logging.error("failed to set calendar button: %s", e)
 
@@ -1737,7 +1740,9 @@ async def add_events_from_text(
     source_message_id: int | None = None,
 ) -> list[tuple[Event, bool, list[str], str]]:
     try:
+        logging.info("LLM parse start (%d chars)", len(text))
         parsed = await parse_event_via_4o(text)
+        logging.info("LLM returned %d events", len(parsed))
     except Exception as e:
         logging.error("LLM error: %s", e)
         if raise_exc:
@@ -1748,6 +1753,12 @@ async def add_events_from_text(
     first = True
     links_iter = iter(extract_links_from_html(html_text) if html_text else [])
     for data in parsed:
+        logging.info(
+            "processing event candidate: %s on %s %s",
+            data.get("title"),
+            data.get("date"),
+            data.get("time"),
+        )
         date_str = data.get("date", "") or ""
         end_date = data.get("end_date") or None
         if end_date and ".." in end_date:
@@ -1835,6 +1846,9 @@ async def add_events_from_text(
 
             async with db.get_session() as session:
                 saved, added = await upsert_event(session, event)
+            logging.info(
+                "event %s with id %s", "added" if added else "updated", saved.id
+            )
 
             media_arg = media if first else None
             upload_info = ""
@@ -1857,6 +1871,7 @@ async def add_events_from_text(
                 if not saved.ics_url:
                     ics = await upload_ics(saved, db)
                     if ics:
+                        logging.info("ICS saved for event %s: %s", saved.id, ics)
                         async with db.get_session() as session:
                             obj = await session.get(Event, saved.id)
                             if obj:
@@ -1866,6 +1881,9 @@ async def add_events_from_text(
                         posted = await post_ics_asset(saved, db, bot)
                         if posted:
                             url_p, msg_id = posted
+                            logging.info(
+                                "asset post %s for event %s", url_p, saved.id
+                            )
                             async with db.get_session() as session:
                                 obj = await session.get(Event, saved.id)
                                 if obj:
@@ -1875,6 +1893,7 @@ async def add_events_from_text(
                                     saved.ics_post_url = url_p
                                     saved.ics_post_id = msg_id
                             await add_calendar_button(saved, bot)
+                            logging.info("calendar button added for event %s", saved.id)
                 res = await create_source_page(
                     saved.title or "Event",
                     saved.source_text,
@@ -1894,15 +1913,18 @@ async def add_events_from_text(
                         url, path = res
                         upload_info = ""
                         photo_count = 0
+                    logging.info("telegraph page %s", url)
                     async with db.get_session() as session:
                         saved.telegraph_url = url
                         saved.telegraph_path = path
                         saved.photo_count = photo_count
                         session.add(saved)
                         await session.commit()
+            logging.info("syncing month page %s", saved.date[:7])
             await sync_month_page(db, saved.date[:7])
             w_start = weekend_start_for_date(datetime.fromisoformat(saved.date).date())
             if w_start:
+                logging.info("syncing weekend page %s", w_start.isoformat())
                 await sync_weekend_page(db, w_start.isoformat())
 
             lines = [
@@ -3503,14 +3525,23 @@ pending_media_groups: dict[str, list[tuple[bytes, str]]] = {}
 
 
 async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
-    logging.info("forwarded message from %s", message.from_user.id)
+    logging.info(
+        "received forwarded message %s from %s",
+        message.message_id,
+        message.from_user.id,
+    )
     text = message.text or message.caption
     images = await extract_images(message, bot)
+    logging.info(
+        "forward text len=%d photos=%d",
+        len(text or ""),
+        len(images or []),
+    )
     media: list[tuple[bytes, str]] | None = None
     if message.media_group_id:
         gid = message.media_group_id
         if gid in processed_media_groups:
-            logging.debug("skip already processed album %s", gid)
+            logging.info("skip already processed album %s", gid)
             return
         if not text:
             if images:
@@ -3518,7 +3549,7 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
                 buf = pending_media_groups.setdefault(gid, [])
                 if len(buf) < 3:
                     buf.extend(images[: 3 - len(buf)])
-            logging.debug("waiting for caption in album %s", gid)
+            logging.info("waiting for caption in album %s", gid)
             return
         stored = pending_media_groups.pop(gid, [])
         if len(stored) < 3 and images:
@@ -3528,12 +3559,12 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
         processed_media_groups.add(gid)
     else:
         if not text:
-            logging.debug("forwarded message has no text")
+            logging.info("forwarded message has no text")
             return
         media = images[:3] if images else None
     async with db.get_session() as session:
         if not await session.get(User, message.from_user.id):
-            logging.debug("user %s not registered", message.from_user.id)
+            logging.info("user %s not registered", message.from_user.id)
             return
     link = None
     if message.forward_from_chat and message.forward_from_message_id:
@@ -3542,7 +3573,7 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
         async with db.get_session() as session:
             ch = await session.get(Channel, chat.id)
             allowed = ch.is_registered if ch else False
-        logging.debug("forward from chat %s allowed=%s", chat.id, allowed)
+        logging.info("forward from chat %s allowed=%s", chat.id, allowed)
         if allowed:
             if chat.username:
                 link = f"https://t.me/{chat.username}/{msg_id}"
@@ -3553,6 +3584,9 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
                 else:
                     cid = cid.lstrip("-")
                 link = f"https://t.me/c/{cid}/{msg_id}"
+        if link:
+            logging.info("source post url %s", link)
+    logging.info("parsing forwarded text via LLM")
     results = await add_events_from_text(
         db,
         text,
