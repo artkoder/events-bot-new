@@ -1924,7 +1924,7 @@ async def test_event_title_link(tmp_path: Path):
         )
         await session.commit()
 
-    _, content = await main.build_month_page_content(db, "2025-07")
+    _, content = await main.build_month_page_content(db, FUTURE_DATE[:7])
     h4 = next(n for n in content if n.get("tag") == "h4")
     children = h4["children"]
     assert any(isinstance(c, dict) and c.get("tag") == "a" for c in children)
@@ -1952,7 +1952,7 @@ async def test_emoji_not_duplicated(tmp_path: Path):
         )
         await session.commit()
 
-    _, content = await main.build_month_page_content(db, "2025-07")
+    _, content = await main.build_month_page_content(db, FUTURE_DATE[:7])
     h4 = next(n for n in content if n.get("tag") == "h4")
     text = "".join(
         c if isinstance(c, str) else "".join(c.get("children", []))
@@ -1991,7 +1991,7 @@ async def test_spacing_after_headers(tmp_path: Path):
         )
         await session.commit()
 
-    _, content = await main.build_month_page_content(db, "2025-07")
+    _, content = await main.build_month_page_content(db, FUTURE_DATE[:7])
     idx = next(
         i
         for i, n in enumerate(content)
@@ -2017,7 +2017,7 @@ async def test_event_spacing(tmp_path: Path):
                 title="One",
                 description="d",
                 source_text="s",
-                date="2025-07-10",
+                date=FUTURE_DATE,
                 time="18:00",
                 location_name="Hall",
             )
@@ -2027,14 +2027,14 @@ async def test_event_spacing(tmp_path: Path):
                 title="Two",
                 description="d",
                 source_text="s",
-                date="2025-07-10",
+                date=FUTURE_DATE,
                 time="19:00",
                 location_name="Hall",
             )
         )
         await session.commit()
 
-    _, content = await main.build_month_page_content(db, "2025-07")
+    _, content = await main.build_month_page_content(db, FUTURE_DATE[:7])
     indices = [i for i, n in enumerate(content) if n.get("tag") == "h4"]
     assert content[indices[0] + 1].get("tag") == "p"
 
