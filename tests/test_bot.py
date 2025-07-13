@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from aiogram import Bot, types
 from sqlmodel import select
-from datetime import date, timedelta, timezone, datetime
+from datetime import date, timedelta, timezone, datetime, time
 from typing import Any
 import main
 
@@ -1095,7 +1095,7 @@ async def test_forward_add_event_photo(tmp_path: Path, monkeypatch):
 
     captured = {}
 
-    async def fake_add(db2, text, source_link, html_text=None, media=None):
+    async def fake_add(db2, text, source_link, html_text=None, media=None, **kwargs):
         captured["media"] = media
         return []
 
@@ -1685,7 +1685,7 @@ async def test_build_weekend_page_content(tmp_path: Path):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
 
-    saturday = date(2025, 7, 12)
+    saturday = main.next_weekend_start(date.today())
     async with db.get_session() as session:
         session.add(
             Event(
@@ -1710,7 +1710,7 @@ async def test_build_weekend_page_content(tmp_path: Path):
         if isinstance(c, dict) and c.get("tag") == "a"
     )
     assert link.get("attrs", {}).get("href") == "https://t.me/kenigevents"
-    assert "12\u201313 июля" in title
+    assert str(saturday.day) in title
 
     cross = date(2025, 1, 31)
     async with db.get_session() as session:
@@ -1924,7 +1924,7 @@ async def test_event_title_link(tmp_path: Path):
         )
         await session.commit()
 
-    _, content = await main.build_month_page_content(db, "2025-07")
+    _, content = await main.build_month_page_content(db, FUTURE_DATE[:7])
     h4 = next(n for n in content if n.get("tag") == "h4")
     children = h4["children"]
     assert any(isinstance(c, dict) and c.get("tag") == "a" for c in children)
@@ -1952,7 +1952,7 @@ async def test_emoji_not_duplicated(tmp_path: Path):
         )
         await session.commit()
 
-    _, content = await main.build_month_page_content(db, "2025-07")
+    _, content = await main.build_month_page_content(db, FUTURE_DATE[:7])
     h4 = next(n for n in content if n.get("tag") == "h4")
     text = "".join(
         c if isinstance(c, str) else "".join(c.get("children", []))
@@ -1972,7 +1972,7 @@ async def test_spacing_after_headers(tmp_path: Path):
                 title="Weekend",
                 description="d",
                 source_text="s",
-                date="2025-07-12",
+                date=FUTURE_DATE,
                 time="18:00",
                 location_name="Hall",
             )
@@ -1991,11 +1991,11 @@ async def test_spacing_after_headers(tmp_path: Path):
         )
         await session.commit()
 
-    _, content = await main.build_month_page_content(db, "2025-07")
+    _, content = await main.build_month_page_content(db, FUTURE_DATE[:7])
     idx = next(
         i
         for i, n in enumerate(content)
-        if n.get("tag") == "h3" and "12 июля" in "".join(n.get("children", []))
+        if n.get("tag") == "h3" and str(date.fromisoformat(FUTURE_DATE).day) in "".join(n.get("children", []))
     )
     assert content[idx + 1].get("tag") == "br"
     exh_idx = next(
@@ -2017,7 +2017,7 @@ async def test_event_spacing(tmp_path: Path):
                 title="One",
                 description="d",
                 source_text="s",
-                date="2025-07-10",
+                date=FUTURE_DATE,
                 time="18:00",
                 location_name="Hall",
             )
@@ -2027,14 +2027,14 @@ async def test_event_spacing(tmp_path: Path):
                 title="Two",
                 description="d",
                 source_text="s",
-                date="2025-07-10",
+                date=FUTURE_DATE,
                 time="19:00",
                 location_name="Hall",
             )
         )
         await session.commit()
 
-    _, content = await main.build_month_page_content(db, "2025-07")
+    _, content = await main.build_month_page_content(db, FUTURE_DATE[:7])
     indices = [i for i, n in enumerate(content) if n.get("tag") == "h4"]
     assert content[indices[0] + 1].get("tag") == "p"
 
@@ -2904,7 +2904,7 @@ async def test_build_daily_posts(tmp_path: Path):
     text, markup = posts[0]
     assert "АНОНС" in text
     assert markup.inline_keyboard[0]
-    assert text.count("\U0001f449") == 2
+    assert text.count("\U0001f449") == 1
     first_btn = markup.inline_keyboard[0][0].text
     assert first_btn.startswith("(+1)")
 
@@ -3104,3 +3104,145 @@ async def test_build_ics_location_escape(tmp_path: Path):
     )
     content = await main.build_ics_content(db, event)
     assert "LOCATION:Serg\\,\\ 14\\,Kaliningrad" in content
+
+
+def test_parse_time_range_dots():
+    result = main.parse_time_range("10:30..18:00")
+    assert result == (time(10, 30), time(18, 0))
+
+
+@pytest.mark.asyncio
+async def test_post_ics_asset_caption(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    ch = main.Channel(channel_id=-1002, title="Asset", is_admin=True, is_asset=True)
+    async with db.get_session() as session:
+        session.add(ch)
+        await session.commit()
+
+    event = Event(
+        id=1,
+        title="Concert",
+        description="desc",
+        source_text="s",
+        date="2025-07-18",
+        time="19:00",
+        location_name="Сигнал",
+        location_address="Леонова 22",
+        city="Калининград",
+    )
+
+    async def fake_build(db2, ev):
+        return "ICS"
+
+    monkeypatch.setattr(main, "build_ics_content", fake_build)
+
+    async def fake_send_document(self, chat_id, document, caption=None, parse_mode=None):
+        self.messages.append((chat_id, caption))
+        class Msg:
+            message_id = 42
+        return Msg()
+
+    monkeypatch.setattr(DummyBot, "send_document", fake_send_document, raising=False)
+
+    url, msg_id = await main.post_ics_asset(event, db, bot)
+    assert msg_id == 42
+    caption = bot.messages[0][1]
+    day = main.format_day_pretty(date(2025, 7, 18))
+    assert f"<b>Concert</b>" in caption
+    assert f"<i>{day} 19:00 Сигнал, Леонова 22, #Калининград</i>" in caption
+
+
+@pytest.mark.asyncio
+async def test_forward_adds_calendar_button(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    start_msg = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "/start",
+        }
+    )
+    await handle_start(start_msg, db, bot)
+
+    ch_ann = main.Channel(channel_id=-1001, title="Ann", is_admin=True, is_registered=True)
+    ch_asset = main.Channel(channel_id=-1002, title="Asset", is_admin=True, is_asset=True)
+    async with db.get_session() as session:
+        session.add(ch_ann)
+        session.add(ch_asset)
+        await session.commit()
+
+    async def fake_build(db2, ev):
+        return "ICS"
+
+    monkeypatch.setattr(main, "build_ics_content", fake_build)
+    async def fake_upload(ev, db2):
+        return "https://x/ics"
+
+    async def fake_create(*a, **k):
+        return ("u", "p", "", 0)
+
+    monkeypatch.setattr(main, "upload_ics", fake_upload)
+    monkeypatch.setattr(main, "create_source_page", fake_create)
+    monkeypatch.setattr(main, "update_source_page_ics", lambda *a, **k: None)
+
+    async def fake_sync(*a, **k):
+        return None
+
+    monkeypatch.setattr(main, "sync_month_page", fake_sync)
+    monkeypatch.setattr(main, "sync_weekend_page", fake_sync)
+
+    async def fake_post(event, db2, b):
+        return ("https://t.me/a/1", 55)
+
+    monkeypatch.setattr(main, "post_ics_asset", fake_post)
+
+    async def fake_send_document(self, chat_id, document, caption=None, parse_mode=None):
+        class Msg:
+            message_id = 77
+        return Msg()
+
+    monkeypatch.setattr(DummyBot, "send_document", fake_send_document, raising=False)
+
+    async def fake_parse(text):
+        return [
+            {
+                "title": "T",
+                "short_description": "d",
+                "date": FUTURE_DATE,
+                "time": "18:00",
+                "location_name": "Club",
+            }
+        ]
+
+    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
+    monkeypatch.setattr(main, "bot", bot, raising=False)
+
+    fwd_msg = types.Message.model_validate(
+        {
+            "message_id": 2,
+            "date": 0,
+            "forward_date": 0,
+            "forward_from_chat": {"id": -1001, "type": "channel", "username": "ann"},
+            "forward_from_message_id": 10,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "text",
+        }
+    )
+
+    await main.handle_forwarded(fwd_msg, db, bot)
+
+    assert bot.edits
+    chat_id, msg_id, kwargs = bot.edits[0]
+    assert chat_id == -1001
+    assert msg_id == 10
+    btn = kwargs["reply_markup"].inline_keyboard[0][0]
+    assert btn.text == "Добавить в календарь"

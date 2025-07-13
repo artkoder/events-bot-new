@@ -39,6 +39,8 @@ ICS_CONTENT_DISP_TEMPLATE = 'inline; filename="{name}"'
 ICS_CALNAME = "kenigevents"
 
 
+
+
 def fold_unicode_line(line: str, limit: int = 74) -> str:
     """Return a folded iCalendar line without splitting UTF-8 code points."""
     encoded = line.encode("utf-8")
@@ -110,8 +112,21 @@ class Channel(SQLModel, table=True):
     username: Optional[str] = None
     is_admin: bool = False
     is_registered: bool = False
+    is_asset: bool = False
     daily_time: Optional[str] = None
     last_daily: Optional[str] = None
+
+
+def build_channel_post_url(ch: Channel, message_id: int) -> str:
+    """Return https://t.me/... link for a channel message."""
+    if ch.username:
+        return f"https://t.me/{ch.username}/{message_id}"
+    cid = str(ch.channel_id)
+    if cid.startswith("-100"):
+        cid = cid[4:]
+    else:
+        cid = cid.lstrip("-")
+    return f"https://t.me/c/{cid}/{message_id}"
 
 
 class Setting(SQLModel, table=True):
@@ -143,6 +158,10 @@ class Event(SQLModel, table=True):
     telegraph_url: Optional[str] = None
     ics_url: Optional[str] = None
     source_post_url: Optional[str] = None
+    ics_post_url: Optional[str] = None
+    ics_post_id: Optional[int] = None
+    source_chat_id: Optional[int] = None
+    source_message_id: Optional[int] = None
     photo_count: int = 0
     added_at: datetime = Field(default_factory=datetime.utcnow)
 
@@ -228,6 +247,22 @@ class Database:
                 await conn.exec_driver_sql(
                     "ALTER TABLE event ADD COLUMN ics_url VARCHAR"
                 )
+            if "ics_post_url" not in cols:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE event ADD COLUMN ics_post_url VARCHAR"
+                )
+            if "ics_post_id" not in cols:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE event ADD COLUMN ics_post_id INTEGER"
+                )
+            if "source_chat_id" not in cols:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE event ADD COLUMN source_chat_id INTEGER"
+                )
+            if "source_message_id" not in cols:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE event ADD COLUMN source_message_id INTEGER"
+                )
 
             result = await conn.exec_driver_sql("PRAGMA table_info(channel)")
             cols = [r[1] for r in result.fetchall()]
@@ -238,6 +273,10 @@ class Database:
             if "last_daily" not in cols:
                 await conn.exec_driver_sql(
                     "ALTER TABLE channel ADD COLUMN last_daily VARCHAR"
+                )
+            if "is_asset" not in cols:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE channel ADD COLUMN is_asset BOOLEAN DEFAULT 0"
                 )
 
     def get_session(self) -> AsyncSession:
@@ -291,6 +330,30 @@ def get_supabase_client() -> Client | None:
     if _supabase_client is None and SUPABASE_URL and SUPABASE_KEY:
         _supabase_client = create_client(SUPABASE_URL, SUPABASE_KEY)
     return _supabase_client
+
+
+async def get_asset_channel(db: Database) -> Channel | None:
+    async with db.get_session() as session:
+        result = await session.execute(
+            select(Channel).where(Channel.is_asset.is_(True))
+        )
+        return result.scalars().first()
+
+
+def build_asset_caption(event: Event, day: date) -> str:
+    """Return HTML caption for a calendar asset post."""
+    loc = html.escape(event.location_name or "")
+    addr = event.location_address
+    if addr and event.city:
+        addr = strip_city_from_address(addr, event.city)
+    if addr:
+        loc += f", {html.escape(addr)}"
+    if event.city:
+        loc += f", #{html.escape(event.city)}"
+    return (
+        f"<b>{html.escape(event.title)}</b>\n"
+        f"<i>{format_day_pretty(day)} {event.time} {loc}</i>"
+    )
 
 
 def validate_offset(value: str) -> bool:
@@ -350,6 +413,26 @@ def strip_city_from_address(address: str | None, city: str | None) -> str | None
     return addr
 
 
+def canonicalize_date(value: str) -> str | None:
+    """Return ISO date string if value parses as date or ``None``."""
+    value = value.split("..", 1)[0].strip()
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(value).isoformat()
+    except ValueError:
+        parsed = parse_events_date(value, timezone.utc)
+        return parsed.isoformat() if parsed else None
+
+
+def parse_iso_date(value: str) -> date | None:
+    """Return ``date`` parsed from ISO string or ``None``."""
+    try:
+        return date.fromisoformat(value.split("..", 1)[0])
+    except Exception:
+        return None
+
+
 ICS_LABEL = "Добавить в календарь на телефоне (ICS)"
 MONTH_NAV_START = "<!--month-nav-start-->"
 MONTH_NAV_END = "<!--month-nav-end-->"
@@ -362,9 +445,12 @@ FOOTER_LINK_HTML = (
 
 
 def parse_time_range(value: str) -> tuple[time, time | None] | None:
-    """Return start and optional end time from text like '10:00' or '10:00-12:00'."""
+    """Return start and optional end time from text like ``10:00`` or ``10:00-12:00``.
+
+    Accepts ``-`` as well as ``..`` or ``—``/``–`` between times.
+    """
     value = value.strip()
-    parts = [p.strip() for p in value.split("-", 1)]
+    parts = re.split(r"\s*(?:-|–|—|\.\.\.?|…)+\s*", value, maxsplit=1)
     try:
         start = datetime.strptime(parts[0], "%H:%M").time()
     except ValueError:
@@ -486,12 +572,12 @@ async def build_ics_content(db: Database, event: Event) -> str:
     if not time_range:
         raise ValueError("bad time")
     start_t, end_t = time_range
-    start_dt = datetime.combine(
-        datetime.fromisoformat(event.date),
-        start_t,
-    )
+    date_obj = parse_iso_date(event.date)
+    if not date_obj:
+        raise ValueError("bad date")
+    start_dt = datetime.combine(date_obj, start_t)
     if end_t:
-        end_dt = datetime.combine(datetime.fromisoformat(event.date), end_t)
+        end_dt = datetime.combine(date_obj, end_t)
     else:
         end_dt = start_dt + timedelta(hours=1)
 
@@ -586,10 +672,10 @@ async def upload_ics(event: Event, db: Database) -> str | None:
         logging.info("skip ics for unclear time %s", event.id)
         return None
     content = await build_ics_content(db, event)
-    try:
-        d = datetime.fromisoformat(event.date)
+    d = parse_iso_date(event.date)
+    if d:
         path = f"Event-{event.id}-{d.day:02d}-{d.month:02d}-{d.year}.ics"
-    except Exception:
+    else:
         path = f"Event-{event.id}.ics"
     try:
         logging.info("Uploading ICS to %s/%s", SUPABASE_BUCKET, path)
@@ -610,6 +696,66 @@ async def upload_ics(event: Event, db: Database) -> str | None:
     return url
 
 
+async def post_ics_asset(event: Event, db: Database, bot: Bot) -> tuple[str, int] | None:
+    channel = await get_asset_channel(db)
+    if not channel:
+        logging.info("no asset channel configured")
+        return None
+    try:
+        content = await build_ics_content(db, event)
+    except Exception as e:
+        logging.error("failed to build ics content: %s", e)
+        return None
+    d = parse_iso_date(event.date)
+    if d:
+        name = f"Event-{event.id}-{d.day:02d}-{d.month:02d}-{d.year}.ics"
+    else:
+        d = date.today()
+        name = f"Event-{event.id}.ics"
+    file = types.BufferedInputFile(content.encode("utf-8"), filename=name)
+    caption = build_asset_caption(event, d)
+    logging.info("posting ics asset to channel %s with caption %s", channel.channel_id, caption.replace('\n', ' | '))
+    try:
+        msg = await bot.send_document(
+            channel.channel_id,
+            file,
+            caption=caption,
+            parse_mode="HTML",
+        )
+        url = build_channel_post_url(channel, msg.message_id)
+        logging.info("posted ics to asset channel: %s", url)
+        return url, msg.message_id
+    except Exception as e:
+        logging.error("failed to post ics to asset channel: %s", e)
+        return None
+
+
+async def add_calendar_button(event: Event, bot: Bot):
+    """Attach calendar link button to the original channel post."""
+    if not (
+        event.source_chat_id
+        and event.source_message_id
+        and event.ics_post_url
+    ):
+        return
+    markup = types.InlineKeyboardMarkup(
+        inline_keyboard=[
+            [types.InlineKeyboardButton(text="Добавить в календарь", url=event.ics_post_url)]
+        ]
+    )
+    try:
+        await bot.edit_message_reply_markup(
+            chat_id=event.source_chat_id,
+            message_id=event.source_message_id,
+            reply_markup=markup,
+        )
+        logging.info(
+            "calendar button set for event %s post %s", event.id, event.source_post_url
+        )
+    except Exception as e:
+        logging.error("failed to set calendar button: %s", e)
+
+
 async def delete_ics(event: Event):
     client = get_supabase_client()
     if not client or not event.ics_url:
@@ -620,6 +766,37 @@ async def delete_ics(event: Event):
         client.storage.from_(SUPABASE_BUCKET).remove([path])
     except Exception as e:
         logging.error("Failed to delete ics: %s", e)
+
+
+async def delete_asset_post(event: Event, db: Database, bot: Bot):
+    if not event.ics_post_id:
+        return
+    channel = await get_asset_channel(db)
+    if not channel:
+        return
+    try:
+        await bot.delete_message(channel.channel_id, event.ics_post_id)
+    except Exception as e:
+        logging.error("failed to delete asset message: %s", e)
+
+
+async def remove_calendar_button(event: Event, bot: Bot):
+    """Remove calendar button from the original channel post."""
+    if not (event.source_chat_id and event.source_message_id):
+        return
+    try:
+        await bot.edit_message_reply_markup(
+            chat_id=event.source_chat_id,
+            message_id=event.source_message_id,
+            reply_markup=None,
+        )
+        logging.info(
+            "calendar button removed for event %s post %s",
+            event.id,
+            event.source_post_url,
+        )
+    except Exception as e:
+        logging.error("failed to remove calendar button: %s", e)
 
 
 async def parse_event_via_4o(text: str) -> list[dict]:
@@ -852,11 +1029,8 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                 await session.commit()
         if month:
             await sync_month_page(db, month)
-            w_start = (
-                weekend_start_for_date(datetime.fromisoformat(event.date).date())
-                if event
-                else None
-            )
+            d = parse_iso_date(event.date) if event else None
+            w_start = weekend_start_for_date(d) if d else None
             if w_start:
                 await sync_weekend_page(db, w_start.isoformat())
         offset = await get_tz_offset(db)
@@ -897,7 +1071,8 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                 month = event.date.split("..", 1)[0][:7]
         if event:
             await sync_month_page(db, month)
-            w_start = weekend_start_for_date(datetime.fromisoformat(event.date).date())
+            d = parse_iso_date(event.date)
+            w_start = weekend_start_for_date(d) if d else None
             if w_start:
                 await sync_weekend_page(db, w_start.isoformat())
         async with db.get_session() as session:
@@ -916,7 +1091,8 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                 month = event.date.split("..", 1)[0][:7]
         if event:
             await sync_month_page(db, month)
-            w_start = weekend_start_for_date(datetime.fromisoformat(event.date).date())
+            d = parse_iso_date(event.date)
+            w_start = weekend_start_for_date(d) if d else None
             if w_start:
                 await sync_weekend_page(db, w_start.isoformat())
         markup = types.InlineKeyboardMarkup(
@@ -952,10 +1128,23 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                     event.ics_url = url
                     await session.commit()
                     logging.info("ICS saved for event %s: %s", eid, url)
+                    posted = await post_ics_asset(event, db, bot)
+                    if posted:
+                        url_p, msg_id = posted
+                        event.ics_post_url = url_p
+                        event.ics_post_id = msg_id
+                        await session.commit()
+                        await add_calendar_button(event, bot)
                     if event.telegraph_path:
                         await update_source_page_ics(
                             event.telegraph_path, event.title or "Event", url
                         )
+                    month = event.date.split("..", 1)[0][:7]
+                    await sync_month_page(db, month)
+                    d = parse_iso_date(event.date)
+                    w_start = weekend_start_for_date(d) if d else None
+                    if w_start:
+                        await sync_weekend_page(db, w_start.isoformat())
                 else:
                     logging.warning("ICS creation failed for event %s", eid)
         if event:
@@ -970,10 +1159,21 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                 event.ics_url = None
                 await session.commit()
                 logging.info("ICS removed for event %s", eid)
+                await delete_asset_post(event, db, bot)
+                event.ics_post_url = None
+                event.ics_post_id = None
+                await session.commit()
+                await remove_calendar_button(event, bot)
                 if event.telegraph_path:
                     await update_source_page_ics(
                         event.telegraph_path, event.title or "Event", None
                     )
+                month = event.date.split("..", 1)[0][:7]
+                await sync_month_page(db, month)
+                d = parse_iso_date(event.date)
+                w_start = weekend_start_for_date(d) if d else None
+                if w_start:
+                    await sync_weekend_page(db, w_start.isoformat())
             elif event:
                 logging.debug("deleteics: no file for event %s", eid)
         if event:
@@ -990,7 +1190,8 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                 month = event.date.split("..", 1)[0][:7]
         if event:
             await sync_month_page(db, month)
-            w_start = weekend_start_for_date(datetime.fromisoformat(event.date).date())
+            d = parse_iso_date(event.date)
+            w_start = weekend_start_for_date(d) if d else None
             if w_start:
                 await sync_weekend_page(db, w_start.isoformat())
         markup = types.InlineKeyboardMarkup(
@@ -1034,6 +1235,16 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                 await session.commit()
         await send_channels_list(callback.message, db, bot, edit=True)
         await callback.answer("Removed")
+    elif data.startswith("assetunset:"):
+        cid = int(data.split(":")[1])
+        async with db.get_session() as session:
+            ch = await session.get(Channel, cid)
+            if ch and ch.is_asset:
+                ch.is_asset = False
+                logging.info("asset channel unset %s", cid)
+                await session.commit()
+        await send_channels_list(callback.message, db, bot, edit=True)
+        await callback.answer("Removed")
     elif data.startswith("set:"):
         cid = int(data.split(":")[1])
         async with db.get_session() as session:
@@ -1042,6 +1253,21 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                 ch.is_registered = True
                 logging.info("channel %s registered", cid)
                 await session.commit()
+        await send_setchannel_list(callback.message, db, bot, edit=True)
+        await callback.answer("Registered")
+    elif data.startswith("assetset:"):
+        cid = int(data.split(":")[1])
+        async with db.get_session() as session:
+            current = await session.execute(
+                select(Channel).where(Channel.is_asset.is_(True))
+            )
+            cur = current.scalars().first()
+            if cur and cur.channel_id != cid:
+                cur.is_asset = False
+            ch = await session.get(Channel, cid)
+            if ch and ch.is_admin:
+                ch.is_asset = True
+            await session.commit()
         await send_setchannel_list(callback.message, db, bot, edit=True)
         await callback.answer("Registered")
     elif data.startswith("dailyset:"):
@@ -1154,17 +1380,25 @@ async def send_channels_list(
     keyboard = []
     for ch in channels:
         name = ch.title or ch.username or str(ch.channel_id)
+        status = []
+        row: list[types.InlineKeyboardButton] = []
         if ch.is_registered:
-            lines.append(f"{name} ✅")
-            keyboard.append(
-                [
-                    types.InlineKeyboardButton(
-                        text="Cancel", callback_data=f"unset:{ch.channel_id}"
-                    )
-                ]
+            status.append("✅")
+            row.append(
+                types.InlineKeyboardButton(
+                    text="Cancel", callback_data=f"unset:{ch.channel_id}"
+                )
             )
-        else:
-            lines.append(name)
+        if ch.is_asset:
+            status.append("📅")
+            row.append(
+                types.InlineKeyboardButton(
+                    text="Asset off", callback_data=f"assetunset:{ch.channel_id}"
+                )
+            )
+        lines.append(f"{name} {' '.join(status)}".strip())
+        if row:
+            keyboard.append(row)
     if not lines:
         lines.append("No channels")
     markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard) if keyboard else None
@@ -1184,9 +1418,7 @@ async def send_setchannel_list(
                 await bot.send_message(message.chat.id, "Not authorized")
             return
         result = await session.execute(
-            select(Channel).where(
-                Channel.is_admin.is_(True), Channel.is_registered.is_(False)
-            )
+            select(Channel).where(Channel.is_admin.is_(True))
         )
         channels = result.scalars().all()
     logging.info("setchannel list: %s", [c.channel_id for c in channels])
@@ -1195,13 +1427,20 @@ async def send_setchannel_list(
     for ch in channels:
         name = ch.title or ch.username or str(ch.channel_id)
         lines.append(name)
-        keyboard.append(
-            [
+        row = []
+        if not ch.is_registered:
+            row.append(
                 types.InlineKeyboardButton(
-                    text=name, callback_data=f"set:{ch.channel_id}"
+                    text="Announce", callback_data=f"set:{ch.channel_id}"
                 )
-            ]
-        )
+            )
+        if not ch.is_asset:
+            row.append(
+                types.InlineKeyboardButton(
+                    text="Asset", callback_data=f"assetset:{ch.channel_id}"
+                )
+            )
+        keyboard.append(row)
     if not lines:
         lines.append("No channels")
     markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard) if keyboard else None
@@ -1530,9 +1769,17 @@ async def add_events_from_text(
     media: list[tuple[bytes, str]] | tuple[bytes, str] | None = None,
     *,
     raise_exc: bool = False,
+    source_chat_id: int | None = None,
+    source_message_id: int | None = None,
+    bot: Bot | None = None,
 ) -> list[tuple[Event, bool, list[str], str]]:
+    logging.info(
+        "add_events_from_text start: len=%d source=%s", len(text), source_link
+    )
     try:
+        logging.info("LLM parse start (%d chars)", len(text))
         parsed = await parse_event_via_4o(text)
+        logging.info("LLM returned %d events", len(parsed))
     except Exception as e:
         logging.error("LLM error: %s", e)
         if raise_exc:
@@ -1543,15 +1790,23 @@ async def add_events_from_text(
     first = True
     links_iter = iter(extract_links_from_html(html_text) if html_text else [])
     for data in parsed:
-        date_str = data.get("date", "") or ""
-        end_date = data.get("end_date") or None
-        if end_date and ".." in end_date:
-            end_date = end_date.split("..", 1)[-1].strip()
-        if ".." in date_str:
-            start, maybe_end = [p.strip() for p in date_str.split("..", 1)]
-            date_str = start
-            if not end_date:
-                end_date = maybe_end
+        logging.info(
+            "processing event candidate: %s on %s %s",
+            data.get("title"),
+            data.get("date"),
+            data.get("time"),
+        )
+        date_raw = data.get("date", "") or ""
+        end_date_raw = data.get("end_date") or None
+        if end_date_raw and ".." in end_date_raw:
+            end_date_raw = end_date_raw.split("..", 1)[-1].strip()
+        if ".." in date_raw:
+            start, maybe_end = [p.strip() for p in date_raw.split("..", 1)]
+            date_raw = start
+            if not end_date_raw:
+                end_date_raw = maybe_end
+        date_str = canonicalize_date(date_raw)
+        end_date = canonicalize_date(end_date_raw) if end_date_raw else None
 
         addr = data.get("location_address")
         city = data.get("city")
@@ -1576,14 +1831,13 @@ async def add_events_from_text(
             pushkin_card=bool(data.get("pushkin_card")),
             source_text=text,
             source_post_url=source_link,
+            source_chat_id=source_chat_id,
+            source_message_id=source_message_id,
         )
 
         if base_event.event_type == "выставка" and not base_event.end_date:
-            try:
-                start_dt = date.fromisoformat(base_event.date)
-            except ValueError:
-                start_dt = date.today()
-                base_event.date = start_dt.isoformat()
+            start_dt = parse_iso_date(base_event.date) or date.today()
+            base_event.date = start_dt.isoformat()
             base_event.end_date = date(start_dt.year, 12, 31).isoformat()
 
         events_to_add = [base_event]
@@ -1592,16 +1846,22 @@ async def add_events_from_text(
             and base_event.end_date
             and base_event.end_date != base_event.date
         ):
-            try:
-                start_dt = date.fromisoformat(base_event.date)
-                end_dt = date.fromisoformat(base_event.end_date)
-            except ValueError:
-                start_dt = end_dt = None
+            start_dt = parse_iso_date(base_event.date)
+            end_dt = parse_iso_date(base_event.end_date) if base_event.end_date else None
             if start_dt and end_dt and end_dt > start_dt:
                 events_to_add = []
                 for i in range((end_dt - start_dt).days + 1):
                     day = start_dt + timedelta(days=i)
-                    copy_e = Event(**base_event.model_dump(exclude={"id", "added_at"}))
+                    copy_e = Event(
+                        **base_event.model_dump(
+                            exclude={
+                                "id",
+                                "added_at",
+                                "ics_post_url",
+                                "ics_post_id",
+                            }
+                        )
+                    )
                     copy_e.date = day.isoformat()
                     copy_e.end_date = None
                     events_to_add.append(copy_e)
@@ -1619,6 +1879,9 @@ async def add_events_from_text(
 
             async with db.get_session() as session:
                 saved, added = await upsert_event(session, event)
+            logging.info(
+                "event %s with id %s", "added" if added else "updated", saved.id
+            )
 
             media_arg = media if first else None
             upload_info = ""
@@ -1641,12 +1904,38 @@ async def add_events_from_text(
                 if not saved.ics_url:
                     ics = await upload_ics(saved, db)
                     if ics:
+                        logging.info("ICS saved for event %s: %s", saved.id, ics)
                         async with db.get_session() as session:
                             obj = await session.get(Event, saved.id)
                             if obj:
                                 obj.ics_url = ics
                                 await session.commit()
                                 saved.ics_url = ics
+                if bot and saved.ics_url and not saved.ics_post_url:
+                    posted = await post_ics_asset(saved, db, bot)
+                    if posted:
+                        url_p, msg_id = posted
+                        logging.info(
+                            "asset post %s for event %s", url_p, saved.id
+                        )
+                        async with db.get_session() as session:
+                            obj = await session.get(Event, saved.id)
+                            if obj:
+                                obj.ics_post_url = url_p
+                                obj.ics_post_id = msg_id
+                                await session.commit()
+                                saved.ics_post_url = url_p
+                                saved.ics_post_id = msg_id
+                        await add_calendar_button(saved, bot)
+                        logging.info(
+                            "calendar button added for event %s", saved.id
+                        )
+                        if saved.telegraph_path:
+                            await update_source_page_ics(
+                                saved.telegraph_path,
+                                saved.title or "Event",
+                                saved.ics_url,
+                            )
                 res = await create_source_page(
                     saved.title or "Event",
                     saved.source_text,
@@ -1666,15 +1955,19 @@ async def add_events_from_text(
                         url, path = res
                         upload_info = ""
                         photo_count = 0
+                    logging.info("telegraph page %s", url)
                     async with db.get_session() as session:
                         saved.telegraph_url = url
                         saved.telegraph_path = path
                         saved.photo_count = photo_count
                         session.add(saved)
                         await session.commit()
+            logging.info("syncing month page %s", saved.date[:7])
             await sync_month_page(db, saved.date[:7])
-            w_start = weekend_start_for_date(datetime.fromisoformat(saved.date).date())
+            d_saved = parse_iso_date(saved.date)
+            w_start = weekend_start_for_date(d_saved) if d_saved else None
             if w_start:
+                logging.info("syncing weekend page %s", w_start.isoformat())
                 await sync_weekend_page(db, w_start.isoformat())
 
             lines = [
@@ -1706,6 +1999,7 @@ async def add_events_from_text(
             status = "added" if added else "updated"
             results.append((saved, added, lines, status))
             first = False
+    logging.info("add_events_from_text finished with %d results", len(results))
     return results
 
 
@@ -1727,6 +2021,7 @@ async def handle_add_event(message: types.Message, db: Database, bot: Bot):
             html_text,
             media,
             raise_exc=True,
+            bot=bot,
         )
     except Exception as e:
         await bot.send_message(message.chat.id, f"LLM error: {e}")
@@ -1768,7 +2063,11 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
             message.chat.id, "Usage: /addevent_raw title|date|time|location"
         )
         return
-    title, date, time, location = (p.strip() for p in parts[1].split("|", 3))
+    title, date_raw, time, location = (p.strip() for p in parts[1].split("|", 3))
+    date_iso = canonicalize_date(date_raw)
+    if not date_iso:
+        await bot.send_message(message.chat.id, "Invalid date")
+        return
     images = await extract_images(message, bot)
     media = images if images else None
 
@@ -1776,7 +2075,7 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
         title=title,
         description="",
         festival=None,
-        date=date,
+        date=date_iso,
         time=time,
         location_name=location,
         source_text=parts[1],
@@ -1825,7 +2124,8 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
             session.add(event)
             await session.commit()
     await sync_month_page(db, event.date[:7])
-    w_start = weekend_start_for_date(datetime.fromisoformat(event.date).date())
+    d = parse_iso_date(event.date)
+    w_start = weekend_start_for_date(d) if d else None
     if w_start:
         await sync_weekend_page(db, w_start.isoformat())
     lines = [
@@ -2113,7 +2413,10 @@ def format_event_md(e: Event) -> str:
     if e.telegraph_url:
         cam = "\U0001f4f8" * max(0, e.photo_count)
         prefix = f"{cam} " if cam else ""
-        lines.append(f"{prefix}[подробнее]({e.telegraph_url})")
+        more_line = f"{prefix}[подробнее]({e.telegraph_url})"
+        if e.ics_post_url:
+            more_line += f" \U0001f4c5 [добавить в календарь]({e.ics_post_url})"
+        lines.append(more_line)
     loc = e.location_name
     addr = e.location_address
     if addr and e.city:
@@ -2123,9 +2426,10 @@ def format_event_md(e: Event) -> str:
     if e.city:
         loc += f", #{e.city}"
     date_part = e.date.split("..", 1)[0]
-    try:
-        day = format_day_pretty(datetime.fromisoformat(date_part).date())
-    except ValueError:
+    d = parse_iso_date(date_part)
+    if d:
+        day = format_day_pretty(d)
+    else:
         logging.error("Invalid event date: %s", e.date)
         day = e.date
     lines.append(f"_{day} {e.time} {loc}_")
@@ -2194,12 +2498,13 @@ def format_event_daily(
     if e.city:
         loc += f", #{html.escape(e.city)}"
     date_part = e.date.split("..", 1)[0]
-    try:
-        day = format_day_pretty(datetime.fromisoformat(date_part).date())
-    except ValueError:
+    d = parse_iso_date(date_part)
+    if d:
+        day = format_day_pretty(d)
+    else:
         logging.error("Invalid event date: %s", e.date)
         day = e.date
-    if weekend_url and datetime.fromisoformat(date_part).weekday() == 5:
+    if weekend_url and d and d.weekday() == 5:
         day_fmt = f'<a href="{html.escape(weekend_url)}">{day}</a>'
     else:
         day_fmt = day
@@ -2249,9 +2554,10 @@ def format_exhibition_md(e: Event) -> str:
         loc += f", #{e.city}"
     if e.end_date:
         end_part = e.end_date.split("..", 1)[0]
-        try:
-            end = format_day_pretty(datetime.fromisoformat(end_part).date())
-        except ValueError:
+        d_end = parse_iso_date(end_part)
+        if d_end:
+            end = format_day_pretty(d_end)
+        else:
             logging.error("Invalid end date: %s", e.end_date)
             end = e.end_date
         lines.append(f"_по {end}, {loc}_")
@@ -2345,23 +2651,31 @@ async def build_month_page_content(db: Database, month: str) -> tuple[str, list]
         nav_pages = result_nav.scalars().all()
 
     today = date.today()
+    today_str = today.isoformat()
     events = [
-        e for e in events if not (e.event_type == "выставка" and e.date < today.isoformat())
+        e
+        for e in events
+        if (
+            (e.end_date and e.end_date >= today_str)
+            or (not e.end_date and e.date >= today_str)
+        )
+    ]
+    events = [
+        e for e in events if not (e.event_type == "выставка" and e.date < today_str)
     ]
     exhibitions = [
         e
         for e in exhibitions
         if e.end_date
-        and e.end_date >= today.isoformat()
-        and e.date <= today.isoformat()
+        and e.end_date >= today_str
+        and e.date <= today_str
     ]
 
     by_day: dict[date, list[Event]] = {}
     for e in events:
         date_part = e.date.split("..", 1)[0]
-        try:
-            d = datetime.fromisoformat(date_part).date()
-        except ValueError:
+        d = parse_iso_date(date_part)
+        if not d:
             logging.error("Invalid date for event %s: %s", e.id, e.date)
             continue
         by_day.setdefault(d, []).append(e)
@@ -2516,7 +2830,9 @@ async def build_weekend_page_content(db: Database, start: str) -> tuple[str, lis
 
     by_day: dict[date, list[Event]] = {}
     for e in events:
-        d = date.fromisoformat(e.date)
+        d = parse_iso_date(e.date)
+        if not d:
+            continue
         by_day.setdefault(d, []).append(e)
 
     content: list[dict] = []
@@ -2738,10 +3054,7 @@ async def build_daily_posts(
     ]
     for e in events_today:
         w_url = None
-        try:
-            d = date.fromisoformat(e.date)
-        except ValueError:
-            d = None
+        d = parse_iso_date(e.date)
         if d and d.weekday() == 5:
             w = weekend_map.get(d.isoformat())
             if w:
@@ -2753,10 +3066,7 @@ async def build_daily_posts(
     lines2 = ["<b><i>ДОБАВИЛИ В АНОНС</i></b>"]
     for e in events_new:
         w_url = None
-        try:
-            d = date.fromisoformat(e.date)
-        except ValueError:
-            d = None
+        d = parse_iso_date(e.date)
         if d and d.weekday() == 5:
             w = weekend_map.get(d.isoformat())
             if w:
@@ -2904,9 +3214,11 @@ async def build_events_message(db: Database, target_date: date, tz: timezone):
     keyboard = [
         [
             types.InlineKeyboardButton(
-                text="\u274c", callback_data=f"del:{e.id}:{target_date.isoformat()}"
+                text=f"\u274c {e.id}", callback_data=f"del:{e.id}:{target_date.isoformat()}"
             ),
-            types.InlineKeyboardButton(text="\u270e", callback_data=f"edit:{e.id}"),
+            types.InlineKeyboardButton(
+                text=f"\u270e {e.id}", callback_data=f"edit:{e.id}"
+            ),
         ]
         for e in events
     ]
@@ -2948,20 +3260,16 @@ async def build_exhibitions_message(db: Database, tz: timezone):
 
     lines = []
     for e in events:
-        try:
-            start = datetime.fromisoformat(e.date).date()
-        except ValueError:
+        start = parse_iso_date(e.date)
+        if not start:
             if ".." in e.date:
-                start = datetime.fromisoformat(e.date.split("..", 1)[0]).date()
-            else:
-                logging.error("Bad start date %s for event %s", e.date, e.id)
-                continue
+                start = parse_iso_date(e.date.split("..", 1)[0])
+        if not start:
+            logging.error("Bad start date %s for event %s", e.date, e.id)
+            continue
         end = None
         if e.end_date:
-            try:
-                end = datetime.fromisoformat(e.end_date).date()
-            except ValueError:
-                end = None
+            end = parse_iso_date(e.end_date)
 
         period = ""
         if end:
@@ -2997,8 +3305,12 @@ async def build_exhibitions_message(db: Database, tz: timezone):
 
     keyboard = [
         [
-            types.InlineKeyboardButton(text="\u274c", callback_data=f"del:{e.id}:exh"),
-            types.InlineKeyboardButton(text="\u270e", callback_data=f"edit:{e.id}"),
+            types.InlineKeyboardButton(
+                text=f"\u274c {e.id}", callback_data=f"del:{e.id}:exh"
+            ),
+            types.InlineKeyboardButton(
+                text=f"\u270e {e.id}", callback_data=f"edit:{e.id}"
+            ),
         ]
         for e in events
     ]
@@ -3218,12 +3530,14 @@ async def handle_edit_message(message: types.Message, db: Database, bot: Bot):
         new_date = event.date.split("..", 1)[0]
         new_month = new_date[:7]
     await sync_month_page(db, old_month)
-    old_w = weekend_start_for_date(datetime.fromisoformat(old_date).date())
+    old_dt = parse_iso_date(old_date)
+    old_w = weekend_start_for_date(old_dt) if old_dt else None
     if old_w:
         await sync_weekend_page(db, old_w.isoformat())
     if new_month != old_month:
         await sync_month_page(db, new_month)
-    new_w = weekend_start_for_date(datetime.fromisoformat(new_date).date())
+    new_dt = parse_iso_date(new_date)
+    new_w = weekend_start_for_date(new_dt) if new_dt else None
     if new_w and new_w != old_w:
         await sync_weekend_page(db, new_w.isoformat())
     editing_sessions[message.from_user.id] = (eid, None)
@@ -3257,14 +3571,23 @@ pending_media_groups: dict[str, list[tuple[bytes, str]]] = {}
 
 
 async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
-    logging.info("forwarded message from %s", message.from_user.id)
+    logging.info(
+        "received forwarded message %s from %s",
+        message.message_id,
+        message.from_user.id,
+    )
     text = message.text or message.caption
     images = await extract_images(message, bot)
+    logging.info(
+        "forward text len=%d photos=%d",
+        len(text or ""),
+        len(images or []),
+    )
     media: list[tuple[bytes, str]] | None = None
     if message.media_group_id:
         gid = message.media_group_id
         if gid in processed_media_groups:
-            logging.debug("skip already processed album %s", gid)
+            logging.info("skip already processed album %s", gid)
             return
         if not text:
             if images:
@@ -3272,7 +3595,7 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
                 buf = pending_media_groups.setdefault(gid, [])
                 if len(buf) < 3:
                     buf.extend(images[: 3 - len(buf)])
-            logging.debug("waiting for caption in album %s", gid)
+            logging.info("waiting for caption in album %s", gid)
             return
         stored = pending_media_groups.pop(gid, [])
         if len(stored) < 3 and images:
@@ -3282,12 +3605,12 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
         processed_media_groups.add(gid)
     else:
         if not text:
-            logging.debug("forwarded message has no text")
+            logging.info("forwarded message has no text")
             return
         media = images[:3] if images else None
     async with db.get_session() as session:
         if not await session.get(User, message.from_user.id):
-            logging.debug("user %s not registered", message.from_user.id)
+            logging.info("user %s not registered", message.from_user.id)
             return
     link = None
     if message.forward_from_chat and message.forward_from_message_id:
@@ -3296,7 +3619,7 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
         async with db.get_session() as session:
             ch = await session.get(Channel, chat.id)
             allowed = ch.is_registered if ch else False
-        logging.debug("forward from chat %s allowed=%s", chat.id, allowed)
+        logging.info("forward from chat %s allowed=%s", chat.id, allowed)
         if allowed:
             if chat.username:
                 link = f"https://t.me/{chat.username}/{msg_id}"
@@ -3307,14 +3630,23 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
                 else:
                     cid = cid.lstrip("-")
                 link = f"https://t.me/c/{cid}/{msg_id}"
+        if link:
+            logging.info("source post url %s", link)
+    logging.info("parsing forwarded text via LLM")
     results = await add_events_from_text(
         db,
         text,
         link,
         message.html_text or message.caption_html,
         media,
+        source_chat_id=chat.id if link else None,
+        source_message_id=msg_id if link else None,
+        bot=bot,
     )
     logging.info("forward parsed %d events", len(results))
+    if not results:
+        logging.info("no events parsed from forwarded text")
+        return
     for saved, added, lines, status in results:
         buttons = []
         if (
@@ -3337,11 +3669,16 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
         markup = (
             types.InlineKeyboardMarkup(inline_keyboard=[buttons]) if buttons else None
         )
-        await bot.send_message(
-            message.chat.id,
-            f"Event {status}\n" + "\n".join(lines),
-            reply_markup=markup,
-        )
+        text_out = f"Event {status}\n" + "\n".join(lines)
+        logging.info("sending response for event %s", saved.id)
+        try:
+            await bot.send_message(
+                message.chat.id,
+                text_out,
+                reply_markup=markup,
+            )
+        except Exception as e:
+            logging.error("failed to send event response: %s", e)
 
 
 async def telegraph_test():
@@ -3663,7 +4000,9 @@ def create_app() -> web.Application:
         or c.data.startswith("editfield:")
         or c.data.startswith("editdone:")
         or c.data.startswith("unset:")
+        or c.data.startswith("assetunset:")
         or c.data.startswith("set:")
+        or c.data.startswith("assetset:")
         or c.data.startswith("dailyset:")
         or c.data.startswith("dailyunset:")
         or c.data.startswith("dailytime:")
