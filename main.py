@@ -706,10 +706,12 @@ async def post_ics_asset(event: Event, db: Database, bot: Bot) -> tuple[str, int
     except Exception as e:
         logging.error("failed to build ics content: %s", e)
         return None
+
     d = parse_iso_date(event.date)
     if d:
         name = f"Event-{event.id}-{d.day:02d}-{d.month:02d}-{d.year}.ics"
     else:
+
         d = date.today()
         name = f"Event-{event.id}.ics"
     file = types.BufferedInputFile(content.encode("utf-8"), filename=name)
@@ -1133,8 +1135,10 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                         )
                     month = event.date.split("..", 1)[0][:7]
                     await sync_month_page(db, month)
+
                     d = parse_iso_date(event.date)
                     w_start = weekend_start_for_date(d) if d else None
+
                     if w_start:
                         await sync_weekend_page(db, w_start.isoformat())
                 else:
@@ -1162,8 +1166,10 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                     )
                 month = event.date.split("..", 1)[0][:7]
                 await sync_month_page(db, month)
+
                 d = parse_iso_date(event.date)
                 w_start = weekend_start_for_date(d) if d else None
+
                 if w_start:
                     await sync_weekend_page(db, w_start.isoformat())
             elif event:
@@ -1763,7 +1769,9 @@ async def add_events_from_text(
     raise_exc: bool = False,
     source_chat_id: int | None = None,
     source_message_id: int | None = None,
+
     bot: Bot | None = None,
+
 ) -> list[tuple[Event, bool, list[str], str]]:
     try:
         logging.info("LLM parse start (%d chars)", len(text))
@@ -1785,6 +1793,7 @@ async def add_events_from_text(
             data.get("date"),
             data.get("time"),
         )
+
         date_raw = data.get("date", "") or ""
         end_date_raw = data.get("end_date") or None
         if end_date_raw and ".." in end_date_raw:
@@ -1796,6 +1805,7 @@ async def add_events_from_text(
                 end_date_raw = maybe_end
         date_str = canonicalize_date(date_raw)
         end_date = canonicalize_date(end_date_raw) if end_date_raw else None
+
 
         addr = data.get("location_address")
         city = data.get("city")
@@ -1900,6 +1910,7 @@ async def add_events_from_text(
                                 obj.ics_url = ics
                                 await session.commit()
                                 saved.ics_url = ics
+
                 if bot and saved.ics_url and not saved.ics_post_url:
                     posted = await post_ics_asset(saved, db, bot)
                     if posted:
@@ -1925,6 +1936,7 @@ async def add_events_from_text(
                                 saved.title or "Event",
                                 saved.ics_url,
                             )
+
                 res = await create_source_page(
                     saved.title or "Event",
                     saved.source_text,
@@ -2695,6 +2707,7 @@ async def build_month_page_content(db: Database, month: str) -> tuple[str, list]
 
     today_month = date.today().strftime("%Y-%m")
     future_pages = [p for p in nav_pages if p.month >= today_month]
+    month_nav: list[dict] = []
     if future_pages:
         nav_children = []
         for idx, p in enumerate(future_pages):
@@ -2707,15 +2720,21 @@ async def build_month_page_content(db: Database, month: str) -> tuple[str, list]
                 )
             if idx < len(future_pages) - 1:
                 nav_children.append(" ")
-        content.append({"tag": "br"})
-        content.append({"tag": "h4", "children": nav_children})
+        month_nav = [{"tag": "br"}, {"tag": "h4", "children": nav_children}]
+        content.extend(month_nav)
 
     if exhibitions:
+        if month_nav:
+            content.append({"tag": "br"})
+            content.append({"tag": "p", "children": ["\u00a0"]})
         content.append({"tag": "h3", "children": ["Постоянные выставки"]})
         content.append({"tag": "br"})
         content.append({"tag": "p", "children": ["\u00a0"]})
         for ev in exhibitions:
             content.extend(exhibition_to_nodes(ev))
+
+    if month_nav:
+        content.extend(month_nav)
 
     title = f"События Калининграда в {month_name_prepositional(month)}: полный анонс от Полюбить Калининград Анонсы"
     return title, content
@@ -3629,7 +3648,9 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
         media,
         source_chat_id=chat.id if link else None,
         source_message_id=msg_id if link else None,
+
         bot=bot,
+
     )
     logging.info("forward parsed %d events", len(results))
     for saved, added, lines, status in results:
