@@ -716,6 +716,9 @@ async def post_ics_asset(event: Event, db: Database, bot: Bot) -> tuple[str, int
         name = f"Event-{event.id}.ics"
     file = types.BufferedInputFile(content.encode("utf-8"), filename=name)
     caption = build_asset_caption(event, d)
+
+    logging.info("posting ics asset to channel %s with caption %s", channel.channel_id, caption.replace('\n', ' | '))
+
     try:
         msg = await bot.send_document(
             channel.channel_id,
@@ -750,7 +753,11 @@ async def add_calendar_button(event: Event, bot: Bot):
             message_id=event.source_message_id,
             reply_markup=markup,
         )
-        logging.info("calendar button set for post %s", event.source_post_url)
+
+        logging.info(
+            "calendar button set for event %s post %s", event.id, event.source_post_url
+        )
+
     except Exception as e:
         logging.error("failed to set calendar button: %s", e)
 
@@ -789,6 +796,13 @@ async def remove_calendar_button(event: Event, bot: Bot):
             message_id=event.source_message_id,
             reply_markup=None,
         )
+
+        logging.info(
+            "calendar button removed for event %s post %s",
+            event.id,
+            event.source_post_url,
+        )
+
     except Exception as e:
         logging.error("failed to remove calendar button: %s", e)
 
@@ -1773,6 +1787,9 @@ async def add_events_from_text(
     bot: Bot | None = None,
 
 ) -> list[tuple[Event, bool, list[str], str]]:
+    logging.info(
+        "add_events_from_text start: len=%d source=%s", len(text), source_link
+    )
     try:
         logging.info("LLM parse start (%d chars)", len(text))
         parsed = await parse_event_via_4o(text)
@@ -2000,6 +2017,7 @@ async def add_events_from_text(
             status = "added" if added else "updated"
             results.append((saved, added, lines, status))
             first = False
+    logging.info("add_events_from_text finished with %d results", len(results))
     return results
 
 
@@ -2652,6 +2670,7 @@ async def build_month_page_content(db: Database, month: str) -> tuple[str, list]
 
     today = date.today()
     today_str = today.isoformat()
+
     events = [
         e
         for e in events
@@ -2661,6 +2680,7 @@ async def build_month_page_content(db: Database, month: str) -> tuple[str, list]
         )
     ]
     events = [
+
         e for e in events if not (e.event_type == "выставка" and e.date < today_str)
     ]
     exhibitions = [
@@ -3653,6 +3673,9 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
 
     )
     logging.info("forward parsed %d events", len(results))
+    if not results:
+        logging.info("no events parsed from forwarded text")
+        return
     for saved, added, lines, status in results:
         buttons = []
         if (
@@ -3675,11 +3698,16 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
         markup = (
             types.InlineKeyboardMarkup(inline_keyboard=[buttons]) if buttons else None
         )
-        await bot.send_message(
-            message.chat.id,
-            f"Event {status}\n" + "\n".join(lines),
-            reply_markup=markup,
-        )
+        text_out = f"Event {status}\n" + "\n".join(lines)
+        logging.info("sending response for event %s", saved.id)
+        try:
+            await bot.send_message(
+                message.chat.id,
+                text_out,
+                reply_markup=markup,
+            )
+        except Exception as e:
+            logging.error("failed to send event response: %s", e)
 
 
 async def telegraph_test():
