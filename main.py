@@ -413,6 +413,26 @@ def strip_city_from_address(address: str | None, city: str | None) -> str | None
     return addr
 
 
+def canonicalize_date(value: str) -> str | None:
+    """Return ISO date string if value parses as date or ``None``."""
+    value = value.split("..", 1)[0].strip()
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(value).isoformat()
+    except ValueError:
+        parsed = parse_events_date(value, timezone.utc)
+        return parsed.isoformat() if parsed else None
+
+
+def parse_iso_date(value: str) -> date | None:
+    """Return ``date`` parsed from ISO string or ``None``."""
+    try:
+        return date.fromisoformat(value.split("..", 1)[0])
+    except Exception:
+        return None
+
+
 ICS_LABEL = "Добавить в календарь на телефоне (ICS)"
 MONTH_NAV_START = "<!--month-nav-start-->"
 MONTH_NAV_END = "<!--month-nav-end-->"
@@ -425,9 +445,12 @@ FOOTER_LINK_HTML = (
 
 
 def parse_time_range(value: str) -> tuple[time, time | None] | None:
-    """Return start and optional end time from text like '10:00' or '10:00-12:00'."""
+    """Return start and optional end time from text like ``10:00`` or ``10:00-12:00``.
+
+    Accepts ``-`` as well as ``..`` or ``—``/``–`` between times.
+    """
     value = value.strip()
-    parts = [p.strip() for p in value.split("-", 1)]
+    parts = re.split(r"\s*(?:-|–|—|\.\.\.?|…)+\s*", value, maxsplit=1)
     try:
         start = datetime.strptime(parts[0], "%H:%M").time()
     except ValueError:
@@ -549,12 +572,12 @@ async def build_ics_content(db: Database, event: Event) -> str:
     if not time_range:
         raise ValueError("bad time")
     start_t, end_t = time_range
-    start_dt = datetime.combine(
-        datetime.fromisoformat(event.date),
-        start_t,
-    )
+    date_obj = parse_iso_date(event.date)
+    if not date_obj:
+        raise ValueError("bad date")
+    start_dt = datetime.combine(date_obj, start_t)
     if end_t:
-        end_dt = datetime.combine(datetime.fromisoformat(event.date), end_t)
+        end_dt = datetime.combine(date_obj, end_t)
     else:
         end_dt = start_dt + timedelta(hours=1)
 
@@ -649,10 +672,10 @@ async def upload_ics(event: Event, db: Database) -> str | None:
         logging.info("skip ics for unclear time %s", event.id)
         return None
     content = await build_ics_content(db, event)
-    try:
-        d = datetime.fromisoformat(event.date)
+    d = parse_iso_date(event.date)
+    if d:
         path = f"Event-{event.id}-{d.day:02d}-{d.month:02d}-{d.year}.ics"
-    except Exception:
+    else:
         path = f"Event-{event.id}.ics"
     try:
         logging.info("Uploading ICS to %s/%s", SUPABASE_BUCKET, path)
@@ -683,10 +706,12 @@ async def post_ics_asset(event: Event, db: Database, bot: Bot) -> tuple[str, int
     except Exception as e:
         logging.error("failed to build ics content: %s", e)
         return None
-    try:
-        d = datetime.fromisoformat(event.date)
+
+    d = parse_iso_date(event.date)
+    if d:
         name = f"Event-{event.id}-{d.day:02d}-{d.month:02d}-{d.year}.ics"
-    except Exception:
+    else:
+
         d = date.today()
         name = f"Event-{event.id}.ics"
     file = types.BufferedInputFile(content.encode("utf-8"), filename=name)
@@ -998,11 +1023,8 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                 await session.commit()
         if month:
             await sync_month_page(db, month)
-            w_start = (
-                weekend_start_for_date(datetime.fromisoformat(event.date).date())
-                if event
-                else None
-            )
+            d = parse_iso_date(event.date) if event else None
+            w_start = weekend_start_for_date(d) if d else None
             if w_start:
                 await sync_weekend_page(db, w_start.isoformat())
         offset = await get_tz_offset(db)
@@ -1043,7 +1065,8 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                 month = event.date.split("..", 1)[0][:7]
         if event:
             await sync_month_page(db, month)
-            w_start = weekend_start_for_date(datetime.fromisoformat(event.date).date())
+            d = parse_iso_date(event.date)
+            w_start = weekend_start_for_date(d) if d else None
             if w_start:
                 await sync_weekend_page(db, w_start.isoformat())
         async with db.get_session() as session:
@@ -1062,7 +1085,8 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                 month = event.date.split("..", 1)[0][:7]
         if event:
             await sync_month_page(db, month)
-            w_start = weekend_start_for_date(datetime.fromisoformat(event.date).date())
+            d = parse_iso_date(event.date)
+            w_start = weekend_start_for_date(d) if d else None
             if w_start:
                 await sync_weekend_page(db, w_start.isoformat())
         markup = types.InlineKeyboardMarkup(
@@ -1111,7 +1135,10 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                         )
                     month = event.date.split("..", 1)[0][:7]
                     await sync_month_page(db, month)
-                    w_start = weekend_start_for_date(datetime.fromisoformat(event.date).date())
+
+                    d = parse_iso_date(event.date)
+                    w_start = weekend_start_for_date(d) if d else None
+
                     if w_start:
                         await sync_weekend_page(db, w_start.isoformat())
                 else:
@@ -1139,7 +1166,10 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                     )
                 month = event.date.split("..", 1)[0][:7]
                 await sync_month_page(db, month)
-                w_start = weekend_start_for_date(datetime.fromisoformat(event.date).date())
+
+                d = parse_iso_date(event.date)
+                w_start = weekend_start_for_date(d) if d else None
+
                 if w_start:
                     await sync_weekend_page(db, w_start.isoformat())
             elif event:
@@ -1158,7 +1188,8 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                 month = event.date.split("..", 1)[0][:7]
         if event:
             await sync_month_page(db, month)
-            w_start = weekend_start_for_date(datetime.fromisoformat(event.date).date())
+            d = parse_iso_date(event.date)
+            w_start = weekend_start_for_date(d) if d else None
             if w_start:
                 await sync_weekend_page(db, w_start.isoformat())
         markup = types.InlineKeyboardMarkup(
@@ -1762,15 +1793,19 @@ async def add_events_from_text(
             data.get("date"),
             data.get("time"),
         )
-        date_str = data.get("date", "") or ""
-        end_date = data.get("end_date") or None
-        if end_date and ".." in end_date:
-            end_date = end_date.split("..", 1)[-1].strip()
-        if ".." in date_str:
-            start, maybe_end = [p.strip() for p in date_str.split("..", 1)]
-            date_str = start
-            if not end_date:
-                end_date = maybe_end
+
+        date_raw = data.get("date", "") or ""
+        end_date_raw = data.get("end_date") or None
+        if end_date_raw and ".." in end_date_raw:
+            end_date_raw = end_date_raw.split("..", 1)[-1].strip()
+        if ".." in date_raw:
+            start, maybe_end = [p.strip() for p in date_raw.split("..", 1)]
+            date_raw = start
+            if not end_date_raw:
+                end_date_raw = maybe_end
+        date_str = canonicalize_date(date_raw)
+        end_date = canonicalize_date(end_date_raw) if end_date_raw else None
+
 
         addr = data.get("location_address")
         city = data.get("city")
@@ -1800,11 +1835,8 @@ async def add_events_from_text(
         )
 
         if base_event.event_type == "выставка" and not base_event.end_date:
-            try:
-                start_dt = date.fromisoformat(base_event.date)
-            except ValueError:
-                start_dt = date.today()
-                base_event.date = start_dt.isoformat()
+            start_dt = parse_iso_date(base_event.date) or date.today()
+            base_event.date = start_dt.isoformat()
             base_event.end_date = date(start_dt.year, 12, 31).isoformat()
 
         events_to_add = [base_event]
@@ -1813,11 +1845,8 @@ async def add_events_from_text(
             and base_event.end_date
             and base_event.end_date != base_event.date
         ):
-            try:
-                start_dt = date.fromisoformat(base_event.date)
-                end_dt = date.fromisoformat(base_event.end_date)
-            except ValueError:
-                start_dt = end_dt = None
+            start_dt = parse_iso_date(base_event.date)
+            end_dt = parse_iso_date(base_event.end_date) if base_event.end_date else None
             if start_dt and end_dt and end_dt > start_dt:
                 events_to_add = []
                 for i in range((end_dt - start_dt).days + 1):
@@ -1936,7 +1965,8 @@ async def add_events_from_text(
                         await session.commit()
             logging.info("syncing month page %s", saved.date[:7])
             await sync_month_page(db, saved.date[:7])
-            w_start = weekend_start_for_date(datetime.fromisoformat(saved.date).date())
+            d_saved = parse_iso_date(saved.date)
+            w_start = weekend_start_for_date(d_saved) if d_saved else None
             if w_start:
                 logging.info("syncing weekend page %s", w_start.isoformat())
                 await sync_weekend_page(db, w_start.isoformat())
@@ -2033,7 +2063,11 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
             message.chat.id, "Usage: /addevent_raw title|date|time|location"
         )
         return
-    title, date, time, location = (p.strip() for p in parts[1].split("|", 3))
+    title, date_raw, time, location = (p.strip() for p in parts[1].split("|", 3))
+    date_iso = canonicalize_date(date_raw)
+    if not date_iso:
+        await bot.send_message(message.chat.id, "Invalid date")
+        return
     images = await extract_images(message, bot)
     media = images if images else None
 
@@ -2041,7 +2075,7 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
         title=title,
         description="",
         festival=None,
-        date=date,
+        date=date_iso,
         time=time,
         location_name=location,
         source_text=parts[1],
@@ -2090,7 +2124,8 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
             session.add(event)
             await session.commit()
     await sync_month_page(db, event.date[:7])
-    w_start = weekend_start_for_date(datetime.fromisoformat(event.date).date())
+    d = parse_iso_date(event.date)
+    w_start = weekend_start_for_date(d) if d else None
     if w_start:
         await sync_weekend_page(db, w_start.isoformat())
     lines = [
@@ -2391,9 +2426,10 @@ def format_event_md(e: Event) -> str:
     if e.city:
         loc += f", #{e.city}"
     date_part = e.date.split("..", 1)[0]
-    try:
-        day = format_day_pretty(datetime.fromisoformat(date_part).date())
-    except ValueError:
+    d = parse_iso_date(date_part)
+    if d:
+        day = format_day_pretty(d)
+    else:
         logging.error("Invalid event date: %s", e.date)
         day = e.date
     lines.append(f"_{day} {e.time} {loc}_")
@@ -2462,12 +2498,13 @@ def format_event_daily(
     if e.city:
         loc += f", #{html.escape(e.city)}"
     date_part = e.date.split("..", 1)[0]
-    try:
-        day = format_day_pretty(datetime.fromisoformat(date_part).date())
-    except ValueError:
+    d = parse_iso_date(date_part)
+    if d:
+        day = format_day_pretty(d)
+    else:
         logging.error("Invalid event date: %s", e.date)
         day = e.date
-    if weekend_url and datetime.fromisoformat(date_part).weekday() == 5:
+    if weekend_url and d and d.weekday() == 5:
         day_fmt = f'<a href="{html.escape(weekend_url)}">{day}</a>'
     else:
         day_fmt = day
@@ -2517,9 +2554,10 @@ def format_exhibition_md(e: Event) -> str:
         loc += f", #{e.city}"
     if e.end_date:
         end_part = e.end_date.split("..", 1)[0]
-        try:
-            end = format_day_pretty(datetime.fromisoformat(end_part).date())
-        except ValueError:
+        d_end = parse_iso_date(end_part)
+        if d_end:
+            end = format_day_pretty(d_end)
+        else:
             logging.error("Invalid end date: %s", e.end_date)
             end = e.end_date
         lines.append(f"_по {end}, {loc}_")
@@ -2636,9 +2674,8 @@ async def build_month_page_content(db: Database, month: str) -> tuple[str, list]
     by_day: dict[date, list[Event]] = {}
     for e in events:
         date_part = e.date.split("..", 1)[0]
-        try:
-            d = datetime.fromisoformat(date_part).date()
-        except ValueError:
+        d = parse_iso_date(date_part)
+        if not d:
             logging.error("Invalid date for event %s: %s", e.id, e.date)
             continue
         by_day.setdefault(d, []).append(e)
@@ -2800,7 +2837,9 @@ async def build_weekend_page_content(db: Database, start: str) -> tuple[str, lis
 
     by_day: dict[date, list[Event]] = {}
     for e in events:
-        d = date.fromisoformat(e.date)
+        d = parse_iso_date(e.date)
+        if not d:
+            continue
         by_day.setdefault(d, []).append(e)
 
     content: list[dict] = []
@@ -3022,10 +3061,7 @@ async def build_daily_posts(
     ]
     for e in events_today:
         w_url = None
-        try:
-            d = date.fromisoformat(e.date)
-        except ValueError:
-            d = None
+        d = parse_iso_date(e.date)
         if d and d.weekday() == 5:
             w = weekend_map.get(d.isoformat())
             if w:
@@ -3037,10 +3073,7 @@ async def build_daily_posts(
     lines2 = ["<b><i>ДОБАВИЛИ В АНОНС</i></b>"]
     for e in events_new:
         w_url = None
-        try:
-            d = date.fromisoformat(e.date)
-        except ValueError:
-            d = None
+        d = parse_iso_date(e.date)
         if d and d.weekday() == 5:
             w = weekend_map.get(d.isoformat())
             if w:
@@ -3234,20 +3267,16 @@ async def build_exhibitions_message(db: Database, tz: timezone):
 
     lines = []
     for e in events:
-        try:
-            start = datetime.fromisoformat(e.date).date()
-        except ValueError:
+        start = parse_iso_date(e.date)
+        if not start:
             if ".." in e.date:
-                start = datetime.fromisoformat(e.date.split("..", 1)[0]).date()
-            else:
-                logging.error("Bad start date %s for event %s", e.date, e.id)
-                continue
+                start = parse_iso_date(e.date.split("..", 1)[0])
+        if not start:
+            logging.error("Bad start date %s for event %s", e.date, e.id)
+            continue
         end = None
         if e.end_date:
-            try:
-                end = datetime.fromisoformat(e.end_date).date()
-            except ValueError:
-                end = None
+            end = parse_iso_date(e.end_date)
 
         period = ""
         if end:
@@ -3508,12 +3537,14 @@ async def handle_edit_message(message: types.Message, db: Database, bot: Bot):
         new_date = event.date.split("..", 1)[0]
         new_month = new_date[:7]
     await sync_month_page(db, old_month)
-    old_w = weekend_start_for_date(datetime.fromisoformat(old_date).date())
+    old_dt = parse_iso_date(old_date)
+    old_w = weekend_start_for_date(old_dt) if old_dt else None
     if old_w:
         await sync_weekend_page(db, old_w.isoformat())
     if new_month != old_month:
         await sync_month_page(db, new_month)
-    new_w = weekend_start_for_date(datetime.fromisoformat(new_date).date())
+    new_dt = parse_iso_date(new_date)
+    new_w = weekend_start_for_date(new_dt) if new_dt else None
     if new_w and new_w != old_w:
         await sync_weekend_page(db, new_w.isoformat())
     editing_sessions[message.from_user.id] = (eid, None)

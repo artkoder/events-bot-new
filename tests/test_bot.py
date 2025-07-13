@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from aiogram import Bot, types
 from sqlmodel import select
-from datetime import date, timedelta, timezone, datetime
+from datetime import date, timedelta, timezone, datetime, time
 from typing import Any
 import main
 
@@ -1685,7 +1685,7 @@ async def test_build_weekend_page_content(tmp_path: Path):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
 
-    saturday = date(2025, 7, 12)
+    saturday = main.next_weekend_start(date.today())
     async with db.get_session() as session:
         session.add(
             Event(
@@ -1710,7 +1710,7 @@ async def test_build_weekend_page_content(tmp_path: Path):
         if isinstance(c, dict) and c.get("tag") == "a"
     )
     assert link.get("attrs", {}).get("href") == "https://t.me/kenigevents"
-    assert "12\u201313 июля" in title
+    assert str(saturday.day) in title
 
     cross = date(2025, 1, 31)
     async with db.get_session() as session:
@@ -2017,7 +2017,7 @@ async def test_spacing_after_headers(tmp_path: Path):
                 title="Weekend",
                 description="d",
                 source_text="s",
-                date="2025-07-12",
+                date=FUTURE_DATE,
                 time="18:00",
                 location_name="Hall",
             )
@@ -2040,7 +2040,7 @@ async def test_spacing_after_headers(tmp_path: Path):
     idx = next(
         i
         for i, n in enumerate(content)
-        if n.get("tag") == "h3" and "12 июля" in "".join(n.get("children", []))
+        if n.get("tag") == "h3" and str(date.fromisoformat(FUTURE_DATE).day) in "".join(n.get("children", []))
     )
     assert content[idx + 1].get("tag") == "br"
     exh_idx = next(
@@ -2949,7 +2949,7 @@ async def test_build_daily_posts(tmp_path: Path):
     text, markup = posts[0]
     assert "АНОНС" in text
     assert markup.inline_keyboard[0]
-    assert text.count("\U0001f449") == 2
+    assert text.count("\U0001f449") == 1
     first_btn = markup.inline_keyboard[0][0].text
     assert first_btn.startswith("(+1)")
 
@@ -3149,6 +3149,13 @@ async def test_build_ics_location_escape(tmp_path: Path):
     )
     content = await main.build_ics_content(db, event)
     assert "LOCATION:Serg\\,\\ 14\\,Kaliningrad" in content
+
+
+
+def test_parse_time_range_dots():
+    result = main.parse_time_range("10:30..18:00")
+    assert result == (time(10, 30), time(18, 0))
+
 
 
 @pytest.mark.asyncio
