@@ -2949,7 +2949,7 @@ async def test_build_daily_posts(tmp_path: Path):
     text, markup = posts[0]
     assert "АНОНС" in text
     assert markup.inline_keyboard[0]
-    assert text.count("\U0001f449") == 1
+    assert text.count("\U0001f449") == 2
     first_btn = markup.inline_keyboard[0][0].text
     assert first_btn.startswith("(+1)")
 
