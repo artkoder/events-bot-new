@@ -3534,20 +3534,60 @@ async def collect_page_stats(db: Database) -> list[str]:
     today = date.today()
     prev_month_start = (today.replace(day=1) - timedelta(days=1)).replace(day=1)
     prev_month = prev_month_start.strftime("%Y-%m")
-    lines: list[str] = []
+
+    prev_weekend = next_weekend_start(today - timedelta(days=7))
+    cur_month = today.strftime("%Y-%m")
+    cur_weekend = next_weekend_start(today)
+
     async with db.get_session() as session:
-        mp = await session.get(MonthPage, prev_month)
-        if mp and mp.path:
-            views = await fetch_views(mp.path)
-            if views is not None:
-                lines.append(f"{MONTHS[prev_month_start.month - 1]}: {views} просмотров")
-        prev_weekend = next_weekend_start(today - timedelta(days=7))
-        wp = await session.get(WeekendPage, prev_weekend.isoformat())
-        if wp and wp.path:
-            views = await fetch_views(wp.path)
-            if views is not None:
-                label = format_weekend_range(prev_weekend)
-                lines.append(f"{label}: {views} просмотров")
+        mp_prev = await session.get(MonthPage, prev_month)
+        wp_prev = await session.get(WeekendPage, prev_weekend.isoformat())
+
+        res_months = await session.execute(
+            select(MonthPage)
+            .where(MonthPage.month >= cur_month)
+            .order_by(MonthPage.month)
+        )
+        future_months = res_months.scalars().all()
+
+        res_weekends = await session.execute(
+            select(WeekendPage)
+            .where(WeekendPage.start >= cur_weekend.isoformat())
+            .order_by(WeekendPage.start)
+        )
+        future_weekends = res_weekends.scalars().all()
+
+    lines: list[str] = []
+
+    if mp_prev and mp_prev.path:
+        views = await fetch_views(mp_prev.path)
+        if views is not None:
+            month_dt = date.fromisoformat(mp_prev.month + "-01")
+            lines.append(f"{MONTHS_NOM[month_dt.month - 1]}: {views} просмотров")
+
+    if wp_prev and wp_prev.path:
+        views = await fetch_views(wp_prev.path)
+        if views is not None:
+            label = format_weekend_range(prev_weekend)
+            lines.append(f"{label}: {views} просмотров")
+
+    for wp in future_weekends:
+        if not wp.path:
+            continue
+        views = await fetch_views(wp.path)
+        if views is not None:
+            label = format_weekend_range(date.fromisoformat(wp.start))
+            lines.append(f"{label}: {views} просмотров")
+
+    for mp in future_months:
+        if not mp.path:
+            continue
+        views = await fetch_views(mp.path)
+        if views is not None:
+            month_dt = date.fromisoformat(mp.month + "-01")
+            lines.append(f"{MONTHS_NOM[month_dt.month - 1]}: {views} просмотров")
+
+
     return lines
 
 

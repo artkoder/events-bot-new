@@ -1731,9 +1731,19 @@ async def test_stats_pages(tmp_path: Path, monkeypatch):
     prev_month = (date.today().replace(day=1) - timedelta(days=1)).strftime("%Y-%m")
     prev_weekend = main.next_weekend_start(date.today() - timedelta(days=7))
 
+    cur_month = date.today().strftime("%Y-%m")
+    next_month = main.next_month(cur_month)
+    cur_weekend = main.next_weekend_start(date.today())
+    next_weekend = main.next_weekend_start(cur_weekend + timedelta(days=1))
+
     async with db.get_session() as session:
-        session.add(main.MonthPage(month=prev_month, url="u", path="mp"))
-        session.add(main.WeekendPage(start=prev_weekend.isoformat(), url="w", path="wp"))
+        session.add(main.MonthPage(month=prev_month, url="u", path="mp_prev"))
+        session.add(main.MonthPage(month=cur_month, url="u2", path="mp_cur"))
+        session.add(main.MonthPage(month=next_month, url="u3", path="mp_next"))
+        session.add(main.WeekendPage(start=prev_weekend.isoformat(), url="w1", path="wp_prev"))
+        session.add(main.WeekendPage(start=cur_weekend.isoformat(), url="w2", path="wp_cur"))
+        session.add(main.WeekendPage(start=next_weekend.isoformat(), url="w3", path="wp_next"))
+
         await session.commit()
 
     class DummyTG:
@@ -1741,7 +1751,17 @@ async def test_stats_pages(tmp_path: Path, monkeypatch):
             self.access_token = access_token
 
         def get_views(self, path, **_):
-            return {"mp": {"views": 100}, "wp": {"views": 50}}[path]
+
+            views = {
+                "mp_prev": {"views": 100},
+                "mp_cur": {"views": 200},
+                "mp_next": {"views": 300},
+                "wp_prev": {"views": 10},
+                "wp_cur": {"views": 20},
+                "wp_next": {"views": 30},
+            }
+            return views[path]
+
 
     monkeypatch.setenv("TELEGRAPH_TOKEN", "t")
     monkeypatch.setattr("main.Telegraph", lambda access_token=None: DummyTG(access_token))
@@ -1764,9 +1784,13 @@ async def test_stats_pages(tmp_path: Path, monkeypatch):
     })
     await handle_stats(msg, db, bot)
 
-    text = bot.messages[-1][1]
-    assert "100" in text
-    assert "50" in text
+
+    lines = bot.messages[-1][1].splitlines()
+    assert any("100" in l for l in lines)  # previous month
+    assert any("10" in l for l in lines)   # previous weekend
+    assert any("20" in l for l in lines)   # current weekend
+    assert any("300" in l for l in lines)  # future month
+
 
 
 @pytest.mark.asyncio

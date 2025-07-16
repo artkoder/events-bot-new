@@ -17,7 +17,9 @@
 | `/daily` | - | Manage daily announcement channels: cancel, change time, test send. |
 | `/exhibitions` | - | List active exhibitions similar to `/events`; each entry shows the period `c <start>` / `по <end>` and includes edit/delete buttons. |
 | `/pages` | - | Show links to Telegraph month and weekend pages. |
-| `/stats [events]` | optional `events` | Superadmin only. Show Telegraph view counts for the previous month and weekend pages. Use `events` to list event page stats. |
+
+| `/stats [events]` | optional `events` | Superadmin only. Show Telegraph view counts starting from the past month and weekend pages up to all current and future ones. Use `events` to list event page stats. |
+
 | `python main.py test_telegraph` | - | Verify Telegraph API access. Automatically creates a token if needed and prints the page URL. |
 
 Use `/addevent` to let model 4o extract fields. `/addevent_raw` lets you
