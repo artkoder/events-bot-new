@@ -1078,6 +1078,72 @@ async def test_forward_add_event(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_forward_add_event_origin(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async def fake_parse(text: str) -> list[dict]:
+        return [
+            {
+                "title": "Forwarded",
+                "short_description": "desc",
+                "date": "2025-07-16",
+                "time": "18:00",
+                "location_name": "Club",
+            }
+        ]
+
+    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None):
+        return "https://t.me/page", "p"
+
+    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.create_source_page", fake_create)
+
+    start_msg = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "/start",
+        }
+    )
+    await handle_start(start_msg, db, bot)
+
+    upd = DummyUpdate(-100123, "Chan")
+    await main.handle_my_chat_member(upd, db)
+
+    async with db.get_session() as session:
+        ch = await session.get(main.Channel, -100123)
+        ch.is_registered = True
+        await session.commit()
+
+    fwd_msg = types.Message.model_validate(
+        {
+            "message_id": 3,
+            "date": 0,
+            "forward_origin": {
+                "type": "messageOriginChannel",
+                "chat": {"id": -100123, "type": "channel", "username": "chan"},
+                "message_id": 10,
+                "date": 0,
+            },
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "Some text",
+        }
+    )
+
+    await main.handle_forwarded(fwd_msg, db, bot)
+
+    async with db.get_session() as session:
+        ev = (await session.execute(select(Event))).scalars().first()
+
+    assert ev.source_post_url == "https://t.me/chan/10"
+
+
+@pytest.mark.asyncio
 async def test_forward_add_event_photo(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
