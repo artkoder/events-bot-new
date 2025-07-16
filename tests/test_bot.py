@@ -1079,6 +1079,72 @@ async def test_forward_add_event(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_forward_add_event_origin(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async def fake_parse(text: str) -> list[dict]:
+        return [
+            {
+                "title": "Forwarded",
+                "short_description": "desc",
+                "date": "2025-07-16",
+                "time": "18:00",
+                "location_name": "Club",
+            }
+        ]
+
+    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None):
+        return "https://t.me/page", "p"
+
+    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.create_source_page", fake_create)
+
+    start_msg = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "/start",
+        }
+    )
+    await handle_start(start_msg, db, bot)
+
+    upd = DummyUpdate(-100123, "Chan")
+    await main.handle_my_chat_member(upd, db)
+
+    async with db.get_session() as session:
+        ch = await session.get(main.Channel, -100123)
+        ch.is_registered = True
+        await session.commit()
+
+    fwd_msg = types.Message.model_validate(
+        {
+            "message_id": 3,
+            "date": 0,
+            "forward_origin": {
+                "type": "messageOriginChannel",
+                "chat": {"id": -100123, "type": "channel", "username": "chan"},
+                "message_id": 10,
+                "date": 0,
+            },
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "Some text",
+        }
+    )
+
+    await main.handle_forwarded(fwd_msg, db, bot)
+
+    async with db.get_session() as session:
+        ev = (await session.execute(select(Event))).scalars().first()
+
+    assert ev.source_post_url == "https://t.me/chan/10"
+
+
+@pytest.mark.asyncio
 async def test_forward_add_event_photo(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
@@ -1665,6 +1731,7 @@ async def test_stats_pages(tmp_path: Path, monkeypatch):
 
     prev_month = (date.today().replace(day=1) - timedelta(days=1)).strftime("%Y-%m")
     prev_weekend = main.next_weekend_start(date.today() - timedelta(days=7))
+
     cur_month = date.today().strftime("%Y-%m")
     next_month = main.next_month(cur_month)
     cur_weekend = main.next_weekend_start(date.today())
@@ -1677,6 +1744,7 @@ async def test_stats_pages(tmp_path: Path, monkeypatch):
         session.add(main.WeekendPage(start=prev_weekend.isoformat(), url="w1", path="wp_prev"))
         session.add(main.WeekendPage(start=cur_weekend.isoformat(), url="w2", path="wp_cur"))
         session.add(main.WeekendPage(start=next_weekend.isoformat(), url="w3", path="wp_next"))
+
         await session.commit()
 
     class DummyTG:
@@ -1684,6 +1752,7 @@ async def test_stats_pages(tmp_path: Path, monkeypatch):
             self.access_token = access_token
 
         def get_views(self, path, **_):
+
             views = {
                 "mp_prev": {"views": 100},
                 "mp_cur": {"views": 200},
@@ -1694,10 +1763,12 @@ async def test_stats_pages(tmp_path: Path, monkeypatch):
             }
             return views[path]
 
+
     monkeypatch.setenv("TELEGRAPH_TOKEN", "t")
     monkeypatch.setattr(
         "main.Telegraph", lambda access_token=None, domain=None: DummyTG(access_token)
     )
+
 
     start_msg = types.Message.model_validate({
         "message_id": 1,
@@ -1717,11 +1788,13 @@ async def test_stats_pages(tmp_path: Path, monkeypatch):
     })
     await handle_stats(msg, db, bot)
 
+
     lines = bot.messages[-1][1].splitlines()
     assert any("100" in l for l in lines)  # previous month
     assert any("10" in l for l in lines)   # previous weekend
     assert any("20" in l for l in lines)   # current weekend
     assert any("300" in l for l in lines)  # future month
+
 
 
 @pytest.mark.asyncio
@@ -1768,9 +1841,11 @@ async def test_stats_events(tmp_path: Path, monkeypatch):
             return {"pa": {"views": 5}, "pb": {"views": 10}}[path]
 
     monkeypatch.setenv("TELEGRAPH_TOKEN", "t")
+
     monkeypatch.setattr(
         "main.Telegraph", lambda access_token=None, domain=None: DummyTG(access_token)
     )
+
 
     start_msg = types.Message.model_validate({
         "message_id": 1,
