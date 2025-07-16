@@ -52,3 +52,7 @@
 - Calendar files are posted to this channel and linked from month and weekend pages.
 - Forwarded posts from the asset channel show a calendar button.
 
+## v0.3.6 - Telegraph stats
+- `/stats` shows view counts for the previous month and recent weekend pages.
+- `/stats events` lists stats for event source pages sorted by views.
+
