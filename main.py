@@ -3515,6 +3515,112 @@ async def handle_pages(message: types.Message, db: Database, bot: Bot):
     await bot.send_message(message.chat.id, "\n".join(lines))
 
 
+
+
+async def fetch_views(path: str) -> int | None:
+    token = get_telegraph_token()
+    if not token:
+        return None
+    tg = Telegraph(access_token=token)
+    try:
+        data = await asyncio.to_thread(tg.get_views, path)
+        return int(data.get("views", 0))
+    except Exception as e:
+        logging.error("Failed to fetch views for %s: %s", path, e)
+        return None
+
+
+async def collect_page_stats(db: Database) -> list[str]:
+    today = date.today()
+    prev_month_start = (today.replace(day=1) - timedelta(days=1)).replace(day=1)
+    prev_month = prev_month_start.strftime("%Y-%m")
+    prev_weekend = next_weekend_start(today - timedelta(days=7))
+    cur_month = today.strftime("%Y-%m")
+    cur_weekend = next_weekend_start(today)
+
+    async with db.get_session() as session:
+        mp_prev = await session.get(MonthPage, prev_month)
+        wp_prev = await session.get(WeekendPage, prev_weekend.isoformat())
+
+        res_months = await session.execute(
+            select(MonthPage)
+            .where(MonthPage.month >= cur_month)
+            .order_by(MonthPage.month)
+        )
+        future_months = res_months.scalars().all()
+
+        res_weekends = await session.execute(
+            select(WeekendPage)
+            .where(WeekendPage.start >= cur_weekend.isoformat())
+            .order_by(WeekendPage.start)
+        )
+        future_weekends = res_weekends.scalars().all()
+
+    lines: list[str] = []
+
+    if mp_prev and mp_prev.path:
+        views = await fetch_views(mp_prev.path)
+        if views is not None:
+            month_dt = date.fromisoformat(mp_prev.month + "-01")
+            lines.append(f"{MONTHS_NOM[month_dt.month - 1]}: {views} просмотров")
+
+    if wp_prev and wp_prev.path:
+        views = await fetch_views(wp_prev.path)
+        if views is not None:
+            label = format_weekend_range(prev_weekend)
+            lines.append(f"{label}: {views} просмотров")
+
+    for wp in future_weekends:
+        if not wp.path:
+            continue
+        views = await fetch_views(wp.path)
+        if views is not None:
+            label = format_weekend_range(date.fromisoformat(wp.start))
+            lines.append(f"{label}: {views} просмотров")
+
+    for mp in future_months:
+        if not mp.path:
+            continue
+        views = await fetch_views(mp.path)
+        if views is not None:
+            month_dt = date.fromisoformat(mp.month + "-01")
+            lines.append(f"{MONTHS_NOM[month_dt.month - 1]}: {views} просмотров")
+
+    return lines
+
+
+async def collect_event_stats(db: Database) -> list[str]:
+    today = date.today()
+    prev_month_start = (today.replace(day=1) - timedelta(days=1)).replace(day=1)
+    async with db.get_session() as session:
+        result = await session.execute(
+            select(Event).where(
+                Event.telegraph_path.is_not(None),
+                Event.date >= prev_month_start.isoformat(),
+            )
+        )
+        events = result.scalars().all()
+    stats = []
+    for e in events:
+        if not e.telegraph_path:
+            continue
+        views = await fetch_views(e.telegraph_path)
+        if views is not None:
+            stats.append((e.telegraph_url or e.telegraph_path, views))
+    stats.sort(key=lambda x: x[1], reverse=True)
+    return [f"{url}: {v}" for url, v in stats]
+
+
+async def handle_stats(message: types.Message, db: Database, bot: Bot):
+    parts = message.text.split()
+    mode = parts[1] if len(parts) > 1 else ""
+    async with db.get_session() as session:
+        user = await session.get(User, message.from_user.id)
+        if not user or not user.is_superadmin:
+            await bot.send_message(message.chat.id, "Not authorized")
+            return
+    lines = await (collect_event_stats(db) if mode == "events" else collect_page_stats(db))
+    await bot.send_message(message.chat.id, "\n".join(lines) if lines else "No data")
 async def handle_edit_message(message: types.Message, db: Database, bot: Bot):
     state = editing_sessions.get(message.from_user.id)
     if not state:
@@ -3998,6 +4104,9 @@ def create_app() -> web.Application:
     async def pages_wrapper(message: types.Message):
         await handle_pages(message, db, bot)
 
+    async def stats_wrapper(message: types.Message):
+        await handle_stats(message, db, bot)
+
     async def edit_message_wrapper(message: types.Message):
         await handle_edit_message(message, db, bot)
 
@@ -4055,6 +4164,7 @@ def create_app() -> web.Application:
     dp.message.register(daily_wrapper, Command("daily"))
     dp.message.register(exhibitions_wrapper, Command("exhibitions"))
     dp.message.register(pages_wrapper, Command("pages"))
+    dp.message.register(stats_wrapper, Command("stats"))
     dp.message.register(
         edit_message_wrapper, lambda m: m.from_user.id in editing_sessions
     )
