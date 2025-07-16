@@ -53,6 +53,8 @@
 - Forwarded posts from the asset channel show a calendar button.
 
 ## v0.3.6 - Telegraph stats
+
 - `/stats` shows view counts for the past month and weekend pages, plus all current and upcoming ones.
+
 - `/stats events` lists stats for event source pages sorted by views.
 

@@ -3534,6 +3534,7 @@ async def collect_page_stats(db: Database) -> list[str]:
     today = date.today()
     prev_month_start = (today.replace(day=1) - timedelta(days=1)).replace(day=1)
     prev_month = prev_month_start.strftime("%Y-%m")
+
     prev_weekend = next_weekend_start(today - timedelta(days=7))
     cur_month = today.strftime("%Y-%m")
     cur_weekend = next_weekend_start(today)
@@ -3585,6 +3586,7 @@ async def collect_page_stats(db: Database) -> list[str]:
         if views is not None:
             month_dt = date.fromisoformat(mp.month + "-01")
             lines.append(f"{MONTHS_NOM[month_dt.month - 1]}: {views} просмотров")
+
 
     return lines
 
@@ -3746,25 +3748,49 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
             logging.info("user %s not registered", message.from_user.id)
             return
     link = None
+    msg_id = None
+    chat_id: int | None = None
     if message.forward_from_chat and message.forward_from_message_id:
         chat = message.forward_from_chat
         msg_id = message.forward_from_message_id
+        chat_id = chat.id
         async with db.get_session() as session:
-            ch = await session.get(Channel, chat.id)
+            ch = await session.get(Channel, chat_id)
             allowed = ch.is_registered if ch else False
-        logging.info("forward from chat %s allowed=%s", chat.id, allowed)
+        logging.info("forward from chat %s allowed=%s", chat_id, allowed)
         if allowed:
             if chat.username:
                 link = f"https://t.me/{chat.username}/{msg_id}"
             else:
-                cid = str(chat.id)
+                cid = str(chat_id)
                 if cid.startswith("-100"):
                     cid = cid[4:]
                 else:
                     cid = cid.lstrip("-")
                 link = f"https://t.me/c/{cid}/{msg_id}"
-        if link:
-            logging.info("source post url %s", link)
+    else:
+        fo = message.model_extra.get("forward_origin") if hasattr(message, "model_extra") else None
+        if isinstance(fo, dict) and fo.get("type") == "messageOriginChannel":
+            chat_data = fo.get("chat") or {}
+            chat_id = chat_data.get("id")
+            msg_id = fo.get("message_id")
+            async with db.get_session() as session:
+                ch = await session.get(Channel, chat_id)
+                allowed = ch.is_registered if ch else False
+            logging.info("forward from origin chat %s allowed=%s", chat_id, allowed)
+            if allowed:
+                username = chat_data.get("username")
+                if username:
+                    link = f"https://t.me/{username}/{msg_id}"
+                else:
+                    cid = str(chat_id)
+                    if cid.startswith("-100"):
+                        cid = cid[4:]
+                    else:
+                        cid = cid.lstrip("-")
+                    link = f"https://t.me/c/{cid}/{msg_id}"
+    if link:
+        logging.info("source post url %s", link)
     logging.info("parsing forwarded text via LLM")
     results = await add_events_from_text(
         db,
@@ -3772,7 +3798,7 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
         link,
         message.html_text or message.caption_html,
         media,
-        source_chat_id=chat.id if link else None,
+        source_chat_id=chat_id if link else None,
         source_message_id=msg_id if link else None,
 
         bot=bot,
@@ -4171,7 +4197,11 @@ def create_app() -> web.Application:
     dp.message.register(
         daily_time_wrapper, lambda m: m.from_user.id in daily_time_sessions
     )
-    dp.message.register(forward_wrapper, lambda m: bool(m.forward_date))
+    dp.message.register(
+        forward_wrapper,
+        lambda m: bool(m.forward_date)
+        or "forward_origin" in getattr(m, "model_extra", {}),
+    )
     dp.my_chat_member.register(partial(handle_my_chat_member, db=db))
 
     app = web.Application()
