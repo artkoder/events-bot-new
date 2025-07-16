@@ -3517,11 +3517,19 @@ async def handle_pages(message: types.Message, db: Database, bot: Bot):
 
 
 
-async def fetch_views(path: str) -> int | None:
+
+async def fetch_views(path: str, url: str | None = None) -> int | None:
     token = get_telegraph_token()
     if not token:
         return None
-    tg = Telegraph(access_token=token)
+    domain = "telegra.ph"
+    if url:
+        try:
+            domain = url.split("//", 1)[1].split("/", 1)[0]
+        except Exception:
+            pass
+    tg = Telegraph(access_token=token, domain=domain)
+
     try:
         data = await asyncio.to_thread(tg.get_views, path)
         return int(data.get("views", 0))
@@ -3560,13 +3568,17 @@ async def collect_page_stats(db: Database) -> list[str]:
     lines: list[str] = []
 
     if mp_prev and mp_prev.path:
-        views = await fetch_views(mp_prev.path)
+
+        views = await fetch_views(mp_prev.path, mp_prev.url)
+
         if views is not None:
             month_dt = date.fromisoformat(mp_prev.month + "-01")
             lines.append(f"{MONTHS_NOM[month_dt.month - 1]}: {views} просмотров")
 
     if wp_prev and wp_prev.path:
-        views = await fetch_views(wp_prev.path)
+
+        views = await fetch_views(wp_prev.path, wp_prev.url)
+
         if views is not None:
             label = format_weekend_range(prev_weekend)
             lines.append(f"{label}: {views} просмотров")
@@ -3574,7 +3586,9 @@ async def collect_page_stats(db: Database) -> list[str]:
     for wp in future_weekends:
         if not wp.path:
             continue
-        views = await fetch_views(wp.path)
+
+        views = await fetch_views(wp.path, wp.url)
+
         if views is not None:
             label = format_weekend_range(date.fromisoformat(wp.start))
             lines.append(f"{label}: {views} просмотров")
@@ -3582,7 +3596,9 @@ async def collect_page_stats(db: Database) -> list[str]:
     for mp in future_months:
         if not mp.path:
             continue
-        views = await fetch_views(mp.path)
+
+        views = await fetch_views(mp.path, mp.url)
+
         if views is not None:
             month_dt = date.fromisoformat(mp.month + "-01")
             lines.append(f"{MONTHS_NOM[month_dt.month - 1]}: {views} просмотров")
@@ -3606,7 +3622,9 @@ async def collect_event_stats(db: Database) -> list[str]:
     for e in events:
         if not e.telegraph_path:
             continue
-        views = await fetch_views(e.telegraph_path)
+
+        views = await fetch_views(e.telegraph_path, e.telegraph_url)
+
         if views is not None:
             stats.append((e.telegraph_url or e.telegraph_path, views))
     stats.sort(key=lambda x: x[1], reverse=True)

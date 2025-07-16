@@ -798,7 +798,8 @@ async def test_telegraph_test(monkeypatch, capsys):
 
     monkeypatch.setenv("TELEGRAPH_TOKEN", "t")
     monkeypatch.setattr(
-        "main.Telegraph", lambda access_token=None: DummyTG(access_token)
+        "main.Telegraph",
+        lambda access_token=None, domain=None: DummyTG(access_token),
     )
 
     await telegraph_test()
@@ -823,7 +824,7 @@ async def test_create_source_page_photo(monkeypatch):
 
     monkeypatch.setenv("TELEGRAPH_TOKEN", "t")
     monkeypatch.setattr(
-        "main.Telegraph", lambda access_token=None: DummyTG(access_token)
+        "main.Telegraph", lambda access_token=None, domain=None: DummyTG(access_token)
     )
 
     res = await main.create_source_page(
@@ -870,7 +871,7 @@ async def test_create_source_page_photo_catbox(monkeypatch):
 
     monkeypatch.setenv("TELEGRAPH_TOKEN", "t")
     monkeypatch.setattr(
-        "main.Telegraph", lambda access_token=None: DummyTG(access_token)
+        "main.Telegraph", lambda access_token=None, domain=None: DummyTG(access_token)
     )
     monkeypatch.setattr(main, "ClientSession", DummySession)
     monkeypatch.setattr(main, "CATBOX_ENABLED", True)
@@ -895,7 +896,7 @@ async def test_create_source_page_normalizes_hashtags(monkeypatch):
 
     monkeypatch.setenv("TELEGRAPH_TOKEN", "t")
     monkeypatch.setattr(
-        "main.Telegraph", lambda access_token=None: DummyTG(access_token)
+        "main.Telegraph", lambda access_token=None, domain=None: DummyTG(access_token)
     )
 
     res = await main.create_source_page("Title", "#1_августа text", None)
@@ -1764,7 +1765,10 @@ async def test_stats_pages(tmp_path: Path, monkeypatch):
 
 
     monkeypatch.setenv("TELEGRAPH_TOKEN", "t")
-    monkeypatch.setattr("main.Telegraph", lambda access_token=None: DummyTG(access_token))
+    monkeypatch.setattr(
+        "main.Telegraph", lambda access_token=None, domain=None: DummyTG(access_token)
+    )
+
 
     start_msg = types.Message.model_validate({
         "message_id": 1,
@@ -1837,7 +1841,11 @@ async def test_stats_events(tmp_path: Path, monkeypatch):
             return {"pa": {"views": 5}, "pb": {"views": 10}}[path]
 
     monkeypatch.setenv("TELEGRAPH_TOKEN", "t")
-    monkeypatch.setattr("main.Telegraph", lambda access_token=None: DummyTG(access_token))
+
+    monkeypatch.setattr(
+        "main.Telegraph", lambda access_token=None, domain=None: DummyTG(access_token)
+    )
+
 
     start_msg = types.Message.model_validate({
         "message_id": 1,
@@ -2061,7 +2069,9 @@ async def test_sync_weekend_page_first_creation_includes_nav(
             updates.append(content)
 
     monkeypatch.setattr("main.get_telegraph_token", lambda: "t")
-    monkeypatch.setattr("main.Telegraph", lambda access_token=None: DummyTG())
+    monkeypatch.setattr(
+        "main.Telegraph", lambda access_token=None, domain=None: DummyTG()
+    )
 
     async with db.get_session() as session:
         session.add(WeekendPage(start=next_sat.isoformat(), url="u2", path="p2"))
@@ -2122,7 +2132,9 @@ async def test_sync_weekend_page_updates_other_pages(tmp_path: Path, monkeypatch
             edits.append(("edit", path))
 
     monkeypatch.setattr("main.get_telegraph_token", lambda: "t")
-    monkeypatch.setattr("main.Telegraph", lambda access_token=None: DummyTG())
+    monkeypatch.setattr(
+        "main.Telegraph", lambda access_token=None, domain=None: DummyTG()
+    )
 
     async with db.get_session() as session:
         session.add(WeekendPage(start=next_sat.isoformat(), url="u2", path="p2"))
@@ -2421,7 +2433,9 @@ async def test_sync_month_page_error(tmp_path: Path, monkeypatch):
             raise Exception("fail")
 
     monkeypatch.setattr("main.get_telegraph_token", lambda: "t")
-    monkeypatch.setattr("main.Telegraph", lambda access_token=None: DummyTG())
+    monkeypatch.setattr(
+        "main.Telegraph", lambda access_token=None, domain=None: DummyTG()
+    )
 
     # Should not raise
     await main.sync_month_page(db, "2025-07")
@@ -2439,7 +2453,9 @@ async def test_update_source_page_uses_content(monkeypatch):
             events["html"] = html_content
 
     monkeypatch.setattr("main.get_telegraph_token", lambda: "t")
-    monkeypatch.setattr("main.Telegraph", lambda access_token=None: DummyTG())
+    monkeypatch.setattr(
+        "main.Telegraph", lambda access_token=None, domain=None: DummyTG()
+    )
 
     await main.update_source_page("path", "Title", "new")
     html = events.get("html", "")
@@ -2460,7 +2476,9 @@ async def test_update_source_page_footer(monkeypatch):
             edited["html"] = html_content
 
     monkeypatch.setattr("main.get_telegraph_token", lambda: "t")
-    monkeypatch.setattr("main.Telegraph", lambda access_token=None: DummyTG())
+    monkeypatch.setattr(
+        "main.Telegraph", lambda access_token=None, domain=None: DummyTG()
+    )
 
     await main.update_source_page("p", "T", "text")
     html = edited.get("html", "")
@@ -2479,7 +2497,9 @@ async def test_update_source_page_normalizes_hashtags(monkeypatch):
             assert "1 августа" in html_content
 
     monkeypatch.setattr("main.get_telegraph_token", lambda: "t")
-    monkeypatch.setattr("main.Telegraph", lambda access_token=None: DummyTG())
+    monkeypatch.setattr(
+        "main.Telegraph", lambda access_token=None, domain=None: DummyTG()
+    )
 
     await main.update_source_page("p", "T", "#1_августа event")
 
@@ -2504,7 +2524,9 @@ async def test_update_source_page_ics(monkeypatch):
             edited["html"] = html_content
 
     monkeypatch.setattr("main.get_telegraph_token", lambda: "t")
-    monkeypatch.setattr("main.Telegraph", lambda access_token=None: DummyTG())
+    monkeypatch.setattr(
+        "main.Telegraph", lambda access_token=None, domain=None: DummyTG()
+    )
 
     await main.update_source_page_ics("p", "T", "http://x")
     assert "Добавить в календарь" in edited.get("html", "")
@@ -2522,7 +2544,9 @@ async def test_create_source_page_adds_nav(tmp_path: Path, monkeypatch):
             return {"url": "https://telegra.ph/test", "path": "p"}
 
     monkeypatch.setenv("TELEGRAPH_TOKEN", "t")
-    monkeypatch.setattr("main.Telegraph", lambda access_token=None: DummyTG())
+    monkeypatch.setattr(
+        "main.Telegraph", lambda access_token=None, domain=None: DummyTG()
+    )
 
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
@@ -2546,7 +2570,9 @@ async def test_create_source_page_footer(monkeypatch):
             return {"url": "https://telegra.ph/test", "path": "p"}
 
     monkeypatch.setenv("TELEGRAPH_TOKEN", "t")
-    monkeypatch.setattr("main.Telegraph", lambda access_token=None: DummyTG())
+    monkeypatch.setattr(
+        "main.Telegraph", lambda access_token=None, domain=None: DummyTG()
+    )
 
     await main.create_source_page("T", "text", None)
     html = captured.get("html", "")
