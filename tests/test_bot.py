@@ -3291,6 +3291,33 @@ async def test_daily_test_send_no_record(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_build_daily_posts_split(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    today = date.today()
+    long_desc = "d" * 200
+    async with db.get_session() as session:
+        for i in range(50):
+            session.add(
+                Event(
+                    title=f"T{i}",
+                    description=long_desc,
+                    source_text="s",
+                    date=today.isoformat(),
+                    time="18:00",
+                    location_name="Hall",
+                )
+            )
+        await session.commit()
+
+    posts = await main.build_daily_posts(db, timezone.utc)
+    assert len(posts) > 1
+    for text, _ in posts:
+        assert len(text) <= 4096
+
+
+@pytest.mark.asyncio
 async def test_upload_ics_content_type(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()

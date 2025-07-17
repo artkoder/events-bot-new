@@ -1452,7 +1452,8 @@ async def send_setchannel_list(
                     text="Asset", callback_data=f"assetset:{ch.channel_id}"
                 )
             )
-        keyboard.append(row)
+        if row:
+            keyboard.append(row)
     if not lines:
         lines.append("No channels")
     markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard) if keyboard else None
@@ -2379,6 +2380,20 @@ def recent_cutoff(tz: timezone, now: datetime | None = None) -> datetime:
     return start_local.astimezone(timezone.utc).replace(tzinfo=None)
 
 
+def split_text(text: str, limit: int = 4096) -> list[str]:
+    """Split text into chunks without breaking lines."""
+    parts: list[str] = []
+    while len(text) > limit:
+        cut = text.rfind("\n", 0, limit)
+        if cut == -1:
+            cut = limit
+        parts.append(text[:cut])
+        text = text[cut:].lstrip("\n")
+    if text:
+        parts.append(text)
+    return parts
+
+
 def is_recent(e: Event, tz: timezone | None = None, now: datetime | None = None) -> bool:
     if e.added_at is None or e.silent:
         return False
@@ -2674,21 +2689,12 @@ async def build_month_page_content(db: Database, month: str) -> tuple[str, list]
     events = [
         e
         for e in events
-        if (
-            (e.end_date and e.end_date >= today_str)
-            or (not e.end_date and e.date >= today_str)
-        )
-    ]
-    events = [
-
-        e for e in events if not (e.event_type == "выставка" and e.date < today_str)
+        if not (e.event_type == "выставка" and e.date < today_str)
     ]
     exhibitions = [
         e
         for e in exhibitions
-        if e.end_date
-        and e.end_date >= today_str
-        and e.date <= today_str
+        if e.end_date and e.date <= today_str
     ]
 
     by_day: dict[date, list[Event]] = {}
@@ -3133,7 +3139,15 @@ async def build_daily_posts(
     combined = section1 + "\n\n\n" + section2
     if len(combined) <= 4096:
         return [(combined, markup)]
-    return [(section1, None), (section2, markup)]
+
+    posts: list[tuple[str, types.InlineKeyboardMarkup | None]] = []
+    for part in split_text(section1):
+        posts.append((part, None))
+    section2_parts = split_text(section2)
+    for part in section2_parts[:-1]:
+        posts.append((part, None))
+    posts.append((section2_parts[-1], markup))
+    return posts
 
 
 async def send_daily_announcement(
@@ -3147,13 +3161,19 @@ async def send_daily_announcement(
 ):
     posts = await build_daily_posts(db, tz, now)
     for text, markup in posts:
-        await bot.send_message(
-            channel_id,
-            text,
-            reply_markup=markup,
-            parse_mode="HTML",
-            disable_web_page_preview=True,
-        )
+        try:
+            await bot.send_message(
+                channel_id,
+                text,
+                reply_markup=markup,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+        except Exception as e:
+            logging.error("daily send failed for %s: %s", channel_id, e)
+            if "message is too long" in str(e):
+                continue
+            raise
     if record and now is None:
         async with db.get_session() as session:
             ch = await session.get(Channel, channel_id)
