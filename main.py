@@ -1440,7 +1440,7 @@ async def send_setchannel_list(
         name = ch.title or ch.username or str(ch.channel_id)
         lines.append(name)
         row = []
-        if not ch.is_registered:
+        if ch.daily_time is None:
             row.append(
                 types.InlineKeyboardButton(
                     text="Announce", callback_data=f"set:{ch.channel_id}"
