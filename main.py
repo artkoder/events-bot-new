@@ -17,7 +17,9 @@ import imghdr
 from difflib import SequenceMatcher
 import json
 import re
-from telegraph import Telegraph
+
+from telegraph import Telegraph, TelegraphException
+
 from telegraph.api import json_dumps
 from functools import partial
 import asyncio
@@ -2834,28 +2836,26 @@ async def sync_month_page(db: Database, month: str, update_links: bool = True):
                 created = True
 
             events, exhibitions, nav_pages = await get_month_data(db, month)
-            title, content = await build_month_page_content(
-                db, month, events, exhibitions, nav_pages
-            )
-            size = len(json_dumps(content).encode("utf-8"))
 
-            if size <= TELEGRAPH_PAGE_LIMIT:
-                if not page.path:
-                    data = await asyncio.to_thread(tg.create_page, title, content=content)
-                    page.url = data.get("url")
-                    page.path = data.get("path")
-                else:
-                    await asyncio.to_thread(
-                        tg.edit_page, page.path, title=title, content=content
+
+            async def split_and_update():
+                """Split the month into two pages keeping the first path."""
+                # Find maximum number of events that fit on the first page
+                low, high, best = 1, len(events) - 1, 1
+                while low <= high:
+                    mid = (low + high) // 2
+                    _, c = await build_month_page_content(
+                        db, month, events[:mid], exhibitions, nav_pages
                     )
-                page.url2 = None
-                page.path2 = None
-                logging.info("%s month page %s", "Created" if created else "Edited", month)
-                await session.commit()
-            else:
-                mid = len(events) // 2 or 1
-                first = events[:mid]
-                second = events[mid:]
+                    if len(json_dumps(c).encode("utf-8")) <= TELEGRAPH_PAGE_LIMIT:
+                        best = mid
+                        low = mid + 1
+                    else:
+                        high = mid - 1
+
+                first = events[:best]
+                second = events[best:]
+
                 title2, content2 = await build_month_page_content(
                     db, month, second, exhibitions, nav_pages
                 )
@@ -2879,8 +2879,43 @@ async def sync_month_page(db: Database, month: str, update_links: bool = True):
                     await asyncio.to_thread(
                         tg.edit_page, page.path, title=title1, content=content1
                     )
-                logging.info("%s month page %s split into two", "Created" if created else "Edited", month)
+                logging.info(
+                    "%s month page %s split into two", "Created" if created else "Edited", month
+                )
                 await session.commit()
+
+
+            title, content = await build_month_page_content(
+                db, month, events, exhibitions, nav_pages
+            )
+            size = len(json_dumps(content).encode("utf-8"))
+
+
+            try:
+                if size <= TELEGRAPH_PAGE_LIMIT:
+                    if not page.path:
+                        data = await asyncio.to_thread(tg.create_page, title, content=content)
+                        page.url = data.get("url")
+                        page.path = data.get("path")
+                    else:
+                        await asyncio.to_thread(
+                            tg.edit_page, page.path, title=title, content=content
+                        )
+                    page.url2 = None
+                    page.path2 = None
+                    logging.info(
+                        "%s month page %s", "Created" if created else "Edited", month
+                    )
+                    await session.commit()
+                else:
+                    await split_and_update()
+            except TelegraphException as e:
+                if "CONTENT_TOO_BIG" in str(e):
+                    logging.warning("Month page %s too big, splitting", month)
+                    await split_and_update()
+                else:
+                    raise
+
         except Exception as e:
             logging.error("Failed to sync month page %s: %s", month, e)
 

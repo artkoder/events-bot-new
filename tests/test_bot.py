@@ -11,6 +11,8 @@ from datetime import date, timedelta, timezone, datetime, time
 from typing import Any
 import main
 from telegraph.api import json_dumps
+from telegraph import TelegraphException
+
 
 from main import (
     Database,
@@ -2488,6 +2490,55 @@ async def test_sync_month_page_split(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_sync_month_page_split_on_error(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.get_session() as session:
+        for day in range(1, 4):
+            session.add(
+                Event(
+                    title=f"E{day}",
+                    description="d",
+                    source_text="s",
+                    date=f"2025-07-{day:02d}",
+                    time="10:00",
+                    location_name="L",
+                )
+            )
+        session.add(MonthPage(month="2025-07", url="u1", path="p1"))
+        await session.commit()
+
+    calls = {"created": [], "edited": 0}
+
+    class DummyTG:
+        def __init__(self, access_token=None):
+            pass
+
+        def create_page(self, title, content=None, **_):
+            calls["created"].append(json_dumps(content))
+            idx = len(calls["created"]) + 1
+            return {"url": f"u{idx}", "path": f"p{idx}"}
+
+        def edit_page(self, path, title=None, content=None):
+            calls["edited"] += 1
+            if path == "p1" and calls["edited"] == 1:
+                raise TelegraphException("CONTENT_TOO_BIG")
+
+    monkeypatch.setattr("main.get_telegraph_token", lambda: "t")
+    monkeypatch.setattr("main.Telegraph", lambda access_token=None, domain=None: DummyTG())
+
+    await main.sync_month_page(db, "2025-07")
+
+    async with db.get_session() as session:
+        page = await session.get(MonthPage, "2025-07")
+    assert page.url == "u1"
+    assert page.url2 is not None
+    assert len(calls["created"]) == 1
+
+
+@pytest.mark.asyncio
+
 async def test_update_source_page_uses_content(monkeypatch):
     events = {}
 
