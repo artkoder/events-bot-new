@@ -17,7 +17,9 @@ import imghdr
 from difflib import SequenceMatcher
 import json
 import re
+
 from telegraph import Telegraph, TelegraphException
+
 from telegraph.api import json_dumps
 from functools import partial
 import asyncio
@@ -2704,6 +2706,46 @@ async def get_month_data(db: Database, month: str):
         result_nav = await session.execute(select(MonthPage).order_by(MonthPage.month))
         nav_pages = result_nav.scalars().all()
 
+    return events, exhibitions, nav_pages
+
+
+async def build_month_page_content(
+    db: Database,
+    month: str,
+    events: list[Event] | None = None,
+    exhibitions: list[Event] | None = None,
+    nav_pages: list[MonthPage] | None = None,
+    continuation_url: str | None = None,
+) -> tuple[str, list]:
+    if events is None or exhibitions is None or nav_pages is None:
+        events, exhibitions, nav_pages = await get_month_data(db, month)
+
+    today = date.today()
+    if month == today.strftime("%Y-%m"):
+        today_str = today.isoformat()
+        events = [
+            e
+            for e in events
+            if e.date.split("..", 1)[0] >= today_str
+        ]
+        exhibitions = [
+            e for e in exhibitions if e.end_date and e.end_date >= today_str
+        ]
+
+    return events, exhibitions, nav_pages
+
+
+async def build_month_page_content(
+    db: Database,
+    month: str,
+    events: list[Event] | None = None,
+    exhibitions: list[Event] | None = None,
+    nav_pages: list[MonthPage] | None = None,
+    continuation_url: str | None = None,
+) -> tuple[str, list]:
+    if events is None or exhibitions is None or nav_pages is None:
+        events, exhibitions, nav_pages = await get_month_data(db, month)
+
     today = date.today()
     if month == today.strftime("%Y-%m"):
         today_str = today.isoformat()
@@ -2853,6 +2895,7 @@ async def sync_month_page(db: Database, month: str, update_links: bool = True):
 
             events, exhibitions, nav_pages = await get_month_data(db, month)
 
+
             async def split_and_update():
                 """Split the month into two pages keeping the first path."""
                 # Find maximum number of events that fit on the first page
@@ -2899,10 +2942,12 @@ async def sync_month_page(db: Database, month: str, update_links: bool = True):
                 )
                 await session.commit()
 
+
             title, content = await build_month_page_content(
                 db, month, events, exhibitions, nav_pages
             )
             size = len(json_dumps(content).encode("utf-8"))
+
 
             try:
                 if size <= TELEGRAPH_PAGE_LIMIT:
@@ -2928,6 +2973,7 @@ async def sync_month_page(db: Database, month: str, update_links: bool = True):
                     await split_and_update()
                 else:
                     raise
+
         except Exception as e:
             logging.error("Failed to sync month page %s: %s", month, e)
 
