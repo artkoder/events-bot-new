@@ -13,6 +13,7 @@ import main
 from telegraph.api import json_dumps
 from telegraph import TelegraphException
 
+
 from main import (
     Database,
     PendingUser,
@@ -2565,6 +2566,7 @@ async def test_sync_month_page_split_on_error(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
+
 async def test_current_month_omits_past_events(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
@@ -2612,6 +2614,7 @@ async def test_current_month_omits_past_events(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
+
 async def test_update_source_page_uses_content(monkeypatch):
     events = {}
 
