@@ -60,3 +60,7 @@ For Sunday:
 ```
 
 If a day has no events the header is omitted.
+
+When the generated content exceeds roughly 64&nbsp;kB the bot splits the month
+into two Telegraph pages. The first page ends with a bold link to the
+continuation.
