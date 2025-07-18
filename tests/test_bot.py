@@ -2615,6 +2615,76 @@ async def test_current_month_omits_past_events(tmp_path: Path, monkeypatch):
 
 @pytest.mark.asyncio
 
+async def test_month_page_split_filters_past_events(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.get_session() as session:
+        for day in range(5, 8):
+            session.add(
+                Event(
+                    title=f"P{day}",
+                    description="d",
+                    source_text="s",
+                    date=f"2025-07-{day:02d}",
+                    time="10:00",
+                    location_name="L",
+                )
+            )
+        for day in range(19, 23):
+            session.add(
+                Event(
+                    title=f"F{day}",
+                    description="d",
+                    source_text="s",
+                    date=f"2025-07-{day:02d}",
+                    time="10:00",
+                    location_name="L",
+                )
+            )
+        await session.commit()
+
+    class FakeDate(date):
+        @classmethod
+        def today(cls):
+            return date(2025, 7, 19)
+
+    created: list[list] = []
+
+    class DummyTG:
+        def __init__(self, access_token=None):
+            pass
+
+        def create_page(self, title, content=None, **_):
+            created.append(content)
+            idx = len(created)
+            return {"url": f"u{idx}", "path": f"p{idx}"}
+
+        def edit_page(self, path, title=None, content=None):
+            created.append(content)
+
+    monkeypatch.setattr(main, "date", FakeDate)
+    monkeypatch.setattr(main, "get_telegraph_token", lambda: "t")
+    monkeypatch.setattr(
+        "main.Telegraph", lambda access_token=None, domain=None: DummyTG()
+    )
+    monkeypatch.setattr(main, "TELEGRAPH_PAGE_LIMIT", 10)
+
+    await main.sync_month_page(db, "2025-07")
+
+    assert len(created) == 2
+    titles = [
+        c
+        for n in created[0]
+        if n.get("tag") == "h4"
+        for c in n.get("children", [])
+        if isinstance(c, str)
+    ]
+    assert not any(t.startswith("P") for t in titles)
+
+
+@pytest.mark.asyncio
+
 async def test_update_source_page_uses_content(monkeypatch):
     events = {}
 

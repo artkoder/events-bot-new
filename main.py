@@ -2747,7 +2747,39 @@ async def build_month_page_content(
         events, exhibitions, nav_pages = await get_month_data(db, month)
 
     today = date.today()
+    if month == today.strftime("%Y-%m"):
+        today_str = today.isoformat()
+        events = [
+            e
+            for e in events
+            if e.date.split("..", 1)[0] >= today_str
+        ]
+        exhibitions = [
+            e for e in exhibitions if e.end_date and e.end_date >= today_str
+        ]
+
+    return events, exhibitions, nav_pages
+
+
+async def build_month_page_content(
+    db: Database,
+    month: str,
+    events: list[Event] | None = None,
+    exhibitions: list[Event] | None = None,
+    nav_pages: list[MonthPage] | None = None,
+    continuation_url: str | None = None,
+) -> tuple[str, list]:
+    if events is None or exhibitions is None or nav_pages is None:
+        events, exhibitions, nav_pages = await get_month_data(db, month)
+
+    today = date.today()
     today_str = today.isoformat()
+
+    if month == today.strftime("%Y-%m"):
+        events = [e for e in events if e.date.split("..", 1)[0] >= today_str]
+        exhibitions = [
+            e for e in exhibitions if e.end_date and e.end_date >= today_str
+        ]
 
     events = [
         e
