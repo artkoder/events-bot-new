@@ -17,7 +17,8 @@ import imghdr
 from difflib import SequenceMatcher
 import json
 import re
-from telegraph import Telegraph
+from telegraph import Telegraph, TelegraphException
+from telegraph.api import json_dumps
 from functools import partial
 import asyncio
 import contextlib
@@ -68,6 +69,10 @@ daily_time_sessions: dict[int, int] = {}
 # toggle for uploading images to catbox
 CATBOX_ENABLED: bool = False
 _supabase_client: Client | None = None
+
+# Telegraph API rejects pages over ~64&nbsp;kB. Use a slightly lower limit
+# to decide when month pages should be split into two parts.
+TELEGRAPH_PAGE_LIMIT = 60000
 
 
 class IPv4AiohttpSession(AiohttpSession):
@@ -171,6 +176,8 @@ class MonthPage(SQLModel, table=True):
     month: str = Field(primary_key=True)
     url: str
     path: str
+    url2: Optional[str] = None
+    path2: Optional[str] = None
 
 
 class WeekendPage(SQLModel, table=True):
@@ -277,6 +284,17 @@ class Database:
             if "is_asset" not in cols:
                 await conn.exec_driver_sql(
                     "ALTER TABLE channel ADD COLUMN is_asset BOOLEAN DEFAULT 0"
+                )
+
+            result = await conn.exec_driver_sql("PRAGMA table_info(monthpage)")
+            cols = [r[1] for r in result.fetchall()]
+            if "url2" not in cols:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE monthpage ADD COLUMN url2 VARCHAR"
+                )
+            if "path2" not in cols:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE monthpage ADD COLUMN path2 VARCHAR"
                 )
 
     def get_session(self) -> AsyncSession:
@@ -2486,7 +2504,10 @@ def format_event_daily(
     if e.source_post_url:
         title = f'<a href="{html.escape(e.source_post_url)}">{title}</a>'
     title = f"<b>{prefix}{emoji_part}{title}</b>".strip()
-    lines = [title, html.escape(e.description.strip())]
+    desc = html.escape(e.description.strip())
+    if e.telegraph_url:
+        desc += f', <a href="{html.escape(e.telegraph_url)}">подробнее</a>'
+    lines = [title, desc]
     if e.pushkin_card:
         lines.append("\u2705 Пушкинская карта")
 
@@ -2656,8 +2677,8 @@ def exhibition_to_nodes(e: Event) -> list[dict]:
     nodes.append({"tag": "p", "children": ["\u00a0"]})
     return nodes
 
-
-async def build_month_page_content(db: Database, month: str) -> tuple[str, list]:
+async def get_month_data(db: Database, month: str):
+    """Return events, exhibitions and nav pages for the given month."""
     start = date.fromisoformat(month + "-01")
     next_start = (start.replace(day=28) + timedelta(days=4)).replace(day=1)
     async with db.get_session() as session:
@@ -2684,7 +2705,39 @@ async def build_month_page_content(db: Database, month: str) -> tuple[str, list]
         nav_pages = result_nav.scalars().all()
 
     today = date.today()
+    if month == today.strftime("%Y-%m"):
+        today_str = today.isoformat()
+        events = [
+            e
+            for e in events
+            if e.date.split("..", 1)[0] >= today_str
+        ]
+        exhibitions = [
+            e for e in exhibitions if e.end_date and e.end_date >= today_str
+        ]
+
+    return events, exhibitions, nav_pages
+
+
+async def build_month_page_content(
+    db: Database,
+    month: str,
+    events: list[Event] | None = None,
+    exhibitions: list[Event] | None = None,
+    nav_pages: list[MonthPage] | None = None,
+    continuation_url: str | None = None,
+) -> tuple[str, list]:
+    if events is None or exhibitions is None or nav_pages is None:
+        events, exhibitions, nav_pages = await get_month_data(db, month)
+
+    today = date.today()
     today_str = today.isoformat()
+
+    if month == today.strftime("%Y-%m"):
+        events = [e for e in events if e.date.split("..", 1)[0] >= today_str]
+        exhibitions = [
+            e for e in exhibitions if e.end_date and e.end_date >= today_str
+        ]
 
     events = [
         e
@@ -2762,6 +2815,22 @@ async def build_month_page_content(db: Database, month: str) -> tuple[str, list]
     if month_nav:
         content.extend(month_nav)
 
+    if continuation_url:
+        content.append({"tag": "br"})
+        content.append({"tag": "p", "children": ["\u00a0"]})
+        content.append(
+            {
+                "tag": "h3",
+                "children": [
+                    {
+                        "tag": "a",
+                        "attrs": {"href": continuation_url},
+                        "children": [f"{month_name_nominative(month)} продолжение"],
+                    }
+                ],
+            }
+        )
+
     title = f"События Калининграда в {month_name_prepositional(month)}: полный анонс от Полюбить Калининград Анонсы"
     return title, content
 
@@ -2777,21 +2846,88 @@ async def sync_month_page(db: Database, month: str, update_links: bool = True):
         try:
             created = False
             if not page:
-                title, content = await build_month_page_content(db, month)
-                data = await asyncio.to_thread(tg.create_page, title, content=content)
-                page = MonthPage(
-                    month=month, url=data.get("url"), path=data.get("path")
-                )
+                page = MonthPage(month=month, url="", path="")
                 session.add(page)
                 await session.commit()
                 created = True
 
-            title, content = await build_month_page_content(db, month)
-            await asyncio.to_thread(
-                tg.edit_page, page.path, title=title, content=content
+            events, exhibitions, nav_pages = await get_month_data(db, month)
+
+            async def split_and_update():
+                """Split the month into two pages keeping the first path."""
+                # Find maximum number of events that fit on the first page
+                low, high, best = 1, len(events) - 1, 1
+                while low <= high:
+                    mid = (low + high) // 2
+                    _, c = await build_month_page_content(
+                        db, month, events[:mid], exhibitions, nav_pages
+                    )
+                    if len(json_dumps(c).encode("utf-8")) <= TELEGRAPH_PAGE_LIMIT:
+                        best = mid
+                        low = mid + 1
+                    else:
+                        high = mid - 1
+
+                first = events[:best]
+                second = events[best:]
+
+                title2, content2 = await build_month_page_content(
+                    db, month, second, exhibitions, nav_pages
+                )
+                if not page.path2:
+                    data2 = await asyncio.to_thread(tg.create_page, title2, content=content2)
+                    page.url2 = data2.get("url")
+                    page.path2 = data2.get("path")
+                else:
+                    await asyncio.to_thread(
+                        tg.edit_page, page.path2, title=title2, content=content2
+                    )
+
+                title1, content1 = await build_month_page_content(
+                    db, month, first, [], nav_pages, continuation_url=page.url2
+                )
+                if not page.path:
+                    data1 = await asyncio.to_thread(tg.create_page, title1, content=content1)
+                    page.url = data1.get("url")
+                    page.path = data1.get("path")
+                else:
+                    await asyncio.to_thread(
+                        tg.edit_page, page.path, title=title1, content=content1
+                    )
+                logging.info(
+                    "%s month page %s split into two", "Created" if created else "Edited", month
+                )
+                await session.commit()
+
+            title, content = await build_month_page_content(
+                db, month, events, exhibitions, nav_pages
             )
-            logging.info("%s month page %s", "Created" if created else "Edited", month)
-            await session.commit()
+            size = len(json_dumps(content).encode("utf-8"))
+
+            try:
+                if size <= TELEGRAPH_PAGE_LIMIT:
+                    if not page.path:
+                        data = await asyncio.to_thread(tg.create_page, title, content=content)
+                        page.url = data.get("url")
+                        page.path = data.get("path")
+                    else:
+                        await asyncio.to_thread(
+                            tg.edit_page, page.path, title=title, content=content
+                        )
+                    page.url2 = None
+                    page.path2 = None
+                    logging.info(
+                        "%s month page %s", "Created" if created else "Edited", month
+                    )
+                    await session.commit()
+                else:
+                    await split_and_update()
+            except TelegraphException as e:
+                if "CONTENT_TOO_BIG" in str(e):
+                    logging.warning("Month page %s too big, splitting", month)
+                    await split_and_update()
+                else:
+                    raise
         except Exception as e:
             logging.error("Failed to sync month page %s: %s", month, e)
 
