@@ -1875,7 +1875,7 @@ async def test_stats_events(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_build_month_page_content(tmp_path: Path):
+async def test_build_month_page_content(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
 
@@ -1892,6 +1892,13 @@ async def test_build_month_page_content(tmp_path: Path):
             )
         )
         await session.commit()
+
+    class FakeDate(date):
+        @classmethod
+        def today(cls):
+            return date(2025, 7, 10)
+
+    monkeypatch.setattr(main, "date", FakeDate)
 
     title, content = await main.build_month_page_content(db, "2025-07")
     assert "июле 2025" in title
@@ -2149,7 +2156,7 @@ async def test_sync_weekend_page_updates_other_pages(tmp_path: Path, monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_missing_added_at(tmp_path: Path):
+async def test_missing_added_at(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
 
@@ -2168,12 +2175,19 @@ async def test_missing_added_at(tmp_path: Path):
         )
         await session.commit()
 
+    class FakeDate(date):
+        @classmethod
+        def today(cls):
+            return date(2025, 7, 10)
+
+    monkeypatch.setattr(main, "date", FakeDate)
+
     title, content = await main.build_month_page_content(db, "2025-07")
     assert any(n.get("tag") == "h4" for n in content)
 
 
 @pytest.mark.asyncio
-async def test_event_title_link(tmp_path: Path):
+async def test_event_title_link(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
 
@@ -2192,6 +2206,13 @@ async def test_event_title_link(tmp_path: Path):
         )
         await session.commit()
 
+    class FakeDate(date):
+        @classmethod
+        def today(cls):
+            return date(2025, 7, 10)
+
+    monkeypatch.setattr(main, "date", FakeDate)
+
     _, content = await main.build_month_page_content(db, FUTURE_DATE[:7])
     h4 = next(n for n in content if n.get("tag") == "h4")
     children = h4["children"]
@@ -2202,7 +2223,7 @@ async def test_event_title_link(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_emoji_not_duplicated(tmp_path: Path):
+async def test_emoji_not_duplicated(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
 
@@ -2219,6 +2240,13 @@ async def test_emoji_not_duplicated(tmp_path: Path):
             )
         )
         await session.commit()
+
+    class FakeDate(date):
+        @classmethod
+        def today(cls):
+            return date(2025, 7, 10)
+
+    monkeypatch.setattr(main, "date", FakeDate)
 
     _, content = await main.build_month_page_content(db, FUTURE_DATE[:7])
     h4 = next(n for n in content if n.get("tag") == "h4")
@@ -2535,6 +2563,54 @@ async def test_sync_month_page_split_on_error(tmp_path: Path, monkeypatch):
     assert page.url == "u1"
     assert page.url2 is not None
     assert len(calls["created"]) == 1
+
+
+@pytest.mark.asyncio
+
+async def test_current_month_omits_past_events(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.get_session() as session:
+        session.add(
+            Event(
+                title="Past",
+                description="d",
+                source_text="s",
+                date="2025-07-10",
+                time="10:00",
+                location_name="Hall",
+            )
+        )
+        session.add(
+            Event(
+                title="Future",
+                description="d",
+                source_text="s",
+                date="2025-07-20",
+                time="10:00",
+                location_name="Hall",
+            )
+        )
+        await session.commit()
+
+    class FakeDate(date):
+        @classmethod
+        def today(cls):
+            return date(2025, 7, 15)
+
+    monkeypatch.setattr(main, "date", FakeDate)
+
+    _, content = await main.build_month_page_content(db, "2025-07")
+    titles = [
+        c
+        for n in content
+        if n.get("tag") == "h4"
+        for c in n.get("children", [])
+        if isinstance(c, str)
+    ]
+    assert any("Future" in t for t in titles)
+    assert not any("Past" in t for t in titles)
 
 
 @pytest.mark.asyncio
