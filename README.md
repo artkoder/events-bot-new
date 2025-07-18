@@ -98,3 +98,10 @@ edits. Opening the link in a browser or the mobile client shows the latest
 content. There is no reliable API to refresh the cached preview without creating
 a new page.
 
+## Telegraph page size
+
+Telegraph rejects pages larger than about 64&nbsp;kB. When a month contains too
+many events the bot automatically splits the announcement into two pages. The
+first one ends with a prominent link "<месяц> продолжение" leading to the second
+page.
+

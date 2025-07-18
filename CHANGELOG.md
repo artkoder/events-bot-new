@@ -58,3 +58,9 @@
 
 - `/stats events` lists stats for event source pages sorted by views.
 
+## v0.3.7 - Daily links and large month pages
+
+- Daily announcements include a "подробнее" link to the original Telegraph page.
+- Month pages are split in two when the content exceeds ~64&nbsp;kB. The first
+  half ends with a link to the continuation page.
+
