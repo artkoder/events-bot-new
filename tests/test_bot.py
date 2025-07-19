@@ -13,6 +13,7 @@ import main
 from telegraph.api import json_dumps
 from telegraph import TelegraphException
 
+
 from main import (
     Database,
     PendingUser,
@@ -1897,6 +1898,7 @@ async def test_build_month_page_content(tmp_path: Path, monkeypatch):
         def today(cls):
             return date(2025, 7, 10)
 
+
     class FakeDatetime(datetime):
         @classmethod
         def now(cls, tz=None):
@@ -1904,6 +1906,7 @@ async def test_build_month_page_content(tmp_path: Path, monkeypatch):
 
     monkeypatch.setattr(main, "date", FakeDate)
     monkeypatch.setattr(main, "datetime", FakeDatetime)
+
 
     title, content = await main.build_month_page_content(db, "2025-07")
     assert "июле 2025" in title
@@ -2185,6 +2188,7 @@ async def test_missing_added_at(tmp_path: Path, monkeypatch):
         def today(cls):
             return date(2025, 7, 10)
 
+
     class FakeDatetime(datetime):
         @classmethod
         def now(cls, tz=None):
@@ -2192,6 +2196,7 @@ async def test_missing_added_at(tmp_path: Path, monkeypatch):
 
     monkeypatch.setattr(main, "date", FakeDate)
     monkeypatch.setattr(main, "datetime", FakeDatetime)
+
 
     title, content = await main.build_month_page_content(db, "2025-07")
     assert any(n.get("tag") == "h4" for n in content)
@@ -2222,6 +2227,7 @@ async def test_event_title_link(tmp_path: Path, monkeypatch):
         def today(cls):
             return date(2025, 7, 10)
 
+
     class FakeDatetime(datetime):
         @classmethod
         def now(cls, tz=None):
@@ -2229,6 +2235,7 @@ async def test_event_title_link(tmp_path: Path, monkeypatch):
 
     monkeypatch.setattr(main, "date", FakeDate)
     monkeypatch.setattr(main, "datetime", FakeDatetime)
+
 
     _, content = await main.build_month_page_content(db, FUTURE_DATE[:7])
     h4 = next(n for n in content if n.get("tag") == "h4")
@@ -2263,6 +2270,7 @@ async def test_emoji_not_duplicated(tmp_path: Path, monkeypatch):
         def today(cls):
             return date(2025, 7, 10)
 
+
     class FakeDatetime(datetime):
         @classmethod
         def now(cls, tz=None):
@@ -2270,6 +2278,7 @@ async def test_emoji_not_duplicated(tmp_path: Path, monkeypatch):
 
     monkeypatch.setattr(main, "date", FakeDate)
     monkeypatch.setattr(main, "datetime", FakeDatetime)
+
 
     _, content = await main.build_month_page_content(db, FUTURE_DATE[:7])
     h4 = next(n for n in content if n.get("tag") == "h4")
@@ -2589,6 +2598,7 @@ async def test_sync_month_page_split_on_error(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
+
 async def test_current_month_omits_past_events(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
@@ -2621,6 +2631,7 @@ async def test_current_month_omits_past_events(tmp_path: Path, monkeypatch):
         def today(cls):
             return date(2025, 7, 15)
 
+
     class FakeDatetime(datetime):
         @classmethod
         def now(cls, tz=None):
@@ -2628,6 +2639,7 @@ async def test_current_month_omits_past_events(tmp_path: Path, monkeypatch):
 
     monkeypatch.setattr(main, "date", FakeDate)
     monkeypatch.setattr(main, "datetime", FakeDatetime)
+
 
     _, content = await main.build_month_page_content(db, "2025-07")
     titles = [
@@ -2642,6 +2654,7 @@ async def test_current_month_omits_past_events(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
+
 async def test_month_page_split_filters_past_events(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
@@ -2676,10 +2689,12 @@ async def test_month_page_split_filters_past_events(tmp_path: Path, monkeypatch)
         def today(cls):
             return date(2025, 7, 19)
 
+
     class FakeDatetime(datetime):
         @classmethod
         def now(cls, tz=None):
             return datetime(2025, 7, 19, 12, 0, tzinfo=tz)
+
 
     created: list[list] = []
 
@@ -2696,7 +2711,9 @@ async def test_month_page_split_filters_past_events(tmp_path: Path, monkeypatch)
             created.append(content)
 
     monkeypatch.setattr(main, "date", FakeDate)
+
     monkeypatch.setattr(main, "datetime", FakeDatetime)
+
     monkeypatch.setattr(main, "get_telegraph_token", lambda: "t")
     monkeypatch.setattr(
         "main.Telegraph", lambda access_token=None, domain=None: DummyTG()
@@ -2717,6 +2734,7 @@ async def test_month_page_split_filters_past_events(tmp_path: Path, monkeypatch)
 
 
 @pytest.mark.asyncio
+
 async def test_update_source_page_uses_content(monkeypatch):
     events = {}
 
