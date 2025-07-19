@@ -10,6 +10,8 @@ from sqlmodel import select
 from datetime import date, timedelta, timezone, datetime, time
 from typing import Any
 import main
+from telegraph.api import json_dumps
+from telegraph import TelegraphException
 
 from main import (
     Database,
@@ -1872,7 +1874,7 @@ async def test_stats_events(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_build_month_page_content(tmp_path: Path):
+async def test_build_month_page_content(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
 
@@ -1889,6 +1891,19 @@ async def test_build_month_page_content(tmp_path: Path):
             )
         )
         await session.commit()
+
+    class FakeDate(date):
+        @classmethod
+        def today(cls):
+            return date(2025, 7, 10)
+
+    class FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2025, 7, 10, 12, 0, tzinfo=tz)
+
+    monkeypatch.setattr(main, "date", FakeDate)
+    monkeypatch.setattr(main, "datetime", FakeDatetime)
 
     title, content = await main.build_month_page_content(db, "2025-07")
     assert "июле 2025" in title
@@ -2146,7 +2161,7 @@ async def test_sync_weekend_page_updates_other_pages(tmp_path: Path, monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_missing_added_at(tmp_path: Path):
+async def test_missing_added_at(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
 
@@ -2165,12 +2180,25 @@ async def test_missing_added_at(tmp_path: Path):
         )
         await session.commit()
 
+    class FakeDate(date):
+        @classmethod
+        def today(cls):
+            return date(2025, 7, 10)
+
+    class FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2025, 7, 10, 12, 0, tzinfo=tz)
+
+    monkeypatch.setattr(main, "date", FakeDate)
+    monkeypatch.setattr(main, "datetime", FakeDatetime)
+
     title, content = await main.build_month_page_content(db, "2025-07")
     assert any(n.get("tag") == "h4" for n in content)
 
 
 @pytest.mark.asyncio
-async def test_event_title_link(tmp_path: Path):
+async def test_event_title_link(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
 
@@ -2189,6 +2217,19 @@ async def test_event_title_link(tmp_path: Path):
         )
         await session.commit()
 
+    class FakeDate(date):
+        @classmethod
+        def today(cls):
+            return date(2025, 7, 10)
+
+    class FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2025, 7, 10, 12, 0, tzinfo=tz)
+
+    monkeypatch.setattr(main, "date", FakeDate)
+    monkeypatch.setattr(main, "datetime", FakeDatetime)
+
     _, content = await main.build_month_page_content(db, FUTURE_DATE[:7])
     h4 = next(n for n in content if n.get("tag") == "h4")
     children = h4["children"]
@@ -2199,7 +2240,7 @@ async def test_event_title_link(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_emoji_not_duplicated(tmp_path: Path):
+async def test_emoji_not_duplicated(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
 
@@ -2216,6 +2257,19 @@ async def test_emoji_not_duplicated(tmp_path: Path):
             )
         )
         await session.commit()
+
+    class FakeDate(date):
+        @classmethod
+        def today(cls):
+            return date(2025, 7, 10)
+
+    class FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2025, 7, 10, 12, 0, tzinfo=tz)
+
+    monkeypatch.setattr(main, "date", FakeDate)
+    monkeypatch.setattr(main, "datetime", FakeDatetime)
 
     _, content = await main.build_month_page_content(db, FUTURE_DATE[:7])
     h4 = next(n for n in content if n.get("tag") == "h4")
@@ -2442,6 +2496,227 @@ async def test_sync_month_page_error(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_sync_month_page_split(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.get_session() as session:
+        for day in range(1, 4):
+            session.add(
+                Event(
+                    title=f"E{day}",
+                    description="d",
+                    source_text="s",
+                    date=f"2025-07-{day:02d}",
+                    time="10:00",
+                    location_name="L",
+                )
+            )
+        await session.commit()
+
+    calls = {"created": []}
+
+    class DummyTG:
+        def __init__(self, access_token=None):
+            pass
+
+        def create_page(self, title, content=None, **_):
+            calls["created"].append(json_dumps(content))
+            idx = len(calls["created"])
+            return {"url": f"u{idx}", "path": f"p{idx}"}
+
+        def edit_page(self, path, title=None, content=None):
+            pass
+
+    monkeypatch.setattr("main.get_telegraph_token", lambda: "t")
+    monkeypatch.setattr("main.Telegraph", lambda access_token=None, domain=None: DummyTG())
+    monkeypatch.setattr("main.TELEGRAPH_PAGE_LIMIT", 10)
+
+    await main.sync_month_page(db, "2025-07")
+
+    async with db.get_session() as session:
+        page = await session.get(MonthPage, "2025-07")
+    assert page.url2 is not None
+    assert len(calls["created"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_sync_month_page_split_on_error(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.get_session() as session:
+        for day in range(1, 4):
+            session.add(
+                Event(
+                    title=f"E{day}",
+                    description="d",
+                    source_text="s",
+                    date=f"2025-07-{day:02d}",
+                    time="10:00",
+                    location_name="L",
+                )
+            )
+        session.add(MonthPage(month="2025-07", url="u1", path="p1"))
+        await session.commit()
+
+    calls = {"created": [], "edited": 0}
+
+    class DummyTG:
+        def __init__(self, access_token=None):
+            pass
+
+        def create_page(self, title, content=None, **_):
+            calls["created"].append(json_dumps(content))
+            idx = len(calls["created"]) + 1
+            return {"url": f"u{idx}", "path": f"p{idx}"}
+
+        def edit_page(self, path, title=None, content=None):
+            calls["edited"] += 1
+            if path == "p1" and calls["edited"] == 1:
+                raise TelegraphException("CONTENT_TOO_BIG")
+
+    monkeypatch.setattr("main.get_telegraph_token", lambda: "t")
+    monkeypatch.setattr("main.Telegraph", lambda access_token=None, domain=None: DummyTG())
+
+    await main.sync_month_page(db, "2025-07")
+
+    async with db.get_session() as session:
+        page = await session.get(MonthPage, "2025-07")
+    assert page.url == "u1"
+    assert page.url2 is not None
+    assert len(calls["created"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_current_month_omits_past_events(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.get_session() as session:
+        session.add(
+            Event(
+                title="Past",
+                description="d",
+                source_text="s",
+                date="2025-07-10",
+                time="10:00",
+                location_name="Hall",
+            )
+        )
+        session.add(
+            Event(
+                title="Future",
+                description="d",
+                source_text="s",
+                date="2025-07-20",
+                time="10:00",
+                location_name="Hall",
+            )
+        )
+        await session.commit()
+
+    class FakeDate(date):
+        @classmethod
+        def today(cls):
+            return date(2025, 7, 15)
+
+    class FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2025, 7, 15, 12, 0, tzinfo=tz)
+
+    monkeypatch.setattr(main, "date", FakeDate)
+    monkeypatch.setattr(main, "datetime", FakeDatetime)
+
+    _, content = await main.build_month_page_content(db, "2025-07")
+    titles = [
+        c
+        for n in content
+        if n.get("tag") == "h4"
+        for c in n.get("children", [])
+        if isinstance(c, str)
+    ]
+    assert any("Future" in t for t in titles)
+    assert not any("Past" in t for t in titles)
+
+
+@pytest.mark.asyncio
+async def test_month_page_split_filters_past_events(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.get_session() as session:
+        for day in range(5, 8):
+            session.add(
+                Event(
+                    title=f"P{day}",
+                    description="d",
+                    source_text="s",
+                    date=f"2025-07-{day:02d}",
+                    time="10:00",
+                    location_name="L",
+                )
+            )
+        for day in range(19, 23):
+            session.add(
+                Event(
+                    title=f"F{day}",
+                    description="d",
+                    source_text="s",
+                    date=f"2025-07-{day:02d}",
+                    time="10:00",
+                    location_name="L",
+                )
+            )
+        await session.commit()
+
+    class FakeDate(date):
+        @classmethod
+        def today(cls):
+            return date(2025, 7, 19)
+
+    class FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2025, 7, 19, 12, 0, tzinfo=tz)
+
+    created: list[list] = []
+
+    class DummyTG:
+        def __init__(self, access_token=None):
+            pass
+
+        def create_page(self, title, content=None, **_):
+            created.append(content)
+            idx = len(created)
+            return {"url": f"u{idx}", "path": f"p{idx}"}
+
+        def edit_page(self, path, title=None, content=None):
+            created.append(content)
+
+    monkeypatch.setattr(main, "date", FakeDate)
+    monkeypatch.setattr(main, "datetime", FakeDatetime)
+    monkeypatch.setattr(main, "get_telegraph_token", lambda: "t")
+    monkeypatch.setattr(
+        "main.Telegraph", lambda access_token=None, domain=None: DummyTG()
+    )
+    monkeypatch.setattr(main, "TELEGRAPH_PAGE_LIMIT", 10)
+
+    await main.sync_month_page(db, "2025-07")
+
+    assert len(created) == 2
+    titles = [
+        c
+        for n in created[0]
+        if n.get("tag") == "h4"
+        for c in n.get("children", [])
+        if isinstance(c, str)
+    ]
+    assert not any(t.startswith("P") for t in titles)
+
+
+@pytest.mark.asyncio
 async def test_update_source_page_uses_content(monkeypatch):
     events = {}
 
@@ -2581,11 +2856,24 @@ async def test_create_source_page_footer(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_nav_limits_past(tmp_path: Path):
+async def test_nav_limits_past(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
 
-    today = date.today()
+    class FakeDate(date):
+        @classmethod
+        def today(cls):
+            return date(2025, 7, 15)
+
+    class FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2025, 7, 15, 12, 0, tzinfo=tz)
+
+    monkeypatch.setattr(main, "date", FakeDate)
+    monkeypatch.setattr(main, "datetime", FakeDatetime)
+
+    today = FakeDate.today()
     async with db.get_session() as session:
         session.add(
             Event(
@@ -2606,11 +2894,24 @@ async def test_nav_limits_past(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_nav_future_has_prev(tmp_path: Path):
+async def test_nav_future_has_prev(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
 
-    today = date.today()
+    class FakeDate(date):
+        @classmethod
+        def today(cls):
+            return date(2025, 7, 15)
+
+    class FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2025, 7, 15, 12, 0, tzinfo=tz)
+
+    monkeypatch.setattr(main, "date", FakeDate)
+    monkeypatch.setattr(main, "datetime", FakeDatetime)
+
+    today = FakeDate.today()
     future = today + timedelta(days=1)
     async with db.get_session() as session:
         session.add(
@@ -3081,10 +3382,23 @@ async def test_exhibition_auto_year_end(tmp_path: Path, monkeypatch):
     monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
     monkeypatch.setattr("main.create_source_page", fake_create)
 
+    class FakeDate(date):
+        @classmethod
+        def today(cls):
+            return date(2025, 7, 15)
+
+    class FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2025, 7, 15, 12, 0, tzinfo=tz)
+
+    monkeypatch.setattr(main, "date", FakeDate)
+    monkeypatch.setattr(main, "datetime", FakeDatetime)
+
     results = await main.add_events_from_text(db, "text", None, None, None)
     assert results
     ev = results[0][0]
-    today = date.today()
+    today = FakeDate.today()
     assert ev.date == today.isoformat()
     assert ev.end_date == date(today.year, 12, 31).isoformat()
 
@@ -3116,7 +3430,13 @@ async def test_month_links_future(tmp_path: Path, monkeypatch):
         def today(cls):
             return date(2025, 7, 15)
 
+    class FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2025, 7, 15, 12, 0, tzinfo=tz)
+
     monkeypatch.setattr(main, "date", FakeDate)
+    monkeypatch.setattr(main, "datetime", FakeDatetime)
     title, content = await main.build_month_page_content(db, "2025-07")
     found = False
     for n in content:
@@ -3130,11 +3450,24 @@ async def test_month_links_future(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_build_daily_posts(tmp_path: Path):
+async def test_build_daily_posts(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
 
-    today = date.today()
+    class FakeDate(date):
+        @classmethod
+        def today(cls):
+            return date(2025, 7, 15)
+
+    class FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2025, 7, 15, 12, 0, tzinfo=tz)
+
+    monkeypatch.setattr(main, "date", FakeDate)
+    monkeypatch.setattr(main, "datetime", FakeDatetime)
+
+    today = FakeDate.today()
     start = main.next_weekend_start(today)
     async with db.get_session() as session:
         session.add(
@@ -3189,11 +3522,24 @@ async def test_build_daily_posts(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_build_daily_posts_tomorrow(tmp_path: Path):
+async def test_build_daily_posts_tomorrow(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
 
-    today = date.today()
+    class FakeDate(date):
+        @classmethod
+        def today(cls):
+            return date(2025, 7, 15)
+
+    class FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2025, 7, 15, 12, 0, tzinfo=tz)
+
+    monkeypatch.setattr(main, "date", FakeDate)
+    monkeypatch.setattr(main, "datetime", FakeDatetime)
+
+    today = FakeDate.today()
     tomorrow = today + timedelta(days=1)
     async with db.get_session() as session:
         session.add(
@@ -3208,7 +3554,7 @@ async def test_build_daily_posts_tomorrow(tmp_path: Path):
         )
         await session.commit()
 
-    now = datetime.now(timezone.utc) + timedelta(days=1)
+    now = FakeDatetime.now(timezone.utc) + timedelta(days=1)
     posts = await main.build_daily_posts(db, timezone.utc, now)
     assert posts and tomorrow.strftime("%d") in posts[0][0]
 
@@ -3315,6 +3661,42 @@ async def test_build_daily_posts_split(tmp_path: Path):
     assert len(posts) > 1
     for text, _ in posts:
         assert len(text) <= 4096
+
+
+@pytest.mark.asyncio
+async def test_daily_no_more_link(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    class FakeDate(date):
+        @classmethod
+        def today(cls):
+            return date(2025, 7, 15)
+
+    class FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2025, 7, 15, 12, 0, tzinfo=tz)
+
+    monkeypatch.setattr(main, "date", FakeDate)
+    monkeypatch.setattr(main, "datetime", FakeDatetime)
+
+    async with db.get_session() as session:
+        session.add(
+            Event(
+                title="T",
+                description="d, подробнее (https://t.me/test)",
+                source_text="s",
+                date=FakeDate.today().isoformat(),
+                time="18:00",
+                location_name="Hall",
+            )
+        )
+        await session.commit()
+
+    posts = await main.build_daily_posts(db, timezone.utc)
+    text = posts[0][0]
+    assert "подробнее" not in text
 
 
 @pytest.mark.asyncio
