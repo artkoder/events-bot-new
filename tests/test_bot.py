@@ -2874,11 +2874,24 @@ async def test_create_source_page_footer(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_nav_limits_past(tmp_path: Path):
+async def test_nav_limits_past(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
 
-    today = date.today()
+    class FakeDate(date):
+        @classmethod
+        def today(cls):
+            return date(2025, 7, 15)
+
+    class FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2025, 7, 15, 12, 0, tzinfo=tz)
+
+    monkeypatch.setattr(main, "date", FakeDate)
+    monkeypatch.setattr(main, "datetime", FakeDatetime)
+
+    today = FakeDate.today()
     async with db.get_session() as session:
         session.add(
             Event(
@@ -2899,11 +2912,24 @@ async def test_nav_limits_past(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_nav_future_has_prev(tmp_path: Path):
+async def test_nav_future_has_prev(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
 
-    today = date.today()
+    class FakeDate(date):
+        @classmethod
+        def today(cls):
+            return date(2025, 7, 15)
+
+    class FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2025, 7, 15, 12, 0, tzinfo=tz)
+
+    monkeypatch.setattr(main, "date", FakeDate)
+    monkeypatch.setattr(main, "datetime", FakeDatetime)
+
+    today = FakeDate.today()
     future = today + timedelta(days=1)
     async with db.get_session() as session:
         session.add(
@@ -3374,10 +3400,23 @@ async def test_exhibition_auto_year_end(tmp_path: Path, monkeypatch):
     monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
     monkeypatch.setattr("main.create_source_page", fake_create)
 
+    class FakeDate(date):
+        @classmethod
+        def today(cls):
+            return date(2025, 7, 15)
+
+    class FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2025, 7, 15, 12, 0, tzinfo=tz)
+
+    monkeypatch.setattr(main, "date", FakeDate)
+    monkeypatch.setattr(main, "datetime", FakeDatetime)
+
     results = await main.add_events_from_text(db, "text", None, None, None)
     assert results
     ev = results[0][0]
-    today = date.today()
+    today = FakeDate.today()
     assert ev.date == today.isoformat()
     assert ev.end_date == date(today.year, 12, 31).isoformat()
 
@@ -3429,11 +3468,24 @@ async def test_month_links_future(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_build_daily_posts(tmp_path: Path):
+async def test_build_daily_posts(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
 
-    today = date.today()
+    class FakeDate(date):
+        @classmethod
+        def today(cls):
+            return date(2025, 7, 15)
+
+    class FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2025, 7, 15, 12, 0, tzinfo=tz)
+
+    monkeypatch.setattr(main, "date", FakeDate)
+    monkeypatch.setattr(main, "datetime", FakeDatetime)
+
+    today = FakeDate.today()
     start = main.next_weekend_start(today)
     async with db.get_session() as session:
         session.add(
@@ -3488,11 +3540,24 @@ async def test_build_daily_posts(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_build_daily_posts_tomorrow(tmp_path: Path):
+async def test_build_daily_posts_tomorrow(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
 
-    today = date.today()
+    class FakeDate(date):
+        @classmethod
+        def today(cls):
+            return date(2025, 7, 15)
+
+    class FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2025, 7, 15, 12, 0, tzinfo=tz)
+
+    monkeypatch.setattr(main, "date", FakeDate)
+    monkeypatch.setattr(main, "datetime", FakeDatetime)
+
+    today = FakeDate.today()
     tomorrow = today + timedelta(days=1)
     async with db.get_session() as session:
         session.add(
@@ -3507,7 +3572,7 @@ async def test_build_daily_posts_tomorrow(tmp_path: Path):
         )
         await session.commit()
 
-    now = datetime.now(timezone.utc) + timedelta(days=1)
+    now = FakeDatetime.now(timezone.utc) + timedelta(days=1)
     posts = await main.build_daily_posts(db, timezone.utc, now)
     assert posts and tomorrow.strftime("%d") in posts[0][0]
 
