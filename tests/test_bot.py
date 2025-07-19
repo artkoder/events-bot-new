@@ -3682,6 +3682,42 @@ async def test_build_daily_posts_split(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_daily_no_more_link(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    class FakeDate(date):
+        @classmethod
+        def today(cls):
+            return date(2025, 7, 15)
+
+    class FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2025, 7, 15, 12, 0, tzinfo=tz)
+
+    monkeypatch.setattr(main, "date", FakeDate)
+    monkeypatch.setattr(main, "datetime", FakeDatetime)
+
+    async with db.get_session() as session:
+        session.add(
+            Event(
+                title="T",
+                description="d, подробнее (https://t.me/test)",
+                source_text="s",
+                date=FakeDate.today().isoformat(),
+                time="18:00",
+                location_name="Hall",
+            )
+        )
+        await session.commit()
+
+    posts = await main.build_daily_posts(db, timezone.utc)
+    text = posts[0][0]
+    assert "подробнее" not in text
+
+
+@pytest.mark.asyncio
 async def test_upload_ics_content_type(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()

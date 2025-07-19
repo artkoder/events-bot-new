@@ -2506,10 +2506,11 @@ def format_event_daily(
     if e.source_post_url:
         title = f'<a href="{html.escape(e.source_post_url)}">{title}</a>'
     title = f"<b>{prefix}{emoji_part}{title}</b>".strip()
-    desc = html.escape(e.description.strip())
-    if e.telegraph_url:
-        desc += f', <a href="{html.escape(e.telegraph_url)}">подробнее</a>'
-    lines = [title, desc]
+
+    desc = e.description.strip()
+    desc = re.sub(r",?\s*подробнее\s*\([^\n]*\)$", "", desc, flags=re.I)
+    lines = [title, html.escape(desc)]
+
     if e.pushkin_card:
         lines.append("\u2705 Пушкинская карта")
 
