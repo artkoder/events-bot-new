@@ -1898,7 +1898,15 @@ async def test_build_month_page_content(tmp_path: Path, monkeypatch):
         def today(cls):
             return date(2025, 7, 10)
 
+
+    class FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2025, 7, 10, 12, 0, tzinfo=tz)
+
     monkeypatch.setattr(main, "date", FakeDate)
+    monkeypatch.setattr(main, "datetime", FakeDatetime)
+
 
     title, content = await main.build_month_page_content(db, "2025-07")
     assert "июле 2025" in title
@@ -2180,7 +2188,15 @@ async def test_missing_added_at(tmp_path: Path, monkeypatch):
         def today(cls):
             return date(2025, 7, 10)
 
+
+    class FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2025, 7, 10, 12, 0, tzinfo=tz)
+
     monkeypatch.setattr(main, "date", FakeDate)
+    monkeypatch.setattr(main, "datetime", FakeDatetime)
+
 
     title, content = await main.build_month_page_content(db, "2025-07")
     assert any(n.get("tag") == "h4" for n in content)
@@ -2211,7 +2227,15 @@ async def test_event_title_link(tmp_path: Path, monkeypatch):
         def today(cls):
             return date(2025, 7, 10)
 
+
+    class FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2025, 7, 10, 12, 0, tzinfo=tz)
+
     monkeypatch.setattr(main, "date", FakeDate)
+    monkeypatch.setattr(main, "datetime", FakeDatetime)
+
 
     _, content = await main.build_month_page_content(db, FUTURE_DATE[:7])
     h4 = next(n for n in content if n.get("tag") == "h4")
@@ -2246,7 +2270,15 @@ async def test_emoji_not_duplicated(tmp_path: Path, monkeypatch):
         def today(cls):
             return date(2025, 7, 10)
 
+
+    class FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2025, 7, 10, 12, 0, tzinfo=tz)
+
     monkeypatch.setattr(main, "date", FakeDate)
+    monkeypatch.setattr(main, "datetime", FakeDatetime)
+
 
     _, content = await main.build_month_page_content(db, FUTURE_DATE[:7])
     h4 = next(n for n in content if n.get("tag") == "h4")
@@ -2599,7 +2631,15 @@ async def test_current_month_omits_past_events(tmp_path: Path, monkeypatch):
         def today(cls):
             return date(2025, 7, 15)
 
+
+    class FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2025, 7, 15, 12, 0, tzinfo=tz)
+
     monkeypatch.setattr(main, "date", FakeDate)
+    monkeypatch.setattr(main, "datetime", FakeDatetime)
+
 
     _, content = await main.build_month_page_content(db, "2025-07")
     titles = [
@@ -2649,6 +2689,13 @@ async def test_month_page_split_filters_past_events(tmp_path: Path, monkeypatch)
         def today(cls):
             return date(2025, 7, 19)
 
+
+    class FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2025, 7, 19, 12, 0, tzinfo=tz)
+
+
     created: list[list] = []
 
     class DummyTG:
@@ -2664,6 +2711,9 @@ async def test_month_page_split_filters_past_events(tmp_path: Path, monkeypatch)
             created.append(content)
 
     monkeypatch.setattr(main, "date", FakeDate)
+
+    monkeypatch.setattr(main, "datetime", FakeDatetime)
+
     monkeypatch.setattr(main, "get_telegraph_token", lambda: "t")
     monkeypatch.setattr(
         "main.Telegraph", lambda access_token=None, domain=None: DummyTG()
@@ -3359,7 +3409,13 @@ async def test_month_links_future(tmp_path: Path, monkeypatch):
         def today(cls):
             return date(2025, 7, 15)
 
+    class FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2025, 7, 15, 12, 0, tzinfo=tz)
+
     monkeypatch.setattr(main, "date", FakeDate)
+    monkeypatch.setattr(main, "datetime", FakeDatetime)
     title, content = await main.build_month_page_content(db, "2025-07")
     found = False
     for n in content:

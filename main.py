@@ -532,7 +532,7 @@ async def build_month_nav_html(db: Database) -> str:
     async with db.get_session() as session:
         result = await session.execute(select(MonthPage).order_by(MonthPage.month))
         months = result.scalars().all()
-    today_month = date.today().strftime("%Y-%m")
+    today_month = datetime.now(LOCAL_TZ).strftime("%Y-%m")
     future_months = [m for m in months if m.month >= today_month]
     if not future_months:
         return ""
@@ -847,7 +847,7 @@ async def parse_event_via_4o(text: str) -> list[dict]:
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
     }
-    today = date.today().isoformat()
+    today = datetime.now(LOCAL_TZ).date().isoformat()
     payload = {
         "model": "gpt-4o",
         "messages": [
@@ -1873,7 +1873,7 @@ async def add_events_from_text(
         )
 
         if base_event.event_type == "выставка" and not base_event.end_date:
-            start_dt = parse_iso_date(base_event.date) or date.today()
+            start_dt = parse_iso_date(base_event.date) or datetime.now(LOCAL_TZ).date()
             base_event.date = start_dt.isoformat()
             base_event.end_date = date(start_dt.year, 12, 31).isoformat()
 
@@ -2297,7 +2297,7 @@ def month_name_nominative(month: str) -> str:
     """Return month name in nominative case, add year if different from current."""
     y, m = month.split("-")
     name = MONTHS_NOM[int(m) - 1]
-    if int(y) != date.today().year:
+    if int(y) != datetime.now(LOCAL_TZ).year:
         return f"{name} {y}"
     return name
 
@@ -2706,21 +2706,9 @@ async def get_month_data(db: Database, month: str):
         result_nav = await session.execute(select(MonthPage).order_by(MonthPage.month))
         nav_pages = result_nav.scalars().all()
 
-    return events, exhibitions, nav_pages
 
+    today = datetime.now(LOCAL_TZ).date()
 
-async def build_month_page_content(
-    db: Database,
-    month: str,
-    events: list[Event] | None = None,
-    exhibitions: list[Event] | None = None,
-    nav_pages: list[MonthPage] | None = None,
-    continuation_url: str | None = None,
-) -> tuple[str, list]:
-    if events is None or exhibitions is None or nav_pages is None:
-        events, exhibitions, nav_pages = await get_month_data(db, month)
-
-    today = date.today()
     if month == today.strftime("%Y-%m"):
         today_str = today.isoformat()
         events = [
@@ -2746,33 +2734,9 @@ async def build_month_page_content(
     if events is None or exhibitions is None or nav_pages is None:
         events, exhibitions, nav_pages = await get_month_data(db, month)
 
-    today = date.today()
-    if month == today.strftime("%Y-%m"):
-        today_str = today.isoformat()
-        events = [
-            e
-            for e in events
-            if e.date.split("..", 1)[0] >= today_str
-        ]
-        exhibitions = [
-            e for e in exhibitions if e.end_date and e.end_date >= today_str
-        ]
 
-    return events, exhibitions, nav_pages
+    today = datetime.now(LOCAL_TZ).date()
 
-
-async def build_month_page_content(
-    db: Database,
-    month: str,
-    events: list[Event] | None = None,
-    exhibitions: list[Event] | None = None,
-    nav_pages: list[MonthPage] | None = None,
-    continuation_url: str | None = None,
-) -> tuple[str, list]:
-    if events is None or exhibitions is None or nav_pages is None:
-        events, exhibitions, nav_pages = await get_month_data(db, month)
-
-    today = date.today()
     today_str = today.isoformat()
 
     if month == today.strftime("%Y-%m"):
@@ -2826,7 +2790,7 @@ async def build_month_page_content(
         for ev in by_day[day]:
             content.extend(event_to_nodes(ev))
 
-    today_month = date.today().strftime("%Y-%m")
+    today_month = datetime.now(LOCAL_TZ).strftime("%Y-%m")
     future_pages = [p for p in nav_pages if p.month >= today_month]
     month_nav: list[dict] = []
     if future_pages:
@@ -3033,7 +2997,7 @@ async def build_weekend_page_content(db: Database, start: str) -> tuple[str, lis
         res_m = await session.execute(select(MonthPage).order_by(MonthPage.month))
         month_pages = res_m.scalars().all()
 
-    today = date.today()
+    today = datetime.now(LOCAL_TZ).date()
     events = [
         e
         for e in events
@@ -3101,7 +3065,7 @@ async def build_weekend_page_content(db: Database, start: str) -> tuple[str, lis
 
     month_nav: list[dict] = []
     cur_month = start[:7]
-    today_month = date.today().strftime("%Y-%m")
+    today_month = datetime.now(LOCAL_TZ).strftime("%Y-%m")
     future_months = [m for m in month_pages if m.month >= today_month]
     if future_months:
         nav_children = []
@@ -3741,7 +3705,7 @@ async def fetch_views(path: str, url: str | None = None) -> int | None:
 
 
 async def collect_page_stats(db: Database) -> list[str]:
-    today = date.today()
+    today = datetime.now(LOCAL_TZ).date()
     prev_month_start = (today.replace(day=1) - timedelta(days=1)).replace(day=1)
     prev_month = prev_month_start.strftime("%Y-%m")
 
@@ -3810,7 +3774,7 @@ async def collect_page_stats(db: Database) -> list[str]:
 
 
 async def collect_event_stats(db: Database) -> list[str]:
-    today = date.today()
+    today = datetime.now(LOCAL_TZ).date()
     prev_month_start = (today.replace(day=1) - timedelta(days=1)).replace(day=1)
     async with db.get_session() as session:
         result = await session.execute(
