@@ -58,6 +58,7 @@
 
 - `/stats events` lists stats for event source pages sorted by views.
 
+
 ## v0.3.7 - Large month pages
 
 - Month pages are split in two when the content exceeds ~64&nbsp;kB. The first
@@ -67,4 +68,5 @@
 
 - Daily announcements no longer append a "подробнее" link to the event's
   Telegraph page.
+
 
