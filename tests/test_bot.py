@@ -9,6 +9,7 @@ from aiogram import Bot, types
 from sqlmodel import select
 from datetime import date, timedelta, timezone, datetime, time
 from typing import Any
+import asyncio
 import main
 from telegraph.api import json_dumps
 from telegraph import TelegraphException
@@ -3954,3 +3955,108 @@ async def test_forward_adds_calendar_button(tmp_path: Path, monkeypatch):
     assert msg_id == 10
     btn = kwargs["reply_markup"].inline_keyboard[0][0]
     assert btn.text == "Добавить в календарь"
+
+
+@pytest.mark.asyncio
+async def test_cleanup_old_events(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async def nop(*args, **kwargs):
+        pass
+
+    monkeypatch.setattr(main, "delete_ics", nop)
+    monkeypatch.setattr(main, "delete_asset_post", nop)
+    monkeypatch.setattr(main, "remove_calendar_button", nop)
+
+    old_date = (date.today() - timedelta(days=8)).isoformat()
+    new_date = (date.today() + timedelta(days=1)).isoformat()
+
+    async with db.get_session() as session:
+        old = Event(
+            title="Old",
+            description="",
+            date=old_date,
+            time="18:00",
+            location_name="P",
+            source_text="",
+        )
+        new = Event(
+            title="New",
+            description="",
+            date=new_date,
+            time="18:00",
+            location_name="P",
+            source_text="",
+        )
+        session.add(old)
+        session.add(new)
+        await session.commit()
+        old_id = old.id
+        new_id = new.id
+
+    await main.cleanup_old_events(db, bot)
+
+    async with db.get_session() as session:
+        old_ev = await session.get(Event, old_id)
+        new_ev = await session.get(Event, new_id)
+
+    assert old_ev is None
+    assert new_ev is not None
+
+
+@pytest.mark.asyncio
+async def test_cleanup_scheduler_notifies_superadmin(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    start_msg = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "/start",
+        }
+    )
+    await handle_start(start_msg, db, bot)
+
+    async def nop(*args, **kwargs):
+        pass
+
+    monkeypatch.setattr(main, "delete_ics", nop)
+    monkeypatch.setattr(main, "delete_asset_post", nop)
+    monkeypatch.setattr(main, "remove_calendar_button", nop)
+
+    old_date = (date.today() - timedelta(days=8)).isoformat()
+    async with db.get_session() as session:
+        session.add(
+            Event(
+                title="Old",
+                description="",
+                date=old_date,
+                time="18:00",
+                location_name="P",
+                source_text="",
+            )
+        )
+        await session.commit()
+
+    class FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime.combine(date.today(), time(3, 5), tzinfo=tz)
+
+    monkeypatch.setattr(main, "datetime", FakeDatetime)
+
+    async def fake_sleep(*args, **kwargs):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        await main.cleanup_scheduler(db, bot)
+
+    assert any("Cleanup completed" in m[1] for m in bot.messages)

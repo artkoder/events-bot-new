@@ -360,6 +360,26 @@ async def get_asset_channel(db: Database) -> Channel | None:
         return result.scalars().first()
 
 
+async def get_superadmin_id(db: Database) -> int | None:
+    """Return the Telegram ID of the superadmin if present."""
+    async with db.get_session() as session:
+        result = await session.execute(
+            select(User.user_id).where(User.is_superadmin.is_(True))
+        )
+        return result.scalars().first()
+
+
+async def notify_superadmin(db: Database, bot: Bot, text: str):
+    """Send a message to the superadmin, ignoring failures."""
+    admin_id = await get_superadmin_id(db)
+    if not admin_id:
+        return
+    try:
+        await bot.send_message(admin_id, text)
+    except Exception as e:
+        logging.error("failed to notify superadmin: %s", e)
+
+
 def build_asset_caption(event: Event, day: date) -> str:
     """Return HTML caption for a calendar asset post."""
     loc = html.escape(event.location_name or "")
@@ -2680,7 +2700,7 @@ def exhibition_to_nodes(e: Event) -> list[dict]:
     nodes.append({"tag": "p", "children": ["\u00a0"]})
     return nodes
 
-async def get_month_data(db: Database, month: str):
+async def get_month_data(db: Database, month: str, *, fallback: bool = True):
     """Return events, exhibitions and nav pages for the given month."""
     start = date.fromisoformat(month + "-01")
     next_start = (start.replace(day=28) + timedelta(days=4)).replace(day=1)
@@ -2712,14 +2732,19 @@ async def get_month_data(db: Database, month: str):
 
     if month == today.strftime("%Y-%m"):
         today_str = today.isoformat()
-        events = [
-            e
-            for e in events
-            if e.date.split("..", 1)[0] >= today_str
-        ]
+        cutoff = (today - timedelta(days=7)).isoformat()
+        events = [e for e in events if e.date.split("..", 1)[0] >= today_str]
         exhibitions = [
-            e for e in exhibitions if e.end_date and e.end_date >= today_str
+            e for e in exhibitions if e.end_date and e.end_date >= cutoff
         ]
+
+    if not exhibitions and fallback:
+        prev_month = (start - timedelta(days=1)).strftime("%Y-%m")
+        if prev_month != month:
+            prev_events, prev_exh, _ = await get_month_data(db, prev_month, fallback=False)
+            if not events:
+                events.extend(prev_events)
+            exhibitions.extend(prev_exh)
 
     return events, exhibitions, nav_pages
 
@@ -2737,24 +2762,20 @@ async def build_month_page_content(
 
 
     today = datetime.now(LOCAL_TZ).date()
-
-    today_str = today.isoformat()
+    cutoff = (today - timedelta(days=7)).isoformat()
 
     if month == today.strftime("%Y-%m"):
-        events = [e for e in events if e.date.split("..", 1)[0] >= today_str]
-        exhibitions = [
-            e for e in exhibitions if e.end_date and e.end_date >= today_str
-        ]
+        events = [e for e in events if e.date.split("..", 1)[0] >= cutoff]
+        exhibitions = [e for e in exhibitions if e.end_date and e.end_date >= cutoff]
 
+    today_str = today.isoformat()
     events = [
         e
         for e in events
         if not (e.event_type == "выставка" and e.date < today_str)
     ]
     exhibitions = [
-        e
-        for e in exhibitions
-        if e.end_date and e.date <= today_str
+        e for e in exhibitions if e.end_date and e.date <= today_str
     ]
 
     by_day: dict[date, list[Event]] = {}
@@ -2794,8 +2815,8 @@ async def build_month_page_content(
     today_month = datetime.now(LOCAL_TZ).strftime("%Y-%m")
     future_pages = [p for p in nav_pages if p.month >= today_month]
     month_nav: list[dict] = []
+    nav_children = []
     if future_pages:
-        nav_children = []
         for idx, p in enumerate(future_pages):
             name = month_name_nominative(p.month)
             if p.month == month:
@@ -2806,6 +2827,10 @@ async def build_month_page_content(
                 )
             if idx < len(future_pages) - 1:
                 nav_children.append(" ")
+    else:
+        nav_children = [month_name_nominative(month)]
+
+    if nav_children:
         month_nav = [{"tag": "br"}, {"tag": "h4", "children": nav_children}]
         content.extend(month_nav)
 
@@ -3357,6 +3382,60 @@ async def daily_scheduler(db: Database, bot: Bot):
         await asyncio.sleep(60)
 
 
+async def cleanup_old_events(db: Database, bot: Bot | None = None) -> int:
+    """Remove events that finished over a week ago.
+
+    Returns the number of deleted events."""
+    offset = await get_tz_offset(db)
+    tz = offset_to_timezone(offset)
+    threshold = (datetime.now(tz) - timedelta(days=7)).date().isoformat()
+    async with db.get_session() as session:
+        result = await session.execute(
+            select(Event).where(
+                (
+                    Event.end_date.is_not(None)
+                    & (Event.end_date < threshold)
+                )
+                | (
+                    Event.end_date.is_(None)
+                    & (Event.date < threshold)
+                )
+            )
+        )
+        events = result.scalars().all()
+        count = len(events)
+        for event in events:
+            await delete_ics(event)
+            if bot:
+                await delete_asset_post(event, db, bot)
+                await remove_calendar_button(event, bot)
+            await session.delete(event)
+        if events:
+            await session.commit()
+    return count
+
+
+async def cleanup_scheduler(db: Database, bot: Bot):
+    last_run: date | None = None
+    while True:
+        offset = await get_tz_offset(db)
+        tz = offset_to_timezone(offset)
+        now = datetime.now(tz)
+        if now.time() >= time(3, 0) and now.date() != last_run:
+            try:
+                count = await cleanup_old_events(db, bot)
+                await notify_superadmin(
+                    db,
+                    bot,
+                    f"Cleanup completed: removed {count} events",
+                )
+            except Exception as e:
+                logging.error("cleanup failed: %s", e)
+                await notify_superadmin(db, bot, f"Cleanup failed: {e}")
+            last_run = now.date()
+        await asyncio.sleep(60)
+
+
 async def build_events_message(db: Database, target_date: date, tz: timezone):
     async with db.get_session() as session:
         result = await session.execute(
@@ -3441,12 +3520,13 @@ async def build_events_message(db: Database, target_date: date, tz: timezone):
 
 async def build_exhibitions_message(db: Database, tz: timezone):
     today = datetime.now(tz).date()
+    cutoff = (today - timedelta(days=7)).isoformat()
     async with db.get_session() as session:
         result = await session.execute(
             select(Event)
             .where(
                 Event.end_date.is_not(None),
-                Event.end_date >= today.isoformat(),
+                Event.end_date >= cutoff,
             )
             .order_by(Event.date)
         )
@@ -4409,6 +4489,7 @@ def create_app() -> web.Application:
         except Exception as e:
             logging.error("Failed to set webhook: %s", e)
         app["daily_task"] = asyncio.create_task(daily_scheduler(db, bot))
+        app["cleanup_task"] = asyncio.create_task(cleanup_scheduler(db, bot))
 
     async def on_shutdown(app: web.Application):
         await bot.session.close()
@@ -4416,6 +4497,10 @@ def create_app() -> web.Application:
             app["daily_task"].cancel()
             with contextlib.suppress(Exception):
                 await app["daily_task"]
+        if "cleanup_task" in app:
+            app["cleanup_task"].cancel()
+            with contextlib.suppress(Exception):
+                await app["cleanup_task"]
 
     app.on_startup.append(on_startup)
     app.on_shutdown.append(on_shutdown)
