@@ -3954,3 +3954,52 @@ async def test_forward_adds_calendar_button(tmp_path: Path, monkeypatch):
     assert msg_id == 10
     btn = kwargs["reply_markup"].inline_keyboard[0][0]
     assert btn.text == "Добавить в календарь"
+
+
+@pytest.mark.asyncio
+async def test_cleanup_old_events(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async def nop(*args, **kwargs):
+        pass
+
+    monkeypatch.setattr(main, "delete_ics", nop)
+    monkeypatch.setattr(main, "delete_asset_post", nop)
+    monkeypatch.setattr(main, "remove_calendar_button", nop)
+
+    old_date = (date.today() - timedelta(days=8)).isoformat()
+    new_date = (date.today() + timedelta(days=1)).isoformat()
+
+    async with db.get_session() as session:
+        old = Event(
+            title="Old",
+            description="",
+            date=old_date,
+            time="18:00",
+            location_name="P",
+            source_text="",
+        )
+        new = Event(
+            title="New",
+            description="",
+            date=new_date,
+            time="18:00",
+            location_name="P",
+            source_text="",
+        )
+        session.add(old)
+        session.add(new)
+        await session.commit()
+        old_id = old.id
+        new_id = new.id
+
+    await main.cleanup_old_events(db, bot)
+
+    async with db.get_session() as session:
+        old_ev = await session.get(Event, old_id)
+        new_ev = await session.get(Event, new_id)
+
+    assert old_ev is None
+    assert new_ev is not None
