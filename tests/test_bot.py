@@ -2875,6 +2875,53 @@ async def test_create_source_page_footer(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_update_event_description_from_telegraph(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    class DummyTG:
+        def get_page(self, path, return_html=True):
+            return {"content": f"<p>first</p><p>{main.CONTENT_SEPARATOR}</p><p>second</p>"}
+
+    monkeypatch.setattr("main.get_telegraph_token", lambda: "t")
+    monkeypatch.setattr("main.Telegraph", lambda access_token=None, domain=None: DummyTG())
+
+    event = Event(
+        title="T",
+        description="old",
+        source_text="s",
+        date=FUTURE_DATE,
+        time="18:00",
+        location_name="Hall",
+        telegraph_path="p",
+    )
+    async with db.get_session() as session:
+        session.add(event)
+        await session.commit()
+
+    async def fake_parse(text: str) -> list[dict]:
+        assert "first" in text and "second" in text
+        return [
+            {
+                "title": "T",
+                "short_description": "combined",
+                "date": FUTURE_DATE,
+                "time": "18:00",
+                "location_name": "Hall",
+            }
+        ]
+
+    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+
+    await main.update_event_description(event, db)
+
+    async with db.get_session() as session:
+        updated = await session.get(Event, event.id)
+
+    assert updated.description == "combined"
+
+
+@pytest.mark.asyncio
 async def test_nav_limits_past(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
