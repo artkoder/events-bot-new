@@ -1957,6 +1957,7 @@ async def add_events_from_text(
                         saved.photo_count = photo_count
                         session.add(saved)
                         await session.commit()
+                await update_event_description(saved, db)
             else:
                 if not saved.ics_url:
                     ics = await upload_ics(saved, db)
@@ -2021,6 +2022,8 @@ async def add_events_from_text(
                         saved.photo_count = photo_count
                         session.add(saved)
                         await session.commit()
+            if saved.telegraph_path:
+                await update_event_description(saved, db)
             logging.info("syncing month page %s", saved.date[:7])
             await sync_month_page(db, saved.date[:7])
             d_saved = parse_iso_date(saved.date)
@@ -4228,6 +4231,56 @@ async def update_source_page_ics(path: str, title: str, url: str | None):
         )
     except Exception as e:
         logging.error("Failed to update ICS link: %s", e)
+
+
+async def get_source_page_text(path: str) -> str:
+    """Return plain text from a Telegraph page."""
+    token = get_telegraph_token()
+    if not token:
+        logging.error("Telegraph token unavailable")
+        return ""
+    tg = Telegraph(access_token=token)
+    try:
+        page = await asyncio.to_thread(tg.get_page, path, return_html=True)
+    except Exception as e:
+        logging.error("Failed to fetch telegraph page: %s", e)
+        return ""
+    html_content = page.get("content") or page.get("content_html") or ""
+    html_content = apply_ics_link(html_content, None)
+    html_content = apply_month_nav(html_content, None)
+    html_content = html_content.replace(FOOTER_LINK_HTML, "")
+    html_content = html_content.replace(f"<p>{CONTENT_SEPARATOR}</p>", f"\n{CONTENT_SEPARATOR}\n")
+    html_content = html_content.replace("<br/>", "\n").replace("<br>", "\n")
+    html_content = re.sub(r"</p>\s*<p>", "\n", html_content)
+    html_content = re.sub(r"<[^>]+>", "", html_content)
+    text = html.unescape(html_content)
+    text = text.replace(CONTENT_SEPARATOR, "").replace("\xa0", " ")
+    return text.strip()
+
+
+async def update_event_description(event: Event, db: Database) -> None:
+    """Rebuild event.description from the Telegraph source page."""
+    if not event.telegraph_path:
+        return
+    text = await get_source_page_text(event.telegraph_path)
+    if not text:
+        return
+    try:
+        parsed = await parse_event_via_4o(text)
+    except Exception as e:
+        logging.error("Failed to parse source text for description: %s", e)
+        return
+    if not parsed:
+        return
+    desc = parsed[0].get("short_description", "").strip()
+    if not desc:
+        return
+    async with db.get_session() as session:
+        obj = await session.get(Event, event.id)
+        if obj:
+            obj.description = desc
+            await session.commit()
+            event.description = desc
 
 
 async def create_source_page(
