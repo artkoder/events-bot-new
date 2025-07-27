@@ -3933,7 +3933,29 @@ async def test_forward_adds_calendar_button(tmp_path: Path, monkeypatch):
     async with db.get_session() as session:
         session.add(ch_ann)
         session.add(ch_asset)
+        session.add(
+            main.MonthPage(month="2025-07", url="m1", path="p1")
+        )
+        session.add(
+            main.MonthPage(month="2025-08", url="m2", path="p2")
+        )
+        session.add(
+            main.MonthPage(month="2025-10", url="m3", path="p3")
+        )
         await session.commit()
+
+    class FakeDate(date):
+        @classmethod
+        def today(cls):
+            return date(2025, 7, 27)
+
+    class FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2025, 7, 27, 12, 0, tzinfo=tz)
+
+    monkeypatch.setattr(main, "date", FakeDate)
+    monkeypatch.setattr(main, "datetime", FakeDatetime)
 
     async def fake_build(db2, ev):
         return "ICS"
@@ -4000,8 +4022,11 @@ async def test_forward_adds_calendar_button(tmp_path: Path, monkeypatch):
     chat_id, msg_id, kwargs = bot.edits[0]
     assert chat_id == -1001
     assert msg_id == 10
-    btn = kwargs["reply_markup"].inline_keyboard[0][0]
-    assert btn.text == "Добавить в календарь"
+    keyboard = kwargs["reply_markup"].inline_keyboard
+    assert keyboard[0][0].text == "Добавить в календарь"
+    row2 = keyboard[1]
+    texts = [b.text for b in row2]
+    assert texts == ["\U0001f4c5 июль", "\U0001f4c5 август", "\U0001f4c5 октябрь"]
 
 
 @pytest.mark.asyncio
