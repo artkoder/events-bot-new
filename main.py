@@ -564,6 +564,22 @@ async def build_month_nav_html(db: Database) -> str:
             links.append(" ")
     return "<br/><h4>" + "".join(links) + "</h4>"
 
+async def build_month_buttons(db: Database, limit: int = 3) -> list[types.InlineKeyboardButton]:
+    """Return buttons linking to upcoming month pages."""
+    async with db.get_session() as session:
+        result = await session.execute(
+            select(MonthPage)
+            .where(MonthPage.month >= datetime.now(LOCAL_TZ).strftime("%Y-%m"))
+            .order_by(MonthPage.month)
+        )
+        months = result.scalars().all()
+    buttons: list[types.InlineKeyboardButton] = []
+    for p in months[:limit]:
+        if p.url:
+            label = f"\U0001f4c5 {month_name_nominative(p.month)}"
+            buttons.append(types.InlineKeyboardButton(text=label, url=p.url))
+    return buttons
+
 
 def parse_bool_text(value: str) -> bool | None:
     """Convert text to boolean if possible."""
@@ -773,8 +789,7 @@ async def post_ics_asset(event: Event, db: Database, bot: Bot) -> tuple[str, int
         logging.error("failed to post ics to asset channel: %s", e)
         return None
 
-
-async def add_calendar_button(event: Event, bot: Bot):
+async def add_calendar_button(event: Event, db: Database, bot: Bot):
     """Attach calendar link button to the original channel post."""
     if not (
         event.source_chat_id
@@ -782,11 +797,11 @@ async def add_calendar_button(event: Event, bot: Bot):
         and event.ics_post_url
     ):
         return
-    markup = types.InlineKeyboardMarkup(
-        inline_keyboard=[
-            [types.InlineKeyboardButton(text="Добавить в календарь", url=event.ics_post_url)]
-        ]
-    )
+    month_buttons = await build_month_buttons(db)
+    rows = [[types.InlineKeyboardButton(text="Добавить в календарь", url=event.ics_post_url)]]
+    if month_buttons:
+        rows.append(month_buttons)
+    markup = types.InlineKeyboardMarkup(inline_keyboard=rows)
     try:
         await bot.edit_message_reply_markup(
             chat_id=event.source_chat_id,
@@ -1181,8 +1196,7 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                         url_p, msg_id = posted
                         event.ics_post_url = url_p
                         event.ics_post_id = msg_id
-                        await session.commit()
-                        await add_calendar_button(event, bot)
+                        await add_calendar_button(event, db, bot)
                     if event.telegraph_path:
                         await update_source_page_ics(
                             event.telegraph_path, event.title or "Event", url
@@ -1981,11 +1995,21 @@ async def add_events_from_text(
                             obj = await session.get(Event, saved.id)
                             if obj:
                                 obj.ics_post_url = url_p
+                    posted = await post_ics_asset(saved, db, bot)
+                    if posted:
+                        url_p, msg_id = posted
+                        logging.info(
+                            "asset post %s for event %s", url_p, saved.id
+                        )
+                        async with db.get_session() as session:
+                            obj = await session.get(Event, saved.id)
+                            if obj:
+                                obj.ics_post_url = url_p
                                 obj.ics_post_id = msg_id
                                 await session.commit()
                                 saved.ics_post_url = url_p
                                 saved.ics_post_id = msg_id
-                        await add_calendar_button(saved, bot)
+                        await add_calendar_button(saved, db, bot)
                         logging.info(
                             "calendar button added for event %s", saved.id
                         )
@@ -1995,7 +2019,6 @@ async def add_events_from_text(
                                 saved.title or "Event",
                                 saved.ics_url,
                             )
-
                 res = await create_source_page(
                     saved.title or "Event",
                     saved.source_text,
