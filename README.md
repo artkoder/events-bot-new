@@ -91,6 +91,12 @@ python main.py test_telegraph
 ```
 The command prints the created page URL and confirms that editing works.
 
+## Backup and restore
+
+Use `/dumpdb` to download a SQL dump of the current database. The bot replies
+with a list of connected channels and the steps required to restore the dump on
+another server. Send `/restore` with the dump file attached to load it back.
+
 ## Telegraph caching
 
 Telegram desktop may cache the first version of a Telegraph page and ignore

@@ -29,6 +29,7 @@ from io import BytesIO
 import markdown
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlmodel import Field, SQLModel, select
+import aiosqlite
 
 logging.basicConfig(level=logging.INFO)
 
@@ -378,6 +379,25 @@ async def notify_superadmin(db: Database, bot: Bot, text: str):
         await bot.send_message(admin_id, text)
     except Exception as e:
         logging.error("failed to notify superadmin: %s", e)
+
+
+async def dump_database(path: str = DB_PATH) -> bytes:
+    """Return a SQL dump of the specified database."""
+    async with aiosqlite.connect(path) as conn:
+        lines: list[str] = []
+        async for line in conn.iterdump():
+            lines.append(line)
+    return "\n".join(lines).encode("utf-8")
+
+
+async def restore_database(data: bytes, db: Database, path: str = DB_PATH):
+    """Replace current database with the provided dump."""
+    if os.path.exists(path):
+        os.remove(path)
+    async with aiosqlite.connect(path) as conn:
+        await conn.executescript(data.decode("utf-8"))
+        await conn.commit()
+    await db.init()
 
 
 def build_asset_caption(event: Event, day: date) -> str:
@@ -3914,6 +3934,63 @@ async def handle_stats(message: types.Message, db: Database, bot: Bot):
             return
     lines = await (collect_event_stats(db) if mode == "events" else collect_page_stats(db))
     await bot.send_message(message.chat.id, "\n".join(lines) if lines else "No data")
+
+
+async def handle_dumpdb(message: types.Message, db: Database, bot: Bot):
+    async with db.get_session() as session:
+        user = await session.get(User, message.from_user.id)
+        if not user or not user.is_superadmin:
+            await bot.send_message(message.chat.id, "Not authorized")
+            return
+        result = await session.execute(select(Channel))
+        channels = result.scalars().all()
+        tz_setting = await session.get(Setting, "tz_offset")
+        catbox_setting = await session.get(Setting, "catbox_enabled")
+
+    data = await dump_database(db.engine.url.database)
+    file = types.BufferedInputFile(data, filename="dump.sql")
+    await bot.send_document(message.chat.id, file)
+
+    lines = ["Channels:"]
+    for ch in channels:
+        roles: list[str] = []
+        if ch.is_registered:
+            roles.append("announcement")
+        if ch.is_asset:
+            roles.append("asset")
+        if ch.daily_time:
+            roles.append(f"daily {ch.daily_time}")
+        title = ch.title or ch.username or str(ch.channel_id)
+        lines.append(f"- {title}: {', '.join(roles) if roles else 'admin'}")
+
+    lines.append("")
+    lines.append("To restore on another server:")
+    lines.append("1. Start the bot and send /restore with the dump file.")
+    if tz_setting:
+        lines.append(f"2. Current timezone: {tz_setting.value}")
+    lines.append("3. Add the bot as admin to the channels listed above.")
+    if catbox_setting and catbox_setting.value == "1":
+        lines.append("4. Run /images to enable photo uploads.")
+
+    await bot.send_message(message.chat.id, "\n".join(lines))
+
+
+async def handle_restore(message: types.Message, db: Database, bot: Bot):
+    async with db.get_session() as session:
+        user = await session.get(User, message.from_user.id)
+        if not user or not user.is_superadmin:
+            await bot.send_message(message.chat.id, "Not authorized")
+            return
+    document = message.document
+    if not document and message.reply_to_message:
+        document = message.reply_to_message.document
+    if not document:
+        await bot.send_message(message.chat.id, "Attach dump file")
+        return
+    bio = BytesIO()
+    await bot.download(document.file_id, destination=bio)
+    await restore_database(bio.getvalue(), db, db.engine.url.database)
+    await bot.send_message(message.chat.id, "Database restored")
 async def handle_edit_message(message: types.Message, db: Database, bot: Bot):
     state = editing_sessions.get(message.from_user.id)
     if not state:
@@ -4474,6 +4551,12 @@ def create_app() -> web.Application:
     async def stats_wrapper(message: types.Message):
         await handle_stats(message, db, bot)
 
+    async def dumpdb_wrapper(message: types.Message):
+        await handle_dumpdb(message, db, bot)
+
+    async def restore_wrapper(message: types.Message):
+        await handle_restore(message, db, bot)
+
     async def edit_message_wrapper(message: types.Message):
         await handle_edit_message(message, db, bot)
 
@@ -4532,6 +4615,8 @@ def create_app() -> web.Application:
     dp.message.register(exhibitions_wrapper, Command("exhibitions"))
     dp.message.register(pages_wrapper, Command("pages"))
     dp.message.register(stats_wrapper, Command("stats"))
+    dp.message.register(dumpdb_wrapper, Command("dumpdb"))
+    dp.message.register(restore_wrapper, Command("restore"))
     dp.message.register(
         edit_message_wrapper, lambda m: m.from_user.id in editing_sessions
     )

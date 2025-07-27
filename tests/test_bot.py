@@ -4132,3 +4132,47 @@ async def test_cleanup_scheduler_notifies_superadmin(tmp_path: Path, monkeypatch
         await main.cleanup_scheduler(db, bot)
 
     assert any("Cleanup completed" in m[1] for m in bot.messages)
+
+
+@pytest.mark.asyncio
+async def test_dumpdb(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async def fake_send_document(self, chat_id, document, caption=None, parse_mode=None):
+        self.sent = document
+        self.messages.append((chat_id, caption))
+
+    monkeypatch.setattr(DummyBot, "send_document", fake_send_document, raising=False)
+
+    start_msg = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "/start",
+        }
+    )
+    await handle_start(start_msg, db, bot)
+
+    async with db.get_session() as session:
+        session.add(main.Channel(channel_id=-100, title="Chan", is_registered=True))
+        await session.commit()
+
+    dump_msg = types.Message.model_validate(
+        {
+            "message_id": 2,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "/dumpdb",
+        }
+    )
+
+    await main.handle_dumpdb(dump_msg, db, bot)
+
+    assert hasattr(bot, "sent")
+    assert "Chan" in bot.messages[-1][1]
+    assert "/restore" in bot.messages[-1][1]
