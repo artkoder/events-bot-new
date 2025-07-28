@@ -64,6 +64,8 @@ LOCAL_TZ = timezone.utc
 
 # separator inserted between versions on Telegraph source pages
 CONTENT_SEPARATOR = "🟧" * 10
+# separator line between events in VK posts
+VK_EVENT_SEPARATOR = "🔹" * 10
 
 # user_id -> (event_id, field?) for editing session
 editing_sessions: dict[int, tuple[int, str | None]] = {}
@@ -2710,7 +2712,11 @@ def format_event_md(e: Event) -> str:
     return "\n".join(lines)
 
 
-def format_event_vk(e: Event, highlight: bool = False, weekend_url: str | None = None) -> str:
+
+def format_event_vk(
+    e: Event, highlight: bool = False, weekend_url: str | None = None
+) -> str:
+
     prefix = ""
     if highlight:
         prefix += "\U0001f449 "
@@ -2720,8 +2726,17 @@ def format_event_vk(e: Event, highlight: bool = False, weekend_url: str | None =
     if e.emoji and not e.title.strip().startswith(e.emoji):
         emoji_part = f"{e.emoji} "
 
-    title = f"{prefix}{emoji_part}{e.title}".strip()
-    desc = re.sub(r",?\s*подробнее\s*\([^\n]*\)$", "", e.description.strip(), flags=re.I)
+
+    title = f"{prefix}{emoji_part}{e.title.upper()}".strip()
+    desc = re.sub(
+        r",?\s*подробнее\s*\([^\n]*\)$",
+        "",
+        e.description.strip(),
+        flags=re.I,
+    )
+    if e.telegraph_url:
+        desc = f"{desc}, подробнее: {e.telegraph_url}"
+
     lines = [title, desc]
 
     if e.pushkin_card:
@@ -2759,10 +2774,9 @@ def format_event_vk(e: Event, highlight: bool = False, weekend_url: str | None =
         if price:
             lines.append(f"Билеты {price}")
 
-    if e.telegraph_url:
-        lines.append(f"подробнее: {e.telegraph_url}")
-    if e.ics_post_url:
-        lines.append(f"\U0001f4c6 Добавить в календарь: {e.ics_post_url}")
+
+    # details link already appended to description above
+
 
     loc = e.location_name
     addr = e.location_address
@@ -2783,7 +2797,9 @@ def format_event_vk(e: Event, highlight: bool = False, weekend_url: str | None =
         day_fmt = f"{day}"
     else:
         day_fmt = day
-    lines.append(f"[i]{day_fmt} {e.time} {loc}[/i]")
+
+    lines.append(f"{day_fmt} {e.time} {loc}")
+
     return "\n".join(lines)
 
 
@@ -3650,9 +3666,12 @@ async def build_daily_sections_vk(
             w = weekend_map.get(d.isoformat())
             if w:
                 w_url = w.url
-        lines1.append("")
+
         lines1.append(format_event_vk(e, highlight=True, weekend_url=w_url))
-        lines1.append("")
+        lines1.append(VK_EVENT_SEPARATOR)
+    if events_today:
+        lines1.pop()
+
     lines1.append("")
     lines1.append(
         f"#Афиша_Калининград #кудапойти_Калининград #Калининград #39region #концерт #{today.day}{MONTHS[today.month - 1]}"
@@ -3667,9 +3686,12 @@ async def build_daily_sections_vk(
             w = weekend_map.get(d.isoformat())
             if w:
                 w_url = w.url
-        lines2.append("")
+
         lines2.append(format_event_vk(e, weekend_url=w_url))
-        lines2.append("")
+        lines2.append(VK_EVENT_SEPARATOR)
+    if events_new:
+        lines2.pop()
+
     lines2.append("")
     lines2.append(
         f"#события_Калининград #Калининград #39region #новое #фестиваль #{today.day}{MONTHS[today.month - 1]}"

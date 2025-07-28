@@ -89,3 +89,12 @@
   "📆 Добавить в календарь: <link>".
 
 
+## v0.3.12 - VK announcement fixes
+
+- Remove unsupported italic tags and calendar line from VK posts.
+- Event titles appear in uppercase and the "подробнее" link follows the
+  description.
+- A visible separator line now divides events to improve readability.
+
+
+
