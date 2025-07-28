@@ -3145,7 +3145,7 @@ async def build_month_page_content(
     return title, content
 
 
-async def sync_month_page(db: Database, month: str, update_links: bool = True):
+async def sync_month_page(db: Database, month: str, update_links: bool = False):
     token = get_telegraph_token()
     if not token:
         logging.error("Telegraph token unavailable")
@@ -3245,7 +3245,7 @@ async def sync_month_page(db: Database, month: str, update_links: bool = True):
         except Exception as e:
             logging.error("Failed to sync month page %s: %s", month, e)
 
-    if update_links:
+    if update_links or created:
         async with db.get_session() as session:
             result = await session.execute(select(MonthPage).order_by(MonthPage.month))
             months = result.scalars().all()
@@ -3403,7 +3403,7 @@ async def build_weekend_page_content(db: Database, start: str) -> tuple[str, lis
     return title, content
 
 
-async def sync_weekend_page(db: Database, start: str, update_links: bool = True):
+async def sync_weekend_page(db: Database, start: str, update_links: bool = False):
     token = get_telegraph_token()
     if not token:
         logging.error("Telegraph token unavailable")
@@ -3436,7 +3436,7 @@ async def sync_weekend_page(db: Database, start: str, update_links: bool = True)
         except Exception as e:
             logging.error("Failed to sync weekend page %s: %s", start, e)
 
-    if update_links:
+    if update_links or created:
         async with db.get_session() as session:
             result = await session.execute(
                 select(WeekendPage).order_by(WeekendPage.start)
