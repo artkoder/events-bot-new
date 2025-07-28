@@ -2,6 +2,9 @@
 
 Telegram bot for publishing event announcements. Daily announcements can also be posted to a VK group.
 
+Use `/regdailychannels` and `/daily` to manage both Telegram channels and the VK group including posting times.
+
+
 This is an MVP using **aiogram 3** and SQLite. It is designed for deployment on
 Fly.io with a webhook.
 

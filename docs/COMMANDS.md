@@ -15,8 +15,8 @@
 | `/events [DATE]` | optional date `YYYY-MM-DD`, `DD.MM.YYYY` or `D месяц [YYYY]` | List events for the day with delete and edit buttons. Dates are shown as `DD.MM.YYYY`. Choosing **Edit** lists all fields with inline buttons including a toggle for "Бесплатно". |
 | `/setchannel` | - | Choose an admin channel and register it as an announcement or calendar asset source. |
 | `/channels` | - | List admin channels showing registered and asset ones with disable buttons. |
-| `/regdailychannels` | - | Choose admin channels for daily announcements (default 08:00). |
-| `/daily` | - | Manage daily announcement channels: cancel, change time, test send. |
+| `/regdailychannels` | - | Choose admin channels for daily announcements and set the VK group. |
+| `/daily` | - | Manage daily announcement channels and VK posting times; send test posts. |
 | `/exhibitions` | - | List active exhibitions similar to `/events`; each entry shows the period `c <start>` / `по <end>` and includes edit/delete buttons. |
 | `/pages` | - | Show links to Telegraph month and weekend pages. |
 

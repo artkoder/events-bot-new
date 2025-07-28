@@ -69,6 +69,10 @@ CONTENT_SEPARATOR = "🟧" * 10
 editing_sessions: dict[int, tuple[int, str | None]] = {}
 # user_id -> channel_id for daily time editing
 daily_time_sessions: dict[int, int] = {}
+# waiting for VK group ID input
+vk_group_sessions: set[int] = set()
+# user_id -> section (today/added) for VK time update
+vk_time_sessions: dict[int, str] = {}
 
 # toggle for uploading images to catbox
 CATBOX_ENABLED: bool = False
@@ -1453,6 +1457,29 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
         now = datetime.now(tz) + timedelta(days=1)
         await send_daily_announcement(db, bot, cid, tz, record=False, now=now)
         await callback.answer("Sent")
+    elif data == "vkset":
+        vk_group_sessions.add(callback.from_user.id)
+        await callback.message.answer("Send VK group id or 'off'")
+        await callback.answer()
+    elif data == "vkunset":
+        await set_vk_group_id(db, None)
+        await send_daily_list(callback.message, db, bot, edit=True)
+        await callback.answer("Disabled")
+    elif data.startswith("vktime:"):
+        typ = data.split(":", 1)[1]
+        vk_time_sessions[callback.from_user.id] = typ
+        await callback.message.answer("Send new time HH:MM")
+        await callback.answer()
+    elif data.startswith("vkdailysend:"):
+        section = data.split(":", 1)[1]
+        group_id = await get_vk_group_id(db)
+        if group_id:
+            offset = await get_tz_offset(db)
+            tz = offset_to_timezone(offset)
+            await send_daily_announcement_vk(
+                db, VK_TOKEN, group_id, tz, section=section
+            )
+        await callback.answer("Sent")
 
 
 async def handle_tz(message: types.Message, db: Database, bot: Bot):
@@ -1653,6 +1680,18 @@ async def send_regdaily_list(
         channels = result.scalars().all()
     lines = []
     keyboard = []
+    group_id = await get_vk_group_id(db)
+    if group_id:
+        lines.append(f"VK group {group_id}")
+        keyboard.append([
+            types.InlineKeyboardButton(text="Change", callback_data="vkset"),
+            types.InlineKeyboardButton(text="Disable", callback_data="vkunset"),
+        ])
+    else:
+        lines.append("VK group disabled")
+        keyboard.append([
+            types.InlineKeyboardButton(text="Set VK group", callback_data="vkset")
+        ])
     for ch in channels:
         name = ch.title or ch.username or str(ch.channel_id)
         lines.append(name)
@@ -1687,6 +1726,23 @@ async def send_daily_list(
         channels = result.scalars().all()
     lines = []
     keyboard = []
+    group_id = await get_vk_group_id(db)
+    if group_id:
+        t_today = await get_vk_time_today(db)
+        t_added = await get_vk_time_added(db)
+        lines.append(f"VK group {group_id} {t_today}/{t_added}")
+        keyboard.append([
+            types.InlineKeyboardButton(text="Disable", callback_data="vkunset"),
+            types.InlineKeyboardButton(text="Today", callback_data="vktime:today"),
+            types.InlineKeyboardButton(text="Added", callback_data="vktime:added"),
+            types.InlineKeyboardButton(text="Test today", callback_data="vkdailysend:today"),
+            types.InlineKeyboardButton(text="Test added", callback_data="vkdailysend:added"),
+        ])
+    else:
+        lines.append("VK group disabled")
+        keyboard.append([
+            types.InlineKeyboardButton(text="Set VK group", callback_data="vkset")
+        ])
     for ch in channels:
         name = ch.title or ch.username or str(ch.channel_id)
         t = ch.daily_time or "?"
@@ -3472,6 +3528,7 @@ async def build_daily_posts(
             elif m == next_month(cur_month):
                 next_count += 1
 
+    tag = f"{today.day}{MONTHS[today.month - 1]}"
     lines1 = [
         f"<b>АНОНС на {format_day_pretty(today)} {today.year} #ежедневныйанонс</b>",
         DAYS_OF_WEEK[today.weekday()],
@@ -3487,6 +3544,10 @@ async def build_daily_posts(
                 w_url = w.url
         lines1.append("")
         lines1.append(format_event_daily(e, highlight=True, weekend_url=w_url))
+    lines1.append("")
+    lines1.append(
+        f"#Афиша_Калининград #Калининград #концерт #{tag} #{today.day}_{MONTHS[today.month - 1]}"
+    )
     section1 = "\n".join(lines1)
 
     lines2 = ["<b><i>ДОБАВИЛИ В АНОНС</i></b>"]
@@ -3590,6 +3651,12 @@ async def build_daily_sections_vk(
                 w_url = w.url
         lines1.append("")
         lines1.append(format_event_vk(e, highlight=True, weekend_url=w_url))
+
+    lines1.append("")
+    lines1.append(
+        f"#Афиша_Калининград #кудапойти_Калининград #Калининград #39region #концерт #{today.day}{MONTHS[today.month - 1]}"
+    )
+
     section1 = "\n".join(lines1)
 
     lines2 = ["ДОБАВИЛИ В АНОНС"]
@@ -3602,6 +3669,12 @@ async def build_daily_sections_vk(
                 w_url = w.url
         lines2.append("")
         lines2.append(format_event_vk(e, weekend_url=w_url))
+
+    lines2.append("")
+    lines2.append(
+        f"#события_Калининград #Калининград #39region #новое #фестиваль #{today.day}{MONTHS[today.month - 1]}"
+    )
+
     section2 = "\n".join(lines2)
 
     return section1, section2
@@ -4376,6 +4449,37 @@ async def handle_daily_time_message(message: types.Message, db: Database, bot: B
     await bot.send_message(message.chat.id, f"Time set to {value}")
 
 
+async def handle_vk_group_message(message: types.Message, db: Database, bot: Bot):
+    if message.from_user.id not in vk_group_sessions:
+        return
+    value = (message.text or "").strip()
+    if value.lower() == "off":
+        await set_vk_group_id(db, None)
+        await bot.send_message(message.chat.id, "VK posting disabled")
+    else:
+        await set_vk_group_id(db, value)
+        await bot.send_message(message.chat.id, f"VK group set to {value}")
+    vk_group_sessions.discard(message.from_user.id)
+
+
+async def handle_vk_time_message(message: types.Message, db: Database, bot: Bot):
+    typ = vk_time_sessions.get(message.from_user.id)
+    if not typ:
+        return
+    value = (message.text or "").strip()
+    if not re.match(r"^\d{1,2}:\d{2}$", value):
+        await bot.send_message(message.chat.id, "Invalid time")
+        return
+    if len(value.split(":")[0]) == 1:
+        value = f"0{value}"
+    if typ == "today":
+        await set_vk_time_today(db, value)
+    else:
+        await set_vk_time_added(db, value)
+    vk_time_sessions.pop(message.from_user.id, None)
+    await bot.send_message(message.chat.id, f"Time set to {value}")
+
+
 processed_media_groups: set[str] = set()
 
 # store up to three images for albums until the caption arrives
@@ -4873,6 +4977,12 @@ def create_app() -> web.Application:
     async def daily_time_wrapper(message: types.Message):
         await handle_daily_time_message(message, db, bot)
 
+    async def vk_group_msg_wrapper(message: types.Message):
+        await handle_vk_group_message(message, db, bot)
+
+    async def vk_time_msg_wrapper(message: types.Message):
+        await handle_vk_time_message(message, db, bot)
+
     async def forward_wrapper(message: types.Message):
         await handle_forwarded(message, db, bot)
 
@@ -4912,6 +5022,10 @@ def create_app() -> web.Application:
         or c.data.startswith("dailytime:")
         or c.data.startswith("dailysend:")
         or c.data.startswith("dailysendtom:")
+        or c.data == "vkset"
+        or c.data == "vkunset"
+        or c.data.startswith("vktime:")
+        or c.data.startswith("vkdailysend:")
         or c.data.startswith("togglefree:")
         or c.data.startswith("markfree:")
         or c.data.startswith("togglesilent:")
@@ -4940,6 +5054,12 @@ def create_app() -> web.Application:
     )
     dp.message.register(
         daily_time_wrapper, lambda m: m.from_user.id in daily_time_sessions
+    )
+    dp.message.register(
+        vk_group_msg_wrapper, lambda m: m.from_user.id in vk_group_sessions
+    )
+    dp.message.register(
+        vk_time_msg_wrapper, lambda m: m.from_user.id in vk_time_sessions
     )
     dp.message.register(
         forward_wrapper,

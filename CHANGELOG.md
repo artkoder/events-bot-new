@@ -75,3 +75,11 @@
   times via `/vktime`. Use the `VK_TOKEN` secret for API access.
 
 
+## v0.3.10 - Unified daily management
+
+- `/regdailychannels` and `/daily` now show the VK group alongside Telegram channels.
+  VK posting times can be changed there and test posts sent.
+- Daily announcements include new hashtag lines for Telegram and VK posts.
+
+
+
