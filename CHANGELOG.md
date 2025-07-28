@@ -88,13 +88,18 @@
 - The "подробнее" line now ends with a colon and calendar links appear on their own line as
   "📆 Добавить в календарь: <link>".
 
-
 ## v0.3.12 - VK announcement fixes
 
 - Remove unsupported italic tags and calendar line from VK posts.
 - Event titles appear in uppercase and the "подробнее" link follows the
   description.
 - A visible separator line now divides events to improve readability.
+
+## v0.3.13 - VK formatting updates
+
+- VK posts use two blank separator lines built with the blank braille symbol.
+- Ticket links show a ticket emoji before the URL.
+- Date lines start with a calendar emoji and the location line with a location pin.
 
 
 

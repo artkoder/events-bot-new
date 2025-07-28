@@ -65,7 +65,9 @@ LOCAL_TZ = timezone.utc
 # separator inserted between versions on Telegraph source pages
 CONTENT_SEPARATOR = "🟧" * 10
 # separator line between events in VK posts
-VK_EVENT_SEPARATOR = "🔹" * 10
+
+VK_EVENT_SEPARATOR = "\u2800\n\u2800"
+
 
 # user_id -> (event_id, field?) for editing session
 editing_sessions: dict[int, tuple[int, str | None]] = {}
@@ -2745,7 +2747,10 @@ def format_event_vk(
     if e.is_free:
         lines.append("🟡 Бесплатно")
         if e.ticket_link:
-            lines.append(f"по регистрации {e.ticket_link}")
+
+            lines.append("по регистрации")
+            lines.append(f"\U0001f39f {e.ticket_link}")
+
     elif e.ticket_link and (
         e.ticket_price_min is not None or e.ticket_price_max is not None
     ):
@@ -2755,10 +2760,12 @@ def format_event_vk(
             val = e.ticket_price_min if e.ticket_price_min is not None else e.ticket_price_max
             price = f"{val} руб." if val is not None else ""
         lines.append(f"Билеты в источнике {price}".strip())
-        lines.append(e.ticket_link)
+
+        lines.append(f"\U0001f39f {e.ticket_link}")
     elif e.ticket_link:
         lines.append("по регистрации")
-        lines.append(e.ticket_link)
+        lines.append(f"\U0001f39f {e.ticket_link}")
+
     else:
         price = ""
         if (
@@ -2798,7 +2805,8 @@ def format_event_vk(
     else:
         day_fmt = day
 
-    lines.append(f"{day_fmt} {e.time} {loc}")
+    lines.append(f"\U0001f4c5 {day_fmt} {e.time}")
+    lines.append(f"\U0001f4cd {loc}")
 
     return "\n".join(lines)
 
