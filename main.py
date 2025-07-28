@@ -65,9 +65,11 @@ LOCAL_TZ = timezone.utc
 # separator inserted between versions on Telegraph source pages
 CONTENT_SEPARATOR = "🟧" * 10
 # separator line between events in VK posts
+
 VK_EVENT_SEPARATOR = "\u2800\n\u2800"
 # single blank line for VK posts
 VK_BLANK_LINE = "\u2800"
+
 
 # user_id -> (event_id, field?) for editing session
 editing_sessions: dict[int, tuple[int, str | None]] = {}
@@ -2714,9 +2716,11 @@ def format_event_md(e: Event) -> str:
     return "\n".join(lines)
 
 
+
 def format_event_vk(
     e: Event, highlight: bool = False, weekend_url: str | None = None
 ) -> str:
+
     prefix = ""
     if highlight:
         prefix += "\U0001f449 "
@@ -2725,6 +2729,7 @@ def format_event_vk(
     emoji_part = ""
     if e.emoji and not e.title.strip().startswith(e.emoji):
         emoji_part = f"{e.emoji} "
+
 
     title = f"{prefix}{emoji_part}{e.title.upper()}".strip()
     desc = re.sub(
@@ -2735,6 +2740,7 @@ def format_event_vk(
     )
     if e.telegraph_url:
         desc = f"{desc}, подробнее: {e.telegraph_url}"
+
     lines = [title, desc]
 
     if e.pushkin_card:
@@ -2745,6 +2751,7 @@ def format_event_vk(
         if e.ticket_link:
             lines.append("по регистрации")
             lines.append(f"\U0001f39f {e.ticket_link}")
+
     elif e.ticket_link and (
         e.ticket_price_min is not None or e.ticket_price_max is not None
     ):
@@ -2775,6 +2782,7 @@ def format_event_vk(
 
     # details link already appended to description above
 
+
     loc = e.location_name
     addr = e.location_address
     if addr and e.city:
@@ -2794,8 +2802,10 @@ def format_event_vk(
         day_fmt = f"{day}"
     else:
         day_fmt = day
+
     lines.append(f"\U0001f4c5 {day_fmt} {e.time}")
     lines.append(f"\U0001f4cd {loc}")
+
     return "\n".join(lines)
 
 
@@ -3157,7 +3167,7 @@ async def build_month_page_content(
     return title, content
 
 
-async def sync_month_page(db: Database, month: str, update_links: bool = True):
+async def sync_month_page(db: Database, month: str, update_links: bool = False):
     token = get_telegraph_token()
     if not token:
         logging.error("Telegraph token unavailable")
@@ -3257,7 +3267,7 @@ async def sync_month_page(db: Database, month: str, update_links: bool = True):
         except Exception as e:
             logging.error("Failed to sync month page %s: %s", month, e)
 
-    if update_links:
+    if update_links or created:
         async with db.get_session() as session:
             result = await session.execute(select(MonthPage).order_by(MonthPage.month))
             months = result.scalars().all()
@@ -3415,7 +3425,7 @@ async def build_weekend_page_content(db: Database, start: str) -> tuple[str, lis
     return title, content
 
 
-async def sync_weekend_page(db: Database, start: str, update_links: bool = True):
+async def sync_weekend_page(db: Database, start: str, update_links: bool = False):
     token = get_telegraph_token()
     if not token:
         logging.error("Telegraph token unavailable")
@@ -3448,7 +3458,7 @@ async def sync_weekend_page(db: Database, start: str, update_links: bool = True)
         except Exception as e:
             logging.error("Failed to sync weekend page %s: %s", start, e)
 
-    if update_links:
+    if update_links or created:
         async with db.get_session() as session:
             result = await session.execute(
                 select(WeekendPage).order_by(WeekendPage.start)
@@ -3699,6 +3709,7 @@ async def build_daily_sections_vk(
             elif m == next_month(cur_month):
                 next_count += 1
 
+
     lines1 = [
         f"\U0001f4c5 АНОНС на {format_day_pretty(today)} {today.year}",
         DAYS_OF_WEEK[today.weekday()],
@@ -3712,6 +3723,7 @@ async def build_daily_sections_vk(
             w = weekend_map.get(d.isoformat())
             if w:
                 w_url = w.url
+
         lines1.append(format_event_vk(e, highlight=True, weekend_url=w_url))
         lines1.append(VK_EVENT_SEPARATOR)
     if events_today:
@@ -3743,6 +3755,7 @@ async def build_daily_sections_vk(
     section1 = "\n".join(lines1)
 
     lines2 = ["ДОБАВИЛИ В АНОНС", VK_BLANK_LINE]
+
     for e in events_new:
         w_url = None
         d = parse_iso_date(e.date)
