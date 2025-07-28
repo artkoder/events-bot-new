@@ -67,6 +67,8 @@ CONTENT_SEPARATOR = "🟧" * 10
 # separator line between events in VK posts
 
 VK_EVENT_SEPARATOR = "\u2800\n\u2800"
+# single blank line for VK posts
+VK_BLANK_LINE = "\u2800"
 
 
 # user_id -> (event_id, field?) for editing session
@@ -2747,7 +2749,6 @@ def format_event_vk(
     if e.is_free:
         lines.append("🟡 Бесплатно")
         if e.ticket_link:
-
             lines.append("по регистрации")
             lines.append(f"\U0001f39f {e.ticket_link}")
 
@@ -2760,12 +2761,10 @@ def format_event_vk(
             val = e.ticket_price_min if e.ticket_price_min is not None else e.ticket_price_max
             price = f"{val} руб." if val is not None else ""
         lines.append(f"Билеты в источнике {price}".strip())
-
         lines.append(f"\U0001f39f {e.ticket_link}")
     elif e.ticket_link:
         lines.append("по регистрации")
         lines.append(f"\U0001f39f {e.ticket_link}")
-
     else:
         price = ""
         if (
@@ -2780,7 +2779,6 @@ def format_event_vk(
             price = f"{e.ticket_price_max} руб."
         if price:
             lines.append(f"Билеты {price}")
-
 
     # details link already appended to description above
 
@@ -3658,8 +3656,59 @@ async def build_daily_sections_vk(
         events_new = res_new.scalars().all()
 
         w_start = next_weekend_start(today)
+        wpage = await session.get(WeekendPage, w_start.isoformat())
         res_w_all = await session.execute(select(WeekendPage))
         weekend_map = {w.start: w for w in res_w_all.scalars().all()}
+        cur_month = today.strftime("%Y-%m")
+        mp_cur = await session.get(MonthPage, cur_month)
+        mp_next = await session.get(MonthPage, next_month(cur_month))
+
+        new_events = (
+            await session.execute(
+                select(Event).where(
+                    Event.added_at.is_not(None),
+                    Event.added_at >= yesterday_utc,
+                )
+            )
+        ).scalars().all()
+
+        weekend_count = 0
+        if wpage:
+            sat = w_start
+            sun = w_start + timedelta(days=1)
+            weekend_new = [
+                e
+                for e in new_events
+                if e.date in {sat.isoformat(), sun.isoformat()}
+                or (
+                    e.event_type == "выставка"
+                    and e.end_date
+                    and e.end_date >= sat.isoformat()
+                    and e.date <= sun.isoformat()
+                )
+            ]
+            weekend_today = [
+                e
+                for e in events_today
+                if e.date in {sat.isoformat(), sun.isoformat()}
+                or (
+                    e.event_type == "выставка"
+                    and e.end_date
+                    and e.end_date >= sat.isoformat()
+                    and e.date <= sun.isoformat()
+                )
+            ]
+            weekend_count = max(0, len(weekend_new) - len(weekend_today))
+
+        cur_count = 0
+        next_count = 0
+        for e in new_events:
+            m = e.date[:7]
+            if m == cur_month:
+                cur_count += 1
+            elif m == next_month(cur_month):
+                next_count += 1
+
 
     lines1 = [
         f"\U0001f4c5 АНОНС на {format_day_pretty(today)} {today.year}",
@@ -3679,14 +3728,34 @@ async def build_daily_sections_vk(
         lines1.append(VK_EVENT_SEPARATOR)
     if events_today:
         lines1.pop()
-
-    lines1.append("")
+    link_lines: list[str] = []
+    if wpage:
+        sunday = w_start + timedelta(days=1)
+        prefix = f"(+{weekend_count}) " if weekend_count else ""
+        link_lines.append(
+            f"{prefix}Мероприятия на выходные {w_start.day} {sunday.day} {MONTHS[w_start.month - 1]}: {wpage.url}"
+        )
+    if mp_cur:
+        prefix = f"(+{cur_count}) " if cur_count else ""
+        link_lines.append(
+            f"{prefix}Мероприятия на {month_name_nominative(cur_month)}: {mp_cur.url}"
+        )
+    if mp_next:
+        prefix = f"(+{next_count}) " if next_count else ""
+        link_lines.append(
+            f"{prefix}Мероприятия на {month_name_nominative(next_month(cur_month))}: {mp_next.url}"
+        )
+    if link_lines:
+        lines1.append(VK_EVENT_SEPARATOR)
+        lines1.extend(link_lines)
+    lines1.append(VK_EVENT_SEPARATOR)
     lines1.append(
         f"#Афиша_Калининград #кудапойти_Калининград #Калининград #39region #концерт #{today.day}{MONTHS[today.month - 1]}"
     )
     section1 = "\n".join(lines1)
 
-    lines2 = ["ДОБАВИЛИ В АНОНС"]
+    lines2 = ["ДОБАВИЛИ В АНОНС", VK_BLANK_LINE]
+
     for e in events_new:
         w_url = None
         d = parse_iso_date(e.date)
@@ -3694,13 +3763,14 @@ async def build_daily_sections_vk(
             w = weekend_map.get(d.isoformat())
             if w:
                 w_url = w.url
-
         lines2.append(format_event_vk(e, weekend_url=w_url))
         lines2.append(VK_EVENT_SEPARATOR)
     if events_new:
         lines2.pop()
-
-    lines2.append("")
+    if link_lines:
+        lines2.append(VK_EVENT_SEPARATOR)
+        lines2.extend(link_lines)
+    lines2.append(VK_EVENT_SEPARATOR)
     lines2.append(
         f"#события_Калининград #Калининград #39region #новое #фестиваль #{today.day}{MONTHS[today.month - 1]}"
     )
