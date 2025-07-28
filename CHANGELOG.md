@@ -69,4 +69,9 @@
 - Daily announcements no longer append a "подробнее" link to the event's
   Telegraph page.
 
+## v0.3.9 - VK daily announcements
+
+- Daily announcements can be posted to a VK group. Set the group with `/vkgroup` and adjust
+  times via `/vktime`. Use the `VK_TOKEN` secret for API access.
+
 
