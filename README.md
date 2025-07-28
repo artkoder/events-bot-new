@@ -1,6 +1,6 @@
 # Events Bot
 
-Telegram bot for publishing event announcements.
+Telegram bot for publishing event announcements. Daily announcements can also be posted to a VK group.
 
 This is an MVP using **aiogram 3** and SQLite. It is designed for deployment on
 Fly.io with a webhook.
@@ -38,6 +38,8 @@ browse upcoming announcements. The command accepts dates like `2025-07-10`,
   # Optional: provide Telegraph token. If omitted, the bot creates an account
   # automatically and saves the token to /data/telegraph_token.txt.
   export TELEGRAPH_TOKEN=your_telegraph_token
+  # Optional: post daily announcements to VK
+  export VK_TOKEN=vk_access_token
   python main.py
    ```
 
@@ -57,10 +59,12 @@ browse upcoming announcements. The command accepts dates like `2025-07-10`,
     fly secrets set DB_PATH=/data/db.sqlite
     # Optional: enable calendar files
     fly secrets set SUPABASE_URL=https://<project>.supabase.co
-    fly secrets set SUPABASE_KEY=service_role_key
+   fly secrets set SUPABASE_KEY=service_role_key
    # Optional: use your own Telegraph token. If not set, a new account will be
    # created on first run and the token saved to the data volume.
    fly secrets set TELEGRAPH_TOKEN=<token>
+   # Optional: post daily announcements to VK
+   fly secrets set VK_TOKEN=<token>
    ```
 3. Deploy:
    ```bash
