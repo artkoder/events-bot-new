@@ -3651,10 +3651,12 @@ async def build_daily_sections_vk(
                 w_url = w.url
         lines1.append("")
         lines1.append(format_event_vk(e, highlight=True, weekend_url=w_url))
+
     lines1.append("")
     lines1.append(
         f"#Афиша_Калининград #кудапойти_Калининград #Калининград #39region #концерт #{today.day}{MONTHS[today.month - 1]}"
     )
+
     section1 = "\n".join(lines1)
 
     lines2 = ["ДОБАВИЛИ В АНОНС"]
@@ -3667,10 +3669,12 @@ async def build_daily_sections_vk(
                 w_url = w.url
         lines2.append("")
         lines2.append(format_event_vk(e, weekend_url=w_url))
+
     lines2.append("")
     lines2.append(
         f"#события_Калининград #Калининград #39region #новое #фестиваль #{today.day}{MONTHS[today.month - 1]}"
     )
+
     section2 = "\n".join(lines2)
 
     return section1, section2
