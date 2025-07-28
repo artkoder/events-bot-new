@@ -2728,20 +2728,22 @@ def format_event_vk(e: Event, highlight: bool = False, weekend_url: str | None =
         lines.append("\u2705 Пушкинская карта")
 
     if e.is_free:
-        txt = "🟡 Бесплатно"
+        lines.append("🟡 Бесплатно")
         if e.ticket_link:
-            txt += f" по регистрации {e.ticket_link}"
-        lines.append(txt)
+            lines.append(f"по регистрации {e.ticket_link}")
     elif e.ticket_link and (
         e.ticket_price_min is not None or e.ticket_price_max is not None
     ):
         if e.ticket_price_max is not None and e.ticket_price_max != e.ticket_price_min:
-            price = f"от {e.ticket_price_min} до {e.ticket_price_max}"
+            price = f"от {e.ticket_price_min} до {e.ticket_price_max} руб."
         else:
-            price = str(e.ticket_price_min or e.ticket_price_max or "")
-        lines.append(f"Билеты в источнике {price} {e.ticket_link}".strip())
+            val = e.ticket_price_min if e.ticket_price_min is not None else e.ticket_price_max
+            price = f"{val} руб." if val is not None else ""
+        lines.append(f"Билеты в источнике {price}".strip())
+        lines.append(e.ticket_link)
     elif e.ticket_link:
-        lines.append(f"по регистрации {e.ticket_link}")
+        lines.append("по регистрации")
+        lines.append(e.ticket_link)
     else:
         price = ""
         if (
@@ -2749,19 +2751,18 @@ def format_event_vk(e: Event, highlight: bool = False, weekend_url: str | None =
             and e.ticket_price_max is not None
             and e.ticket_price_min != e.ticket_price_max
         ):
-            price = f"от {e.ticket_price_min} до {e.ticket_price_max}"
+            price = f"от {e.ticket_price_min} до {e.ticket_price_max} руб."
         elif e.ticket_price_min is not None:
-            price = str(e.ticket_price_min)
+            price = f"{e.ticket_price_min} руб."
         elif e.ticket_price_max is not None:
-            price = str(e.ticket_price_max)
+            price = f"{e.ticket_price_max} руб."
         if price:
             lines.append(f"Билеты {price}")
 
     if e.telegraph_url:
-        more_line = f"подробнее {e.telegraph_url}"
-        if e.ics_post_url:
-            more_line += f" \U0001f4c5 {e.ics_post_url}"
-        lines.append(more_line)
+        lines.append(f"подробнее: {e.telegraph_url}")
+    if e.ics_post_url:
+        lines.append(f"\U0001f4c6 Добавить в календарь: {e.ics_post_url}")
 
     loc = e.location_name
     addr = e.location_address
@@ -2782,7 +2783,7 @@ def format_event_vk(e: Event, highlight: bool = False, weekend_url: str | None =
         day_fmt = f"{day}"
     else:
         day_fmt = day
-    lines.append(f"{day_fmt} {e.time} {loc}")
+    lines.append(f"[i]{day_fmt} {e.time} {loc}[/i]")
     return "\n".join(lines)
 
 
@@ -3637,7 +3638,7 @@ async def build_daily_sections_vk(
         weekend_map = {w.start: w for w in res_w_all.scalars().all()}
 
     lines1 = [
-        f"АНОНС на {format_day_pretty(today)} {today.year}",
+        f"\U0001f4c5 АНОНС на {format_day_pretty(today)} {today.year}",
         DAYS_OF_WEEK[today.weekday()],
         "",
         "НЕ ПРОПУСТИТЕ СЕГОДНЯ",
@@ -3651,12 +3652,11 @@ async def build_daily_sections_vk(
                 w_url = w.url
         lines1.append("")
         lines1.append(format_event_vk(e, highlight=True, weekend_url=w_url))
-
+        lines1.append("")
     lines1.append("")
     lines1.append(
         f"#Афиша_Калининград #кудапойти_Калининград #Калининград #39region #концерт #{today.day}{MONTHS[today.month - 1]}"
     )
-
     section1 = "\n".join(lines1)
 
     lines2 = ["ДОБАВИЛИ В АНОНС"]
@@ -3669,12 +3669,11 @@ async def build_daily_sections_vk(
                 w_url = w.url
         lines2.append("")
         lines2.append(format_event_vk(e, weekend_url=w_url))
-
+        lines2.append("")
     lines2.append("")
     lines2.append(
         f"#события_Калининград #Калининград #39region #новое #фестиваль #{today.day}{MONTHS[today.month - 1]}"
     )
-
     section2 = "\n".join(lines2)
 
     return section1, section2
