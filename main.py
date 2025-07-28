@@ -38,6 +38,7 @@ TELEGRAPH_TOKEN_FILE = os.getenv("TELEGRAPH_TOKEN_FILE", "/data/telegraph_token.
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "events-ics")
+VK_TOKEN = os.getenv("VK_TOKEN")
 ICS_CONTENT_TYPE = "text/calendar; charset=utf-8"
 ICS_CONTENT_DISP_TEMPLATE = 'inline; filename="{name}"'
 ICS_CALNAME = "kenigevents"
@@ -63,11 +64,19 @@ LOCAL_TZ = timezone.utc
 
 # separator inserted between versions on Telegraph source pages
 CONTENT_SEPARATOR = "🟧" * 10
+# separator line between events in VK posts
+VK_EVENT_SEPARATOR = "\u2800\n\u2800"
+# single blank line for VK posts
+VK_BLANK_LINE = "\u2800"
 
 # user_id -> (event_id, field?) for editing session
 editing_sessions: dict[int, tuple[int, str | None]] = {}
 # user_id -> channel_id for daily time editing
 daily_time_sessions: dict[int, int] = {}
+# waiting for VK group ID input
+vk_group_sessions: set[int] = set()
+# user_id -> section (today/added) for VK time update
+vk_time_sessions: dict[int, str] = {}
 
 # toggle for uploading images to catbox
 CATBOX_ENABLED: bool = False
@@ -344,6 +353,66 @@ async def set_catbox_enabled(db: Database, value: bool):
         await session.commit()
     global CATBOX_ENABLED
     CATBOX_ENABLED = value
+
+
+async def get_setting_value(db: Database, key: str) -> str | None:
+    async with db.get_session() as session:
+        setting = await session.get(Setting, key)
+        return setting.value if setting else None
+
+
+async def set_setting_value(db: Database, key: str, value: str | None):
+    async with db.get_session() as session:
+        setting = await session.get(Setting, key)
+        if value is None:
+            if setting:
+                await session.delete(setting)
+        elif setting:
+            setting.value = value
+        else:
+            setting = Setting(key=key, value=value)
+            session.add(setting)
+        await session.commit()
+
+
+async def get_vk_group_id(db: Database) -> str | None:
+    return await get_setting_value(db, "vk_group_id")
+
+
+async def set_vk_group_id(db: Database, group_id: str | None):
+    await set_setting_value(db, "vk_group_id", group_id)
+
+
+async def get_vk_time_today(db: Database) -> str:
+    return await get_setting_value(db, "vk_time_today") or "08:00"
+
+
+async def set_vk_time_today(db: Database, value: str):
+    await set_setting_value(db, "vk_time_today", value)
+
+
+async def get_vk_time_added(db: Database) -> str:
+    return await get_setting_value(db, "vk_time_added") or "20:00"
+
+
+async def set_vk_time_added(db: Database, value: str):
+    await set_setting_value(db, "vk_time_added", value)
+
+
+async def get_vk_last_today(db: Database) -> str | None:
+    return await get_setting_value(db, "vk_last_today")
+
+
+async def set_vk_last_today(db: Database, value: str):
+    await set_setting_value(db, "vk_last_today", value)
+
+
+async def get_vk_last_added(db: Database) -> str | None:
+    return await get_setting_value(db, "vk_last_added")
+
+
+async def set_vk_last_added(db: Database, value: str):
+    await set_setting_value(db, "vk_last_added", value)
 
 
 def get_supabase_client() -> Client | None:
@@ -1392,6 +1461,29 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
         now = datetime.now(tz) + timedelta(days=1)
         await send_daily_announcement(db, bot, cid, tz, record=False, now=now)
         await callback.answer("Sent")
+    elif data == "vkset":
+        vk_group_sessions.add(callback.from_user.id)
+        await callback.message.answer("Send VK group id or 'off'")
+        await callback.answer()
+    elif data == "vkunset":
+        await set_vk_group_id(db, None)
+        await send_daily_list(callback.message, db, bot, edit=True)
+        await callback.answer("Disabled")
+    elif data.startswith("vktime:"):
+        typ = data.split(":", 1)[1]
+        vk_time_sessions[callback.from_user.id] = typ
+        await callback.message.answer("Send new time HH:MM")
+        await callback.answer()
+    elif data.startswith("vkdailysend:"):
+        section = data.split(":", 1)[1]
+        group_id = await get_vk_group_id(db)
+        if group_id:
+            offset = await get_tz_offset(db)
+            tz = offset_to_timezone(offset)
+            await send_daily_announcement_vk(
+                db, VK_TOKEN, group_id, tz, section=section
+            )
+        await callback.answer("Sent")
 
 
 async def handle_tz(message: types.Message, db: Database, bot: Bot):
@@ -1418,6 +1510,44 @@ async def handle_images(message: types.Message, db: Database, bot: Bot):
     await set_catbox_enabled(db, new_value)
     status = "enabled" if new_value else "disabled"
     await bot.send_message(message.chat.id, f"Image uploads {status}")
+
+
+async def handle_vkgroup(message: types.Message, db: Database, bot: Bot):
+    parts = message.text.split(maxsplit=1)
+    if len(parts) != 2:
+        await bot.send_message(message.chat.id, "Usage: /vkgroup <id|off>")
+        return
+    async with db.get_session() as session:
+        user = await session.get(User, message.from_user.id)
+        if not user or not user.is_superadmin:
+            await bot.send_message(message.chat.id, "Not authorized")
+            return
+    if parts[1].lower() == "off":
+        await set_vk_group_id(db, None)
+        await bot.send_message(message.chat.id, "VK posting disabled")
+    else:
+        await set_vk_group_id(db, parts[1])
+        await bot.send_message(message.chat.id, f"VK group set to {parts[1]}")
+
+
+async def handle_vktime(message: types.Message, db: Database, bot: Bot):
+    parts = message.text.split()
+    if len(parts) != 3 or parts[1] not in {"today", "added"}:
+        await bot.send_message(message.chat.id, "Usage: /vktime today|added HH:MM")
+        return
+    async with db.get_session() as session:
+        user = await session.get(User, message.from_user.id)
+        if not user or not user.is_superadmin:
+            await bot.send_message(message.chat.id, "Not authorized")
+            return
+    if not re.match(r"^\d{2}:\d{2}$", parts[2]):
+        await bot.send_message(message.chat.id, "Invalid time format")
+        return
+    if parts[1] == "today":
+        await set_vk_time_today(db, parts[2])
+    else:
+        await set_vk_time_added(db, parts[2])
+    await bot.send_message(message.chat.id, "VK time updated")
 
 
 async def handle_my_chat_member(update: types.ChatMemberUpdated, db: Database):
@@ -1554,6 +1684,18 @@ async def send_regdaily_list(
         channels = result.scalars().all()
     lines = []
     keyboard = []
+    group_id = await get_vk_group_id(db)
+    if group_id:
+        lines.append(f"VK group {group_id}")
+        keyboard.append([
+            types.InlineKeyboardButton(text="Change", callback_data="vkset"),
+            types.InlineKeyboardButton(text="Disable", callback_data="vkunset"),
+        ])
+    else:
+        lines.append("VK group disabled")
+        keyboard.append([
+            types.InlineKeyboardButton(text="Set VK group", callback_data="vkset")
+        ])
     for ch in channels:
         name = ch.title or ch.username or str(ch.channel_id)
         lines.append(name)
@@ -1588,6 +1730,23 @@ async def send_daily_list(
         channels = result.scalars().all()
     lines = []
     keyboard = []
+    group_id = await get_vk_group_id(db)
+    if group_id:
+        t_today = await get_vk_time_today(db)
+        t_added = await get_vk_time_added(db)
+        lines.append(f"VK group {group_id} {t_today}/{t_added}")
+        keyboard.append([
+            types.InlineKeyboardButton(text="Disable", callback_data="vkunset"),
+            types.InlineKeyboardButton(text="Today", callback_data="vktime:today"),
+            types.InlineKeyboardButton(text="Added", callback_data="vktime:added"),
+            types.InlineKeyboardButton(text="Test today", callback_data="vkdailysend:today"),
+            types.InlineKeyboardButton(text="Test added", callback_data="vkdailysend:added"),
+        ])
+    else:
+        lines.append("VK group disabled")
+        keyboard.append([
+            types.InlineKeyboardButton(text="Set VK group", callback_data="vkset")
+        ])
     for ch in channels:
         name = ch.title or ch.username or str(ch.channel_id)
         t = ch.daily_time or "?"
@@ -2555,6 +2714,91 @@ def format_event_md(e: Event) -> str:
     return "\n".join(lines)
 
 
+def format_event_vk(
+    e: Event, highlight: bool = False, weekend_url: str | None = None
+) -> str:
+    prefix = ""
+    if highlight:
+        prefix += "\U0001f449 "
+    if is_recent(e):
+        prefix += "\U0001f6a9 "
+    emoji_part = ""
+    if e.emoji and not e.title.strip().startswith(e.emoji):
+        emoji_part = f"{e.emoji} "
+
+    title = f"{prefix}{emoji_part}{e.title.upper()}".strip()
+    desc = re.sub(
+        r",?\s*подробнее\s*\([^\n]*\)$",
+        "",
+        e.description.strip(),
+        flags=re.I,
+    )
+    if e.telegraph_url:
+        desc = f"{desc}, подробнее: {e.telegraph_url}"
+    lines = [title, desc]
+
+    if e.pushkin_card:
+        lines.append("\u2705 Пушкинская карта")
+
+    if e.is_free:
+        lines.append("🟡 Бесплатно")
+        if e.ticket_link:
+            lines.append("по регистрации")
+            lines.append(f"\U0001f39f {e.ticket_link}")
+    elif e.ticket_link and (
+        e.ticket_price_min is not None or e.ticket_price_max is not None
+    ):
+        if e.ticket_price_max is not None and e.ticket_price_max != e.ticket_price_min:
+            price = f"от {e.ticket_price_min} до {e.ticket_price_max} руб."
+        else:
+            val = e.ticket_price_min if e.ticket_price_min is not None else e.ticket_price_max
+            price = f"{val} руб." if val is not None else ""
+        lines.append(f"Билеты в источнике {price}".strip())
+        lines.append(f"\U0001f39f {e.ticket_link}")
+    elif e.ticket_link:
+        lines.append("по регистрации")
+        lines.append(f"\U0001f39f {e.ticket_link}")
+    else:
+        price = ""
+        if (
+            e.ticket_price_min is not None
+            and e.ticket_price_max is not None
+            and e.ticket_price_min != e.ticket_price_max
+        ):
+            price = f"от {e.ticket_price_min} до {e.ticket_price_max} руб."
+        elif e.ticket_price_min is not None:
+            price = f"{e.ticket_price_min} руб."
+        elif e.ticket_price_max is not None:
+            price = f"{e.ticket_price_max} руб."
+        if price:
+            lines.append(f"Билеты {price}")
+
+    # details link already appended to description above
+
+    loc = e.location_name
+    addr = e.location_address
+    if addr and e.city:
+        addr = strip_city_from_address(addr, e.city)
+    if addr:
+        loc += f", {addr}"
+    if e.city:
+        loc += f", #{e.city}"
+    date_part = e.date.split("..", 1)[0]
+    d = parse_iso_date(date_part)
+    if d:
+        day = format_day_pretty(d)
+    else:
+        logging.error("Invalid event date: %s", e.date)
+        day = e.date
+    if weekend_url and d and d.weekday() == 5:
+        day_fmt = f"{day}"
+    else:
+        day_fmt = day
+    lines.append(f"\U0001f4c5 {day_fmt} {e.time}")
+    lines.append(f"\U0001f4cd {loc}")
+    return "\n".join(lines)
+
+
 def format_event_daily(
     e: Event, highlight: bool = False, weekend_url: str | None = None
 ) -> str:
@@ -2778,7 +3022,7 @@ async def get_month_data(db: Database, month: str, *, fallback: bool = True):
 
     if month == today.strftime("%Y-%m"):
         today_str = today.isoformat()
-        cutoff = (today - timedelta(days=7)).isoformat()
+        cutoff = (today - timedelta(days=30)).isoformat()
         events = [e for e in events if e.date.split("..", 1)[0] >= today_str]
         exhibitions = [
             e for e in exhibitions if e.end_date and e.end_date >= cutoff
@@ -2808,7 +3052,7 @@ async def build_month_page_content(
 
 
     today = datetime.now(LOCAL_TZ).date()
-    cutoff = (today - timedelta(days=7)).isoformat()
+    cutoff = (today - timedelta(days=30)).isoformat()
 
     if month == today.strftime("%Y-%m"):
         events = [e for e in events if e.date.split("..", 1)[0] >= cutoff]
@@ -3297,6 +3541,7 @@ async def build_daily_posts(
             elif m == next_month(cur_month):
                 next_count += 1
 
+    tag = f"{today.day}{MONTHS[today.month - 1]}"
     lines1 = [
         f"<b>АНОНС на {format_day_pretty(today)} {today.year} #ежедневныйанонс</b>",
         DAYS_OF_WEEK[today.weekday()],
@@ -3312,6 +3557,10 @@ async def build_daily_posts(
                 w_url = w.url
         lines1.append("")
         lines1.append(format_event_daily(e, highlight=True, weekend_url=w_url))
+    lines1.append("")
+    lines1.append(
+        f"#Афиша_Калининград #Калининград #концерт #{tag} #{today.day}_{MONTHS[today.month - 1]}"
+    )
     section1 = "\n".join(lines1)
 
     lines2 = ["<b><i>ДОБАВИЛИ В АНОНС</i></b>"]
@@ -3366,6 +3615,192 @@ async def build_daily_posts(
         posts.append((part, None))
     posts.append((section2_parts[-1], markup))
     return posts
+
+
+async def build_daily_sections_vk(
+    db: Database,
+    tz: timezone,
+    now: datetime | None = None,
+) -> tuple[str, str]:
+    if now is None:
+        now = datetime.now(tz)
+    today = now.date()
+    yesterday_utc = recent_cutoff(tz, now)
+    async with db.get_session() as session:
+        res_today = await session.execute(
+            select(Event)
+            .where(Event.date == today.isoformat())
+            .order_by(Event.time)
+        )
+        events_today = res_today.scalars().all()
+        res_new = await session.execute(
+            select(Event)
+            .where(
+                Event.date > today.isoformat(),
+                Event.added_at.is_not(None),
+                Event.added_at >= yesterday_utc,
+                Event.silent.is_(False),
+            )
+            .order_by(Event.date, Event.time)
+        )
+        events_new = res_new.scalars().all()
+
+        w_start = next_weekend_start(today)
+        wpage = await session.get(WeekendPage, w_start.isoformat())
+        res_w_all = await session.execute(select(WeekendPage))
+        weekend_map = {w.start: w for w in res_w_all.scalars().all()}
+        cur_month = today.strftime("%Y-%m")
+        mp_cur = await session.get(MonthPage, cur_month)
+        mp_next = await session.get(MonthPage, next_month(cur_month))
+
+        new_events = (
+            await session.execute(
+                select(Event).where(
+                    Event.added_at.is_not(None),
+                    Event.added_at >= yesterday_utc,
+                )
+            )
+        ).scalars().all()
+
+        weekend_count = 0
+        if wpage:
+            sat = w_start
+            sun = w_start + timedelta(days=1)
+            weekend_new = [
+                e
+                for e in new_events
+                if e.date in {sat.isoformat(), sun.isoformat()}
+                or (
+                    e.event_type == "выставка"
+                    and e.end_date
+                    and e.end_date >= sat.isoformat()
+                    and e.date <= sun.isoformat()
+                )
+            ]
+            weekend_today = [
+                e
+                for e in events_today
+                if e.date in {sat.isoformat(), sun.isoformat()}
+                or (
+                    e.event_type == "выставка"
+                    and e.end_date
+                    and e.end_date >= sat.isoformat()
+                    and e.date <= sun.isoformat()
+                )
+            ]
+            weekend_count = max(0, len(weekend_new) - len(weekend_today))
+
+        cur_count = 0
+        next_count = 0
+        for e in new_events:
+            m = e.date[:7]
+            if m == cur_month:
+                cur_count += 1
+            elif m == next_month(cur_month):
+                next_count += 1
+
+    lines1 = [
+        f"\U0001f4c5 АНОНС на {format_day_pretty(today)} {today.year}",
+        DAYS_OF_WEEK[today.weekday()],
+        "",
+        "НЕ ПРОПУСТИТЕ СЕГОДНЯ",
+    ]
+    for e in events_today:
+        w_url = None
+        d = parse_iso_date(e.date)
+        if d and d.weekday() == 5:
+            w = weekend_map.get(d.isoformat())
+            if w:
+                w_url = w.url
+        lines1.append(format_event_vk(e, highlight=True, weekend_url=w_url))
+        lines1.append(VK_EVENT_SEPARATOR)
+    if events_today:
+        lines1.pop()
+    link_lines: list[str] = []
+    if wpage:
+        sunday = w_start + timedelta(days=1)
+        prefix = f"(+{weekend_count}) " if weekend_count else ""
+        link_lines.append(
+            f"{prefix}Мероприятия на выходные {w_start.day} {sunday.day} {MONTHS[w_start.month - 1]}: {wpage.url}"
+        )
+    if mp_cur:
+        prefix = f"(+{cur_count}) " if cur_count else ""
+        link_lines.append(
+            f"{prefix}Мероприятия на {month_name_nominative(cur_month)}: {mp_cur.url}"
+        )
+    if mp_next:
+        prefix = f"(+{next_count}) " if next_count else ""
+        link_lines.append(
+            f"{prefix}Мероприятия на {month_name_nominative(next_month(cur_month))}: {mp_next.url}"
+        )
+    if link_lines:
+        lines1.append(VK_EVENT_SEPARATOR)
+        lines1.extend(link_lines)
+    lines1.append(VK_EVENT_SEPARATOR)
+    lines1.append(
+        f"#Афиша_Калининград #кудапойти_Калининград #Калининград #39region #концерт #{today.day}{MONTHS[today.month - 1]}"
+    )
+    section1 = "\n".join(lines1)
+
+    lines2 = ["ДОБАВИЛИ В АНОНС", VK_BLANK_LINE]
+    for e in events_new:
+        w_url = None
+        d = parse_iso_date(e.date)
+        if d and d.weekday() == 5:
+            w = weekend_map.get(d.isoformat())
+            if w:
+                w_url = w.url
+        lines2.append(format_event_vk(e, weekend_url=w_url))
+        lines2.append(VK_EVENT_SEPARATOR)
+    if events_new:
+        lines2.pop()
+    if link_lines:
+        lines2.append(VK_EVENT_SEPARATOR)
+        lines2.extend(link_lines)
+    lines2.append(VK_EVENT_SEPARATOR)
+    lines2.append(
+        f"#события_Калининград #Калининград #39region #новое #фестиваль #{today.day}{MONTHS[today.month - 1]}"
+    )
+    section2 = "\n".join(lines2)
+
+    return section1, section2
+
+
+async def post_to_vk(token: str, group_id: str, message: str):
+    if not token or not group_id:
+        return
+    url = "https://api.vk.com/method/wall.post"
+    params = {
+        "owner_id": f"-{group_id.lstrip('-')}",
+        "from_group": 1,
+        "message": message,
+        "access_token": token,
+        "v": "5.131",
+    }
+    async with create_ipv4_session(ClientSession) as session:
+        async with session.post(url, data=params) as resp:
+            data = await resp.json()
+            if "error" in data:
+                raise RuntimeError(f"VK error: {data['error']}")
+
+
+async def send_daily_announcement_vk(
+    db: Database,
+    token: str,
+    group_id: str,
+    tz: timezone,
+    *,
+    section: str,
+    now: datetime | None = None,
+):
+    section1, section2 = await build_daily_sections_vk(db, tz, now)
+    if section == "today":
+        await post_to_vk(token, group_id, section1)
+    elif section == "added":
+        await post_to_vk(token, group_id, section2)
+    else:
+        await post_to_vk(token, group_id, section1)
+        await post_to_vk(token, group_id, section2)
 
 
 async def send_daily_announcement(
@@ -3425,6 +3860,40 @@ async def daily_scheduler(db: Database, bot: Bot):
                     await send_daily_announcement(db, bot, ch.channel_id, tz)
                 except Exception as e:
                     logging.error("daily send failed for %s: %s", ch.channel_id, e)
+        await asyncio.sleep(60)
+
+
+async def vk_scheduler(db: Database):
+    if not VK_TOKEN:
+        return
+    while True:
+        group_id = await get_vk_group_id(db)
+        if not group_id:
+            await asyncio.sleep(60)
+            continue
+        offset = await get_tz_offset(db)
+        tz = offset_to_timezone(offset)
+        now = datetime.now(tz)
+        now_time = now.time().replace(second=0, microsecond=0)
+        today_time = datetime.strptime(await get_vk_time_today(db), "%H:%M").time()
+        added_time = datetime.strptime(await get_vk_time_added(db), "%H:%M").time()
+
+        last_today = await get_vk_last_today(db)
+        if (last_today or "") != now.date().isoformat() and now_time >= today_time:
+            try:
+                await send_daily_announcement_vk(db, VK_TOKEN, group_id, tz, section="today")
+                await set_vk_last_today(db, now.date().isoformat())
+            except Exception as e:
+                logging.error("vk daily today failed: %s", e)
+
+        last_added = await get_vk_last_added(db)
+        if (last_added or "") != now.date().isoformat() and now_time >= added_time:
+            try:
+                await send_daily_announcement_vk(db, VK_TOKEN, group_id, tz, section="added")
+                await set_vk_last_added(db, now.date().isoformat())
+            except Exception as e:
+                logging.error("vk daily added failed: %s", e)
+
         await asyncio.sleep(60)
 
 
@@ -3566,7 +4035,7 @@ async def build_events_message(db: Database, target_date: date, tz: timezone):
 
 async def build_exhibitions_message(db: Database, tz: timezone):
     today = datetime.now(tz).date()
-    cutoff = (today - timedelta(days=7)).isoformat()
+    cutoff = (today - timedelta(days=30)).isoformat()
     async with db.get_session() as session:
         result = await session.execute(
             select(Event)
@@ -4063,6 +4532,37 @@ async def handle_daily_time_message(message: types.Message, db: Database, bot: B
             ch.daily_time = value
             await session.commit()
     del daily_time_sessions[message.from_user.id]
+    await bot.send_message(message.chat.id, f"Time set to {value}")
+
+
+async def handle_vk_group_message(message: types.Message, db: Database, bot: Bot):
+    if message.from_user.id not in vk_group_sessions:
+        return
+    value = (message.text or "").strip()
+    if value.lower() == "off":
+        await set_vk_group_id(db, None)
+        await bot.send_message(message.chat.id, "VK posting disabled")
+    else:
+        await set_vk_group_id(db, value)
+        await bot.send_message(message.chat.id, f"VK group set to {value}")
+    vk_group_sessions.discard(message.from_user.id)
+
+
+async def handle_vk_time_message(message: types.Message, db: Database, bot: Bot):
+    typ = vk_time_sessions.get(message.from_user.id)
+    if not typ:
+        return
+    value = (message.text or "").strip()
+    if not re.match(r"^\d{1,2}:\d{2}$", value):
+        await bot.send_message(message.chat.id, "Invalid time")
+        return
+    if len(value.split(":")[0]) == 1:
+        value = f"0{value}"
+    if typ == "today":
+        await set_vk_time_today(db, value)
+    else:
+        await set_vk_time_added(db, value)
+    vk_time_sessions.pop(message.from_user.id, None)
     await bot.send_message(message.chat.id, f"Time set to {value}")
 
 
@@ -4563,6 +5063,12 @@ def create_app() -> web.Application:
     async def daily_time_wrapper(message: types.Message):
         await handle_daily_time_message(message, db, bot)
 
+    async def vk_group_msg_wrapper(message: types.Message):
+        await handle_vk_group_message(message, db, bot)
+
+    async def vk_time_msg_wrapper(message: types.Message):
+        await handle_vk_time_message(message, db, bot)
+
     async def forward_wrapper(message: types.Message):
         await handle_forwarded(message, db, bot)
 
@@ -4574,6 +5080,12 @@ def create_app() -> web.Application:
 
     async def images_wrapper(message: types.Message):
         await handle_images(message, db, bot)
+
+    async def vkgroup_wrapper(message: types.Message):
+        await handle_vkgroup(message, db, bot)
+
+    async def vktime_wrapper(message: types.Message):
+        await handle_vktime(message, db, bot)
 
     dp.message.register(start_wrapper, Command("start"))
     dp.message.register(register_wrapper, Command("register"))
@@ -4596,6 +5108,10 @@ def create_app() -> web.Application:
         or c.data.startswith("dailytime:")
         or c.data.startswith("dailysend:")
         or c.data.startswith("dailysendtom:")
+        or c.data == "vkset"
+        or c.data == "vkunset"
+        or c.data.startswith("vktime:")
+        or c.data.startswith("vkdailysend:")
         or c.data.startswith("togglefree:")
         or c.data.startswith("markfree:")
         or c.data.startswith("togglesilent:")
@@ -4609,6 +5125,8 @@ def create_app() -> web.Application:
     dp.message.register(list_events_wrapper, Command("events"))
     dp.message.register(set_channel_wrapper, Command("setchannel"))
     dp.message.register(images_wrapper, Command("images"))
+    dp.message.register(vkgroup_wrapper, Command("vkgroup"))
+    dp.message.register(vktime_wrapper, Command("vktime"))
     dp.message.register(channels_wrapper, Command("channels"))
     dp.message.register(reg_daily_wrapper, Command("regdailychannels"))
     dp.message.register(daily_wrapper, Command("daily"))
@@ -4622,6 +5140,12 @@ def create_app() -> web.Application:
     )
     dp.message.register(
         daily_time_wrapper, lambda m: m.from_user.id in daily_time_sessions
+    )
+    dp.message.register(
+        vk_group_msg_wrapper, lambda m: m.from_user.id in vk_group_sessions
+    )
+    dp.message.register(
+        vk_time_msg_wrapper, lambda m: m.from_user.id in vk_time_sessions
     )
     dp.message.register(
         forward_wrapper,
@@ -4650,6 +5174,7 @@ def create_app() -> web.Application:
         except Exception as e:
             logging.error("Failed to set webhook: %s", e)
         app["daily_task"] = asyncio.create_task(daily_scheduler(db, bot))
+        app["vk_task"] = asyncio.create_task(vk_scheduler(db))
         app["cleanup_task"] = asyncio.create_task(cleanup_scheduler(db, bot))
 
     async def on_shutdown(app: web.Application):
@@ -4658,6 +5183,10 @@ def create_app() -> web.Application:
             app["daily_task"].cancel()
             with contextlib.suppress(Exception):
                 await app["daily_task"]
+        if "vk_task" in app:
+            app["vk_task"].cancel()
+            with contextlib.suppress(Exception):
+                await app["vk_task"]
         if "cleanup_task" in app:
             app["cleanup_task"].cancel()
             with contextlib.suppress(Exception):
