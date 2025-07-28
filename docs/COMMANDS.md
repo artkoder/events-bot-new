@@ -9,12 +9,14 @@
 | `/addevent <text>` | event description | Parse text with model 4o and store one or several events. The original text is published to Telegraph. Images up to 5&nbsp;MB are uploaded to Catbox and shown on that page. Forwarded messages from moderators are processed the same way. |
 | `/addevent_raw <title>|<date>|<time>|<location>` | manual fields | Add event without LLM. The bot also creates a Telegraph page with the provided text and optional attached photo. |
 | `/images` | - | Toggle uploading photos to Catbox. |
+| `/vkgroup <id|off>` | required id or `off` | Set or disable VK group for daily announcements. |
+| `/vktime today|added <HH:MM>` | required type and time | Change VK posting times (default 08:00/20:00). |
 | `/ask4o <text>` | any text | Send query to model 4o and show plain response (superadmin only). |
 | `/events [DATE]` | optional date `YYYY-MM-DD`, `DD.MM.YYYY` or `D месяц [YYYY]` | List events for the day with delete and edit buttons. Dates are shown as `DD.MM.YYYY`. Choosing **Edit** lists all fields with inline buttons including a toggle for "Бесплатно". |
 | `/setchannel` | - | Choose an admin channel and register it as an announcement or calendar asset source. |
 | `/channels` | - | List admin channels showing registered and asset ones with disable buttons. |
-| `/regdailychannels` | - | Choose admin channels for daily announcements (default 08:00). |
-| `/daily` | - | Manage daily announcement channels: cancel, change time, test send. |
+| `/regdailychannels` | - | Choose admin channels for daily announcements and set the VK group. |
+| `/daily` | - | Manage daily announcement channels and VK posting times; send test posts. |
 | `/exhibitions` | - | List active exhibitions similar to `/events`; each entry shows the period `c <start>` / `по <end>` and includes edit/delete buttons. |
 | `/pages` | - | Show links to Telegraph month and weekend pages. |
 
