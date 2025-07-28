@@ -88,11 +88,13 @@
 - The "подробнее" line now ends with a colon and calendar links appear on their own line as
   "📆 Добавить в календарь: <link>".
 
+
 ## v0.3.12 - VK announcement fixes
 
 - Remove unsupported italic tags and calendar line from VK posts.
 - Event titles appear in uppercase and the "подробнее" link follows the
   description.
 - A visible separator line now divides events to improve readability.
+
 
 
