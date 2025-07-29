@@ -4906,6 +4906,10 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
     logging.info("forward parsed %d events", len(results))
     if not results:
         logging.info("no events parsed from forwarded text")
+        try:
+            await bot.send_message(message.chat.id, "No events found")
+        except Exception as e:
+            logging.error("failed to send no events response: %s", e)
         return
     for saved, added, lines, status in results:
         buttons = []
