@@ -3326,6 +3326,38 @@ async def test_multiple_ticket_links(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_add_event_lines_include_vk_link(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async def fake_parse(text: str) -> list[dict]:
+        return [
+            {
+                "title": "T",
+                "short_description": "d",
+                "date": FUTURE_DATE,
+                "time": "18:00",
+                "location_name": "Hall",
+            }
+        ]
+
+    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None):
+        return "https://t.me/page", "p"
+
+    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.create_source_page", fake_create)
+
+    results = await main.add_events_from_text(
+        db, "text", "https://vk.com/wall-1_1", None, None
+    )
+    assert results
+    lines = results[0][2]
+    assert "telegraph: https://t.me/page" in lines
+    idx = lines.index("telegraph: https://t.me/page")
+    assert lines[idx + 1] == "Vk: https://vk.com/wall-1_1"
+
+
+@pytest.mark.asyncio
 async def test_add_event_strips_city_from_address(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()

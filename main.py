@@ -2404,6 +2404,8 @@ async def add_events_from_text(
                 lines.append(f"ticket_link: {saved.ticket_link}")
             if saved.telegraph_url:
                 lines.append(f"telegraph: {saved.telegraph_url}")
+            if is_vk_wall_url(saved.source_post_url):
+                lines.append(f"Vk: {saved.source_post_url}")
             if upload_info:
                 lines.append(f"catbox: {upload_info}")
             status = "added" if added else "updated"
@@ -2560,6 +2562,8 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
     ]
     if event.telegraph_url:
         lines.append(f"telegraph: {event.telegraph_url}")
+    if is_vk_wall_url(event.source_post_url):
+        lines.append(f"Vk: {event.source_post_url}")
     if upload_info:
         lines.append(f"catbox: {upload_info}")
     status = "added" if added else "updated"
