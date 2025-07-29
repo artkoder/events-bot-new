@@ -18,6 +18,10 @@ Payload:
 }
 ```
 
+When a post is forwarded from a channel, its title is appended to the user
+message on a new line. This helps the model infer the venue when it is omitted
+in the text.
+
 If `docs/LOCATIONS.md` exists, its lines are appended to the system prompt as a
 list of known venues. This helps the model normalise `location_name` to a
 standard form.
