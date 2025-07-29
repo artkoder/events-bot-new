@@ -80,6 +80,9 @@ vk_group_sessions: set[int] = set()
 # user_id -> section (today/added) for VK time update
 vk_time_sessions: dict[int, str] = {}
 
+# superadmin user_id -> pending partner user_id
+partner_info_sessions: dict[int, int] = {}
+
 # toggle for uploading images to catbox
 CATBOX_ENABLED: bool = False
 _supabase_client: Client | None = None
@@ -111,6 +114,10 @@ class User(SQLModel, table=True):
     user_id: int = Field(primary_key=True)
     username: Optional[str] = None
     is_superadmin: bool = False
+    is_partner: bool = False
+    organization: Optional[str] = None
+    location: Optional[str] = None
+    blocked: bool = False
 
 
 class PendingUser(SQLModel, table=True):
@@ -181,6 +188,7 @@ class Event(SQLModel, table=True):
     ics_post_id: Optional[int] = None
     source_chat_id: Optional[int] = None
     source_message_id: Optional[int] = None
+    creator_id: Optional[int] = None
     photo_count: int = 0
     added_at: datetime = Field(default_factory=datetime.utcnow)
 
@@ -283,6 +291,29 @@ class Database:
             if "source_message_id" not in cols:
                 await conn.exec_driver_sql(
                     "ALTER TABLE event ADD COLUMN source_message_id INTEGER"
+                )
+            if "creator_id" not in cols:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE event ADD COLUMN creator_id INTEGER"
+                )
+
+            result = await conn.exec_driver_sql("PRAGMA table_info(user)")
+            cols = [r[1] for r in result.fetchall()]
+            if "is_partner" not in cols:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE user ADD COLUMN is_partner BOOLEAN DEFAULT 0"
+                )
+            if "organization" not in cols:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE user ADD COLUMN organization VARCHAR"
+                )
+            if "location" not in cols:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE user ADD COLUMN location VARCHAR"
+                )
+            if "blocked" not in cols:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE user ADD COLUMN blocked BOOLEAN DEFAULT 0"
                 )
 
             result = await conn.exec_driver_sql("PRAGMA table_info(channel)")
@@ -1086,7 +1117,14 @@ async def handle_start(message: types.Message, db: Database, bot: Bot):
         user_count = len(result.scalars().all())
         user = await session.get(User, message.from_user.id)
         if user:
-            await bot.send_message(message.chat.id, "Bot is running")
+            if user.blocked:
+                await bot.send_message(message.chat.id, "Access denied")
+                return
+            if user.is_partner:
+                org = f" ({user.organization})" if user.organization else ""
+                await bot.send_message(message.chat.id, f"You are partner{org}")
+            else:
+                await bot.send_message(message.chat.id, "Bot is running")
             return
         if user_count == 0:
             session.add(
@@ -1104,8 +1142,12 @@ async def handle_start(message: types.Message, db: Database, bot: Bot):
 
 async def handle_register(message: types.Message, db: Database, bot: Bot):
     async with db.get_session() as session:
-        if await session.get(User, message.from_user.id):
-            await bot.send_message(message.chat.id, "Already registered")
+        existing = await session.get(User, message.from_user.id)
+        if existing:
+            if existing.blocked:
+                await bot.send_message(message.chat.id, "Access denied")
+            else:
+                await bot.send_message(message.chat.id, "Already registered")
             return
         if await session.get(RejectedUser, message.from_user.id):
             await bot.send_message(message.chat.id, "Access denied by administrator")
@@ -1144,6 +1186,9 @@ async def handle_requests(message: types.Message, db: Database, bot: Bot):
                     text="Approve", callback_data=f"approve:{p.user_id}"
                 ),
                 types.InlineKeyboardButton(
+                    text="Partner", callback_data=f"partner:{p.user_id}"
+                ),
+                types.InlineKeyboardButton(
                     text="Reject", callback_data=f"reject:{p.user_id}"
                 ),
             ]
@@ -1156,7 +1201,7 @@ async def handle_requests(message: types.Message, db: Database, bot: Bot):
 
 async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot):
     data = callback.data
-    if data.startswith("approve") or data.startswith("reject"):
+    if data.startswith("approve") or data.startswith("reject") or data.startswith("partner"):
         uid = int(data.split(":", 1)[1])
         async with db.get_session() as session:
             p = await session.get(PendingUser, uid)
@@ -1166,17 +1211,41 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
             if data.startswith("approve"):
                 session.add(User(user_id=uid, username=p.username, is_superadmin=False))
                 await bot.send_message(uid, "You are approved")
+            elif data.startswith("partner"):
+                partner_info_sessions[callback.from_user.id] = uid
+                await callback.message.answer(
+                    "Send organization and location, e.g. 'Дом Китобоя, Мира 9, Калининград'"
+                )
+                await callback.answer()
+                return
             else:
                 session.add(RejectedUser(user_id=uid, username=p.username))
                 await bot.send_message(uid, "Your registration was rejected")
             await session.delete(p)
             await session.commit()
             await callback.answer("Done")
+    elif data.startswith("block:") or data.startswith("unblock:"):
+        uid = int(data.split(":", 1)[1])
+        async with db.get_session() as session:
+            user = await session.get(User, uid)
+            if not user or user.is_superadmin:
+                await callback.answer("Not allowed", show_alert=True)
+                return
+            user.blocked = data.startswith("block:")
+            await session.commit()
+        await send_users_list(callback.message, db, bot, edit=True)
+        await callback.answer("Updated")
     elif data.startswith("del:"):
         _, eid, marker = data.split(":")
         month = None
         async with db.get_session() as session:
+            user = await session.get(User, callback.from_user.id)
             event = await session.get(Event, int(eid))
+            if (user and user.blocked) or (
+                user and user.is_partner and event and event.creator_id != user.user_id
+            ):
+                await callback.answer("Not authorized", show_alert=True)
+                return
             if event:
                 month = event.date.split("..", 1)[0][:7]
                 await session.delete(event)
@@ -1193,19 +1262,32 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
             text, markup = await build_exhibitions_message(db, tz)
         else:
             target = datetime.strptime(marker, "%Y-%m-%d").date()
-            text, markup = await build_events_message(db, target, tz)
+            filter_id = user.user_id if user and user.is_partner else None
+            text, markup = await build_events_message(db, target, tz, filter_id)
         await callback.message.edit_text(text, reply_markup=markup)
         await callback.answer("Deleted")
     elif data.startswith("edit:"):
         eid = int(data.split(":")[1])
         async with db.get_session() as session:
+            user = await session.get(User, callback.from_user.id)
             event = await session.get(Event, eid)
+        if event and ((user and user.blocked) or (user and user.is_partner and event.creator_id != user.user_id)):
+            await callback.answer("Not authorized", show_alert=True)
+            return
         if event:
             editing_sessions[callback.from_user.id] = (eid, None)
             await show_edit_menu(callback.from_user.id, event, bot)
         await callback.answer()
     elif data.startswith("editfield:"):
         _, eid, field = data.split(":")
+        async with db.get_session() as session:
+            user = await session.get(User, callback.from_user.id)
+            event = await session.get(Event, int(eid))
+            if not event or (user and user.blocked) or (
+                user and user.is_partner and event.creator_id != user.user_id
+            ):
+                await callback.answer("Not authorized", show_alert=True)
+                return
         editing_sessions[callback.from_user.id] = (int(eid), field)
         await callback.message.answer(f"Send new value for {field}")
         await callback.answer()
@@ -1217,7 +1299,13 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
     elif data.startswith("togglefree:"):
         eid = int(data.split(":")[1])
         async with db.get_session() as session:
+            user = await session.get(User, callback.from_user.id)
             event = await session.get(Event, eid)
+            if not event or (user and user.blocked) or (
+                user and user.is_partner and event.creator_id != user.user_id
+            ):
+                await callback.answer("Not authorized", show_alert=True)
+                return
             if event:
                 event.is_free = not event.is_free
                 await session.commit()
@@ -1237,7 +1325,13 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
     elif data.startswith("togglesilent:"):
         eid = int(data.split(":")[1])
         async with db.get_session() as session:
+            user = await session.get(User, callback.from_user.id)
             event = await session.get(Event, eid)
+            if not event or (user and user.blocked) or (
+                user and user.is_partner and event.creator_id != user.user_id
+            ):
+                await callback.answer("Not authorized", show_alert=True)
+                return
             if event:
                 event.silent = not event.silent
                 await session.commit()
@@ -1275,7 +1369,13 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
     elif data.startswith("createics:"):
         eid = int(data.split(":")[1])
         async with db.get_session() as session:
+            user = await session.get(User, callback.from_user.id)
             event = await session.get(Event, eid)
+            if not event or (user and user.blocked) or (
+                user and user.is_partner and event.creator_id != user.user_id
+            ):
+                await callback.answer("Not authorized", show_alert=True)
+                return
             if event:
                 url = await upload_ics(event, db)
                 if url:
@@ -1308,7 +1408,13 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
     elif data.startswith("delics:"):
         eid = int(data.split(":")[1])
         async with db.get_session() as session:
+            user = await session.get(User, callback.from_user.id)
             event = await session.get(Event, eid)
+            if not event or (user and user.blocked) or (
+                user and user.is_partner and event.creator_id != user.user_id
+            ):
+                await callback.answer("Not authorized", show_alert=True)
+                return
             if event and event.ics_url:
                 await delete_ics(event)
                 event.ics_url = None
@@ -1339,7 +1445,13 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
     elif data.startswith("markfree:"):
         eid = int(data.split(":")[1])
         async with db.get_session() as session:
+            user = await session.get(User, callback.from_user.id)
             event = await session.get(Event, eid)
+            if not event or (user and user.blocked) or (
+                user and user.is_partner and event.creator_id != user.user_id
+            ):
+                await callback.answer("Not authorized", show_alert=True)
+                return
             if event:
                 event.is_free = True
                 await session.commit()
@@ -1379,7 +1491,10 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
         offset = await get_tz_offset(db)
         tz = offset_to_timezone(offset)
         target = datetime.strptime(day, "%Y-%m-%d").date()
-        text, markup = await build_events_message(db, target, tz)
+        async with db.get_session() as session:
+            user = await session.get(User, callback.from_user.id)
+        filter_id = user.user_id if user and user.is_partner else None
+        text, markup = await build_events_message(db, target, tz, filter_id)
         await callback.message.edit_text(text, reply_markup=markup)
         await callback.answer()
     elif data.startswith("unset:"):
@@ -1626,6 +1741,34 @@ async def send_channels_list(
         await bot.send_message(message.chat.id, "\n".join(lines), reply_markup=markup)
 
 
+async def send_users_list(message: types.Message, db: Database, bot: Bot, edit: bool = False):
+    async with db.get_session() as session:
+        user = await session.get(User, message.from_user.id)
+        if not user or not user.is_superadmin:
+            if not edit:
+                await bot.send_message(message.chat.id, "Not authorized")
+            return
+        result = await session.execute(select(User))
+        users = result.scalars().all()
+    lines = []
+    keyboard = []
+    for u in users:
+        role = "superadmin" if u.is_superadmin else ("partner" if u.is_partner else "user")
+        org = f" ({u.organization})" if u.is_partner and u.organization else ""
+        status = " 🚫" if u.blocked else ""
+        lines.append(f"{u.user_id} {u.username or ''} {role}{org}{status}".strip())
+        if not u.is_superadmin:
+            if u.blocked:
+                keyboard.append([types.InlineKeyboardButton(text="Unblock", callback_data=f"unblock:{u.user_id}")])
+            else:
+                keyboard.append([types.InlineKeyboardButton(text="Block", callback_data=f"block:{u.user_id}")])
+    markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard) if keyboard else None
+    if edit:
+        await message.edit_text("\n".join(lines), reply_markup=markup)
+    else:
+        await bot.send_message(message.chat.id, "\n".join(lines), reply_markup=markup)
+
+
 async def send_setchannel_list(
     message: types.Message, db: Database, bot: Bot, edit: bool = False
 ):
@@ -1785,6 +1928,10 @@ async def handle_set_channel(message: types.Message, db: Database, bot: Bot):
 
 async def handle_channels(message: types.Message, db: Database, bot: Bot):
     await send_channels_list(message, db, bot, edit=False)
+
+
+async def handle_users(message: types.Message, db: Database, bot: Bot):
+    await send_users_list(message, db, bot, edit=False)
 
 
 async def handle_regdailychannels(message: types.Message, db: Database, bot: Bot):
@@ -2019,6 +2166,7 @@ async def add_events_from_text(
     raise_exc: bool = False,
     source_chat_id: int | None = None,
     source_message_id: int | None = None,
+    creator_id: int | None = None,
 
     bot: Bot | None = None,
 
@@ -2085,6 +2233,7 @@ async def add_events_from_text(
             source_post_url=source_link,
             source_chat_id=source_chat_id,
             source_message_id=source_message_id,
+            creator_id=creator_id,
         )
 
         if base_event.event_type == "выставка" and not base_event.end_date:
@@ -2274,6 +2423,12 @@ async def handle_add_event(message: types.Message, db: Database, bot: Bot):
     if len(parts) != 2:
         await bot.send_message(message.chat.id, "Usage: /addevent <text>")
         return
+    async with db.get_session() as session:
+        user = await session.get(User, message.from_user.id)
+        if user and user.blocked:
+            await bot.send_message(message.chat.id, "Not authorized")
+            return
+    creator_id = user.user_id if user else message.from_user.id
     images = await extract_images(message, bot)
     media = images if images else None
     html_text = message.html_text or message.caption_html
@@ -2287,6 +2442,7 @@ async def handle_add_event(message: types.Message, db: Database, bot: Bot):
             html_text,
             media,
             raise_exc=True,
+            creator_id=creator_id,
             bot=bot,
         )
     except Exception as e:
@@ -2329,6 +2485,12 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
             message.chat.id, "Usage: /addevent_raw title|date|time|location"
         )
         return
+    async with db.get_session() as session:
+        user = await session.get(User, message.from_user.id)
+        if user and user.blocked:
+            await bot.send_message(message.chat.id, "Not authorized")
+            return
+    creator_id = user.user_id if user else message.from_user.id
     title, date_raw, time, location = (p.strip() for p in parts[1].split("|", 3))
     date_iso = canonicalize_date(date_raw)
     if not date_iso:
@@ -2345,6 +2507,7 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
         time=time,
         location_name=location,
         source_text=parts[1],
+        creator_id=creator_id,
     )
     async with db.get_session() as session:
         event, added = await upsert_event(session, event)
@@ -3959,16 +4122,15 @@ async def cleanup_scheduler(db: Database, bot: Bot):
         await asyncio.sleep(60)
 
 
-async def build_events_message(db: Database, target_date: date, tz: timezone):
+async def build_events_message(db: Database, target_date: date, tz: timezone, creator_id: int | None = None):
     async with db.get_session() as session:
-        result = await session.execute(
-            select(Event)
-            .where(
-                (Event.date == target_date.isoformat())
-                | (Event.end_date == target_date.isoformat())
-            )
-            .order_by(Event.time)
+        stmt = select(Event).where(
+            (Event.date == target_date.isoformat())
+            | (Event.end_date == target_date.isoformat())
         )
+        if creator_id is not None:
+            stmt = stmt.where(Event.creator_id == creator_id)
+        result = await session.execute(stmt.order_by(Event.time))
         events = result.scalars().all()
 
     lines = []
@@ -4226,11 +4388,13 @@ async def handle_events(message: types.Message, db: Database, bot: Bot):
         day = datetime.now(tz).date()
 
     async with db.get_session() as session:
-        if not await session.get(User, message.from_user.id):
+        user = await session.get(User, message.from_user.id)
+        if not user or user.blocked:
             await bot.send_message(message.chat.id, "Not authorized")
             return
+        creator_filter = user.user_id if user.is_partner else None
 
-    text, markup = await build_events_message(db, day, tz)
+    text, markup = await build_events_message(db, day, tz, creator_filter)
     await bot.send_message(message.chat.id, text, reply_markup=markup)
 
 
@@ -4482,9 +4646,12 @@ async def handle_edit_message(message: types.Message, db: Database, bot: Bot):
         await bot.send_message(message.chat.id, "No text supplied")
         return
     async with db.get_session() as session:
+        user = await session.get(User, message.from_user.id)
         event = await session.get(Event, eid)
-        if not event:
-            await bot.send_message(message.chat.id, "Event not found")
+        if not event or (user and user.blocked) or (
+            user and user.is_partner and event.creator_id != user.user_id
+        ):
+            await bot.send_message(message.chat.id, "Event not found" if not event else "Not authorized")
             del editing_sessions[message.from_user.id]
             return
         old_date = event.date.split("..", 1)[0]
@@ -4574,6 +4741,36 @@ async def handle_vk_time_message(message: types.Message, db: Database, bot: Bot)
     await bot.send_message(message.chat.id, f"Time set to {value}")
 
 
+async def handle_partner_info_message(message: types.Message, db: Database, bot: Bot):
+    uid = partner_info_sessions.get(message.from_user.id)
+    if not uid:
+        return
+    text = (message.text or "").strip()
+    if "," not in text:
+        await bot.send_message(message.chat.id, "Please send 'Organization, location'")
+        return
+    org, loc = [p.strip() for p in text.split(",", 1)]
+    async with db.get_session() as session:
+        pending = await session.get(PendingUser, uid)
+        if not pending:
+            await bot.send_message(message.chat.id, "Pending user not found")
+            partner_info_sessions.pop(message.from_user.id, None)
+            return
+        session.add(
+            User(
+                user_id=uid,
+                username=pending.username,
+                is_partner=True,
+                organization=org,
+                location=loc,
+            )
+        )
+        await session.delete(pending)
+        await session.commit()
+    partner_info_sessions.pop(message.from_user.id, None)
+    await bot.send_message(uid, "You are approved as partner")
+
+
 processed_media_groups: set[str] = set()
 
 # store up to three images for albums until the caption arrives
@@ -4620,8 +4817,9 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
             return
         media = images[:3] if images else None
     async with db.get_session() as session:
-        if not await session.get(User, message.from_user.id):
-            logging.info("user %s not registered", message.from_user.id)
+        user = await session.get(User, message.from_user.id)
+        if not user or user.blocked:
+            logging.info("user %s not registered or blocked", message.from_user.id)
             return
     link = None
     msg_id = None
@@ -4676,6 +4874,7 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
         media,
         source_chat_id=chat_id if link else None,
         source_message_id=msg_id if link else None,
+        creator_id=user.user_id,
 
         bot=bot,
 
@@ -5059,6 +5258,9 @@ def create_app() -> web.Application:
     async def stats_wrapper(message: types.Message):
         await handle_stats(message, db, bot)
 
+    async def users_wrapper(message: types.Message):
+        await handle_users(message, db, bot)
+
     async def dumpdb_wrapper(message: types.Message):
         await handle_dumpdb(message, db, bot)
 
@@ -5076,6 +5278,9 @@ def create_app() -> web.Application:
 
     async def vk_time_msg_wrapper(message: types.Message):
         await handle_vk_time_message(message, db, bot)
+
+    async def partner_info_wrapper(message: types.Message):
+        await handle_partner_info_message(message, db, bot)
 
     async def forward_wrapper(message: types.Message):
         await handle_forwarded(message, db, bot)
@@ -5124,7 +5329,10 @@ def create_app() -> web.Application:
         or c.data.startswith("markfree:")
         or c.data.startswith("togglesilent:")
         or c.data.startswith("createics:")
-        or c.data.startswith("delics:"),
+        or c.data.startswith("delics:")
+        or c.data.startswith("partner:")
+        or c.data.startswith("block:")
+        or c.data.startswith("unblock:"),
     )
     dp.message.register(tz_wrapper, Command("tz"))
     dp.message.register(add_event_wrapper, Command("addevent"))
@@ -5135,12 +5343,14 @@ def create_app() -> web.Application:
     dp.message.register(images_wrapper, Command("images"))
     dp.message.register(vkgroup_wrapper, Command("vkgroup"))
     dp.message.register(vktime_wrapper, Command("vktime"))
+    dp.message.register(partner_info_wrapper, lambda m: m.from_user.id in partner_info_sessions)
     dp.message.register(channels_wrapper, Command("channels"))
     dp.message.register(reg_daily_wrapper, Command("regdailychannels"))
     dp.message.register(daily_wrapper, Command("daily"))
     dp.message.register(exhibitions_wrapper, Command("exhibitions"))
     dp.message.register(pages_wrapper, Command("pages"))
     dp.message.register(stats_wrapper, Command("stats"))
+    dp.message.register(users_wrapper, Command("users"))
     dp.message.register(dumpdb_wrapper, Command("dumpdb"))
     dp.message.register(restore_wrapper, Command("restore"))
     dp.message.register(
