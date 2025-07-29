@@ -3842,8 +3842,11 @@ async def sync_festival_page(db: Database, name: str):
         return
     tg = Telegraph(access_token=token)
     async with db.get_session() as session:
-        fest = await session.exec(select(Festival).where(Festival.name == name))
-        fest = fest.first()
+        result = await session.execute(
+            select(Festival).where(Festival.name == name)
+        )
+        fest = result.scalar_one_or_none()
+
         if not fest:
             return
         try:
@@ -3855,14 +3858,12 @@ async def sync_festival_page(db: Database, name: str):
                     tg.edit_page, fest.telegraph_path, title=title, content=content
                 )
                 logging.info("updated festival page %s in Telegraph", name)
-
             else:
                 data = await asyncio.to_thread(tg.create_page, title, content=content)
                 fest.telegraph_url = data.get("url")
                 fest.telegraph_path = data.get("path")
                 created = True
                 logging.info("created festival page %s: %s", name, fest.telegraph_url)
-
             await session.commit()
             logging.info("synced festival page %s", name)
         except Exception as e:
