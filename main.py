@@ -1400,6 +1400,7 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                 eid,
                 fest_name or "None",
             )
+
         if fest_name:
             await sync_festival_page(db, fest_name)
         await show_edit_menu(callback.from_user.id, event, bot)
@@ -3845,10 +3846,12 @@ async def sync_festival_page(db: Database, name: str):
             select(Festival).where(Festival.name == name)
         )
         fest = result.scalar_one_or_none()
+
         if not fest:
             return
         try:
             title, content = await build_festival_page_content(db, fest)
+
             created = False
             if fest.telegraph_path:
                 await asyncio.to_thread(
@@ -5070,6 +5073,7 @@ async def handle_festival_edit_message(message: types.Message, db: Database, bot
         fest.description = text
         await session.commit()
         logging.info("festival %s description updated", fest.name)
+
     festival_edit_sessions.pop(message.from_user.id, None)
     await bot.send_message(message.chat.id, "Festival updated")
     await sync_festival_page(db, fest.name)
