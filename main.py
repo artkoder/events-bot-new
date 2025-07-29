@@ -984,7 +984,7 @@ async def remove_calendar_button(event: Event, bot: Bot):
         logging.error("failed to remove calendar button: %s", e)
 
 
-async def parse_event_via_4o(text: str) -> list[dict]:
+async def parse_event_via_4o(text: str, source_channel: str | None = None) -> list[dict]:
     token = os.getenv("FOUR_O_TOKEN")
     if not token:
         raise RuntimeError("FOUR_O_TOKEN is missing")
@@ -1005,11 +1005,15 @@ async def parse_event_via_4o(text: str) -> list[dict]:
         "Content-Type": "application/json",
     }
     today = datetime.now(LOCAL_TZ).date().isoformat()
+    user_msg = f"Today is {today}. "
+    if source_channel:
+        user_msg += f"Channel: {source_channel}. "
+    user_msg += text
     payload = {
         "model": "gpt-4o",
         "messages": [
             {"role": "system", "content": prompt},
-            {"role": "user", "content": f"Today is {today}. {text}"},
+            {"role": "user", "content": user_msg},
         ],
         "temperature": 0,
     }
@@ -2167,6 +2171,7 @@ async def add_events_from_text(
     source_chat_id: int | None = None,
     source_message_id: int | None = None,
     creator_id: int | None = None,
+    source_channel: str | None = None,
 
     bot: Bot | None = None,
 
@@ -2176,7 +2181,7 @@ async def add_events_from_text(
     )
     try:
         logging.info("LLM parse start (%d chars)", len(text))
-        parsed = await parse_event_via_4o(text)
+        parsed = await parse_event_via_4o(text, source_channel)
         logging.info("LLM returned %d events", len(parsed))
     except Exception as e:
         logging.error("LLM error: %s", e)
@@ -2433,6 +2438,7 @@ async def handle_add_event(message: types.Message, db: Database, bot: Bot):
             media,
             raise_exc=True,
             creator_id=creator_id,
+            source_channel=None,
             bot=bot,
         )
     except Exception as e:
@@ -4814,10 +4820,12 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
     link = None
     msg_id = None
     chat_id: int | None = None
+    channel_name: str | None = None
     if message.forward_from_chat and message.forward_from_message_id:
         chat = message.forward_from_chat
         msg_id = message.forward_from_message_id
         chat_id = chat.id
+        channel_name = chat.title or getattr(chat, "username", None)
         async with db.get_session() as session:
             ch = await session.get(Channel, chat_id)
             allowed = ch.is_registered if ch else False
@@ -4838,6 +4846,7 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
             chat_data = fo.get("chat") or {}
             chat_id = chat_data.get("id")
             msg_id = fo.get("message_id")
+            channel_name = chat_data.get("title") or chat_data.get("username")
             async with db.get_session() as session:
                 ch = await session.get(Channel, chat_id)
                 allowed = ch.is_registered if ch else False
@@ -4865,6 +4874,7 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
         source_chat_id=chat_id if link else None,
         source_message_id=msg_id if link else None,
         creator_id=user.user_id,
+        source_channel=channel_name,
 
         bot=bot,
 
