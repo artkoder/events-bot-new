@@ -2,6 +2,7 @@ import logging
 import os
 from datetime import date, datetime, timedelta, timezone, time
 from typing import Optional, Tuple, Iterable
+from urllib.parse import urlparse
 import uuid
 import textwrap
 from supabase import create_client, Client
@@ -2176,7 +2177,10 @@ async def add_events_from_text(
     )
     try:
         logging.info("LLM parse start (%d chars)", len(text))
-        parsed = await parse_event_via_4o(text)
+        llm_text = text
+        if channel_title:
+            llm_text = f"{channel_title}\n{llm_text}"
+        parsed = await parse_event_via_4o(llm_text)
         logging.info("LLM returned %d events", len(parsed))
     except Exception as e:
         logging.error("LLM error: %s", e)
@@ -2325,16 +2329,6 @@ async def add_events_from_text(
                             obj = await session.get(Event, saved.id)
                             if obj:
                                 obj.ics_post_url = url_p
-                    posted = await post_ics_asset(saved, db, bot)
-                    if posted:
-                        url_p, msg_id = posted
-                        logging.info(
-                            "asset post %s for event %s", url_p, saved.id
-                        )
-                        async with db.get_session() as session:
-                            obj = await session.get(Event, saved.id)
-                            if obj:
-                                obj.ics_post_url = url_p
                                 obj.ics_post_id = msg_id
                                 await session.commit()
                                 saved.ics_post_url = url_p
@@ -2409,6 +2403,8 @@ async def add_events_from_text(
                 lines.append(f"ticket_link: {saved.ticket_link}")
             if saved.telegraph_url:
                 lines.append(f"telegraph: {saved.telegraph_url}")
+            if is_vk_wall_url(saved.source_post_url):
+                lines.append(f"Vk: {saved.source_post_url}")
             if upload_info:
                 lines.append(f"catbox: {upload_info}")
             status = "added" if added else "updated"
@@ -2565,6 +2561,8 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
     ]
     if event.telegraph_url:
         lines.append(f"telegraph: {event.telegraph_url}")
+    if is_vk_wall_url(event.source_post_url):
+        lines.append(f"Vk: {event.source_post_url}")
     if upload_info:
         lines.append(f"catbox: {upload_info}")
     status = "added" if added else "updated"
@@ -2778,6 +2776,22 @@ def is_valid_url(text: str | None) -> bool:
     return bool(re.match(r"https?://", text))
 
 
+def is_vk_wall_url(url: str | None) -> bool:
+    """Return True if the URL points to a VK wall post."""
+    if not url:
+        return False
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return False
+    host = parsed.netloc.lower()
+    if host in {"vk.cc", "vk.link", "go.vk.com", "l.vk.com"}:
+        return False
+    if host.endswith("vk.com") and "/wall" in parsed.path:
+        return True
+    return False
+
+
 def recent_cutoff(tz: timezone, now: datetime | None = None) -> datetime:
     """Return UTC datetime for the start of the previous day in the given tz."""
     if now is None:
@@ -2901,8 +2915,13 @@ def format_event_vk(
         e.description.strip(),
         flags=re.I,
     )
-    if e.telegraph_url:
-        desc = f"{desc}, подробнее: {e.telegraph_url}"
+    details_link = None
+    if is_vk_wall_url(e.source_post_url):
+        details_link = e.source_post_url
+    elif e.telegraph_url:
+        details_link = e.telegraph_url
+    if details_link:
+        desc = f"{desc}, [подробнее|{details_link}]"
     lines = [title, desc]
 
     if e.pushkin_card:
@@ -4776,6 +4795,7 @@ async def handle_partner_info_message(message: types.Message, db: Database, bot:
     logging.info("approved user %s as partner %s, %s", uid, org, loc)
 
 
+
 processed_media_groups: set[str] = set()
 
 # store up to three images for albums until the caption arrives
@@ -4829,10 +4849,12 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
     link = None
     msg_id = None
     chat_id: int | None = None
+    channel_title = None
     if message.forward_from_chat and message.forward_from_message_id:
         chat = message.forward_from_chat
         msg_id = message.forward_from_message_id
         chat_id = chat.id
+        channel_title = chat.title
         async with db.get_session() as session:
             ch = await session.get(Channel, chat_id)
             allowed = ch.is_registered if ch else False
@@ -4853,6 +4875,7 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
             chat_data = fo.get("chat") or {}
             chat_id = chat_data.get("id")
             msg_id = fo.get("message_id")
+            channel_title = chat_data.get("title")
             async with db.get_session() as session:
                 ch = await session.get(Channel, chat_id)
                 allowed = ch.is_registered if ch else False
