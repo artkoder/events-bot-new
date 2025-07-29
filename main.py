@@ -1425,6 +1425,7 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                 eid,
                 fest_name or "None",
             )
+
         if fest_name:
             await sync_festival_page(db, fest_name)
         await show_edit_menu(callback.from_user.id, event, bot)
@@ -2377,6 +2378,7 @@ async def add_events_from_text(
                 data.get("title"),
             )
             await ensure_festival(db, data.get("festival"))
+
 
         date_raw = data.get("date", "") or ""
         end_date_raw = data.get("end_date") or None
@@ -3971,6 +3973,7 @@ async def sync_festival_vk_post(db: Database, fest: Festival):
                     logging.error("VK post error: %s", data)
 
 
+
 async def sync_festival_page(db: Database, name: str):
     token = get_telegraph_token()
     if not token:
@@ -3982,10 +3985,12 @@ async def sync_festival_page(db: Database, name: str):
             select(Festival).where(Festival.name == name)
         )
         fest = result.scalar_one_or_none()
+
         if not fest:
             return
         try:
             title, content = await build_festival_page_content(db, fest)
+
             created = False
             if fest.telegraph_path:
                 await asyncio.to_thread(
@@ -4001,6 +4006,7 @@ async def sync_festival_page(db: Database, name: str):
             await session.commit()
             logging.info("synced festival page %s", name)
             await sync_festival_vk_post(db, fest)
+
         except Exception as e:
             logging.error("Failed to sync festival %s: %s", name, e)
 

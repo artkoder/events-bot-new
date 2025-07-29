@@ -4151,6 +4151,7 @@ def test_event_to_nodes_festival_link():
     assert nodes[1]["children"][0]["attrs"]["href"] == "http://tg"
 
 
+
 @pytest.mark.asyncio
 async def test_upload_ics_content_type(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
