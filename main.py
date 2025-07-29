@@ -2168,6 +2168,8 @@ async def add_events_from_text(
     source_chat_id: int | None = None,
     source_message_id: int | None = None,
     creator_id: int | None = None,
+    display_source: bool = True,
+
 
     bot: Bot | None = None,
 
@@ -2343,6 +2345,7 @@ async def add_events_from_text(
                                 saved.title or "Event",
                                 saved.ics_url,
                             )
+                extra_kwargs = {"display_link": False} if not display_source else {}
                 res = await create_source_page(
                     saved.title or "Event",
                     saved.source_text,
@@ -2351,6 +2354,7 @@ async def add_events_from_text(
                     media_arg,
                     saved.ics_url,
                     db,
+                    **extra_kwargs,
                 )
                 if res:
                     if len(res) == 4:
@@ -2430,15 +2434,29 @@ async def handle_add_event(message: types.Message, db: Database, bot: Bot):
     html_text = message.html_text or message.caption_html
     if html_text and html_text.startswith("/addevent"):
         html_text = html_text[len("/addevent") :].lstrip()
+    text_content = parts[1]
+    source_link = None
+    lines = text_content.splitlines()
+    if lines:
+        m = re.match(r"https?://vk\.com/wall[\w\d_-]+", lines[0].strip(), re.I)
+        if m:
+            source_link = lines[0].strip()
+            text_content = "\n".join(lines[1:]).lstrip()
+            if html_text:
+                html_lines = html_text.splitlines()
+                if html_lines and re.match(r"https?://vk\.com/wall[\w\d_-]+", html_lines[0].strip(), re.I):
+                    html_text = "\n".join(html_lines[1:]).lstrip()
     try:
         results = await add_events_from_text(
             db,
-            parts[1],
-            None,
+            text_content,
+            source_link,
             html_text,
             media,
             raise_exc=True,
             creator_id=creator_id,
+            display_source=False if source_link else True,
+
             bot=bot,
         )
     except Exception as e:
@@ -4795,7 +4813,6 @@ async def handle_partner_info_message(message: types.Message, db: Database, bot:
     logging.info("approved user %s as partner %s, %s", uid, org, loc)
 
 
-
 processed_media_groups: set[str] = set()
 
 # store up to three images for albums until the caption arrives
@@ -5126,6 +5143,8 @@ async def create_source_page(
     media: list[tuple[bytes, str]] | tuple[bytes, str] | None = None,
     ics_url: str | None = None,
     db: Database | None = None,
+    *,
+    display_link: bool = True,
 ) -> tuple[str, str, str, int] | None:
     """Create a Telegraph page with the original event text."""
     token = get_telegraph_token()
@@ -5185,7 +5204,7 @@ async def create_source_page(
     elif images:
         catbox_msg = "disabled"
 
-    if source_url:
+    if source_url and display_link:
         html_content += (
             f'<p><a href="{html.escape(source_url)}"><strong>'
             f"{html.escape(title)}</strong></a></p>"
