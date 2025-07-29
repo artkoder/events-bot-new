@@ -2740,7 +2740,6 @@ def format_event_vk(
     )
     if e.telegraph_url:
         desc = f"{desc}, подробнее: {e.telegraph_url}"
-
     lines = [title, desc]
 
     if e.pushkin_card:
@@ -2751,7 +2750,6 @@ def format_event_vk(
         if e.ticket_link:
             lines.append("по регистрации")
             lines.append(f"\U0001f39f {e.ticket_link}")
-
     elif e.ticket_link and (
         e.ticket_price_min is not None or e.ticket_price_max is not None
     ):
@@ -2782,7 +2780,6 @@ def format_event_vk(
 
     # details link already appended to description above
 
-
     loc = e.location_name
     addr = e.location_address
     if addr and e.city:
@@ -2802,7 +2799,6 @@ def format_event_vk(
         day_fmt = f"{day}"
     else:
         day_fmt = day
-
     lines.append(f"\U0001f4c5 {day_fmt} {e.time}")
     lines.append(f"\U0001f4cd {loc}")
 
@@ -3709,7 +3705,6 @@ async def build_daily_sections_vk(
             elif m == next_month(cur_month):
                 next_count += 1
 
-
     lines1 = [
         f"\U0001f4c5 АНОНС на {format_day_pretty(today)} {today.year}",
         DAYS_OF_WEEK[today.weekday()],
@@ -3723,7 +3718,6 @@ async def build_daily_sections_vk(
             w = weekend_map.get(d.isoformat())
             if w:
                 w_url = w.url
-
         lines1.append(format_event_vk(e, highlight=True, weekend_url=w_url))
         lines1.append(VK_EVENT_SEPARATOR)
     if events_today:
@@ -3733,17 +3727,19 @@ async def build_daily_sections_vk(
         sunday = w_start + timedelta(days=1)
         prefix = f"(+{weekend_count}) " if weekend_count else ""
         link_lines.append(
-            f"{prefix}Мероприятия на выходные {w_start.day} {sunday.day} {MONTHS[w_start.month - 1]}: {wpage.url}"
+            f"{prefix}выходные {w_start.day} {sunday.day} {MONTHS[w_start.month - 1]}: {wpage.url}"
+
         )
     if mp_cur:
         prefix = f"(+{cur_count}) " if cur_count else ""
         link_lines.append(
-            f"{prefix}Мероприятия на {month_name_nominative(cur_month)}: {mp_cur.url}"
+            f"{prefix}{month_name_nominative(cur_month)}: {mp_cur.url}"
+
         )
     if mp_next:
         prefix = f"(+{next_count}) " if next_count else ""
         link_lines.append(
-            f"{prefix}Мероприятия на {month_name_nominative(next_month(cur_month))}: {mp_next.url}"
+            f"{prefix}{month_name_nominative(next_month(cur_month))}: {mp_next.url}"
         )
     if link_lines:
         lines1.append(VK_EVENT_SEPARATOR)
@@ -3755,7 +3751,6 @@ async def build_daily_sections_vk(
     section1 = "\n".join(lines1)
 
     lines2 = ["ДОБАВИЛИ В АНОНС", VK_BLANK_LINE]
-
     for e in events_new:
         w_url = None
         d = parse_iso_date(e.date)

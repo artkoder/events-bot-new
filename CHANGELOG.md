@@ -101,5 +101,9 @@
 - Ticket links show a ticket emoji before the URL.
 - Date lines start with a calendar emoji and the location line with a location pin.
 
+## v0.3.14 - VK link cleanup
+
+- Removed the "Мероприятия на" prefix from month and weekend links in VK daily posts.
+
 
 
