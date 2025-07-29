@@ -4160,6 +4160,7 @@ async def test_dumpdb(tmp_path: Path, monkeypatch):
     async with db.get_session() as session:
         session.add(main.Channel(channel_id=-100, title="Chan", is_registered=True))
         await session.commit()
+    await main.set_vk_group_id(db, "123")
 
     dump_msg = types.Message.model_validate(
         {
@@ -4176,3 +4177,4 @@ async def test_dumpdb(tmp_path: Path, monkeypatch):
     assert hasattr(bot, "sent")
     assert "Chan" in bot.messages[-1][1]
     assert "/restore" in bot.messages[-1][1]
+    assert "VK group" in bot.messages[-1][1]
