@@ -2325,16 +2325,6 @@ async def add_events_from_text(
                             obj = await session.get(Event, saved.id)
                             if obj:
                                 obj.ics_post_url = url_p
-                    posted = await post_ics_asset(saved, db, bot)
-                    if posted:
-                        url_p, msg_id = posted
-                        logging.info(
-                            "asset post %s for event %s", url_p, saved.id
-                        )
-                        async with db.get_session() as session:
-                            obj = await session.get(Event, saved.id)
-                            if obj:
-                                obj.ics_post_url = url_p
                                 obj.ics_post_id = msg_id
                                 await session.commit()
                                 saved.ics_post_url = url_p
