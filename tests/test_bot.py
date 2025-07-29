@@ -27,6 +27,8 @@ from main import (
     handle_register,
     handle_start,
     handle_tz,
+    handle_requests,
+    handle_partner_info_message,
     handle_add_event_raw,
     handle_add_event,
     handle_ask_4o,
@@ -169,6 +171,85 @@ async def test_start_superadmin(tmp_path: Path):
     async with db.get_session() as session:
         user = await session.get(User, 1)
     assert user and user.is_superadmin
+
+
+@pytest.mark.asyncio
+async def test_partner_registration(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    # superadmin becomes user 1
+    start_msg = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "S"},
+            "text": "/start",
+        }
+    )
+    await handle_start(start_msg, db, bot)
+
+    # user 2 registers
+    reg_msg = types.Message.model_validate(
+        {
+            "message_id": 2,
+            "date": 0,
+            "chat": {"id": 2, "type": "private"},
+            "from": {"id": 2, "is_bot": False, "first_name": "U"},
+            "text": "/register",
+        }
+    )
+    await handle_register(reg_msg, db, bot)
+
+    # superadmin requests and selects partner
+    req_msg = types.Message.model_validate(
+        {
+            "message_id": 3,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "S"},
+            "text": "/requests",
+        }
+    )
+    await handle_requests(req_msg, db, bot)
+
+    cb = types.CallbackQuery.model_validate(
+        {
+            "id": "c1",
+            "from": {"id": 1, "is_bot": False, "first_name": "S"},
+            "chat_instance": "1",
+            "data": "partner:2",
+            "message": {"message_id": 3, "date": 0, "chat": {"id": 1, "type": "private"}},
+        }
+    ).as_(bot)
+    async def dummy_answer(*args, **kwargs):
+        return None
+
+    object.__setattr__(cb, "answer", dummy_answer)
+    object.__setattr__(cb.message, "answer", dummy_answer)
+    await process_request(cb, db, bot)
+
+    info_msg = types.Message.model_validate(
+        {
+            "message_id": 4,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "S"},
+            "text": "Org, Loc",
+        }
+    )
+    await handle_partner_info_message(info_msg, db, bot)
+
+    async with db.get_session() as session:
+        user2 = await session.get(User, 2)
+    assert user2 and user2.is_partner
+    assert user2.organization == "Org"
+    assert user2.location == "Loc"
+    # check messages to user and admin
+    assert any("approved" in m[1] for m in bot.messages if m[0] == 2)
+    assert any("approved" in m[1] for m in bot.messages if m[0] == 1)
 
 
 def test_create_app_requires_webhook_url(monkeypatch):
@@ -789,6 +870,36 @@ async def test_parse_event_includes_date(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_add_events_from_text_channel_title(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    captured = {}
+
+    async def fake_parse(text: str):
+        captured["text"] = text
+        return [
+            {
+                "title": "T",
+                "short_description": "d",
+                "date": FUTURE_DATE,
+                "time": "18:00",
+                "location_name": "Hall",
+            }
+        ]
+
+    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None):
+        return "u", "p"
+
+    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.create_source_page", fake_create)
+
+    await main.add_events_from_text(db, "info", None, None, None, channel_title="Chan")
+
+    assert "Chan" in captured["text"]
+
+
+@pytest.mark.asyncio
 async def test_telegraph_test(monkeypatch, capsys):
     class DummyTG:
         def __init__(self, access_token=None):
@@ -1017,6 +1128,55 @@ async def test_addevent_strips_command(tmp_path: Path, monkeypatch):
 
     assert captured["text"] == "Some info"
     assert captured["html"] == "Some info"
+
+
+@pytest.mark.asyncio
+async def test_addevent_vk_wall_link(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    captured = {}
+
+    async def fake_parse(text: str) -> list[dict]:
+        captured["text"] = text
+        return [
+            {
+                "title": "T",
+                "short_description": "d",
+                "date": FUTURE_DATE,
+                "time": "18:00",
+                "location_name": "Hall",
+            }
+        ]
+
+    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
+        captured["source"] = source
+        captured["display"] = kwargs.get("display_link")
+        return "u", "p"
+
+    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.create_source_page", fake_create)
+
+    msg = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "/addevent https://vk.com/wall-1_2\nSome info",
+        }
+    )
+
+    await handle_add_event(msg, db, bot)
+
+    async with db.get_session() as session:
+        ev = (await session.execute(select(Event))).scalars().first()
+
+    assert ev.source_post_url == "https://vk.com/wall-1_2"
+    assert captured["text"] == "Some info"
+    assert captured["source"] == "https://vk.com/wall-1_2"
+    assert captured.get("display") is False
 
 
 @pytest.mark.asyncio
@@ -3391,6 +3551,38 @@ async def test_multiple_ticket_links(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_add_event_lines_include_vk_link(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async def fake_parse(text: str) -> list[dict]:
+        return [
+            {
+                "title": "T",
+                "short_description": "d",
+                "date": FUTURE_DATE,
+                "time": "18:00",
+                "location_name": "Hall",
+            }
+        ]
+
+    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None):
+        return "https://t.me/page", "p"
+
+    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.create_source_page", fake_create)
+
+    results = await main.add_events_from_text(
+        db, "text", "https://vk.com/wall-1_1", None, None
+    )
+    assert results
+    lines = results[0][2]
+    assert "telegraph: https://t.me/page" in lines
+    idx = lines.index("telegraph: https://t.me/page")
+    assert lines[idx + 1] == "Vk: https://vk.com/wall-1_1"
+
+
+@pytest.mark.asyncio
 async def test_add_event_strips_city_from_address(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
@@ -3858,6 +4050,37 @@ async def test_daily_no_more_link(tmp_path: Path, monkeypatch):
     posts = await main.build_daily_posts(db, timezone.utc)
     text = posts[0][0]
     assert "подробнее" not in text
+
+
+def test_format_event_vk_with_vk_link():
+    e = Event(
+        title="T",
+        description="d",
+        source_text="s",
+        date="2025-07-10",
+        time="18:00",
+        location_name="Hall",
+        source_post_url="https://vk.com/wall-1_1",
+        telegraph_url="https://t.me/page",
+    )
+    text = main.format_event_vk(e)
+    assert "[подробнее|https://vk.com/wall-1_1]" in text
+    assert "t.me/page" not in text
+
+
+def test_format_event_vk_fallback_link():
+    e = Event(
+        title="T",
+        description="d",
+        source_text="s",
+        date="2025-07-10",
+        time="18:00",
+        location_name="Hall",
+        source_post_url="https://vk.cc/abc",
+        telegraph_url="https://t.me/page",
+    )
+    text = main.format_event_vk(e)
+    assert "[подробнее|https://t.me/page]" in text
 
 
 @pytest.mark.asyncio
