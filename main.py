@@ -3130,7 +3130,10 @@ def format_event_vk(
     elif e.telegraph_url:
         details_link = e.telegraph_url
     if details_link:
-        desc = f"{desc}, [подробнее|{details_link}]"
+        if is_vk_wall_url(details_link):
+            desc = f"{desc}, [{details_link}|подробнее]"
+        else:
+            desc = f"{desc}, подробнее: {details_link}"
     lines = [title]
     if festival:
         link = festival.vk_post_url
