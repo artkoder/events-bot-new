@@ -105,5 +105,10 @@
 
 - Removed the "Мероприятия на" prefix from month and weekend links in VK daily posts.
 
+## v0.3.15 - Channel title hint
+
+- Forwarded posts include the channel title in LLM requests so locations can be
+  detected even when missing from the text.
+
 
 
