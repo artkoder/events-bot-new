@@ -1400,6 +1400,7 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                 eid,
                 fest_name or "None",
             )
+
         if fest_name:
             await sync_festival_page(db, fest_name)
         await show_edit_menu(callback.from_user.id, event, bot)
@@ -3847,18 +3848,21 @@ async def sync_festival_page(db: Database, name: str):
             return
         try:
             title, content = await build_festival_page_content(db, fest)
+
             created = False
             if fest.telegraph_path:
                 await asyncio.to_thread(
                     tg.edit_page, fest.telegraph_path, title=title, content=content
                 )
                 logging.info("updated festival page %s in Telegraph", name)
+
             else:
                 data = await asyncio.to_thread(tg.create_page, title, content=content)
                 fest.telegraph_url = data.get("url")
                 fest.telegraph_path = data.get("path")
                 created = True
                 logging.info("created festival page %s: %s", name, fest.telegraph_url)
+
             await session.commit()
             logging.info("synced festival page %s", name)
         except Exception as e:
@@ -5068,6 +5072,7 @@ async def handle_festival_edit_message(message: types.Message, db: Database, bot
         fest.description = text
         await session.commit()
         logging.info("festival %s description updated", fest.name)
+
     festival_edit_sessions.pop(message.from_user.id, None)
     await bot.send_message(message.chat.id, "Festival updated")
     await sync_festival_page(db, fest.name)
