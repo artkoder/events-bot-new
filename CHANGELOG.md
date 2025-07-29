@@ -105,10 +105,13 @@
 
 - Removed the "Мероприятия на" prefix from month and weekend links in VK daily posts.
 
-## v0.3.15 - Channel title hint
+## v0.3.15 - Channel name context
 
-- Forwarded posts include the channel title in LLM requests so locations can be
-  detected even when missing from the text.
+- Forwarded messages include the Telegram channel title in 4o requests so the
+  model can infer the venue.
+- `parse_event_via_4o` also accepts the legacy `channel_title` argument for
+  compatibility.
+
 
 
 

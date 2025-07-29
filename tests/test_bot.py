@@ -1044,7 +1044,7 @@ async def test_addevent_caption_photo(tmp_path: Path, monkeypatch):
     await db.init()
     bot = DummyBot("123:abc")
 
-    async def fake_parse(text: str) -> list[dict]:
+    async def fake_parse(text: str, source_channel: str | None = None) -> list[dict]:
         return [
             {
                 "title": "T",
@@ -1093,7 +1093,7 @@ async def test_addevent_strips_command(tmp_path: Path, monkeypatch):
     await db.init()
     bot = DummyBot("123:abc")
 
-    async def fake_parse(text: str) -> list[dict]:
+    async def fake_parse(text: str, source_channel: str | None = None) -> list[dict]:
         return [
             {
                 "title": "T",
@@ -1185,7 +1185,7 @@ async def test_forward_add_event(tmp_path: Path, monkeypatch):
     await db.init()
     bot = DummyBot("123:abc")
 
-    async def fake_parse(text: str) -> list[dict]:
+    async def fake_parse(text: str, source_channel: str | None = None) -> list[dict]:
         return [
             {
                 "title": "Forwarded",
@@ -1243,12 +1243,107 @@ async def test_forward_add_event(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_forward_passes_channel_name(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    captured = {}
+
+    async def fake_parse(text: str, source_channel: str | None = None) -> list[dict]:
+        captured["chan"] = source_channel
+        return [
+            {
+                "title": "Forwarded",
+                "short_description": "desc",
+                "date": FUTURE_DATE,
+                "time": "18:00",
+                "location_name": "Club",
+            }
+        ]
+
+    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+
+    async def fake_create(*args, **kwargs):
+        return "u", "p"
+
+    monkeypatch.setattr("main.create_source_page", fake_create)
+
+    start_msg = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "/start",
+        }
+    )
+    await handle_start(start_msg, db, bot)
+
+    upd = DummyUpdate(-100123, "Chan")
+    await main.handle_my_chat_member(upd, db)
+
+    async with db.get_session() as session:
+        ch = await session.get(main.Channel, -100123)
+        ch.is_registered = True
+        await session.commit()
+
+    fwd_msg = types.Message.model_validate(
+        {
+            "message_id": 3,
+            "date": 0,
+            "forward_date": 0,
+            "forward_from_chat": {"id": -100123, "type": "channel", "title": "Chan"},
+            "forward_from_message_id": 10,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "Some text",
+        }
+    )
+
+    await main.handle_forwarded(fwd_msg, db, bot)
+
+    assert captured["chan"] == "Chan"
+
+
+@pytest.mark.asyncio
+async def test_parse_event_alias_channel_title(monkeypatch):
+    seen = {}
+
+    class DummySession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            pass
+
+        async def post(self, url, json=None, headers=None):
+            seen["payload"] = json
+
+            class Resp:
+                def raise_for_status(self):
+                    pass
+
+                async def json(self):
+                    return {"choices": [{"message": {"content": "{}"}}]}
+
+            return Resp()
+
+    monkeypatch.setenv("FOUR_O_TOKEN", "x")
+    monkeypatch.setattr("main.ClientSession", DummySession)
+
+    await main.parse_event_via_4o("t", channel_title="Name")
+
+    assert "Name" in seen["payload"]["messages"][1]["content"]
+
+
+@pytest.mark.asyncio
 async def test_forward_add_event_origin(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
     bot = DummyBot("123:abc")
 
-    async def fake_parse(text: str) -> list[dict]:
+    async def fake_parse(text: str, source_channel: str | None = None) -> list[dict]:
         return [
             {
                 "title": "Forwarded",
@@ -1314,7 +1409,7 @@ async def test_forward_add_event_photo(tmp_path: Path, monkeypatch):
     await db.init()
     bot = DummyBot("123:abc")
 
-    async def fake_parse(text: str) -> list[dict]:
+    async def fake_parse(text: str, source_channel: str | None = None) -> list[dict]:
         return [
             {
                 "title": "Forwarded",
@@ -1385,7 +1480,7 @@ async def test_forward_unregistered(tmp_path: Path, monkeypatch):
     await db.init()
     bot = DummyBot("123:abc")
 
-    async def fake_parse(text: str) -> list[dict]:
+    async def fake_parse(text: str, source_channel: str | None = None) -> list[dict]:
         return [
             {
                 "title": "Fwd",
@@ -1443,7 +1538,7 @@ async def test_media_group_caption_first(tmp_path: Path, monkeypatch):
     await db.init()
     bot = DummyBot("123:abc")
 
-    async def fake_parse(text: str) -> list[dict]:
+    async def fake_parse(text: str, source_channel: str | None = None) -> list[dict]:
         return [
             {
                 "title": "MG",
@@ -1521,7 +1616,7 @@ async def test_media_group_caption_last(tmp_path: Path, monkeypatch):
     await db.init()
     bot = DummyBot("123:abc")
 
-    async def fake_parse(text: str) -> list[dict]:
+    async def fake_parse(text: str, source_channel: str | None = None) -> list[dict]:
         return [
             {
                 "title": "MG",
@@ -1716,7 +1811,7 @@ async def test_exhibition_listing(tmp_path: Path, monkeypatch):
     )
     await handle_start(start_msg, db, bot)
 
-    async def fake_parse(text: str) -> list[dict]:
+    async def fake_parse(text: str, source_channel: str | None = None) -> list[dict]:
         return [
             {
                 "title": "Expo",
@@ -1809,7 +1904,7 @@ async def test_multiple_events(tmp_path: Path, monkeypatch):
     )
     await handle_start(start_msg, db, bot)
 
-    async def fake_parse(text: str) -> list[dict]:
+    async def fake_parse(text: str, source_channel: str | None = None) -> list[dict]:
         return [
             {
                 "title": "One",
@@ -2582,7 +2677,7 @@ async def test_date_range_parsing(tmp_path: Path, monkeypatch):
     await db.init()
     bot = DummyBot("123:abc")
 
-    async def fake_parse(text: str) -> list[dict]:
+    async def fake_parse(text: str, source_channel: str | None = None) -> list[dict]:
         return [
             {
                 "title": "Expo",
@@ -3059,7 +3154,7 @@ async def test_update_event_description_from_telegraph(tmp_path: Path, monkeypat
         session.add(event)
         await session.commit()
 
-    async def fake_parse(text: str) -> list[dict]:
+    async def fake_parse(text: str, source_channel: str | None = None) -> list[dict]:
         assert "first" in text and "second" in text
         return [
             {
@@ -3314,7 +3409,7 @@ async def test_extract_ticket_link(tmp_path: Path, monkeypatch):
     await db.init()
     bot = DummyBot("123:abc")
 
-    async def fake_parse(text: str) -> list[dict]:
+    async def fake_parse(text: str, source_channel: str | None = None) -> list[dict]:
         return [
             {
                 "title": "T",
@@ -3347,7 +3442,7 @@ async def test_extract_ticket_link_near_word(tmp_path: Path, monkeypatch):
     await db.init()
     bot = DummyBot("123:abc")
 
-    async def fake_parse(text: str) -> list[dict]:
+    async def fake_parse(text: str, source_channel: str | None = None) -> list[dict]:
         return [
             {
                 "title": "T",
@@ -3380,7 +3475,7 @@ async def test_ticket_link_overrides_invalid(tmp_path: Path, monkeypatch):
     await db.init()
     bot = DummyBot("123:abc")
 
-    async def fake_parse(text: str) -> list[dict]:
+    async def fake_parse(text: str, source_channel: str | None = None) -> list[dict]:
         return [
             {
                 "title": "T",
@@ -3413,7 +3508,7 @@ async def test_multiple_ticket_links(tmp_path: Path, monkeypatch):
     await db.init()
     bot = DummyBot("123:abc")
 
-    async def fake_parse(text: str) -> list[dict]:
+    async def fake_parse(text: str, source_channel: str | None = None) -> list[dict]:
         return [
             {
                 "title": "A",
@@ -3492,7 +3587,7 @@ async def test_add_event_strips_city_from_address(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
 
-    async def fake_parse(text: str) -> list[dict]:
+    async def fake_parse(text: str, source_channel: str | None = None) -> list[dict]:
         return [
             {
                 "title": "Show",
@@ -3523,7 +3618,7 @@ async def test_festival_expands_dates(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
 
-    async def fake_parse(text: str) -> list[dict]:
+    async def fake_parse(text: str, source_channel: str | None = None) -> list[dict]:
         return [
             {
                 "title": "Jazz",
@@ -3624,7 +3719,7 @@ async def test_exhibition_auto_year_end(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
 
-    async def fake_parse(text: str) -> list[dict]:
+    async def fake_parse(text: str, source_channel: str | None = None) -> list[dict]:
         return [
             {
                 "title": "AutoExpo",
@@ -4212,7 +4307,7 @@ async def test_forward_adds_calendar_button(tmp_path: Path, monkeypatch):
 
     monkeypatch.setattr(DummyBot, "send_document", fake_send_document, raising=False)
 
-    async def fake_parse(text):
+    async def fake_parse(text, source_channel=None):
         return [
             {
                 "title": "T",
