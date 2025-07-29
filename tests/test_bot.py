@@ -4136,6 +4136,22 @@ async def test_handle_fest_list(tmp_path: Path):
     assert "Jazz" in bot.messages[-1][1]
 
 
+def test_event_to_nodes_festival_link():
+    e = Event(
+        title="T",
+        description="d",
+        source_text="s",
+        date="2025-07-10",
+        time="18:00",
+        location_name="Hall",
+        festival="Jazz",
+    )
+    fest = main.Festival(name="Jazz", telegraph_url="http://tg")
+    nodes = main.event_to_nodes(e, fest)
+    assert nodes[1]["children"][0]["attrs"]["href"] == "http://tg"
+
+
+
 @pytest.mark.asyncio
 async def test_upload_ics_content_type(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))

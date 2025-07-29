@@ -117,6 +117,9 @@
 - Added a `Festival` model and `/fest` command for listing festivals.
 - Daily announcements now show festival links.
 - Logged festival-related actions including page creation and edits.
+- Festival pages are created in Telegraph and VK with links shown in event
+  updates and month pages. Festivals can be edited or deleted.
+
 
 
 
