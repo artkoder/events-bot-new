@@ -4494,3 +4494,89 @@ async def test_dumpdb(tmp_path: Path, monkeypatch):
     assert hasattr(bot, "sent")
     assert "Chan" in bot.messages[-1][1]
     assert "/restore" in bot.messages[-1][1]
+
+
+@pytest.mark.asyncio
+async def test_event_add_notifies_superadmin(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async def fake_create(*args, **kwargs):
+        return "u", "p"
+
+    monkeypatch.setattr("main.create_source_page", fake_create)
+
+    start_msg = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "S"},
+            "text": "/start",
+        }
+    )
+    await handle_start(start_msg, db, bot)
+
+    async with db.get_session() as session:
+        session.add(User(user_id=2, username="u2"))
+        await session.commit()
+
+    add_msg = types.Message.model_validate(
+        {
+            "message_id": 2,
+            "date": 0,
+            "chat": {"id": 2, "type": "private"},
+            "from": {"id": 2, "is_bot": False, "first_name": "U"},
+            "text": f"/addevent_raw Party|{FUTURE_DATE}|18:00|Club",
+        }
+    )
+
+    await handle_add_event_raw(add_msg, db, bot)
+
+    assert any(
+        "added event" in m[1] and "u2" in m[1] for m in bot.messages if m[0] == 1
+    )
+
+
+@pytest.mark.asyncio
+async def test_partner_event_add_notifies_superadmin(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async def fake_create(*args, **kwargs):
+        return "u", "p"
+
+    monkeypatch.setattr("main.create_source_page", fake_create)
+
+    start_msg = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "S"},
+            "text": "/start",
+        }
+    )
+    await handle_start(start_msg, db, bot)
+
+    async with db.get_session() as session:
+        session.add(User(user_id=3, username="p", is_partner=True))
+        await session.commit()
+
+    add_msg = types.Message.model_validate(
+        {
+            "message_id": 2,
+            "date": 0,
+            "chat": {"id": 3, "type": "private"},
+            "from": {"id": 3, "is_bot": False, "first_name": "P"},
+            "text": f"/addevent_raw Party|{FUTURE_DATE}|18:00|Club",
+        }
+    )
+
+    await handle_add_event_raw(add_msg, db, bot)
+
+    assert any(
+        "partner" in m[1] and "added event" in m[1] for m in bot.messages if m[0] == 1
+    )
