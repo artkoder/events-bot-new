@@ -4064,7 +4064,7 @@ def test_format_event_vk_with_vk_link():
         telegraph_url="https://t.me/page",
     )
     text = main.format_event_vk(e)
-    assert "[подробнее|https://vk.com/wall-1_1]" in text
+    assert "[https://vk.com/wall-1_1|подробнее]" in text
     assert "t.me/page" not in text
 
 
@@ -4080,7 +4080,7 @@ def test_format_event_vk_fallback_link():
         telegraph_url="https://t.me/page",
     )
     text = main.format_event_vk(e)
-    assert "[подробнее|https://t.me/page]" in text
+    assert "подробнее: https://t.me/page" in text
 
 
 @pytest.mark.asyncio
