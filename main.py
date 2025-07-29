@@ -3800,7 +3800,7 @@ async def build_daily_posts(
     )
     section1 = "\n".join(lines1)
 
-    lines2 = ["<b><i>ДОБАВИЛИ В АНОНС</i></b>"]
+    lines2 = [f"<b><i>+{len(events_new)} ДОБАВИЛИ В АНОНС</i></b>"]
     for e in events_new:
         w_url = None
         d = parse_iso_date(e.date)
@@ -3981,7 +3981,7 @@ async def build_daily_sections_vk(
     )
     section1 = "\n".join(lines1)
 
-    lines2 = ["ДОБАВИЛИ В АНОНС", VK_BLANK_LINE]
+    lines2 = [f"+{len(events_new)} ДОБАВИЛИ В АНОНС", VK_BLANK_LINE]
     for e in events_new:
         w_url = None
         d = parse_iso_date(e.date)
