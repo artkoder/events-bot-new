@@ -2,6 +2,7 @@ import logging
 import os
 from datetime import date, datetime, timedelta, timezone, time
 from typing import Optional, Tuple, Iterable
+from urllib.parse import urlparse
 import uuid
 import textwrap
 from supabase import create_client, Client
@@ -2768,6 +2769,22 @@ def is_valid_url(text: str | None) -> bool:
     return bool(re.match(r"https?://", text))
 
 
+def is_vk_wall_url(url: str | None) -> bool:
+    """Return True if the URL points to a VK wall post."""
+    if not url:
+        return False
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return False
+    host = parsed.netloc.lower()
+    if host in {"vk.cc", "vk.link", "go.vk.com", "l.vk.com"}:
+        return False
+    if host.endswith("vk.com") and "/wall" in parsed.path:
+        return True
+    return False
+
+
 def recent_cutoff(tz: timezone, now: datetime | None = None) -> datetime:
     """Return UTC datetime for the start of the previous day in the given tz."""
     if now is None:
@@ -2891,8 +2908,13 @@ def format_event_vk(
         e.description.strip(),
         flags=re.I,
     )
-    if e.telegraph_url:
-        desc = f"{desc}, подробнее: {e.telegraph_url}"
+    details_link = None
+    if is_vk_wall_url(e.source_post_url):
+        details_link = e.source_post_url
+    elif e.telegraph_url:
+        details_link = e.telegraph_url
+    if details_link:
+        desc = f"{desc}, [подробнее|{details_link}]"
     lines = [title, desc]
 
     if e.pushkin_card:
