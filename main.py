@@ -484,6 +484,18 @@ async def notify_superadmin(db: Database, bot: Bot, text: str):
         logging.error("failed to notify superadmin: %s", e)
 
 
+async def notify_event_added(
+    db: Database, bot: Bot, user: User | None, event: Event, added: bool
+) -> None:
+    """Notify superadmin when a user or partner adds an event."""
+    if not added or not user or user.is_superadmin:
+        return
+    role = "partner" if user.is_partner else "user"
+    name = f"@{user.username}" if user.username else str(user.user_id)
+    text = f"{name} ({role}) added event {event.title} {event.date}"
+    await notify_superadmin(db, bot, text)
+
+
 async def dump_database(path: str = DB_PATH) -> bytes:
     """Return a SQL dump of the specified database."""
     async with aiosqlite.connect(path) as conn:
@@ -2178,7 +2190,9 @@ async def add_events_from_text(
     source_chat_id: int | None = None,
     source_message_id: int | None = None,
     creator_id: int | None = None,
+    display_source: bool = True,
     source_channel: str | None = None,
+    channel_title: str | None = None,
 
 
     bot: Bot | None = None,
@@ -2189,7 +2203,13 @@ async def add_events_from_text(
     )
     try:
         logging.info("LLM parse start (%d chars)", len(text))
-        parsed = await parse_event_via_4o(text, source_channel)
+        llm_text = text
+        if channel_title:
+            llm_text = f"{channel_title}\n{llm_text}"
+        if source_channel:
+            parsed = await parse_event_via_4o(llm_text, source_channel)
+        else:
+            parsed = await parse_event_via_4o(llm_text)
 
         logging.info("LLM returned %d events", len(parsed))
     except Exception as e:
@@ -2463,6 +2483,7 @@ async def handle_add_event(message: types.Message, db: Database, bot: Bot):
             media,
             raise_exc=True,
             creator_id=creator_id,
+            display_source=False if source_link else True,
             source_channel=None,
 
             bot=bot,
@@ -2498,6 +2519,7 @@ async def handle_add_event(message: types.Message, db: Database, bot: Bot):
             f"Event {status}\n" + "\n".join(lines),
             reply_markup=markup,
         )
+        await notify_event_added(db, bot, user, saved, added)
 
 
 async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
@@ -2616,6 +2638,7 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
         f"Event {status}\n" + "\n".join(lines),
         reply_markup=markup,
     )
+    await notify_event_added(db, bot, user, event, added)
 
 
 def format_day(day: date, tz: timezone) -> str:
@@ -4970,6 +4993,7 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
                 text_out,
                 reply_markup=markup,
             )
+            await notify_event_added(db, bot, user, saved, added)
         except Exception as e:
             logging.error("failed to send event response: %s", e)
 
