@@ -3765,6 +3765,37 @@ async def test_daily_no_more_link(tmp_path: Path, monkeypatch):
     assert "подробнее" not in text
 
 
+def test_format_event_vk_with_vk_link():
+    e = Event(
+        title="T",
+        description="d",
+        source_text="s",
+        date="2025-07-10",
+        time="18:00",
+        location_name="Hall",
+        source_post_url="https://vk.com/wall-1_1",
+        telegraph_url="https://t.me/page",
+    )
+    text = main.format_event_vk(e)
+    assert "[подробнее|https://vk.com/wall-1_1]" in text
+    assert "t.me/page" not in text
+
+
+def test_format_event_vk_fallback_link():
+    e = Event(
+        title="T",
+        description="d",
+        source_text="s",
+        date="2025-07-10",
+        time="18:00",
+        location_name="Hall",
+        source_post_url="https://vk.cc/abc",
+        telegraph_url="https://t.me/page",
+    )
+    text = main.format_event_vk(e)
+    assert "[подробнее|https://t.me/page]" in text
+
+
 @pytest.mark.asyncio
 async def test_upload_ics_content_type(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
