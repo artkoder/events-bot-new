@@ -789,6 +789,36 @@ async def test_parse_event_includes_date(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_add_events_from_text_channel_title(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    captured = {}
+
+    async def fake_parse(text: str):
+        captured["text"] = text
+        return [
+            {
+                "title": "T",
+                "short_description": "d",
+                "date": FUTURE_DATE,
+                "time": "18:00",
+                "location_name": "Hall",
+            }
+        ]
+
+    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None):
+        return "u", "p"
+
+    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.create_source_page", fake_create)
+
+    await main.add_events_from_text(db, "info", None, None, None, channel_title="Chan")
+
+    assert "Chan" in captured["text"]
+
+
+@pytest.mark.asyncio
 async def test_telegraph_test(monkeypatch, capsys):
     class DummyTG:
         def __init__(self, access_token=None):
