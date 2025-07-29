@@ -2168,7 +2168,6 @@ async def add_events_from_text(
     source_chat_id: int | None = None,
     source_message_id: int | None = None,
     creator_id: int | None = None,
-    channel_title: str | None = None,
 
     bot: Bot | None = None,
 
@@ -4789,6 +4788,12 @@ async def handle_partner_info_message(message: types.Message, db: Database, bot:
         await session.commit()
     partner_info_sessions.pop(message.from_user.id, None)
     await bot.send_message(uid, "You are approved as partner")
+    await bot.send_message(
+        message.chat.id,
+        f"User {uid} approved as partner at {org}, {loc}",
+    )
+    logging.info("approved user %s as partner %s, %s", uid, org, loc)
+
 
 
 processed_media_groups: set[str] = set()
@@ -4898,7 +4903,6 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
         source_chat_id=chat_id if link else None,
         source_message_id=msg_id if link else None,
         creator_id=user.user_id,
-        channel_title=channel_title,
 
         bot=bot,
 

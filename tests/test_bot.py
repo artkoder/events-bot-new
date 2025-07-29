@@ -27,6 +27,8 @@ from main import (
     handle_register,
     handle_start,
     handle_tz,
+    handle_requests,
+    handle_partner_info_message,
     handle_add_event_raw,
     handle_add_event,
     handle_ask_4o,
@@ -169,6 +171,85 @@ async def test_start_superadmin(tmp_path: Path):
     async with db.get_session() as session:
         user = await session.get(User, 1)
     assert user and user.is_superadmin
+
+
+@pytest.mark.asyncio
+async def test_partner_registration(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    # superadmin becomes user 1
+    start_msg = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "S"},
+            "text": "/start",
+        }
+    )
+    await handle_start(start_msg, db, bot)
+
+    # user 2 registers
+    reg_msg = types.Message.model_validate(
+        {
+            "message_id": 2,
+            "date": 0,
+            "chat": {"id": 2, "type": "private"},
+            "from": {"id": 2, "is_bot": False, "first_name": "U"},
+            "text": "/register",
+        }
+    )
+    await handle_register(reg_msg, db, bot)
+
+    # superadmin requests and selects partner
+    req_msg = types.Message.model_validate(
+        {
+            "message_id": 3,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "S"},
+            "text": "/requests",
+        }
+    )
+    await handle_requests(req_msg, db, bot)
+
+    cb = types.CallbackQuery.model_validate(
+        {
+            "id": "c1",
+            "from": {"id": 1, "is_bot": False, "first_name": "S"},
+            "chat_instance": "1",
+            "data": "partner:2",
+            "message": {"message_id": 3, "date": 0, "chat": {"id": 1, "type": "private"}},
+        }
+    ).as_(bot)
+    async def dummy_answer(*args, **kwargs):
+        return None
+
+    object.__setattr__(cb, "answer", dummy_answer)
+    object.__setattr__(cb.message, "answer", dummy_answer)
+    await process_request(cb, db, bot)
+
+    info_msg = types.Message.model_validate(
+        {
+            "message_id": 4,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "S"},
+            "text": "Org, Loc",
+        }
+    )
+    await handle_partner_info_message(info_msg, db, bot)
+
+    async with db.get_session() as session:
+        user2 = await session.get(User, 2)
+    assert user2 and user2.is_partner
+    assert user2.organization == "Org"
+    assert user2.location == "Loc"
+    # check messages to user and admin
+    assert any("approved" in m[1] for m in bot.messages if m[0] == 2)
+    assert any("approved" in m[1] for m in bot.messages if m[0] == 1)
 
 
 def test_create_app_requires_webhook_url(monkeypatch):
