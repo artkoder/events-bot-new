@@ -221,6 +221,7 @@ class Festival(SQLModel, table=True):
     telegraph_url: Optional[str] = None
     telegraph_path: Optional[str] = None
     vk_post_url: Optional[str] = None
+    photo_url: Optional[str] = None
 
 
 class Database:
@@ -354,6 +355,13 @@ class Database:
             if "path2" not in cols:
                 await conn.exec_driver_sql(
                     "ALTER TABLE monthpage ADD COLUMN path2 VARCHAR"
+                )
+
+            result = await conn.exec_driver_sql("PRAGMA table_info(festival)")
+            cols = [r[1] for r in result.fetchall()]
+            if "photo_url" not in cols:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE festival ADD COLUMN photo_url VARCHAR"
                 )
 
     def get_session(self) -> AsyncSession:
@@ -502,14 +510,18 @@ async def get_asset_channel(db: Database) -> Channel | None:
         return result.scalars().first()
 
 
-async def ensure_festival(db: Database, name: str) -> Festival:
+async def ensure_festival(db: Database, name: str, photo_url: str | None = None) -> Festival:
     """Return existing festival by name or create a new record."""
     async with db.get_session() as session:
         res = await session.execute(select(Festival).where(Festival.name == name))
         fest = res.scalar_one_or_none()
         if fest:
+            if photo_url and not fest.photo_url:
+                fest.photo_url = photo_url
+                session.add(fest)
+                await session.commit()
             return fest
-        fest = Festival(name=name)
+        fest = Festival(name=name, photo_url=photo_url)
         session.add(fest)
         await session.commit()
         logging.info("created festival %s", name)
@@ -618,6 +630,51 @@ async def extract_images(message: types.Message, bot: Bot) -> list[tuple[bytes, 
         name = message.document.file_name or "image.jpg"
         images.append((bio.getvalue(), name))
     return images[:3]
+
+
+async def upload_to_catbox(images: list[tuple[bytes, str]]) -> tuple[list[str], str]:
+    """Upload images to Catbox and return URLs with status message."""
+    catbox_urls: list[str] = []
+    catbox_msg = ""
+    if CATBOX_ENABLED and images:
+        async with ClientSession() as session:
+            for data, name in images[:3]:
+                if len(data) > 5 * 1024 * 1024:
+                    logging.warning("catbox skip %s: too large", name)
+                    catbox_msg += f"{name}: too large; "
+                    continue
+                if not imghdr.what(None, data):
+                    logging.warning("catbox skip %s: not image", name)
+                    catbox_msg += f"{name}: not image; "
+                    continue
+                try:
+                    form = FormData()
+                    form.add_field("reqtype", "fileupload")
+                    form.add_field("fileToUpload", data, filename=name)
+                    async with session.post(
+                        "https://catbox.moe/user/api.php", data=form
+                    ) as resp:
+                        text_r = await resp.text()
+                        if resp.status == 200 and text_r.startswith("http"):
+                            url = text_r.strip()
+                            catbox_urls.append(url)
+                            catbox_msg += "ok; "
+                            logging.info("catbox uploaded %s", url)
+                        else:
+                            catbox_msg += f"{name}: err {resp.status}; "
+                            logging.error(
+                                "catbox upload failed %s: %s %s",
+                                name,
+                                resp.status,
+                                text_r,
+                            )
+                except Exception as e:
+                    catbox_msg += f"{name}: {e}; "
+                    logging.error("catbox error %s: %s", name, e)
+        catbox_msg = catbox_msg.strip("; ")
+    elif images:
+        catbox_msg = "disabled"
+    return catbox_urls, catbox_msg
 
 
 def normalize_hashtag_dates(text: str) -> str:
@@ -2412,6 +2469,10 @@ async def add_events_from_text(
 
     results: list[tuple[Event, bool, list[str], str]] = []
     first = True
+    images: list[tuple[bytes, str]] = []
+    if media:
+        images = [media] if isinstance(media, tuple) else list(media)
+    catbox_urls, catbox_msg_global = await upload_to_catbox(images)
     links_iter = iter(extract_links_from_html(html_text) if html_text else [])
     for data in parsed:
         logging.info(
@@ -2469,7 +2530,8 @@ async def add_events_from_text(
         )
 
         if base_event.festival:
-            await ensure_festival(db, base_event.festival)
+            photo_u = catbox_urls[0] if catbox_urls else None
+            await ensure_festival(db, base_event.festival, photo_url=photo_u)
 
         if base_event.event_type == "выставка" and not base_event.end_date:
             start_dt = parse_iso_date(base_event.date) or datetime.now(LOCAL_TZ).date()
@@ -2519,8 +2581,8 @@ async def add_events_from_text(
                 "event %s with id %s", "added" if added else "updated", saved.id
             )
 
-            media_arg = media if first else None
-            upload_info = ""
+            media_arg = None
+            upload_info = catbox_msg_global if first else ""
             photo_count = saved.photo_count
             if saved.telegraph_url and saved.telegraph_path:
                 upload_info, added_count = await update_source_page(
@@ -2529,6 +2591,7 @@ async def add_events_from_text(
                     html_text or text,
                     media_arg,
                     db,
+                    catbox_urls=catbox_urls,
                 )
                 if added_count:
                     photo_count += added_count
@@ -2580,21 +2643,22 @@ async def add_events_from_text(
                     saved.source_text,
                     source_link,
                     html_text,
-                    media_arg,
+                    None,
                     saved.ics_url,
                     db,
+                    catbox_urls=catbox_urls,
                     **extra_kwargs,
                 )
                 if res:
                     if len(res) == 4:
-                        url, path, upload_info, photo_count = res
+                        url, path, _, photo_count = res
                     elif len(res) == 3:
-                        url, path, upload_info = res
+                        url, path, _ = res
                         photo_count = 0
                     else:
                         url, path = res
-                        upload_info = ""
                         photo_count = 0
+                    upload_info = catbox_msg_global if first else ""
                     logging.info("telegraph page %s", url)
                     async with db.get_session() as session:
                         saved.telegraph_url = url
@@ -4016,6 +4080,9 @@ async def build_festival_page_content(db: Database, fest: Festival) -> tuple[str
                 await session.commit()
 
     nodes: list[dict] = []
+    if fest.photo_url:
+        nodes.append({"tag": "img", "attrs": {"src": fest.photo_url}})
+        nodes.append({"tag": "p", "children": ["\u00a0"]})
     if fest.description:
         nodes.append({"tag": "p", "children": [fest.description]})
     for e in events:
@@ -5561,6 +5628,8 @@ async def update_source_page(
     new_html: str,
     media: list[tuple[bytes, str]] | tuple[bytes, str] | None = None,
     db: Database | None = None,
+    *,
+    catbox_urls: list[str] | None = None,
 ) -> tuple[str, int]:
     """Append text to an existing Telegraph page."""
     token = get_telegraph_token()
@@ -5576,46 +5645,11 @@ async def update_source_page(
         images: list[tuple[bytes, str]] = []
         if media:
             images = [media] if isinstance(media, tuple) else list(media)
-        catbox_urls: list[str] = []
-        if CATBOX_ENABLED and images:
-            async with ClientSession() as session:
-                for data, name in images[:3]:
-                    if len(data) > 5 * 1024 * 1024:
-                        logging.warning("catbox skip %s: too large", name)
-                        catbox_msg += f"{name}: too large; "
-                        continue
-                    if not imghdr.what(None, data):
-                        logging.warning("catbox skip %s: not image", name)
-                        catbox_msg += f"{name}: not image; "
-                        continue
-                    try:
-                        form = FormData()
-                        form.add_field("reqtype", "fileupload")
-                        form.add_field("fileToUpload", data, filename=name)
-                        async with session.post(
-                            "https://catbox.moe/user/api.php", data=form
-                        ) as resp:
-                            text = await resp.text()
-                            if resp.status == 200 and text.startswith("http"):
-                                url = text.strip()
-                                catbox_urls.append(url)
-                                catbox_msg += "ok; "
-                                logging.info("catbox uploaded %s", url)
-                            else:
-                                catbox_msg += f"{name}: err {resp.status}; "
-                                logging.error(
-                                    "catbox upload failed %s: %s %s",
-                                    name,
-                                    resp.status,
-                                    text,
-                                )
-                    except Exception as e:
-                        catbox_msg += f"{name}: {e}; "
-                        logging.error("catbox error %s: %s", name, e)
-            catbox_msg = catbox_msg.strip("; ")
-        elif images:
-            catbox_msg = "disabled"
-        for url in catbox_urls:
+        if catbox_urls is not None:
+            urls = list(catbox_urls)
+        else:
+            urls, catbox_msg = await upload_to_catbox(images)
+        for url in urls:
             html_content += f'<img src="{html.escape(url)}"/><p></p>'
         new_html = normalize_hashtag_dates(new_html)
         cleaned = re.sub(r"</?tg-emoji[^>]*>", "", new_html)
@@ -5634,7 +5668,7 @@ async def update_source_page(
             tg.edit_page, path, title=title, html_content=html_content
         )
         logging.info("Updated telegraph page %s", path)
-        return catbox_msg, len(catbox_urls)
+        return catbox_msg, len(urls)
     except Exception as e:
         logging.error("Failed to update telegraph page: %s", e)
         return f"error: {e}", 0
@@ -5720,6 +5754,7 @@ async def create_source_page(
     db: Database | None = None,
     *,
     display_link: bool = True,
+    catbox_urls: list[str] | None = None,
 ) -> tuple[str, str, str, int] | None:
     """Create a Telegraph page with the original event text."""
     token = get_telegraph_token()
@@ -5738,46 +5773,11 @@ async def create_source_page(
     images: list[tuple[bytes, str]] = []
     if media:
         images = [media] if isinstance(media, tuple) else list(media)
-    catbox_urls: list[str] = []
-    catbox_msg = ""
-    if CATBOX_ENABLED and images:
-        async with ClientSession() as session:
-            for data, name in images[:3]:
-                if len(data) > 5 * 1024 * 1024:
-                    logging.warning("catbox skip %s: too large", name)
-                    catbox_msg += f"{name}: too large; "
-                    continue
-                if not imghdr.what(None, data):
-                    logging.warning("catbox skip %s: not image", name)
-                    catbox_msg += f"{name}: not image; "
-                    continue
-                try:
-                    form = FormData()
-                    form.add_field("reqtype", "fileupload")
-                    form.add_field("fileToUpload", data, filename=name)
-                    async with session.post(
-                        "https://catbox.moe/user/api.php", data=form
-                    ) as resp:
-                        text_r = await resp.text()
-                        if resp.status == 200 and text_r.startswith("http"):
-                            url = text_r.strip()
-                            catbox_urls.append(url)
-                            catbox_msg += "ok; "
-                            logging.info("catbox uploaded %s", url)
-                        else:
-                            catbox_msg += f"{name}: err {resp.status}; "
-                            logging.error(
-                                "catbox upload failed %s: %s %s",
-                                name,
-                                resp.status,
-                                text_r,
-                            )
-                except Exception as e:
-                    catbox_msg += f"{name}: {e}; "
-                    logging.error("catbox error %s: %s", name, e)
-        catbox_msg = catbox_msg.strip("; ")
-    elif images:
-        catbox_msg = "disabled"
+    if catbox_urls is not None:
+        urls = list(catbox_urls)
+        catbox_msg = ""
+    else:
+        urls, catbox_msg = await upload_to_catbox(images)
 
     if source_url and display_link:
         html_content += (
@@ -5787,7 +5787,7 @@ async def create_source_page(
     else:
         html_content += f"<p><strong>{html.escape(title)}</strong></p>"
 
-    for url in catbox_urls:
+    for url in urls:
         html_content += f'<img src="{html.escape(url)}"/><p></p>'
 
     html_content = apply_ics_link(html_content, ics_url)
@@ -5819,7 +5819,7 @@ async def create_source_page(
         logging.error("Failed to create telegraph page: %s", e)
         return None
     logging.info("Created telegraph page %s", page.get("url"))
-    return page.get("url"), page.get("path"), catbox_msg, len(catbox_urls)
+    return page.get("url"), page.get("path"), catbox_msg, len(urls)
 
 
 def create_app() -> web.Application:

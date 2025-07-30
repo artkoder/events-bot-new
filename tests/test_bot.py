@@ -266,7 +266,7 @@ async def test_add_event_raw(tmp_path: Path, monkeypatch):
     await db.init()
     bot = DummyBot("123:abc")
 
-    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None):
+    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
         return "https://t.me/test", "path"
 
     monkeypatch.setattr("main.create_source_page", fake_create)
@@ -297,7 +297,7 @@ async def test_month_page_sync(tmp_path: Path, monkeypatch):
     await db.init()
     bot = DummyBot("123:abc")
 
-    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None):
+    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
         return "https://t.me/test", "path"
 
     called = {}
@@ -329,7 +329,7 @@ async def test_weekend_page_sync(tmp_path: Path, monkeypatch):
     await db.init()
     bot = DummyBot("123:abc")
 
-    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None):
+    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
         return "url", "p"
 
     called = {}
@@ -365,7 +365,7 @@ async def test_add_event_raw_update(tmp_path: Path, monkeypatch):
     await db.init()
     bot = DummyBot("123:abc")
 
-    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None):
+    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
         return "https://t.me/test", "path"
 
     monkeypatch.setattr("main.create_source_page", fake_create)
@@ -405,7 +405,7 @@ async def test_edit_event(tmp_path: Path, monkeypatch):
     await db.init()
     bot = DummyBot("123:abc")
 
-    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None):
+    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
         return "https://t.me/test", "path"
 
     monkeypatch.setattr("main.create_source_page", fake_create)
@@ -447,7 +447,7 @@ async def test_edit_remove_ticket_link(tmp_path: Path, monkeypatch):
     await db.init()
     bot = DummyBot("123:abc")
 
-    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None):
+    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
         return "https://t.me/test", "path"
 
     monkeypatch.setattr("main.create_source_page", fake_create)
@@ -491,7 +491,7 @@ async def test_edit_event_forwarded(tmp_path: Path, monkeypatch):
     await db.init()
     bot = DummyBot("123:abc")
 
-    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None):
+    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
         return "https://t.me/test", "path"
 
     monkeypatch.setattr("main.create_source_page", fake_create)
@@ -535,7 +535,7 @@ async def test_edit_boolean_fields(tmp_path: Path, monkeypatch):
     await db.init()
     bot = DummyBot("123:abc")
 
-    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None):
+    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
         return "https://t.me/test", "path"
 
     monkeypatch.setattr("main.create_source_page", fake_create)
@@ -591,7 +591,7 @@ async def test_events_list(tmp_path: Path, monkeypatch):
     await db.init()
     bot = DummyBot("123:abc")
 
-    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None):
+    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
         return "https://t.me/test", "path"
 
     monkeypatch.setattr("main.create_source_page", fake_create)
@@ -646,7 +646,7 @@ async def test_events_russian_date_current_year(tmp_path: Path, monkeypatch):
     await db.init()
     bot = DummyBot("123:abc")
 
-    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None):
+    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
         return "u", "p"
 
     monkeypatch.setattr("main.create_source_page", fake_create)
@@ -710,7 +710,7 @@ async def test_events_russian_date_next_year(tmp_path: Path, monkeypatch):
     await db.init()
     bot = DummyBot("123:abc")
 
-    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None):
+    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
         return "u", "p"
 
     monkeypatch.setattr("main.create_source_page", fake_create)
@@ -888,7 +888,7 @@ async def test_add_events_from_text_channel_title(tmp_path: Path, monkeypatch):
             }
         ]
 
-    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None):
+    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
         return "u", "p"
 
     monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
@@ -999,6 +999,34 @@ async def test_create_source_page_photo_catbox(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_create_source_page_reuse_urls(monkeypatch):
+    class DummyTG:
+        def create_page(self, title, html_content=None, **_):
+            assert "https://files.catbox.moe/img.jpg" in html_content
+            return {"url": "https://telegra.ph/test", "path": "test"}
+
+    class DummySession:
+        def __init__(self, *_, **__):
+            raise AssertionError("should not be called")
+
+    monkeypatch.setenv("TELEGRAPH_TOKEN", "t")
+    monkeypatch.setattr(
+        "main.Telegraph", lambda access_token=None, domain=None: DummyTG()
+    )
+    monkeypatch.setattr(main, "ClientSession", DummySession)
+    monkeypatch.setattr(main, "CATBOX_ENABLED", True)
+
+    res = await main.create_source_page(
+        "Title",
+        "text",
+        None,
+        media=(b"img", "photo.jpg"),
+        catbox_urls=["https://files.catbox.moe/img.jpg"],
+    )
+    assert res == ("https://telegra.ph/test", "test", "", 1)
+
+
+@pytest.mark.asyncio
 async def test_create_source_page_normalizes_hashtags(monkeypatch):
     class DummyTG:
         def __init__(self, access_token=None):
@@ -1057,8 +1085,9 @@ async def test_addevent_caption_photo(tmp_path: Path, monkeypatch):
 
     captured = {}
 
-    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None):
+    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
         captured["media"] = media
+        captured["urls"] = kwargs.get("catbox_urls")
         return "u", "p"
 
     monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
@@ -1084,7 +1113,8 @@ async def test_addevent_caption_photo(tmp_path: Path, monkeypatch):
 
     await handle_add_event(msg, db, bot)
 
-    assert captured["media"] == [(b"img", "photo.jpg")]
+    assert captured["media"] is None
+    assert captured["urls"] == []
 
 
 @pytest.mark.asyncio
@@ -1106,7 +1136,7 @@ async def test_addevent_strips_command(tmp_path: Path, monkeypatch):
 
     captured = {}
 
-    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None):
+    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
         captured["text"] = text
         captured["html"] = html_text
         return "u", "p"
@@ -1196,7 +1226,7 @@ async def test_forward_add_event(tmp_path: Path, monkeypatch):
             }
         ]
 
-    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None):
+    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
         return "https://t.me/page", "p"
 
     monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
@@ -1354,7 +1384,7 @@ async def test_forward_add_event_origin(tmp_path: Path, monkeypatch):
             }
         ]
 
-    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None):
+    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
         return "https://t.me/page", "p"
 
     monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
@@ -1491,7 +1521,7 @@ async def test_forward_unregistered(tmp_path: Path, monkeypatch):
             }
         ]
 
-    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None):
+    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
         return "https://t.me/page", "p"
 
     monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
@@ -1549,7 +1579,7 @@ async def test_media_group_caption_first(tmp_path: Path, monkeypatch):
             }
         ]
 
-    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None):
+    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
         return "https://t.me/page", "p"
 
     monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
@@ -1627,7 +1657,7 @@ async def test_media_group_caption_last(tmp_path: Path, monkeypatch):
             }
         ]
 
-    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None):
+    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
         return "https://t.me/page", "p"
 
     monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
@@ -1694,7 +1724,7 @@ async def test_mark_free(tmp_path: Path, monkeypatch):
     await db.init()
     bot = DummyBot("123:abc")
 
-    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None):
+    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
         return "https://t.me/test", "path"
 
     monkeypatch.setattr("main.create_source_page", fake_create)
@@ -1747,7 +1777,7 @@ async def test_toggle_silent(tmp_path: Path, monkeypatch):
     await db.init()
     bot = DummyBot("123:abc")
 
-    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None):
+    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
         return "https://t.me/test", "path"
 
     monkeypatch.setattr("main.create_source_page", fake_create)
@@ -1834,7 +1864,7 @@ async def test_exhibition_listing(tmp_path: Path, monkeypatch):
 
     monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
 
-    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None):
+    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
         return "url", "p"
 
     monkeypatch.setattr("main.create_source_page", fake_create)
@@ -1922,7 +1952,7 @@ async def test_multiple_events(tmp_path: Path, monkeypatch):
             },
         ]
 
-    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None):
+    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
         return f"url/{title}", title
 
     monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
@@ -2689,7 +2719,7 @@ async def test_date_range_parsing(tmp_path: Path, monkeypatch):
             }
         ]
 
-    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None):
+    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
         return "url", "p"
 
     monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
@@ -3260,7 +3290,7 @@ async def test_delete_event_updates_month(tmp_path: Path, monkeypatch):
     await db.init()
     bot = DummyBot("123:abc")
 
-    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None):
+    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
         return "url", "p"
 
     called = {}
@@ -3322,7 +3352,7 @@ async def test_title_duplicate_update(tmp_path: Path, monkeypatch):
     await db.init()
     bot = DummyBot("123:abc")
 
-    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None):
+    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
         return "url", "p"
 
     monkeypatch.setattr("main.create_source_page", fake_create)
@@ -3362,7 +3392,7 @@ async def test_llm_duplicate_check(tmp_path: Path, monkeypatch):
     await db.init()
     bot = DummyBot("123:abc")
 
-    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None):
+    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
         return "url", "p"
 
     called = {"cnt": 0}
@@ -3424,7 +3454,7 @@ async def test_extract_ticket_link(tmp_path: Path, monkeypatch):
             }
         ]
 
-    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None):
+    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
         return "url", "p"
 
     monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
@@ -3457,7 +3487,7 @@ async def test_extract_ticket_link_near_word(tmp_path: Path, monkeypatch):
             }
         ]
 
-    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None):
+    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
         return "url", "p"
 
     monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
@@ -3490,7 +3520,7 @@ async def test_ticket_link_overrides_invalid(tmp_path: Path, monkeypatch):
             }
         ]
 
-    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None):
+    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
         return "url", "p"
 
     monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
@@ -3534,7 +3564,7 @@ async def test_multiple_ticket_links(tmp_path: Path, monkeypatch):
             },
         ]
 
-    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None):
+    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
         return "url", "p"
 
     monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
@@ -3566,7 +3596,7 @@ async def test_add_event_lines_include_vk_link(tmp_path: Path, monkeypatch):
             }
         ]
 
-    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None):
+    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
         return "https://t.me/page", "p"
 
     monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
