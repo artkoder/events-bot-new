@@ -4064,7 +4064,7 @@ def test_format_event_vk_with_vk_link():
         telegraph_url="https://t.me/page",
     )
     text = main.format_event_vk(e)
-    assert "[подробнее|https://vk.com/wall-1_1]" in text
+    assert "[https://vk.com/wall-1_1|подробнее]" in text
     assert "t.me/page" not in text
 
 
@@ -4080,7 +4080,76 @@ def test_format_event_vk_fallback_link():
         telegraph_url="https://t.me/page",
     )
     text = main.format_event_vk(e)
-    assert "[подробнее|https://t.me/page]" in text
+    assert "подробнее: https://t.me/page" in text
+
+
+@pytest.mark.asyncio
+async def test_daily_posts_festival_link(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    today = date.today()
+    async with db.get_session() as session:
+        session.add(
+            main.Festival(name="Jazz", telegraph_url="http://tg", vk_post_url="http://vk")
+        )
+        session.add(
+            Event(
+                title="T",
+                description="d",
+                source_text="s",
+                date=today.isoformat(),
+                time="18:00",
+                location_name="Hall",
+                festival="Jazz",
+            )
+        )
+        await session.commit()
+
+    posts = await main.build_daily_posts(db, timezone.utc)
+    assert "http://tg" in posts[0][0]
+    sec1, _ = await main.build_daily_sections_vk(db, timezone.utc)
+    assert sec1
+
+
+@pytest.mark.asyncio
+async def test_handle_fest_list(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async with db.get_session() as session:
+        session.add(User(user_id=1))
+        session.add(main.Festival(name="Jazz"))
+        await session.commit()
+
+    msg = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "/fest",
+        }
+    )
+    await main.handle_fest(msg, db, bot)
+    assert "Jazz" in bot.messages[-1][1]
+
+
+def test_event_to_nodes_festival_link():
+    e = Event(
+        title="T",
+        description="d",
+        source_text="s",
+        date="2025-07-10",
+        time="18:00",
+        location_name="Hall",
+        festival="Jazz",
+    )
+    fest = main.Festival(name="Jazz", telegraph_url="http://tg")
+    nodes = main.event_to_nodes(e, fest)
+    assert nodes[1]["children"][0]["attrs"]["href"] == "http://tg"
+
 
 
 @pytest.mark.asyncio
