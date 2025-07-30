@@ -21,6 +21,7 @@
 | `/pages` | - | Show links to Telegraph month and weekend pages. |
 | `/fest` | - | List festivals with edit/delete options; send a new description after tapping **Edit**. |
 
+
 | `/stats [events]` | optional `events` | Superadmin only. Show Telegraph view counts starting from the past month and weekend pages up to all current and future ones. Use `events` to list event page stats. |
 | `/dumpdb` | - | Superadmin only. Download a SQL dump of the database and see restore instructions. |
 | `/restore` | attach file | Superadmin only. Replace current database with the uploaded dump. |
