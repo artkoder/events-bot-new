@@ -1442,6 +1442,9 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
             )
         if fest_name:
             await sync_festival_page(db, fest_name)
+
+            await sync_festival_vk_post(db, fest_name)
+
         await show_edit_menu(callback.from_user.id, event, bot)
         await callback.answer("Updated")
     elif data.startswith("festedit:"):
@@ -2612,6 +2615,9 @@ async def add_events_from_text(
             if saved.festival:
                 logging.info("syncing festival %s", saved.festival)
                 await sync_festival_page(db, saved.festival)
+
+                await sync_festival_vk_post(db, saved.festival)
+
                 async with db.get_session() as session:
                     res = await session.execute(
                         select(Festival).where(Festival.name == saved.festival)
@@ -3191,10 +3197,8 @@ def format_event_vk(
     elif e.telegraph_url:
         details_link = e.telegraph_url
     if details_link:
-        if is_vk_wall_url(details_link):
-            desc = f"{desc}, [{details_link}|подробнее]"
-        else:
-            desc = f"{desc}, подробнее: {details_link}"
+
+        desc = f"{desc}, [подробнее|{details_link}]"
 
     lines = [title]
     if festival:
@@ -3995,11 +3999,16 @@ async def generate_festival_description(fest: Festival, events: list[Event]) -> 
 
 
 async def build_festival_page_content(db: Database, fest: Festival) -> tuple[str, list]:
+    logging.info("building festival page content for %s", fest.name)
+
     async with db.get_session() as session:
         res = await session.execute(
             select(Event).where(Event.festival == fest.name).order_by(Event.date, Event.time)
         )
         events = res.scalars().all()
+
+        logging.info("festival %s has %d events", fest.name, len(events))
+
         if not fest.description:
             desc = await generate_festival_description(fest, events)
             if desc:
@@ -4049,6 +4058,52 @@ async def sync_festival_page(db: Database, name: str):
 
         except Exception as e:
             logging.error("Failed to sync festival %s: %s", name, e)
+
+
+
+async def build_festival_vk_message(db: Database, fest: Festival) -> str:
+    async with db.get_session() as session:
+        res = await session.execute(
+            select(Event).where(Event.festival == fest.name).order_by(Event.date, Event.time)
+        )
+        events = res.scalars().all()
+    lines = [fest.name]
+    if fest.description:
+        lines.append(fest.description)
+    for ev in events:
+        lines.append(VK_BLANK_LINE)
+        lines.append(format_event_vk(ev))
+    return "\n".join(lines)
+
+
+async def sync_festival_vk_post(db: Database, name: str):
+    token = VK_TOKEN
+    if not token:
+        return
+    group_id = await get_vk_group_id(db)
+    if not group_id:
+        return
+    async with db.get_session() as session:
+        res = await session.execute(select(Festival).where(Festival.name == name))
+        fest = res.scalar_one_or_none()
+        if not fest:
+            return
+    message = await build_festival_vk_message(db, fest)
+    try:
+        if fest.vk_post_url:
+            await edit_vk_post(token, fest.vk_post_url, message)
+            logging.info("updated festival post %s on VK", name)
+        else:
+            url = await post_to_vk(token, group_id, message)
+            if url:
+                async with db.get_session() as session:
+                    fest = (await session.execute(select(Festival).where(Festival.name == name))).scalar_one()
+                    fest.vk_post_url = url
+                    await session.commit()
+            logging.info("created festival post %s: %s", name, url)
+    except Exception as e:
+        logging.error("VK post error for festival %s: %s", name, e)
+
 
 
 async def build_daily_posts(
@@ -4391,14 +4446,47 @@ async def build_daily_sections_vk(
     return section1, section2
 
 
-async def post_to_vk(token: str, group_id: str, message: str):
+async def post_to_vk(token: str, group_id: str, message: str) -> str | None:
     if not token or not group_id:
-        return
+        return None
     url = "https://api.vk.com/method/wall.post"
     params = {
         "owner_id": f"-{group_id.lstrip('-')}",
         "from_group": 1,
         "message": message,
+        "access_token": token,
+        "v": "5.131",
+    }
+    async with create_ipv4_session(ClientSession) as session:
+        async with session.post(url, data=params) as resp:
+            data = await resp.json()
+            if "error" in data:
+                raise RuntimeError(f"VK error: {data['error']}")
+            post_id = data.get("response", {}).get("post_id")
+            if post_id:
+                return f"https://vk.com/wall-{group_id.lstrip('-')}_{post_id}"
+    return None
+
+
+def _vk_owner_and_post_id(url: str) -> tuple[str, str] | None:
+    m = re.search(r"wall(-?\d+)_(\d+)", url)
+    if not m:
+        return None
+    return m.group(1), m.group(2)
+
+
+async def edit_vk_post(token: str, post_url: str, message: str) -> None:
+    ids = _vk_owner_and_post_id(post_url)
+    if not ids:
+        logging.error("invalid VK post url %s", post_url)
+        return
+    owner_id, post_id = ids
+    url = "https://api.vk.com/method/wall.edit"
+    params = {
+        "owner_id": owner_id,
+        "post_id": post_id,
+        "message": message,
+        "from_group": 1,
         "access_token": token,
         "v": "5.131",
     }
@@ -5168,8 +5256,12 @@ async def handle_edit_message(message: types.Message, db: Database, bot: Bot):
         await sync_weekend_page(db, new_w.isoformat())
     if old_fest:
         await sync_festival_page(db, old_fest)
+
+        await sync_festival_vk_post(db, old_fest)
     if new_fest and new_fest != old_fest:
         await sync_festival_page(db, new_fest)
+        await sync_festival_vk_post(db, new_fest)
+
     editing_sessions[message.from_user.id] = (eid, None)
     await show_edit_menu(message.from_user.id, event, bot)
 
@@ -5277,6 +5369,9 @@ async def handle_festival_edit_message(message: types.Message, db: Database, bot
     await bot.send_message(message.chat.id, "Festival updated")
     await sync_festival_page(db, fest.name)
 
+    await sync_festival_vk_post(db, fest.name)
+
+
 
 processed_media_groups: set[str] = set()
 
@@ -5354,19 +5449,29 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
                     cid = cid.lstrip("-")
                 link = f"https://t.me/c/{cid}/{msg_id}"
     else:
-        fo = message.model_extra.get("forward_origin") if hasattr(message, "model_extra") else None
-        if isinstance(fo, dict) and fo.get("type") == "messageOriginChannel":
-            chat_data = fo.get("chat") or {}
-            chat_id = chat_data.get("id")
-            msg_id = fo.get("message_id")
-            channel_name = chat_data.get("title") or chat_data.get("username")
+        fo = getattr(message, "forward_origin", None)
+        if isinstance(fo, dict):
+            fo_type = fo.get("type")
+        else:
+            fo_type = getattr(fo, "type", None)
+        if fo_type in {"messageOriginChannel", "channel"}:
+            chat_data = fo.get("chat") if isinstance(fo, dict) else getattr(fo, "chat", {})
+            chat_id = chat_data.get("id") if isinstance(chat_data, dict) else getattr(chat_data, "id", None)
+            msg_id = fo.get("message_id") if isinstance(fo, dict) else getattr(fo, "message_id", None)
+            channel_name = (
+                chat_data.get("title") if isinstance(chat_data, dict) else getattr(chat_data, "title", None)
+            )
+            if not channel_name:
+                channel_name = (
+                    chat_data.get("username") if isinstance(chat_data, dict) else getattr(chat_data, "username", None)
+                )
 
             async with db.get_session() as session:
                 ch = await session.get(Channel, chat_id)
                 allowed = ch.is_registered if ch else False
             logging.info("forward from origin chat %s allowed=%s", chat_id, allowed)
             if allowed:
-                username = chat_data.get("username")
+                username = chat_data.get("username") if isinstance(chat_data, dict) else getattr(chat_data, "username", None)
                 if username:
                     link = f"https://t.me/{username}/{msg_id}"
                 else:
