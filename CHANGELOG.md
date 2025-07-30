@@ -120,6 +120,11 @@
 - Festival pages automatically include an LLM-generated description and can be
   edited or deleted via `/fest`.
 
+## v0.3.17 - Festival description update
+
+- Festival blurbs use the full text of event announcements and are generated in
+  two or three paragraphs via 4o.
+
 
 
 
