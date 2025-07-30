@@ -5754,6 +5754,12 @@ def create_app() -> web.Application:
     async def stats_wrapper(message: types.Message):
         await handle_stats(message, db, bot)
 
+    async def fest_wrapper(message: types.Message):
+        await handle_fest(message, db, bot)
+
+    async def festival_edit_wrapper(message: types.Message):
+        await handle_festival_edit_message(message, db, bot)
+
     async def users_wrapper(message: types.Message):
         await handle_users(message, db, bot)
 
@@ -5848,7 +5854,8 @@ def create_app() -> web.Application:
     dp.message.register(reg_daily_wrapper, Command("regdailychannels"))
     dp.message.register(daily_wrapper, Command("daily"))
     dp.message.register(exhibitions_wrapper, Command("exhibitions"))
-    dp.message.register(handle_fest, Command("fest"))
+    dp.message.register(fest_wrapper, Command("fest"))
+
     dp.message.register(pages_wrapper, Command("pages"))
     dp.message.register(stats_wrapper, Command("stats"))
     dp.message.register(users_wrapper, Command("users"))
@@ -5867,7 +5874,9 @@ def create_app() -> web.Application:
         vk_time_msg_wrapper, lambda m: m.from_user.id in vk_time_sessions
     )
     dp.message.register(
-        handle_festival_edit_message, lambda m: m.from_user.id in festival_edit_sessions
+
+        festival_edit_wrapper, lambda m: m.from_user.id in festival_edit_sessions
+
     )
     dp.message.register(
         forward_wrapper,
