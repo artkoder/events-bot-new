@@ -3983,15 +3983,15 @@ async def sync_weekend_page(db: Database, start: str, update_links: bool = False
 
 async def generate_festival_description(fest: Festival, events: list[Event]) -> str:
     """Use LLM to craft a short festival blurb."""
-    lines = [f"{e.title}: {e.description}" for e in events[:5]]
+    texts = [e.source_text for e in events[:5]]
     prompt = (
-        f"Напиши дружелюбное описание фестиваля {fest.name} в 2-3 предложения. "
-        "Используй только факты из списка событий:\n" + "\n".join(lines)
+        f"Сформируй описание фестиваля {fest.name} объёмом два-три абзаца. "
+        "Используй только факты из следующих объявлений:\n\n" + "\n\n".join(texts)
     )
     try:
         text = await ask_4o(prompt)
         logging.info("generated description for festival %s", fest.name)
-        return text
+        return text.strip()
     except Exception as e:
         logging.error("failed to generate festival description %s: %s", fest.name, e)
         return ""

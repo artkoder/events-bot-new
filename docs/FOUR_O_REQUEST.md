@@ -45,3 +45,9 @@ they describe the same event. The model replies with JSON
 `{"duplicate": true|false, "title": "", "short_description": ""}`. If
 `duplicate` is true the returned title and description replace the stored event
 fields.
+
+Festival pages also rely on 4o. When a festival is created, the bot sends the
+full source text of the first event with the prompt “Сформируй описание
+фестиваля <name> объёмом два‑три абзаца”. When more events are added, source
+texts of several festival announcements (up to five) are combined and the model
+is asked to write a new summary using only facts from these texts.
