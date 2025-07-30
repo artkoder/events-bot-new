@@ -120,6 +120,10 @@
 - Festival pages automatically include an LLM-generated description and can be
   edited or deleted via `/fest`.
 
+## v0.3.17 - Telegraph cleanup
+
+- Month and weekend pages refresh at 01:00 local time to drop past events.
+
 
 
 
