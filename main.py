@@ -3191,8 +3191,10 @@ def format_event_vk(
     elif e.telegraph_url:
         details_link = e.telegraph_url
     if details_link:
-
-        desc = f"{desc}, [подробнее|{details_link}]"
+        if is_vk_wall_url(details_link):
+            desc = f"{desc}, [{details_link}|подробнее]"
+        else:
+            desc = f"{desc}, подробнее: {details_link}"
 
     lines = [title]
     if festival:
@@ -4574,6 +4576,25 @@ async def cleanup_scheduler(db: Database, bot: Bot):
         await asyncio.sleep(60)
 
 
+async def page_update_scheduler(db: Database):
+    """Refresh month and weekend Telegraph pages after midnight."""
+    last_run: date | None = None
+    while True:
+        offset = await get_tz_offset(db)
+        tz = offset_to_timezone(offset)
+        now = datetime.now(tz)
+        if now.time() >= time(1, 0) and now.date() != last_run:
+            try:
+                await sync_month_page(db, now.strftime("%Y-%m"))
+                w_start = weekend_start_for_date(now.date())
+                if w_start:
+                    await sync_weekend_page(db, w_start.isoformat())
+            except Exception as e:
+                logging.error("page update failed: %s", e)
+            last_run = now.date()
+        await asyncio.sleep(60)
+
+
 async def build_events_message(db: Database, target_date: date, tz: timezone, creator_id: int | None = None):
     async with db.get_session() as session:
         stmt = select(Event).where(
@@ -5907,6 +5928,7 @@ def create_app() -> web.Application:
         app["daily_task"] = asyncio.create_task(daily_scheduler(db, bot))
         app["vk_task"] = asyncio.create_task(vk_scheduler(db))
         app["cleanup_task"] = asyncio.create_task(cleanup_scheduler(db, bot))
+        app["page_task"] = asyncio.create_task(page_update_scheduler(db))
 
     async def on_shutdown(app: web.Application):
         await bot.session.close()
@@ -5922,6 +5944,10 @@ def create_app() -> web.Application:
             app["cleanup_task"].cancel()
             with contextlib.suppress(Exception):
                 await app["cleanup_task"]
+        if "page_task" in app:
+            app["page_task"].cancel()
+            with contextlib.suppress(Exception):
+                await app["page_task"]
 
     app.on_startup.append(on_startup)
     app.on_shutdown.append(on_shutdown)
