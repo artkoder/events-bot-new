@@ -469,6 +469,31 @@ def get_supabase_client() -> Client | None:
     return _supabase_client
 
 
+async def get_festival(db: Database, name: str) -> Festival | None:
+    async with db.get_session() as session:
+        result = await session.execute(
+            select(Festival).where(Festival.name == name)
+        )
+        return result.scalar_one_or_none()
+
+
+async def ensure_festival(
+    db: Database, name: str, description: str | None = None
+) -> Festival:
+    async with db.get_session() as session:
+        result = await session.execute(
+            select(Festival).where(Festival.name == name)
+        )
+        fest = result.scalar_one_or_none()
+        if fest:
+            return fest
+        fest = Festival(name=name, description=description)
+        session.add(fest)
+        await session.commit()
+        logging.info("festival %s created", name)
+        return fest
+
+
 async def get_asset_channel(db: Database) -> Channel | None:
     async with db.get_session() as session:
         result = await session.execute(
@@ -1417,7 +1442,9 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
             )
         if fest_name:
             await sync_festival_page(db, fest_name)
+
             await sync_festival_vk_post(db, fest_name)
+
         await show_edit_menu(callback.from_user.id, event, bot)
         await callback.answer("Updated")
     elif data.startswith("festedit:"):
@@ -1451,6 +1478,7 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
             logging.info("festival %s deleted", fest.name)
         await send_festivals_list(callback.message, db, bot, edit=True)
         await callback.answer("Deleted")
+
     elif data.startswith("togglesilent:"):
         eid = int(data.split(":")[1])
         async with db.get_session() as session:
@@ -1615,6 +1643,28 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
         except Exception as e:
             logging.error("failed to update free button: %s", e)
         await callback.answer("Marked")
+    elif data.startswith("festedit:"):
+        fid = int(data.split(":")[1])
+        async with db.get_session() as session:
+            fest = await session.get(Festival, fid)
+        if not fest:
+            await callback.answer("Festival not found", show_alert=True)
+            return
+        festival_edit_sessions[callback.from_user.id] = fid
+        await callback.message.answer(
+            f"Editing {fest.name}. Send new description"
+        )
+        await callback.answer()
+    elif data.startswith("festdel:"):
+        fid = int(data.split(":")[1])
+        async with db.get_session() as session:
+            fest = await session.get(Festival, fid)
+            if fest:
+                await session.delete(fest)
+                await session.commit()
+                logging.info("festival %s deleted", fest.name)
+        await send_festivals_list(callback.message, db, bot, edit=True)
+        await callback.answer("Deleted")
     elif data.startswith("nav:"):
         _, day = data.split(":")
         offset = await get_tz_offset(db)
@@ -2565,12 +2615,15 @@ async def add_events_from_text(
             if saved.festival:
                 logging.info("syncing festival %s", saved.festival)
                 await sync_festival_page(db, saved.festival)
+
                 await sync_festival_vk_post(db, saved.festival)
+
                 async with db.get_session() as session:
                     res = await session.execute(
                         select(Festival).where(Festival.name == saved.festival)
                     )
                     fest_obj = res.scalar_one_or_none()
+
 
             lines = [
                 f"title: {saved.title}",
@@ -2586,6 +2639,7 @@ async def add_events_from_text(
                 lines.append(f"festival: {saved.festival}")
                 if fest_obj and fest_obj.telegraph_url:
                     lines.append(f"festival_page: {fest_obj.telegraph_url}")
+
             if saved.description:
                 lines.append(f"description: {saved.description}")
             if saved.event_type:
@@ -3143,7 +3197,9 @@ def format_event_vk(
     elif e.telegraph_url:
         details_link = e.telegraph_url
     if details_link:
+
         desc = f"{desc}, [подробнее|{details_link}]"
+
     lines = [title]
     if festival:
         link = festival.vk_post_url
@@ -3376,11 +3432,32 @@ def event_title_nodes(e: Event) -> list:
 
 def event_to_nodes(e: Event, festival: Festival | None = None) -> list[dict]:
     md = format_event_md(e, festival)
+
     lines = md.split("\n")
     body_md = "\n".join(lines[1:]) if len(lines) > 1 else ""
     from telegraph.utils import html_to_nodes
 
     nodes = [{"tag": "h4", "children": event_title_nodes(e)}]
+    if festival or e.festival:
+        fest = festival
+        if fest is None and e.festival:
+            # fallback fetch will be handled by caller typically
+            pass
+        if fest and fest.telegraph_url:
+            nodes.append(
+                {
+                    "tag": "p",
+                    "children": [
+                        {
+                            "tag": "a",
+                            "attrs": {"href": fest.telegraph_url},
+                            "children": [fest.name],
+                        }
+                    ],
+                }
+            )
+        elif fest:
+            nodes.append({"tag": "p", "children": [fest.name]})
     if body_md:
         html_text = md_to_html(body_md)
         nodes.extend(html_to_nodes(html_text))
@@ -3477,6 +3554,10 @@ async def build_month_page_content(
     if events is None or exhibitions is None or nav_pages is None:
         events, exhibitions, nav_pages = await get_month_data(db, month)
 
+    async with db.get_session() as session:
+        res_f = await session.execute(select(Festival))
+        fest_map = {f.name: f for f in res_f.scalars().all()}
+
 
     today = datetime.now(LOCAL_TZ).date()
     cutoff = (today - timedelta(days=30)).isoformat()
@@ -3533,6 +3614,7 @@ async def build_month_page_content(
         for ev in by_day[day]:
             fest = fest_map.get(ev.festival or "")
             content.extend(event_to_nodes(ev, fest))
+
 
     today_month = datetime.now(LOCAL_TZ).strftime("%Y-%m")
     future_pages = [p for p in nav_pages if p.month >= today_month]
@@ -3744,6 +3826,8 @@ async def build_weekend_page_content(db: Database, start: str) -> tuple[str, lis
         weekend_pages = res_w.scalars().all()
         res_m = await session.execute(select(MonthPage).order_by(MonthPage.month))
         month_pages = res_m.scalars().all()
+        res_f = await session.execute(select(Festival))
+        fest_map = {f.name: f for f in res_f.scalars().all()}
 
     today = datetime.now(LOCAL_TZ).date()
     events = [
@@ -3797,6 +3881,7 @@ async def build_weekend_page_content(db: Database, start: str) -> tuple[str, lis
         for ev in by_day[d]:
             fest = fest_map.get(ev.festival or "")
             content.extend(event_to_nodes(ev, fest))
+
 
     weekend_nav: list[dict] = []
     future_weekends = [w for w in weekend_pages if w.start >= start]
@@ -3912,25 +3997,31 @@ async def generate_festival_description(fest: Festival, events: list[Event]) -> 
         return ""
 
 
+
 async def build_festival_page_content(db: Database, fest: Festival) -> tuple[str, list]:
     logging.info("building festival page content for %s", fest.name)
+
     async with db.get_session() as session:
         res = await session.execute(
             select(Event).where(Event.festival == fest.name).order_by(Event.date, Event.time)
         )
         events = res.scalars().all()
+
         logging.info("festival %s has %d events", fest.name, len(events))
+
         if not fest.description:
             desc = await generate_festival_description(fest, events)
             if desc:
                 fest.description = desc
                 await session.commit()
+
     nodes: list[dict] = []
     if fest.description:
         nodes.append({"tag": "p", "children": [fest.description]})
     for e in events:
         nodes.extend(event_to_nodes(e))
     return fest.name, nodes
+
 
 
 async def sync_festival_page(db: Database, name: str):
@@ -3944,10 +4035,12 @@ async def sync_festival_page(db: Database, name: str):
             select(Festival).where(Festival.name == name)
         )
         fest = result.scalar_one_or_none()
+
         if not fest:
             return
         try:
             title, content = await build_festival_page_content(db, fest)
+
             created = False
             if fest.telegraph_path:
                 await asyncio.to_thread(
@@ -3962,8 +4055,10 @@ async def sync_festival_page(db: Database, name: str):
                 logging.info("created festival page %s: %s", name, fest.telegraph_url)
             await session.commit()
             logging.info("synced festival page %s", name)
+
         except Exception as e:
             logging.error("Failed to sync festival %s: %s", name, e)
+
 
 
 async def build_festival_vk_message(db: Database, fest: Festival) -> str:
@@ -4008,6 +4103,7 @@ async def sync_festival_vk_post(db: Database, name: str):
             logging.info("created festival post %s: %s", name, url)
     except Exception as e:
         logging.error("VK post error for festival %s: %s", name, e)
+
 
 
 async def build_daily_posts(
@@ -4564,6 +4660,25 @@ async def cleanup_scheduler(db: Database, bot: Bot):
             except Exception as e:
                 logging.error("cleanup failed: %s", e)
                 await notify_superadmin(db, bot, f"Cleanup failed: {e}")
+            last_run = now.date()
+        await asyncio.sleep(60)
+
+
+async def page_update_scheduler(db: Database):
+    """Refresh month and weekend Telegraph pages after midnight."""
+    last_run: date | None = None
+    while True:
+        offset = await get_tz_offset(db)
+        tz = offset_to_timezone(offset)
+        now = datetime.now(tz)
+        if now.time() >= time(1, 0) and now.date() != last_run:
+            try:
+                await sync_month_page(db, now.strftime("%Y-%m"))
+                w_start = weekend_start_for_date(now.date())
+                if w_start:
+                    await sync_weekend_page(db, w_start.isoformat())
+            except Exception as e:
+                logging.error("page update failed: %s", e)
             last_run = now.date()
         await asyncio.sleep(60)
 
@@ -5141,10 +5256,12 @@ async def handle_edit_message(message: types.Message, db: Database, bot: Bot):
         await sync_weekend_page(db, new_w.isoformat())
     if old_fest:
         await sync_festival_page(db, old_fest)
+
         await sync_festival_vk_post(db, old_fest)
     if new_fest and new_fest != old_fest:
         await sync_festival_page(db, new_fest)
         await sync_festival_vk_post(db, new_fest)
+
     editing_sessions[message.from_user.id] = (eid, None)
     await show_edit_menu(message.from_user.id, event, bot)
 
@@ -5251,7 +5368,9 @@ async def handle_festival_edit_message(message: types.Message, db: Database, bot
     festival_edit_sessions.pop(message.from_user.id, None)
     await bot.send_message(message.chat.id, "Festival updated")
     await sync_festival_page(db, fest.name)
+
     await sync_festival_vk_post(db, fest.name)
+
 
 
 processed_media_groups: set[str] = set()
@@ -5862,6 +5981,7 @@ def create_app() -> web.Application:
     dp.message.register(daily_wrapper, Command("daily"))
     dp.message.register(exhibitions_wrapper, Command("exhibitions"))
     dp.message.register(fest_wrapper, Command("fest"))
+
     dp.message.register(pages_wrapper, Command("pages"))
     dp.message.register(stats_wrapper, Command("stats"))
     dp.message.register(users_wrapper, Command("users"))
@@ -5880,7 +6000,9 @@ def create_app() -> web.Application:
         vk_time_msg_wrapper, lambda m: m.from_user.id in vk_time_sessions
     )
     dp.message.register(
+
         festival_edit_wrapper, lambda m: m.from_user.id in festival_edit_sessions
+
     )
     dp.message.register(
         forward_wrapper,
@@ -5911,6 +6033,7 @@ def create_app() -> web.Application:
         app["daily_task"] = asyncio.create_task(daily_scheduler(db, bot))
         app["vk_task"] = asyncio.create_task(vk_scheduler(db))
         app["cleanup_task"] = asyncio.create_task(cleanup_scheduler(db, bot))
+        app["page_task"] = asyncio.create_task(page_update_scheduler(db))
 
     async def on_shutdown(app: web.Application):
         await bot.session.close()
@@ -5926,6 +6049,10 @@ def create_app() -> web.Application:
             app["cleanup_task"].cancel()
             with contextlib.suppress(Exception):
                 await app["cleanup_task"]
+        if "page_task" in app:
+            app["page_task"].cancel()
+            with contextlib.suppress(Exception):
+                await app["page_task"]
 
     app.on_startup.append(on_startup)
     app.on_shutdown.append(on_shutdown)
