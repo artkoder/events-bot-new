@@ -4153,6 +4153,132 @@ def test_event_to_nodes_festival_link():
 
 
 @pytest.mark.asyncio
+async def test_daily_posts_festival_link(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    today = date.today()
+    async with db.get_session() as session:
+        session.add(
+            main.Festival(name="Jazz", telegraph_url="http://tg", vk_post_url="http://vk")
+        )
+        session.add(
+            Event(
+                title="T",
+                description="d",
+                source_text="s",
+                date=today.isoformat(),
+                time="18:00",
+                location_name="Hall",
+                festival="Jazz",
+            )
+        )
+        await session.commit()
+
+    posts = await main.build_daily_posts(db, timezone.utc)
+    assert "http://tg" in posts[0][0]
+    sec1, _ = await main.build_daily_sections_vk(db, timezone.utc)
+    assert sec1
+
+
+@pytest.mark.asyncio
+async def test_festival_auto_page_creation(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async def fake_parse(*args, **kwargs):
+        return [
+            {
+                "title": "Jazz Day",
+                "short_description": "desc",
+                "date": FUTURE_DATE,
+                "time": "18:00",
+                "location_name": "Hall",
+                "festival": "Jazz",
+            }
+        ]
+
+    class DummyTG:
+        def __init__(self, access_token=None):
+            pass
+
+        def create_page(self, title, content=None):
+            return {"url": "http://tg", "path": "p"}
+
+        def edit_page(self, path, title=None, content=None):
+            pass
+
+    monkeypatch.setenv("TELEGRAPH_TOKEN", "t")
+    monkeypatch.setattr("main.Telegraph", lambda access_token=None: DummyTG())
+    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+
+    async def fake_ask(text):
+        return "Desc"
+
+    monkeypatch.setattr("main.ask_4o", fake_ask)
+    async def fake_create(*args, **kwargs):
+        return "u", "p"
+
+    monkeypatch.setattr("main.create_source_page", fake_create)
+
+    await main.add_events_from_text(db, "t", None, None, None)
+
+    async with db.get_session() as session:
+        fest = (await session.execute(select(main.Festival))).scalars().first()
+    assert fest and fest.telegraph_url == "http://tg"
+    assert fest.description == "Desc"
+
+
+@pytest.mark.asyncio
+async def test_handle_fest_list(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async with db.get_session() as session:
+        session.add(User(user_id=1))
+        session.add(main.Festival(name="Jazz"))
+        await session.commit()
+
+    msg = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "/fest",
+        }
+    )
+    await main.handle_fest(msg, db, bot)
+    assert "Jazz" in bot.messages[-1][1]
+
+
+@pytest.mark.asyncio
+async def test_month_page_festival_link(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    m = FUTURE_DATE[:7]
+    async with db.get_session() as session:
+        session.add(main.Festival(name="Jazz", telegraph_url="http://tg"))
+        session.add(
+            Event(
+                title="T",
+                description="d",
+                source_text="s",
+                date=FUTURE_DATE,
+                time="18:00",
+                location_name="Hall",
+                festival="Jazz",
+            )
+        )
+        await session.commit()
+
+    title, content = await main.build_month_page_content(db, m)
+    assert "http://tg" in json_dumps(content)
+
+
+@pytest.mark.asyncio
 async def test_upload_ics_content_type(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
