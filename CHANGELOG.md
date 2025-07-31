@@ -125,6 +125,11 @@
 - Festival blurbs use the full text of event announcements and are generated in
   two or three paragraphs via 4o.
 
+## v0.3.18 - Festival contacts
+
+- Festival entries store website, VK and Telegram links.
+- `/fest` shows these links and accepts `site:`, `vk:` and `tg:` edits.
+
 
 
 

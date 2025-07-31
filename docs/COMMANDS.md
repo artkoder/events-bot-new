@@ -19,7 +19,7 @@
 | `/daily` | - | Manage daily announcement channels and VK posting times; send test posts. |
 | `/exhibitions` | - | List active exhibitions similar to `/events`; each entry shows the period `c <start>` / `по <end>` and includes edit/delete buttons. |
 | `/pages` | - | Show links to Telegraph month and weekend pages. |
-| `/fest` | - | List festivals with edit/delete options; send a new description after tapping **Edit**. |
+| `/fest` | - | List festivals with edit/delete options; send a new description or `site/vk/tg: URL` after tapping **Edit**. |
 
 
 | `/stats [events]` | optional `events` | Superadmin only. Show Telegraph view counts starting from the past month and weekend pages up to all current and future ones. Use `events` to list event page stats. |
