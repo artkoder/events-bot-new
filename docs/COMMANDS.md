@@ -22,6 +22,7 @@
 | `/fest` | - | List festivals with edit/delete options. Tap **Edit** to pick description or contact fields to update. |
 
 
+
 | `/stats [events]` | optional `events` | Superadmin only. Show Telegraph view counts starting from the past month and weekend pages up to all current and future ones. Use `events` to list event page stats. |
 | `/dumpdb` | - | Superadmin only. Download a SQL dump of the database and see restore instructions. |
 | `/restore` | attach file | Superadmin only. Replace current database with the uploaded dump. |

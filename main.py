@@ -5554,6 +5554,7 @@ async def handle_festival_edit_message(message: types.Message, db: Database, bot
         logging.info("festival %s updated", fest.name)
     festival_edit_sessions[message.from_user.id] = (fid, None)
     await show_festival_edit_menu(message.from_user.id, fest, bot)
+
     await sync_festival_page(db, fest.name)
     await sync_festival_vk_post(db, fest.name)
 

@@ -5215,6 +5215,7 @@ async def test_edit_festival_contacts(tmp_path: Path):
         fid = fest.id
 
     festival_edit_sessions[1] = (fid, "site")
+
     msg = types.Message.model_validate(
         {
             "message_id": 2,
@@ -5222,6 +5223,7 @@ async def test_edit_festival_contacts(tmp_path: Path):
             "chat": {"id": 1, "type": "private"},
             "from": {"id": 1, "is_bot": False, "first_name": "A"},
             "text": "https://example.com",
+
         }
     )
     await main.handle_festival_edit_message(msg, db, bot)
@@ -5231,6 +5233,7 @@ async def test_edit_festival_contacts(tmp_path: Path):
         assert fest.website_url == "https://example.com"
 
     festival_edit_sessions[1] = (fid, "vk")
+
     msg2 = types.Message.model_validate(
         {
             "message_id": 3,
@@ -5238,6 +5241,7 @@ async def test_edit_festival_contacts(tmp_path: Path):
             "chat": {"id": 1, "type": "private"},
             "from": {"id": 1, "is_bot": False, "first_name": "A"},
             "text": "-",
+
         }
     )
     await main.handle_festival_edit_message(msg2, db, bot)
