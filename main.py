@@ -534,6 +534,57 @@ async def _vk_api(
     raise RuntimeError("VK token missing")
 
 
+async def upload_vk_photo(
+    group_id: str,
+    url: str,
+    db: Database | None = None,
+    bot: Bot | None = None,
+) -> str | None:
+    """Upload an image to VK and return attachment id."""
+    if not url:
+        return None
+    try:
+        data = await _vk_api(
+            "photos.getWallUploadServer",
+            {"group_id": group_id.lstrip("-")},
+            db,
+            bot,
+        )
+        upload_url = data["response"]["upload_url"]
+        async with create_ipv4_session(ClientSession) as session:
+            async with session.get(url) as resp:
+                img_bytes = await resp.read()
+            form = FormData()
+            ctype = "image/jpeg"
+            kind = imghdr.what(None, img_bytes)
+            if kind:
+                ctype = f"image/{kind}"
+            form.add_field(
+                "photo",
+                img_bytes,
+                filename="image.jpg",
+                content_type=ctype,
+            )
+            async with session.post(upload_url, data=form) as up:
+                upload_result = await up.json()
+        save = await _vk_api(
+            "photos.saveWallPhoto",
+            {
+                "group_id": group_id.lstrip("-"),
+                "photo": upload_result.get("photo"),
+                "server": upload_result.get("server"),
+                "hash": upload_result.get("hash"),
+            },
+            db,
+            bot,
+        )
+        info = save["response"][0]
+        return f"photo{info['owner_id']}_{info['id']}"
+    except Exception as e:
+        logging.error("VK photo upload failed: %s", e)
+        return None
+
+
 def get_supabase_client() -> Client | None:
     global _supabase_client
     if _supabase_client is None and SUPABASE_URL and SUPABASE_KEY:
@@ -4363,6 +4414,16 @@ async def build_festival_vk_message(db: Database, fest: Festival) -> str:
         )
         events = res.scalars().all()
     lines = [fest.name]
+    if events:
+        start, end = festival_date_range(events)
+        if start:
+            date_text = format_day_pretty(start)
+            if end and end != start:
+                date_text += f" - {format_day_pretty(end)}"
+            lines.append(f"\U0001f4c5 {date_text}")
+        loc_text = festival_location(events)
+        if loc_text:
+            lines.append(f"\U0001f4cd {loc_text}")
     if fest.description:
         lines.append(fest.description)
     if fest.website_url or fest.vk_url or fest.tg_url:
@@ -4390,12 +4451,17 @@ async def sync_festival_vk_post(db: Database, name: str, bot: Bot | None = None)
         if not fest:
             return
     message = await build_festival_vk_message(db, fest)
+    attachments: list[str] | None = None
+    if fest.photo_url:
+        photo_id = await upload_vk_photo(group_id, fest.photo_url, db, bot)
+        if photo_id:
+            attachments = [photo_id]
     try:
         if fest.vk_post_url:
-            await edit_vk_post(fest.vk_post_url, message, db, bot)
+            await edit_vk_post(fest.vk_post_url, message, db, bot, attachments)
             logging.info("updated festival post %s on VK", name)
         else:
-            url = await post_to_vk(group_id, message, db, bot)
+            url = await post_to_vk(group_id, message, db, bot, attachments)
             if url:
                 async with db.get_session() as session:
                     fest = (await session.execute(select(Festival).where(Festival.name == name))).scalar_one()
@@ -4748,7 +4814,11 @@ async def build_daily_sections_vk(
 
 
 async def post_to_vk(
-    group_id: str, message: str, db: Database | None = None, bot: Bot | None = None
+    group_id: str,
+    message: str,
+    db: Database | None = None,
+    bot: Bot | None = None,
+    attachments: list[str] | None = None,
 ) -> str | None:
     if not group_id:
         return None
@@ -4757,6 +4827,8 @@ async def post_to_vk(
         "from_group": 1,
         "message": message,
     }
+    if attachments:
+        params["attachments"] = ",".join(attachments)
     data = await _vk_api("wall.post", params, db, bot)
     post_id = data.get("response", {}).get("post_id")
     if post_id:
@@ -4772,7 +4844,11 @@ def _vk_owner_and_post_id(url: str) -> tuple[str, str] | None:
 
 
 async def edit_vk_post(
-    post_url: str, message: str, db: Database | None = None, bot: Bot | None = None
+    post_url: str,
+    message: str,
+    db: Database | None = None,
+    bot: Bot | None = None,
+    attachments: list[str] | None = None,
 ) -> None:
     ids = _vk_owner_and_post_id(post_url)
     if not ids:
@@ -4785,6 +4861,8 @@ async def edit_vk_post(
         "message": message,
         "from_group": 1,
     }
+    if attachments:
+        params["attachments"] = ",".join(attachments)
     await _vk_api("wall.edit", params, db, bot)
 
 

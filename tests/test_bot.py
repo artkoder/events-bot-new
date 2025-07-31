@@ -5361,3 +5361,42 @@ async def test_month_page_festival_star(tmp_path: Path):
     )
     assert fest_line["children"][0] == "✨ "
 
+
+@pytest.mark.asyncio
+async def test_festival_vk_message_period_location(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.get_session() as session:
+        fest = main.Festival(name="Jazz")
+        session.add(fest)
+        session.add(
+            Event(
+                title="A",
+                description="d",
+                source_text="s",
+                date="2025-07-10",
+                time="18:00",
+                location_name="Hall",
+                city="Калининград",
+                festival="Jazz",
+            )
+        )
+        session.add(
+            Event(
+                title="B",
+                description="d",
+                source_text="s",
+                date="2025-07-12",
+                time="19:00",
+                location_name="Hall",
+                city="Калининград",
+                festival="Jazz",
+            )
+        )
+        await session.commit()
+
+    text = await main.build_festival_vk_message(db, fest)
+    assert "\U0001f4c5" in text or "📅" in text
+    assert "\U0001f4cd" in text or "📍" in text
+
