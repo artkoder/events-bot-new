@@ -5486,3 +5486,4 @@ async def test_festival_vk_message_lists_upcoming(tmp_path: Path):
     assert "[http://vk1|Jazz]" not in text
 
 
+
