@@ -551,11 +551,21 @@ async def upload_vk_photo(
             bot,
         )
         upload_url = data["response"]["upload_url"]
-        async with create_ipv4_session(ClientSession) as session:
+        async with ClientSession() as session:
             async with session.get(url) as resp:
                 img_bytes = await resp.read()
             form = FormData()
-            form.add_field("photo", img_bytes, filename="image.jpg")
+            ctype = "image/jpeg"
+            kind = imghdr.what(None, img_bytes)
+            if kind:
+                ctype = f"image/{kind}"
+            form.add_field(
+                "photo",
+                img_bytes,
+                filename="image.jpg",
+                content_type=ctype,
+            )
+
             async with session.post(upload_url, data=form) as up:
                 upload_result = await up.json()
         save = await _vk_api(
@@ -4450,7 +4460,8 @@ async def build_festival_vk_message(db: Database, fest: Festival) -> str:
         events = res.scalars().all()
     lines = [fest.name]
     if events:
-        start, end = festival_dates(fest, events)
+        start, end = festival_date_range(events)
+
         if start:
             date_text = format_day_pretty(start)
             if end and end != start:
