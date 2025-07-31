@@ -43,6 +43,10 @@ Guidelines:
 - If the event text does not specify a year, assume it happens in the current
   year.
 - Omit any events dated before today.
+- When a festival period is mentioned but only some performances are described,
+  include just those individual events with their own dates and set the
+  `festival` field. Do **not** create separate events for each day of the
+  festival unless every date is explicitly detailed.
 - Respond with **plain JSON only** &mdash; do not wrap the output in code
   fences.
 
