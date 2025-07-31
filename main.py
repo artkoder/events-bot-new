@@ -84,8 +84,8 @@ vk_time_sessions: dict[int, str] = {}
 
 # superadmin user_id -> pending partner user_id
 partner_info_sessions: dict[int, int] = {}
-# user_id -> festival_id for description editing
-festival_edit_sessions: dict[int, int] = {}
+# user_id -> (festival_id, field?) for festival editing
+festival_edit_sessions: dict[int, tuple[int, str | None]] = {}
 
 # toggle for uploading images to catbox
 CATBOX_ENABLED: bool = False
@@ -1529,8 +1529,31 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
             if not fest:
                 await callback.answer("Festival not found", show_alert=True)
                 return
-        festival_edit_sessions[callback.from_user.id] = fid
-        await callback.message.answer("Send festival description")
+        festival_edit_sessions[callback.from_user.id] = (fid, None)
+        await show_festival_edit_menu(callback.from_user.id, fest, bot)
+        await callback.answer()
+    elif data.startswith("festeditfield:"):
+        _, fid, field = data.split(":")
+        async with db.get_session() as session:
+            if not await session.get(User, callback.from_user.id):
+                await callback.answer("Not authorized", show_alert=True)
+                return
+            fest = await session.get(Festival, int(fid))
+            if not fest:
+                await callback.answer("Festival not found", show_alert=True)
+                return
+        festival_edit_sessions[callback.from_user.id] = (int(fid), field)
+        prompt = (
+            "Send new description"
+            if field == "description"
+            else "Send URL or '-' to delete"
+        )
+        await callback.message.answer(prompt)
+        await callback.answer()
+    elif data == "festeditdone":
+        if callback.from_user.id in festival_edit_sessions:
+            del festival_edit_sessions[callback.from_user.id]
+        await callback.message.answer("Festival editing finished")
         await callback.answer()
     elif data.startswith("festdel:"):
         fid = int(data.split(":")[1])
@@ -1722,10 +1745,28 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
         if not fest:
             await callback.answer("Festival not found", show_alert=True)
             return
-        festival_edit_sessions[callback.from_user.id] = fid
-        await callback.message.answer(
-            f"Editing {fest.name}. Send new description"
+        festival_edit_sessions[callback.from_user.id] = (fid, None)
+        await show_festival_edit_menu(callback.from_user.id, fest, bot)
+        await callback.answer()
+    elif data.startswith("festeditfield:"):
+        _, fid, field = data.split(":")
+        async with db.get_session() as session:
+            fest = await session.get(Festival, int(fid))
+        if not fest:
+            await callback.answer("Festival not found", show_alert=True)
+            return
+        festival_edit_sessions[callback.from_user.id] = (int(fid), field)
+        prompt = (
+            "Send new description"
+            if field == "description"
+            else "Send URL or '-' to delete"
         )
+        await callback.message.answer(prompt)
+        await callback.answer()
+    elif data == "festeditdone":
+        if callback.from_user.id in festival_edit_sessions:
+            del festival_edit_sessions[callback.from_user.id]
+        await callback.message.answer("Festival editing finished")
         await callback.answer()
     elif data.startswith("festdel:"):
         fid = int(data.split(":")[1])
@@ -5031,6 +5072,46 @@ async def show_edit_menu(user_id: int, event: Event, bot: Bot):
     await bot.send_message(user_id, "\n".join(lines), reply_markup=markup)
 
 
+async def show_festival_edit_menu(user_id: int, fest: Festival, bot: Bot):
+    """Send festival fields with edit options."""
+    lines = [
+        f"name: {fest.name}",
+        f"description: {fest.description or ''}",
+        f"site: {fest.website_url or ''}",
+        f"vk: {fest.vk_url or ''}",
+        f"tg: {fest.tg_url or ''}",
+    ]
+    keyboard = [
+        [
+            types.InlineKeyboardButton(
+                text="Edit description",
+                callback_data=f"festeditfield:{fest.id}:description",
+            )
+        ],
+        [
+            types.InlineKeyboardButton(
+                text=("Delete site" if fest.website_url else "Add site"),
+                callback_data=f"festeditfield:{fest.id}:site",
+            )
+        ],
+        [
+            types.InlineKeyboardButton(
+                text=("Delete VK" if fest.vk_url else "Add VK"),
+                callback_data=f"festeditfield:{fest.id}:vk",
+            )
+        ],
+        [
+            types.InlineKeyboardButton(
+                text=("Delete TG" if fest.tg_url else "Add TG"),
+                callback_data=f"festeditfield:{fest.id}:tg",
+            )
+        ],
+        [types.InlineKeyboardButton(text="Done", callback_data="festeditdone")],
+    ]
+    markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard)
+    await bot.send_message(user_id, "\n".join(lines), reply_markup=markup)
+
+
 async def handle_events(message: types.Message, db: Database, bot: Bot):
     parts = message.text.split(maxsplit=1)
     offset = await get_tz_offset(db)
@@ -5448,8 +5529,11 @@ async def handle_partner_info_message(message: types.Message, db: Database, bot:
 
 
 async def handle_festival_edit_message(message: types.Message, db: Database, bot: Bot):
-    fid = festival_edit_sessions.get(message.from_user.id)
-    if not fid:
+    state = festival_edit_sessions.get(message.from_user.id)
+    if not state:
+        return
+    fid, field = state
+    if field is None:
         return
     text = (message.text or "").strip()
     async with db.get_session() as session:
@@ -5458,24 +5542,20 @@ async def handle_festival_edit_message(message: types.Message, db: Database, bot
             await bot.send_message(message.chat.id, "Festival not found")
             festival_edit_sessions.pop(message.from_user.id, None)
             return
-        lowered = text.lower()
-        if lowered.startswith("site:") or lowered.startswith("site "):
-            url = text.split(maxsplit=1)[1] if " " in text else text.split(":", 1)[1]
-            fest.website_url = None if url.strip() in {"", "-"} else url.strip()
-        elif lowered.startswith("vk:") or lowered.startswith("vk "):
-            url = text.split(maxsplit=1)[1] if " " in text else text.split(":", 1)[1]
-            fest.vk_url = None if url.strip() in {"", "-"} else url.strip()
-        elif lowered.startswith("tg:") or lowered.startswith("tg "):
-            url = text.split(maxsplit=1)[1] if " " in text else text.split(":", 1)[1]
-            fest.tg_url = None if url.strip() in {"", "-"} else url.strip()
-        else:
+        if field == "description":
             fest.description = None if text in {"", "-"} else text
+        elif field == "site":
+            fest.website_url = None if text in {"", "-"} else text
+        elif field == "vk":
+            fest.vk_url = None if text in {"", "-"} else text
+        elif field == "tg":
+            fest.tg_url = None if text in {"", "-"} else text
         await session.commit()
         logging.info("festival %s updated", fest.name)
-    festival_edit_sessions.pop(message.from_user.id, None)
-    await bot.send_message(message.chat.id, "Festival updated")
-    await sync_festival_page(db, fest.name)
+    festival_edit_sessions[message.from_user.id] = (fid, None)
+    await show_festival_edit_menu(message.from_user.id, fest, bot)
 
+    await sync_festival_page(db, fest.name)
     await sync_festival_vk_post(db, fest.name)
 
 
@@ -6002,6 +6082,8 @@ def create_app() -> web.Application:
         or c.data.startswith("block:")
         or c.data.startswith("unblock:")
         or c.data.startswith("festedit:")
+        or c.data.startswith("festeditfield:")
+        or c.data == "festeditdone"
         or c.data.startswith("festdel:")
         or c.data.startswith("setfest:")
     ,

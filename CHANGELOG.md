@@ -129,6 +129,8 @@
 
 - Festival entries store website, VK and Telegram links.
 - `/fest` shows these links and accepts `site:`, `vk:` and `tg:` edits.
+- **Edit** now opens a menu to update description or contact links individually.
+
 
 
 

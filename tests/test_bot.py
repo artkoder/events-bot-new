@@ -5214,14 +5214,16 @@ async def test_edit_festival_contacts(tmp_path: Path):
         await session.commit()
         fid = fest.id
 
-    festival_edit_sessions[1] = fid
+    festival_edit_sessions[1] = (fid, "site")
+
     msg = types.Message.model_validate(
         {
             "message_id": 2,
             "date": 0,
             "chat": {"id": 1, "type": "private"},
             "from": {"id": 1, "is_bot": False, "first_name": "A"},
-            "text": "site: https://example.com",
+            "text": "https://example.com",
+
         }
     )
     await main.handle_festival_edit_message(msg, db, bot)
@@ -5230,14 +5232,16 @@ async def test_edit_festival_contacts(tmp_path: Path):
         fest = await session.get(main.Festival, fid)
         assert fest.website_url == "https://example.com"
 
-    festival_edit_sessions[1] = fid
+    festival_edit_sessions[1] = (fid, "vk")
+
     msg2 = types.Message.model_validate(
         {
             "message_id": 3,
             "date": 0,
             "chat": {"id": 1, "type": "private"},
             "from": {"id": 1, "is_bot": False, "first_name": "A"},
-            "text": "vk: -",
+            "text": "-",
+
         }
     )
     await main.handle_festival_edit_message(msg2, db, bot)
