@@ -4215,6 +4215,7 @@ async def build_festival_page_content(db: Database, fest: Festival) -> tuple[str
     if fest.website_url or fest.vk_url or fest.tg_url:
         nodes.append({"tag": "br"})
         nodes.append({"tag": "p", "children": ["\u00a0"]})
+
         nodes.append({"tag": "h3", "children": ["Контакты фестиваля"]})
         if fest.website_url:
             nodes.append(
