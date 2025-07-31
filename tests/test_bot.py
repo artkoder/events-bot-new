@@ -5108,3 +5108,57 @@ async def test_partner_event_add_notifies_superadmin(tmp_path: Path, monkeypatch
     assert any(
         "partner" in m[1] and "added event" in m[1] for m in bot.messages if m[0] == 1
     )
+
+
+@pytest.mark.asyncio
+async def test_festival_description_dash(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async def fake_parse(*args, **kwargs):
+        return [
+            {
+                "title": "Jazz Day",
+                "short_description": "desc",
+                "date": FUTURE_DATE,
+                "time": "18:00",
+                "location_name": "Hall",
+                "festival": "Jazz",
+            }
+        ]
+
+    class DummyTG:
+        def __init__(self, access_token=None):
+            pass
+
+        def create_page(self, title, content=None):
+            return {"url": "http://tg", "path": "p"}
+
+        def edit_page(self, path, title=None, content=None):
+            pass
+
+    monkeypatch.setenv("TELEGRAPH_TOKEN", "t")
+    monkeypatch.setattr("main.Telegraph", lambda access_token=None: DummyTG())
+    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+
+    async def fake_ask(text):
+        return "Desc"
+
+    monkeypatch.setattr("main.ask_4o", fake_ask)
+
+    async def fake_create(*args, **kwargs):
+        return "u", "p"
+
+    monkeypatch.setattr("main.create_source_page", fake_create)
+
+    async with db.get_session() as session:
+        session.add(main.Festival(name="Jazz", description="-"))
+        await session.commit()
+
+    await main.add_events_from_text(db, "t", None, None, None)
+    await main.sync_festival_page(db, "Jazz")
+
+    async with db.get_session() as session:
+        fest = (await session.execute(select(main.Festival))).scalars().first()
+
+    assert fest and fest.description == "Desc"

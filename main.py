@@ -4076,7 +4076,7 @@ async def build_festival_page_content(db: Database, fest: Festival) -> tuple[str
 
         logging.info("festival %s has %d events", fest.name, len(events))
 
-        if not fest.description:
+        if not fest.description or fest.description.strip() == "-":
             desc = await generate_festival_description(fest, events)
             if desc:
                 fest.description = desc
@@ -5432,7 +5432,10 @@ async def handle_festival_edit_message(message: types.Message, db: Database, bot
             await bot.send_message(message.chat.id, "Festival not found")
             festival_edit_sessions.pop(message.from_user.id, None)
             return
-        fest.description = text
+        if text == "-" or not text:
+            fest.description = None
+        else:
+            fest.description = text
         await session.commit()
         logging.info("festival %s description updated", fest.name)
     festival_edit_sessions.pop(message.from_user.id, None)
