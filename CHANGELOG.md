@@ -131,6 +131,12 @@
 - `/fest` shows these links and accepts `site:`, `vk:` and `tg:` edits.
 - **Edit** now opens a menu to update description or contact links individually.
 
+## v0.3.19 - Festival range fix
+
+- LLM instructions clarified: when festival dates span multiple days but only
+  some performances are listed, only those performances become events. The bot
+  no longer adds extra dates unless every day is described.
+
 
 
 
