@@ -90,6 +90,8 @@ festival_edit_sessions: dict[int, tuple[int, str | None]] = {}
 
 # toggle for uploading images to catbox
 CATBOX_ENABLED: bool = False
+# toggle for sending photos to VK
+VK_PHOTOS_ENABLED: bool = False
 _supabase_client: Client | None = None
 _vk_user_token_bad: str | None = None
 
@@ -425,6 +427,25 @@ async def set_catbox_enabled(db: Database, value: bool):
         await session.commit()
     global CATBOX_ENABLED
     CATBOX_ENABLED = value
+
+
+async def get_vk_photos_enabled(db: Database) -> bool:
+    async with db.get_session() as session:
+        setting = await session.get(Setting, "vk_photos_enabled")
+        return setting.value == "1" if setting else False
+
+
+async def set_vk_photos_enabled(db: Database, value: bool):
+    async with db.get_session() as session:
+        setting = await session.get(Setting, "vk_photos_enabled")
+        if setting:
+            setting.value = "1" if value else "0"
+        else:
+            setting = Setting(key="vk_photos_enabled", value="1" if value else "0")
+            session.add(setting)
+        await session.commit()
+    global VK_PHOTOS_ENABLED
+    VK_PHOTOS_ENABLED = value
 
 
 async def get_setting_value(db: Database, key: str) -> str | None:
@@ -2127,6 +2148,18 @@ async def handle_vktime(message: types.Message, db: Database, bot: Bot):
     else:
         await set_vk_time_added(db, parts[2])
     await bot.send_message(message.chat.id, "VK time updated")
+
+
+async def handle_vkphotos(message: types.Message, db: Database, bot: Bot):
+    async with db.get_session() as session:
+        user = await session.get(User, message.from_user.id)
+        if not user or not user.is_superadmin:
+            await bot.send_message(message.chat.id, "Not authorized")
+            return
+    new_value = not VK_PHOTOS_ENABLED
+    await set_vk_photos_enabled(db, new_value)
+    status = "enabled" if new_value else "disabled"
+    await bot.send_message(message.chat.id, f"VK photo posting {status}")
 
 
 async def handle_my_chat_member(update: types.ChatMemberUpdated, db: Database):
@@ -4499,9 +4532,12 @@ async def sync_festival_vk_post(db: Database, name: str, bot: Bot | None = None)
     message = await build_festival_vk_message(db, fest)
     attachments: list[str] | None = None
     if fest.photo_url:
-        photo_id = await upload_vk_photo(group_id, fest.photo_url, db, bot)
-        if photo_id:
-            attachments = [photo_id]
+        if VK_PHOTOS_ENABLED:
+            photo_id = await upload_vk_photo(group_id, fest.photo_url, db, bot)
+            if photo_id:
+                attachments = [photo_id]
+        else:
+            logging.info("VK photo posting disabled")
     try:
         if fest.vk_post_url:
             await edit_vk_post(fest.vk_post_url, message, db, bot, attachments)
@@ -6326,6 +6362,9 @@ def create_app() -> web.Application:
     async def vktime_wrapper(message: types.Message):
         await handle_vktime(message, db, bot)
 
+    async def vkphotos_wrapper(message: types.Message):
+        await handle_vkphotos(message, db, bot)
+
     dp.message.register(start_wrapper, Command("start"))
     dp.message.register(register_wrapper, Command("register"))
     dp.message.register(requests_wrapper, Command("requests"))
@@ -6375,6 +6414,7 @@ def create_app() -> web.Application:
     dp.message.register(images_wrapper, Command("images"))
     dp.message.register(vkgroup_wrapper, Command("vkgroup"))
     dp.message.register(vktime_wrapper, Command("vktime"))
+    dp.message.register(vkphotos_wrapper, Command("vkphotos"))
     dp.message.register(partner_info_wrapper, lambda m: m.from_user.id in partner_info_sessions)
     dp.message.register(channels_wrapper, Command("channels"))
     dp.message.register(reg_daily_wrapper, Command("regdailychannels"))
@@ -6421,6 +6461,8 @@ def create_app() -> web.Application:
         await get_tz_offset(db)
         global CATBOX_ENABLED
         CATBOX_ENABLED = await get_catbox_enabled(db)
+        global VK_PHOTOS_ENABLED
+        VK_PHOTOS_ENABLED = await get_vk_photos_enabled(db)
         hook = webhook.rstrip("/") + "/webhook"
         logging.info("Setting webhook to %s", hook)
         try:
