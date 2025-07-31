@@ -846,19 +846,50 @@ def festival_date_range(events: Iterable[Event]) -> tuple[date | None, date | No
     return min(starts), max(ends) if ends else min(starts)
 
 
+def festival_dates_from_text(text: str) -> tuple[date | None, date | None]:
+    """Extract start and end dates for a festival from free-form text."""
+    text = text.lower()
+    m = RE_FEST_RANGE.search(text)
+    if m:
+        start_str, end_str = m.group(1), m.group(2)
+        year = None
+        m_year = re.search(r"\d{4}", end_str)
+        if m_year:
+            year = m_year.group(0)
+        if year and not re.search(r"\d{4}", start_str):
+            start_str = f"{start_str} {year}"
+        if year and not re.search(r"\d{4}", end_str):
+            end_str = f"{end_str} {year}"
+        start = parse_events_date(start_str.replace("года", "").replace("г.", "").strip(), timezone.utc)
+        end = parse_events_date(end_str.replace("года", "").replace("г.", "").strip(), timezone.utc)
+        return start, end
+    m = RE_FEST_SINGLE.search(text)
+    if m:
+        d = parse_events_date(m.group(1).replace("года", "").replace("г.", "").strip(), timezone.utc)
+        return d, d
+    return None, None
+
+
+def festival_dates(fest: Festival, events: Iterable[Event]) -> tuple[date | None, date | None]:
+    """Return start and end dates using festival description when available."""
+    if fest.description:
+        s, e = festival_dates_from_text(fest.description)
+        if s or e:
+            return s, e or s
+    return festival_date_range(events)
+
+
 def festival_location(events: Iterable[Event]) -> str | None:
     """Return display string for festival venue(s)."""
-    pairs = {(e.location_name, e.city) for e in events}
+    pairs = {(e.location_name, e.city) for e in events if e.location_name}
     if not pairs:
         return None
-    if len(pairs) == 1:
-        name, city = pairs.pop()
-        return f"{name}{', #' + city if city else ''}"
+    names = sorted({name for name, _ in pairs})
     cities = {c for _, c in pairs if c}
+    city_text = ""
     if len(cities) == 1:
-        city = next(iter(cities))
-        return f"разные площадки, #{city}"
-    return "разные площадки"
+        city_text = f", #{next(iter(cities))}"
+    return ", ".join(names) + city_text
 
 
 ICS_LABEL = "Добавить в календарь на телефоне (ICS)"
@@ -3150,6 +3181,19 @@ DAYS_OF_WEEK = [
 ]
 
 
+DATE_WORDS = "|".join(MONTHS)
+RE_FEST_RANGE = re.compile(
+    rf"(?:\bс\s*)?(\d{{1,2}}\s+(?:{DATE_WORDS})(?:\s+\d{{4}})?)"
+    rf"\s*(?:по|\-|–|—)\s*"
+    rf"(\d{{1,2}}\s+(?:{DATE_WORDS})(?:\s+\d{{4}})?)",
+    re.IGNORECASE,
+)
+RE_FEST_SINGLE = re.compile(
+    rf"(\d{{1,2}}\s+(?:{DATE_WORDS})(?:\s+\d{{4}})?)",
+    re.IGNORECASE,
+)
+
+
 def format_day_pretty(day: date) -> str:
     return f"{day.day} {MONTHS[day.month - 1]}"
 
@@ -4291,7 +4335,7 @@ async def build_festival_page_content(db: Database, fest: Festival) -> tuple[str
         nodes.append({"tag": "img", "attrs": {"src": fest.photo_url}})
         nodes.append({"tag": "p", "children": ["\u00a0"]})
     if events:
-        start, end = festival_date_range(events)
+        start, end = festival_dates(fest, events)
         if start:
             date_text = format_day_pretty(start)
             if end and end != start:
@@ -4406,7 +4450,7 @@ async def build_festival_vk_message(db: Database, fest: Festival) -> str:
         events = res.scalars().all()
     lines = [fest.name]
     if events:
-        start, end = festival_date_range(events)
+        start, end = festival_dates(fest, events)
         if start:
             date_text = format_day_pretty(start)
             if end and end != start:

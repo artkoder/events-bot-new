@@ -53,3 +53,6 @@ announcements. The prompt instructs the model:
 используй типовые штампы, не выдумывай факты. Описание должно состоять из трёх
 предложений, если сведений мало — из одного". Only information from the
 provided texts may appear in the summary.
+If the description contains a date range like "с 27 августа по 6 сентября 2025",
+these dates define the festival period. When no range is present the period is
+calculated from the events added to the festival.
