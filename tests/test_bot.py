@@ -41,6 +41,7 @@ from main import (
     telegraph_test,
     get_telegraph_token,
     editing_sessions,
+    festival_edit_sessions,
 )
 
 FUTURE_DATE = (date.today() + timedelta(days=10)).isoformat()
@@ -5162,3 +5163,86 @@ async def test_festival_description_dash(tmp_path: Path, monkeypatch):
         fest = (await session.execute(select(main.Festival))).scalars().first()
 
     assert fest and fest.description == "Desc"
+
+
+@pytest.mark.asyncio
+async def test_fest_list_includes_links(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async with db.get_session() as session:
+        session.add(User(user_id=1))
+        session.add(
+            main.Festival(
+                name="Jazz",
+                telegraph_url="http://tg",
+                website_url="https://jazz.ru",
+                vk_url="https://vk.com/jazz",
+                tg_url="https://t.me/jazz",
+            )
+        )
+        await session.commit()
+
+    msg = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "/fest",
+        }
+    )
+    await main.handle_fest(msg, db, bot)
+    text = bot.messages[-1][1]
+    assert "http://tg" in text
+    assert "https://jazz.ru" in text
+    assert "https://vk.com/jazz" in text
+    assert "https://t.me/jazz" in text
+
+
+@pytest.mark.asyncio
+async def test_edit_festival_contacts(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async with db.get_session() as session:
+        session.add(User(user_id=1))
+        fest = main.Festival(name="Jazz")
+        session.add(fest)
+        await session.commit()
+        fid = fest.id
+
+    festival_edit_sessions[1] = fid
+    msg = types.Message.model_validate(
+        {
+            "message_id": 2,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "site: https://example.com",
+        }
+    )
+    await main.handle_festival_edit_message(msg, db, bot)
+
+    async with db.get_session() as session:
+        fest = await session.get(main.Festival, fid)
+        assert fest.website_url == "https://example.com"
+
+    festival_edit_sessions[1] = fid
+    msg2 = types.Message.model_validate(
+        {
+            "message_id": 3,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "vk: -",
+        }
+    )
+    await main.handle_festival_edit_message(msg2, db, bot)
+
+    async with db.get_session() as session:
+        fest = await session.get(main.Festival, fid)
+        assert fest.vk_url is None
+

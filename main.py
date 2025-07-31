@@ -222,6 +222,9 @@ class Festival(SQLModel, table=True):
     telegraph_path: Optional[str] = None
     vk_post_url: Optional[str] = None
     photo_url: Optional[str] = None
+    website_url: Optional[str] = None
+    vk_url: Optional[str] = None
+    tg_url: Optional[str] = None
 
 
 class Database:
@@ -362,6 +365,18 @@ class Database:
             if "photo_url" not in cols:
                 await conn.exec_driver_sql(
                     "ALTER TABLE festival ADD COLUMN photo_url VARCHAR"
+                )
+            if "website_url" not in cols:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE festival ADD COLUMN website_url VARCHAR"
+                )
+            if "vk_url" not in cols:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE festival ADD COLUMN vk_url VARCHAR"
+                )
+            if "tg_url" not in cols:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE festival ADD COLUMN tg_url VARCHAR"
                 )
 
     def get_session(self) -> AsyncSession:
@@ -2013,7 +2028,18 @@ async def send_festivals_list(message: types.Message, db: Database, bot: Bot, ed
             return
         result = await session.execute(select(Festival))
         fests = result.scalars().all()
-    lines = [f"{f.id} {f.name}" for f in fests]
+    lines = []
+    for f in fests:
+        parts = [f"{f.id} {f.name}"]
+        if f.telegraph_url:
+            parts.append(f.telegraph_url)
+        if f.website_url:
+            parts.append(f"site: {f.website_url}")
+        if f.vk_url:
+            parts.append(f"vk: {f.vk_url}")
+        if f.tg_url:
+            parts.append(f"tg: {f.tg_url}")
+        lines.append(" ".join(parts))
     keyboard = [
         [
             types.InlineKeyboardButton(text="Edit", callback_data=f"festedit:{f.id}"),
@@ -5432,12 +5458,20 @@ async def handle_festival_edit_message(message: types.Message, db: Database, bot
             await bot.send_message(message.chat.id, "Festival not found")
             festival_edit_sessions.pop(message.from_user.id, None)
             return
-        if text == "-" or not text:
-            fest.description = None
+        lowered = text.lower()
+        if lowered.startswith("site:") or lowered.startswith("site "):
+            url = text.split(maxsplit=1)[1] if " " in text else text.split(":", 1)[1]
+            fest.website_url = None if url.strip() in {"", "-"} else url.strip()
+        elif lowered.startswith("vk:") or lowered.startswith("vk "):
+            url = text.split(maxsplit=1)[1] if " " in text else text.split(":", 1)[1]
+            fest.vk_url = None if url.strip() in {"", "-"} else url.strip()
+        elif lowered.startswith("tg:") or lowered.startswith("tg "):
+            url = text.split(maxsplit=1)[1] if " " in text else text.split(":", 1)[1]
+            fest.tg_url = None if url.strip() in {"", "-"} else url.strip()
         else:
-            fest.description = text
+            fest.description = None if text in {"", "-"} else text
         await session.commit()
-        logging.info("festival %s description updated", fest.name)
+        logging.info("festival %s updated", fest.name)
     festival_edit_sessions.pop(message.from_user.id, None)
     await bot.send_message(message.chat.id, "Festival updated")
     await sync_festival_page(db, fest.name)
