@@ -4192,6 +4192,21 @@ def test_event_to_nodes_festival_link():
     ) == 1
 
 
+def test_event_to_nodes_festival_icon():
+    e = Event(
+        title="T",
+        description="d",
+        source_text="s",
+        date="2025-07-10",
+        time="18:00",
+        location_name="Hall",
+        festival="Jazz",
+    )
+    fest = main.Festival(name="Jazz", telegraph_url="http://tg")
+    nodes = main.event_to_nodes(e, fest, fest_icon=True)
+    assert nodes[1]["children"][0] == "✨ "
+
+
 
 @pytest.mark.asyncio
 async def test_daily_posts_festival_link(tmp_path: Path):
@@ -5249,4 +5264,100 @@ async def test_edit_festival_contacts(tmp_path: Path):
     async with db.get_session() as session:
         fest = await session.get(main.Festival, fid)
         assert fest.vk_url is None
+
+
+@pytest.mark.asyncio
+async def test_festival_page_contacts_and_dates(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.get_session() as session:
+        fest = main.Festival(
+            name="Jazz",
+            website_url="https://jazz.ru",
+            vk_url="https://vk.com/jazz",
+            tg_url="https://t.me/jazz",
+            photo_url="http://img",
+        )
+        session.add(fest)
+        session.add(
+            Event(
+                title="A",
+                description="d",
+                source_text="s",
+                date="2025-07-10",
+                time="18:00",
+                location_name="Hall",
+                city="Калининград",
+                festival="Jazz",
+            )
+        )
+        session.add(
+            Event(
+                title="B",
+                description="d",
+                source_text="s",
+                date="2025-07-12",
+                time="19:00",
+                location_name="Hall",
+                city="Калининград",
+                festival="Jazz",
+            )
+        )
+        await session.commit()
+
+    title, content = await main.build_festival_page_content(db, fest)
+    dump = json_dumps(content)
+    assert "Контакты фестиваля" in dump
+    assert "Мероприятия фестиваля" in dump
+    assert "\ud83d\udcc5" in dump or "📅" in dump
+    assert "\ud83d\xdccd" in dump or "📍" in dump
+    idx_contacts = next(
+        i
+        for i, n in enumerate(content)
+        if n.get("tag") == "h3" and "Контакты" in "".join(n.get("children", []))
+    )
+    assert content[idx_contacts - 1].get("tag") == "p"
+    assert content[idx_contacts - 2].get("tag") == "br"
+    idx_events = next(
+        i
+        for i, n in enumerate(content)
+        if n.get("tag") == "h3" and "Мероприятия" in "".join(n.get("children", []))
+    )
+    assert content[idx_events - 1].get("tag") == "p"
+    assert content[idx_events - 2].get("tag") == "br"
+
+
+@pytest.mark.asyncio
+async def test_month_page_festival_star(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    m = FUTURE_DATE[:7]
+    async with db.get_session() as session:
+        session.add(main.Festival(name="Jazz", telegraph_url="http://tg"))
+        session.add(
+            Event(
+                title="T",
+                description="d",
+                source_text="s",
+                date=FUTURE_DATE,
+                time="18:00",
+                location_name="Hall",
+                festival="Jazz",
+            )
+        )
+        await session.commit()
+
+    _, content = await main.build_month_page_content(db, m)
+    fest_line = next(
+        n
+        for n in content
+        if isinstance(n, dict)
+        and any(
+            isinstance(c, dict) and c.get("attrs", {}).get("href") == "http://tg"
+            for c in n.get("children", [])
+        )
+    )
+    assert fest_line["children"][0] == "✨ "
 

@@ -732,6 +732,44 @@ def parse_iso_date(value: str) -> date | None:
         return None
 
 
+def festival_date_range(events: Iterable[Event]) -> tuple[date | None, date | None]:
+    """Return start and end dates for a festival based on its events."""
+    starts: list[date] = []
+    ends: list[date] = []
+    for e in events:
+        s = parse_iso_date(e.date)
+        if not s:
+            continue
+        starts.append(s)
+        if e.end_date:
+            end = parse_iso_date(e.end_date)
+        elif ".." in e.date:
+            _, end_part = e.date.split("..", 1)
+            end = parse_iso_date(end_part)
+        else:
+            end = s
+        if end:
+            ends.append(end)
+    if not starts:
+        return None, None
+    return min(starts), max(ends) if ends else min(starts)
+
+
+def festival_location(events: Iterable[Event]) -> str | None:
+    """Return display string for festival venue(s)."""
+    pairs = {(e.location_name, e.city) for e in events}
+    if not pairs:
+        return None
+    if len(pairs) == 1:
+        name, city = pairs.pop()
+        return f"{name}{', #' + city if city else ''}"
+    cities = {c for _, c in pairs if c}
+    if len(cities) == 1:
+        city = next(iter(cities))
+        return f"разные площадки, #{city}"
+    return "разные площадки"
+
+
 ICS_LABEL = "Добавить в календарь на телефоне (ICS)"
 MONTH_NAV_START = "<!--month-nav-start-->"
 MONTH_NAV_END = "<!--month-nav-end-->"
@@ -3561,7 +3599,9 @@ def event_title_nodes(e: Event) -> list:
     return nodes
 
 
-def event_to_nodes(e: Event, festival: Festival | None = None) -> list[dict]:
+def event_to_nodes(
+    e: Event, festival: Festival | None = None, fest_icon: bool = False
+) -> list[dict]:
     md = format_event_md(e, festival)
 
     lines = md.split("\n")
@@ -3575,23 +3615,25 @@ def event_to_nodes(e: Event, festival: Festival | None = None) -> list[dict]:
     if festival or e.festival:
         fest = festival
         if fest is None and e.festival:
-            # fallback fetch will be handled by caller typically
+            # caller typically provides the object
             pass
-        if fest and fest.telegraph_url:
-            nodes.append(
-                {
-                    "tag": "p",
-                    "children": [
-                        {
-                            "tag": "a",
-                            "attrs": {"href": fest.telegraph_url},
-                            "children": [fest.name],
-                        }
-                    ],
-                }
-            )
-        elif fest:
-            nodes.append({"tag": "p", "children": [fest.name]})
+        if fest:
+            prefix = "✨ " if fest_icon else ""
+            if fest.telegraph_url:
+                children = []
+                if prefix:
+                    children.append(prefix)
+                children.append(
+                    {
+                        "tag": "a",
+                        "attrs": {"href": fest.telegraph_url},
+                        "children": [fest.name],
+                    }
+                )
+                nodes.append({"tag": "p", "children": children})
+            else:
+                text = f"{prefix}{fest.name}" if prefix else fest.name
+                nodes.append({"tag": "p", "children": [text]})
     if body_md:
         html_text = md_to_html(body_md)
         nodes.extend(html_to_nodes(html_text))
@@ -3747,7 +3789,7 @@ async def build_month_page_content(
         content.append({"tag": "p", "children": ["\u00a0"]})
         for ev in by_day[day]:
             fest = fest_map.get(ev.festival or "")
-            content.extend(event_to_nodes(ev, fest))
+            content.extend(event_to_nodes(ev, fest, fest_icon=True))
 
 
     today_month = datetime.now(LOCAL_TZ).strftime("%Y-%m")
@@ -4014,7 +4056,7 @@ async def build_weekend_page_content(db: Database, start: str) -> tuple[str, lis
         content.append({"tag": "p", "children": ["\u00a0"]})
         for ev in by_day[d]:
             fest = fest_map.get(ev.festival or "")
-            content.extend(event_to_nodes(ev, fest))
+            content.extend(event_to_nodes(ev, fest, fest_icon=True))
 
 
     weekend_nav: list[dict] = []
@@ -4157,10 +4199,72 @@ async def build_festival_page_content(db: Database, fest: Festival) -> tuple[str
     if fest.photo_url:
         nodes.append({"tag": "img", "attrs": {"src": fest.photo_url}})
         nodes.append({"tag": "p", "children": ["\u00a0"]})
+    if events:
+        start, end = festival_date_range(events)
+        if start:
+            date_text = format_day_pretty(start)
+            if end and end != start:
+                date_text += f" - {format_day_pretty(end)}"
+            nodes.append({"tag": "p", "children": [f"\U0001f4c5 {date_text}"]})
+        loc_text = festival_location(events)
+        if loc_text:
+            nodes.append({"tag": "p", "children": [f"\U0001f4cd {loc_text}"]})
     if fest.description:
         nodes.append({"tag": "p", "children": [fest.description]})
-    for e in events:
-        nodes.extend(event_to_nodes(e))
+
+    if fest.website_url or fest.vk_url or fest.tg_url:
+        nodes.append({"tag": "br"})
+        nodes.append({"tag": "p", "children": ["\u00a0"]})
+        nodes.append({"tag": "h3", "children": ["Контакты фестиваля"]})
+        if fest.website_url:
+            nodes.append(
+                {
+                    "tag": "p",
+                    "children": [
+                        "сайт: ",
+                        {
+                            "tag": "a",
+                            "attrs": {"href": fest.website_url},
+                            "children": [fest.website_url],
+                        },
+                    ],
+                }
+            )
+        if fest.vk_url:
+            nodes.append(
+                {
+                    "tag": "p",
+                    "children": [
+                        "вк: ",
+                        {
+                            "tag": "a",
+                            "attrs": {"href": fest.vk_url},
+                            "children": [fest.vk_url],
+                        },
+                    ],
+                }
+            )
+        if fest.tg_url:
+            nodes.append(
+                {
+                    "tag": "p",
+                    "children": [
+                        "телеграм: ",
+                        {
+                            "tag": "a",
+                            "attrs": {"href": fest.tg_url},
+                            "children": [fest.tg_url],
+                        },
+                    ],
+                }
+            )
+
+    if events:
+        nodes.append({"tag": "br"})
+        nodes.append({"tag": "p", "children": ["\u00a0"]})
+        nodes.append({"tag": "h3", "children": ["Мероприятия фестиваля"]})
+        for e in events:
+            nodes.extend(event_to_nodes(e))
     return fest.name, nodes
 
 
