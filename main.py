@@ -4118,9 +4118,14 @@ async def sync_weekend_page(db: Database, start: str, update_links: bool = False
 async def generate_festival_description(fest: Festival, events: list[Event]) -> str:
     """Use LLM to craft a short festival blurb."""
     texts = [e.source_text for e in events[:5]]
+    if fest.description:
+        texts.insert(0, fest.description)
     prompt = (
-        f"Сформируй описание фестиваля {fest.name} объёмом два-три абзаца. "
-        "Используй только факты из следующих объявлений:\n\n" + "\n\n".join(texts)
+        f"Напиши краткое описание фестиваля {fest.name}. "
+        "Стиль профессионального журналиста в сфере мероприятий и культуры. "
+        "Не используй типовые штампы и не придумывай факты. "
+        "Описание должно состоять из трёх предложений, если сведений мало — из одного. "
+        "Используй только информацию из этих текстов:\n\n" + "\n\n".join(texts)
     )
     try:
         text = await ask_4o(prompt)
@@ -4143,11 +4148,10 @@ async def build_festival_page_content(db: Database, fest: Festival) -> tuple[str
 
         logging.info("festival %s has %d events", fest.name, len(events))
 
-        if not fest.description or fest.description.strip() == "-":
-            desc = await generate_festival_description(fest, events)
-            if desc:
-                fest.description = desc
-                await session.commit()
+        desc = await generate_festival_description(fest, events)
+        if desc:
+            fest.description = desc
+            await session.commit()
 
     nodes: list[dict] = []
     if fest.photo_url:
