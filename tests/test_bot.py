@@ -5401,3 +5401,88 @@ async def test_festival_vk_message_period_location(tmp_path: Path):
     assert "\U0001f4cd" in text or "📍" in text
 
 
+@pytest.mark.asyncio
+async def test_festival_page_lists_upcoming(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    next_month_date = (date.fromisoformat(FUTURE_DATE) + timedelta(days=31)).isoformat()
+
+    async with db.get_session() as session:
+        fest1 = main.Festival(name="Jazz", telegraph_url="http://tg1")
+        fest2 = main.Festival(name="Rock", telegraph_url="http://tg2")
+        session.add(fest1)
+        session.add(fest2)
+        session.add(
+            Event(
+                title="A",
+                description="d",
+                source_text="s",
+                date=FUTURE_DATE,
+                time="18:00",
+                location_name="Hall",
+                festival="Jazz",
+            )
+        )
+        session.add(
+            Event(
+                title="B",
+                description="d",
+                source_text="s",
+                date=next_month_date,
+                time="18:00",
+                location_name="Park",
+                festival="Rock",
+            )
+        )
+        await session.commit()
+
+    _, nodes = await main.build_festival_page_content(db, fest1)
+    dump = json_dumps(nodes)
+    assert "Ближайшие фестивали" in dump
+    assert "Rock" in dump
+    assert "Jazz" not in dump
+
+
+@pytest.mark.asyncio
+async def test_festival_vk_message_lists_upcoming(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    next_month_date = (date.fromisoformat(FUTURE_DATE) + timedelta(days=31)).isoformat()
+
+    async with db.get_session() as session:
+        fest1 = main.Festival(name="Jazz", vk_post_url="http://vk1")
+        fest2 = main.Festival(name="Rock", vk_post_url="http://vk2")
+        session.add(fest1)
+        session.add(fest2)
+        session.add(
+            Event(
+                title="A",
+                description="d",
+                source_text="s",
+                date=FUTURE_DATE,
+                time="18:00",
+                location_name="Hall",
+                festival="Jazz",
+            )
+        )
+        session.add(
+            Event(
+                title="B",
+                description="d",
+                source_text="s",
+                date=next_month_date,
+                time="18:00",
+                location_name="Park",
+                festival="Rock",
+            )
+        )
+        await session.commit()
+
+    text = await main.build_festival_vk_message(db, fest1)
+    assert "Ближайшие фестивали" in text
+    assert "[Rock|http://vk2]" in text
+    assert "[Jazz|http://vk1]" not in text
+
+
