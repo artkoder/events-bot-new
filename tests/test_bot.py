@@ -5400,3 +5400,89 @@ async def test_festival_vk_message_period_location(tmp_path: Path):
     assert "\U0001f4c5" in text or "📅" in text
     assert "\U0001f4cd" in text or "📍" in text
 
+
+@pytest.mark.asyncio
+async def test_festival_dates_from_description(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    desc = (
+        "XXII фестиваль искусств \u00abБалтийские сезоны\u00bb пройдет с 27 августа по 6 "
+        "сентября 2025 года в Калининграде."
+    )
+    async with db.get_session() as session:
+        fest = main.Festival(name="Seasons", description=desc)
+        session.add(fest)
+        session.add(
+            Event(
+                title="A",
+                description="d",
+                source_text="s",
+                date="2025-08-29",
+                time="18:00",
+                location_name="Hall",
+                festival="Seasons",
+            )
+        )
+        session.add(
+            Event(
+                title="B",
+                description="d",
+                source_text="s",
+                date="2025-09-02",
+                time="19:00",
+                location_name="Hall",
+                festival="Seasons",
+            )
+        )
+        await session.commit()
+
+    _, content = await main.build_festival_page_content(db, fest)
+    dump = json_dumps(content)
+    assert "27 августа" in dump
+    assert "6 сентября" in dump
+
+    text = await main.build_festival_vk_message(db, fest)
+    assert "27 августа" in text
+    assert "6 сентября" in text
+
+
+@pytest.mark.asyncio
+async def test_festival_location_list(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.get_session() as session:
+        fest = main.Festival(name="Venues")
+        session.add(fest)
+        session.add(
+            Event(
+                title="A",
+                description="d",
+                source_text="s",
+                date="2025-07-10",
+                time="18:00",
+                location_name="Hall1",
+                city="Калининград",
+                festival="Venues",
+            )
+        )
+        session.add(
+            Event(
+                title="B",
+                description="d",
+                source_text="s",
+                date="2025-07-12",
+                time="19:00",
+                location_name="Hall2",
+                city="Калининград",
+                festival="Venues",
+            )
+        )
+        await session.commit()
+
+    async with db.get_session() as session:
+        events = (await session.execute(select(Event))).scalars().all()
+    loc = main.festival_location(events)
+    assert "Hall1" in loc and "Hall2" in loc
+
