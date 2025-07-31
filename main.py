@@ -512,8 +512,11 @@ async def _vk_api(
     for kind, token in tokens:
         params["access_token"] = token
         params["v"] = "5.131"
+        logging.info("calling VK API %s using %s token %s", method, kind, token)
         async with create_ipv4_session(ClientSession) as session:
-            async with session.post(f"https://api.vk.com/method/{method}", data=params) as resp:
+            async with session.post(
+                f"https://api.vk.com/method/{method}", data=params
+            ) as resp:
                 data = await resp.json()
         if "error" not in data:
             return data
@@ -4362,6 +4365,15 @@ async def build_festival_vk_message(db: Database, fest: Festival) -> str:
     lines = [fest.name]
     if fest.description:
         lines.append(fest.description)
+    if fest.website_url or fest.vk_url or fest.tg_url:
+        lines.append(VK_BLANK_LINE)
+        lines.append("Контакты фестиваля")
+        if fest.website_url:
+            lines.append(f"сайт: {fest.website_url}")
+        if fest.vk_url:
+            lines.append(f"вк: {fest.vk_url}")
+        if fest.tg_url:
+            lines.append(f"телеграм: {fest.tg_url}")
     for ev in events:
         lines.append(VK_BLANK_LINE)
         lines.append(format_event_vk(ev))
