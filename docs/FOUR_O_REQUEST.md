@@ -46,8 +46,10 @@ they describe the same event. The model replies with JSON
 `duplicate` is true the returned title and description replace the stored event
 fields.
 
-Festival pages also rely on 4o. When a festival is created, the bot sends the
-full source text of the first event with the prompt “Сформируй описание
-фестиваля <name> объёмом два‑три абзаца”. When more events are added, source
-texts of several festival announcements (up to five) are combined and the model
-is asked to write a new summary using only facts from these texts.
+Festival pages also rely on 4o. To craft a festival blurb the bot sends the
+previous description (if any) together with the full text of up to five recent
+announcements. The prompt instructs the model:
+"Стиль профессионального журналиста в сфере мероприятий и культуры. Не
+используй типовые штампы, не выдумывай факты. Описание должно состоять из трёх
+предложений, если сведений мало — из одного". Only information from the
+provided texts may appear in the summary.
