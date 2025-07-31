@@ -902,12 +902,15 @@ def festival_dates_from_text(text: str) -> tuple[date | None, date | None]:
 
 
 def festival_dates(fest: Festival, events: Iterable[Event]) -> tuple[date | None, date | None]:
-    """Return start and end dates using festival description when available."""
+    """Return start and end dates for a festival."""
+    start, end = festival_date_range(events)
+    if start or end:
+        return start, end
     if fest.description:
         s, e = festival_dates_from_text(fest.description)
         if s or e:
             return s, e or s
-    return festival_date_range(events)
+    return None, None
 
 
 def festival_location(events: Iterable[Event]) -> str | None:
@@ -921,6 +924,110 @@ def festival_location(events: Iterable[Event]) -> str | None:
     if len(cities) == 1:
         city_text = f", #{next(iter(cities))}"
     return ", ".join(names) + city_text
+
+
+async def upcoming_festivals(
+    db: Database,
+    *,
+    today: date | None = None,
+    exclude: str | None = None,
+) -> list[tuple[date | None, date | None, Festival]]:
+    """Return festivals that are current or upcoming."""
+    if today is None:
+        today = date.today()
+    async with db.get_session() as session:
+        res_f = await session.execute(select(Festival))
+        fests = res_f.scalars().all()
+        res_e = await session.execute(select(Event))
+        events = res_e.scalars().all()
+
+    ev_map: dict[str, list[Event]] = {}
+    for e in events:
+        if e.festival:
+            ev_map.setdefault(e.festival, []).append(e)
+
+    data: list[tuple[date | None, date | None, Festival]] = []
+    for fest in fests:
+        if exclude and fest.name == exclude:
+            continue
+        evs = ev_map.get(fest.name, [])
+        start, end = festival_dates(fest, evs)
+        if end and end < today:
+            continue
+        if not start and not end:
+            continue
+        data.append((start, end, fest))
+
+    data.sort(key=lambda t: t[0] or date.max)
+    return data
+
+
+async def build_festivals_list_nodes(
+    db: Database, *, exclude: str | None = None, today: date | None = None
+) -> list[dict]:
+    """Return Telegraph nodes listing upcoming festivals."""
+    items = await upcoming_festivals(db, today=today, exclude=exclude)
+    if not items:
+        return []
+    if today is None:
+        today = date.today()
+    groups: dict[str, list[Festival]] = {}
+    for start, end, fest in items:
+        if start and start <= today <= (end or start):
+            month = today.strftime("%Y-%m")
+        else:
+            month = (start or today).strftime("%Y-%m")
+        groups.setdefault(month, []).append(fest)
+
+    nodes: list[dict] = []
+    nodes.append({"tag": "h3", "children": ["Ближайшие фестивали"]})
+    for month in sorted(groups.keys()):
+        nodes.append({"tag": "h4", "children": [month_name_nominative(month)]})
+        for fest in groups[month]:
+            if fest.telegraph_url:
+                nodes.append(
+                    {
+                        "tag": "p",
+                        "children": [
+                            {
+                                "tag": "a",
+                                "attrs": {"href": fest.telegraph_url},
+                                "children": [fest.name],
+                            }
+                        ],
+                    }
+                )
+            else:
+                nodes.append({"tag": "p", "children": [fest.name]})
+    return nodes
+
+
+async def build_festivals_list_lines_vk(
+    db: Database, *, exclude: str | None = None, today: date | None = None
+) -> list[str]:
+    """Return lines listing upcoming festivals for VK posts."""
+    items = await upcoming_festivals(db, today=today, exclude=exclude)
+    if not items:
+        return []
+    if today is None:
+        today = date.today()
+    groups: dict[str, list[Festival]] = {}
+    for start, end, fest in items:
+        if start and start <= today <= (end or start):
+            month = today.strftime("%Y-%m")
+        else:
+            month = (start or today).strftime("%Y-%m")
+        groups.setdefault(month, []).append(fest)
+
+    lines: list[str] = ["Ближайшие фестивали"]
+    for month in sorted(groups.keys()):
+        lines.append(month_name_nominative(month))
+        for fest in groups[month]:
+            if fest.vk_post_url:
+                lines.append(f"[{fest.vk_post_url}|{fest.name}]")
+            else:
+                lines.append(fest.name)
+    return lines
 
 
 ICS_LABEL = "Добавить в календарь на телефоне (ICS)"
@@ -4444,6 +4551,11 @@ async def build_festival_page_content(db: Database, fest: Festival) -> tuple[str
         nodes.append({"tag": "h3", "children": ["Мероприятия фестиваля"]})
         for e in events:
             nodes.extend(event_to_nodes(e))
+    fest_list = await build_festivals_list_nodes(db, exclude=fest.name)
+    if fest_list:
+        nodes.append({"tag": "br"})
+        nodes.append({"tag": "p", "children": ["\u00a0"]})
+        nodes.extend(fest_list)
     return fest.name, nodes
 
 
@@ -4517,6 +4629,10 @@ async def build_festival_vk_message(db: Database, fest: Festival) -> str:
     for ev in events:
         lines.append(VK_BLANK_LINE)
         lines.append(format_event_vk(ev))
+    fest_lines = await build_festivals_list_lines_vk(db, exclude=fest.name)
+    if fest_lines:
+        lines.append(VK_BLANK_LINE)
+        lines.extend(fest_lines)
     return "\n".join(lines)
 
 
