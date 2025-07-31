@@ -551,7 +551,8 @@ async def upload_vk_photo(
             bot,
         )
         upload_url = data["response"]["upload_url"]
-        async with ClientSession() as session:
+        async with create_ipv4_session(ClientSession) as session:
+
             async with session.get(url) as resp:
                 img_bytes = await resp.read()
             form = FormData()
@@ -565,7 +566,6 @@ async def upload_vk_photo(
                 filename="image.jpg",
                 content_type=ctype,
             )
-
             async with session.post(upload_url, data=form) as up:
                 upload_result = await up.json()
         save = await _vk_api(

@@ -5401,4 +5401,3 @@ async def test_festival_vk_message_period_location(tmp_path: Path):
     assert "\U0001f4cd" in text or "📍" in text
 
 
-
