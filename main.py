@@ -4213,6 +4213,9 @@ async def build_festival_page_content(db: Database, fest: Festival) -> tuple[str
         nodes.append({"tag": "p", "children": [fest.description]})
 
     if fest.website_url or fest.vk_url or fest.tg_url:
+        nodes.append({"tag": "br"})
+        nodes.append({"tag": "p", "children": ["\u00a0"]})
+
         nodes.append({"tag": "h3", "children": ["Контакты фестиваля"]})
         if fest.website_url:
             nodes.append(
@@ -4258,6 +4261,8 @@ async def build_festival_page_content(db: Database, fest: Festival) -> tuple[str
             )
 
     if events:
+        nodes.append({"tag": "br"})
+        nodes.append({"tag": "p", "children": ["\u00a0"]})
         nodes.append({"tag": "h3", "children": ["Мероприятия фестиваля"]})
         for e in events:
             nodes.extend(event_to_nodes(e))

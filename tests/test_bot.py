@@ -5312,6 +5312,20 @@ async def test_festival_page_contacts_and_dates(tmp_path: Path):
     assert "Мероприятия фестиваля" in dump
     assert "\ud83d\udcc5" in dump or "📅" in dump
     assert "\ud83d\xdccd" in dump or "📍" in dump
+    idx_contacts = next(
+        i
+        for i, n in enumerate(content)
+        if n.get("tag") == "h3" and "Контакты" in "".join(n.get("children", []))
+    )
+    assert content[idx_contacts - 1].get("tag") == "p"
+    assert content[idx_contacts - 2].get("tag") == "br"
+    idx_events = next(
+        i
+        for i, n in enumerate(content)
+        if n.get("tag") == "h3" and "Мероприятия" in "".join(n.get("children", []))
+    )
+    assert content[idx_events - 1].get("tag") == "p"
+    assert content[idx_events - 2].get("tag") == "br"
 
 
 @pytest.mark.asyncio
