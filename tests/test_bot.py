@@ -5482,7 +5482,8 @@ async def test_festival_vk_message_lists_upcoming(tmp_path: Path):
 
     text = await main.build_festival_vk_message(db, fest1)
     assert "Ближайшие фестивали" in text
-    assert "[Rock|http://vk2]" in text
-    assert "[Jazz|http://vk1]" not in text
+    assert "[http://vk2|Rock]" in text
+    assert "[http://vk1|Jazz]" not in text
+
 
 

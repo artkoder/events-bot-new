@@ -1024,7 +1024,8 @@ async def build_festivals_list_lines_vk(
         lines.append(month_name_nominative(month))
         for fest in groups[month]:
             if fest.vk_post_url:
-                lines.append(f"[{fest.name}|{fest.vk_post_url}]")
+                lines.append(f"[{fest.vk_post_url}|{fest.name}]")
+
             else:
                 lines.append(fest.name)
     return lines
