@@ -40,7 +40,9 @@ browse upcoming announcements. The command accepts dates like `2025-07-10`,
   # automatically and saves the token to /data/telegraph_token.txt.
   export TELEGRAPH_TOKEN=your_telegraph_token
   # Optional: post daily announcements to VK
-  export VK_TOKEN=vk_access_token
+  export VK_TOKEN=vk_group_token
+  # Optional: user access token for VK posts with images
+  export VK_USER_TOKEN=vk_user_token
   python main.py
    ```
 
@@ -66,6 +68,8 @@ browse upcoming announcements. The command accepts dates like `2025-07-10`,
    fly secrets set TELEGRAPH_TOKEN=<token>
    # Optional: post daily announcements to VK
    fly secrets set VK_TOKEN=<token>
+   # Optional: user access token for VK posts with images
+   fly secrets set VK_USER_TOKEN=<token>
    ```
 3. Deploy:
    ```bash

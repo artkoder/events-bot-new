@@ -41,6 +41,7 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "events-ics")
 VK_TOKEN = os.getenv("VK_TOKEN")
+VK_USER_TOKEN = os.getenv("VK_USER_TOKEN")
 ICS_CONTENT_TYPE = "text/calendar; charset=utf-8"
 ICS_CONTENT_DISP_TEMPLATE = 'inline; filename="{name}"'
 ICS_CALNAME = "kenigevents"
@@ -90,6 +91,7 @@ festival_edit_sessions: dict[int, tuple[int, str | None]] = {}
 # toggle for uploading images to catbox
 CATBOX_ENABLED: bool = False
 _supabase_client: Client | None = None
+_vk_user_token_bad: str | None = None
 
 # Telegraph API rejects pages over ~64&nbsp;kB. Use a slightly lower limit
 # to decide when month pages should be split into two parts.
@@ -483,6 +485,50 @@ async def get_vk_last_added(db: Database) -> str | None:
 
 async def set_vk_last_added(db: Database, value: str):
     await set_setting_value(db, "vk_last_added", value)
+
+
+def _vk_user_token() -> str | None:
+    """Return user token unless it was previously marked invalid."""
+    token = os.getenv("VK_USER_TOKEN")
+    global _vk_user_token_bad
+    if token and _vk_user_token_bad and token != _vk_user_token_bad:
+        _vk_user_token_bad = None
+    if token and token != _vk_user_token_bad:
+        return token
+    return None
+
+
+async def _vk_api(
+    method: str, params: dict, db: Database | None = None, bot: Bot | None = None
+) -> dict:
+    """Call VK API with token fallback."""
+    tokens: list[tuple[str, str]] = []
+    user_token = _vk_user_token()
+    if user_token:
+        tokens.append(("user", user_token))
+    if VK_TOKEN:
+        tokens.append(("group", VK_TOKEN))
+    last_err: dict | None = None
+    for kind, token in tokens:
+        params["access_token"] = token
+        params["v"] = "5.131"
+        async with create_ipv4_session(ClientSession) as session:
+            async with session.post(f"https://api.vk.com/method/{method}", data=params) as resp:
+                data = await resp.json()
+        if "error" not in data:
+            return data
+        last_err = data["error"]
+        if kind == "user" and last_err.get("error_code") in {5, 27}:
+            global _vk_user_token_bad
+            if _vk_user_token_bad != token:
+                _vk_user_token_bad = token
+                if db and bot:
+                    await notify_superadmin(db, bot, "VK_USER_TOKEN expired")
+            continue
+        raise RuntimeError(f"VK error: {last_err}")
+    if last_err:
+        raise RuntimeError(f"VK error: {last_err}")
+    raise RuntimeError("VK token missing")
 
 
 def get_supabase_client() -> Client | None:
@@ -1553,7 +1599,7 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
         if fest_name:
             await sync_festival_page(db, fest_name)
 
-            await sync_festival_vk_post(db, fest_name)
+            await sync_festival_vk_post(db, fest_name, bot)
 
         await show_edit_menu(callback.from_user.id, event, bot)
         await callback.answer("Updated")
@@ -1928,7 +1974,7 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
             offset = await get_tz_offset(db)
             tz = offset_to_timezone(offset)
             await send_daily_announcement_vk(
-                db, VK_TOKEN, group_id, tz, section=section
+                db, group_id, tz, section=section, bot=bot
             )
         await callback.answer("Sent")
 
@@ -2785,7 +2831,7 @@ async def add_events_from_text(
                 logging.info("syncing festival %s", saved.festival)
                 await sync_festival_page(db, saved.festival)
 
-                await sync_festival_vk_post(db, saved.festival)
+                await sync_festival_vk_post(db, saved.festival, bot)
 
                 async with db.get_session() as session:
                     res = await session.execute(
@@ -4322,10 +4368,7 @@ async def build_festival_vk_message(db: Database, fest: Festival) -> str:
     return "\n".join(lines)
 
 
-async def sync_festival_vk_post(db: Database, name: str):
-    token = VK_TOKEN
-    if not token:
-        return
+async def sync_festival_vk_post(db: Database, name: str, bot: Bot | None = None):
     group_id = await get_vk_group_id(db)
     if not group_id:
         return
@@ -4337,10 +4380,10 @@ async def sync_festival_vk_post(db: Database, name: str):
     message = await build_festival_vk_message(db, fest)
     try:
         if fest.vk_post_url:
-            await edit_vk_post(token, fest.vk_post_url, message)
+            await edit_vk_post(fest.vk_post_url, message, db, bot)
             logging.info("updated festival post %s on VK", name)
         else:
-            url = await post_to_vk(token, group_id, message)
+            url = await post_to_vk(group_id, message, db, bot)
             if url:
                 async with db.get_session() as session:
                     fest = (await session.execute(select(Festival).where(Festival.name == name))).scalar_one()
@@ -4692,25 +4735,20 @@ async def build_daily_sections_vk(
     return section1, section2
 
 
-async def post_to_vk(token: str, group_id: str, message: str) -> str | None:
-    if not token or not group_id:
+async def post_to_vk(
+    group_id: str, message: str, db: Database | None = None, bot: Bot | None = None
+) -> str | None:
+    if not group_id:
         return None
-    url = "https://api.vk.com/method/wall.post"
     params = {
         "owner_id": f"-{group_id.lstrip('-')}",
         "from_group": 1,
         "message": message,
-        "access_token": token,
-        "v": "5.131",
     }
-    async with create_ipv4_session(ClientSession) as session:
-        async with session.post(url, data=params) as resp:
-            data = await resp.json()
-            if "error" in data:
-                raise RuntimeError(f"VK error: {data['error']}")
-            post_id = data.get("response", {}).get("post_id")
-            if post_id:
-                return f"https://vk.com/wall-{group_id.lstrip('-')}_{post_id}"
+    data = await _vk_api("wall.post", params, db, bot)
+    post_id = data.get("response", {}).get("post_id")
+    if post_id:
+        return f"https://vk.com/wall-{group_id.lstrip('-')}_{post_id}"
     return None
 
 
@@ -4721,45 +4759,40 @@ def _vk_owner_and_post_id(url: str) -> tuple[str, str] | None:
     return m.group(1), m.group(2)
 
 
-async def edit_vk_post(token: str, post_url: str, message: str) -> None:
+async def edit_vk_post(
+    post_url: str, message: str, db: Database | None = None, bot: Bot | None = None
+) -> None:
     ids = _vk_owner_and_post_id(post_url)
     if not ids:
         logging.error("invalid VK post url %s", post_url)
         return
     owner_id, post_id = ids
-    url = "https://api.vk.com/method/wall.edit"
     params = {
         "owner_id": owner_id,
         "post_id": post_id,
         "message": message,
         "from_group": 1,
-        "access_token": token,
-        "v": "5.131",
     }
-    async with create_ipv4_session(ClientSession) as session:
-        async with session.post(url, data=params) as resp:
-            data = await resp.json()
-            if "error" in data:
-                raise RuntimeError(f"VK error: {data['error']}")
+    await _vk_api("wall.edit", params, db, bot)
 
 
 async def send_daily_announcement_vk(
     db: Database,
-    token: str,
     group_id: str,
     tz: timezone,
     *,
     section: str,
     now: datetime | None = None,
+    bot: Bot | None = None,
 ):
     section1, section2 = await build_daily_sections_vk(db, tz, now)
     if section == "today":
-        await post_to_vk(token, group_id, section1)
+        await post_to_vk(group_id, section1, db, bot)
     elif section == "added":
-        await post_to_vk(token, group_id, section2)
+        await post_to_vk(group_id, section2, db, bot)
     else:
-        await post_to_vk(token, group_id, section1)
-        await post_to_vk(token, group_id, section2)
+        await post_to_vk(group_id, section1, db, bot)
+        await post_to_vk(group_id, section2, db, bot)
 
 
 async def send_daily_announcement(
@@ -4822,8 +4855,8 @@ async def daily_scheduler(db: Database, bot: Bot):
         await asyncio.sleep(60)
 
 
-async def vk_scheduler(db: Database):
-    if not VK_TOKEN:
+async def vk_scheduler(db: Database, bot: Bot):
+    if not (VK_TOKEN or os.getenv("VK_USER_TOKEN")):
         return
     while True:
         group_id = await get_vk_group_id(db)
@@ -4840,7 +4873,7 @@ async def vk_scheduler(db: Database):
         last_today = await get_vk_last_today(db)
         if (last_today or "") != now.date().isoformat() and now_time >= today_time:
             try:
-                await send_daily_announcement_vk(db, VK_TOKEN, group_id, tz, section="today")
+                await send_daily_announcement_vk(db, group_id, tz, section="today", bot=bot)
                 await set_vk_last_today(db, now.date().isoformat())
             except Exception as e:
                 logging.error("vk daily today failed: %s", e)
@@ -4848,7 +4881,7 @@ async def vk_scheduler(db: Database):
         last_added = await get_vk_last_added(db)
         if (last_added or "") != now.date().isoformat() and now_time >= added_time:
             try:
-                await send_daily_announcement_vk(db, VK_TOKEN, group_id, tz, section="added")
+                await send_daily_announcement_vk(db, group_id, tz, section="added", bot=bot)
                 await set_vk_last_added(db, now.date().isoformat())
             except Exception as e:
                 logging.error("vk daily added failed: %s", e)
@@ -5543,10 +5576,10 @@ async def handle_edit_message(message: types.Message, db: Database, bot: Bot):
     if old_fest:
         await sync_festival_page(db, old_fest)
 
-        await sync_festival_vk_post(db, old_fest)
+        await sync_festival_vk_post(db, old_fest, bot)
     if new_fest and new_fest != old_fest:
         await sync_festival_page(db, new_fest)
-        await sync_festival_vk_post(db, new_fest)
+        await sync_festival_vk_post(db, new_fest, bot)
 
     editing_sessions[message.from_user.id] = (eid, None)
     await show_edit_menu(message.from_user.id, event, bot)
@@ -5665,7 +5698,7 @@ async def handle_festival_edit_message(message: types.Message, db: Database, bot
     await show_festival_edit_menu(message.from_user.id, fest, bot)
 
     await sync_festival_page(db, fest.name)
-    await sync_festival_vk_post(db, fest.name)
+    await sync_festival_vk_post(db, fest.name, bot)
 
 
 
@@ -6262,7 +6295,7 @@ def create_app() -> web.Application:
         except Exception as e:
             logging.error("Failed to set webhook: %s", e)
         app["daily_task"] = asyncio.create_task(daily_scheduler(db, bot))
-        app["vk_task"] = asyncio.create_task(vk_scheduler(db))
+        app["vk_task"] = asyncio.create_task(vk_scheduler(db, bot))
         app["cleanup_task"] = asyncio.create_task(cleanup_scheduler(db, bot))
         app["page_task"] = asyncio.create_task(page_update_scheduler(db))
 
