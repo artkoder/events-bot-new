@@ -1041,6 +1041,66 @@ def parse_bool_text(value: str) -> bool | None:
     return None
 
 
+def linkify_plain_text(text: str) -> str:
+    """Return HTML with bare links and @username mentions made clickable."""
+    pattern = re.compile(r"(https?://\S+)|(@[A-Za-z0-9_]+)")
+    result: list[str] = []
+    pos = 0
+    for m in pattern.finditer(text):
+        result.append(html.escape(text[pos : m.start()]))
+        url, mention = m.groups()
+        if url:
+            escaped = html.escape(url)
+            result.append(f'<a href="{escaped}">{escaped}</a>')
+        else:
+            mention_text = html.escape(mention)
+            href = html.escape(f"https://t.me/{mention[1:]}")
+            result.append(f'<a href="{href}">{mention_text}</a>')
+        pos = m.end()
+    result.append(html.escape(text[pos:]))
+    return "".join(result)
+
+
+def linkify_html(html_text: str) -> str:
+    """Apply linkify_plain_text to data portions of HTML."""
+    from html.parser import HTMLParser
+
+    class Parser(HTMLParser):
+        def __init__(self) -> None:
+            super().__init__()
+            self.parts: list[str] = []
+
+        def handle_starttag(self, tag, attrs):
+            attrs_str = "".join(
+                f' {name}="{html.escape(value, quote=True)}"' if value is not None else f" {name}"
+                for name, value in attrs
+            )
+            self.parts.append(f"<{tag}{attrs_str}>")
+
+        def handle_endtag(self, tag):
+            self.parts.append(f"</{tag}>")
+
+        def handle_startendtag(self, tag, attrs):
+            attrs_str = "".join(
+                f' {name}="{html.escape(value, quote=True)}"' if value is not None else f" {name}"
+                for name, value in attrs
+            )
+            self.parts.append(f"<{tag}{attrs_str}/>")
+
+        def handle_data(self, data):
+            self.parts.append(linkify_plain_text(data))
+
+        def handle_entityref(self, name):
+            self.parts.append(f"&{name};")
+
+        def handle_charref(self, name):
+            self.parts.append(f"&#{name};")
+
+    parser = Parser()
+    parser.feed(html_text)
+    return "".join(parser.parts)
+
+
 def parse_events_date(text: str, tz: timezone) -> date | None:
     """Parse a date argument for /events allowing '2 августа [2025]'."""
     text = text.strip().lower()
@@ -6090,9 +6150,9 @@ async def update_source_page(
         cleaned = cleaned.replace(
             "\U0001f193\U0001f193\U0001f193\U0001f193", "Бесплатно"
         )
-        html_content += (
-            f"<p>{CONTENT_SEPARATOR}</p><p>" + cleaned.replace("\n", "<br/>") + "</p>"
-        )
+        cleaned = cleaned.replace("\n", "<br/>")
+        cleaned = linkify_html(cleaned)
+        html_content += f"<p>{CONTENT_SEPARATOR}</p><p>{cleaned}</p>"
         if db:
             nav_html = await build_month_nav_html(db)
             html_content = apply_month_nav(html_content, nav_html)
@@ -6233,14 +6293,16 @@ async def create_source_page(
         cleaned = cleaned.replace(
             "\U0001f193\U0001f193\U0001f193\U0001f193", "Бесплатно"
         )
-        html_content += f"<p>{cleaned.replace('\n', '<br/>')}</p>"
+        cleaned = cleaned.replace('\n', '<br/>')
+        cleaned = linkify_html(cleaned)
+        html_content += f"<p>{cleaned}</p>"
     else:
         clean_text = strip_title(text)
         clean_text = normalize_hashtag_dates(clean_text)
         clean_text = clean_text.replace(
             "\U0001f193\U0001f193\U0001f193\U0001f193", "Бесплатно"
         )
-        paragraphs = [f"<p>{html.escape(line)}</p>" for line in clean_text.splitlines()]
+        paragraphs = [f"<p>{linkify_plain_text(line)}</p>" for line in clean_text.splitlines()]
         html_content += "".join(paragraphs)
 
     if db:
