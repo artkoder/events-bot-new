@@ -4179,6 +4179,16 @@ def test_event_to_nodes_festival_link():
     fest = main.Festival(name="Jazz", telegraph_url="http://tg")
     nodes = main.event_to_nodes(e, fest)
     assert nodes[1]["children"][0]["attrs"]["href"] == "http://tg"
+    assert sum(
+        1
+        for n in nodes
+        if isinstance(n, dict)
+        and any(
+            isinstance(c, dict)
+            and c.get("attrs", {}).get("href") == "http://tg"
+            for c in n.get("children", [])
+        )
+    ) == 1
 
 
 

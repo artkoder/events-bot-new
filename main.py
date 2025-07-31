@@ -3498,7 +3498,10 @@ def event_to_nodes(e: Event, festival: Festival | None = None) -> list[dict]:
     md = format_event_md(e, festival)
 
     lines = md.split("\n")
-    body_md = "\n".join(lines[1:]) if len(lines) > 1 else ""
+    body_lines = lines[1:]
+    if festival and body_lines:
+        body_lines = body_lines[1:]
+    body_md = "\n".join(body_lines) if body_lines else ""
     from telegraph.utils import html_to_nodes
 
     nodes = [{"tag": "h4", "children": event_title_nodes(e)}]
