@@ -84,8 +84,8 @@ vk_time_sessions: dict[int, str] = {}
 
 # superadmin user_id -> pending partner user_id
 partner_info_sessions: dict[int, int] = {}
-# user_id -> festival_id for description editing
-festival_edit_sessions: dict[int, int] = {}
+# user_id -> (festival_id, field)
+festival_edit_sessions: dict[int, tuple[int, str] | int] = {}
 
 # toggle for uploading images to catbox
 CATBOX_ENABLED: bool = False
@@ -222,6 +222,9 @@ class Festival(SQLModel, table=True):
     telegraph_path: Optional[str] = None
     vk_post_url: Optional[str] = None
     photo_url: Optional[str] = None
+    site_url: Optional[str] = None
+    vk_url: Optional[str] = None
+    tg_url: Optional[str] = None
 
 
 class Database:
@@ -362,6 +365,18 @@ class Database:
             if "photo_url" not in cols:
                 await conn.exec_driver_sql(
                     "ALTER TABLE festival ADD COLUMN photo_url VARCHAR"
+                )
+            if "site_url" not in cols:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE festival ADD COLUMN site_url VARCHAR"
+                )
+            if "vk_url" not in cols:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE festival ADD COLUMN vk_url VARCHAR"
+                )
+            if "tg_url" not in cols:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE festival ADD COLUMN tg_url VARCHAR"
                 )
 
     def get_session(self) -> AsyncSession:
@@ -1514,8 +1529,26 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
             if not fest:
                 await callback.answer("Festival not found", show_alert=True)
                 return
-        festival_edit_sessions[callback.from_user.id] = fid
-        await callback.message.answer("Send festival description")
+        festival_edit_sessions[callback.from_user.id] = (fid, None)
+        await show_festival_edit_menu(callback.from_user.id, fest, bot)
+        await callback.answer()
+    elif data.startswith("festfield:"):
+        _, fid, field = data.split(":")
+        async with db.get_session() as session:
+            if not await session.get(User, callback.from_user.id):
+                await callback.answer("Not authorized", show_alert=True)
+                return
+            fest = await session.get(Festival, int(fid))
+            if not fest:
+                await callback.answer("Festival not found", show_alert=True)
+                return
+        festival_edit_sessions[callback.from_user.id] = (int(fid), field)
+        await callback.message.answer(f"Send new value for {field} (use - to clear)")
+        await callback.answer()
+    elif data.startswith("festdone:"):
+        if callback.from_user.id in festival_edit_sessions:
+            del festival_edit_sessions[callback.from_user.id]
+        await callback.message.answer("Editing finished")
         await callback.answer()
     elif data.startswith("festdel:"):
         fid = int(data.split(":")[1])
@@ -1707,10 +1740,8 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
         if not fest:
             await callback.answer("Festival not found", show_alert=True)
             return
-        festival_edit_sessions[callback.from_user.id] = fid
-        await callback.message.answer(
-            f"Editing {fest.name}. Send new description"
-        )
+        festival_edit_sessions[callback.from_user.id] = (fid, None)
+        await show_festival_edit_menu(callback.from_user.id, fest, bot)
         await callback.answer()
     elif data.startswith("festdel:"):
         fid = int(data.split(":")[1])
@@ -3515,16 +3546,17 @@ def event_to_nodes(e: Event, festival: Festival | None = None) -> list[dict]:
                 {
                     "tag": "p",
                     "children": [
+                        "\u2728 ",
                         {
                             "tag": "a",
                             "attrs": {"href": fest.telegraph_url},
                             "children": [fest.name],
-                        }
+                        },
                     ],
                 }
             )
         elif fest:
-            nodes.append({"tag": "p", "children": [fest.name]})
+            nodes.append({"tag": "p", "children": ["\u2728 ", fest.name]})
     if body_md:
         html_text = md_to_html(body_md)
         nodes.extend(html_to_nodes(html_text))
@@ -4086,8 +4118,52 @@ async def build_festival_page_content(db: Database, fest: Festival) -> tuple[str
     if fest.photo_url:
         nodes.append({"tag": "img", "attrs": {"src": fest.photo_url}})
         nodes.append({"tag": "p", "children": ["\u00a0"]})
+    if events:
+        starts: list[date] = []
+        ends: list[date] = []
+        locs: set[str] = set()
+        for ev in events:
+            d_start = parse_iso_date(ev.date.split("..", 1)[0])
+            if d_start:
+                starts.append(d_start)
+            d_end = None
+            if ev.end_date:
+                d_end = parse_iso_date(ev.end_date.split("..", 1)[0])
+            elif ".." in ev.date:
+                d_end = parse_iso_date(ev.date.split("..", 1)[1])
+            else:
+                d_end = d_start
+            if d_end:
+                ends.append(d_end)
+            if ev.location_name:
+                locs.add(ev.location_name)
+        if starts:
+            start_d = min(starts)
+            end_d = max(ends) if ends else start_d
+            if start_d == end_d:
+                date_line = f"\U0001f4c5 {format_day_pretty(start_d)}"
+            else:
+                date_line = f"\U0001f4c5 {format_day_pretty(start_d)} - {format_day_pretty(end_d)}"
+            nodes.append({"tag": "p", "children": [date_line]})
+        if len(locs) == 1:
+            nodes.append({"tag": "p", "children": [f"\U0001f4cd {next(iter(locs))}"]})
     if fest.description:
         nodes.append({"tag": "p", "children": [fest.description]})
+    contacts: list[str] = []
+    if fest.site_url:
+        contacts.append(f"сайт: {fest.site_url}")
+    if fest.vk_url:
+        contacts.append(f"вк: {fest.vk_url}")
+    if fest.tg_url:
+        contacts.append(f"телеграм: {fest.tg_url}")
+    if contacts:
+        nodes.append({"tag": "h3", "children": ["Контакты фестиваля"]})
+        for line in contacts:
+            nodes.append({"tag": "p", "children": [line]})
+    if events:
+        nodes.append({"tag": "h3", "children": ["Мероприятия фестиваля"]})
+        nodes.append({"tag": "br"})
+        nodes.append({"tag": "p", "children": ["\u00a0"]})
     for e in events:
         nodes.extend(event_to_nodes(e))
     return fest.name, nodes
@@ -4137,7 +4213,7 @@ async def build_festival_vk_message(db: Database, fest: Festival) -> str:
             select(Event).where(Event.festival == fest.name).order_by(Event.date, Event.time)
         )
         events = res.scalars().all()
-    lines = [fest.name]
+    lines = [fest.name.upper()]
     if fest.description:
         lines.append(fest.description)
     for ev in events:
@@ -5005,6 +5081,35 @@ async def show_edit_menu(user_id: int, event: Event, bot: Bot):
     await bot.send_message(user_id, "\n".join(lines), reply_markup=markup)
 
 
+async def show_festival_edit_menu(user_id: int, fest: Festival, bot: Bot):
+    lines = [
+        f"name: {fest.name}",
+        f"description: {fest.description or ''}",
+        f"site: {fest.site_url or ''}",
+        f"vk: {fest.vk_url or ''}",
+        f"telegram: {fest.tg_url or ''}",
+    ]
+    fields = ["description", "site", "vk", "telegram"]
+    keyboard = []
+    row = []
+    for idx, field in enumerate(fields, 1):
+        row.append(
+            types.InlineKeyboardButton(
+                text=field, callback_data=f"festfield:{fest.id}:{field}"
+            )
+        )
+        if idx % 2 == 0:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+    keyboard.append(
+        [types.InlineKeyboardButton(text="Done", callback_data=f"festdone:{fest.id}")]
+    )
+    markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard)
+    await bot.send_message(user_id, "\n".join(lines), reply_markup=markup)
+
+
 async def handle_events(message: types.Message, db: Database, bot: Bot):
     parts = message.text.split(maxsplit=1)
     offset = await get_tz_offset(db)
@@ -5422,9 +5527,10 @@ async def handle_partner_info_message(message: types.Message, db: Database, bot:
 
 
 async def handle_festival_edit_message(message: types.Message, db: Database, bot: Bot):
-    fid = festival_edit_sessions.get(message.from_user.id)
-    if not fid:
+    state = festival_edit_sessions.get(message.from_user.id)
+    if not state:
         return
+    fid, field = state if isinstance(state, tuple) else (state, "description")
     text = (message.text or "").strip()
     async with db.get_session() as session:
         fest = await session.get(Festival, fid)
@@ -5432,9 +5538,16 @@ async def handle_festival_edit_message(message: types.Message, db: Database, bot
             await bot.send_message(message.chat.id, "Festival not found")
             festival_edit_sessions.pop(message.from_user.id, None)
             return
-        fest.description = text
+        if field == "description":
+            fest.description = text
+        elif field == "site":
+            fest.site_url = None if text in {"", "-"} else text
+        elif field == "vk":
+            fest.vk_url = None if text in {"", "-"} else text
+        elif field == "telegram":
+            fest.tg_url = None if text in {"", "-"} else text
         await session.commit()
-        logging.info("festival %s description updated", fest.name)
+        logging.info("festival %s %s updated", fest.name, field)
     festival_edit_sessions.pop(message.from_user.id, None)
     await bot.send_message(message.chat.id, "Festival updated")
     await sync_festival_page(db, fest.name)
@@ -5965,6 +6078,8 @@ def create_app() -> web.Application:
         or c.data.startswith("block:")
         or c.data.startswith("unblock:")
         or c.data.startswith("festedit:")
+        or c.data.startswith("festfield:")
+        or c.data.startswith("festdone:")
         or c.data.startswith("festdel:")
         or c.data.startswith("setfest:")
     ,
