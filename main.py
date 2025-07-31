@@ -902,12 +902,15 @@ def festival_dates_from_text(text: str) -> tuple[date | None, date | None]:
 
 
 def festival_dates(fest: Festival, events: Iterable[Event]) -> tuple[date | None, date | None]:
-    """Return start and end dates using festival description when available."""
+    """Return start and end dates for a festival."""
+    start, end = festival_date_range(events)
+    if start or end:
+        return start, end
     if fest.description:
         s, e = festival_dates_from_text(fest.description)
         if s or e:
             return s, e or s
-    return festival_date_range(events)
+    return None, None
 
 
 def festival_location(events: Iterable[Event]) -> str | None:
