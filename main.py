@@ -727,6 +727,35 @@ async def notify_event_added(
     await notify_superadmin(db, bot, text)
 
 
+async def notify_inactive_partners(
+    db: Database, bot: Bot, tz: timezone
+) -> list[User]:
+    """Send reminders to partners without events in the last week."""
+    cutoff = week_cutoff(tz)
+    notified: list[User] = []
+    async with db.get_session() as session:
+        res = await session.execute(
+            select(User).where(User.is_partner.is_(True), User.blocked.is_(False))
+        )
+        partners = res.scalars().all()
+        for p in partners:
+            last = (
+                await session.execute(
+                    select(Event.added_at)
+                    .where(Event.creator_id == p.user_id)
+                    .order_by(Event.added_at.desc())
+                    .limit(1)
+                )
+            ).scalars().first()
+            if not last or last < cutoff:
+                await bot.send_message(
+                    p.user_id,
+                    "\u26a0\ufe0f Вы не добавляли мероприятия на прошлой неделе",
+                )
+                notified.append(p)
+    return notified
+
+
 async def dump_database(path: str = DB_PATH) -> bytes:
     """Return a SQL dump of the specified database."""
     async with aiosqlite.connect(path) as conn:
@@ -3677,6 +3706,15 @@ def recent_cutoff(tz: timezone, now: datetime | None = None) -> datetime:
     return start_local.astimezone(timezone.utc).replace(tzinfo=None)
 
 
+def week_cutoff(tz: timezone, now: datetime | None = None) -> datetime:
+    """Return UTC datetime for 7 days ago."""
+    if now is None:
+        now = datetime.now(tz)
+    return (
+        now.astimezone(timezone.utc).replace(tzinfo=None) - timedelta(days=7)
+    )
+
+
 def split_text(text: str, limit: int = 4096) -> list[str]:
     """Split text into chunks without breaking lines."""
     parts: list[str] = []
@@ -5427,6 +5465,33 @@ async def page_update_scheduler(db: Database):
         await asyncio.sleep(60)
 
 
+async def partner_notification_scheduler(db: Database, bot: Bot):
+    """Remind partners who haven't added events for a week."""
+    last_run: date | None = None
+    while True:
+        offset = await get_tz_offset(db)
+        tz = offset_to_timezone(offset)
+        now = datetime.now(tz)
+        if now.time() >= time(9, 0) and now.date() != last_run:
+            try:
+                notified = await notify_inactive_partners(db, bot, tz)
+                if notified:
+                    names = ", ".join(
+                        f"@{u.username}" if u.username else str(u.user_id)
+                        for u in notified
+                    )
+                    await notify_superadmin(
+                        db, bot, f"Partner reminders sent to: {names}"
+                    )
+                else:
+                    await notify_superadmin(db, bot, "Partner reminders: none")
+            except Exception as e:
+                logging.error("partner reminder failed: %s", e)
+                await notify_superadmin(db, bot, f"Partner reminder failed: {e}")
+            last_run = now.date()
+        await asyncio.sleep(60)
+
+
 async def build_events_message(db: Database, target_date: date, tz: timezone, creator_id: int | None = None):
     async with db.get_session() as session:
         stmt = select(Event).where(
@@ -6938,6 +7003,9 @@ def create_app() -> web.Application:
         app["vk_task"] = asyncio.create_task(vk_scheduler(db, bot))
         app["cleanup_task"] = asyncio.create_task(cleanup_scheduler(db, bot))
         app["page_task"] = asyncio.create_task(page_update_scheduler(db))
+        app["partner_task"] = asyncio.create_task(
+            partner_notification_scheduler(db, bot)
+        )
 
     async def on_shutdown(app: web.Application):
         await bot.session.close()
@@ -6957,6 +7025,10 @@ def create_app() -> web.Application:
             app["page_task"].cancel()
             with contextlib.suppress(Exception):
                 await app["page_task"]
+        if "partner_task" in app:
+            app["partner_task"].cancel()
+            with contextlib.suppress(Exception):
+                await app["partner_task"]
 
     app.on_startup.append(on_startup)
     app.on_shutdown.append(on_shutdown)
