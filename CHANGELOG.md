@@ -144,6 +144,12 @@
 - `/fest` gained edit options for these fields. Existing records are updated
   automatically with the short name as the default full one.
 
+## v0.3.21 - Partner activity reminder
+
+- Partners receive a weekly reminder at 9 AM if they haven't added events in
+  the past seven days.
+- The superadmin gets a list of partners who were reminded.
+
 
 
 

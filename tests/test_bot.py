@@ -5686,4 +5686,44 @@ async def test_edit_vk_post_add_photo(monkeypatch):
     assert captured.get("attachments") == "photo-1_10,photo-1_20"
 
 
+@pytest.mark.asyncio
+async def test_partner_notification_scheduler(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    start_msg = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "S"},
+            "text": "/start",
+        }
+    )
+    await handle_start(start_msg, db, bot)
+
+    async with db.get_session() as session:
+        session.add(User(user_id=2, username="p", is_partner=True))
+        await session.commit()
+
+    class FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime.combine(date.today(), time(9, 5), tzinfo=tz)
+
+    monkeypatch.setattr(main, "datetime", FakeDatetime)
+
+    async def fake_sleep(*args, **kwargs):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        await main.partner_notification_scheduler(db, bot)
+
+    assert any("неделе" in m[1] for m in bot.messages if m[0] == 2)
+    assert any("p" in m[1] for m in bot.messages if m[0] == 1)
+
+
 
