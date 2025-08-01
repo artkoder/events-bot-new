@@ -92,6 +92,9 @@ festival_edit_sessions: dict[int, tuple[int, str | None]] = {}
 add_event_sessions: set[int] = set()
 # user_id -> event_id waiting for VK link
 vk_link_sessions: dict[int, int] = {}
+# waiting for a date for events listing
+events_date_sessions: set[int] = set()
+
 
 # toggle for uploading images to catbox
 CATBOX_ENABLED: bool = False
@@ -1632,6 +1635,37 @@ async def handle_menu(message: types.Message, db: Database, bot: Bot):
         await send_main_menu(bot, user, message.chat.id)
 
 
+async def handle_events_menu(message: types.Message, db: Database, bot: Bot):
+    """Show options for events listing."""
+    buttons = [
+        [types.InlineKeyboardButton(text="Сегодня", callback_data="menuevt:today")],
+        [types.InlineKeyboardButton(text="Дата", callback_data="menuevt:date")],
+    ]
+    markup = types.InlineKeyboardMarkup(inline_keyboard=buttons)
+    await bot.send_message(message.chat.id, "Выберите день", reply_markup=markup)
+
+
+async def handle_events_date_message(message: types.Message, db: Database, bot: Bot):
+    if message.from_user.id not in events_date_sessions:
+        return
+    value = (message.text or "").strip()
+    offset = await get_tz_offset(db)
+    tz = offset_to_timezone(offset)
+    day = parse_events_date(value, tz)
+    if not day:
+        await bot.send_message(message.chat.id, "Неверная дата")
+        return
+    events_date_sessions.discard(message.from_user.id)
+    async with db.get_session() as session:
+        user = await session.get(User, message.from_user.id)
+        if not user or user.blocked:
+            await bot.send_message(message.chat.id, "Not authorized")
+            return
+        creator_filter = user.user_id if user.is_partner else None
+    text, markup = await build_events_message(db, day, tz, creator_filter)
+    await bot.send_message(message.chat.id, text, reply_markup=markup)
+
+
 async def handle_register(message: types.Message, db: Database, bot: Bot):
     async with db.get_session() as session:
         existing = await session.get(User, message.from_user.id)
@@ -2244,6 +2278,25 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
         await callback.answer()
     elif data == "vklinkskip":
         await callback.answer("Skipped")
+    elif data == "menuevt:today":
+        offset = await get_tz_offset(db)
+        tz = offset_to_timezone(offset)
+        async with db.get_session() as session:
+            user = await session.get(User, callback.from_user.id)
+            if not user or user.blocked:
+                await callback.message.answer("Not authorized")
+                await callback.answer()
+                return
+            creator_filter = user.user_id if user.is_partner else None
+        day = datetime.now(tz).date()
+        text, markup = await build_events_message(db, day, tz, creator_filter)
+        await callback.message.answer(text, reply_markup=markup)
+        await callback.answer()
+    elif data == "menuevt:date":
+        events_date_sessions.add(callback.from_user.id)
+        await callback.message.answer("Введите дату")
+        await callback.answer()
+
 
 
 async def handle_tz(message: types.Message, db: Database, bot: Bot):
@@ -6747,6 +6800,13 @@ def create_app() -> web.Application:
     async def menu_wrapper(message: types.Message):
         await handle_menu(message, db, bot)
 
+    async def events_menu_wrapper(message: types.Message):
+        await handle_events_menu(message, db, bot)
+
+    async def events_date_wrapper(message: types.Message):
+        await handle_events_date_message(message, db, bot)
+
+
     async def add_event_start_wrapper(message: types.Message):
         await handle_add_event_start(message, db, bot)
 
@@ -6783,6 +6843,7 @@ def create_app() -> web.Application:
         or c.data.startswith("vkdailysend:")
         or c.data.startswith("vklink:")
         or c.data == "vklinkskip"
+        or c.data.startswith("menuevt:")
         or c.data.startswith("togglefree:")
         or c.data.startswith("markfree:")
         or c.data.startswith("togglesilent:")
@@ -6809,6 +6870,8 @@ def create_app() -> web.Application:
     dp.message.register(vktime_wrapper, Command("vktime"))
     dp.message.register(vkphotos_wrapper, Command("vkphotos"))
     dp.message.register(menu_wrapper, Command("menu"))
+    dp.message.register(events_menu_wrapper, lambda m: m.text == MENU_EVENTS)
+    dp.message.register(events_date_wrapper, lambda m: m.from_user.id in events_date_sessions)
     dp.message.register(add_event_start_wrapper, lambda m: m.text == MENU_ADD_EVENT)
     dp.message.register(add_event_session_wrapper, lambda m: m.from_user.id in add_event_sessions)
     dp.message.register(vk_link_msg_wrapper, lambda m: m.from_user.id in vk_link_sessions)
