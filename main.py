@@ -5822,6 +5822,13 @@ async def handle_dumpdb(message: types.Message, db: Database, bot: Bot):
     data = await dump_database(db.engine.url.database)
     file = types.BufferedInputFile(data, filename="dump.sql")
     await bot.send_document(message.chat.id, file)
+    token_exists = os.path.exists(TELEGRAPH_TOKEN_FILE)
+    if token_exists:
+        with open(TELEGRAPH_TOKEN_FILE, "rb") as f:
+            token_file = types.BufferedInputFile(
+                f.read(), filename="telegraph_token.txt"
+            )
+        await bot.send_document(message.chat.id, token_file)
 
     lines = ["Channels:"]
     for ch in channels:
@@ -5837,12 +5844,21 @@ async def handle_dumpdb(message: types.Message, db: Database, bot: Bot):
 
     lines.append("")
     lines.append("To restore on another server:")
-    lines.append("1. Start the bot and send /restore with the dump file.")
+    step = 1
+    lines.append(f"{step}. Start the bot and send /restore with the dump file.")
+    step += 1
     if tz_setting:
-        lines.append(f"2. Current timezone: {tz_setting.value}")
-    lines.append("3. Add the bot as admin to the channels listed above.")
+        lines.append(f"{step}. Current timezone: {tz_setting.value}")
+        step += 1
+    lines.append(f"{step}. Add the bot as admin to the channels listed above.")
+    step += 1
+    if token_exists:
+        lines.append(
+            f"{step}. Copy telegraph_token.txt to {TELEGRAPH_TOKEN_FILE} before first run."
+        )
+        step += 1
     if catbox_setting and catbox_setting.value == "1":
-        lines.append("4. Run /images to enable photo uploads.")
+        lines.append(f"{step}. Run /images to enable photo uploads.")
 
     await bot.send_message(message.chat.id, "\n".join(lines))
 

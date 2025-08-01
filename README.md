@@ -104,9 +104,11 @@ The command prints the created page URL and confirms that editing works.
 
 ## Backup and restore
 
-Use `/dumpdb` to download a SQL dump of the current database. The bot replies
-with a list of connected channels and the steps required to restore the dump on
-another server. Send `/restore` with the dump file attached to load it back.
+Use `/dumpdb` to download a SQL dump of the current database. When a Telegraph
+token file exists the bot also sends `telegraph_token.txt`. The reply lists all
+connected channels and detailed steps to set up the bot elsewhere. Copy the
+token file to `/data/telegraph_token.txt` on the new host and send `/restore`
+with the dump file attached to load the database.
 
 ## Telegraph caching
 
