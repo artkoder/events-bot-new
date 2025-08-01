@@ -88,6 +88,13 @@ partner_info_sessions: dict[int, int] = {}
 # user_id -> (festival_id, field?) for festival editing
 festival_edit_sessions: dict[int, tuple[int, str | None]] = {}
 
+# pending event text/photo input
+add_event_sessions: set[int] = set()
+# user_id -> event_id waiting for VK link
+vk_link_sessions: dict[int, int] = {}
+# waiting for a date for events listing
+events_date_sessions: set[int] = set()
+
 # toggle for uploading images to catbox
 CATBOX_ENABLED: bool = False
 # toggle for sending photos to VK
@@ -98,6 +105,10 @@ _vk_user_token_bad: str | None = None
 # Telegraph API rejects pages over ~64&nbsp;kB. Use a slightly lower limit
 # to decide when month pages should be split into two parts.
 TELEGRAPH_PAGE_LIMIT = 60000
+
+# main menu buttons
+MENU_ADD_EVENT = "\u2795 Добавить событие"
+MENU_EVENTS = "\U0001f4c5 События"
 
 
 class IPv4AiohttpSession(AiohttpSession):
@@ -1574,6 +1585,16 @@ def get_telegraph_token() -> str | None:
         return None
 
 
+async def send_main_menu(bot: Bot, user: User | None, chat_id: int) -> None:
+    """Show main menu buttons depending on user role."""
+    buttons = [
+        [types.KeyboardButton(text=MENU_ADD_EVENT)],
+        [types.KeyboardButton(text=MENU_EVENTS)],
+    ]
+    markup = types.ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
+    await bot.send_message(chat_id, "Choose action", reply_markup=markup)
+
+
 async def handle_start(message: types.Message, db: Database, bot: Bot):
     async with db.get_session() as session:
         result = await session.execute(select(User))
@@ -1588,6 +1609,7 @@ async def handle_start(message: types.Message, db: Database, bot: Bot):
                 await bot.send_message(message.chat.id, f"You are partner{org}")
             else:
                 await bot.send_message(message.chat.id, "Bot is running")
+            await send_main_menu(bot, user, message.chat.id)
             return
         if user_count == 0:
             session.add(
@@ -1599,8 +1621,48 @@ async def handle_start(message: types.Message, db: Database, bot: Bot):
             )
             await session.commit()
             await bot.send_message(message.chat.id, "You are superadmin")
+            new_user = await session.get(User, message.from_user.id)
+            await send_main_menu(bot, new_user, message.chat.id)
         else:
             await bot.send_message(message.chat.id, "Use /register to apply")
+
+
+async def handle_menu(message: types.Message, db: Database, bot: Bot):
+    async with db.get_session() as session:
+        user = await session.get(User, message.from_user.id)
+    if user and not user.blocked:
+        await send_main_menu(bot, user, message.chat.id)
+
+
+async def handle_events_menu(message: types.Message, db: Database, bot: Bot):
+    """Show options for events listing."""
+    buttons = [
+        [types.InlineKeyboardButton(text="Сегодня", callback_data="menuevt:today")],
+        [types.InlineKeyboardButton(text="Дата", callback_data="menuevt:date")],
+    ]
+    markup = types.InlineKeyboardMarkup(inline_keyboard=buttons)
+    await bot.send_message(message.chat.id, "Выберите день", reply_markup=markup)
+
+
+async def handle_events_date_message(message: types.Message, db: Database, bot: Bot):
+    if message.from_user.id not in events_date_sessions:
+        return
+    value = (message.text or "").strip()
+    offset = await get_tz_offset(db)
+    tz = offset_to_timezone(offset)
+    day = parse_events_date(value, tz)
+    if not day:
+        await bot.send_message(message.chat.id, "Неверная дата")
+        return
+    events_date_sessions.discard(message.from_user.id)
+    async with db.get_session() as session:
+        user = await session.get(User, message.from_user.id)
+        if not user or user.blocked:
+            await bot.send_message(message.chat.id, "Not authorized")
+            return
+        creator_filter = user.user_id if user.is_partner else None
+    text, markup = await build_events_message(db, day, tz, creator_filter)
+    await bot.send_message(message.chat.id, text, reply_markup=markup)
 
 
 async def handle_register(message: types.Message, db: Database, bot: Bot):
@@ -2208,6 +2270,31 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                 db, group_id, tz, section=section, bot=bot
             )
         await callback.answer("Sent")
+    elif data.startswith("vklink:"):
+        eid = int(data.split(":", 1)[1])
+        vk_link_sessions[callback.from_user.id] = eid
+        await callback.message.answer("Send VK post link")
+        await callback.answer()
+    elif data == "vklinkskip":
+        await callback.answer("Skipped")
+    elif data == "menuevt:today":
+        offset = await get_tz_offset(db)
+        tz = offset_to_timezone(offset)
+        async with db.get_session() as session:
+            user = await session.get(User, callback.from_user.id)
+            if not user or user.blocked:
+                await callback.message.answer("Not authorized")
+                await callback.answer()
+                return
+            creator_filter = user.user_id if user.is_partner else None
+        day = datetime.now(tz).date()
+        text, markup = await build_events_message(db, day, tz, creator_filter)
+        await callback.message.answer(text, reply_markup=markup)
+        await callback.answer()
+    elif data == "menuevt:date":
+        events_date_sessions.add(callback.from_user.id)
+        await callback.message.answer("Введите дату")
+        await callback.answer()
 
 
 async def handle_tz(message: types.Message, db: Database, bot: Bot):
@@ -3127,10 +3214,18 @@ async def add_events_from_text(
 
 
 async def handle_add_event(message: types.Message, db: Database, bot: Bot):
-    parts = (message.text or message.caption or "").split(maxsplit=1)
-    if len(parts) != 2:
-        await bot.send_message(message.chat.id, "Usage: /addevent <text>")
-        return
+    using_session = False
+    text_raw = message.text or message.caption or ""
+    if message.from_user.id in add_event_sessions:
+        using_session = True
+        add_event_sessions.discard(message.from_user.id)
+        text_content = text_raw
+    else:
+        parts = text_raw.split(maxsplit=1)
+        if len(parts) != 2:
+            await bot.send_message(message.chat.id, "Usage: /addevent <text>")
+            return
+        text_content = parts[1]
     async with db.get_session() as session:
         user = await session.get(User, message.from_user.id)
         if user and user.blocked:
@@ -3140,9 +3235,8 @@ async def handle_add_event(message: types.Message, db: Database, bot: Bot):
     images = await extract_images(message, bot)
     media = images if images else None
     html_text = message.html_text or message.caption_html
-    if html_text and html_text.startswith("/addevent"):
+    if not using_session and html_text and html_text.startswith("/addevent"):
         html_text = html_text[len("/addevent") :].lstrip()
-    text_content = parts[1]
     source_link = None
     lines = text_content.splitlines()
     if lines:
@@ -3200,6 +3294,22 @@ async def handle_add_event(message: types.Message, db: Database, bot: Bot):
             reply_markup=markup,
         )
         await notify_event_added(db, bot, user, saved, added)
+        link_markup = types.InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    types.InlineKeyboardButton(
+                        text="Добавить ссылку на Вк этого мероприятия",
+                        callback_data=f"vklink:{saved.id}",
+                    ),
+                    types.InlineKeyboardButton(text="Нет", callback_data="vklinkskip"),
+                ]
+            ]
+        )
+        await bot.send_message(
+            message.chat.id,
+            "Добавить ссылку на Вк этого мероприятия?",
+            reply_markup=link_markup,
+        )
 
 
 async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
@@ -3319,6 +3429,22 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
         reply_markup=markup,
     )
     await notify_event_added(db, bot, user, event, added)
+    link_markup = types.InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                types.InlineKeyboardButton(
+                    text="Добавить ссылку на Вк этого мероприятия",
+                    callback_data=f"vklink:{event.id}",
+                ),
+                types.InlineKeyboardButton(text="Нет", callback_data="vklinkskip"),
+            ]
+        ]
+    )
+    await bot.send_message(
+        message.chat.id,
+        "Добавить ссылку на Вк этого мероприятия?",
+        reply_markup=link_markup,
+    )
 
 
 def format_day(day: date, tz: timezone) -> str:
@@ -6028,6 +6154,34 @@ async def handle_edit_message(message: types.Message, db: Database, bot: Bot):
     await show_edit_menu(message.from_user.id, event, bot)
 
 
+async def handle_add_event_start(message: types.Message, db: Database, bot: Bot):
+    """Initiate event creation via the menu."""
+    async with db.get_session() as session:
+        user = await session.get(User, message.from_user.id)
+        if not user or user.blocked:
+            await bot.send_message(message.chat.id, "Not authorized")
+            return
+    add_event_sessions.add(message.from_user.id)
+    await bot.send_message(message.chat.id, "Send event text and optional photo")
+
+
+async def handle_vk_link_message(message: types.Message, db: Database, bot: Bot):
+    eid = vk_link_sessions.get(message.from_user.id)
+    if not eid:
+        return
+    link = (message.text or "").strip()
+    if not is_vk_wall_url(link):
+        await bot.send_message(message.chat.id, "Invalid link")
+        return
+    async with db.get_session() as session:
+        event = await session.get(Event, eid)
+        if event:
+            event.source_post_url = link
+            await session.commit()
+    vk_link_sessions.pop(message.from_user.id, None)
+    await bot.send_message(message.chat.id, "Link saved")
+
+
 async def handle_daily_time_message(message: types.Message, db: Database, bot: Bot):
     cid = daily_time_sessions.get(message.from_user.id)
     if not cid:
@@ -6641,6 +6795,24 @@ def create_app() -> web.Application:
     async def vkphotos_wrapper(message: types.Message):
         await handle_vkphotos(message, db, bot)
 
+    async def menu_wrapper(message: types.Message):
+        await handle_menu(message, db, bot)
+
+    async def events_menu_wrapper(message: types.Message):
+        await handle_events_menu(message, db, bot)
+
+    async def events_date_wrapper(message: types.Message):
+        await handle_events_date_message(message, db, bot)
+
+    async def add_event_start_wrapper(message: types.Message):
+        await handle_add_event_start(message, db, bot)
+
+    async def add_event_session_wrapper(message: types.Message):
+        await handle_add_event(message, db, bot)
+
+    async def vk_link_msg_wrapper(message: types.Message):
+        await handle_vk_link_message(message, db, bot)
+
     dp.message.register(start_wrapper, Command("start"))
     dp.message.register(register_wrapper, Command("register"))
     dp.message.register(requests_wrapper, Command("requests"))
@@ -6666,6 +6838,9 @@ def create_app() -> web.Application:
         or c.data == "vkunset"
         or c.data.startswith("vktime:")
         or c.data.startswith("vkdailysend:")
+        or c.data.startswith("vklink:")
+        or c.data == "vklinkskip"
+        or c.data.startswith("menuevt:")
         or c.data.startswith("togglefree:")
         or c.data.startswith("markfree:")
         or c.data.startswith("togglesilent:")
@@ -6691,6 +6866,12 @@ def create_app() -> web.Application:
     dp.message.register(vkgroup_wrapper, Command("vkgroup"))
     dp.message.register(vktime_wrapper, Command("vktime"))
     dp.message.register(vkphotos_wrapper, Command("vkphotos"))
+    dp.message.register(menu_wrapper, Command("menu"))
+    dp.message.register(events_menu_wrapper, lambda m: m.text == MENU_EVENTS)
+    dp.message.register(events_date_wrapper, lambda m: m.from_user.id in events_date_sessions)
+    dp.message.register(add_event_start_wrapper, lambda m: m.text == MENU_ADD_EVENT)
+    dp.message.register(add_event_session_wrapper, lambda m: m.from_user.id in add_event_sessions)
+    dp.message.register(vk_link_msg_wrapper, lambda m: m.from_user.id in vk_link_sessions)
     dp.message.register(partner_info_wrapper, lambda m: m.from_user.id in partner_info_sessions)
     dp.message.register(channels_wrapper, Command("channels"))
     dp.message.register(reg_daily_wrapper, Command("regdailychannels"))
