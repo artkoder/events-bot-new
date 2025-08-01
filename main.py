@@ -1110,26 +1110,20 @@ async def build_month_nav_html(db: Database) -> str:
     async with db.get_session() as session:
         result = await session.execute(select(MonthPage).order_by(MonthPage.month))
         months = result.scalars().all()
-    today_month = datetime.now(LOCAL_TZ).strftime("%Y-%m")
-    future_months = [m for m in months if m.month >= today_month]
-    if not future_months:
+    if not months:
         return ""
     links: list[str] = []
-    for idx, p in enumerate(future_months):
+    for idx, p in enumerate(months):
         name = month_name_nominative(p.month)
         links.append(f'<a href="{html.escape(p.url)}">{name}</a>')
-        if idx < len(future_months) - 1:
+        if idx < len(months) - 1:
             links.append(" ")
     return "<br/><h4>" + "".join(links) + "</h4>"
 
 async def build_month_buttons(db: Database, limit: int = 3) -> list[types.InlineKeyboardButton]:
     """Return buttons linking to upcoming month pages."""
     async with db.get_session() as session:
-        result = await session.execute(
-            select(MonthPage)
-            .where(MonthPage.month >= datetime.now(LOCAL_TZ).strftime("%Y-%m"))
-            .order_by(MonthPage.month)
-        )
+        result = await session.execute(select(MonthPage).order_by(MonthPage.month))
         months = result.scalars().all()
     buttons: list[types.InlineKeyboardButton] = []
     for p in months[:limit]:
@@ -3657,11 +3651,12 @@ def format_event_vk(
 
     lines = [title]
     if festival:
-        link = festival.vk_post_url
+        link = festival.vk_url or festival.vk_post_url
+        prefix = "✨ "
         if link:
-            lines.append(f"[{link}|{festival.name}]")
+            lines.append(f"{prefix}[{link}|{festival.name}]")
         else:
-            lines.append(festival.name)
+            lines.append(f"{prefix}{festival.name}")
     lines.append(desc)
 
     if e.pushkin_card:
@@ -4078,8 +4073,7 @@ async def build_month_page_content(
             content.extend(event_to_nodes(ev, fest, fest_icon=True))
 
 
-    today_month = datetime.now(LOCAL_TZ).strftime("%Y-%m")
-    future_pages = [p for p in nav_pages if p.month >= today_month]
+    future_pages = [p for p in nav_pages if p.month >= month]
     month_nav: list[dict] = []
     nav_children = []
     if future_pages:
@@ -4365,8 +4359,7 @@ async def build_weekend_page_content(db: Database, start: str) -> tuple[str, lis
 
     month_nav: list[dict] = []
     cur_month = start[:7]
-    today_month = datetime.now(LOCAL_TZ).strftime("%Y-%m")
-    future_months = [m for m in month_pages if m.month >= today_month]
+    future_months = [m for m in month_pages if m.month >= cur_month]
     if future_months:
         nav_children = []
         for idx, p in enumerate(future_months):
