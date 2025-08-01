@@ -4127,7 +4127,7 @@ def test_format_event_vk_festival_link():
     fest = main.Festival(name="Jazz", vk_post_url="https://vk.com/wall-1_1")
     text = main.format_event_vk(e, festival=fest)
     lines = text.splitlines()
-    assert lines[1] == "[https://vk.com/wall-1_1|Jazz]"
+    assert lines[1] == "✨ [https://vk.com/wall-1_1|Jazz]"
 
 
 @pytest.mark.asyncio
