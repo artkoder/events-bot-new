@@ -5053,8 +5053,32 @@ async def edit_vk_post(
         "message": message,
         "from_group": 1,
     }
+    current: list[str] = []
+    try:
+        data = await _vk_api(
+            "wall.getById",
+            {"posts": f"{owner_id}_{post_id}"},
+            db,
+            bot,
+        )
+        items = data.get("response") or []
+        if items:
+            post = items[0]
+            for att in post.get("attachments", []):
+                if att.get("type") == "photo":
+                    p = att.get("photo") or {}
+                    o_id = p.get("owner_id")
+                    p_id = p.get("id")
+                    if o_id is not None and p_id is not None:
+                        current.append(f"photo{o_id}_{p_id}")
+    except Exception as e:
+        logging.error("failed to fetch VK post attachments: %s", e)
     if attachments:
-        params["attachments"] = ",".join(attachments)
+        for a in attachments:
+            if a not in current:
+                current.append(a)
+    if current:
+        params["attachments"] = ",".join(current)
     await _vk_api("wall.edit", params, db, bot)
 
 

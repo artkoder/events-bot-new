@@ -5502,4 +5502,69 @@ async def test_festival_vk_message_lists_upcoming(tmp_path: Path):
     assert "[http://vk1|Jazz]" not in text
 
 
+@pytest.mark.asyncio
+async def test_edit_vk_post_preserves_photos(monkeypatch):
+    captured = {}
+
+    async def fake_api(method, params, db=None, bot=None):
+        if method == "wall.getById":
+            assert params["posts"] == "-1_2"
+            return {
+                "response": [
+                    {
+                        "attachments": [
+                            {
+                                "type": "photo",
+                                "photo": {"owner_id": -1, "id": 10},
+                            }
+                        ]
+                    }
+                ]
+            }
+        if method == "wall.edit":
+            captured.update(params)
+            return {"response": 1}
+        raise AssertionError(method)
+
+    monkeypatch.setattr(main, "_vk_api", fake_api)
+
+    await main.edit_vk_post("https://vk.com/wall-1_2", "msg")
+
+    assert captured.get("attachments") == "photo-1_10"
+
+
+@pytest.mark.asyncio
+async def test_edit_vk_post_add_photo(monkeypatch):
+    captured = {}
+
+    async def fake_api(method, params, db=None, bot=None):
+        if method == "wall.getById":
+            return {
+                "response": [
+                    {
+                        "attachments": [
+                            {
+                                "type": "photo",
+                                "photo": {"owner_id": -1, "id": 10},
+                            }
+                        ]
+                    }
+                ]
+            }
+        if method == "wall.edit":
+            captured.update(params)
+            return {"response": 1}
+        raise AssertionError(method)
+
+    monkeypatch.setattr(main, "_vk_api", fake_api)
+
+    await main.edit_vk_post(
+        "https://vk.com/wall-1_2",
+        "msg",
+        attachments=["photo-1_20"],
+    )
+
+    assert captured.get("attachments") == "photo-1_10,photo-1_20"
+
+
 
