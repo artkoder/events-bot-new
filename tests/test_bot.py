@@ -4114,6 +4114,22 @@ def test_format_event_vk_fallback_link():
     assert "[подробнее|https://t.me/page]" in text
 
 
+def test_format_event_vk_festival_link():
+    e = Event(
+        title="T",
+        description="d",
+        source_text="s",
+        date="2025-07-10",
+        time="18:00",
+        location_name="Hall",
+        festival="Jazz",
+    )
+    fest = main.Festival(name="Jazz", vk_post_url="https://vk.com/wall-1_1")
+    text = main.format_event_vk(e, festival=fest)
+    lines = text.splitlines()
+    assert lines[1] == "[https://vk.com/wall-1_1|Jazz]"
+
+
 @pytest.mark.asyncio
 async def test_daily_posts_festival_link(tmp_path: Path):
     db = Database(str(tmp_path / "db.sqlite"))
