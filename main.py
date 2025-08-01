@@ -221,6 +221,7 @@ class Festival(SQLModel, table=True):
     __table_args__ = {"extend_existing": True}
     id: Optional[int] = Field(default=None, primary_key=True)
     name: str
+    full_name: Optional[str] = None
     description: Optional[str] = None
     telegraph_url: Optional[str] = None
     telegraph_path: Optional[str] = None
@@ -366,6 +367,13 @@ class Database:
 
             result = await conn.exec_driver_sql("PRAGMA table_info(festival)")
             cols = [r[1] for r in result.fetchall()]
+            if "full_name" not in cols:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE festival ADD COLUMN full_name VARCHAR"
+                )
+                await conn.exec_driver_sql(
+                    "UPDATE festival SET full_name = name"
+                )
             if "photo_url" not in cols:
                 await conn.exec_driver_sql(
                     "ALTER TABLE festival ADD COLUMN photo_url VARCHAR"
@@ -647,18 +655,29 @@ async def get_asset_channel(db: Database) -> Channel | None:
         return result.scalars().first()
 
 
-async def ensure_festival(db: Database, name: str, photo_url: str | None = None) -> Festival:
+async def ensure_festival(
+    db: Database,
+    name: str,
+    full_name: str | None = None,
+    photo_url: str | None = None,
+) -> Festival:
     """Return existing festival by name or create a new record."""
     async with db.get_session() as session:
         res = await session.execute(select(Festival).where(Festival.name == name))
         fest = res.scalar_one_or_none()
         if fest:
+            updated = False
             if photo_url and not fest.photo_url:
                 fest.photo_url = photo_url
+                updated = True
+            if full_name and not fest.full_name:
+                fest.full_name = full_name
+                updated = True
+            if updated:
                 session.add(fest)
                 await session.commit()
             return fest
-        fest = Festival(name=name, photo_url=photo_url)
+        fest = Festival(name=name, full_name=full_name, photo_url=photo_url)
         session.add(fest)
         await session.commit()
         logging.info("created festival %s", name)
@@ -1836,11 +1855,14 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                 await callback.answer("Festival not found", show_alert=True)
                 return
         festival_edit_sessions[callback.from_user.id] = (int(fid), field)
-        prompt = (
-            "Send new description"
-            if field == "description"
-            else "Send URL or '-' to delete"
-        )
+        if field == "description":
+            prompt = "Send new description"
+        elif field == "name":
+            prompt = "Send short name"
+        elif field == "full":
+            prompt = "Send full name or '-' to delete"
+        else:
+            prompt = "Send URL or '-' to delete"
         await callback.message.answer(prompt)
         await callback.answer()
     elif data == "festeditdone":
@@ -2903,7 +2925,12 @@ async def add_events_from_text(
 
         if base_event.festival:
             photo_u = catbox_urls[0] if catbox_urls else None
-            await ensure_festival(db, base_event.festival, photo_url=photo_u)
+            await ensure_festival(
+                db,
+                base_event.festival,
+                full_name=data.get("festival_full"),
+                photo_url=photo_u,
+            )
 
         if base_event.event_type == "выставка" and not base_event.end_date:
             start_dt = parse_iso_date(base_event.date) or datetime.now(LOCAL_TZ).date()
@@ -4550,7 +4577,8 @@ async def build_festival_page_content(db: Database, fest: Festival) -> tuple[str
         nodes.append({"tag": "br"})
         nodes.append({"tag": "p", "children": ["\u00a0"]})
         nodes.extend(fest_list)
-    return fest.name, nodes
+    title = fest.full_name or fest.name
+    return title, nodes
 
 
 
@@ -4597,7 +4625,7 @@ async def build_festival_vk_message(db: Database, fest: Festival) -> str:
             select(Event).where(Event.festival == fest.name).order_by(Event.date, Event.time)
         )
         events = res.scalars().all()
-    lines = [fest.name]
+    lines = [fest.full_name or fest.name]
     if events:
         start, end = festival_date_range(events)
 
@@ -5524,12 +5552,25 @@ async def show_festival_edit_menu(user_id: int, fest: Festival, bot: Bot):
     """Send festival fields with edit options."""
     lines = [
         f"name: {fest.name}",
+        f"full: {fest.full_name or ''}",
         f"description: {fest.description or ''}",
         f"site: {fest.website_url or ''}",
         f"vk: {fest.vk_url or ''}",
         f"tg: {fest.tg_url or ''}",
     ]
     keyboard = [
+        [
+            types.InlineKeyboardButton(
+                text="Edit short name",
+                callback_data=f"festeditfield:{fest.id}:name",
+            )
+        ],
+        [
+            types.InlineKeyboardButton(
+                text="Edit full name",
+                callback_data=f"festeditfield:{fest.id}:full",
+            )
+        ],
         [
             types.InlineKeyboardButton(
                 text="Edit description",
@@ -5992,6 +6033,11 @@ async def handle_festival_edit_message(message: types.Message, db: Database, bot
             return
         if field == "description":
             fest.description = None if text in {"", "-"} else text
+        elif field == "name":
+            if text:
+                fest.name = text
+        elif field == "full":
+            fest.full_name = None if text in {"", "-"} else text
         elif field == "site":
             fest.website_url = None if text in {"", "-"} else text
         elif field == "vk":

@@ -49,6 +49,8 @@ fields.
 Festival pages also rely on 4o. To craft a festival blurb the bot sends the
 previous description (if any) together with the full text of up to five recent
 announcements. The prompt instructs the model:
+The model also returns `festival_full` alongside `festival` so the bot can store
+the edition name separately.
 "Стиль профессионального журналиста в сфере мероприятий и культуры. Не
 используй типовые штампы, не выдумывай факты. Описание должно состоять из трёх
 предложений, если сведений мало — из одного". Only information from the
