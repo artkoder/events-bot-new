@@ -137,6 +137,13 @@
   some performances are listed, only those performances become events. The bot
   no longer adds extra dates unless every day is described.
 
+## v0.3.20 - Festival full name
+
+- Festivals now store both short and full names. Telegraph pages and VK posts
+  use the full name while events and lists keep the short version.
+- `/fest` gained edit options for these fields. Existing records are updated
+  automatically with the short name as the default full one.
+
 
 
 

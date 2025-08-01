@@ -5290,6 +5290,7 @@ async def test_festival_page_contacts_and_dates(tmp_path: Path):
     async with db.get_session() as session:
         fest = main.Festival(
             name="Jazz",
+            full_name="Jazz XVIII",
             website_url="https://jazz.ru",
             vk_url="https://vk.com/jazz",
             tg_url="https://t.me/jazz",
@@ -5323,6 +5324,7 @@ async def test_festival_page_contacts_and_dates(tmp_path: Path):
         await session.commit()
 
     title, content = await main.build_festival_page_content(db, fest)
+    assert title == "Jazz XVIII"
     dump = json_dumps(content)
     assert "Контакты фестиваля" in dump
     assert "Мероприятия фестиваля" in dump
@@ -5384,7 +5386,7 @@ async def test_festival_vk_message_period_location(tmp_path: Path):
     await db.init()
 
     async with db.get_session() as session:
-        fest = main.Festival(name="Jazz")
+        fest = main.Festival(name="Jazz", full_name="Jazz XVIII")
         session.add(fest)
         session.add(
             Event(
@@ -5413,6 +5415,8 @@ async def test_festival_vk_message_period_location(tmp_path: Path):
         await session.commit()
 
     text = await main.build_festival_vk_message(db, fest)
+    lines = text.splitlines()
+    assert lines[0] == "Jazz XVIII"
     assert "\U0001f4c5" in text or "📅" in text
     assert "\U0001f4cd" in text or "📍" in text
 

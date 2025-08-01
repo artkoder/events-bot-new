@@ -12,6 +12,7 @@ If multiple events are found, return an array of objects. Each object uses these
 title             - name of the event
 short_description - one-sentence summary
 festival          - festival name or empty string
+festival_full     - full festival edition name or empty string
 date              - single date or range (YYYY-MM-DD or YYYY-MM-DD..YYYY-MM-DD)
 time              - start time or time range (HH:MM or HH:MM..HH:MM)
 location_name     - venue name, use standard directory form if known
@@ -47,6 +48,8 @@ Guidelines:
   include just those individual events with their own dates and set the
   `festival` field. Do **not** create separate events for each day of the
   festival unless every date is explicitly detailed.
+- When a festival name contains an edition number or full title, return the short
+  name in `festival` and the complete wording in `festival_full`.
 - Respond with **plain JSON only** &mdash; do not wrap the output in code
   fences.
 
