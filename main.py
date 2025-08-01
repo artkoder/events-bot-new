@@ -2,7 +2,7 @@ import logging
 import os
 from datetime import date, datetime, timedelta, timezone, time
 from typing import Optional, Tuple, Iterable
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs
 import uuid
 import textwrap
 from supabase import create_client, Client
@@ -94,7 +94,6 @@ add_event_sessions: set[int] = set()
 vk_link_sessions: dict[int, int] = {}
 # waiting for a date for events listing
 events_date_sessions: set[int] = set()
-
 
 # toggle for uploading images to catbox
 CATBOX_ENABLED: bool = False
@@ -2298,7 +2297,6 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
         await callback.answer()
 
 
-
 async def handle_tz(message: types.Message, db: Database, bot: Bot):
     parts = message.text.split(maxsplit=1)
     if len(parts) != 2 or not validate_offset(parts[1]):
@@ -3241,15 +3239,13 @@ async def handle_add_event(message: types.Message, db: Database, bot: Bot):
         html_text = html_text[len("/addevent") :].lstrip()
     source_link = None
     lines = text_content.splitlines()
-    if lines:
-        m = re.match(r"https?://vk\.com/wall[\w\d_-]+", lines[0].strip(), re.I)
-        if m:
-            source_link = lines[0].strip()
-            text_content = "\n".join(lines[1:]).lstrip()
-            if html_text:
-                html_lines = html_text.splitlines()
-                if html_lines and re.match(r"https?://vk\.com/wall[\w\d_-]+", html_lines[0].strip(), re.I):
-                    html_text = "\n".join(html_lines[1:]).lstrip()
+    if lines and is_vk_wall_url(lines[0].strip()):
+        source_link = lines[0].strip()
+        text_content = "\n".join(lines[1:]).lstrip()
+        if html_text:
+            html_lines = html_text.splitlines()
+            if html_lines and is_vk_wall_url(html_lines[0].strip()):
+                html_text = "\n".join(html_lines[1:]).lstrip()
     try:
         results = await add_events_from_text(
             db,
@@ -3657,7 +3653,14 @@ def is_vk_wall_url(url: str | None) -> bool:
     host = parsed.netloc.lower()
     if host in {"vk.cc", "vk.link", "go.vk.com", "l.vk.com"}:
         return False
-    if host.endswith("vk.com") and "/wall" in parsed.path:
+    if not host.endswith("vk.com"):
+        return False
+    if "/wall" in parsed.path:
+        return True
+    query = parse_qs(parsed.query)
+    if "w" in query and any(v.startswith("wall") for v in query["w"]):
+        return True
+    if "z" in query and any("wall" in v for v in query["z"]):
         return True
     return False
 
@@ -6805,7 +6808,6 @@ def create_app() -> web.Application:
 
     async def events_date_wrapper(message: types.Message):
         await handle_events_date_message(message, db, bot)
-
 
     async def add_event_start_wrapper(message: types.Message):
         await handle_add_event_start(message, db, bot)
