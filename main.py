@@ -3659,7 +3659,7 @@ def format_event_vk(
     if festival:
         link = festival.vk_post_url
         if link:
-            lines.append(f"[{festival.name}|{link}]")
+            lines.append(f"[{link}|{festival.name}]")
         else:
             lines.append(festival.name)
     lines.append(desc)
