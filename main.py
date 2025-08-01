@@ -95,6 +95,7 @@ vk_link_sessions: dict[int, int] = {}
 # waiting for a date for events listing
 events_date_sessions: set[int] = set()
 
+
 # toggle for uploading images to catbox
 CATBOX_ENABLED: bool = False
 # toggle for sending photos to VK
@@ -2295,6 +2296,7 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
         events_date_sessions.add(callback.from_user.id)
         await callback.message.answer("Введите дату")
         await callback.answer()
+
 
 
 async def handle_tz(message: types.Message, db: Database, bot: Bot):
@@ -6803,6 +6805,7 @@ def create_app() -> web.Application:
 
     async def events_date_wrapper(message: types.Message):
         await handle_events_date_message(message, db, bot)
+
 
     async def add_event_start_wrapper(message: types.Message):
         await handle_add_event_start(message, db, bot)
