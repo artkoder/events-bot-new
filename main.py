@@ -5796,6 +5796,73 @@ async def collect_event_stats(db: Database) -> list[str]:
     return [f"{url}: {v}" for url, v in stats]
 
 
+async def collect_festival_telegraph_stats(db: Database) -> list[str]:
+    """Return Telegraph view counts for all festivals."""
+    async with db.get_session() as session:
+        result = await session.execute(
+            select(Festival).where(Festival.telegraph_path.is_not(None))
+        )
+        fests = result.scalars().all()
+    stats: list[tuple[str, int]] = []
+    for f in fests:
+        views = await fetch_views(f.telegraph_path, f.telegraph_url)
+        if views is not None:
+            stats.append((f.name, views))
+    stats.sort(key=lambda x: x[1], reverse=True)
+    return [f"{name}: {views}" for name, views in stats]
+
+
+async def fetch_vk_post_stats(
+    post_url: str, db: Database | None = None, bot: Bot | None = None
+) -> tuple[int | None, int | None]:
+    """Return view and reach counts for a VK post."""
+    ids = _vk_owner_and_post_id(post_url)
+    if not ids:
+        logging.error("invalid VK post url %s", post_url)
+        return None, None
+    owner_id, post_id = ids
+    views: int | None = None
+    reach: int | None = None
+    try:
+        data = await _vk_api(
+            "wall.getById", {"posts": f"{owner_id}_{post_id}"}, db, bot
+        )
+        items = data.get("response") or []
+        if items:
+            views = (items[0].get("views") or {}).get("count")
+    except Exception as e:
+        logging.error("VK views fetch error for %s: %s", post_url, e)
+    try:
+        data = await _vk_api(
+            "stats.getPostReach",
+            {"owner_id": owner_id, "post_id": post_id},
+            db,
+            bot,
+        )
+        items = data.get("response") or []
+        if items:
+            reach = items[0].get("reach_total")
+    except Exception as e:
+        logging.error("VK reach fetch error for %s: %s", post_url, e)
+    return views, reach
+
+
+async def collect_festival_vk_stats(db: Database) -> list[str]:
+    """Return VK view and reach counts for all festivals."""
+    async with db.get_session() as session:
+        result = await session.execute(
+            select(Festival).where(Festival.vk_post_url.is_not(None))
+        )
+        fests = result.scalars().all()
+    stats: list[tuple[str, int, int]] = []
+    for f in fests:
+        views, reach = await fetch_vk_post_stats(f.vk_post_url, db)
+        if views is not None or reach is not None:
+            stats.append((f.name, views or 0, reach or 0))
+    stats.sort(key=lambda x: x[1], reverse=True)
+    return [f"{name}: {views}, {reach}" for name, views, reach in stats]
+
+
 async def handle_stats(message: types.Message, db: Database, bot: Bot):
     parts = message.text.split()
     mode = parts[1] if len(parts) > 1 else ""
@@ -5804,7 +5871,20 @@ async def handle_stats(message: types.Message, db: Database, bot: Bot):
         if not user or not user.is_superadmin:
             await bot.send_message(message.chat.id, "Not authorized")
             return
-    lines = await (collect_event_stats(db) if mode == "events" else collect_page_stats(db))
+    if mode == "events":
+        lines = await collect_event_stats(db)
+    else:
+        lines = await collect_page_stats(db)
+        fest_tg = await collect_festival_telegraph_stats(db)
+        fest_vk = await collect_festival_vk_stats(db)
+        if fest_tg:
+            lines.append("")
+            lines.append("Фестивали (телеграм)")
+            lines.extend(fest_tg)
+        if fest_vk:
+            lines.append("")
+            lines.append("Фестивали (Вк) (просмотров, пользователи)")
+            lines.extend(fest_vk)
     await bot.send_message(message.chat.id, "\n".join(lines) if lines else "No data")
 
 

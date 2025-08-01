@@ -2162,6 +2162,72 @@ async def test_stats_events(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_stats_festivals(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async with db.get_session() as session:
+        session.add(
+            main.Festival(
+                name="Fest",
+                telegraph_url="http://fest",
+                telegraph_path="fp",
+                vk_post_url="https://vk.com/wall-1_2",
+            )
+        )
+        await session.commit()
+
+    class DummyTG:
+        def __init__(self, access_token=None, domain=None):
+            pass
+
+        def get_views(self, path, **_):
+            return {"fp": {"views": 50}}[path]
+
+    monkeypatch.setenv("TELEGRAPH_TOKEN", "t")
+    monkeypatch.setattr(
+        "main.Telegraph", lambda access_token=None, domain=None: DummyTG(access_token)
+    )
+
+    async def fake_vk_api(method, params, db=None, bot=None):
+        if method == "wall.getById":
+            return {"response": [{"views": {"count": 70}}]}
+        if method == "stats.getPostReach":
+            return {"response": [{"reach_total": 40}]}
+        raise AssertionError(method)
+
+    monkeypatch.setattr(main, "_vk_api", fake_vk_api)
+
+    start_msg = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "/start",
+        }
+    )
+    await handle_start(start_msg, db, bot)
+
+    msg = types.Message.model_validate(
+        {
+            "message_id": 2,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "/stats",
+        }
+    )
+    await handle_stats(msg, db, bot)
+
+    lines = bot.messages[-1][1].splitlines()
+    assert "Фестивали (телеграм)" in lines
+    assert any("Fest" in l and "50" in l for l in lines)
+    assert any("Fest" in l and "70" in l and "40" in l for l in lines)
+
+
+@pytest.mark.asyncio
 async def test_build_month_page_content(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
