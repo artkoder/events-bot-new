@@ -72,6 +72,8 @@ CONTENT_SEPARATOR = "🟧" * 10
 VK_EVENT_SEPARATOR = "\u2800\n\u2800"
 # single blank line for VK posts
 VK_BLANK_LINE = "\u2800"
+# default options for VK polls
+VK_POLL_OPTIONS = ["Пойду", "Подумаю", "Нет"]
 
 
 # user_id -> (event_id, field?) for editing session
@@ -237,6 +239,7 @@ class Festival(SQLModel, table=True):
     telegraph_url: Optional[str] = None
     telegraph_path: Optional[str] = None
     vk_post_url: Optional[str] = None
+    vk_poll_url: Optional[str] = None
     photo_url: Optional[str] = None
     website_url: Optional[str] = None
     vk_url: Optional[str] = None
@@ -400,6 +403,10 @@ class Database:
             if "tg_url" not in cols:
                 await conn.exec_driver_sql(
                     "ALTER TABLE festival ADD COLUMN tg_url VARCHAR"
+                )
+            if "vk_poll_url" not in cols:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE festival ADD COLUMN vk_poll_url VARCHAR"
                 )
 
     def get_session(self) -> AsyncSession:
@@ -4653,6 +4660,24 @@ async def generate_festival_description(fest: Festival, events: list[Event]) -> 
         return ""
 
 
+async def generate_festival_poll_text(fest: Festival) -> str:
+    """Use LLM to craft poll question for VK."""
+    base = (
+        "Придумай короткий вопрос, приглашая читателей поделиться,"\
+        f" пойдут ли они на фестиваль {fest.name}. "
+        "Не повторяй дословно 'Друзья, а вы пойдёте на фестиваль'."
+    )
+    try:
+        text = await ask_4o(base)
+        text = text.strip()
+    except Exception as e:
+        logging.error("failed to generate poll text %s: %s", fest.name, e)
+        text = f"Пойдёте ли вы на фестиваль {fest.name}?"
+    if fest.vk_post_url:
+        text += f"\n{fest.vk_post_url}"
+    return text
+
+
 
 async def build_festival_page_content(db: Database, fest: Festival) -> tuple[str, list]:
     logging.info("building festival page content for %s", fest.name)
@@ -4859,6 +4884,22 @@ async def sync_festival_vk_post(db: Database, name: str, bot: Bot | None = None)
             logging.info("created festival post %s: %s", name, url)
     except Exception as e:
         logging.error("VK post error for festival %s: %s", name, e)
+
+
+async def send_festival_poll(
+    db: Database,
+    fest: Festival,
+    group_id: str,
+    bot: Bot | None = None,
+) -> None:
+    question = await generate_festival_poll_text(fest)
+    url = await post_vk_poll(group_id, question, VK_POLL_OPTIONS, db, bot)
+    if url:
+        async with db.get_session() as session:
+            obj = await session.get(Festival, fest.id)
+            if obj:
+                obj.vk_poll_url = url
+                await session.commit()
 
 
 
@@ -5225,6 +5266,43 @@ async def post_to_vk(
     return None
 
 
+async def create_vk_poll(
+    group_id: str,
+    question: str,
+    options: list[str],
+    db: Database | None = None,
+    bot: Bot | None = None,
+) -> str | None:
+    """Create poll and return attachment id."""
+    params = {
+        "owner_id": f"-{group_id.lstrip('-')}",
+        "question": question,
+        "is_anonymous": 0,
+        "add_answers": json.dumps(options, ensure_ascii=False),
+    }
+    data = await _vk_api("polls.create", params, db, bot)
+    poll = data.get("response") or {}
+    p_id = poll.get("id")
+    owner = poll.get("owner_id", f"-{group_id.lstrip('-')}")
+    if p_id is not None:
+        return f"poll{owner}_{p_id}"
+    return None
+
+
+async def post_vk_poll(
+    group_id: str,
+    question: str,
+    options: list[str],
+    db: Database | None = None,
+    bot: Bot | None = None,
+) -> str | None:
+    """Create poll and post it to group wall."""
+    attachment = await create_vk_poll(group_id, question, options, db, bot)
+    if not attachment:
+        return None
+    return await post_to_vk(group_id, "", db, bot, [attachment])
+
+
 def _vk_owner_and_post_id(url: str) -> tuple[str, str] | None:
     m = re.search(r"wall(-?\d+)_(\d+)", url)
     if not m:
@@ -5489,6 +5567,58 @@ async def partner_notification_scheduler(db: Database, bot: Bot):
                 logging.error("partner reminder failed: %s", e)
                 await notify_superadmin(db, bot, f"Partner reminder failed: {e}")
             last_run = now.date()
+        await asyncio.sleep(60)
+
+
+async def vk_poll_scheduler(db: Database, bot: Bot):
+    if not (VK_TOKEN or os.getenv("VK_USER_TOKEN")):
+        return
+    while True:
+        group_id = await get_vk_group_id(db)
+        if not group_id:
+            await asyncio.sleep(60)
+            continue
+        offset = await get_tz_offset(db)
+        tz = offset_to_timezone(offset)
+        now = datetime.now(tz)
+        async with db.get_session() as session:
+            res_f = await session.execute(select(Festival))
+            festivals = res_f.scalars().all()
+            res_e = await session.execute(select(Event))
+            events = res_e.scalars().all()
+        ev_map: dict[str, list[Event]] = {}
+        for e in events:
+            if e.festival:
+                ev_map.setdefault(e.festival, []).append(e)
+        for fest in festivals:
+            if fest.vk_poll_url:
+                continue
+            evs = ev_map.get(fest.name, [])
+            if not evs:
+                continue
+            start, _ = festival_dates(fest, evs)
+            if not start:
+                continue
+            first_time: time | None = None
+            for ev in evs:
+                if ev.date != start.isoformat():
+                    continue
+                tr = parse_time_range(ev.time)
+                if tr:
+                    if first_time is None or tr[0] < first_time:
+                        first_time = tr[0]
+            if first_time is None:
+                first_time = time(0, 0)
+            sched: datetime | None = None
+            if start == now.date() and first_time >= time(17, 0):
+                sched = datetime.combine(start, time(13, 0), tz)
+            elif start == now.date() + timedelta(days=1) and first_time < time(17, 0):
+                sched = datetime.combine(now.date(), time(21, 0), tz)
+            if sched and now >= sched:
+                try:
+                    await send_festival_poll(db, fest, group_id, bot)
+                except Exception as e:
+                    logging.error("VK poll send failed for %s: %s", fest.name, e)
         await asyncio.sleep(60)
 
 
@@ -7001,6 +7131,7 @@ def create_app() -> web.Application:
             logging.error("Failed to set webhook: %s", e)
         app["daily_task"] = asyncio.create_task(daily_scheduler(db, bot))
         app["vk_task"] = asyncio.create_task(vk_scheduler(db, bot))
+        app["vk_poll_task"] = asyncio.create_task(vk_poll_scheduler(db, bot))
         app["cleanup_task"] = asyncio.create_task(cleanup_scheduler(db, bot))
         app["page_task"] = asyncio.create_task(page_update_scheduler(db))
         app["partner_task"] = asyncio.create_task(
@@ -7017,6 +7148,10 @@ def create_app() -> web.Application:
             app["vk_task"].cancel()
             with contextlib.suppress(Exception):
                 await app["vk_task"]
+        if "vk_poll_task" in app:
+            app["vk_poll_task"].cancel()
+            with contextlib.suppress(Exception):
+                await app["vk_poll_task"]
         if "cleanup_task" in app:
             app["cleanup_task"].cancel()
             with contextlib.suppress(Exception):
