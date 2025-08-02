@@ -3064,6 +3064,9 @@ async def add_events_from_text(
         images = [media] if isinstance(media, tuple) else list(media)
     catbox_urls, catbox_msg_global = await upload_to_catbox(images)
     links_iter = iter(extract_links_from_html(html_text) if html_text else [])
+    source_text_clean = re.sub(
+        r"<[^>]+>", "", _vk_expose_links(html_text or text)
+    )
     for data in parsed:
         logging.info(
             "processing event candidate: %s on %s %s",
@@ -3112,7 +3115,7 @@ async def add_events_from_text(
             end_date=end_date,
             is_free=bool(data.get("is_free")),
             pushkin_card=bool(data.get("pushkin_card")),
-            source_text=text,
+            source_text=source_text_clean,
             source_post_url=source_link,
             source_chat_id=source_chat_id,
             source_message_id=source_message_id,
@@ -3493,6 +3496,10 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
     catbox_msg = ""
     if images:
         catbox_urls, catbox_msg = await upload_to_catbox(images)
+    html_text = message.html_text or message.caption_html
+    if html_text and html_text.startswith("/addevent_raw"):
+        html_text = html_text[len("/addevent_raw") :].lstrip()
+    source_clean = re.sub(r"<[^>]+>", "", _vk_expose_links(html_text or parts[1]))
 
     event = Event(
         title=title,
@@ -3501,7 +3508,7 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
         date=date_iso,
         time=time,
         location_name=location,
-        source_text=parts[1],
+        source_text=source_clean,
         creator_id=creator_id,
     )
     async with db.get_session() as session:
@@ -3517,9 +3524,6 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
                     await session.commit()
                     event.ics_url = ics
 
-    html_text = message.html_text or message.caption_html
-    if html_text and html_text.startswith("/addevent_raw"):
-        html_text = html_text[len("/addevent_raw") :].lstrip()
     res = await create_source_page(
         event.title or "Event",
         event.source_text,
