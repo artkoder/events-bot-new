@@ -160,6 +160,11 @@
 - Creating a weekend Telegraph page now also publishes a simplified weekend
   post to VK and links existing weekend VK posts in chronological order.
 
+## v0.3.24 - Weekend VK source filter
+
+- Weekend VK posts include only events with existing VK source posts and no
+  longer attempt to create source posts automatically.
+
 
 
 

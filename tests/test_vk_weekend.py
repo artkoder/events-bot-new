@@ -45,9 +45,11 @@ async def test_sync_weekend_page_posts_vk(tmp_path: Path, monkeypatch):
 
     posted: list[str] = []
 
-    async def fake_post_to_vk(group_id, message, db=None, bot=None, attachments=None, token=None):
+    async def fake_post_to_vk(
+        group_id, message, db=None, bot=None, attachments=None, token=None
+    ):
         posted.append(message)
-        return f'https://vk.com/wall-1_{111 if len(posted) == 1 else 123}'
+        return 'https://vk.com/wall-1_111'
 
     monkeypatch.setattr(main, 'post_to_vk', fake_post_to_vk)
 
@@ -67,13 +69,13 @@ async def test_sync_weekend_page_posts_vk(tmp_path: Path, monkeypatch):
         await session.commit()
 
     await main.sync_weekend_page(db, sat.isoformat())
-    assert len(posted) == 2
-    assert '[https://vk.com/wall-1_111|Party]' in posted[1]
+    assert len(posted) == 1
+    assert 'Party' not in posted[0]
     async with db.get_session() as session:
         wp = await session.get(WeekendPage, sat.isoformat())
-        assert wp and wp.vk_post_url == 'https://vk.com/wall-1_123'
+        assert wp and wp.vk_post_url == 'https://vk.com/wall-1_111'
         ev = (await session.execute(select(Event))).scalars().first()
-        assert ev.source_vk_post_url == 'https://vk.com/wall-1_111'
+        assert ev.source_vk_post_url is None
 
 
 @pytest.mark.asyncio

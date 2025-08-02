@@ -4909,29 +4909,6 @@ async def sync_vk_weekend_post(db: Database, start: str, bot: Bot | None = None)
         logging.info("sync_vk_weekend_post: weekend page %s not found", start)
         return
 
-    saturday = date.fromisoformat(start)
-    sunday = saturday + timedelta(days=1)
-    days = [saturday, sunday]
-    async with db.get_session() as session:
-        result = await session.execute(
-            select(Event).where(Event.date.in_([d.isoformat() for d in days]))
-        )
-        events = result.scalars().all()
-        for ev in events:
-            if ev.source_vk_post_url:
-                continue
-            url = await sync_vk_source_post(
-                ev,
-                ev.source_post_url,
-                ev.source_text,
-
-                db,
-                bot,
-            )
-            if url:
-                ev.source_vk_post_url = url
-        await session.commit()
-
     message = await build_weekend_vk_message(db, start)
     logging.info("sync_vk_weekend_post message len=%d", len(message))
     needs_new_post = not page.vk_post_url
