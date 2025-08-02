@@ -3962,6 +3962,32 @@ async def test_month_links_future(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_month_buttons_future(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.get_session() as session:
+        session.add(MonthPage(month="2025-07", url="u1", path="p1"))
+        session.add(MonthPage(month="2025-08", url="u2", path="p2"))
+        session.add(MonthPage(month="2025-09", url="u3", path="p3"))
+        session.add(MonthPage(month="2025-10", url="u4", path="p4"))
+        await session.commit()
+
+    class FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2025, 8, 2, tzinfo=tz)
+
+    monkeypatch.setattr(main, "datetime", FakeDatetime)
+    buttons = await main.build_month_buttons(db)
+    assert [b.text for b in buttons] == [
+        "\U0001f4c5 август",
+        "\U0001f4c5 сентябрь",
+        "\U0001f4c5 октябрь",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_build_daily_posts(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()

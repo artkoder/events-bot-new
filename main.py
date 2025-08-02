@@ -1234,8 +1234,13 @@ async def build_month_nav_html(db: Database) -> str:
 
 async def build_month_buttons(db: Database, limit: int = 3) -> list[types.InlineKeyboardButton]:
     """Return buttons linking to upcoming month pages."""
+    cur_month = datetime.now(LOCAL_TZ).strftime("%Y-%m")
     async with db.get_session() as session:
-        result = await session.execute(select(MonthPage).order_by(MonthPage.month))
+        result = await session.execute(
+            select(MonthPage)
+            .where(MonthPage.month >= cur_month)
+            .order_by(MonthPage.month)
+        )
         months = result.scalars().all()
     buttons: list[types.InlineKeyboardButton] = []
     for p in months[:limit]:
