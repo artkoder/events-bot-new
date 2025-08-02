@@ -5461,15 +5461,38 @@ def _vk_owner_and_post_id(url: str) -> tuple[str, str] | None:
     return m.group(1), m.group(2)
 
 
+def _vk_expose_links(text: str) -> str:
+    def repl_html(m: re.Match) -> str:
+        href, label = m.group(1), m.group(2)
+        return f"{label} ({href})"
+
+    def repl_md(m: re.Match) -> str:
+        label, href = m.group(1), m.group(2)
+        return f"{label} ({href})"
+
+    text = re.sub(
+        r"<a[^>]+href=['\"]([^'\"]+)['\"][^>]*>(.*?)</a>",
+        repl_html,
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    text = re.sub(r"\[([^\]]+)\]\((https?://[^)]+)\)", repl_md, text)
+    return text
+
+
 def build_vk_source_message(
     text: str,
     source_url: str | None = None,
     *,
     display_link: bool = True,
+    ics_url: str | None = None,
 ) -> str:
+    text = _vk_expose_links(text)
     lines = text.strip().splitlines()
     if lines and source_url and display_link:
         lines[0] = f"[{source_url}|{lines[0]}]"
+    if ics_url:
+        lines.append(f"Добавить в календарь {ics_url}")
     lines.append(VK_SOURCE_FOOTER)
     return "\n".join(lines)
 
@@ -5488,11 +5511,8 @@ async def sync_vk_source_post(
     """Create or update VK source post for an event."""
     if not VK_AFISHA_GROUP_ID:
         return None
-    message = build_vk_source_message(text, source_url, display_link=display_link)
-    comment = (
-        f"Добавить это мероприятие в календарь можно по ссылке: {ics_url}"
-        if ics_url
-        else None
+    message = build_vk_source_message(
+        text, source_url, display_link=display_link, ics_url=ics_url
     )
     if event.source_vk_post_url:
         existing = ""
@@ -5526,23 +5546,6 @@ async def sync_vk_source_post(
             db,
             bot,
         )
-    if comment and url:
-        try:
-            ids = _vk_owner_and_post_id(url)
-            if ids:
-                await _vk_api(
-                    "wall.createComment",
-                    {
-                        "owner_id": ids[0],
-                        "post_id": ids[1],
-                        "from_group": 1,
-                        "message": comment,
-                    },
-                    db,
-                    bot,
-                )
-        except Exception as e:
-            logging.error("failed to post VK comment: %s", e)
     return url
 
 
