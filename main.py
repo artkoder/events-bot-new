@@ -235,6 +235,7 @@ class WeekendPage(SQLModel, table=True):
     start: str = Field(primary_key=True)
     url: str
     path: str
+    vk_post_url: Optional[str] = None
 
 
 class Festival(SQLModel, table=True):
@@ -394,6 +395,13 @@ class Database:
             if "path2" not in cols:
                 await conn.exec_driver_sql(
                     "ALTER TABLE monthpage ADD COLUMN path2 VARCHAR"
+                )
+
+            result = await conn.exec_driver_sql("PRAGMA table_info(weekendpage)")
+            cols = [r[1] for r in result.fetchall()]
+            if "vk_post_url" not in cols:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE weekendpage ADD COLUMN vk_post_url VARCHAR"
                 )
 
             result = await conn.exec_driver_sql("PRAGMA table_info(festival)")
@@ -4776,6 +4784,8 @@ async def sync_weekend_page(db: Database, start: str, update_links: bool = False
         except Exception as e:
             logging.error("Failed to sync weekend page %s: %s", start, e)
 
+    await sync_vk_weekend_post(db, start)
+
     if update_links or created:
         async with db.get_session() as session:
             result = await session.execute(
@@ -4785,6 +4795,80 @@ async def sync_weekend_page(db: Database, start: str, update_links: bool = False
         for w in weekends:
             if w.start != start:
                 await sync_weekend_page(db, w.start, update_links=False)
+
+
+async def build_weekend_vk_message(db: Database, start: str) -> str:
+    saturday = date.fromisoformat(start)
+    sunday = saturday + timedelta(days=1)
+    days = [saturday, sunday]
+    async with db.get_session() as session:
+        result = await session.execute(
+            select(Event)
+            .where(Event.date.in_([d.isoformat() for d in days]))
+            .order_by(Event.date, Event.time)
+        )
+        events = result.scalars().all()
+        res_w = await session.execute(select(WeekendPage).order_by(WeekendPage.start))
+        weekend_pages = res_w.scalars().all()
+
+    by_day: dict[date, list[Event]] = {}
+    for e in events:
+        if not e.source_vk_post_url:
+            continue
+        d = parse_iso_date(e.date)
+        if not d:
+            continue
+        by_day.setdefault(d, []).append(e)
+
+    lines = [f"{format_weekend_range(saturday)} Афиша выходных"]
+    for d in days:
+        evs = by_day.get(d)
+        if not evs:
+            continue
+        lines.append("")
+        lines.append(f"🟥🟥🟥 {format_day_pretty(d)} 🟥🟥🟥")
+        for ev in evs:
+            lines.append(f"[{ev.source_vk_post_url}|{ev.title}]")
+            city = f" {ev.city}" if ev.city else ""
+            lines.append(f"📍 {ev.location_name}{city}")
+
+    nav_pages = [w for w in weekend_pages if w.vk_post_url or w.start == start]
+    if nav_pages:
+        parts = []
+        for w in nav_pages:
+            label = format_weekend_range(date.fromisoformat(w.start))
+            if w.start == start or not w.vk_post_url:
+                parts.append(label)
+            else:
+                parts.append(f"[{w.vk_post_url}|{label}]")
+        lines.append("")
+        lines.append(" ".join(parts))
+
+    return "\n".join(lines)
+
+
+async def sync_vk_weekend_post(db: Database, start: str, bot: Bot | None = None) -> None:
+    group_id = await get_vk_group_id(db)
+    if not group_id:
+        return
+    async with db.get_session() as session:
+        page = await session.get(WeekendPage, start)
+    if not page:
+        return
+    message = await build_weekend_vk_message(db, start)
+    try:
+        if page.vk_post_url:
+            await edit_vk_post(page.vk_post_url, message, db, bot)
+        else:
+            url = await post_to_vk(group_id, message, db, bot)
+            if url:
+                async with db.get_session() as session:
+                    obj = await session.get(WeekendPage, start)
+                    if obj:
+                        obj.vk_post_url = url
+                        await session.commit()
+    except Exception as e:
+        logging.error("VK post error for weekend %s: %s", start, e)
 
 
 async def generate_festival_description(fest: Festival, events: list[Event]) -> str:
