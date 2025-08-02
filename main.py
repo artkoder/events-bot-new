@@ -237,6 +237,8 @@ class Festival(SQLModel, table=True):
     name: str
     full_name: Optional[str] = None
     description: Optional[str] = None
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
     telegraph_url: Optional[str] = None
     telegraph_path: Optional[str] = None
     vk_post_url: Optional[str] = None
@@ -409,6 +411,15 @@ class Database:
                 await conn.exec_driver_sql(
                     "ALTER TABLE festival ADD COLUMN tg_url VARCHAR"
                 )
+            if "start_date" not in cols:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE festival ADD COLUMN start_date VARCHAR"
+                )
+            if "end_date" not in cols:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE festival ADD COLUMN end_date VARCHAR"
+                )
+
             if "vk_poll_url" not in cols:
                 await conn.exec_driver_sql(
                     "ALTER TABLE festival ADD COLUMN vk_poll_url VARCHAR"
@@ -980,6 +991,10 @@ def festival_dates_from_text(text: str) -> tuple[date | None, date | None]:
 
 def festival_dates(fest: Festival, events: Iterable[Event]) -> tuple[date | None, date | None]:
     """Return start and end dates for a festival."""
+    if fest.start_date or fest.end_date:
+        s = parse_iso_date(fest.start_date) if fest.start_date else None
+        e = parse_iso_date(fest.end_date) if fest.end_date else s
+        return s, e
     start, end = festival_date_range(events)
     if start or end:
         return start, end
@@ -1970,6 +1985,10 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
             prompt = "Send short name"
         elif field == "full":
             prompt = "Send full name or '-' to delete"
+        elif field == "start":
+            prompt = "Send start date (YYYY-MM-DD) or '-' to delete"
+        elif field == "end":
+            prompt = "Send end date (YYYY-MM-DD) or '-' to delete"
         else:
             prompt = "Send URL or '-' to delete"
         await callback.message.answer(prompt)
@@ -4903,23 +4922,16 @@ async def send_festival_poll(
     group_id: str,
     bot: Bot | None = None,
 ) -> None:
-    logging.info("Creating VK poll for festival %s in group %s", fest.name, group_id)
     question = await generate_festival_poll_text(fest)
-    logging.info("Generated poll question for %s: %s", fest.name, question)
     url = await post_vk_poll(group_id, question, VK_POLL_OPTIONS, db, bot)
     if url:
-        logging.info("Poll for %s posted to VK: %s", fest.name, url)
+
         async with db.get_session() as session:
             obj = await session.get(Festival, fest.id)
             if obj:
                 obj.vk_poll_url = url
                 await session.commit()
-        if bot:
-            await notify_superadmin(
-                db, bot, f"VK poll created for {fest.name}: {url}"
-            )
-    else:
-        logging.error("Failed to post VK poll for %s", fest.name)
+
 
 
 
@@ -5294,7 +5306,6 @@ async def create_vk_poll(
     bot: Bot | None = None,
 ) -> str | None:
     """Create poll and return attachment id."""
-    logging.info("Calling VK polls.create for group %s", group_id)
     params = {
         "owner_id": f"-{group_id.lstrip('-')}",
         "question": question,
@@ -5306,10 +5317,8 @@ async def create_vk_poll(
     p_id = poll.get("id")
     owner = poll.get("owner_id", f"-{group_id.lstrip('-')}")
     if p_id is not None:
-        att = f"poll{owner}_{p_id}"
-        logging.info("VK poll created with attachment %s", att)
-        return att
-    logging.error("VK poll creation failed for group %s: %s", group_id, poll)
+        return f"poll{owner}_{p_id}"
+
     return None
 
 
@@ -5321,14 +5330,11 @@ async def post_vk_poll(
     bot: Bot | None = None,
 ) -> str | None:
     """Create poll and post it to group wall."""
-    logging.info("Posting VK poll to group %s", group_id)
     attachment = await create_vk_poll(group_id, question, options, db, bot)
     if not attachment:
-        logging.error("create_vk_poll returned no attachment for group %s", group_id)
         return None
-    url = await post_to_vk(group_id, "", db, bot, [attachment])
-    logging.info("VK poll post result for group %s: %s", group_id, url)
-    return url
+    return await post_to_vk(group_id, "", db, bot, [attachment])
+
 
 
 def _vk_owner_and_post_id(url: str) -> tuple[str, str] | None:
@@ -5604,14 +5610,11 @@ async def vk_poll_scheduler(db: Database, bot: Bot):
     while True:
         group_id = await get_vk_group_id(db)
         if not group_id:
-            logging.info("vk_poll_scheduler: no VK group ID configured")
             await asyncio.sleep(60)
             continue
         offset = await get_tz_offset(db)
         tz = offset_to_timezone(offset)
         now = datetime.now(tz)
-        logging.debug("vk_poll_scheduler tick at %s", now.isoformat())
-
         async with db.get_session() as session:
             res_f = await session.execute(select(Festival))
             festivals = res_f.scalars().all()
@@ -5622,17 +5625,12 @@ async def vk_poll_scheduler(db: Database, bot: Bot):
             if e.festival:
                 ev_map.setdefault(e.festival, []).append(e)
         for fest in festivals:
-            logging.debug("Evaluating festival %s", fest.name)
             if fest.vk_poll_url:
-                logging.debug("Skipping %s: poll already exists", fest.name)
                 continue
             evs = ev_map.get(fest.name, [])
-            if not evs:
-                logging.debug("Skipping %s: no events associated", fest.name)
-                continue
-            start, _ = festival_dates(fest, evs)
+            start, end = festival_dates(fest, evs)
             if not start:
-                logging.debug("Skipping %s: unable to determine start date", fest.name)
+
                 continue
             first_time: time | None = None
             for ev in evs:
@@ -5644,29 +5642,16 @@ async def vk_poll_scheduler(db: Database, bot: Bot):
                         first_time = tr[0]
             if first_time is None:
                 first_time = time(0, 0)
-            logging.debug(
-                "Festival %s starts %s at %s", fest.name, start.isoformat(), first_time
-            )
-            sched: datetime | None = None
-            if start == now.date() and first_time >= time(17, 0):
+            if first_time >= time(17, 0):
                 sched = datetime.combine(start, time(13, 0), tz)
-            elif start == now.date() + timedelta(days=1) and first_time < time(17, 0):
-                sched = datetime.combine(now.date(), time(21, 0), tz)
-            if sched:
-                logging.info("Poll for %s scheduled at %s", fest.name, sched.isoformat())
-            if sched and now >= sched:
-                logging.info("Sending poll for %s", fest.name)
+            else:
+                sched = datetime.combine(start - timedelta(days=1), time(21, 0), tz)
+            if now >= sched and now.date() <= (end or start):
+
                 try:
                     await send_festival_poll(db, fest, group_id, bot)
                 except Exception as e:
                     logging.error("VK poll send failed for %s: %s", fest.name, e)
-            else:
-                logging.debug(
-                    "Not time yet for %s poll (now %s, sched %s)",
-                    fest.name,
-                    now.isoformat(),
-                    sched.isoformat() if sched else None,
-                )
         await asyncio.sleep(60)
 
 
@@ -5928,6 +5913,8 @@ async def show_festival_edit_menu(user_id: int, fest: Festival, bot: Bot):
         f"name: {fest.name}",
         f"full: {fest.full_name or ''}",
         f"description: {fest.description or ''}",
+        f"start: {fest.start_date or ''}",
+        f"end: {fest.end_date or ''}",
         f"site: {fest.website_url or ''}",
         f"vk: {fest.vk_url or ''}",
         f"tg: {fest.tg_url or ''}",
@@ -5949,6 +5936,18 @@ async def show_festival_edit_menu(user_id: int, fest: Festival, bot: Bot):
             types.InlineKeyboardButton(
                 text="Edit description",
                 callback_data=f"festeditfield:{fest.id}:description",
+            )
+        ],
+        [
+            types.InlineKeyboardButton(
+                text=("Delete start" if fest.start_date else "Add start"),
+                callback_data=f"festeditfield:{fest.id}:start",
+            )
+        ],
+        [
+            types.InlineKeyboardButton(
+                text=("Delete end" if fest.end_date else "Add end"),
+                callback_data=f"festeditfield:{fest.id}:end",
             )
         ],
         [
@@ -6536,6 +6535,24 @@ async def handle_festival_edit_message(message: types.Message, db: Database, bot
                 fest.name = text
         elif field == "full":
             fest.full_name = None if text in {"", "-"} else text
+        elif field == "start":
+            if text in {"", "-"}:
+                fest.start_date = None
+            else:
+                d = parse_events_date(text, timezone.utc)
+                if not d:
+                    await bot.send_message(message.chat.id, "Invalid date")
+                    return
+                fest.start_date = d.isoformat()
+        elif field == "end":
+            if text in {"", "-"}:
+                fest.end_date = None
+            else:
+                d = parse_events_date(text, timezone.utc)
+                if not d:
+                    await bot.send_message(message.chat.id, "Invalid date")
+                    return
+                fest.end_date = d.isoformat()
         elif field == "site":
             fest.website_url = None if text in {"", "-"} else text
         elif field == "vk":

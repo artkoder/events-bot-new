@@ -43,8 +43,8 @@ from main import (
     get_telegraph_token,
     editing_sessions,
     festival_edit_sessions,
-    notify_inactive_partners,
-    send_festival_poll,
+    festival_dates,
+
 )
 
 FUTURE_DATE = (date.today() + timedelta(days=10)).isoformat()
@@ -5802,5 +5802,18 @@ async def test_partner_reminder_weekly(tmp_path: Path):
     notified = await notify_inactive_partners(db, bot, tz)
     assert [u.user_id for u in notified] == [1]
     assert len(bot.messages) == 2
+
+
+@pytest.mark.asyncio
+async def test_festival_dates_manual(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    fest = Festival(name="Fest", start_date="2025-08-01", end_date="2025-08-03")
+    async with db.get_session() as session:
+        session.add(fest)
+        await session.commit()
+    start, end = festival_dates(fest, [])
+    assert start == date(2025, 8, 1)
+    assert end == date(2025, 8, 3)
 
 
