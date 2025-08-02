@@ -273,10 +273,15 @@ class Festival(SQLModel, table=True):
 
 class Database:
     def __init__(self, path: str):
-        self.engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
+        """Initialize async engine with increased busy timeout."""
+        self.engine = create_async_engine(
+            f"sqlite+aiosqlite:///{path}",
+            connect_args={"timeout": 30},
+        )
 
     async def init(self):
         async with self.engine.begin() as conn:
+            await conn.exec_driver_sql("PRAGMA journal_mode=WAL")
             await conn.run_sync(SQLModel.metadata.create_all)
             result = await conn.exec_driver_sql("PRAGMA table_info(event)")
             cols = [r[1] for r in result.fetchall()]
@@ -830,7 +835,7 @@ async def notify_inactive_partners(
 
 async def dump_database(path: str = DB_PATH) -> bytes:
     """Return a SQL dump of the specified database."""
-    async with aiosqlite.connect(path) as conn:
+    async with aiosqlite.connect(path, timeout=30) as conn:
         lines: list[str] = []
         async for line in conn.iterdump():
             lines.append(line)
@@ -841,7 +846,7 @@ async def restore_database(data: bytes, db: Database, path: str = DB_PATH):
     """Replace current database with the provided dump."""
     if os.path.exists(path):
         os.remove(path)
-    async with aiosqlite.connect(path) as conn:
+    async with aiosqlite.connect(path, timeout=30) as conn:
         await conn.executescript(data.decode("utf-8"))
         await conn.commit()
     await db.init()
