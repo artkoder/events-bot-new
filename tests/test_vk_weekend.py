@@ -2,10 +2,9 @@ import pytest
 from datetime import date, timedelta
 from pathlib import Path
 
-import pytest
-
 import main
 from main import Database, WeekendPage, Event, format_weekend_range
+from sqlmodel import select
 
 
 @pytest.mark.asyncio
@@ -32,7 +31,7 @@ async def test_sync_weekend_page_posts_vk(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / 'db.sqlite'))
     await db.init()
     sat = date(2025, 7, 12)
-    await main.set_vk_group_id(db, '1')
+    main.VK_AFISHA_GROUP_ID = '1'
 
     class DummyTG:
         def create_page(self, title, content):
@@ -44,20 +43,34 @@ async def test_sync_weekend_page_posts_vk(tmp_path: Path, monkeypatch):
     monkeypatch.setattr('main.get_telegraph_token', lambda: 't')
     monkeypatch.setattr('main.Telegraph', lambda access_token=None, domain=None: DummyTG())
 
-    posted = {}
+    posted: list[str] = []
 
     async def fake_post_to_vk(group_id, message, db=None, bot=None, attachments=None, token=None):
-        posted['message'] = message
-        return 'https://vk.com/wall-1_123'
+        posted.append(message)
+        return f'https://vk.com/wall-1_{111 if len(posted) == 1 else 123}'
 
     monkeypatch.setattr(main, 'post_to_vk', fake_post_to_vk)
 
     async with db.get_session() as session:
-        session.add(Event(title='Party', description='d', source_text='s', date=sat.isoformat(), time='10:00', location_name='Club', city='Kaliningrad', source_vk_post_url='https://vk.com/wall-1_1'))
+        session.add(
+            Event(
+                title='Party',
+                description='d',
+                source_text='s',
+                source_post_url='https://vk.com/wall-1_1',
+                date=sat.isoformat(),
+                time='10:00',
+                location_name='Club',
+                city='Kaliningrad',
+            )
+        )
         await session.commit()
 
     await main.sync_weekend_page(db, sat.isoformat())
-    assert 'message' in posted
+    assert len(posted) == 2
+    assert '[https://vk.com/wall-1_111|Party]' in posted[1]
     async with db.get_session() as session:
         wp = await session.get(WeekendPage, sat.isoformat())
         assert wp and wp.vk_post_url == 'https://vk.com/wall-1_123'
+        ev = (await session.execute(select(Event))).scalars().first()
+        assert ev.source_vk_post_url == 'https://vk.com/wall-1_111'

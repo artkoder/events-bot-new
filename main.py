@@ -4899,7 +4899,7 @@ async def build_weekend_vk_message(db: Database, start: str) -> str:
 
 async def sync_vk_weekend_post(db: Database, start: str, bot: Bot | None = None) -> None:
     logging.info("sync_vk_weekend_post start for %s", start)
-    group_id = await get_vk_group_id(db)
+    group_id = VK_AFISHA_GROUP_ID
     if not group_id:
         logging.info("sync_vk_weekend_post: VK group not configured")
         return
@@ -4908,6 +4908,30 @@ async def sync_vk_weekend_post(db: Database, start: str, bot: Bot | None = None)
     if not page:
         logging.info("sync_vk_weekend_post: weekend page %s not found", start)
         return
+
+    saturday = date.fromisoformat(start)
+    sunday = saturday + timedelta(days=1)
+    days = [saturday, sunday]
+    async with db.get_session() as session:
+        result = await session.execute(
+            select(Event).where(Event.date.in_([d.isoformat() for d in days]))
+        )
+        events = result.scalars().all()
+        for ev in events:
+            if ev.source_vk_post_url:
+                continue
+            url = await sync_vk_source_post(
+                ev,
+                ev.source_post_url,
+                ev.source_text,
+
+                db,
+                bot,
+            )
+            if url:
+                ev.source_vk_post_url = url
+        await session.commit()
+
     message = await build_weekend_vk_message(db, start)
     logging.info("sync_vk_weekend_post message len=%d", len(message))
     try:
