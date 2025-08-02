@@ -5456,27 +5456,15 @@ def _vk_owner_and_post_id(url: str) -> tuple[str, str] | None:
     return m.group(1), m.group(2)
 
 
-def _strip_title(line_text: str, title: str) -> str:
-    lines = line_text.splitlines()
-    if lines and lines[0].strip() == title.strip():
-        return "\n".join(lines[1:]).lstrip()
-    return line_text
-
-
 def build_vk_source_message(
-    title: str,
     text: str,
     source_url: str | None = None,
-    ics_url: str | None = None,
+    *,
     display_link: bool = True,
 ) -> str:
-    header = f"[{source_url}|{title}]" if source_url and display_link else title
-    body = _strip_title(text, title).strip()
-    lines = [header]
-    if body:
-        lines.append(body)
-    if ics_url:
-        lines.append(ics_url)
+    lines = text.strip().splitlines()
+    if lines and source_url and display_link:
+        lines[0] = f"[{source_url}|{lines[0]}]"
     lines.append(VK_SOURCE_FOOTER)
     return "\n".join(lines)
 
@@ -5495,8 +5483,11 @@ async def sync_vk_source_post(
     """Create or update VK source post for an event."""
     if not VK_AFISHA_GROUP_ID:
         return None
-    message = build_vk_source_message(
-        event.title or "Event", text, source_url, ics_url, display_link
+    message = build_vk_source_message(text, source_url, display_link=display_link)
+    comment = (
+        f"Добавить это мероприятие в календарь можно по ссылке: {ics_url}"
+        if ics_url
+        else None
     )
     if event.source_vk_post_url:
         existing = ""
@@ -5522,13 +5513,31 @@ async def sync_vk_source_post(
             db,
             bot,
         )
-        return event.source_vk_post_url
-    url = await post_to_vk(
-        VK_AFISHA_GROUP_ID,
-        message,
-        db,
-        bot,
-    )
+        url = event.source_vk_post_url
+    else:
+        url = await post_to_vk(
+            VK_AFISHA_GROUP_ID,
+            message,
+            db,
+            bot,
+        )
+    if comment and url:
+        try:
+            ids = _vk_owner_and_post_id(url)
+            if ids:
+                await _vk_api(
+                    "wall.createComment",
+                    {
+                        "owner_id": ids[0],
+                        "post_id": ids[1],
+                        "from_group": 1,
+                        "message": comment,
+                    },
+                    db,
+                    bot,
+                )
+        except Exception as e:
+            logging.error("failed to post VK comment: %s", e)
     return url
 
 
