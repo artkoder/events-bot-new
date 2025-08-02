@@ -4899,10 +4899,11 @@ async def build_weekend_vk_message(db: Database, start: str) -> str:
         lines.append(VK_BLANK_LINE)
         lines.append(f"🟥🟥🟥 {format_day_pretty(d)} 🟥🟥🟥")
         for ev in evs:
-            title = ev.title
+            line = f"[{ev.source_vk_post_url}|{ev.title}]"
             if ev.time:
-                title = f"{ev.time} | {title}"
-            lines.append(f"[{ev.source_vk_post_url}|{title}]")
+                line = f"{ev.time} | {line}"
+            lines.append(line)
+
             location_parts = [p for p in [ev.location_name, ev.city] if p]
             if location_parts:
                 lines.append(", ".join(location_parts))
