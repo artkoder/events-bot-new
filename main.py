@@ -2811,6 +2811,12 @@ async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
     """Insert or update an event if a similar one exists.
 
     Returns (event, added_flag)."""
+    logging.info(
+        "upsert_event: checking '%s' on %s %s",
+        new.title,
+        new.date,
+        new.time,
+    )
 
     stmt = select(Event).where(
         Event.date == new.date,
@@ -2838,6 +2844,7 @@ async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
             ev.is_free = new.is_free
             ev.pushkin_card = new.pushkin_card
             await session.commit()
+            logging.info("upsert_event: updated event id=%s", ev.id)
             return ev, False
 
         title_ratio = SequenceMatcher(None, ev.title.lower(), new.title.lower()).ratio()
@@ -2857,6 +2864,7 @@ async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
             ev.is_free = new.is_free
             ev.pushkin_card = new.pushkin_card
             await session.commit()
+            logging.info("upsert_event: updated event id=%s", ev.id)
             return ev, False
 
         if (
@@ -2879,6 +2887,7 @@ async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
             ev.is_free = new.is_free
             ev.pushkin_card = new.pushkin_card
             await session.commit()
+            logging.info("upsert_event: updated event id=%s", ev.id)
             return ev, False
 
         title_ratio = SequenceMatcher(None, ev.title.lower(), new.title.lower()).ratio()
@@ -2898,6 +2907,7 @@ async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
             ev.is_free = new.is_free
             ev.pushkin_card = new.pushkin_card
             await session.commit()
+            logging.info("upsert_event: updated event id=%s", ev.id)
             return ev, False
 
         if (
@@ -2920,6 +2930,7 @@ async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
             ev.is_free = new.is_free
             ev.pushkin_card = new.pushkin_card
             await session.commit()
+            logging.info("upsert_event: updated event id=%s", ev.id)
             return ev, False
 
         title_ratio = SequenceMatcher(None, ev.title.lower(), new.title.lower()).ratio()
@@ -2939,6 +2950,7 @@ async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
             ev.is_free = new.is_free
             ev.pushkin_card = new.pushkin_card
             await session.commit()
+            logging.info("upsert_event: updated event id=%s", ev.id)
             return ev, False
 
         if (
@@ -2961,6 +2973,7 @@ async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
             ev.is_free = new.is_free
             ev.pushkin_card = new.pushkin_card
             await session.commit()
+            logging.info("upsert_event: updated event id=%s", ev.id)
             return ev, False
 
         title_ratio = SequenceMatcher(None, ev.title.lower(), new.title.lower()).ratio()
@@ -2983,6 +2996,7 @@ async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
             ev.is_free = new.is_free
             ev.pushkin_card = new.pushkin_card
             await session.commit()
+            logging.info("upsert_event: updated event id=%s", ev.id)
             return ev, False
         should_check = False
         if loc_ratio >= 0.4 or (ev.location_address or "") == (
@@ -3014,10 +3028,12 @@ async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
                 ev.is_free = new.is_free
                 ev.pushkin_card = new.pushkin_card
                 await session.commit()
+                logging.info("upsert_event: updated event id=%s", ev.id)
                 return ev, False
     new.added_at = datetime.utcnow()
     session.add(new)
     await session.commit()
+    logging.info("upsert_event: inserted new event id=%s", new.id)
     return new, True
 
 
@@ -3392,6 +3408,9 @@ async def add_events_from_text(
 async def handle_add_event(message: types.Message, db: Database, bot: Bot):
     using_session = False
     text_raw = message.text or message.caption or ""
+    logging.info(
+        "handle_add_event start: user=%s len=%d", message.from_user.id, len(text_raw)
+    )
     if message.from_user.id in add_event_sessions:
         using_session = True
         add_event_sessions.discard(message.from_user.id)
@@ -3450,7 +3469,11 @@ async def handle_add_event(message: types.Message, db: Database, bot: Bot):
     if not results:
         await bot.send_message(message.chat.id, "LLM error")
         return
+    logging.info("handle_add_event parsed %d results", len(results))
     for saved, added, lines, status in results:
+        logging.info(
+            "handle_add_event %s event id=%s", status, saved.id
+        )
         btns = []
         if (
             not saved.is_free
@@ -3492,10 +3515,16 @@ async def handle_add_event(message: types.Message, db: Database, bot: Bot):
             "Добавить ссылку на Вк этого мероприятия?",
             reply_markup=link_markup,
         )
+    logging.info("handle_add_event finished for user %s", message.from_user.id)
 
 
 async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
     parts = (message.text or message.caption or "").split(maxsplit=1)
+    logging.info(
+        "handle_add_event_raw start: user=%s text=%s",
+        message.from_user.id,
+        parts[1] if len(parts) > 1 else "",
+    )
     if len(parts) != 2 or "|" not in parts[1]:
         await bot.send_message(
             message.chat.id, "Usage: /addevent_raw title|date|time|location"
@@ -3608,6 +3637,7 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
     if upload_info:
         lines.append(f"catbox: {upload_info}")
     status = "added" if added else "updated"
+    logging.info("handle_add_event_raw %s event id=%s", status, event.id)
     btns = []
     if (
         not event.is_free
@@ -3649,6 +3679,7 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
         "Добавить ссылку на Вк этого мероприятия?",
         reply_markup=link_markup,
     )
+    logging.info("handle_add_event_raw finished for user %s", message.from_user.id)
 
 
 def format_day(day: date, tz: timezone) -> str:
@@ -4812,6 +4843,7 @@ async def sync_weekend_page(db: Database, start: str, update_links: bool = False
 
 
 async def build_weekend_vk_message(db: Database, start: str) -> str:
+    logging.info("build_weekend_vk_message start for %s", start)
     saturday = date.fromisoformat(start)
     sunday = saturday + timedelta(days=1)
     days = [saturday, sunday]
@@ -4858,21 +4890,30 @@ async def build_weekend_vk_message(db: Database, start: str) -> str:
         lines.append("")
         lines.append(" ".join(parts))
 
-    return "\n".join(lines)
+    message = "\n".join(lines)
+    logging.info(
+        "build_weekend_vk_message built %d lines", len(lines)
+    )
+    return message
 
 
 async def sync_vk_weekend_post(db: Database, start: str, bot: Bot | None = None) -> None:
+    logging.info("sync_vk_weekend_post start for %s", start)
     group_id = await get_vk_group_id(db)
     if not group_id:
+        logging.info("sync_vk_weekend_post: VK group not configured")
         return
     async with db.get_session() as session:
         page = await session.get(WeekendPage, start)
     if not page:
+        logging.info("sync_vk_weekend_post: weekend page %s not found", start)
         return
     message = await build_weekend_vk_message(db, start)
+    logging.info("sync_vk_weekend_post message len=%d", len(message))
     try:
         if page.vk_post_url:
             await edit_vk_post(page.vk_post_url, message, db, bot)
+            logging.info("sync_vk_weekend_post updated %s", page.vk_post_url)
         else:
             url = await post_to_vk(group_id, message, db, bot)
             if url:
@@ -4881,6 +4922,7 @@ async def sync_vk_weekend_post(db: Database, start: str, bot: Bot | None = None)
                     if obj:
                         obj.vk_post_url = url
                         await session.commit()
+                logging.info("sync_vk_weekend_post created %s", url)
     except Exception as e:
         logging.error("VK post error for weekend %s: %s", start, e)
 
@@ -5503,6 +5545,12 @@ async def post_to_vk(
 ) -> str | None:
     if not group_id:
         return None
+    logging.info(
+        "post_to_vk start: group=%s len=%d attachments=%d",
+        group_id,
+        len(message),
+        len(attachments or []),
+    )
     params = {
         "owner_id": f"-{group_id.lstrip('-')}",
         "from_group": 1,
@@ -5513,7 +5561,10 @@ async def post_to_vk(
     data = await _vk_api("wall.post", params, db, bot, token=token)
     post_id = data.get("response", {}).get("post_id")
     if post_id:
-        return f"https://vk.com/wall-{group_id.lstrip('-')}_{post_id}"
+        url = f"https://vk.com/wall-{group_id.lstrip('-')}_{post_id}"
+        logging.info("post_to_vk success: %s", url)
+        return url
+    logging.error("post_to_vk failed for group %s", group_id)
     return None
 
 
@@ -5525,6 +5576,9 @@ async def create_vk_poll(
     bot: Bot | None = None,
 ) -> str | None:
     """Create poll and return attachment id."""
+    logging.info(
+        "create_vk_poll start: group=%s question=%s", group_id, question
+    )
     params = {
         "owner_id": f"-{group_id.lstrip('-')}",
         "question": question,
@@ -5536,8 +5590,10 @@ async def create_vk_poll(
     p_id = poll.get("id")
     owner = poll.get("owner_id", f"-{group_id.lstrip('-')}")
     if p_id is not None:
-        return f"poll{owner}_{p_id}"
-
+        attachment = f"poll{owner}_{p_id}"
+        logging.info("create_vk_poll success: %s", attachment)
+        return attachment
+    logging.error("create_vk_poll failed for group %s", group_id)
     return None
 
 
@@ -5549,8 +5605,10 @@ async def post_vk_poll(
     bot: Bot | None = None,
 ) -> str | None:
     """Create poll and post it to group wall."""
+    logging.info("post_vk_poll start for group %s", group_id)
     attachment = await create_vk_poll(group_id, question, options, db, bot)
     if not attachment:
+        logging.error("post_vk_poll: poll creation failed for group %s", group_id)
         return None
     return await post_to_vk(group_id, "", db, bot, [attachment])
 
@@ -5613,6 +5671,7 @@ async def sync_vk_source_post(
     """Create or update VK source post for an event."""
     if not VK_AFISHA_GROUP_ID:
         return None
+    logging.info("sync_vk_source_post start for event %s", event.id)
     message = build_vk_source_message(
         text, source_url, display_link=display_link, ics_url=ics_url
     )
@@ -5641,6 +5700,7 @@ async def sync_vk_source_post(
             bot,
         )
         url = event.source_vk_post_url
+        logging.info("sync_vk_source_post updated %s", url)
     else:
         url = await post_to_vk(
             VK_AFISHA_GROUP_ID,
@@ -5648,6 +5708,8 @@ async def sync_vk_source_post(
             db,
             bot,
         )
+        if url:
+            logging.info("sync_vk_source_post created %s", url)
     return url
 
 
@@ -5659,6 +5721,7 @@ async def edit_vk_post(
     attachments: list[str] | None = None,
     token: str | None = None,
 ) -> None:
+    logging.info("edit_vk_post start: %s", post_url)
     ids = _vk_owner_and_post_id(post_url)
     if not ids:
         logging.error("invalid VK post url %s", post_url)
@@ -5698,6 +5761,7 @@ async def edit_vk_post(
     if current:
         params["attachments"] = ",".join(current)
     await _vk_api("wall.edit", params, db, bot, token=token)
+    logging.info("edit_vk_post done: %s", post_url)
 
 
 async def send_daily_announcement_vk(
@@ -6712,12 +6776,16 @@ async def handle_edit_message(message: types.Message, db: Database, bot: Bot):
 
 async def handle_add_event_start(message: types.Message, db: Database, bot: Bot):
     """Initiate event creation via the menu."""
+    logging.info("handle_add_event_start from user %s", message.from_user.id)
     async with db.get_session() as session:
         user = await session.get(User, message.from_user.id)
         if not user or user.blocked:
             await bot.send_message(message.chat.id, "Not authorized")
             return
     add_event_sessions.add(message.from_user.id)
+    logging.info(
+        "handle_add_event_start session opened for user %s", message.from_user.id
+    )
     await bot.send_message(message.chat.id, "Send event text and optional photo")
 
 
