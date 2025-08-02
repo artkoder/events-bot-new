@@ -137,6 +137,7 @@ class User(SQLModel, table=True):
     organization: Optional[str] = None
     location: Optional[str] = None
     blocked: bool = False
+    last_partner_reminder: Optional[datetime] = None
 
 
 class PendingUser(SQLModel, table=True):
@@ -348,6 +349,10 @@ class Database:
             if "blocked" not in cols:
                 await conn.exec_driver_sql(
                     "ALTER TABLE user ADD COLUMN blocked BOOLEAN DEFAULT 0"
+                )
+            if "last_partner_reminder" not in cols:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE user ADD COLUMN last_partner_reminder VARCHAR"
                 )
 
             result = await conn.exec_driver_sql("PRAGMA table_info(channel)")
@@ -732,6 +737,7 @@ async def notify_inactive_partners(
 ) -> list[User]:
     """Send reminders to partners without events in the last week."""
     cutoff = week_cutoff(tz)
+    now = datetime.utcnow()
     notified: list[User] = []
     async with db.get_session() as session:
         res = await session.execute(
@@ -747,12 +753,17 @@ async def notify_inactive_partners(
                     .limit(1)
                 )
             ).scalars().first()
-            if not last or last < cutoff:
+            last_reminder = p.last_partner_reminder
+            if (not last or last < cutoff) and (
+                not last_reminder or last_reminder < cutoff
+            ):
                 await bot.send_message(
                     p.user_id,
                     "\u26a0\ufe0f Вы не добавляли мероприятия на прошлой неделе",
                 )
+                p.last_partner_reminder = now
                 notified.append(p)
+        await session.commit()
     return notified
 
 
