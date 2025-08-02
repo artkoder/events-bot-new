@@ -3,7 +3,7 @@ import main
 
 
 @pytest.mark.asyncio
-async def test_sync_vk_source_post_adds_comment(monkeypatch):
+async def test_sync_vk_source_post_includes_calendar_link(monkeypatch):
     main.VK_AFISHA_GROUP_ID = "1"
 
     event = main.Event(
@@ -16,7 +16,9 @@ async def test_sync_vk_source_post_adds_comment(monkeypatch):
 
     captured_message = {}
 
-    async def fake_post_to_vk(group_id, message, db=None, bot=None, attachments=None, token=None):
+    async def fake_post_to_vk(
+        group_id, message, db=None, bot=None, attachments=None, token=None
+    ):
         captured_message["text"] = message
         return "https://vk.com/wall-1_2"
 
@@ -26,7 +28,7 @@ async def test_sync_vk_source_post_adds_comment(monkeypatch):
 
     async def fake_vk_api(method, params, db=None, bot=None, token=None):
         calls.append((method, params))
-        return {"response": {"comment_id": 1}}
+        return {"response": {}}
 
     monkeypatch.setattr(main, "_vk_api", fake_vk_api)
 
@@ -40,10 +42,14 @@ async def test_sync_vk_source_post_adds_comment(monkeypatch):
     )
 
     assert url == "https://vk.com/wall-1_2"
-    assert calls and calls[0][0] == "wall.createComment"
-    assert calls[0][1]["message"] == (
-        "Добавить это мероприятие в календарь можно по ссылке: http://ics"
-    )
-    assert "http://ics" not in captured_message["text"]
+    assert not any(method == "wall.createComment" for method, _ in calls)
+    assert "Добавить в календарь http://ics" in captured_message["text"]
     assert captured_message["text"].startswith("[https://source|Title]\nDescription")
+
+
+def test_build_vk_source_message_converts_links():
+    text = "Регистрация [здесь](http://reg) и <a href=\"http://pay\">билеты</a>"
+    msg = main.build_vk_source_message(text, None, display_link=False)
+    assert "здесь (http://reg)" in msg
+    assert "билеты (http://pay)" in msg
 
