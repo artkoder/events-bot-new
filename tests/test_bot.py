@@ -3742,6 +3742,48 @@ async def test_add_event_lines_include_vk_link(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_update_event_description_error_does_not_stop_sync(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async def fake_parse(text: str, source_channel: str | None = None) -> list[dict]:
+        return [
+            {
+                "title": "T",
+                "short_description": "d",
+                "date": "2025-08-09",
+                "time": "14:00",
+                "location_name": "Hall",
+            }
+        ]
+
+    async def fake_create(*args, db=None, **kwargs):
+        return "u", "p"
+
+    called: dict[str, str] = {}
+
+    async def fake_month(db_obj, month, update_links=True):
+        called["month"] = month
+
+    async def fake_weekend(db_obj, start, update_links=True):
+        called["weekend"] = start
+
+    async def boom(event, db_obj):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.create_source_page", fake_create)
+    monkeypatch.setattr("main.sync_month_page", fake_month)
+    monkeypatch.setattr("main.sync_weekend_page", fake_weekend)
+    monkeypatch.setattr("main.update_event_description", boom)
+
+    results = await main.add_events_from_text(db, "t", None, None, None)
+    assert called.get("month") == "2025-08"
+    assert called.get("weekend") == "2025-08-09"
+    assert results and results[0][0].title == "T"
+
+
+@pytest.mark.asyncio
 async def test_add_event_strips_city_from_address(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()

@@ -3211,7 +3211,10 @@ async def add_events_from_text(
                         saved.photo_count = photo_count
                         session.add(saved)
                         await session.commit()
-                await update_event_description(saved, db)
+                try:
+                    await update_event_description(saved, db)
+                except Exception as e:
+                    logging.error("failed to update event %s description: %s", saved.id, e)
                 vk_url = await sync_vk_source_post(
                     saved,
                     source_link,
@@ -3319,7 +3322,10 @@ async def add_events_from_text(
                             session.add(saved)
                             await session.commit()
             if saved.telegraph_path:
-                await update_event_description(saved, db)
+                try:
+                    await update_event_description(saved, db)
+                except Exception as e:
+                    logging.error("failed to update event %s description: %s", saved.id, e)
             logging.info("syncing month page %s", saved.date[:7])
             await sync_month_page(db, saved.date[:7])
             d_saved = parse_iso_date(saved.date)
