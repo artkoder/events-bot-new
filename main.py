@@ -4121,7 +4121,7 @@ def format_event_vk(
     else:
         day_fmt = day
     lines.append(f"\U0001f4c5 {day_fmt} {e.time}")
-    lines.append(f"\U0001f4cd {loc}")
+    lines.append(loc)
 
     return "\n".join(lines)
 
