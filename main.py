@@ -114,6 +114,20 @@ _vk_user_token_bad: str | None = None
 # to decide when month pages should be split into two parts.
 TELEGRAPH_PAGE_LIMIT = 60000
 
+# Timeout for Telegraph API operations (in seconds)
+TELEGRAPH_TIMEOUT = float(os.getenv("TELEGRAPH_TIMEOUT", "30"))
+
+
+# Run blocking Telegraph API calls with a timeout
+async def telegraph_call(func, /, *args, **kwargs):
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(func, *args, **kwargs), TELEGRAPH_TIMEOUT
+        )
+    except asyncio.TimeoutError as e:
+        raise TelegraphException("Telegraph request timed out") from e
+
+
 # main menu buttons
 MENU_ADD_EVENT = "\u2795 Добавить событие"
 MENU_EVENTS = "\U0001f4c5 События"
@@ -4572,11 +4586,11 @@ async def sync_month_page(db: Database, month: str, update_links: bool = False):
                     db, month, second, exhibitions, nav_pages
                 )
                 if not page.path2:
-                    data2 = await asyncio.to_thread(tg.create_page, title2, content=content2)
+                    data2 = await telegraph_call(tg.create_page, title2, content=content2)
                     page.url2 = data2.get("url")
                     page.path2 = data2.get("path")
                 else:
-                    await asyncio.to_thread(
+                    await telegraph_call(
                         tg.edit_page, page.path2, title=title2, content=content2
                     )
 
@@ -4584,11 +4598,11 @@ async def sync_month_page(db: Database, month: str, update_links: bool = False):
                     db, month, first, [], nav_pages, continuation_url=page.url2
                 )
                 if not page.path:
-                    data1 = await asyncio.to_thread(tg.create_page, title1, content=content1)
+                    data1 = await telegraph_call(tg.create_page, title1, content=content1)
                     page.url = data1.get("url")
                     page.path = data1.get("path")
                 else:
-                    await asyncio.to_thread(
+                    await telegraph_call(
                         tg.edit_page, page.path, title=title1, content=content1
                     )
                 logging.info(
@@ -4606,11 +4620,11 @@ async def sync_month_page(db: Database, month: str, update_links: bool = False):
             try:
                 if size <= TELEGRAPH_PAGE_LIMIT:
                     if not page.path:
-                        data = await asyncio.to_thread(tg.create_page, title, content=content)
+                        data = await telegraph_call(tg.create_page, title, content=content)
                         page.url = data.get("url")
                         page.path = data.get("path")
                     else:
-                        await asyncio.to_thread(
+                        await telegraph_call(
                             tg.edit_page, page.path, title=title, content=content
                         )
                     page.url2 = None
@@ -4809,7 +4823,7 @@ async def sync_weekend_page(db: Database, start: str, update_links: bool = False
             if not page:
                 # Create a placeholder page to obtain path and URL
                 title, content = await build_weekend_page_content(db, start)
-                data = await asyncio.to_thread(tg.create_page, title, content=content)
+                data = await telegraph_call(tg.create_page, title, content=content)
                 page = WeekendPage(
                     start=start, url=data.get("url"), path=data.get("path")
                 )
@@ -4819,7 +4833,7 @@ async def sync_weekend_page(db: Database, start: str, update_links: bool = False
 
             # Rebuild content including this page in navigation
             title, content = await build_weekend_page_content(db, start)
-            await asyncio.to_thread(
+            await telegraph_call(
                 tg.edit_page, page.path, title=title, content=content
             )
             logging.info(
@@ -5094,12 +5108,12 @@ async def sync_festival_page(db: Database, name: str):
 
             created = False
             if fest.telegraph_path:
-                await asyncio.to_thread(
+                await telegraph_call(
                     tg.edit_page, fest.telegraph_path, title=title, content=content
                 )
                 logging.info("updated festival page %s in Telegraph", name)
             else:
-                data = await asyncio.to_thread(tg.create_page, title, content=content)
+                data = await telegraph_call(tg.create_page, title, content=content)
                 fest.telegraph_url = data.get("url")
                 fest.telegraph_path = data.get("path")
                 created = True
@@ -6453,7 +6467,7 @@ async def fetch_views(path: str, url: str | None = None) -> int | None:
     tg = Telegraph(access_token=token, domain=domain)
 
     try:
-        data = await asyncio.to_thread(tg.get_views, path)
+        data = await telegraph_call(tg.get_views, path)
         return int(data.get("views", 0))
     except Exception as e:
         logging.error("Failed to fetch views for %s: %s", path, e)
@@ -7127,12 +7141,12 @@ async def telegraph_test():
         print("Unable to obtain Telegraph token")
         return
     tg = Telegraph(access_token=token)
-    page = await asyncio.to_thread(
+    page = await telegraph_call(
         tg.create_page, "Test Page", html_content="<p>test</p>"
     )
     logging.info("Created %s", page["url"])
     print("Created", page["url"])
-    await asyncio.to_thread(
+    await telegraph_call(
         tg.edit_page, page["path"], title="Test Page", html_content="<p>updated</p>"
     )
     logging.info("Edited %s", page["url"])
@@ -7156,7 +7170,7 @@ async def update_source_page(
     tg = Telegraph(access_token=token)
     try:
         logging.info("Fetching telegraph page %s", path)
-        page = await asyncio.to_thread(tg.get_page, path, return_html=True)
+        page = await telegraph_call(tg.get_page, path, return_html=True)
         html_content = page.get("content") or page.get("content_html") or ""
         catbox_msg = ""
         images: list[tuple[bytes, str]] = []
@@ -7181,7 +7195,7 @@ async def update_source_page(
             html_content = apply_month_nav(html_content, nav_html)
         html_content = apply_footer_link(html_content)
         logging.info("Editing telegraph page %s", path)
-        await asyncio.to_thread(
+        await telegraph_call(
             tg.edit_page, path, title=title, html_content=html_content
         )
         logging.info("Updated telegraph page %s", path)
@@ -7200,11 +7214,11 @@ async def update_source_page_ics(path: str, title: str, url: str | None):
     tg = Telegraph(access_token=token)
     try:
         logging.info("Editing telegraph ICS for %s", path)
-        page = await asyncio.to_thread(tg.get_page, path, return_html=True)
+        page = await telegraph_call(tg.get_page, path, return_html=True)
         html_content = page.get("content") or page.get("content_html") or ""
         html_content = apply_ics_link(html_content, url)
         html_content = apply_footer_link(html_content)
-        await asyncio.to_thread(
+        await telegraph_call(
             tg.edit_page, path, title=title, html_content=html_content
         )
     except Exception as e:
@@ -7219,7 +7233,7 @@ async def get_source_page_text(path: str) -> str:
         return ""
     tg = Telegraph(access_token=token)
     try:
-        page = await asyncio.to_thread(tg.get_page, path, return_html=True)
+        page = await telegraph_call(tg.get_page, path, return_html=True)
     except Exception as e:
         logging.error("Failed to fetch telegraph page: %s", e)
         return ""
@@ -7331,7 +7345,7 @@ async def create_source_page(
         html_content = apply_month_nav(html_content, nav_html)
     html_content = apply_footer_link(html_content)
     try:
-        page = await asyncio.to_thread(tg.create_page, title, html_content=html_content)
+        page = await telegraph_call(tg.create_page, title, html_content=html_content)
     except Exception as e:
         logging.error("Failed to create telegraph page: %s", e)
         return None

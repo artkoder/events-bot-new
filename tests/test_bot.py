@@ -937,6 +937,18 @@ async def test_telegraph_test(monkeypatch, capsys):
 
 
 @pytest.mark.asyncio
+async def test_telegraph_call_timeout(monkeypatch):
+    monkeypatch.setattr(main, "TELEGRAPH_TIMEOUT", 0.05)
+
+    def slow():
+        import time as time_module
+        time_module.sleep(0.2)
+
+    with pytest.raises(TelegraphException):
+        await main.telegraph_call(slow)
+
+
+@pytest.mark.asyncio
 async def test_create_source_page_photo(monkeypatch):
     class DummyTG:
         def __init__(self, access_token=None):
