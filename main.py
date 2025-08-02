@@ -5610,7 +5610,8 @@ async def vk_poll_scheduler(db: Database, bot: Bot):
         offset = await get_tz_offset(db)
         tz = offset_to_timezone(offset)
         now = datetime.now(tz)
-        logging.info("vk_poll_scheduler tick at %s", now.isoformat())
+        logging.debug("vk_poll_scheduler tick at %s", now.isoformat())
+
         async with db.get_session() as session:
             res_f = await session.execute(select(Festival))
             festivals = res_f.scalars().all()
@@ -5621,17 +5622,17 @@ async def vk_poll_scheduler(db: Database, bot: Bot):
             if e.festival:
                 ev_map.setdefault(e.festival, []).append(e)
         for fest in festivals:
-            logging.info("Evaluating festival %s", fest.name)
+            logging.debug("Evaluating festival %s", fest.name)
             if fest.vk_poll_url:
-                logging.info("Skipping %s: poll already exists", fest.name)
+                logging.debug("Skipping %s: poll already exists", fest.name)
                 continue
             evs = ev_map.get(fest.name, [])
             if not evs:
-                logging.info("Skipping %s: no events associated", fest.name)
+                logging.debug("Skipping %s: no events associated", fest.name)
                 continue
             start, _ = festival_dates(fest, evs)
             if not start:
-                logging.info("Skipping %s: unable to determine start date", fest.name)
+                logging.debug("Skipping %s: unable to determine start date", fest.name)
                 continue
             first_time: time | None = None
             for ev in evs:
@@ -5643,7 +5644,7 @@ async def vk_poll_scheduler(db: Database, bot: Bot):
                         first_time = tr[0]
             if first_time is None:
                 first_time = time(0, 0)
-            logging.info(
+            logging.debug(
                 "Festival %s starts %s at %s", fest.name, start.isoformat(), first_time
             )
             sched: datetime | None = None
@@ -5660,7 +5661,7 @@ async def vk_poll_scheduler(db: Database, bot: Bot):
                 except Exception as e:
                     logging.error("VK poll send failed for %s: %s", fest.name, e)
             else:
-                logging.info(
+                logging.debug(
                     "Not time yet for %s poll (now %s, sched %s)",
                     fest.name,
                     now.isoformat(),
