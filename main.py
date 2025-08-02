@@ -5611,6 +5611,7 @@ async def vk_poll_scheduler(db: Database, bot: Bot):
         tz = offset_to_timezone(offset)
         now = datetime.now(tz)
         logging.debug("vk_poll_scheduler tick at %s", now.isoformat())
+
         async with db.get_session() as session:
             res_f = await session.execute(select(Festival))
             festivals = res_f.scalars().all()
