@@ -21,6 +21,7 @@ from main import (
     Setting,
     User,
     Event,
+    Festival,
     MonthPage,
     WeekendPage,
     create_app,
@@ -43,6 +44,7 @@ from main import (
     editing_sessions,
     festival_edit_sessions,
     notify_inactive_partners,
+    send_festival_poll,
 )
 
 FUTURE_DATE = (date.today() + timedelta(days=10)).isoformat()
@@ -5255,6 +5257,52 @@ async def test_partner_event_add_notifies_superadmin(tmp_path: Path, monkeypatch
 
     assert any(
         "partner" in m[1] and "added event" in m[1] for m in bot.messages if m[0] == 1
+    )
+
+
+@pytest.mark.asyncio
+async def test_festival_poll_notifies_superadmin(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    start_msg = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "S"},
+            "text": "/start",
+        }
+    )
+    await handle_start(start_msg, db, bot)
+
+    async def fake_generate(fest):
+        return "Q?"
+
+    async def fake_post(group_id, question, options, db_obj, bot_obj):
+        return "https://vk.com/poll1"
+
+    monkeypatch.setattr(main, "generate_festival_poll_text", fake_generate)
+    monkeypatch.setattr(main, "post_vk_poll", fake_post)
+
+    async with db.get_session() as session:
+        fest = Festival(name="Jazz")
+        session.add(fest)
+        await session.commit()
+        await session.refresh(fest)
+        fid = fest.id
+
+    await send_festival_poll(db, fest, "-1", bot)
+
+    async with db.get_session() as session:
+        obj = await session.get(Festival, fid)
+
+    assert obj and obj.vk_poll_url == "https://vk.com/poll1"
+    assert any(
+        "poll created" in m[1] and "https://vk.com/poll1" in m[1]
+        for m in bot.messages
+        if m[0] == 1
     )
 
 
