@@ -42,6 +42,8 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "events-ics")
 VK_TOKEN = os.getenv("VK_TOKEN")
 VK_USER_TOKEN = os.getenv("VK_USER_TOKEN")
+VK_TOKEN_AFISHA = os.getenv("VK_TOKEN_AFISHA")
+VK_AFISHA_GROUP_ID = os.getenv("VK_AFISHA_GROUP_ID")
 ICS_CONTENT_TYPE = "text/calendar; charset=utf-8"
 ICS_CONTENT_DISP_TEMPLATE = 'inline; filename="{name}"'
 ICS_CALNAME = "kenigevents"
@@ -72,6 +74,10 @@ CONTENT_SEPARATOR = "🟧" * 10
 VK_EVENT_SEPARATOR = "\u2800\n\u2800"
 # single blank line for VK posts
 VK_BLANK_LINE = "\u2800"
+# footer appended to VK source posts
+VK_SOURCE_FOOTER = (
+    f"{VK_BLANK_LINE}\n[https://vk.com/club231828790|Полюбить Калининград Анонсы]"
+)
 # default options for VK polls
 VK_POLL_OPTIONS = ["Пойду", "Подумаю", "Нет"]
 
@@ -206,6 +212,7 @@ class Event(SQLModel, table=True):
     telegraph_url: Optional[str] = None
     ics_url: Optional[str] = None
     source_post_url: Optional[str] = None
+    source_vk_post_url: Optional[str] = None
     ics_post_url: Optional[str] = None
     ics_post_id: Optional[int] = None
     source_chat_id: Optional[int] = None
@@ -277,6 +284,10 @@ class Database:
             if "source_post_url" not in cols:
                 await conn.exec_driver_sql(
                     "ALTER TABLE event ADD COLUMN source_post_url VARCHAR"
+                )
+            if "source_vk_post_url" not in cols:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE event ADD COLUMN source_vk_post_url VARCHAR"
                 )
             if "is_free" not in cols:
                 await conn.exec_driver_sql(
@@ -562,15 +573,22 @@ def _vk_user_token() -> str | None:
 
 
 async def _vk_api(
-    method: str, params: dict, db: Database | None = None, bot: Bot | None = None
+    method: str,
+    params: dict,
+    db: Database | None = None,
+    bot: Bot | None = None,
+    token: str | None = None,
 ) -> dict:
     """Call VK API with token fallback."""
     tokens: list[tuple[str, str]] = []
-    user_token = _vk_user_token()
-    if user_token:
-        tokens.append(("user", user_token))
-    if VK_TOKEN:
-        tokens.append(("group", VK_TOKEN))
+    if token:
+        tokens.append(("group", token))
+    else:
+        user_token = _vk_user_token()
+        if user_token:
+            tokens.append(("user", user_token))
+        if VK_TOKEN:
+            tokens.append(("group", VK_TOKEN))
     last_err: dict | None = None
     for kind, token in tokens:
         params["access_token"] = token
@@ -602,6 +620,7 @@ async def upload_vk_photo(
     url: str,
     db: Database | None = None,
     bot: Bot | None = None,
+    token: str | None = None,
 ) -> str | None:
     """Upload an image to VK and return attachment id."""
     if not url:
@@ -612,6 +631,7 @@ async def upload_vk_photo(
             {"group_id": group_id.lstrip("-")},
             db,
             bot,
+            token=token,
         )
         upload_url = data["response"]["upload_url"]
         async with create_ipv4_session(ClientSession) as session:
@@ -641,6 +661,7 @@ async def upload_vk_photo(
             },
             db,
             bot,
+            token=token,
         )
         info = save["response"][0]
         return f"photo{info['owner_id']}_{info['id']}"
@@ -2087,6 +2108,14 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                         await update_source_page_ics(
                             event.telegraph_path, event.title or "Event", url
                         )
+                        await sync_vk_source_post(
+                            event,
+                            event.source_post_url,
+                            event.source_text,
+                            db,
+                            bot,
+                            ics_url=url,
+                        )
                     month = event.date.split("..", 1)[0][:7]
                     await sync_month_page(db, month)
 
@@ -2123,6 +2152,14 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                 if event.telegraph_path:
                     await update_source_page_ics(
                         event.telegraph_path, event.title or "Event", None
+                    )
+                    await sync_vk_source_post(
+                        event,
+                        event.source_post_url,
+                        event.source_text,
+                        db,
+                        bot,
+                        ics_url=None,
                     )
                 month = event.date.split("..", 1)[0][:7]
                 await sync_month_page(db, month)
@@ -3152,6 +3189,20 @@ async def add_events_from_text(
                         session.add(saved)
                         await session.commit()
                 await update_event_description(saved, db)
+                vk_url = await sync_vk_source_post(
+                    saved,
+                    source_link,
+                    saved.source_text,
+                    db,
+                    bot,
+                    display_link=display_source,
+                    ics_url=saved.ics_url,
+                )
+                if vk_url:
+                    async with db.get_session() as session:
+                        saved.source_vk_post_url = vk_url
+                        session.add(saved)
+                        await session.commit()
             else:
                 if not saved.ics_url:
                     ics = await upload_ics(saved, db)
@@ -3189,6 +3240,15 @@ async def add_events_from_text(
                                 saved.title or "Event",
                                 saved.ics_url,
                             )
+                            await sync_vk_source_post(
+                                saved,
+                                source_link,
+                                saved.source_text,
+                                db,
+                                bot,
+                                display_link=display_source,
+                                ics_url=saved.ics_url,
+                            )
                 extra_kwargs = {"display_link": False} if not display_source else {}
                 res = await create_source_page(
                     saved.title or "Event",
@@ -3218,6 +3278,20 @@ async def add_events_from_text(
                         saved.photo_count = photo_count
                         session.add(saved)
                         await session.commit()
+                    vk_url = await sync_vk_source_post(
+                        saved,
+                        source_link,
+                        saved.source_text,
+                        db,
+                        bot,
+                        display_link=display_source,
+                        ics_url=saved.ics_url,
+                    )
+                    if vk_url:
+                        async with db.get_session() as session:
+                            saved.source_vk_post_url = vk_url
+                            session.add(saved)
+                            await session.commit()
             if saved.telegraph_path:
                 await update_event_description(saved, db)
             logging.info("syncing month page %s", saved.date[:7])
@@ -3268,6 +3342,8 @@ async def add_events_from_text(
                 lines.append(f"ticket_link: {saved.ticket_link}")
             if saved.telegraph_url:
                 lines.append(f"telegraph: {saved.telegraph_url}")
+            if saved.source_vk_post_url:
+                lines.append(f"vk_source: {saved.source_vk_post_url}")
             if is_vk_wall_url(saved.source_post_url):
                 lines.append(f"Vk: {saved.source_post_url}")
             if upload_info:
@@ -3300,6 +3376,14 @@ async def handle_add_event(message: types.Message, db: Database, bot: Bot):
     creator_id = user.user_id if user else message.from_user.id
     images = await extract_images(message, bot)
     media = images if images else None
+    catbox_urls: list[str] | None = None
+    catbox_msg = ""
+    if images:
+        catbox_urls, catbox_msg = await upload_to_catbox(images)
+    catbox_urls: list[str] | None = None
+    catbox_msg = ""
+    if images:
+        catbox_urls, catbox_msg = await upload_to_catbox(images)
     html_text = message.html_text or message.caption_html
     if not using_session and html_text and html_text.startswith("/addevent"):
         html_text = html_text[len("/addevent") :].lstrip()
@@ -3396,6 +3480,10 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
         return
     images = await extract_images(message, bot)
     media = images if images else None
+    catbox_urls: list[str] | None = None
+    catbox_msg = ""
+    if images:
+        catbox_urls, catbox_msg = await upload_to_catbox(images)
 
     event = Event(
         title=title,
@@ -3428,11 +3516,12 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
         event.source_text,
         None,
         html_text or event.source_text,
-        media,
+        None,
         event.ics_url,
         db,
+        catbox_urls=catbox_urls,
     )
-    upload_info = ""
+    upload_info = catbox_msg
     photo_count = 0
     if res:
         if len(res) == 4:
@@ -3450,6 +3539,19 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
             event.photo_count = photo_count
             session.add(event)
             await session.commit()
+        vk_url = await sync_vk_source_post(
+            event,
+            None,
+            event.source_text,
+            db,
+            bot,
+            ics_url=event.ics_url,
+        )
+        if vk_url:
+            async with db.get_session() as session:
+                event.source_vk_post_url = vk_url
+                session.add(event)
+                await session.commit()
     await sync_month_page(db, event.date[:7])
     d = parse_iso_date(event.date)
     w_start = weekend_start_for_date(d) if d else None
@@ -3463,6 +3565,8 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
     ]
     if event.telegraph_url:
         lines.append(f"telegraph: {event.telegraph_url}")
+    if event.source_vk_post_url:
+        lines.append(f"vk_source: {event.source_vk_post_url}")
     if is_vk_wall_url(event.source_post_url):
         lines.append(f"Vk: {event.source_post_url}")
     if upload_info:
@@ -4931,6 +5035,8 @@ async def send_festival_poll(
             if obj:
                 obj.vk_poll_url = url
                 await session.commit()
+        if bot:
+            await notify_superadmin(db, bot, f"poll created {url}")
 
 
 
@@ -5281,6 +5387,7 @@ async def post_to_vk(
     db: Database | None = None,
     bot: Bot | None = None,
     attachments: list[str] | None = None,
+    token: str | None = None,
 ) -> str | None:
     if not group_id:
         return None
@@ -5291,7 +5398,7 @@ async def post_to_vk(
     }
     if attachments:
         params["attachments"] = ",".join(attachments)
-    data = await _vk_api("wall.post", params, db, bot)
+    data = await _vk_api("wall.post", params, db, bot, token=token)
     post_id = data.get("response", {}).get("post_id")
     if post_id:
         return f"https://vk.com/wall-{group_id.lstrip('-')}_{post_id}"
@@ -5344,12 +5451,91 @@ def _vk_owner_and_post_id(url: str) -> tuple[str, str] | None:
     return m.group(1), m.group(2)
 
 
+def _strip_title(line_text: str, title: str) -> str:
+    lines = line_text.splitlines()
+    if lines and lines[0].strip() == title.strip():
+        return "\n".join(lines[1:]).lstrip()
+    return line_text
+
+
+def build_vk_source_message(
+    title: str,
+    text: str,
+    source_url: str | None = None,
+    ics_url: str | None = None,
+    display_link: bool = True,
+) -> str:
+    header = f"[{source_url}|{title}]" if source_url and display_link else title
+    body = _strip_title(text, title).strip()
+    lines = [header]
+    if body:
+        lines.append(body)
+    if ics_url:
+        lines.append(ics_url)
+    lines.append(VK_SOURCE_FOOTER)
+    return "\n".join(lines)
+
+
+async def sync_vk_source_post(
+    event: Event,
+    source_url: str | None,
+    text: str,
+    db: Database | None,
+    bot: Bot | None,
+    *,
+    display_link: bool = True,
+    ics_url: str | None = None,
+) -> str | None:
+    """Create or update VK source post for an event."""
+    if not (VK_TOKEN_AFISHA and VK_AFISHA_GROUP_ID):
+        return None
+    message = build_vk_source_message(
+        event.title or "Event", text, source_url, ics_url, display_link
+    )
+    if event.source_vk_post_url:
+        existing = ""
+        try:
+            ids = _vk_owner_and_post_id(event.source_vk_post_url)
+            if ids:
+                data = await _vk_api(
+                    "wall.getById",
+                    {"posts": f"{ids[0]}_{ids[1]}"},
+                    db,
+                    bot,
+                    token=VK_TOKEN_AFISHA,
+                )
+                items = data.get("response") or []
+                if items:
+                    existing = items[0].get("text", "")
+        except Exception as e:
+            logging.error("failed to fetch existing VK post: %s", e)
+        base = existing.split(VK_SOURCE_FOOTER)[0].rstrip()
+        new_message = f"{base}\n{CONTENT_SEPARATOR}\n{message}"
+        await edit_vk_post(
+            event.source_vk_post_url,
+            new_message,
+            db,
+            bot,
+            token=VK_TOKEN_AFISHA,
+        )
+        return event.source_vk_post_url
+    url = await post_to_vk(
+        VK_AFISHA_GROUP_ID,
+        message,
+        db,
+        bot,
+        token=VK_TOKEN_AFISHA,
+    )
+    return url
+
+
 async def edit_vk_post(
     post_url: str,
     message: str,
     db: Database | None = None,
     bot: Bot | None = None,
     attachments: list[str] | None = None,
+    token: str | None = None,
 ) -> None:
     ids = _vk_owner_and_post_id(post_url)
     if not ids:
@@ -5369,6 +5555,7 @@ async def edit_vk_post(
             {"posts": f"{owner_id}_{post_id}"},
             db,
             bot,
+            token=token,
         )
         items = data.get("response") or []
         if items:
@@ -5388,7 +5575,7 @@ async def edit_vk_post(
                 current.append(a)
     if current:
         params["attachments"] = ",".join(current)
-    await _vk_api("wall.edit", params, db, bot)
+    await _vk_api("wall.edit", params, db, bot, token=token)
 
 
 async def send_daily_announcement_vk(

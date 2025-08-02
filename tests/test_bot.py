@@ -44,8 +44,17 @@ from main import (
     editing_sessions,
     festival_edit_sessions,
     festival_dates,
+    send_festival_poll,
+    notify_inactive_partners,
 
 )
+
+
+@pytest.fixture(autouse=True)
+def _mock_sync_vk_source_post(monkeypatch):
+    async def fake_sync(*args, **kwargs):
+        return "https://vk.com/source"
+    monkeypatch.setattr(main, "sync_vk_source_post", fake_sync)
 
 FUTURE_DATE = (date.today() + timedelta(days=10)).isoformat()
 
@@ -3728,7 +3737,8 @@ async def test_add_event_lines_include_vk_link(tmp_path: Path, monkeypatch):
     lines = results[0][2]
     assert "telegraph: https://t.me/page" in lines
     idx = lines.index("telegraph: https://t.me/page")
-    assert lines[idx + 1] == "Vk: https://vk.com/wall-1_1"
+    assert lines[idx + 1] == "vk_source: https://vk.com/source"
+    assert lines[idx + 2] == "Vk: https://vk.com/wall-1_1"
 
 
 @pytest.mark.asyncio
@@ -5674,7 +5684,7 @@ async def test_festival_vk_message_lists_upcoming(tmp_path: Path):
 async def test_edit_vk_post_preserves_photos(monkeypatch):
     captured = {}
 
-    async def fake_api(method, params, db=None, bot=None):
+    async def fake_api(method, params, db=None, bot=None, token=None):
         if method == "wall.getById":
             assert params["posts"] == "-1_2"
             return {
@@ -5705,7 +5715,7 @@ async def test_edit_vk_post_preserves_photos(monkeypatch):
 async def test_edit_vk_post_add_photo(monkeypatch):
     captured = {}
 
-    async def fake_api(method, params, db=None, bot=None):
+    async def fake_api(method, params, db=None, bot=None, token=None):
         if method == "wall.getById":
             return {
                 "response": [
