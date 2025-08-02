@@ -165,6 +165,10 @@
 - Weekend VK posts include only events with existing VK source posts and no
   longer attempt to create source posts automatically.
 
+## v0.3.25 - Daily VK title links
+
+- Event titles in VK daily announcements link to their VK posts when available.
+
 
 
 

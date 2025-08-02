@@ -4383,8 +4383,11 @@ def test_format_event_vk_with_vk_link():
         location_name="Hall",
         source_post_url="https://vk.com/wall-1_1",
         telegraph_url="https://t.me/page",
+        added_at=datetime.utcnow() - timedelta(days=2),
     )
     text = main.format_event_vk(e)
+    lines = text.splitlines()
+    assert lines[0] == "[https://vk.com/wall-1_1|T]"
     assert "[подробнее|https://vk.com/wall-1_1]" in text
     assert "t.me/page" not in text
 
@@ -4418,6 +4421,26 @@ def test_format_event_vk_festival_link():
     text = main.format_event_vk(e, festival=fest)
     lines = text.splitlines()
     assert lines[1] == "✨ [https://vk.com/wall-1_1|Jazz]"
+
+
+def test_format_event_vk_prefers_source_vk_post_url():
+    e = Event(
+        title="T",
+        description="d",
+        source_text="s",
+        date="2025-07-10",
+        time="18:00",
+        location_name="Hall",
+        source_post_url="https://example.com/page",
+        source_vk_post_url="https://vk.com/wall-1_1",
+        telegraph_url="https://t.me/page",
+        added_at=datetime.utcnow() - timedelta(days=2),
+    )
+    text = main.format_event_vk(e)
+    lines = text.splitlines()
+    assert lines[0] == "[https://vk.com/wall-1_1|T]"
+    assert "[подробнее|https://vk.com/wall-1_1]" in text
+    assert "t.me/page" not in text
 
 
 @pytest.mark.asyncio
