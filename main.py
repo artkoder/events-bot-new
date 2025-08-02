@@ -4911,6 +4911,10 @@ async def send_festival_poll(
             if obj:
                 obj.vk_poll_url = url
                 await session.commit()
+        if bot:
+            await notify_superadmin(
+                db, bot, f"VK poll created for {fest.name}: {url}"
+            )
 
 
 
