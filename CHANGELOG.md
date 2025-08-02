@@ -155,6 +155,11 @@
 - Partners who haven't added events no longer receive daily reminders; each
   partner is notified at most once a week.
 
+## v0.3.23 - Weekend VK posts
+
+- Creating a weekend Telegraph page now also publishes a simplified weekend
+  post to VK and links existing weekend VK posts in chronological order.
+
 
 
 
