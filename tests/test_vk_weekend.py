@@ -74,3 +74,52 @@ async def test_sync_weekend_page_posts_vk(tmp_path: Path, monkeypatch):
         assert wp and wp.vk_post_url == 'https://vk.com/wall-1_123'
         ev = (await session.execute(select(Event))).scalars().first()
         assert ev.source_vk_post_url == 'https://vk.com/wall-1_111'
+
+
+@pytest.mark.asyncio
+async def test_sync_vk_weekend_post_recreates_deleted(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / 'db.sqlite'))
+    await db.init()
+    sat = date(2025, 7, 12)
+    main.VK_AFISHA_GROUP_ID = '1'
+
+    async with db.get_session() as session:
+        session.add(
+            WeekendPage(
+                start=sat.isoformat(),
+                url='u1',
+                path='p1',
+                vk_post_url='https://vk.com/wall-1_1',
+            )
+        )
+        session.add(
+            Event(
+                title='Party',
+                description='d',
+                source_text='s',
+                date=sat.isoformat(),
+                time='10:00',
+                location_name='Club',
+                source_vk_post_url='https://vk.com/wall-1_111',
+            )
+        )
+        await session.commit()
+
+    async def fake_edit_vk_post(url, message, db=None, bot=None):
+        raise RuntimeError("VK error: {'error_msg': 'Access denied: post or comment deleted'}")
+
+    created: list[str] = []
+
+    async def fake_post_to_vk(group_id, message, db=None, bot=None, attachments=None, token=None):
+        created.append(message)
+        return 'https://vk.com/wall-1_2'
+
+    monkeypatch.setattr(main, 'edit_vk_post', fake_edit_vk_post)
+    monkeypatch.setattr(main, 'post_to_vk', fake_post_to_vk)
+
+    await main.sync_vk_weekend_post(db, sat.isoformat())
+
+    assert created and 'Party' in created[0]
+    async with db.get_session() as session:
+        page = await session.get(WeekendPage, sat.isoformat())
+        assert page.vk_post_url == 'https://vk.com/wall-1_2'

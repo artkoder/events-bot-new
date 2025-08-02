@@ -4934,21 +4934,29 @@ async def sync_vk_weekend_post(db: Database, start: str, bot: Bot | None = None)
 
     message = await build_weekend_vk_message(db, start)
     logging.info("sync_vk_weekend_post message len=%d", len(message))
-    try:
-        if page.vk_post_url:
+    needs_new_post = not page.vk_post_url
+    if page.vk_post_url:
+        try:
             await edit_vk_post(page.vk_post_url, message, db, bot)
             logging.info("sync_vk_weekend_post updated %s", page.vk_post_url)
-        else:
-            url = await post_to_vk(group_id, message, db, bot)
-            if url:
-                async with db.get_session() as session:
-                    obj = await session.get(WeekendPage, start)
-                    if obj:
-                        obj.vk_post_url = url
-                        await session.commit()
-                logging.info("sync_vk_weekend_post created %s", url)
-    except Exception as e:
-        logging.error("VK post error for weekend %s: %s", start, e)
+        except Exception as e:
+            if "post or comment deleted" in str(e) or "Пост удалён" in str(e):
+                logging.warning(
+                    "sync_vk_weekend_post: original VK post missing, creating new"
+                )
+                needs_new_post = True
+            else:
+                logging.error("VK post error for weekend %s: %s", start, e)
+                return
+    if needs_new_post:
+        url = await post_to_vk(group_id, message, db, bot)
+        if url:
+            async with db.get_session() as session:
+                obj = await session.get(WeekendPage, start)
+                if obj:
+                    obj.vk_post_url = url
+                    await session.commit()
+            logging.info("sync_vk_weekend_post created %s", url)
 
 
 async def generate_festival_description(fest: Festival, events: list[Event]) -> str:
