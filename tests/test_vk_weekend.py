@@ -21,6 +21,7 @@ async def test_build_weekend_vk_message(tmp_path: Path):
         await session.commit()
     msg = await main.build_weekend_vk_message(db, sat.isoformat())
     assert '10:00 | [https://vk.com/wall-1_1|Party]' in msg
+
     assert 'NoVK' not in msg
     assert f'[https://vk.com/wall-1_2|{format_weekend_range(next_sat)}]' in msg
     assert msg.splitlines()[0] == f'{format_weekend_range(sat)} Афиша выходных'

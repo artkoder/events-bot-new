@@ -1883,6 +1883,8 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
     elif data.startswith("del:"):
         _, eid, marker = data.split(":")
         month = None
+        w_start: date | None = None
+        vk_post: str | None = None
         async with db.get_session() as session:
             user = await session.get(User, callback.from_user.id)
             event = await session.get(Event, int(eid))
@@ -1893,14 +1895,18 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                 return
             if event:
                 month = event.date.split("..", 1)[0][:7]
+                d = parse_iso_date(event.date)
+                w_start = weekend_start_for_date(d) if d else None
+                vk_post = event.source_vk_post_url
                 await session.delete(event)
                 await session.commit()
         if month:
             await sync_month_page(db, month)
-            d = parse_iso_date(event.date) if event else None
-            w_start = weekend_start_for_date(d) if d else None
             if w_start:
                 await sync_weekend_page(db, w_start.isoformat())
+                await sync_vk_weekend_post(db, w_start.isoformat())
+        if vk_post:
+            await delete_vk_post(vk_post, db, bot)
         offset = await get_tz_offset(db)
         tz = offset_to_timezone(offset)
         if marker == "exh":
@@ -4897,6 +4903,7 @@ async def build_weekend_vk_message(db: Database, start: str) -> str:
             if ev.time:
                 line = f"{ev.time} | {line}"
             lines.append(line)
+
             location_parts = [p for p in [ev.location_name, ev.city] if p]
             if location_parts:
                 lines.append(", ".join(location_parts))
@@ -5795,6 +5802,28 @@ async def edit_vk_post(
         params["attachments"] = ",".join(current)
     await _vk_api("wall.edit", params, db, bot, token=token)
     logging.info("edit_vk_post done: %s", post_url)
+
+
+async def delete_vk_post(
+    post_url: str,
+    db: Database | None = None,
+    bot: Bot | None = None,
+    token: str | None = None,
+) -> None:
+    """Delete a VK post given its URL."""
+    logging.info("delete_vk_post start: %s", post_url)
+    ids = _vk_owner_and_post_id(post_url)
+    if not ids:
+        logging.error("invalid VK post url %s", post_url)
+        return
+    owner_id, post_id = ids
+    params = {"owner_id": owner_id, "post_id": post_id}
+    try:
+        await _vk_api("wall.delete", params, db, bot, token=token)
+    except Exception as e:
+        logging.error("failed to delete VK post %s: %s", post_url, e)
+        return
+    logging.info("delete_vk_post done: %s", post_url)
 
 
 async def send_daily_announcement_vk(

@@ -3487,6 +3487,78 @@ async def test_delete_event_updates_month(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_delete_event_cleans_vk_posts(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    called = {}
+
+    async def fake_sync_month_page(db_obj, month):
+        called["month"] = month
+
+    async def fake_sync_weekend_page(db_obj, start, update_links=False):
+        called["weekend_page"] = start
+
+    async def fake_sync_vk_weekend_post(db_obj, start, bot=None):
+        called["weekend_post"] = start
+
+    async def fake_delete_vk_post(url, db_obj=None, bot_obj=None):
+        called["deleted"] = url
+
+    monkeypatch.setattr(main, "sync_month_page", fake_sync_month_page)
+    monkeypatch.setattr(main, "sync_weekend_page", fake_sync_weekend_page)
+    monkeypatch.setattr(main, "sync_vk_weekend_post", fake_sync_vk_weekend_post)
+    monkeypatch.setattr(main, "delete_vk_post", fake_delete_vk_post)
+
+    saturday = date(2025, 7, 19)
+
+    async with db.get_session() as session:
+        ev = Event(
+            title="Party",
+            description="d",
+            source_text="s",
+            date=saturday.isoformat(),
+            time="10:00",
+            location_name="Club",
+            source_vk_post_url="https://vk.com/wall-1_1",
+        )
+        session.add(ev)
+        await session.commit()
+        eid = ev.id
+
+    cb = types.CallbackQuery.model_validate(
+        {
+            "id": "c1",
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "chat_instance": "1",
+            "data": f"del:{eid}:{saturday.isoformat()}",
+            "message": {
+                "message_id": 2,
+                "date": 0,
+                "chat": {"id": 1, "type": "private"},
+            },
+        }
+    ).as_(bot)
+    object.__setattr__(cb.message, "_bot", bot)
+
+    async def dummy_edit(*args, **kwargs):
+        return None
+
+    object.__setattr__(cb.message, "edit_text", dummy_edit)
+
+    async def dummy_answer(*args, **kwargs):
+        return None
+
+    object.__setattr__(cb, "answer", dummy_answer)
+
+    await process_request(cb, db, bot)
+
+    assert called.get("deleted") == "https://vk.com/wall-1_1"
+    assert called.get("weekend_post") == saturday.isoformat()
+
+
+@pytest.mark.asyncio
 async def test_title_duplicate_update(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
