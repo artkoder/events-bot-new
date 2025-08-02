@@ -21,6 +21,7 @@ from main import (
     Setting,
     User,
     Event,
+    Festival,
     MonthPage,
     WeekendPage,
     create_app,
@@ -42,6 +43,7 @@ from main import (
     get_telegraph_token,
     editing_sessions,
     festival_edit_sessions,
+    festival_dates,
 )
 
 FUTURE_DATE = (date.today() + timedelta(days=10)).isoformat()
@@ -5725,5 +5727,18 @@ async def test_partner_notification_scheduler(tmp_path: Path, monkeypatch):
     assert any("неделе" in m[1] for m in bot.messages if m[0] == 2)
     assert any("p" in m[1] for m in bot.messages if m[0] == 1)
 
+
+
+@pytest.mark.asyncio
+async def test_festival_dates_manual(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    fest = Festival(name="Fest", start_date="2025-08-01", end_date="2025-08-03")
+    async with db.get_session() as session:
+        session.add(fest)
+        await session.commit()
+    start, end = festival_dates(fest, [])
+    assert start == date(2025, 8, 1)
+    assert end == date(2025, 8, 3)
 
 
