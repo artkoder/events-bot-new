@@ -4903,9 +4903,12 @@ async def send_festival_poll(
     group_id: str,
     bot: Bot | None = None,
 ) -> None:
+    logging.info("Creating VK poll for festival %s in group %s", fest.name, group_id)
     question = await generate_festival_poll_text(fest)
+    logging.info("Generated poll question for %s: %s", fest.name, question)
     url = await post_vk_poll(group_id, question, VK_POLL_OPTIONS, db, bot)
     if url:
+        logging.info("Poll for %s posted to VK: %s", fest.name, url)
         async with db.get_session() as session:
             obj = await session.get(Festival, fest.id)
             if obj:
@@ -4915,6 +4918,8 @@ async def send_festival_poll(
             await notify_superadmin(
                 db, bot, f"VK poll created for {fest.name}: {url}"
             )
+    else:
+        logging.error("Failed to post VK poll for %s", fest.name)
 
 
 
@@ -5289,6 +5294,7 @@ async def create_vk_poll(
     bot: Bot | None = None,
 ) -> str | None:
     """Create poll and return attachment id."""
+    logging.info("Calling VK polls.create for group %s", group_id)
     params = {
         "owner_id": f"-{group_id.lstrip('-')}",
         "question": question,
@@ -5300,7 +5306,10 @@ async def create_vk_poll(
     p_id = poll.get("id")
     owner = poll.get("owner_id", f"-{group_id.lstrip('-')}")
     if p_id is not None:
-        return f"poll{owner}_{p_id}"
+        att = f"poll{owner}_{p_id}"
+        logging.info("VK poll created with attachment %s", att)
+        return att
+    logging.error("VK poll creation failed for group %s: %s", group_id, poll)
     return None
 
 
@@ -5312,10 +5321,14 @@ async def post_vk_poll(
     bot: Bot | None = None,
 ) -> str | None:
     """Create poll and post it to group wall."""
+    logging.info("Posting VK poll to group %s", group_id)
     attachment = await create_vk_poll(group_id, question, options, db, bot)
     if not attachment:
+        logging.error("create_vk_poll returned no attachment for group %s", group_id)
         return None
-    return await post_to_vk(group_id, "", db, bot, [attachment])
+    url = await post_to_vk(group_id, "", db, bot, [attachment])
+    logging.info("VK poll post result for group %s: %s", group_id, url)
+    return url
 
 
 def _vk_owner_and_post_id(url: str) -> tuple[str, str] | None:
@@ -5591,11 +5604,13 @@ async def vk_poll_scheduler(db: Database, bot: Bot):
     while True:
         group_id = await get_vk_group_id(db)
         if not group_id:
+            logging.info("vk_poll_scheduler: no VK group ID configured")
             await asyncio.sleep(60)
             continue
         offset = await get_tz_offset(db)
         tz = offset_to_timezone(offset)
         now = datetime.now(tz)
+        logging.info("vk_poll_scheduler tick at %s", now.isoformat())
         async with db.get_session() as session:
             res_f = await session.execute(select(Festival))
             festivals = res_f.scalars().all()
@@ -5606,13 +5621,17 @@ async def vk_poll_scheduler(db: Database, bot: Bot):
             if e.festival:
                 ev_map.setdefault(e.festival, []).append(e)
         for fest in festivals:
+            logging.info("Evaluating festival %s", fest.name)
             if fest.vk_poll_url:
+                logging.info("Skipping %s: poll already exists", fest.name)
                 continue
             evs = ev_map.get(fest.name, [])
             if not evs:
+                logging.info("Skipping %s: no events associated", fest.name)
                 continue
             start, _ = festival_dates(fest, evs)
             if not start:
+                logging.info("Skipping %s: unable to determine start date", fest.name)
                 continue
             first_time: time | None = None
             for ev in evs:
@@ -5624,16 +5643,29 @@ async def vk_poll_scheduler(db: Database, bot: Bot):
                         first_time = tr[0]
             if first_time is None:
                 first_time = time(0, 0)
+            logging.info(
+                "Festival %s starts %s at %s", fest.name, start.isoformat(), first_time
+            )
             sched: datetime | None = None
             if start == now.date() and first_time >= time(17, 0):
                 sched = datetime.combine(start, time(13, 0), tz)
             elif start == now.date() + timedelta(days=1) and first_time < time(17, 0):
                 sched = datetime.combine(now.date(), time(21, 0), tz)
+            if sched:
+                logging.info("Poll for %s scheduled at %s", fest.name, sched.isoformat())
             if sched and now >= sched:
+                logging.info("Sending poll for %s", fest.name)
                 try:
                     await send_festival_poll(db, fest, group_id, bot)
                 except Exception as e:
                     logging.error("VK poll send failed for %s: %s", fest.name, e)
+            else:
+                logging.info(
+                    "Not time yet for %s poll (now %s, sched %s)",
+                    fest.name,
+                    now.isoformat(),
+                    sched.isoformat() if sched else None,
+                )
         await asyncio.sleep(60)
 
 
