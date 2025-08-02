@@ -42,6 +42,7 @@ from main import (
     get_telegraph_token,
     editing_sessions,
     festival_edit_sessions,
+    notify_inactive_partners,
 )
 
 FUTURE_DATE = (date.today() + timedelta(days=10)).isoformat()
@@ -5725,5 +5726,33 @@ async def test_partner_notification_scheduler(tmp_path: Path, monkeypatch):
     assert any("неделе" in m[1] for m in bot.messages if m[0] == 2)
     assert any("p" in m[1] for m in bot.messages if m[0] == 1)
 
+
+@pytest.mark.asyncio
+async def test_partner_reminder_weekly(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async with db.get_session() as session:
+        session.add(User(user_id=1, username="p", is_partner=True))
+        await session.commit()
+
+    tz = timezone.utc
+    notified = await notify_inactive_partners(db, bot, tz)
+    assert [u.user_id for u in notified] == [1]
+    assert len(bot.messages) == 1
+
+    notified = await notify_inactive_partners(db, bot, tz)
+    assert notified == []
+    assert len(bot.messages) == 1
+
+    async with db.get_session() as session:
+        user = await session.get(User, 1)
+        user.last_partner_reminder = datetime.utcnow() - timedelta(days=8)
+        await session.commit()
+
+    notified = await notify_inactive_partners(db, bot, tz)
+    assert [u.user_id for u in notified] == [1]
+    assert len(bot.messages) == 2
 
 
