@@ -2151,15 +2151,16 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                         await update_source_page_ics(
                             event.telegraph_path, event.title or "Event", url
                         )
-                        await sync_vk_source_post(
-                            event,
-                            event.source_post_url,
-                            event.source_text,
+                        if not is_vk_wall_url(event.source_post_url):
+                            await sync_vk_source_post(
+                                event,
+                                event.source_post_url,
+                                event.source_text,
 
-                            db,
-                            bot,
-                            ics_url=url,
-                        )
+                                db,
+                                bot,
+                                ics_url=url,
+                            )
                     month = event.date.split("..", 1)[0][:7]
                     await sync_month_page(db, month)
 
@@ -2197,15 +2198,16 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                     await update_source_page_ics(
                         event.telegraph_path, event.title or "Event", None
                     )
-                    await sync_vk_source_post(
-                        event,
-                        event.source_post_url,
-                        event.source_text,
+                    if not is_vk_wall_url(event.source_post_url):
+                        await sync_vk_source_post(
+                            event,
+                            event.source_post_url,
+                            event.source_text,
 
-                        db,
-                        bot,
-                        ics_url=None,
-                    )
+                            db,
+                            bot,
+                            ics_url=None,
+                        )
                 month = event.date.split("..", 1)[0][:7]
                 await sync_month_page(db, month)
 
@@ -3256,16 +3258,19 @@ async def add_events_from_text(
                     await update_event_description(saved, db)
                 except Exception as e:
                     logging.error("failed to update event %s description: %s", saved.id, e)
-                vk_url = await sync_vk_source_post(
-                    saved,
-                    source_link,
-                    saved.source_text,
+                if is_vk_wall_url(source_link):
+                    vk_url = source_link
+                else:
+                    vk_url = await sync_vk_source_post(
+                        saved,
+                        source_link,
+                        saved.source_text,
 
-                    db,
-                    bot,
-                    display_link=display_source,
-                    ics_url=saved.ics_url,
-                )
+                        db,
+                        bot,
+                        display_link=display_source,
+                        ics_url=saved.ics_url,
+                    )
                 if vk_url:
                     async with db.get_session() as session:
                         saved.source_vk_post_url = vk_url
@@ -3308,16 +3313,17 @@ async def add_events_from_text(
                                 saved.title or "Event",
                                 saved.ics_url,
                             )
-                            await sync_vk_source_post(
-                                saved,
-                                source_link,
-                                saved.source_text,
+                            if not is_vk_wall_url(source_link):
+                                await sync_vk_source_post(
+                                    saved,
+                                    source_link,
+                                    saved.source_text,
 
-                                db,
-                                bot,
-                                display_link=display_source,
-                                ics_url=saved.ics_url,
-                            )
+                                    db,
+                                    bot,
+                                    display_link=display_source,
+                                    ics_url=saved.ics_url,
+                                )
                 extra_kwargs = {"display_link": False} if not display_source else {}
                 res = await create_source_page(
                     saved.title or "Event",
@@ -3347,16 +3353,19 @@ async def add_events_from_text(
                         saved.photo_count = photo_count
                         session.add(saved)
                         await session.commit()
-                    vk_url = await sync_vk_source_post(
-                        saved,
-                        source_link,
-                        saved.source_text,
+                    if is_vk_wall_url(source_link):
+                        vk_url = source_link
+                    else:
+                        vk_url = await sync_vk_source_post(
+                            saved,
+                            source_link,
+                            saved.source_text,
 
-                        db,
-                        bot,
-                        display_link=display_source,
-                        ics_url=saved.ics_url,
-                    )
+                            db,
+                            bot,
+                            display_link=display_source,
+                            ics_url=saved.ics_url,
+                        )
                     if vk_url:
                         async with db.get_session() as session:
                             saved.source_vk_post_url = vk_url
@@ -3416,8 +3425,11 @@ async def add_events_from_text(
             if saved.telegraph_url:
                 lines.append(f"telegraph: {saved.telegraph_url}")
             if saved.source_vk_post_url:
-                lines.append(f"vk_source: {saved.source_vk_post_url}")
-            if is_vk_wall_url(saved.source_post_url):
+                if is_vk_wall_url(saved.source_post_url):
+                    lines.append(f"vk_weekend_post: {saved.source_vk_post_url}")
+                else:
+                    lines.append(f"vk_source: {saved.source_vk_post_url}")
+            elif is_vk_wall_url(saved.source_post_url):
                 lines.append(f"Vk: {saved.source_post_url}")
             if upload_info:
                 lines.append(f"catbox: {upload_info}")
@@ -3628,15 +3640,18 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
             event.photo_count = photo_count
             session.add(event)
             await session.commit()
-        vk_url = await sync_vk_source_post(
-            event,
-            None,
-            event.source_text,
+        if is_vk_wall_url(event.source_post_url):
+            vk_url = event.source_post_url
+        else:
+            vk_url = await sync_vk_source_post(
+                event,
+                None,
+                event.source_text,
 
-            db,
-            bot,
-            ics_url=event.ics_url,
-        )
+                db,
+                bot,
+                ics_url=event.ics_url,
+            )
         if vk_url:
             async with db.get_session() as session:
                 event.source_vk_post_url = vk_url
@@ -3656,8 +3671,11 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
     if event.telegraph_url:
         lines.append(f"telegraph: {event.telegraph_url}")
     if event.source_vk_post_url:
-        lines.append(f"vk_source: {event.source_vk_post_url}")
-    if is_vk_wall_url(event.source_post_url):
+        if is_vk_wall_url(event.source_post_url):
+            lines.append(f"vk_weekend_post: {event.source_vk_post_url}")
+        else:
+            lines.append(f"vk_source: {event.source_vk_post_url}")
+    elif is_vk_wall_url(event.source_post_url):
         lines.append(f"Vk: {event.source_post_url}")
     if upload_info:
         lines.append(f"catbox: {upload_info}")
