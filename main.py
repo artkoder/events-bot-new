@@ -42,7 +42,6 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "events-ics")
 VK_TOKEN = os.getenv("VK_TOKEN")
 VK_USER_TOKEN = os.getenv("VK_USER_TOKEN")
-VK_TOKEN_AFISHA = os.getenv("VK_TOKEN_AFISHA")
 VK_AFISHA_GROUP_ID = os.getenv("VK_AFISHA_GROUP_ID")
 ICS_CONTENT_TYPE = "text/calendar; charset=utf-8"
 ICS_CONTENT_DISP_TEMPLATE = 'inline; filename="{name}"'
@@ -5494,7 +5493,7 @@ async def sync_vk_source_post(
     ics_url: str | None = None,
 ) -> str | None:
     """Create or update VK source post for an event."""
-    if not (VK_TOKEN_AFISHA and VK_AFISHA_GROUP_ID):
+    if not VK_AFISHA_GROUP_ID:
         return None
     message = build_vk_source_message(
         event.title or "Event", text, source_url, ics_url, display_link
@@ -5509,7 +5508,6 @@ async def sync_vk_source_post(
                     {"posts": f"{ids[0]}_{ids[1]}"},
                     db,
                     bot,
-                    token=VK_TOKEN_AFISHA,
                 )
                 items = data.get("response") or []
                 if items:
@@ -5523,7 +5521,6 @@ async def sync_vk_source_post(
             new_message,
             db,
             bot,
-            token=VK_TOKEN_AFISHA,
         )
         return event.source_vk_post_url
     url = await post_to_vk(
@@ -5531,7 +5528,6 @@ async def sync_vk_source_post(
         message,
         db,
         bot,
-        token=VK_TOKEN_AFISHA,
     )
     return url
 
