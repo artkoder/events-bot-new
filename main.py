@@ -2112,7 +2112,7 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                             event,
                             event.source_post_url,
                             event.source_text,
-                            None,
+
                             db,
                             bot,
                             ics_url=url,
@@ -2158,7 +2158,7 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                         event,
                         event.source_post_url,
                         event.source_text,
-                        None,
+
                         db,
                         bot,
                         ics_url=None,
@@ -3195,7 +3195,7 @@ async def add_events_from_text(
                     saved,
                     source_link,
                     saved.source_text,
-                    catbox_urls if added_count else None,
+
                     db,
                     bot,
                     display_link=display_source,
@@ -3247,7 +3247,7 @@ async def add_events_from_text(
                                 saved,
                                 source_link,
                                 saved.source_text,
-                                None,
+
                                 db,
                                 bot,
                                 display_link=display_source,
@@ -3286,7 +3286,7 @@ async def add_events_from_text(
                         saved,
                         source_link,
                         saved.source_text,
-                        catbox_urls,
+
                         db,
                         bot,
                         display_link=display_source,
@@ -3548,7 +3548,7 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
             event,
             None,
             event.source_text,
-            catbox_urls,
+
             db,
             bot,
             ics_url=event.ics_url,
@@ -5486,7 +5486,7 @@ async def sync_vk_source_post(
     event: Event,
     source_url: str | None,
     text: str,
-    catbox_urls: list[str] | None,
+
     db: Database | None,
     bot: Bot | None,
     *,
@@ -5496,14 +5496,6 @@ async def sync_vk_source_post(
     """Create or update VK source post for an event."""
     if not (VK_TOKEN_AFISHA and VK_AFISHA_GROUP_ID):
         return None
-    attachments: list[str] = []
-    if catbox_urls:
-        for url in catbox_urls:
-            pid = await upload_vk_photo(
-                VK_AFISHA_GROUP_ID, url, db, bot, token=VK_TOKEN_AFISHA
-            )
-            if pid:
-                attachments.append(pid)
     message = build_vk_source_message(
         event.title or "Event", text, source_url, ics_url, display_link
     )
@@ -5531,7 +5523,6 @@ async def sync_vk_source_post(
             new_message,
             db,
             bot,
-            attachments,
             token=VK_TOKEN_AFISHA,
         )
         return event.source_vk_post_url
@@ -5540,7 +5531,6 @@ async def sync_vk_source_post(
         message,
         db,
         bot,
-        attachments,
         token=VK_TOKEN_AFISHA,
     )
     return url
