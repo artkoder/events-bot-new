@@ -3814,15 +3814,25 @@ async def test_add_event_lines_include_vk_link(tmp_path: Path, monkeypatch):
     monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
     monkeypatch.setattr("main.create_source_page", fake_create)
 
+    called = False
+
+    async def fake_sync(event, source, text, db=None, bot=None, **kwargs):
+        nonlocal called
+        called = True
+        return "https://vk.com/source"
+
+    monkeypatch.setattr(main, "sync_vk_source_post", fake_sync)
+
     results = await main.add_events_from_text(
         db, "text", "https://vk.com/wall-1_1", None, None
     )
     assert results
+    assert not called
     lines = results[0][2]
     assert "telegraph: https://t.me/page" in lines
     idx = lines.index("telegraph: https://t.me/page")
-    assert lines[idx + 1] == "vk_source: https://vk.com/source"
-    assert lines[idx + 2] == "Vk: https://vk.com/wall-1_1"
+    assert lines[idx + 1] == "vk_weekend_post: https://vk.com/wall-1_1"
+    assert "Vk: https://vk.com/wall-1_1" not in lines
 
 
 @pytest.mark.asyncio
