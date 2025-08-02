@@ -2112,6 +2112,7 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                             event,
                             event.source_post_url,
                             event.source_text,
+
                             db,
                             bot,
                             ics_url=url,
@@ -2157,6 +2158,7 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                         event,
                         event.source_post_url,
                         event.source_text,
+
                         db,
                         bot,
                         ics_url=None,
@@ -3193,6 +3195,7 @@ async def add_events_from_text(
                     saved,
                     source_link,
                     saved.source_text,
+
                     db,
                     bot,
                     display_link=display_source,
@@ -3244,6 +3247,7 @@ async def add_events_from_text(
                                 saved,
                                 source_link,
                                 saved.source_text,
+
                                 db,
                                 bot,
                                 display_link=display_source,
@@ -3282,6 +3286,7 @@ async def add_events_from_text(
                         saved,
                         source_link,
                         saved.source_text,
+
                         db,
                         bot,
                         display_link=display_source,
@@ -3543,6 +3548,7 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
             event,
             None,
             event.source_text,
+
             db,
             bot,
             ics_url=event.ics_url,
@@ -5480,6 +5486,7 @@ async def sync_vk_source_post(
     event: Event,
     source_url: str | None,
     text: str,
+
     db: Database | None,
     bot: Bot | None,
     *,
