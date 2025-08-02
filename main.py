@@ -4121,7 +4121,7 @@ def format_event_vk(
     else:
         day_fmt = day
     lines.append(f"\U0001f4c5 {day_fmt} {e.time}")
-    lines.append(f"\U0001f4cd {loc}")
+    lines.append(loc)
 
     return "\n".join(lines)
 
@@ -4871,12 +4871,13 @@ async def build_weekend_vk_message(db: Database, start: str) -> str:
         evs = by_day.get(d)
         if not evs:
             continue
-        lines.append("")
+        lines.append(VK_BLANK_LINE)
         lines.append(f"🟥🟥🟥 {format_day_pretty(d)} 🟥🟥🟥")
         for ev in evs:
             lines.append(f"[{ev.source_vk_post_url}|{ev.title}]")
-            city = f" {ev.city}" if ev.city else ""
-            lines.append(f"📍 {ev.location_name}{city}")
+            location_parts = [p for p in [ev.location_name, ev.city] if p]
+            if location_parts:
+                lines.append(", ".join(location_parts))
 
     nav_pages = [w for w in weekend_pages if w.vk_post_url or w.start == start]
     if nav_pages:
@@ -4887,7 +4888,8 @@ async def build_weekend_vk_message(db: Database, start: str) -> str:
                 parts.append(label)
             else:
                 parts.append(f"[{w.vk_post_url}|{label}]")
-        lines.append("")
+        lines.append(VK_BLANK_LINE)
+        lines.append(VK_BLANK_LINE)
         lines.append(" ".join(parts))
 
     message = "\n".join(lines)
