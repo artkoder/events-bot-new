@@ -32,6 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy import update
 from sqlmodel import Field, SQLModel, select
 import aiosqlite
+import gc
 
 logging.basicConfig(level=logging.INFO)
 
@@ -1586,11 +1587,16 @@ async def parse_event_via_4o(
     async with create_ipv4_session(ClientSession) as session:
         resp = await session.post(url, json=payload, headers=headers)
         resp.raise_for_status()
-        data = await resp.json()
-    logging.debug("4o response: %s", data)
+        data_raw = await resp.json()
     content = (
-        data.get("choices", [{}])[0].get("message", {}).get("content", "{}").strip()
+        data_raw.get("choices", [{}])[0]
+        .get("message", {})
+        .get("content", "{}")
+        .strip()
     )
+    if logging.getLogger().isEnabledFor(logging.DEBUG):
+        logging.debug("4o content snippet: %s", content[:1000])
+    del data_raw
     if content.startswith("```"):
         content = content.strip("`\n")
         if content.lower().startswith("json"):
@@ -3372,6 +3378,8 @@ async def add_events_from_text(
             results.append((saved, added, lines, status))
             first = False
     logging.info("add_events_from_text finished with %d results", len(results))
+    del parsed
+    gc.collect()
     return results
 
 
