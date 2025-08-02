@@ -150,6 +150,11 @@
   the past seven days.
 - The superadmin gets a list of partners who were reminded.
 
+## v0.3.22 - Partner reminder frequency fix
+
+- Partners who haven't added events no longer receive daily reminders; each
+  partner is notified at most once a week.
+
 
 
 

@@ -139,6 +139,7 @@ class User(SQLModel, table=True):
     organization: Optional[str] = None
     location: Optional[str] = None
     blocked: bool = False
+    last_partner_reminder: Optional[datetime] = None
 
 
 class PendingUser(SQLModel, table=True):
@@ -354,6 +355,10 @@ class Database:
                 await conn.exec_driver_sql(
                     "ALTER TABLE user ADD COLUMN blocked BOOLEAN DEFAULT 0"
                 )
+            if "last_partner_reminder" not in cols:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE user ADD COLUMN last_partner_reminder VARCHAR"
+                )
 
             result = await conn.exec_driver_sql("PRAGMA table_info(channel)")
             cols = [r[1] for r in result.fetchall()]
@@ -414,6 +419,7 @@ class Database:
                 await conn.exec_driver_sql(
                     "ALTER TABLE festival ADD COLUMN end_date VARCHAR"
                 )
+
             if "vk_poll_url" not in cols:
                 await conn.exec_driver_sql(
                     "ALTER TABLE festival ADD COLUMN vk_poll_url VARCHAR"
@@ -749,6 +755,7 @@ async def notify_inactive_partners(
 ) -> list[User]:
     """Send reminders to partners without events in the last week."""
     cutoff = week_cutoff(tz)
+    now = datetime.utcnow()
     notified: list[User] = []
     async with db.get_session() as session:
         res = await session.execute(
@@ -764,12 +771,17 @@ async def notify_inactive_partners(
                     .limit(1)
                 )
             ).scalars().first()
-            if not last or last < cutoff:
+            last_reminder = p.last_partner_reminder
+            if (not last or last < cutoff) and (
+                not last_reminder or last_reminder < cutoff
+            ):
                 await bot.send_message(
                     p.user_id,
                     "\u26a0\ufe0f Вы не добавляли мероприятия на прошлой неделе",
                 )
+                p.last_partner_reminder = now
                 notified.append(p)
+        await session.commit()
     return notified
 
 
@@ -4913,11 +4925,13 @@ async def send_festival_poll(
     question = await generate_festival_poll_text(fest)
     url = await post_vk_poll(group_id, question, VK_POLL_OPTIONS, db, bot)
     if url:
+
         async with db.get_session() as session:
             obj = await session.get(Festival, fest.id)
             if obj:
                 obj.vk_poll_url = url
                 await session.commit()
+
 
 
 
@@ -5304,6 +5318,7 @@ async def create_vk_poll(
     owner = poll.get("owner_id", f"-{group_id.lstrip('-')}")
     if p_id is not None:
         return f"poll{owner}_{p_id}"
+
     return None
 
 
@@ -5319,6 +5334,7 @@ async def post_vk_poll(
     if not attachment:
         return None
     return await post_to_vk(group_id, "", db, bot, [attachment])
+
 
 
 def _vk_owner_and_post_id(url: str) -> tuple[str, str] | None:
@@ -5614,6 +5630,7 @@ async def vk_poll_scheduler(db: Database, bot: Bot):
             evs = ev_map.get(fest.name, [])
             start, end = festival_dates(fest, evs)
             if not start:
+
                 continue
             first_time: time | None = None
             for ev in evs:
@@ -5630,6 +5647,7 @@ async def vk_poll_scheduler(db: Database, bot: Bot):
             else:
                 sched = datetime.combine(start - timedelta(days=1), time(21, 0), tz)
             if now >= sched and now.date() <= (end or start):
+
                 try:
                     await send_festival_poll(db, fest, group_id, bot)
                 except Exception as e:
