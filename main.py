@@ -117,6 +117,9 @@ TELEGRAPH_PAGE_LIMIT = 60000
 # Timeout for Telegraph API operations (in seconds)
 TELEGRAPH_TIMEOUT = float(os.getenv("TELEGRAPH_TIMEOUT", "30"))
 
+# Timeout for posting ICS files to Telegram (in seconds)
+ICS_POST_TIMEOUT = float(os.getenv("ICS_POST_TIMEOUT", "30"))
+
 
 # Run blocking Telegraph API calls with a timeout
 async def telegraph_call(func, /, *args, **kwargs):
@@ -3282,7 +3285,13 @@ async def add_events_from_text(
                                 saved.ics_url = ics
 
                 if bot and saved.ics_url and not saved.ics_post_url:
-                    posted = await post_ics_asset(saved, db, bot)
+                    try:
+                        posted = await asyncio.wait_for(
+                            post_ics_asset(saved, db, bot), ICS_POST_TIMEOUT
+                        )
+                    except Exception as e:
+                        logging.error("failed to post ics asset: %s", e)
+                        posted = None
                     if posted:
                         url_p, msg_id = posted
                         logging.info(
@@ -3364,24 +3373,23 @@ async def add_events_from_text(
                 except Exception as e:
                     logging.error("failed to update event %s description: %s", saved.id, e)
             logging.info("syncing month page %s", saved.date[:7])
-            await sync_month_page(db, saved.date[:7])
+            asyncio.create_task(sync_month_page(db, saved.date[:7]))
             d_saved = parse_iso_date(saved.date)
             w_start = weekend_start_for_date(d_saved) if d_saved else None
             if w_start:
                 logging.info("syncing weekend page %s", w_start.isoformat())
-                await sync_weekend_page(db, w_start.isoformat())
+                asyncio.create_task(sync_weekend_page(db, w_start.isoformat()))
             fest_obj = None
             if saved.festival:
                 logging.info("syncing festival %s", saved.festival)
                 await sync_festival_page(db, saved.festival)
-
-                await sync_festival_vk_post(db, saved.festival, bot)
-
+                asyncio.create_task(sync_festival_vk_post(db, saved.festival, bot))
                 async with db.get_session() as session:
                     res = await session.execute(
                         select(Festival).where(Festival.name == saved.festival)
                     )
                     fest_obj = res.scalar_one_or_none()
+            await asyncio.sleep(0)
 
 
             lines = [
