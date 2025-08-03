@@ -6992,6 +6992,9 @@ async def handle_add_event_start(message: types.Message, db: Database, bot: Bot)
 
 async def handle_vk_link_message(message: types.Message, db: Database, bot: Bot):
     eid = vk_link_sessions.get(message.from_user.id)
+    logging.info(
+        "handle_vk_link_message start: user=%s eid=%s", message.from_user.id, eid
+    )
     if not eid:
         return
     link = (message.text or "").strip()
@@ -7561,9 +7564,11 @@ def create_app() -> web.Application:
         await process_request(callback, db, bot)
 
     async def add_event_wrapper(message: types.Message):
+        logging.info("add_event_wrapper start: user=%s", message.from_user.id)
         await handle_add_event(message, db, bot)
 
     async def add_event_raw_wrapper(message: types.Message):
+        logging.info("add_event_raw_wrapper start: user=%s", message.from_user.id)
         await handle_add_event_raw(message, db, bot)
 
     async def ask_4o_wrapper(message: types.Message):
@@ -7648,12 +7653,15 @@ def create_app() -> web.Application:
         await handle_events_date_message(message, db, bot)
 
     async def add_event_start_wrapper(message: types.Message):
+        logging.info("add_event_start_wrapper start: user=%s", message.from_user.id)
         await handle_add_event_start(message, db, bot)
 
     async def add_event_session_wrapper(message: types.Message):
+        logging.info("add_event_session_wrapper start: user=%s", message.from_user.id)
         await handle_add_event(message, db, bot)
 
     async def vk_link_msg_wrapper(message: types.Message):
+        logging.info("vk_link_msg_wrapper start: user=%s", message.from_user.id)
         await handle_vk_link_message(message, db, bot)
 
     dp.message.register(start_wrapper, Command("start"))
