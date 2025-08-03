@@ -3818,7 +3818,7 @@ async def test_add_event_lines_include_vk_link(tmp_path: Path, monkeypatch):
 
     called = False
 
-    async def fake_sync(event, source, text, db=None, bot=None, **kwargs):
+    async def fake_sync(event, text, db=None, bot=None, **kwargs):
         nonlocal called
         called = True
         return "https://vk.com/source"
