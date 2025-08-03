@@ -117,6 +117,9 @@ TELEGRAPH_PAGE_LIMIT = 60000
 # Timeout for Telegraph API operations (in seconds)
 TELEGRAPH_TIMEOUT = float(os.getenv("TELEGRAPH_TIMEOUT", "30"))
 
+# Timeout for Telegram Bot API operations (in seconds)
+TELEGRAM_API_TIMEOUT = float(os.getenv("TELEGRAM_API_TIMEOUT", "20"))
+
 
 # Run blocking Telegraph API calls with a timeout
 async def telegraph_call(func, /, *args, **kwargs):
@@ -1473,11 +1476,14 @@ async def post_ics_asset(event: Event, db: Database, bot: Bot) -> tuple[str, int
     logging.info("posting ics asset to channel %s with caption %s", channel.channel_id, caption.replace('\n', ' | '))
 
     try:
-        msg = await bot.send_document(
-            channel.channel_id,
-            file,
-            caption=caption,
-            parse_mode="HTML",
+        msg = await asyncio.wait_for(
+            bot.send_document(
+                channel.channel_id,
+                file,
+                caption=caption,
+                parse_mode="HTML",
+            ),
+            TELEGRAM_API_TIMEOUT,
         )
         url = build_channel_post_url(channel, msg.message_id)
         logging.info("posted ics to asset channel: %s", url)
@@ -1500,10 +1506,13 @@ async def add_calendar_button(event: Event, db: Database, bot: Bot):
         rows.append(month_buttons)
     markup = types.InlineKeyboardMarkup(inline_keyboard=rows)
     try:
-        await bot.edit_message_reply_markup(
-            chat_id=event.source_chat_id,
-            message_id=event.source_message_id,
-            reply_markup=markup,
+        await asyncio.wait_for(
+            bot.edit_message_reply_markup(
+                chat_id=event.source_chat_id,
+                message_id=event.source_message_id,
+                reply_markup=markup,
+            ),
+            TELEGRAM_API_TIMEOUT,
         )
 
         logging.info(
