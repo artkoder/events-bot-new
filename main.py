@@ -3750,8 +3750,8 @@ async def add_event_queue_worker(db: Database, bot: Bot):
     """Background worker to process queued events sequentially."""
     while True:
         size = add_event_queue.qsize()
-        logging.info("add_event_queue_worker tick: size=%d", size)
         if size > 0:
+            logging.info("add_event_queue_worker tick: size=%d", size)
             kind, msg, using_session = await add_event_queue.get()
             try:
                 if kind == "regular":
