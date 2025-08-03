@@ -3275,10 +3275,13 @@ async def add_events_from_text(
                         saved.photo_count = photo_count
                         session.add(saved)
                         await session.commit()
-                try:
-                    await update_event_description(saved, db)
-                except Exception as e:
-                    logging.error("failed to update event %s description: %s", saved.id, e)
+                if not saved.description:
+                    try:
+                        await update_event_description(saved, db)
+                    except Exception as e:
+                        logging.error(
+                            "failed to update event %s description: %s", saved.id, e
+                        )
                 if is_vk_wall_url(source_link):
                     vk_url = source_link
                 else:
@@ -3389,11 +3392,6 @@ async def add_events_from_text(
                             saved.source_vk_post_url = vk_url
                             session.add(saved)
                             await session.commit()
-            if saved.telegraph_path:
-                try:
-                    await update_event_description(saved, db)
-                except Exception as e:
-                    logging.error("failed to update event %s description: %s", saved.id, e)
             logging.info("syncing month page %s", saved.date[:7])
             try:
                 await sync_month_page(db, saved.date[:7])
@@ -7467,11 +7465,25 @@ async def get_source_page_text(path: str) -> str:
 
 
 async def update_event_description(event: Event, db: Database) -> None:
-    """Rebuild event.description from the Telegraph source page."""
-    if not event.telegraph_path:
+    """Populate event.description from the Telegraph source page if missing."""
+    if event.description:
+        logging.info(
+            "skip description update for event %s: already present", event.id
+        )
         return
+    if not event.telegraph_path:
+        logging.info(
+            "skip description update for event %s: no telegraph page", event.id
+        )
+        return
+    logging.info(
+        "updating description for event %s from %s",
+        event.id,
+        event.telegraph_path,
+    )
     text = await get_source_page_text(event.telegraph_path)
     if not text:
+        logging.info("no source text for event %s", event.id)
         return
     try:
         parsed = await parse_event_via_4o(text)
@@ -7479,9 +7491,11 @@ async def update_event_description(event: Event, db: Database) -> None:
         logging.error("Failed to parse source text for description: %s", e)
         return
     if not parsed:
+        logging.info("4o returned no data for event %s", event.id)
         return
     desc = parsed[0].get("short_description", "").strip()
     if not desc:
+        logging.info("no short description parsed for event %s", event.id)
         return
     async with db.get_session() as session:
         obj = await session.get(Event, event.id)
@@ -7489,6 +7503,7 @@ async def update_event_description(event: Event, db: Database) -> None:
             obj.description = desc
             await session.commit()
             event.description = desc
+            logging.info("stored description for event %s", event.id)
 
 
 async def create_source_page(
