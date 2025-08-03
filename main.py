@@ -1903,7 +1903,7 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
         if month:
             await sync_month_page(db, month)
             if w_start:
-                await sync_weekend_page(db, w_start.isoformat())
+                await sync_weekend_page(db, w_start.isoformat(), post_vk=False)
                 await sync_vk_weekend_post(db, w_start.isoformat())
         if vk_post:
             await delete_vk_post(vk_post, db, bot)
@@ -4847,7 +4847,9 @@ async def build_weekend_page_content(db: Database, start: str) -> tuple[str, lis
     return title, content
 
 
-async def sync_weekend_page(db: Database, start: str, update_links: bool = False):
+async def sync_weekend_page(
+    db: Database, start: str, update_links: bool = False, post_vk: bool = True
+):
     token = get_telegraph_token()
     if not token:
         logging.error("Telegraph token unavailable")
@@ -4880,7 +4882,8 @@ async def sync_weekend_page(db: Database, start: str, update_links: bool = False
         except Exception as e:
             logging.error("Failed to sync weekend page %s: %s", start, e)
 
-    await sync_vk_weekend_post(db, start)
+    if post_vk:
+        await sync_vk_weekend_post(db, start)
 
     if update_links or created:
         async with db.get_session() as session:
@@ -4890,7 +4893,9 @@ async def sync_weekend_page(db: Database, start: str, update_links: bool = False
             weekends = result.scalars().all()
         for w in weekends:
             if w.start != start:
-                await sync_weekend_page(db, w.start, update_links=False)
+                await sync_weekend_page(
+                    db, w.start, update_links=False, post_vk=False
+                )
 
 
 async def build_weekend_vk_message(db: Database, start: str) -> str:
@@ -5800,6 +5805,8 @@ async def edit_vk_post(
         "from_group": 1,
     }
     current: list[str] = []
+    post_text = ""
+    old_attachments: list[str] = []
     try:
         data = await _vk_api(
             "wall.getById",
@@ -5811,6 +5818,7 @@ async def edit_vk_post(
         items = data.get("response") or []
         if items:
             post = items[0]
+            post_text = post.get("text") or ""
             for att in post.get("attachments", []):
                 if att.get("type") == "photo":
                     p = att.get("photo") or {}
@@ -5818,12 +5826,16 @@ async def edit_vk_post(
                     p_id = p.get("id")
                     if o_id is not None and p_id is not None:
                         current.append(f"photo{o_id}_{p_id}")
+            old_attachments = current.copy()
     except Exception as e:
         logging.error("failed to fetch VK post attachments: %s", e)
     if attachments:
         for a in attachments:
             if a not in current:
                 current.append(a)
+    if post_text == message and current == old_attachments:
+        logging.info("edit_vk_post: no changes for %s", post_url)
+        return
     if current:
         params["attachments"] = ",".join(current)
     await _vk_api("wall.edit", params, db, bot, token=token)
