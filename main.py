@@ -36,6 +36,9 @@ import gc
 
 logging.basicConfig(level=logging.INFO)
 
+_weekend_page_locks: dict[str, asyncio.Lock] = {}
+_weekend_vk_locks: dict[str, asyncio.Lock] = {}
+
 DB_PATH = os.getenv("DB_PATH", "/data/db.sqlite")
 TELEGRAPH_TOKEN_FILE = os.getenv("TELEGRAPH_TOKEN_FILE", "/data/telegraph_token.txt")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -3494,10 +3497,6 @@ async def handle_add_event(message: types.Message, db: Database, bot: Bot):
     catbox_msg = ""
     if images:
         catbox_urls, catbox_msg = await upload_to_catbox(images)
-    catbox_urls: list[str] | None = None
-    catbox_msg = ""
-    if images:
-        catbox_urls, catbox_msg = await upload_to_catbox(images)
     html_text = message.html_text or message.caption_html
     if not using_session and html_text and html_text.startswith("/addevent"):
         html_text = html_text[len("/addevent") :].lstrip()
@@ -4872,52 +4871,54 @@ async def build_weekend_page_content(db: Database, start: str) -> tuple[str, lis
 async def sync_weekend_page(
     db: Database, start: str, update_links: bool = False, post_vk: bool = True
 ):
-    token = get_telegraph_token()
-    if not token:
-        logging.error("Telegraph token unavailable")
-        return
-    tg = Telegraph(access_token=token)
-    async with db.get_session() as session:
-        page = await session.get(WeekendPage, start)
-        try:
-            created = False
-            if not page:
-                # Create a placeholder page to obtain path and URL
-                title, content = await build_weekend_page_content(db, start)
-                data = await telegraph_call(tg.create_page, title, content=content)
-                page = WeekendPage(
-                    start=start, url=data.get("url"), path=data.get("path")
-                )
-                session.add(page)
-                await session.commit()
-                created = True
-
-            # Rebuild content including this page in navigation
-            title, content = await build_weekend_page_content(db, start)
-            await telegraph_call(
-                tg.edit_page, page.path, title=title, content=content
-            )
-            logging.info(
-                "%s weekend page %s", "Created" if created else "Edited", start
-            )
-            await session.commit()
-        except Exception as e:
-            logging.error("Failed to sync weekend page %s: %s", start, e)
-
-    if post_vk:
-        await sync_vk_weekend_post(db, start)
-
-    if update_links or created:
+    lock = _weekend_page_locks.setdefault(start, asyncio.Lock())
+    async with lock:
+        token = get_telegraph_token()
+        if not token:
+            logging.error("Telegraph token unavailable")
+            return
+        tg = Telegraph(access_token=token)
         async with db.get_session() as session:
-            result = await session.execute(
-                select(WeekendPage).order_by(WeekendPage.start)
-            )
-            weekends = result.scalars().all()
-        for w in weekends:
-            if w.start != start:
-                await sync_weekend_page(
-                    db, w.start, update_links=False, post_vk=False
+            page = await session.get(WeekendPage, start)
+            try:
+                created = False
+                if not page:
+                    # Create a placeholder page to obtain path and URL
+                    title, content = await build_weekend_page_content(db, start)
+                    data = await telegraph_call(tg.create_page, title, content=content)
+                    page = WeekendPage(
+                        start=start, url=data.get("url"), path=data.get("path")
+                    )
+                    session.add(page)
+                    await session.commit()
+                    created = True
+
+                # Rebuild content including this page in navigation
+                title, content = await build_weekend_page_content(db, start)
+                await telegraph_call(
+                    tg.edit_page, page.path, title=title, content=content
                 )
+                logging.info(
+                    "%s weekend page %s", "Created" if created else "Edited", start
+                )
+                await session.commit()
+            except Exception as e:
+                logging.error("Failed to sync weekend page %s: %s", start, e)
+
+        if post_vk:
+            await sync_vk_weekend_post(db, start)
+
+        if update_links or created:
+            async with db.get_session() as session:
+                result = await session.execute(
+                    select(WeekendPage).order_by(WeekendPage.start)
+                )
+                weekends = result.scalars().all()
+            for w in weekends:
+                if w.start != start:
+                    await sync_weekend_page(
+                        db, w.start, update_links=False, post_vk=False
+                    )
 
 
 async def build_weekend_vk_message(db: Database, start: str) -> str:
@@ -4982,47 +4983,49 @@ async def build_weekend_vk_message(db: Database, start: str) -> str:
 
 
 async def sync_vk_weekend_post(db: Database, start: str, bot: Bot | None = None) -> None:
-    logging.info("sync_vk_weekend_post start for %s", start)
-    group_id = VK_AFISHA_GROUP_ID
-    if not group_id:
-        logging.info("sync_vk_weekend_post: VK group not configured")
-        return
-    async with db.get_session() as session:
-        page = await session.get(WeekendPage, start)
-    if not page:
-        logging.info("sync_vk_weekend_post: weekend page %s not found", start)
-        return
+    lock = _weekend_vk_locks.setdefault(start, asyncio.Lock())
+    async with lock:
+        logging.info("sync_vk_weekend_post start for %s", start)
+        group_id = VK_AFISHA_GROUP_ID
+        if not group_id:
+            logging.info("sync_vk_weekend_post: VK group not configured")
+            return
+        async with db.get_session() as session:
+            page = await session.get(WeekendPage, start)
+        if not page:
+            logging.info("sync_vk_weekend_post: weekend page %s not found", start)
+            return
 
-    message = await build_weekend_vk_message(db, start)
-    logging.info("sync_vk_weekend_post message len=%d", len(message))
-    needs_new_post = not page.vk_post_url
-    if page.vk_post_url:
-        try:
-            updated = await edit_vk_post(page.vk_post_url, message, db, bot)
-            if updated:
-                logging.info("sync_vk_weekend_post updated %s", page.vk_post_url)
-            else:
-                logging.info(
-                    "sync_vk_weekend_post: no changes for %s", page.vk_post_url
-                )
-        except Exception as e:
-            if "post or comment deleted" in str(e) or "Пост удалён" in str(e):
-                logging.warning(
-                    "sync_vk_weekend_post: original VK post missing, creating new"
-                )
-                needs_new_post = True
-            else:
-                logging.error("VK post error for weekend %s: %s", start, e)
-                return
-    if needs_new_post:
-        url = await post_to_vk(group_id, message, db, bot)
-        if url:
-            async with db.get_session() as session:
-                obj = await session.get(WeekendPage, start)
-                if obj:
-                    obj.vk_post_url = url
-                    await session.commit()
-            logging.info("sync_vk_weekend_post created %s", url)
+        message = await build_weekend_vk_message(db, start)
+        logging.info("sync_vk_weekend_post message len=%d", len(message))
+        needs_new_post = not page.vk_post_url
+        if page.vk_post_url:
+            try:
+                updated = await edit_vk_post(page.vk_post_url, message, db, bot)
+                if updated:
+                    logging.info("sync_vk_weekend_post updated %s", page.vk_post_url)
+                else:
+                    logging.info(
+                        "sync_vk_weekend_post: no changes for %s", page.vk_post_url
+                    )
+            except Exception as e:
+                if "post or comment deleted" in str(e) or "Пост удалён" in str(e):
+                    logging.warning(
+                        "sync_vk_weekend_post: original VK post missing, creating new"
+                    )
+                    needs_new_post = True
+                else:
+                    logging.error("VK post error for weekend %s: %s", start, e)
+                    return
+        if needs_new_post:
+            url = await post_to_vk(group_id, message, db, bot)
+            if url:
+                async with db.get_session() as session:
+                    obj = await session.get(WeekendPage, start)
+                    if obj:
+                        obj.vk_post_url = url
+                        await session.commit()
+                logging.info("sync_vk_weekend_post created %s", url)
 
 
 async def generate_festival_description(fest: Festival, events: list[Event]) -> str:
