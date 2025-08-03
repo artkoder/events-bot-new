@@ -2154,9 +2154,7 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                         if not is_vk_wall_url(event.source_post_url):
                             await sync_vk_source_post(
                                 event,
-                                event.source_post_url,
                                 event.source_text,
-
                                 db,
                                 bot,
                                 ics_url=url,
@@ -2201,9 +2199,7 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                     if not is_vk_wall_url(event.source_post_url):
                         await sync_vk_source_post(
                             event,
-                            event.source_post_url,
                             event.source_text,
-
                             db,
                             bot,
                             ics_url=None,
@@ -3263,12 +3259,9 @@ async def add_events_from_text(
                 else:
                     vk_url = await sync_vk_source_post(
                         saved,
-                        source_link,
                         saved.source_text,
-
                         db,
                         bot,
-                        display_link=display_source,
                         ics_url=saved.ics_url,
                     )
                 if vk_url:
@@ -3316,12 +3309,9 @@ async def add_events_from_text(
                             if not is_vk_wall_url(source_link):
                                 await sync_vk_source_post(
                                     saved,
-                                    source_link,
                                     saved.source_text,
-
                                     db,
                                     bot,
-                                    display_link=display_source,
                                     ics_url=saved.ics_url,
                                 )
                 extra_kwargs = {"display_link": False} if not display_source else {}
@@ -3358,12 +3348,9 @@ async def add_events_from_text(
                     else:
                         vk_url = await sync_vk_source_post(
                             saved,
-                            source_link,
                             saved.source_text,
-
                             db,
                             bot,
-                            display_link=display_source,
                             ics_url=saved.ics_url,
                         )
                     if vk_url:
@@ -3645,9 +3632,7 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
         else:
             vk_url = await sync_vk_source_post(
                 event,
-                None,
                 event.source_text,
-
                 db,
                 bot,
                 ics_url=event.ics_url,
@@ -5712,16 +5697,89 @@ def _vk_expose_links(text: str) -> str:
 
 
 def build_vk_source_message(
+    event: Event,
     text: str,
-    source_url: str | None = None,
+    festival: Festival | None = None,
     *,
-    display_link: bool = True,
     ics_url: str | None = None,
 ) -> str:
+    """Build detailed VK post for an event including original source text."""
+
     text = _vk_expose_links(text)
-    lines = text.strip().splitlines()
-    if lines and source_url and display_link:
-        lines[0] = f"[{source_url}|{lines[0]}]"
+    lines: list[str] = [event.title]
+
+    if festival:
+        link = festival.vk_url or festival.vk_post_url
+        prefix = "✨ "
+        if link:
+            lines.append(f"{prefix}[{link}|{festival.name}]")
+        else:
+            lines.append(f"{prefix}{festival.name}")
+
+    lines.append(VK_BLANK_LINE)
+
+    if event.pushkin_card:
+        lines.append("\u2705 Пушкинская карта")
+
+    if event.is_free:
+        lines.append("🟡 Бесплатно")
+        if event.ticket_link:
+            lines.append("по регистрации")
+            lines.append(f"\U0001f39f {event.ticket_link}")
+    elif event.ticket_link and (
+        event.ticket_price_min is not None or event.ticket_price_max is not None
+    ):
+        if event.ticket_price_max is not None and event.ticket_price_max != event.ticket_price_min:
+            price = f"от {event.ticket_price_min} до {event.ticket_price_max} руб."
+        else:
+            val = (
+                event.ticket_price_min
+                if event.ticket_price_min is not None
+                else event.ticket_price_max
+            )
+            price = f"{val} руб." if val is not None else ""
+        lines.append(f"Билеты в источнике {price}".strip())
+        lines.append(f"\U0001f39f {event.ticket_link}")
+    elif event.ticket_link:
+        lines.append("по регистрации")
+        lines.append(f"\U0001f39f {event.ticket_link}")
+    else:
+        price = ""
+        if (
+            event.ticket_price_min is not None
+            and event.ticket_price_max is not None
+            and event.ticket_price_min != event.ticket_price_max
+        ):
+            price = f"от {event.ticket_price_min} до {event.ticket_price_max} руб."
+        elif event.ticket_price_min is not None:
+            price = f"{event.ticket_price_min} руб."
+        elif event.ticket_price_max is not None:
+            price = f"{event.ticket_price_max} руб."
+        if price:
+            lines.append(f"Билеты {price}")
+
+    date_part = event.date.split("..", 1)[0]
+    d = parse_iso_date(date_part)
+    if d:
+        day = format_day_pretty(d)
+    else:
+        logging.error("Invalid event date: %s", event.date)
+        day = event.date
+    lines.append(f"{day} {event.time}")
+
+    loc = event.location_name
+    addr = event.location_address
+    if addr and event.city:
+        addr = strip_city_from_address(addr, event.city)
+    if addr:
+        loc += f", {addr}"
+    if event.city:
+        loc += f", #{event.city}"
+    lines.append(loc)
+
+    lines.append(VK_BLANK_LINE)
+    lines.extend(text.strip().splitlines())
+    lines.append(VK_BLANK_LINE)
     if ics_url:
         lines.append(f"Добавить в календарь {ics_url}")
     lines.append(VK_SOURCE_FOOTER)
@@ -5730,22 +5788,25 @@ def build_vk_source_message(
 
 async def sync_vk_source_post(
     event: Event,
-    source_url: str | None,
     text: str,
 
     db: Database | None,
     bot: Bot | None,
     *,
-    display_link: bool = True,
     ics_url: str | None = None,
 ) -> str | None:
     """Create or update VK source post for an event."""
     if not VK_AFISHA_GROUP_ID:
         return None
     logging.info("sync_vk_source_post start for event %s", event.id)
-    message = build_vk_source_message(
-        text, source_url, display_link=display_link, ics_url=ics_url
-    )
+    festival = None
+    if event.festival and db:
+        async with db.get_session() as session:
+            res = await session.execute(
+                select(Festival).where(Festival.name == event.festival)
+            )
+            festival = res.scalars().first()
+    message = build_vk_source_message(event, text, festival=festival, ics_url=ics_url)
     if event.source_vk_post_url:
         existing = ""
         try:

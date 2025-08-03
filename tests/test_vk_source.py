@@ -35,7 +35,6 @@ async def test_sync_vk_source_post_includes_calendar_link(monkeypatch):
 
     url = await main.sync_vk_source_post(
         event,
-        "https://source",
         "Title\nDescription",
         None,
         None,
@@ -44,13 +43,23 @@ async def test_sync_vk_source_post_includes_calendar_link(monkeypatch):
 
     assert url == "https://vk.com/wall-1_2"
     assert not any(method == "wall.createComment" for method, _ in calls)
+    lines = captured_message["text"].splitlines()
+    assert lines[0] == "Title"
+    assert lines[1] == main.VK_BLANK_LINE
     assert "Добавить в календарь http://ics" in captured_message["text"]
-    assert captured_message["text"].startswith("[https://source|Title]\nDescription")
+    assert captured_message["text"].endswith(main.VK_SOURCE_FOOTER)
 
 
 def test_build_vk_source_message_converts_links():
     text = "Регистрация [здесь](http://reg) и <a href=\"http://pay\">билеты</a>"
-    msg = main.build_vk_source_message(text, None, display_link=False)
+    event = main.Event(
+        title="T",
+        description="",
+        date="2024-01-01",
+        time="00:00",
+        location_name="Place",
+    )
+    msg = main.build_vk_source_message(event, text)
     assert "здесь (http://reg)" in msg
     assert "билеты (http://pay)" in msg
 
