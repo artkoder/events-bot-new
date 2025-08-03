@@ -350,7 +350,7 @@ async def test_weekend_page_sync(tmp_path: Path, monkeypatch):
     async def fake_month(db_obj, month):
         called["month"] = month
 
-    async def fake_weekend(db_obj, start, update_links=True):
+    async def fake_weekend(db_obj, start, update_links=True, post_vk=True):
         called["weekend"] = start
 
     monkeypatch.setattr("main.create_source_page", fake_create)
@@ -3497,7 +3497,9 @@ async def test_delete_event_cleans_vk_posts(tmp_path: Path, monkeypatch):
     async def fake_sync_month_page(db_obj, month):
         called["month"] = month
 
-    async def fake_sync_weekend_page(db_obj, start, update_links=False):
+    async def fake_sync_weekend_page(
+        db_obj, start, update_links=False, post_vk=True
+    ):
         called["weekend_page"] = start
 
     async def fake_sync_vk_weekend_post(db_obj, start, bot=None):
@@ -3859,7 +3861,7 @@ async def test_update_event_description_error_does_not_stop_sync(tmp_path: Path,
     async def fake_month(db_obj, month, update_links=True):
         called["month"] = month
 
-    async def fake_weekend(db_obj, start, update_links=True):
+    async def fake_weekend(db_obj, start, update_links=True, post_vk=True):
         called["weekend"] = start
 
     async def boom(event, db_obj):
@@ -5314,7 +5316,7 @@ async def test_page_update_scheduler(tmp_path: Path, monkeypatch):
     async def fake_month(db_obj, month):
         called["month"] = month
 
-    async def fake_weekend(db_obj, start, update_links=True):
+    async def fake_weekend(db_obj, start, update_links=True, post_vk=True):
         called["weekend"] = start
 
     monkeypatch.setattr(main, "sync_month_page", fake_month)
