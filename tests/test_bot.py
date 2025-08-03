@@ -3313,7 +3313,7 @@ async def test_update_event_description_from_telegraph(tmp_path: Path, monkeypat
 
     event = Event(
         title="T",
-        description="old",
+        description="",
         source_text="s",
         date=FUTURE_DATE,
         time="18:00",
@@ -3344,6 +3344,49 @@ async def test_update_event_description_from_telegraph(tmp_path: Path, monkeypat
         updated = await session.get(Event, event.id)
 
     assert updated.description == "combined"
+
+
+@pytest.mark.asyncio
+async def test_update_event_description_skips_if_present(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    class DummyTG:
+        def get_page(self, path, return_html=True):
+            raise AssertionError("should not be called")
+
+    monkeypatch.setattr("main.get_telegraph_token", lambda: "t")
+    monkeypatch.setattr("main.Telegraph", lambda access_token=None, domain=None: DummyTG())
+
+    event = Event(
+        title="T",
+        description="existing",
+        source_text="s",
+        date=FUTURE_DATE,
+        time="18:00",
+        location_name="Hall",
+        telegraph_path="p",
+    )
+    async with db.get_session() as session:
+        session.add(event)
+        await session.commit()
+
+    called = False
+
+    async def fake_parse(text: str, source_channel: str | None = None) -> list[dict]:
+        nonlocal called
+        called = True
+        return []
+
+    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+
+    await main.update_event_description(event, db)
+
+    async with db.get_session() as session:
+        updated = await session.get(Event, event.id)
+
+    assert updated.description == "existing"
+    assert called is False
 
 
 @pytest.mark.asyncio
@@ -3877,6 +3920,56 @@ async def test_update_event_description_error_does_not_stop_sync(tmp_path: Path,
     assert called.get("month") == "2025-08"
     assert called.get("weekend") == "2025-08-09"
     assert results and results[0][0].title == "T"
+
+
+@pytest.mark.asyncio
+async def test_add_events_from_text_skips_description_update_for_new_event(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    calls = {"parse": 0}
+
+    async def fake_parse(text: str, source_channel: str | None = None, festival_names=None):
+        calls["parse"] += 1
+        return [
+            {
+                "title": "T",
+                "short_description": "",
+                "date": "2025-08-09",
+                "time": "14:00",
+                "location_name": "Hall",
+            }
+        ]
+
+    async def fake_create(*args, db=None, **kwargs):
+        return "u", "p"
+
+    async def fake_month(db_obj, month, update_links=True):
+        return None
+
+    async def fake_weekend(db_obj, start, update_links=True, post_vk=True):
+        return None
+
+    def boom(event, db_obj):  # should not be called
+        raise AssertionError("update_event_description called")
+
+    async def fake_sync_vk(*args, **kwargs):
+        return None
+
+    async def fake_upload_ics(event, db_obj):
+        return None
+
+    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.create_source_page", fake_create)
+    monkeypatch.setattr("main.sync_month_page", fake_month)
+    monkeypatch.setattr("main.sync_weekend_page", fake_weekend)
+    monkeypatch.setattr("main.update_event_description", boom)
+    monkeypatch.setattr("main.sync_vk_source_post", fake_sync_vk)
+    monkeypatch.setattr("main.upload_ics", fake_upload_ics)
+
+    results = await main.add_events_from_text(db, "text", None, None, None)
+    assert calls["parse"] == 1
+    assert results and results[0][0].description == ""
 
 
 @pytest.mark.asyncio

@@ -3275,10 +3275,13 @@ async def add_events_from_text(
                         saved.photo_count = photo_count
                         session.add(saved)
                         await session.commit()
-                try:
-                    await update_event_description(saved, db)
-                except Exception as e:
-                    logging.error("failed to update event %s description: %s", saved.id, e)
+                if not saved.description:
+                    try:
+                        await update_event_description(saved, db)
+                    except Exception as e:
+                        logging.error(
+                            "failed to update event %s description: %s", saved.id, e
+                        )
                 if is_vk_wall_url(source_link):
                     vk_url = source_link
                 else:
@@ -3389,11 +3392,6 @@ async def add_events_from_text(
                             saved.source_vk_post_url = vk_url
                             session.add(saved)
                             await session.commit()
-            if saved.telegraph_path:
-                try:
-                    await update_event_description(saved, db)
-                except Exception as e:
-                    logging.error("failed to update event %s description: %s", saved.id, e)
             logging.info("syncing month page %s", saved.date[:7])
             try:
                 await sync_month_page(db, saved.date[:7])
@@ -4604,6 +4602,7 @@ async def build_month_page_content(
 
 
 async def sync_month_page(db: Database, month: str, update_links: bool = False):
+    logging.info("sync_month_page start: month=%s update_links=%s", month, update_links)
     token = get_telegraph_token()
     if not token:
         logging.error("Telegraph token unavailable")
@@ -4611,6 +4610,7 @@ async def sync_month_page(db: Database, month: str, update_links: bool = False):
     tg = Telegraph(access_token=token)
     async with db.get_session() as session:
         page = await session.get(MonthPage, month)
+        logging.debug("existing MonthPage: %s", page)
         try:
             created = False
             if not page:
@@ -4618,11 +4618,20 @@ async def sync_month_page(db: Database, month: str, update_links: bool = False):
                 session.add(page)
                 await session.commit()
                 created = True
+                logging.debug("created MonthPage row for %s", month)
 
             events, exhibitions, nav_pages = await get_month_data(db, month)
-
+            logging.debug(
+                "got month data: events=%d exhibitions=%d nav_pages=%d",
+                len(events),
+                len(exhibitions),
+                len(nav_pages),
+            )
 
             async def split_and_update():
+                logging.info(
+                    "sync_month_page: splitting %s (events=%d)", month, len(events)
+                )
                 """Split the month into two pages keeping the first path."""
                 # Find maximum number of events that fit on the first page
                 low, high, best = 1, len(events) - 1, 1
@@ -4631,7 +4640,14 @@ async def sync_month_page(db: Database, month: str, update_links: bool = False):
                     _, c = await build_month_page_content(
                         db, month, events[:mid], exhibitions, nav_pages
                     )
-                    if len(json_dumps(c).encode("utf-8")) <= TELEGRAPH_PAGE_LIMIT:
+                    size_mid = len(json_dumps(c).encode("utf-8"))
+                    logging.debug(
+                        "split_and_update mid=%d size=%d limit=%d",
+                        mid,
+                        size_mid,
+                        TELEGRAPH_PAGE_LIMIT,
+                    )
+                    if size_mid <= TELEGRAPH_PAGE_LIMIT:
                         best = mid
                         low = mid + 1
                     else:
@@ -4639,15 +4655,22 @@ async def sync_month_page(db: Database, month: str, update_links: bool = False):
 
                 first = events[:best]
                 second = events[best:]
+                logging.debug(
+                    "split_and_update best=%d first=%d second=%d", best, len(first), len(second)
+                )
 
                 title2, content2 = await build_month_page_content(
                     db, month, second, exhibitions, nav_pages
                 )
+                size2 = len(json_dumps(content2).encode("utf-8"))
+                logging.debug("second page size=%d", size2)
                 if not page.path2:
+                    logging.info("creating second page for %s", month)
                     data2 = await telegraph_call(tg.create_page, title2, content=content2)
                     page.url2 = data2.get("url")
                     page.path2 = data2.get("path")
                 else:
+                    logging.info("updating second page for %s", month)
                     await telegraph_call(
                         tg.edit_page, page.path2, title=title2, content=content2
                     )
@@ -4655,11 +4678,15 @@ async def sync_month_page(db: Database, month: str, update_links: bool = False):
                 title1, content1 = await build_month_page_content(
                     db, month, first, [], nav_pages, continuation_url=page.url2
                 )
+                size1 = len(json_dumps(content1).encode("utf-8"))
+                logging.debug("first page size=%d", size1)
                 if not page.path:
+                    logging.info("creating first page for %s", month)
                     data1 = await telegraph_call(tg.create_page, title1, content=content1)
                     page.url = data1.get("url")
                     page.path = data1.get("path")
                 else:
+                    logging.info("updating first page for %s", month)
                     await telegraph_call(
                         tg.edit_page, page.path, title=title1, content=content1
                     )
@@ -4668,20 +4695,22 @@ async def sync_month_page(db: Database, month: str, update_links: bool = False):
                 )
                 await session.commit()
 
-
+            logging.info("building month page for %s", month)
             title, content = await build_month_page_content(
                 db, month, events, exhibitions, nav_pages
             )
             size = len(json_dumps(content).encode("utf-8"))
-
+            logging.debug("full page size=%d", size)
 
             try:
                 if size <= TELEGRAPH_PAGE_LIMIT:
                     if not page.path:
+                        logging.info("creating month page %s", month)
                         data = await telegraph_call(tg.create_page, title, content=content)
                         page.url = data.get("url")
                         page.path = data.get("path")
                     else:
+                        logging.info("updating month page %s", month)
                         await telegraph_call(
                             tg.edit_page, page.path, title=title, content=content
                         )
@@ -4692,6 +4721,9 @@ async def sync_month_page(db: Database, month: str, update_links: bool = False):
                     )
                     await session.commit()
                 else:
+                    logging.info(
+                        "month page %s content too big (%d), splitting", month, size
+                    )
                     await split_and_update()
             except TelegraphException as e:
                 if "CONTENT_TOO_BIG" in str(e):
@@ -7433,11 +7465,25 @@ async def get_source_page_text(path: str) -> str:
 
 
 async def update_event_description(event: Event, db: Database) -> None:
-    """Rebuild event.description from the Telegraph source page."""
-    if not event.telegraph_path:
+    """Populate event.description from the Telegraph source page if missing."""
+    if event.description:
+        logging.info(
+            "skip description update for event %s: already present", event.id
+        )
         return
+    if not event.telegraph_path:
+        logging.info(
+            "skip description update for event %s: no telegraph page", event.id
+        )
+        return
+    logging.info(
+        "updating description for event %s from %s",
+        event.id,
+        event.telegraph_path,
+    )
     text = await get_source_page_text(event.telegraph_path)
     if not text:
+        logging.info("no source text for event %s", event.id)
         return
     try:
         parsed = await parse_event_via_4o(text)
@@ -7445,9 +7491,11 @@ async def update_event_description(event: Event, db: Database) -> None:
         logging.error("Failed to parse source text for description: %s", e)
         return
     if not parsed:
+        logging.info("4o returned no data for event %s", event.id)
         return
     desc = parsed[0].get("short_description", "").strip()
     if not desc:
+        logging.info("no short description parsed for event %s", event.id)
         return
     async with db.get_session() as session:
         obj = await session.get(Event, event.id)
@@ -7455,6 +7503,7 @@ async def update_event_description(event: Event, db: Database) -> None:
             obj.description = desc
             await session.commit()
             event.description = desc
+            logging.info("stored description for event %s", event.id)
 
 
 async def create_source_page(
