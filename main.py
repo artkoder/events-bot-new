@@ -104,6 +104,9 @@ add_event_sessions: set[int] = set()
 # waiting for a date for events listing
 events_date_sessions: set[int] = set()
 
+# queue for background event processing
+add_event_queue: asyncio.Queue[tuple[str, types.Message, bool]] = asyncio.Queue()
+
 # toggle for uploading images to catbox
 CATBOX_ENABLED: bool = False
 # toggle for sending photos to VK
@@ -3458,15 +3461,14 @@ async def add_events_from_text(
     return results
 
 
-async def handle_add_event(message: types.Message, db: Database, bot: Bot):
-    using_session = False
+async def handle_add_event(
+    message: types.Message, db: Database, bot: Bot, *, using_session: bool = False
+):
     text_raw = message.text or message.caption or ""
     logging.info(
         "handle_add_event start: user=%s len=%d", message.from_user.id, len(text_raw)
     )
-    if message.from_user.id in add_event_sessions:
-        using_session = True
-        add_event_sessions.discard(message.from_user.id)
+    if using_session:
         text_content = text_raw
     else:
         parts = text_raw.split(maxsplit=1)
@@ -3523,31 +3525,33 @@ async def handle_add_event(message: types.Message, db: Database, bot: Bot):
         logging.info(
             "handle_add_event %s event id=%s", status, saved.id
         )
-        btns = []
+        buttons_first: list[types.InlineKeyboardButton] = []
         if (
             not saved.is_free
             and saved.ticket_price_min is None
             and saved.ticket_price_max is None
         ):
-            btns.append(
+            buttons_first.append(
                 types.InlineKeyboardButton(
                     text="\u2753 Это бесплатное мероприятие",
                     callback_data=f"markfree:{saved.id}",
                 )
-        )
-        btns.append(
+            )
+        buttons_first.append(
             types.InlineKeyboardButton(
                 text="\U0001f6a9 Переключить на тихий режим",
                 callback_data=f"togglesilent:{saved.id}",
             )
         )
-        btns.append(
+        buttons_second = [
             types.InlineKeyboardButton(
                 text="Добавить ссылку на Вк",
                 switch_inline_query_current_chat=f"/vklink {saved.id} ",
             )
+        ]
+        markup = types.InlineKeyboardMarkup(
+            inline_keyboard=[buttons_first, buttons_second]
         )
-        markup = types.InlineKeyboardMarkup(inline_keyboard=[btns])
         await bot.send_message(
             message.chat.id,
             f"Event {status}\n" + "\n".join(lines),
@@ -3681,31 +3685,33 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
         lines.append(f"catbox: {upload_info}")
     status = "added" if added else "updated"
     logging.info("handle_add_event_raw %s event id=%s", status, event.id)
-    btns = []
+    buttons_first: list[types.InlineKeyboardButton] = []
     if (
         not event.is_free
         and event.ticket_price_min is None
         and event.ticket_price_max is None
     ):
-        btns.append(
+        buttons_first.append(
             types.InlineKeyboardButton(
                 text="\u2753 Это бесплатное мероприятие",
                 callback_data=f"markfree:{event.id}",
             )
         )
-    btns.append(
+    buttons_first.append(
         types.InlineKeyboardButton(
             text="\U0001f6a9 Переключить на тихий режим",
             callback_data=f"togglesilent:{event.id}",
         )
     )
-    btns.append(
+    buttons_second = [
         types.InlineKeyboardButton(
             text="Добавить ссылку на Вк",
             switch_inline_query_current_chat=f"/vklink {event.id} ",
         )
+    ]
+    markup = types.InlineKeyboardMarkup(
+        inline_keyboard=[buttons_first, buttons_second]
     )
-    markup = types.InlineKeyboardMarkup(inline_keyboard=[btns])
     await bot.send_message(
         message.chat.id,
         f"Event {status}\n" + "\n".join(lines),
@@ -3713,6 +3719,50 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
     )
     await notify_event_added(db, bot, user, event, added)
     logging.info("handle_add_event_raw finished for user %s", message.from_user.id)
+
+
+async def enqueue_add_event(message: types.Message, db: Database, bot: Bot):
+    """Queue an event addition for background processing."""
+    using_session = message.from_user.id in add_event_sessions
+    if using_session:
+        add_event_sessions.discard(message.from_user.id)
+    await add_event_queue.put(("regular", message, using_session))
+    logging.info(
+        "enqueue_add_event user=%s queue=%d",
+        message.from_user.id,
+        add_event_queue.qsize(),
+    )
+    await bot.send_message(message.chat.id, "Пост принят на обработку")
+
+
+async def enqueue_add_event_raw(message: types.Message, db: Database, bot: Bot):
+    """Queue a raw event addition for background processing."""
+    await add_event_queue.put(("raw", message, False))
+    logging.info(
+        "enqueue_add_event_raw user=%s queue=%d",
+        message.from_user.id,
+        add_event_queue.qsize(),
+    )
+    await bot.send_message(message.chat.id, "Пост принят на обработку")
+
+
+async def add_event_queue_worker(db: Database, bot: Bot):
+    """Background worker to process queued events sequentially."""
+    while True:
+        size = add_event_queue.qsize()
+        logging.info("add_event_queue_worker tick: size=%d", size)
+        if size > 0:
+            kind, msg, using_session = await add_event_queue.get()
+            try:
+                if kind == "regular":
+                    await handle_add_event(msg, db, bot, using_session=using_session)
+                else:
+                    await handle_add_event_raw(msg, db, bot)
+            except Exception as e:  # pragma: no cover - log unexpected errors
+                logging.error("add_event_queue_worker error: %s", e)
+            finally:
+                add_event_queue.task_done()
+        await asyncio.sleep(60)
 
 
 def format_day(day: date, tz: timezone) -> str:
@@ -7598,11 +7648,11 @@ def create_app() -> web.Application:
 
     async def add_event_wrapper(message: types.Message):
         logging.info("add_event_wrapper start: user=%s", message.from_user.id)
-        await handle_add_event(message, db, bot)
+        await enqueue_add_event(message, db, bot)
 
     async def add_event_raw_wrapper(message: types.Message):
         logging.info("add_event_raw_wrapper start: user=%s", message.from_user.id)
-        await handle_add_event_raw(message, db, bot)
+        await enqueue_add_event_raw(message, db, bot)
 
     async def ask_4o_wrapper(message: types.Message):
         await handle_ask_4o(message, db, bot)
@@ -7691,7 +7741,7 @@ def create_app() -> web.Application:
 
     async def add_event_session_wrapper(message: types.Message):
         logging.info("add_event_session_wrapper start: user=%s", message.from_user.id)
-        await handle_add_event(message, db, bot)
+        await enqueue_add_event(message, db, bot)
 
     async def vk_link_cmd_wrapper(message: types.Message):
         logging.info("vk_link_cmd_wrapper start: user=%s", message.from_user.id)
@@ -7819,6 +7869,9 @@ def create_app() -> web.Application:
         app["partner_task"] = asyncio.create_task(
             partner_notification_scheduler(db, bot)
         )
+        app["add_event_worker"] = asyncio.create_task(
+            add_event_queue_worker(db, bot)
+        )
 
     async def on_shutdown(app: web.Application):
         await bot.session.close()
@@ -7846,6 +7899,10 @@ def create_app() -> web.Application:
             app["partner_task"].cancel()
             with contextlib.suppress(Exception):
                 await app["partner_task"]
+        if "add_event_worker" in app:
+            app["add_event_worker"].cancel()
+            with contextlib.suppress(Exception):
+                await app["add_event_worker"]
 
     app.on_startup.append(on_startup)
     app.on_shutdown.append(on_shutdown)
