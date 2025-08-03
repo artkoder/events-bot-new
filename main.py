@@ -4079,9 +4079,9 @@ def format_event_vk(
     if e.emoji and not e.title.strip().startswith(e.emoji):
         emoji_part = f"{e.emoji} "
 
-    vk_link = e.source_vk_post_url if is_vk_wall_url(e.source_vk_post_url) else None
-    if not vk_link and is_vk_wall_url(e.source_post_url):
-        vk_link = e.source_post_url
+    vk_link = e.source_post_url if is_vk_wall_url(e.source_post_url) else None
+    if not vk_link and is_vk_wall_url(e.source_vk_post_url):
+        vk_link = e.source_vk_post_url
 
     title_text = f"{emoji_part}{e.title.upper()}".strip()
     if vk_link:
