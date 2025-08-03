@@ -5348,6 +5348,48 @@ async def test_page_update_scheduler(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_page_update_scheduler_skips_when_started_late(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    called = {}
+
+    async def fake_month(db_obj, month):
+        called["month"] = month
+
+    async def fake_weekend(db_obj, start, update_links=True, post_vk=True):
+        called["weekend"] = start
+
+    monkeypatch.setattr(main, "sync_month_page", fake_month)
+    monkeypatch.setattr(main, "sync_weekend_page", fake_weekend)
+
+    class FakeDate(date):
+        @classmethod
+        def today(cls):
+            return date(2025, 7, 6)  # Sunday
+
+    class FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            # Midday, after the scheduled update window
+            return datetime(2025, 7, 6, 12, 0, tzinfo=tz)
+
+    monkeypatch.setattr(main, "date", FakeDate)
+    monkeypatch.setattr(main, "datetime", FakeDatetime)
+
+    async def fake_sleep(*args, **kwargs):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        await main.page_update_scheduler(db)
+
+    # Scheduler should not trigger any page syncs when started late
+    assert called == {}
+
+
+@pytest.mark.asyncio
 async def test_dumpdb(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
