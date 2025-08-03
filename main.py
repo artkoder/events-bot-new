@@ -4969,8 +4969,13 @@ async def sync_vk_weekend_post(db: Database, start: str, bot: Bot | None = None)
     needs_new_post = not page.vk_post_url
     if page.vk_post_url:
         try:
-            await edit_vk_post(page.vk_post_url, message, db, bot)
-            logging.info("sync_vk_weekend_post updated %s", page.vk_post_url)
+            updated = await edit_vk_post(page.vk_post_url, message, db, bot)
+            if updated:
+                logging.info("sync_vk_weekend_post updated %s", page.vk_post_url)
+            else:
+                logging.info(
+                    "sync_vk_weekend_post: no changes for %s", page.vk_post_url
+                )
         except Exception as e:
             if "post or comment deleted" in str(e) or "Пост удалён" in str(e):
                 logging.warning(
@@ -5860,7 +5865,12 @@ async def edit_vk_post(
     bot: Bot | None = None,
     attachments: list[str] | None = None,
     token: str | None = None,
-) -> None:
+) -> bool:
+    """Edit an existing VK post.
+
+    Returns ``True`` if the post was changed and ``False`` if the current
+    content already matches ``message`` and ``attachments``.
+    """
     logging.info("edit_vk_post start: %s", post_url)
     ids = _vk_owner_and_post_id(post_url)
     if not ids:
@@ -5904,11 +5914,12 @@ async def edit_vk_post(
                 current.append(a)
     if post_text == message and current == old_attachments:
         logging.info("edit_vk_post: no changes for %s", post_url)
-        return
+        return False
     if current:
         params["attachments"] = ",".join(current)
     await _vk_api("wall.edit", params, db, bot, token=token)
     logging.info("edit_vk_post done: %s", post_url)
+    return True
 
 
 async def delete_vk_post(
@@ -6101,12 +6112,24 @@ async def cleanup_scheduler(db: Database, bot: Bot):
 
 
 async def page_update_scheduler(db: Database):
-    """Refresh month and weekend Telegraph pages after midnight."""
+    """Refresh month and weekend Telegraph pages after midnight.
+
+    To avoid unnecessary API calls after a manual restart during the day the
+    first iteration skips syncing if the current time is well past the
+    scheduled run window (01:00 local time).
+    """
     last_run: date | None = None
+    first = True
     while True:
         offset = await get_tz_offset(db)
         tz = offset_to_timezone(offset)
         now = datetime.now(tz)
+        if first:
+            first = False
+            # If the bot starts long after the scheduled time, assume today's
+            # pages are already up to date.
+            if now.time() >= time(2, 0):
+                last_run = now.date()
         if now.time() >= time(1, 0) and now.date() != last_run:
             try:
                 await sync_month_page(db, now.strftime("%Y-%m"))
