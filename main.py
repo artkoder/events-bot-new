@@ -121,14 +121,33 @@ TELEGRAPH_TIMEOUT = float(os.getenv("TELEGRAPH_TIMEOUT", "30"))
 ICS_POST_TIMEOUT = float(os.getenv("ICS_POST_TIMEOUT", "30"))
 
 
-# Run blocking Telegraph API calls with a timeout
-async def telegraph_call(func, /, *args, **kwargs):
-    try:
-        return await asyncio.wait_for(
-            asyncio.to_thread(func, *args, **kwargs), TELEGRAPH_TIMEOUT
-        )
-    except asyncio.TimeoutError as e:
-        raise TelegraphException("Telegraph request timed out") from e
+# Run blocking Telegraph API calls with a timeout and simple retries
+async def telegraph_call(func, /, *args, retries: int = 3, **kwargs):
+    """Execute a Telegraph API call in a thread with timeout and retries.
+
+    Telegraph can occasionally respond very slowly causing timeouts.  In that
+    case we retry the operation a few times before giving up.  This makes
+    synchronization of month/weekend pages more reliable and helps ensure that
+    events are not missed due to transient network issues.
+    """
+
+    last_exc: Exception | None = None
+    for attempt in range(retries):
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(func, *args, **kwargs), TELEGRAPH_TIMEOUT
+            )
+        except asyncio.TimeoutError as e:
+            last_exc = e
+            if attempt < retries - 1:
+                # exponential backoff: 1s, 2s, 4s ...
+                await asyncio.sleep(2**attempt)
+                continue
+            raise TelegraphException("Telegraph request timed out") from e
+
+    # If we exit the loop without returning or raising, raise the last exception
+    if last_exc:
+        raise TelegraphException("Telegraph request failed") from last_exc
 
 
 # main menu buttons
@@ -3373,12 +3392,22 @@ async def add_events_from_text(
                 except Exception as e:
                     logging.error("failed to update event %s description: %s", saved.id, e)
             logging.info("syncing month page %s", saved.date[:7])
-            asyncio.create_task(sync_month_page(db, saved.date[:7]))
+            try:
+                await sync_month_page(db, saved.date[:7])
+            except Exception as e:
+                logging.error(
+                    "failed to sync month page %s: %s", saved.date[:7], e
+                )
             d_saved = parse_iso_date(saved.date)
             w_start = weekend_start_for_date(d_saved) if d_saved else None
             if w_start:
                 logging.info("syncing weekend page %s", w_start.isoformat())
-                asyncio.create_task(sync_weekend_page(db, w_start.isoformat()))
+                try:
+                    await sync_weekend_page(db, w_start.isoformat())
+                except Exception as e:
+                    logging.error(
+                        "failed to sync weekend page %s: %s", w_start.isoformat(), e
+                    )
             fest_obj = None
             if saved.festival:
                 logging.info("syncing festival %s", saved.festival)
