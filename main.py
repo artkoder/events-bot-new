@@ -6,18 +6,20 @@ from urllib.parse import urlparse, parse_qs
 import uuid
 import textwrap
 from supabase import create_client, Client
+from supabase.client import ClientOptions
 from icalendar import Calendar, Event as IcsEvent
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
-from aiohttp import web, FormData, ClientSession, TCPConnector
+from aiohttp import web, FormData, ClientSession, TCPConnector, ClientTimeout
 from aiogram.client.session.aiohttp import AiohttpSession
 import socket
 import imghdr
 from difflib import SequenceMatcher
 import json
 import re
+import httpx
 
 from telegraph import Telegraph, TelegraphException
 
@@ -124,6 +126,12 @@ TELEGRAPH_TIMEOUT = float(os.getenv("TELEGRAPH_TIMEOUT", "30"))
 # Timeout for posting ICS files to Telegram (in seconds)
 ICS_POST_TIMEOUT = float(os.getenv("ICS_POST_TIMEOUT", "30"))
 
+# Timeout for general HTTP requests (in seconds)
+HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "30"))
+
+# Timeout for OpenAI 4o requests (in seconds)
+FOUR_O_TIMEOUT = float(os.getenv("FOUR_O_TIMEOUT", "60"))
+
 
 # Run blocking Telegraph API calls with a timeout and simple retries
 async def telegraph_call(func, /, *args, retries: int = 3, **kwargs):
@@ -170,10 +178,14 @@ class IPv4AiohttpSession(AiohttpSession):
 def create_ipv4_session(session_cls: type[ClientSession] = ClientSession) -> ClientSession:
     """Return ClientSession that forces IPv4 connections."""
     connector = TCPConnector(family=socket.AF_INET)
+    timeout = ClientTimeout(total=HTTP_TIMEOUT)
     try:
-        return session_cls(connector=connector)
+        return session_cls(connector=connector, timeout=timeout)
     except TypeError:
-        return session_cls()
+        try:
+            return session_cls(timeout=timeout)
+        except TypeError:
+            return session_cls()
 
 
 
@@ -648,10 +660,13 @@ async def _vk_api(
         params["v"] = "5.131"
         logging.info("calling VK API %s using %s token %s", method, kind, token)
         async with create_ipv4_session(ClientSession) as session:
-            async with session.post(
-                f"https://api.vk.com/method/{method}", data=params
-            ) as resp:
-                data = await resp.json()
+            async def _call():
+                async with session.post(
+                    f"https://api.vk.com/method/{method}", data=params
+                ) as resp:
+                    return await resp.json()
+
+            data = await asyncio.wait_for(_call(), HTTP_TIMEOUT)
         if "error" not in data:
             return data
         last_err = data["error"]
@@ -688,9 +703,11 @@ async def upload_vk_photo(
         )
         upload_url = data["response"]["upload_url"]
         async with create_ipv4_session(ClientSession) as session:
+            async def _download():
+                async with session.get(url) as resp:
+                    return await resp.read()
 
-            async with session.get(url) as resp:
-                img_bytes = await resp.read()
+            img_bytes = await asyncio.wait_for(_download(), HTTP_TIMEOUT)
             form = FormData()
             ctype = "image/jpeg"
             kind = imghdr.what(None, img_bytes)
@@ -702,8 +719,11 @@ async def upload_vk_photo(
                 filename="image.jpg",
                 content_type=ctype,
             )
-            async with session.post(upload_url, data=form) as up:
-                upload_result = await up.json()
+            async def _upload():
+                async with session.post(upload_url, data=form) as up:
+                    return await up.json()
+
+            upload_result = await asyncio.wait_for(_upload(), HTTP_TIMEOUT)
         save = await _vk_api(
             "photos.saveWallPhoto",
             {
@@ -726,7 +746,9 @@ async def upload_vk_photo(
 def get_supabase_client() -> Client | None:
     global _supabase_client
     if _supabase_client is None and SUPABASE_URL and SUPABASE_KEY:
-        _supabase_client = create_client(SUPABASE_URL, SUPABASE_KEY)
+        options = ClientOptions()
+        options.httpx_client = httpx.Client(timeout=HTTP_TIMEOUT)
+        _supabase_client = create_client(SUPABASE_URL, SUPABASE_KEY, options=options)
     return _supabase_client
 
 
@@ -936,7 +958,7 @@ async def upload_to_catbox(images: list[tuple[bytes, str]]) -> tuple[list[str], 
     catbox_urls: list[str] = []
     catbox_msg = ""
     if CATBOX_ENABLED and images:
-        async with ClientSession() as session:
+        async with create_ipv4_session(ClientSession) as session:
             for data, name in images[:3]:
                 if len(data) > 5 * 1024 * 1024:
                     logging.warning("catbox skip %s: too large", name)
@@ -950,23 +972,27 @@ async def upload_to_catbox(images: list[tuple[bytes, str]]) -> tuple[list[str], 
                     form = FormData()
                     form.add_field("reqtype", "fileupload")
                     form.add_field("fileToUpload", data, filename=name)
-                    async with session.post(
-                        "https://catbox.moe/user/api.php", data=form
-                    ) as resp:
-                        text_r = await resp.text()
-                        if resp.status == 200 and text_r.startswith("http"):
-                            url = text_r.strip()
-                            catbox_urls.append(url)
-                            catbox_msg += "ok; "
-                            logging.info("catbox uploaded %s", url)
-                        else:
-                            catbox_msg += f"{name}: err {resp.status}; "
-                            logging.error(
-                                "catbox upload failed %s: %s %s",
-                                name,
-                                resp.status,
-                                text_r,
-                            )
+                    async def _upload():
+                        nonlocal catbox_msg
+                        async with session.post(
+                            "https://catbox.moe/user/api.php", data=form
+                        ) as resp:
+                            text_r = await resp.text()
+                            if resp.status == 200 and text_r.startswith("http"):
+                                url = text_r.strip()
+                                catbox_urls.append(url)
+                                catbox_msg += "ok; "
+                                logging.info("catbox uploaded %s", url)
+                            else:
+                                catbox_msg += f"{name}: err {resp.status}; "
+                                logging.error(
+                                    "catbox upload failed %s: %s %s",
+                                    name,
+                                    resp.status,
+                                    text_r,
+                                )
+
+                    await asyncio.wait_for(_upload(), HTTP_TIMEOUT)
                 except Exception as e:
                     catbox_msg += f"{name}: {e}; "
                     logging.error("catbox error %s: %s", name, e)
@@ -1630,9 +1656,12 @@ async def parse_event_via_4o(
     }
     logging.info("Sending 4o parse request to %s", url)
     async with create_ipv4_session(ClientSession) as session:
-        resp = await session.post(url, json=payload, headers=headers)
-        resp.raise_for_status()
-        data_raw = await resp.json()
+        async def _call():
+            resp = await session.post(url, json=payload, headers=headers)
+            resp.raise_for_status()
+            return await resp.json()
+
+        data_raw = await asyncio.wait_for(_call(), FOUR_O_TIMEOUT)
     content = (
         data_raw.get("choices", [{}])[0]
         .get("message", {})
@@ -1677,9 +1706,12 @@ async def ask_4o(text: str) -> str:
     }
     logging.info("Sending 4o ask request to %s", url)
     async with create_ipv4_session(ClientSession) as session:
-        resp = await session.post(url, json=payload, headers=headers)
-        resp.raise_for_status()
-        data = await resp.json()
+        async def _call():
+            resp = await session.post(url, json=payload, headers=headers)
+            resp.raise_for_status()
+            return await resp.json()
+
+        data = await asyncio.wait_for(_call(), FOUR_O_TIMEOUT)
     logging.debug("4o response: %s", data)
     return data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
 
