@@ -1,7 +1,7 @@
 import logging
 import os
 from datetime import date, datetime, timedelta, timezone, time
-from typing import Optional, Tuple, Iterable
+from typing import Optional, Tuple, Iterable, Any
 from urllib.parse import urlparse, parse_qs
 import uuid
 import textwrap
@@ -6273,43 +6273,23 @@ async def build_exhibitions_message(db: Database, tz: timezone):
 
 
 async def show_edit_menu(user_id: int, event: Event, bot: Bot):
-    lines = [
-        f"title: {event.title}",
-        f"description: {event.description}",
-        f"festival: {event.festival or ''}",
-        f"date: {event.date}",
-        f"end_date: {event.end_date or ''}",
-        f"time: {event.time}",
-        f"location_name: {event.location_name}",
-        f"location_address: {event.location_address or ''}",
-        f"city: {event.city or ''}",
-        f"event_type: {event.event_type or ''}",
-        f"emoji: {event.emoji or ''}",
-        f"ticket_price_min: {event.ticket_price_min}",
-        f"ticket_price_max: {event.ticket_price_max}",
-        f"ticket_link: {event.ticket_link or ''}",
-        f"is_free: {event.is_free}",
-        f"pushkin_card: {event.pushkin_card}",
-        f"ics_url: {event.ics_url or ''}",
-    ]
-    fields = [
-        "title",
-        "description",
-        "festival",
-        "date",
-        "end_date",
-        "time",
-        "location_name",
-        "location_address",
-        "city",
-        "event_type",
-        "emoji",
-        "ticket_price_min",
-        "ticket_price_max",
-        "ticket_link",
-        "is_free",
-        "pushkin_card",
-    ]
+    data: dict[str, Any]
+    try:
+        data = event.model_dump()  # type: ignore[attr-defined]
+    except AttributeError:  # pragma: no cover - pydantic v1 fallback
+        data = event.dict()
+
+    lines = []
+    for key, value in data.items():
+        if value is None:
+            val = ""
+        elif isinstance(value, str):
+            val = value if len(value) <= 1000 else value[:1000] + "..."
+        else:
+            val = str(value)
+        lines.append(f"{key}: {val}")
+
+    fields = [k for k in data.keys() if k not in {"id", "added_at", "silent"}]
     keyboard = []
     row = []
     for idx, field in enumerate(fields, 1):
