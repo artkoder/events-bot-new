@@ -101,8 +101,6 @@ festival_edit_sessions: dict[int, tuple[int, str | None]] = {}
 
 # pending event text/photo input
 add_event_sessions: set[int] = set()
-# user_id -> event_id waiting for VK link
-vk_link_sessions: dict[int, int] = {}
 # waiting for a date for events listing
 events_date_sessions: set[int] = set()
 
@@ -2441,13 +2439,6 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                 db, group_id, tz, section=section, bot=bot
             )
         await callback.answer("Sent")
-    elif data.startswith("vklink:"):
-        eid = int(data.split(":", 1)[1])
-        vk_link_sessions[callback.from_user.id] = eid
-        await callback.message.answer("Send VK post link")
-        await callback.answer()
-    elif data == "vklinkskip":
-        await callback.answer("Skipped")
     elif data == "menuevt:today":
         offset = await get_tz_offset(db)
         tz = offset_to_timezone(offset)
@@ -3543,11 +3534,17 @@ async def handle_add_event(message: types.Message, db: Database, bot: Bot):
                     text="\u2753 Это бесплатное мероприятие",
                     callback_data=f"markfree:{saved.id}",
                 )
-            )
+        )
         btns.append(
             types.InlineKeyboardButton(
                 text="\U0001f6a9 Переключить на тихий режим",
                 callback_data=f"togglesilent:{saved.id}",
+            )
+        )
+        btns.append(
+            types.InlineKeyboardButton(
+                text="Добавить ссылку на Вк",
+                switch_inline_query_current_chat=f"/vklink {saved.id} ",
             )
         )
         markup = types.InlineKeyboardMarkup(inline_keyboard=[btns])
@@ -3557,22 +3554,6 @@ async def handle_add_event(message: types.Message, db: Database, bot: Bot):
             reply_markup=markup,
         )
         await notify_event_added(db, bot, user, saved, added)
-        link_markup = types.InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    types.InlineKeyboardButton(
-                        text="Добавить ссылку на Вк этого мероприятия",
-                        callback_data=f"vklink:{saved.id}",
-                    ),
-                    types.InlineKeyboardButton(text="Нет", callback_data="vklinkskip"),
-                ]
-            ]
-        )
-        await bot.send_message(
-            message.chat.id,
-            "Добавить ссылку на Вк этого мероприятия?",
-            reply_markup=link_markup,
-        )
     logging.info("handle_add_event finished for user %s", message.from_user.id)
 
 
@@ -3718,6 +3699,12 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
             callback_data=f"togglesilent:{event.id}",
         )
     )
+    btns.append(
+        types.InlineKeyboardButton(
+            text="Добавить ссылку на Вк",
+            switch_inline_query_current_chat=f"/vklink {event.id} ",
+        )
+    )
     markup = types.InlineKeyboardMarkup(inline_keyboard=[btns])
     await bot.send_message(
         message.chat.id,
@@ -3725,22 +3712,6 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
         reply_markup=markup,
     )
     await notify_event_added(db, bot, user, event, added)
-    link_markup = types.InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                types.InlineKeyboardButton(
-                    text="Добавить ссылку на Вк этого мероприятия",
-                    callback_data=f"vklink:{event.id}",
-                ),
-                types.InlineKeyboardButton(text="Нет", callback_data="vklinkskip"),
-            ]
-        ]
-    )
-    await bot.send_message(
-        message.chat.id,
-        "Добавить ссылку на Вк этого мероприятия?",
-        reply_markup=link_markup,
-    )
     logging.info("handle_add_event_raw finished for user %s", message.from_user.id)
 
 
@@ -7025,25 +6996,35 @@ async def handle_add_event_start(message: types.Message, db: Database, bot: Bot)
     await bot.send_message(message.chat.id, "Send event text and optional photo")
 
 
-async def handle_vk_link_message(message: types.Message, db: Database, bot: Bot):
-    eid = vk_link_sessions.get(message.from_user.id)
-    logging.info(
-        "handle_vk_link_message start: user=%s eid=%s", message.from_user.id, eid
-    )
-    if not eid:
+async def handle_vk_link_command(message: types.Message, db: Database, bot: Bot):
+    parts = (message.text or "").split(maxsplit=2)
+    logging.info("handle_vk_link_command start: user=%s", message.from_user.id)
+    if len(parts) < 3:
+        await bot.send_message(
+            message.chat.id, "Usage: /vklink <event_id> <VK post link>"
+        )
         return
-    link = (message.text or "").strip()
+    try:
+        eid = int(parts[1])
+    except ValueError:
+        await bot.send_message(message.chat.id, "Invalid event id")
+        return
+    link = parts[2].strip()
     if not is_vk_wall_url(link):
         await bot.send_message(message.chat.id, "Invalid link")
         return
     async with db.get_session() as session:
+        user = await session.get(User, message.from_user.id)
         event = await session.get(Event, eid)
-        if event:
-            event.source_post_url = link
-            await session.commit()
-    vk_link_sessions.pop(message.from_user.id, None)
+        if not event:
+            await bot.send_message(message.chat.id, "Event not found")
+            return
+        if event.creator_id != message.from_user.id and not (user and user.is_superadmin):
+            await bot.send_message(message.chat.id, "Not authorized")
+            return
+        event.source_post_url = link
+        await session.commit()
     await bot.send_message(message.chat.id, "Link saved")
-
 
 async def handle_daily_time_message(message: types.Message, db: Database, bot: Bot):
     cid = daily_time_sessions.get(message.from_user.id)
@@ -7712,9 +7693,9 @@ def create_app() -> web.Application:
         logging.info("add_event_session_wrapper start: user=%s", message.from_user.id)
         await handle_add_event(message, db, bot)
 
-    async def vk_link_msg_wrapper(message: types.Message):
-        logging.info("vk_link_msg_wrapper start: user=%s", message.from_user.id)
-        await handle_vk_link_message(message, db, bot)
+    async def vk_link_cmd_wrapper(message: types.Message):
+        logging.info("vk_link_cmd_wrapper start: user=%s", message.from_user.id)
+        await handle_vk_link_command(message, db, bot)
 
     dp.message.register(start_wrapper, Command("start"))
     dp.message.register(register_wrapper, Command("register"))
@@ -7741,8 +7722,6 @@ def create_app() -> web.Application:
         or c.data == "vkunset"
         or c.data.startswith("vktime:")
         or c.data.startswith("vkdailysend:")
-        or c.data.startswith("vklink:")
-        or c.data == "vklinkskip"
         or c.data.startswith("menuevt:")
         or c.data.startswith("togglefree:")
         or c.data.startswith("markfree:")
@@ -7774,7 +7753,7 @@ def create_app() -> web.Application:
     dp.message.register(events_date_wrapper, lambda m: m.from_user.id in events_date_sessions)
     dp.message.register(add_event_start_wrapper, lambda m: m.text == MENU_ADD_EVENT)
     dp.message.register(add_event_session_wrapper, lambda m: m.from_user.id in add_event_sessions)
-    dp.message.register(vk_link_msg_wrapper, lambda m: m.from_user.id in vk_link_sessions)
+    dp.message.register(vk_link_cmd_wrapper, Command("vklink"))
     dp.message.register(partner_info_wrapper, lambda m: m.from_user.id in partner_info_sessions)
     dp.message.register(channels_wrapper, Command("channels"))
     dp.message.register(reg_daily_wrapper, Command("regdailychannels"))
