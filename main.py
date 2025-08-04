@@ -13,8 +13,7 @@ from typing import Optional, Tuple, Iterable, Any
 from urllib.parse import urlparse, parse_qs
 import uuid
 import textwrap
-from supabase import create_client, Client
-from supabase.client import ClientOptions
+# тяжёлый стек подтягиваем только если понадобится
 from icalendar import Calendar, Event as IcsEvent
 
 from aiogram import Bot, Dispatcher, types
@@ -43,7 +42,6 @@ from sqlmodel import Field, SQLModel, select
 import aiosqlite
 import gc
 import atexit
-import tracemalloc
 from cachetools import TTLCache
 from markup import simple_md_to_html
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -57,10 +55,6 @@ for noisy in ("aiogram", "httpx"):
     logging.getLogger(noisy).setLevel(
         logging.INFO if DEBUG else logging.WARNING
     )
-
-PROFILE = os.getenv("PROFILE") == "1"
-if PROFILE:
-    tracemalloc.start()
 
 
 def print_current_rss() -> None:
@@ -221,7 +215,7 @@ async def _log_queue_stats():
 CATBOX_ENABLED: bool = False
 # toggle for sending photos to VK
 VK_PHOTOS_ENABLED: bool = False
-_supabase_client: Client | None = None
+_supabase_client: "Client | None" = None  # type: ignore[name-defined]
 _vk_user_token_bad: str | None = None
 _vk_session: ClientSession | None = None
 _http_session: ClientSession | None = None
@@ -747,9 +741,14 @@ async def upload_vk_photo(
         return None
 
 
-def get_supabase_client() -> Client | None:
+def get_supabase_client() -> "Client | None":  # type: ignore[name-defined]
+    if os.getenv("DISABLE_SUPABASE") == "1":
+        return None
     global _supabase_client
     if _supabase_client is None and SUPABASE_URL and SUPABASE_KEY:
+        from supabase import create_client, Client  # локальный импорт
+        from supabase.client import ClientOptions
+
         options = ClientOptions()
         options.httpx_client = httpx.Client(timeout=HTTP_TIMEOUT)
         _supabase_client = create_client(SUPABASE_URL, SUPABASE_KEY, options=options)
