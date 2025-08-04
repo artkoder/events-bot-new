@@ -2930,6 +2930,26 @@ async def handle_daily(message: types.Message, db: Database, bot: Bot):
     await send_daily_list(message, db, bot, edit=False)
 
 
+def _copy_fields(dst: Event, src: Event) -> None:
+    for f in (
+        "title",
+        "description",
+        "festival",
+        "source_text",
+        "location_name",
+        "location_address",
+        "ticket_price_min",
+        "ticket_price_max",
+        "ticket_link",
+        "event_type",
+        "emoji",
+        "end_date",
+        "is_free",
+        "pushkin_card",
+    ):
+        setattr(dst, f, getattr(src, f))
+
+
 async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
     """Insert or update an event if a similar one exists.
 
@@ -2952,40 +2972,14 @@ async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
             and (ev.location_address or "").strip().lower()
             == (new.location_address or "").strip().lower()
         ):
-            ev.title = new.title
-            ev.description = new.description
-            ev.festival = new.festival
-            ev.source_text = new.source_text
-            ev.location_name = new.location_name
-            ev.location_address = new.location_address
-            ev.ticket_price_min = new.ticket_price_min
-            ev.ticket_price_max = new.ticket_price_max
-            ev.ticket_link = new.ticket_link
-            ev.event_type = new.event_type
-            ev.emoji = new.emoji
-            ev.end_date = new.end_date
-            ev.is_free = new.is_free
-            ev.pushkin_card = new.pushkin_card
+            _copy_fields(ev, new)
             await session.commit()
             logging.info("upsert_event: updated event id=%s", ev.id)
             return ev, False
 
         title_ratio = SequenceMatcher(None, ev.title.lower(), new.title.lower()).ratio()
         if title_ratio >= 0.9:
-            ev.title = new.title
-            ev.description = new.description
-            ev.festival = new.festival
-            ev.source_text = new.source_text
-            ev.location_name = new.location_name
-            ev.location_address = new.location_address
-            ev.ticket_price_min = new.ticket_price_min
-            ev.ticket_price_max = new.ticket_price_max
-            ev.ticket_link = new.ticket_link
-            ev.event_type = new.event_type
-            ev.emoji = new.emoji
-            ev.end_date = new.end_date
-            ev.is_free = new.is_free
-            ev.pushkin_card = new.pushkin_card
+            _copy_fields(ev, new)
             await session.commit()
             logging.info("upsert_event: updated event id=%s", ev.id)
             return ev, False
@@ -2995,40 +2989,14 @@ async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
             and (ev.location_address or "").strip().lower()
             == (new.location_address or "").strip().lower()
         ):
-            ev.title = new.title
-            ev.description = new.description
-            ev.festival = new.festival
-            ev.source_text = new.source_text
-            ev.location_name = new.location_name
-            ev.location_address = new.location_address
-            ev.ticket_price_min = new.ticket_price_min
-            ev.ticket_price_max = new.ticket_price_max
-            ev.ticket_link = new.ticket_link
-            ev.event_type = new.event_type
-            ev.emoji = new.emoji
-            ev.end_date = new.end_date
-            ev.is_free = new.is_free
-            ev.pushkin_card = new.pushkin_card
+            _copy_fields(ev, new)
             await session.commit()
             logging.info("upsert_event: updated event id=%s", ev.id)
             return ev, False
 
         title_ratio = SequenceMatcher(None, ev.title.lower(), new.title.lower()).ratio()
         if title_ratio >= 0.9:
-            ev.title = new.title
-            ev.description = new.description
-            ev.festival = new.festival
-            ev.source_text = new.source_text
-            ev.location_name = new.location_name
-            ev.location_address = new.location_address
-            ev.ticket_price_min = new.ticket_price_min
-            ev.ticket_price_max = new.ticket_price_max
-            ev.ticket_link = new.ticket_link
-            ev.event_type = new.event_type
-            ev.emoji = new.emoji
-            ev.end_date = new.end_date
-            ev.is_free = new.is_free
-            ev.pushkin_card = new.pushkin_card
+            _copy_fields(ev, new)
             await session.commit()
             logging.info("upsert_event: updated event id=%s", ev.id)
             return ev, False
@@ -3038,40 +3006,14 @@ async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
             and (ev.location_address or "").strip().lower()
             == (new.location_address or "").strip().lower()
         ):
-            ev.title = new.title
-            ev.description = new.description
-            ev.festival = new.festival
-            ev.source_text = new.source_text
-            ev.location_name = new.location_name
-            ev.location_address = new.location_address
-            ev.ticket_price_min = new.ticket_price_min
-            ev.ticket_price_max = new.ticket_price_max
-            ev.ticket_link = new.ticket_link
-            ev.event_type = new.event_type
-            ev.emoji = new.emoji
-            ev.end_date = new.end_date
-            ev.is_free = new.is_free
-            ev.pushkin_card = new.pushkin_card
+            _copy_fields(ev, new)
             await session.commit()
             logging.info("upsert_event: updated event id=%s", ev.id)
             return ev, False
 
         title_ratio = SequenceMatcher(None, ev.title.lower(), new.title.lower()).ratio()
         if title_ratio >= 0.9:
-            ev.title = new.title
-            ev.description = new.description
-            ev.festival = new.festival
-            ev.source_text = new.source_text
-            ev.location_name = new.location_name
-            ev.location_address = new.location_address
-            ev.ticket_price_min = new.ticket_price_min
-            ev.ticket_price_max = new.ticket_price_max
-            ev.ticket_link = new.ticket_link
-            ev.event_type = new.event_type
-            ev.emoji = new.emoji
-            ev.end_date = new.end_date
-            ev.is_free = new.is_free
-            ev.pushkin_card = new.pushkin_card
+            _copy_fields(ev, new)
             await session.commit()
             logging.info("upsert_event: updated event id=%s", ev.id)
             return ev, False
@@ -3081,20 +3023,7 @@ async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
             and (ev.location_address or "").strip().lower()
             == (new.location_address or "").strip().lower()
         ):
-            ev.title = new.title
-            ev.description = new.description
-            ev.festival = new.festival
-            ev.source_text = new.source_text
-            ev.location_name = new.location_name
-            ev.location_address = new.location_address
-            ev.ticket_price_min = new.ticket_price_min
-            ev.ticket_price_max = new.ticket_price_max
-            ev.ticket_link = new.ticket_link
-            ev.event_type = new.event_type
-            ev.emoji = new.emoji
-            ev.end_date = new.end_date
-            ev.is_free = new.is_free
-            ev.pushkin_card = new.pushkin_card
+            _copy_fields(ev, new)
             await session.commit()
             logging.info("upsert_event: updated event id=%s", ev.id)
             return ev, False
@@ -3104,20 +3033,7 @@ async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
             None, ev.location_name.lower(), new.location_name.lower()
         ).ratio()
         if title_ratio >= 0.6 and loc_ratio >= 0.6:
-            ev.title = new.title
-            ev.description = new.description
-            ev.festival = new.festival
-            ev.source_text = new.source_text
-            ev.location_name = new.location_name
-            ev.location_address = new.location_address
-            ev.ticket_price_min = new.ticket_price_min
-            ev.ticket_price_max = new.ticket_price_max
-            ev.ticket_link = new.ticket_link
-            ev.event_type = new.event_type
-            ev.emoji = new.emoji
-            ev.end_date = new.end_date
-            ev.is_free = new.is_free
-            ev.pushkin_card = new.pushkin_card
+            _copy_fields(ev, new)
             await session.commit()
             logging.info("upsert_event: updated event id=%s", ev.id)
             return ev, False
@@ -3136,20 +3052,9 @@ async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
                 logging.exception("duplicate check failed")
                 dup = False
             if dup:
-                ev.title = title or new.title
-                ev.description = desc or new.description
-                ev.festival = new.festival
-                ev.source_text = new.source_text
-                ev.location_name = new.location_name
-                ev.location_address = new.location_address
-                ev.ticket_price_min = new.ticket_price_min
-                ev.ticket_price_max = new.ticket_price_max
-                ev.ticket_link = new.ticket_link
-                ev.event_type = new.event_type
-                ev.emoji = new.emoji
-                ev.end_date = new.end_date
-                ev.is_free = new.is_free
-                ev.pushkin_card = new.pushkin_card
+                _copy_fields(ev, new)
+                ev.title = title or ev.title
+                ev.description = desc or ev.description
                 await session.commit()
                 logging.info("upsert_event: updated event id=%s", ev.id)
                 return ev, False
