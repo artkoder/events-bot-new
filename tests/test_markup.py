@@ -21,3 +21,20 @@ def test_header_and_newline():
 
 def test_emoji_preserved():
     assert simple_md_to_html('smile 😀') == 'smile 😀'
+
+
+def test_no_italic_in_urls():
+    url = 'https://example.com/image_2024_08.jpg'
+    assert simple_md_to_html(url) == url
+
+
+def test_link_with_underscore_url():
+    assert (
+        simple_md_to_html('[doc](https://site.com/a_b_c)')
+        == '<a href="https://site.com/a_b_c">doc</a>'
+    )
+
+
+def test_plain_underscores_unchanged():
+    assert simple_md_to_html('file_name') == 'file_name'
+
