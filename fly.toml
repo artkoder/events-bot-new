@@ -27,3 +27,9 @@ app = "events-bot-new"
   [[services.ports]]
     handlers = ["tls", "http"]
     port = "443"
+
+  [[services.checks]]
+    interval = "15s"
+    timeout  = "2s"
+    method   = "get"
+    path     = "/healthz"

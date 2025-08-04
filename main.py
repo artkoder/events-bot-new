@@ -6,6 +6,21 @@ Debugging:
 
 import logging
 import os
+
+
+def configure_logging() -> None:
+    debug = os.getenv("EVBOT_DEBUG") == "1"
+    level = logging.DEBUG if debug else logging.INFO
+    logging.basicConfig(level=level)
+    if os.getenv("LOG_SQL", "0") == "0":
+        for noisy in ("aiosqlite", "sqlalchemy.engine"):
+            logging.getLogger(noisy).setLevel(logging.WARNING)
+    for noisy in ("aiogram", "httpx"):
+        logging.getLogger(noisy).setLevel(logging.INFO if debug else logging.WARNING)
+
+
+configure_logging()
+
 import psutil
 import time as _time
 from datetime import date, datetime, timedelta, timezone, time
@@ -38,23 +53,27 @@ import html
 from io import BytesIO
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import update
-from sqlmodel import Field, SQLModel, select
+from sqlmodel import select
 import aiosqlite
 import gc
 import atexit
 from cachetools import TTLCache
 from markup import simple_md_to_html
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from db import Database
-from scheduler import setup_scheduler
+from scheduler import startup as scheduler_startup, cleanup as scheduler_cleanup
+from models import (
+    User,
+    PendingUser,
+    RejectedUser,
+    Channel,
+    Setting,
+    Event,
+    MonthPage,
+    WeekendPage,
+    Festival,
+)
 
 DEBUG = os.getenv("EVBOT_DEBUG") == "1"
-LOG_LVL = logging.DEBUG if DEBUG else logging.INFO
-
-for noisy in ("aiogram", "httpx"):
-    logging.getLogger(noisy).setLevel(
-        logging.INFO if DEBUG else logging.WARNING
-    )
 
 
 def print_current_rss() -> None:
@@ -69,11 +88,6 @@ _cleanup_last_run: date | None = None
 _page_last_run: date | None = None
 _page_first_run = True
 _partner_last_run: date | None = None
-
-
-def setup_logging() -> None:
-    if not logging.getLogger().handlers:
-        logging.basicConfig(level=LOG_LVL)
 
 _P = psutil.Process(os.getpid())
 
@@ -308,40 +322,6 @@ class IPv4AiohttpSession(AiohttpSession):
 
 
 
-class User(SQLModel, table=True):
-    user_id: int = Field(primary_key=True)
-    username: Optional[str] = None
-    is_superadmin: bool = False
-    is_partner: bool = False
-    organization: Optional[str] = None
-    location: Optional[str] = None
-    blocked: bool = False
-    last_partner_reminder: Optional[datetime] = None
-
-
-class PendingUser(SQLModel, table=True):
-    user_id: int = Field(primary_key=True)
-    username: Optional[str] = None
-    requested_at: datetime = Field(default_factory=datetime.utcnow)
-
-
-class RejectedUser(SQLModel, table=True):
-    user_id: int = Field(primary_key=True)
-    username: Optional[str] = None
-    rejected_at: datetime = Field(default_factory=datetime.utcnow)
-
-
-class Channel(SQLModel, table=True):
-    channel_id: int = Field(primary_key=True)
-    title: Optional[str] = None
-    username: Optional[str] = None
-    is_admin: bool = False
-    is_registered: bool = False
-    is_asset: bool = False
-    daily_time: Optional[str] = None
-    last_daily: Optional[str] = None
-
-
 def build_channel_post_url(ch: Channel, message_id: int) -> str:
     """Return https://t.me/... link for a channel message."""
     if ch.username:
@@ -352,80 +332,6 @@ def build_channel_post_url(ch: Channel, message_id: int) -> str:
     else:
         cid = cid.lstrip("-")
     return f"https://t.me/c/{cid}/{message_id}"
-
-
-class Setting(SQLModel, table=True):
-    key: str = Field(primary_key=True)
-    value: str
-
-
-class Event(SQLModel, table=True):
-    id: Optional[int] = Field(default=None, primary_key=True)
-    title: str
-    description: str
-    festival: Optional[str] = None
-    date: str
-    time: str
-    location_name: str
-    location_address: Optional[str] = None
-    city: Optional[str] = None
-    ticket_price_min: Optional[int] = None
-    ticket_price_max: Optional[int] = None
-    ticket_link: Optional[str] = None
-    event_type: Optional[str] = None
-    emoji: Optional[str] = None
-    end_date: Optional[str] = None
-    is_free: bool = False
-    pushkin_card: bool = False
-    silent: bool = False
-    telegraph_path: Optional[str] = None
-    source_text: str
-    telegraph_url: Optional[str] = None
-    ics_url: Optional[str] = None
-    source_post_url: Optional[str] = None
-    source_vk_post_url: Optional[str] = None
-    ics_post_url: Optional[str] = None
-    ics_post_id: Optional[int] = None
-    source_chat_id: Optional[int] = None
-    source_message_id: Optional[int] = None
-    creator_id: Optional[int] = None
-    photo_count: int = 0
-    added_at: datetime = Field(default_factory=datetime.utcnow)
-
-
-class MonthPage(SQLModel, table=True):
-    __table_args__ = {"extend_existing": True}
-    month: str = Field(primary_key=True)
-    url: str
-    path: str
-    url2: Optional[str] = None
-    path2: Optional[str] = None
-
-
-class WeekendPage(SQLModel, table=True):
-    __table_args__ = {"extend_existing": True}
-    start: str = Field(primary_key=True)
-    url: str
-    path: str
-    vk_post_url: Optional[str] = None
-
-
-class Festival(SQLModel, table=True):
-    __table_args__ = {"extend_existing": True}
-    id: Optional[int] = Field(default=None, primary_key=True)
-    name: str
-    full_name: Optional[str] = None
-    description: Optional[str] = None
-    start_date: Optional[str] = None
-    end_date: Optional[str] = None
-    telegraph_url: Optional[str] = None
-    telegraph_path: Optional[str] = None
-    vk_post_url: Optional[str] = None
-    vk_poll_url: Optional[str] = None
-    photo_url: Optional[str] = None
-    website_url: Optional[str] = None
-    vk_url: Optional[str] = None
-    tg_url: Optional[str] = None
 
 
 
@@ -6388,12 +6294,6 @@ async def vk_poll_scheduler(db: Database, bot: Bot):
                 logging.error("VK poll send failed for %s: %s", fest.name, e)
 
 
-def start_periodic_tasks(db: Database, bot: Bot) -> AsyncIOScheduler:
-    scheduler = setup_scheduler(db, bot)
-    scheduler.start()
-    return scheduler
-
-
 async def init_db_and_scheduler(
     app: web.Application, db: Database, bot: Bot, webhook: str
 ) -> None:
@@ -6414,7 +6314,7 @@ async def init_db_and_scheduler(
     except Exception as e:
         logging.error("Failed to set webhook: %s", e)
     app["daily_task"] = asyncio.create_task(daily_scheduler(db, bot))
-    app["scheduler"] = start_periodic_tasks(db, bot)
+    scheduler_startup(db, bot)
     app["add_event_worker"] = asyncio.create_task(add_event_queue_worker(db, bot))
     if DEBUG:
         app["qstat_task"] = asyncio.create_task(_log_queue_stats())
@@ -7733,7 +7633,6 @@ async def create_source_page(
 
 
 def create_app() -> web.Application:
-    setup_logging()
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is missing")
@@ -7979,8 +7878,7 @@ def create_app() -> web.Application:
             app["daily_task"].cancel()
             with contextlib.suppress(Exception):
                 await app["daily_task"]
-        if "scheduler" in app:
-            await app["scheduler"].shutdown(wait=False)
+        scheduler_cleanup()
         if "add_event_worker" in app:
             app["add_event_worker"].cancel()
             with contextlib.suppress(Exception):
@@ -7999,7 +7897,6 @@ def create_app() -> web.Application:
 
 if __name__ == "__main__":
     import sys
-    setup_logging()
     if len(sys.argv) > 1 and sys.argv[1] == "test_telegraph":
         asyncio.run(telegraph_test())
     else:
