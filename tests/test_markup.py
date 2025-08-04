@@ -37,3 +37,4 @@ def test_link_with_underscore_url():
 
 def test_plain_underscores_unchanged():
     assert simple_md_to_html('file_name') == 'file_name'
+

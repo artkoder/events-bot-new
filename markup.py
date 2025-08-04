@@ -3,6 +3,7 @@ from typing import List
 
 MD_BOLD   = re.compile(r'(?<!\w)(\*\*|__)(.+?)\1(?!\w)', re.S)
 MD_ITALIC = re.compile(r'(?<!\w)(\*|_)(.+?)\1(?!\w)', re.S)
+
 MD_LINK   = re.compile(r'\[([^\]]+?)\]\((https?://[^)]+?)\)')
 MD_HEADER = re.compile(r'^(#{1,6})\s+(.+)$', re.M)
 
@@ -13,4 +14,5 @@ def simple_md_to_html(text: str) -> str:
     text = MD_LINK.sub(lambda m: f'<a href="{m[2]}">{m[1]}</a>', text)
     text = MD_BOLD.sub(r'<b>\2</b>', text)
     text = MD_ITALIC.sub(r'<i>\2</i>', text)
+
     return text.replace('\n', '<br>')
