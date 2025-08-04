@@ -36,6 +36,7 @@ from sqlmodel import Field, SQLModel, select
 import aiosqlite
 import gc
 import atexit
+import lzma
 from cachetools import TTLCache
 
 
@@ -1704,17 +1705,8 @@ async def remove_calendar_button(event: Event, bot: Bot):
         logging.error("failed to remove calendar button: %s", e)
 
 
-async def parse_event_via_4o(
-    text: str,
-    source_channel: str | None = None,
-    *,
-    festival_names: list[str] | None = None,
-    **extra: str | None,
-) -> list[dict]:
-    token = os.getenv("FOUR_O_TOKEN")
-    if not token:
-        raise RuntimeError("FOUR_O_TOKEN is missing")
-    url = os.getenv("FOUR_O_URL", "https://api.openai.com/v1/chat/completions")
+@lru_cache(maxsize=8)
+def _prompt_cache(festival_key: tuple[str, ...] | None) -> bytes:
     prompt_path = os.path.join("docs", "PROMPTS.md")
     with open(prompt_path, "r", encoding="utf-8") as f:
         prompt = f.read()
@@ -1726,8 +1718,28 @@ async def parse_event_via_4o(
             ]
         if locations:
             prompt += "\nKnown venues:\n" + "\n".join(locations)
-    if festival_names:
-        prompt += "\nKnown festivals:\n" + "\n".join(festival_names)
+    if festival_key:
+        prompt += "\nKnown festivals:\n" + "\n".join(festival_key)
+    return lzma.compress(prompt.encode("utf-8"))
+
+
+def _build_prompt(festival_names: list[str] | None) -> str:
+    key = tuple(sorted(festival_names)) if festival_names else None
+    return lzma.decompress(_prompt_cache(key)).decode("utf-8")
+
+
+async def parse_event_via_4o(
+    text: str,
+    source_channel: str | None = None,
+    *,
+    festival_names: list[str] | None = None,
+    **extra: str | None,
+) -> list[dict]:
+    token = os.getenv("FOUR_O_TOKEN")
+    if not token:
+        raise RuntimeError("FOUR_O_TOKEN is missing")
+    url = os.getenv("FOUR_O_URL", "https://api.openai.com/v1/chat/completions")
+    prompt = _build_prompt(festival_names)
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
@@ -3936,6 +3948,7 @@ def next_month(month: str) -> str:
     return n.strftime("%Y-%m")
 
 
+@lru_cache(maxsize=8)
 def md_to_html(text: str) -> str:
     html_text = markdown.markdown(
         text,
