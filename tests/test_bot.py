@@ -5397,14 +5397,8 @@ async def test_cleanup_scheduler_notifies_superadmin(tmp_path: Path, monkeypatch
             return datetime.combine(date.today(), time(3, 5), tzinfo=tz)
 
     monkeypatch.setattr(main, "datetime", FakeDatetime)
-
-    async def fake_sleep(*args, **kwargs):
-        raise asyncio.CancelledError
-
-    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
-
-    with pytest.raises(asyncio.CancelledError):
-        await main.cleanup_scheduler(db, bot)
+    main._cleanup_last_run = None
+    await main.cleanup_scheduler(db, bot)
 
     assert any("Cleanup completed" in m[1] for m in bot.messages)
 
@@ -5437,14 +5431,9 @@ async def test_page_update_scheduler(tmp_path: Path, monkeypatch):
 
     monkeypatch.setattr(main, "date", FakeDate)
     monkeypatch.setattr(main, "datetime", FakeDatetime)
-
-    async def fake_sleep(*args, **kwargs):
-        raise asyncio.CancelledError
-
-    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
-
-    with pytest.raises(asyncio.CancelledError):
-        await main.page_update_scheduler(db)
+    main._page_last_run = None
+    main._page_first_run = True
+    await main.page_update_scheduler(db)
 
     assert called.get("month") == "2025-07"
     assert called.get("weekend") == "2025-07-05"
@@ -5479,14 +5468,9 @@ async def test_page_update_scheduler_skips_when_started_late(tmp_path: Path, mon
 
     monkeypatch.setattr(main, "date", FakeDate)
     monkeypatch.setattr(main, "datetime", FakeDatetime)
-
-    async def fake_sleep(*args, **kwargs):
-        raise asyncio.CancelledError
-
-    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
-
-    with pytest.raises(asyncio.CancelledError):
-        await main.page_update_scheduler(db)
+    main._page_last_run = None
+    main._page_first_run = True
+    await main.page_update_scheduler(db)
 
     # Scheduler should not trigger any page syncs when started late
     assert called == {}
@@ -6124,14 +6108,8 @@ async def test_partner_notification_scheduler(tmp_path: Path, monkeypatch):
             return datetime.combine(date.today(), time(9, 5), tzinfo=tz)
 
     monkeypatch.setattr(main, "datetime", FakeDatetime)
-
-    async def fake_sleep(*args, **kwargs):
-        raise asyncio.CancelledError
-
-    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
-
-    with pytest.raises(asyncio.CancelledError):
-        await main.partner_notification_scheduler(db, bot)
+    main._partner_last_run = None
+    await main.partner_notification_scheduler(db, bot)
 
     assert any("неделе" in m[1] for m in bot.messages if m[0] == 2)
     assert any("p" in m[1] for m in bot.messages if m[0] == 1)
