@@ -4,7 +4,8 @@ from contextlib import asynccontextmanager
 import aiosqlite
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.pool import NullPool
-from sqlmodel import SQLModel
+
+from models import create_all
 
 
 class Database:
@@ -18,6 +19,8 @@ class Database:
         )
         self._conn: aiosqlite.Connection | None = None
         self._lock = asyncio.Lock()
+        self._session: AsyncSession | None = None
+        self._session_lock = asyncio.Lock()
 
     async def raw_conn(self) -> aiosqlite.Connection:
         """Return a shared aiosqlite connection."""
@@ -42,7 +45,7 @@ class Database:
     async def init(self):
         async with self.engine.begin() as conn:
             await conn.exec_driver_sql("PRAGMA journal_mode=WAL")
-            await conn.run_sync(SQLModel.metadata.create_all)
+            await conn.run_sync(create_all)
             result = await conn.exec_driver_sql("PRAGMA table_info(event)")
             cols = [r[1] for r in result.fetchall()]
             if "telegraph_url" not in cols:
@@ -225,7 +228,15 @@ class Database:
         # ensure shared connection is ready
         await self.raw_conn()
 
-    def get_session(self) -> AsyncSession:
-        """Create a new session with attributes kept after commit."""
-        return AsyncSession(self.engine, expire_on_commit=False)
+    
+    @asynccontextmanager
+    async def get_session(self) -> AsyncSession:
+        if self._session is None:
+            async with self._session_lock:
+                if self._session is None:
+                    self._session = AsyncSession(self.engine, expire_on_commit=False)
+        try:
+            yield self._session
+        finally:
+            await self._session.rollback()
 
