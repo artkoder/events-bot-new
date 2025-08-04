@@ -124,3 +124,12 @@ many events the bot automatically splits the announcement into two pages. The
 first one ends with a prominent link "<месяц> продолжение" leading to the second
 page.
 
+## Production tips
+
+- Periodic jobs are staggered to avoid CPU and I/O spikes. Each scheduler task
+  runs every 15 minutes with an individual offset and is limited to a single
+  concurrent instance.
+- Database access reuses a single SQLite connection and disables per-request
+  ping queries for faster read operations. A read-only context manager is
+  available for pure `SELECT` statements.
+
