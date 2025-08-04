@@ -1,5 +1,13 @@
+"""
+Debugging:
+    EVBOT_DEBUG=1 fly deploy ...
+    Logs will include ▶/■ markers with RSS & duration.
+"""
+
 import logging
 import os
+import psutil
+import time as _time
 from datetime import date, datetime, timedelta, timezone, time
 from typing import Optional, Tuple, Iterable, Any
 from urllib.parse import urlparse, parse_qs
@@ -24,6 +32,7 @@ import httpx
 from telegraph import Telegraph, TelegraphException
 
 from functools import partial, lru_cache
+from contextlib import asynccontextmanager, contextmanager
 import asyncio
 import contextlib
 import html
@@ -37,10 +46,56 @@ import gc
 import atexit
 from cachetools import TTLCache
 
+DEBUG = os.getenv("EVBOT_DEBUG") == "1"
+LOG_LVL = logging.DEBUG if DEBUG else logging.INFO
 
 def setup_logging() -> None:
     if not logging.getLogger().handlers:
-        logging.basicConfig(level=logging.INFO)
+        logging.basicConfig(level=LOG_LVL)
+
+_P = psutil.Process(os.getpid())
+
+@asynccontextmanager
+async def perf(name: str, **details):
+    if not DEBUG:
+        yield
+        return
+    start_t = _time.perf_counter()
+    start_rss = _P.memory_info().rss // 2**20
+    logging.debug("▶ %s START %s MB %s", name, start_rss, details)
+    try:
+        yield
+    finally:
+        end_t = _time.perf_counter()
+        end_rss = _P.memory_info().rss // 2**20
+        logging.debug(
+            "■ %s END   %s MB Δ%+d MB  dur=%.3f s",
+            name,
+            end_rss,
+            end_rss - start_rss,
+            end_t - start_t,
+        )
+
+@contextmanager
+def perf_sync(name: str, **details):
+    if not DEBUG:
+        yield
+        return
+    start_t = _time.perf_counter()
+    start_rss = _P.memory_info().rss // 2**20
+    logging.debug("▶ %s START %s MB %s", name, start_rss, details)
+    try:
+        yield
+    finally:
+        end_t = _time.perf_counter()
+        end_rss = _P.memory_info().rss // 2**20
+        logging.debug(
+            "■ %s END   %s MB Δ%+d MB  dur=%.3f s",
+            name,
+            end_rss,
+            end_rss - start_rss,
+            end_t - start_t,
+        )
 
 
 @lru_cache(maxsize=20)
@@ -122,6 +177,14 @@ events_date_sessions: TTLCache[int, bool] = TTLCache(maxsize=256, ttl=3600)
 add_event_queue: asyncio.Queue[tuple[str, types.Message, bool]] = asyncio.Queue(
     maxsize=200
 )
+working: set[asyncio.Task] = set()
+
+async def _log_queue_stats():
+    while DEBUG:
+        logging.debug(
+            "QSTAT add_event=%d workers=%d", add_event_queue.qsize(), len(working)
+        )
+        await asyncio.sleep(10)
 
 # toggle for uploading images to catbox
 CATBOX_ENABLED: bool = False
@@ -194,6 +257,11 @@ async def telegraph_call(func, /, *args, retries: int = 3, **kwargs):
     # If we exit the loop without returning or raising, raise the last exception
     if last_exc:
         raise TelegraphException("Telegraph request failed") from last_exc
+
+
+async def telegraph_create_page(tg: Telegraph, *args, **kwargs):
+    async with perf("telegraph_create_page"):
+        return await telegraph_call(tg.create_page, *args, **kwargs)
 
 
 def seconds_to_next_minute(now: datetime) -> float:
@@ -1568,41 +1636,44 @@ async def build_ics_content(db: Database, event: Event) -> str:
 
 
 async def upload_ics(event: Event, db: Database) -> str | None:
-    client = get_supabase_client()
-    if not client:
-        logging.error("Supabase client not configured")
-        return None
-    if event.end_date:
-        logging.info("skip ics for multi-day event %s", event.id)
-        return None
-    if not parse_time_range(event.time):
-        logging.info("skip ics for unclear time %s", event.id)
-        return None
-    content = await build_ics_content(db, event)
-    d = parse_iso_date(event.date)
-    if d:
-        path = f"Event-{event.id}-{d.day:02d}-{d.month:02d}-{d.year}.ics"
-    else:
-        path = f"Event-{event.id}.ics"
-    try:
-        logging.info("Uploading ICS to %s/%s", SUPABASE_BUCKET, path)
-        storage = client.storage.from_(SUPABASE_BUCKET)
-        await asyncio.to_thread(
-            storage.upload,
-            path,
-            content.encode("utf-8"),
-            {
-                "content-type": ICS_CONTENT_TYPE,
-                "content-disposition": ICS_CONTENT_DISP_TEMPLATE.format(name=path),
-                "upsert": "true",
-            },
-        )
-        url = await asyncio.to_thread(storage.get_public_url, path)
-        logging.info("ICS uploaded: %s", url)
-    except Exception as e:
-        logging.error("Failed to upload ics: %s", e)
-        return None
-    return url
+    async with perf("supabase_upload_ics"):
+        client = get_supabase_client()
+        if not client:
+            logging.error("Supabase client not configured")
+            return None
+        if event.end_date:
+            logging.info("skip ics for multi-day event %s", event.id)
+            return None
+        if not parse_time_range(event.time):
+            logging.info("skip ics for unclear time %s", event.id)
+            return None
+        content = await build_ics_content(db, event)
+        d = parse_iso_date(event.date)
+        if d:
+            path = f"Event-{event.id}-{d.day:02d}-{d.month:02d}-{d.year}.ics"
+        else:
+            path = f"Event-{event.id}.ics"
+        if DEBUG:
+            logging.debug("ICS upload %s size=%d", path, len(content.encode("utf-8")))
+        try:
+            logging.info("Uploading ICS to %s/%s", SUPABASE_BUCKET, path)
+            storage = client.storage.from_(SUPABASE_BUCKET)
+            await asyncio.to_thread(
+                storage.upload,
+                path,
+                content.encode("utf-8"),
+                {
+                    "content-type": ICS_CONTENT_TYPE,
+                    "content-disposition": ICS_CONTENT_DISP_TEMPLATE.format(name=path),
+                    "upsert": "true",
+                },
+            )
+            url = await asyncio.to_thread(storage.get_public_url, path)
+            logging.info("ICS uploaded: %s", url)
+        except Exception as e:
+            logging.error("Failed to upload ics: %s", e)
+            return None
+        return url
 
 
 async def post_ics_asset(event: Event, db: Database, bot: Bot) -> tuple[str, int] | None:
@@ -1785,8 +1856,8 @@ async def parse_event_via_4o(
             resp = await session.post(url, json=payload, headers=headers)
             resp.raise_for_status()
             return await resp.json()
-
-    data_raw = await asyncio.wait_for(_call(), FOUR_O_TIMEOUT)
+    async with perf("LLM_parse", size=len(user_msg)):
+        data_raw = await asyncio.wait_for(_call(), FOUR_O_TIMEOUT)
     content = (
         data_raw.get("choices", [{}])[0]
         .get("message", {})
@@ -3842,6 +3913,9 @@ async def add_event_queue_worker(db: Database, bot: Bot):
         if size > 0:
             logging.info("add_event_queue_worker tick: size=%d", size)
             kind, msg, using_session = await add_event_queue.get()
+            task = asyncio.current_task()
+            if task:
+                working.add(task)
             try:
                 if kind == "regular":
                     await handle_add_event(msg, db, bot, using_session=using_session)
@@ -3850,6 +3924,8 @@ async def add_event_queue_worker(db: Database, bot: Bot):
             except Exception as e:  # pragma: no cover - log unexpected errors
                 logging.error("add_event_queue_worker error: %s", e)
             finally:
+                if task:
+                    working.discard(task)
                 add_event_queue.task_done()
         await asyncio.sleep(
             seconds_to_next_minute(datetime.now(timezone.utc))
@@ -4596,23 +4672,33 @@ async def build_month_page_content(
     continuation_url: str | None = None,
     size_limit: int | None = None,
 ) -> tuple[str, list, int]:
-    if events is None or exhibitions is None or nav_pages is None:
-        events, exhibitions, nav_pages = await get_month_data(db, month)
+    async with perf("build_month_page_content"):
+        if events is None or exhibitions is None or nav_pages is None:
+            events, exhibitions, nav_pages = await get_month_data(db, month)
 
-    async with db.get_session() as session:
-        res_f = await session.execute(select(Festival))
-        fest_map = {f.name: f for f in res_f.scalars().all()}
+        async with db.get_session() as session:
+            res_f = await session.execute(select(Festival))
+            fest_map = {f.name: f for f in res_f.scalars().all()}
 
-    return await asyncio.to_thread(
-        _build_month_page_content_sync,
-        month,
-        events,
-        exhibitions,
-        nav_pages,
-        fest_map,
-        continuation_url,
-        size_limit,
-    )
+        title, content, size = await asyncio.to_thread(
+            _build_month_page_content_sync,
+            month,
+            events,
+            exhibitions,
+            nav_pages,
+            fest_map,
+            continuation_url,
+            size_limit,
+        )
+    if DEBUG:
+        from telegraph.utils import nodes_to_html
+        html = nodes_to_html(content)
+        logging.debug(
+            "month_html sizes: html=%d json=%d",
+            len(html),
+            len(json.dumps(content, ensure_ascii=False)),
+        )
+    return title, content, size
 
 
 def _build_month_page_content_sync(
@@ -4752,29 +4838,30 @@ def _build_month_page_content_sync(
 
 async def sync_month_page(db: Database, month: str, update_links: bool = False):
     logging.info("sync_month_page start: month=%s update_links=%s", month, update_links)
-    token = get_telegraph_token()
-    if not token:
-        logging.error("Telegraph token unavailable")
-        return
-    tg = Telegraph(access_token=token)
-    async with db.get_session() as session:
-        page = await session.get(MonthPage, month)
-        logging.debug("existing MonthPage: %s", page)
-        created = False
-        if not page:
-            page = MonthPage(month=month, url="", path="")
-            session.add(page)
-            await session.commit()
-            created = True
-            logging.debug("created MonthPage row for %s", month)
+    async with perf("sync_month_page"):
+        token = get_telegraph_token()
+        if not token:
+            logging.error("Telegraph token unavailable")
+            return
+        tg = Telegraph(access_token=token)
+        async with db.get_session() as session:
+            page = await session.get(MonthPage, month)
+            logging.debug("existing MonthPage: %s", page)
+            created = False
+            if not page:
+                page = MonthPage(month=month, url="", path="")
+                session.add(page)
+                await session.commit()
+                created = True
+                logging.debug("created MonthPage row for %s", month)
 
-    events, exhibitions, nav_pages = await get_month_data(db, month)
-    logging.debug(
-        "got month data: events=%d exhibitions=%d nav_pages=%d",
-        len(events),
-        len(exhibitions),
-        len(nav_pages),
-    )
+        events, exhibitions, nav_pages = await get_month_data(db, month)
+        logging.debug(
+            "got month data: events=%d exhibitions=%d nav_pages=%d",
+            len(events),
+            len(exhibitions),
+            len(nav_pages),
+        )
 
     async def commit_page() -> None:
         async with db.get_session() as s:
@@ -4824,7 +4911,7 @@ async def sync_month_page(db: Database, month: str, update_links: bool = False):
         logging.debug("second page size=%d", size2)
         if not page.path2:
             logging.info("creating second page for %s", month)
-            data2 = await telegraph_call(tg.create_page, title2, content=content2)
+            data2 = await telegraph_create_page(tg, title2, content=content2)
             page.url2 = data2.get("url")
             page.path2 = data2.get("path")
         else:
@@ -4844,7 +4931,7 @@ async def sync_month_page(db: Database, month: str, update_links: bool = False):
         logging.debug("first page size=%d", size1)
         if not page.path:
             logging.info("creating first page for %s", month)
-            data1 = await telegraph_call(tg.create_page, title1, content=content1)
+            data1 = await telegraph_create_page(tg, title1, content=content1)
             page.url = data1.get("url")
             page.path = data1.get("path")
             created = True
@@ -4870,7 +4957,7 @@ async def sync_month_page(db: Database, month: str, update_links: bool = False):
         if size <= TELEGRAPH_PAGE_LIMIT:
             if not page.path:
                 logging.info("creating month page %s", month)
-                data = await telegraph_call(tg.create_page, title, content=content)
+                data = await telegraph_create_page(tg, title, content=content)
                 page.url = data.get("url")
                 page.path = data.get("path")
                 created = True
@@ -4899,13 +4986,13 @@ async def sync_month_page(db: Database, month: str, update_links: bool = False):
     except Exception as e:
         logging.error("Failed to sync month page %s: %s", month, e)
 
-    if update_links or created:
-        async with db.get_session() as session:
-            result = await session.execute(select(MonthPage).order_by(MonthPage.month))
-            months = result.scalars().all()
-        for p in months:
-            if p.month != month:
-                await sync_month_page(db, p.month, update_links=False)
+        if update_links or created:
+            async with db.get_session() as session:
+                result = await session.execute(select(MonthPage).order_by(MonthPage.month))
+                months = result.scalars().all()
+            for p in months:
+                if p.month != month:
+                    await sync_month_page(db, p.month, update_links=False)
 
 
 def weekend_start_for_date(d: date) -> date | None:
@@ -4929,159 +5016,167 @@ def next_weekend_start(d: date) -> date:
 async def build_weekend_page_content(
     db: Database, start: str, size_limit: int | None = None
 ) -> tuple[str, list, int]:
-    saturday = date.fromisoformat(start)
-    sunday = saturday + timedelta(days=1)
-    days = [saturday, sunday]
-    async with db.get_session() as session:
-        result = await session.execute(
-            select(Event)
-            .where(Event.date.in_([d.isoformat() for d in days]))
-            .order_by(Event.date, Event.time)
-        )
-        events = result.scalars().all()
-
-        ex_res = await session.execute(
-            select(Event)
-            .where(
-                Event.event_type == "выставка",
-                Event.end_date.is_not(None),
-                Event.date <= sunday.isoformat(),
-                Event.end_date >= saturday.isoformat(),
+    async with perf("build_weekend_page_content"):
+        saturday = date.fromisoformat(start)
+        sunday = saturday + timedelta(days=1)
+        days = [saturday, sunday]
+        async with db.get_session() as session:
+            result = await session.execute(
+                select(Event)
+                .where(Event.date.in_([d.isoformat() for d in days]))
+                .order_by(Event.date, Event.time)
             )
-            .order_by(Event.date)
-        )
-        exhibitions = ex_res.scalars().all()
+            events = result.scalars().all()
 
-        res_w = await session.execute(select(WeekendPage).order_by(WeekendPage.start))
-        weekend_pages = res_w.scalars().all()
-        res_m = await session.execute(select(MonthPage).order_by(MonthPage.month))
-        month_pages = res_m.scalars().all()
-        res_f = await session.execute(select(Festival))
-        fest_map = {f.name: f for f in res_f.scalars().all()}
-
-    today = datetime.now(LOCAL_TZ).date()
-    events = [
-        e
-        for e in events
-        if (
-            (e.end_date and e.end_date >= today.isoformat())
-            or (not e.end_date and e.date >= today.isoformat())
-        )
-    ]
-
-    async with db.get_session() as session:
-        res_f = await session.execute(select(Festival))
-        fest_map = {f.name: f for f in res_f.scalars().all()}
-
-    by_day: dict[date, list[Event]] = {}
-    for e in events:
-        d = parse_iso_date(e.date)
-        if not d:
-            continue
-        by_day.setdefault(d, []).append(e)
-
-    content: list[dict] = []
-    size = 0
-    exceeded = False
-
-    def add(node: dict):
-        nonlocal size, exceeded
-        size += rough_size((node,))
-        if size_limit is not None and size > size_limit:
-            exceeded = True
-            return
-        content.append(node)
-
-    def add_many(nodes: Iterable[dict]):
-        for n in nodes:
-            if exceeded:
-                break
-            add(n)
-
-    add(
-        {
-            "tag": "p",
-            "children": [
-                "Вот что рекомендуют ",
-                {
-                    "tag": "a",
-                    "attrs": {"href": "https://t.me/kenigevents"},
-                    "children": ["Полюбить Калининград Анонсы"],
-                },
-                " чтобы провести выходные ярко: события Калининградской области и 39 региона — концерты, спектакли, фестивали.",
-            ],
-        }
-    )
-
-    for d in days:
-        if exceeded or d not in by_day:
-            continue
-        if d.weekday() == 5:
-            add({"tag": "h3", "children": ["🟥🟥🟥 суббота 🟥🟥🟥"]})
-        elif d.weekday() == 6:
-            add({"tag": "h3", "children": ["🟥🟥 воскресенье 🟥🟥"]})
-        add({"tag": "h3", "children": [f"🟥🟥🟥 {format_day_pretty(d)} 🟥🟥🟥"]})
-        add({"tag": "br"})
-        add({"tag": "p", "children": ["\u00a0"]})
-        for ev in by_day[d]:
-            if exceeded:
-                break
-            fest = fest_map.get(ev.festival or "")
-            add_many(event_to_nodes(ev, fest, fest_icon=True))
-
-
-    weekend_nav: list[dict] = []
-    future_weekends = [w for w in weekend_pages if w.start >= start]
-    if future_weekends:
-        nav_children = []
-        for idx, w in enumerate(future_weekends):
-            s = date.fromisoformat(w.start)
-            label = format_weekend_range(s)
-            if w.start == start:
-                nav_children.append(label)
-            else:
-                nav_children.append(
-                    {"tag": "a", "attrs": {"href": w.url}, "children": [label]}
+            ex_res = await session.execute(
+                select(Event)
+                .where(
+                    Event.event_type == "выставка",
+                    Event.end_date.is_not(None),
+                    Event.date <= sunday.isoformat(),
+                    Event.end_date >= saturday.isoformat(),
                 )
-            if idx < len(future_weekends) - 1:
-                nav_children.append(" ")
-        weekend_nav = [{"tag": "br"}, {"tag": "h4", "children": nav_children}]
-        add_many(weekend_nav)
+                .order_by(Event.date)
+            )
+            exhibitions = ex_res.scalars().all()
 
-    month_nav: list[dict] = []
-    cur_month = start[:7]
-    future_months = [m for m in month_pages if m.month >= cur_month]
-    if future_months:
-        nav_children = []
-        for idx, p in enumerate(future_months):
-            name = month_name_nominative(p.month)
-            nav_children.append({"tag": "a", "attrs": {"href": p.url}, "children": [name]})
-            if idx < len(future_months) - 1:
-                nav_children.append(" ")
-        month_nav = [{"tag": "br"}, {"tag": "h4", "children": nav_children}]
-        add_many(month_nav)
+            res_w = await session.execute(select(WeekendPage).order_by(WeekendPage.start))
+            weekend_pages = res_w.scalars().all()
+            res_m = await session.execute(select(MonthPage).order_by(MonthPage.month))
+            month_pages = res_m.scalars().all()
+            res_f = await session.execute(select(Festival))
+            fest_map = {f.name: f for f in res_f.scalars().all()}
 
-    if exhibitions and not exceeded:
-        if weekend_nav or month_nav:
+        today = datetime.now(LOCAL_TZ).date()
+        events = [
+            e
+            for e in events
+            if (
+                (e.end_date and e.end_date >= today.isoformat())
+                or (not e.end_date and e.date >= today.isoformat())
+            )
+        ]
+
+        async with db.get_session() as session:
+            res_f = await session.execute(select(Festival))
+            fest_map = {f.name: f for f in res_f.scalars().all()}
+
+        by_day: dict[date, list[Event]] = {}
+        for e in events:
+            d = parse_iso_date(e.date)
+            if not d:
+                continue
+            by_day.setdefault(d, []).append(e)
+
+        content: list[dict] = []
+        size = 0
+        exceeded = False
+
+        def add(node: dict):
+            nonlocal size, exceeded
+            size += rough_size((node,))
+            if size_limit is not None and size > size_limit:
+                exceeded = True
+                return
+            content.append(node)
+
+        def add_many(nodes: Iterable[dict]):
+            for n in nodes:
+                if exceeded:
+                    break
+                add(n)
+
+        add(
+            {
+                "tag": "p",
+                "children": [
+                    "Вот что рекомендуют ",
+                    {
+                        "tag": "a",
+                        "attrs": {"href": "https://t.me/kenigevents"},
+                        "children": ["Полюбить Калининград Анонсы"],
+                    },
+                    " чтобы провести выходные ярко: события Калининградской области и 39 региона — концерты, спектакли, фестивали.",
+                ],
+            }
+        )
+
+        for d in days:
+            if exceeded or d not in by_day:
+                continue
+            if d.weekday() == 5:
+                add({"tag": "h3", "children": ["🟥🟥🟥 суббота 🟥🟥🟥"]})
+            elif d.weekday() == 6:
+                add({"tag": "h3", "children": ["🟥🟥 воскресенье 🟥🟥"]})
+            add({"tag": "h3", "children": [f"🟥🟥🟥 {format_day_pretty(d)} 🟥🟥🟥"]})
             add({"tag": "br"})
             add({"tag": "p", "children": ["\u00a0"]})
-        add({"tag": "h3", "children": ["Постоянные выставки"]})
-        add({"tag": "br"})
-        add({"tag": "p", "children": ["\u00a0"]})
-        for ev in exhibitions:
-            if exceeded:
-                break
-            add_many(exhibition_to_nodes(ev))
+            for ev in by_day[d]:
+                if exceeded:
+                    break
+                fest = fest_map.get(ev.festival or "")
+                add_many(event_to_nodes(ev, fest, fest_icon=True))
 
-    if weekend_nav and not exceeded:
-        add_many(weekend_nav)
-    if month_nav and not exceeded:
-        add_many(month_nav)
+        weekend_nav: list[dict] = []
+        future_weekends = [w for w in weekend_pages if w.start >= start]
+        if future_weekends:
+            nav_children = []
+            for idx, w in enumerate(future_weekends):
+                s = date.fromisoformat(w.start)
+                label = format_weekend_range(s)
+                if w.start == start:
+                    nav_children.append(label)
+                else:
+                    nav_children.append(
+                        {"tag": "a", "attrs": {"href": w.url}, "children": [label]}
+                    )
+                if idx < len(future_weekends) - 1:
+                    nav_children.append(" ")
+            weekend_nav = [{"tag": "br"}, {"tag": "h4", "children": nav_children}]
+            add_many(weekend_nav)
 
-    title = (
-        "Чем заняться на выходных в Калининградской области "
-        f"{format_weekend_range(saturday)}"
-    )
+        month_nav: list[dict] = []
+        cur_month = start[:7]
+        future_months = [m for m in month_pages if m.month >= cur_month]
+        if future_months:
+            nav_children = []
+            for idx, p in enumerate(future_months):
+                name = month_name_nominative(p.month)
+                nav_children.append({"tag": "a", "attrs": {"href": p.url}, "children": [name]})
+                if idx < len(future_months) - 1:
+                    nav_children.append(" ")
+            month_nav = [{"tag": "br"}, {"tag": "h4", "children": nav_children}]
+            add_many(month_nav)
+
+        if exhibitions and not exceeded:
+            if weekend_nav or month_nav:
+                add({"tag": "br"})
+                add({"tag": "p", "children": ["\u00a0"]})
+            add({"tag": "h3", "children": ["Постоянные выставки"]})
+            add({"tag": "br"})
+            add({"tag": "p", "children": ["\u00a0"]})
+            for ev in exhibitions:
+                if exceeded:
+                    break
+                add_many(exhibition_to_nodes(ev))
+
+        if weekend_nav and not exceeded:
+            add_many(weekend_nav)
+        if month_nav and not exceeded:
+            add_many(month_nav)
+
+        title = (
+            "Чем заняться на выходных в Калининградской области "
+            f"{format_weekend_range(saturday)}"
+        )
+    if DEBUG:
+        from telegraph.utils import nodes_to_html
+        html = nodes_to_html(content)
+        logging.debug(
+            "weekend_html sizes: html=%d json=%d",
+            len(html),
+            len(json.dumps(content, ensure_ascii=False)),
+        )
     return title, content, size
 
 
@@ -5111,7 +5206,7 @@ async def sync_weekend_page(
         if not path:
             # Create placeholder page then update with navigation
             title, content, _ = await build_weekend_page_content(db, start)
-            data = await telegraph_call(tg.create_page, title, content=content)
+            data = await telegraph_create_page(tg, title, content=content)
             page.url = data.get("url")
             page.path = data.get("path")
             created = True
@@ -5418,7 +5513,7 @@ async def sync_festival_page(db: Database, name: str):
             await telegraph_call(tg.edit_page, path, title=title, content=content)
             logging.info("updated festival page %s in Telegraph", name)
         else:
-            data = await telegraph_call(tg.create_page, title, content=content)
+            data = await telegraph_create_page(tg, title, content=content)
             url = data.get("url")
             path = data.get("path")
             created = True
@@ -5884,27 +5979,28 @@ async def post_to_vk(
 ) -> str | None:
     if not group_id:
         return None
-    logging.info(
-        "post_to_vk start: group=%s len=%d attachments=%d",
-        group_id,
-        len(message),
-        len(attachments or []),
-    )
-    params = {
-        "owner_id": f"-{group_id.lstrip('-')}",
-        "from_group": 1,
-        "message": message,
-    }
-    if attachments:
-        params["attachments"] = ",".join(attachments)
-    data = await _vk_api("wall.post", params, db, bot, token=token)
-    post_id = data.get("response", {}).get("post_id")
-    if post_id:
-        url = f"https://vk.com/wall-{group_id.lstrip('-')}_{post_id}"
-        logging.info("post_to_vk success: %s", url)
-        return url
-    logging.error("post_to_vk failed for group %s", group_id)
-    return None
+    async with perf("post_to_vk", size=len(message)):
+        logging.info(
+            "post_to_vk start: group=%s len=%d attachments=%d",
+            group_id,
+            len(message),
+            len(attachments or []),
+        )
+        params = {
+            "owner_id": f"-{group_id.lstrip('-')}",
+            "from_group": 1,
+            "message": message,
+        }
+        if attachments:
+            params["attachments"] = ",".join(attachments)
+        data = await _vk_api("wall.post", params, db, bot, token=token)
+        post_id = data.get("response", {}).get("post_id")
+        if post_id:
+            url = f"https://vk.com/wall-{group_id.lstrip('-')}_{post_id}"
+            logging.info("post_to_vk success: %s", url)
+            return url
+        logging.error("post_to_vk failed for group %s", group_id)
+        return None
 
 
 async def create_vk_poll(
@@ -6331,33 +6427,34 @@ async def cleanup_old_events(db: Database, bot: Bot | None = None) -> int:
     """Remove events that finished over a week ago.
 
     Returns the number of deleted events."""
-    offset = await get_tz_offset(db)
-    tz = offset_to_timezone(offset)
-    threshold = (datetime.now(tz) - timedelta(days=7)).date().isoformat()
-    async with db.get_session() as session:
-        result = await session.execute(
-            select(Event).where(
-                (
-                    Event.end_date.is_not(None)
-                    & (Event.end_date < threshold)
-                )
-                | (
-                    Event.end_date.is_(None)
-                    & (Event.date < threshold)
+    async with perf("cleanup_old_events"):
+        offset = await get_tz_offset(db)
+        tz = offset_to_timezone(offset)
+        threshold = (datetime.now(tz) - timedelta(days=7)).date().isoformat()
+        async with db.get_session() as session:
+            result = await session.execute(
+                select(Event).where(
+                    (
+                        Event.end_date.is_not(None)
+                        & (Event.end_date < threshold)
+                    )
+                    | (
+                        Event.end_date.is_(None)
+                        & (Event.date < threshold)
+                    )
                 )
             )
-        )
-        events = result.scalars().all()
-        count = len(events)
-        for event in events:
-            await delete_ics(event)
-            if bot:
-                await delete_asset_post(event, db, bot)
-                await remove_calendar_button(event, bot)
-            await session.delete(event)
-        if events:
-            await session.commit()
-    return count
+            events = result.scalars().all()
+            count = len(events)
+            for event in events:
+                await delete_ics(event)
+                if bot:
+                    await delete_asset_post(event, db, bot)
+                    await remove_calendar_button(event, bot)
+                await session.delete(event)
+            if events:
+                await session.commit()
+        return count
 
 
 async def cleanup_scheduler(db: Database, bot: Bot):
@@ -6421,7 +6518,8 @@ async def partner_notification_scheduler(db: Database, bot: Bot):
         now = datetime.now(tz)
         if now.time() >= time(9, 0) and now.date() != last_run:
             try:
-                notified = await notify_inactive_partners(db, bot, tz)
+                async with perf("partner_reminders"):
+                    notified = await notify_inactive_partners(db, bot, tz)
                 if notified:
                     names = ", ".join(
                         f"@{u.username}" if u.username else str(u.user_id)
@@ -7792,7 +7890,7 @@ async def create_source_page(
         html_content = apply_month_nav(html_content, nav_html)
     html_content = apply_footer_link(html_content)
     try:
-        page = await telegraph_call(tg.create_page, title, html_content=html_content)
+        page = await telegraph_create_page(tg, title, html_content=html_content)
     except Exception as e:
         logging.error("Failed to create telegraph page: %s", e)
         return None
@@ -7834,11 +7932,13 @@ def create_app() -> web.Application:
 
     async def add_event_wrapper(message: types.Message):
         logging.info("add_event_wrapper start: user=%s", message.from_user.id)
-        await enqueue_add_event(message, db, bot)
+        async with perf("enqueue_add_event"):
+            await enqueue_add_event(message, db, bot)
 
     async def add_event_raw_wrapper(message: types.Message):
         logging.info("add_event_raw_wrapper start: user=%s", message.from_user.id)
-        await enqueue_add_event_raw(message, db, bot)
+        async with perf("enqueue_add_event_raw"):
+            await enqueue_add_event_raw(message, db, bot)
 
     async def ask_4o_wrapper(message: types.Message):
         await handle_ask_4o(message, db, bot)
@@ -8058,6 +8158,8 @@ def create_app() -> web.Application:
         app["add_event_worker"] = asyncio.create_task(
             add_event_queue_worker(db, bot)
         )
+        if DEBUG:
+            app["qstat_task"] = asyncio.create_task(_log_queue_stats())
 
     async def on_shutdown(app: web.Application):
         await bot.session.close()
@@ -8089,6 +8191,10 @@ def create_app() -> web.Application:
             app["add_event_worker"].cancel()
             with contextlib.suppress(Exception):
                 await app["add_event_worker"]
+        if "qstat_task" in app:
+            app["qstat_task"].cancel()
+            with contextlib.suppress(Exception):
+                await app["qstat_task"]
         await close_vk_session()
         close_supabase_client()
 
