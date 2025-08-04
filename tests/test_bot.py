@@ -56,6 +56,11 @@ def _mock_sync_vk_source_post(monkeypatch):
         return "https://vk.com/source"
     monkeypatch.setattr(main, "sync_vk_source_post", fake_sync)
 
+
+@pytest.fixture(autouse=True)
+def _reset_http_session(monkeypatch):
+    monkeypatch.setattr(main, "_http_session", None)
+
 FUTURE_DATE = (date.today() + timedelta(days=10)).isoformat()
 
 
