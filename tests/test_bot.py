@@ -2511,10 +2511,10 @@ async def test_sync_weekend_page_first_creation_includes_nav(
     updates: list[list[dict]] = []
 
     class DummyTG:
-        def create_page(self, title, content):
+        def create_page(self, title, content=None, html_content=None, **_):
             return {"url": "u1", "path": "p1"}
 
-        def edit_page(self, path, title=None, content=None):
+        def edit_page(self, path, title=None, content=None, html_content=None):
             updates.append(content)
 
     monkeypatch.setattr("main.get_telegraph_token", lambda: "t")
@@ -2573,11 +2573,11 @@ async def test_sync_weekend_page_updates_other_pages(tmp_path: Path, monkeypatch
     edits: list[tuple[str, str]] = []
 
     class DummyTG:
-        def create_page(self, title, content):
+        def create_page(self, title, content=None, html_content=None, **_):
             edits.append(("create", "p1"))
             return {"url": "u1", "path": "p1"}
 
-        def edit_page(self, path, title=None, content=None):
+        def edit_page(self, path, title=None, content=None, html_content=None):
             edits.append(("edit", path))
 
     monkeypatch.setattr("main.get_telegraph_token", lambda: "t")
@@ -2960,17 +2960,17 @@ async def test_sync_month_page_split(tmp_path: Path, monkeypatch):
         def __init__(self, access_token=None):
             pass
 
-        def create_page(self, title, content=None, **_):
-            calls["created"].append(json_dumps(content))
+        def create_page(self, title, content=None, html_content=None, **_):
+            calls["created"].append(html_content or json_dumps(content))
             idx = len(calls["created"])
             return {"url": f"u{idx}", "path": f"p{idx}"}
 
-        def edit_page(self, path, title=None, content=None):
+        def edit_page(self, path, title=None, content=None, html_content=None):
             pass
 
     monkeypatch.setattr("main.get_telegraph_token", lambda: "t")
     monkeypatch.setattr("main.Telegraph", lambda access_token=None, domain=None: DummyTG())
-    monkeypatch.setattr("main.TELEGRAPH_PAGE_LIMIT", 10)
+    monkeypatch.setattr("main.TELEGRAPH_LIMIT", 10)
 
     await main.sync_month_page(db, "2025-07")
 
@@ -3006,12 +3006,12 @@ async def test_sync_month_page_split_on_error(tmp_path: Path, monkeypatch):
         def __init__(self, access_token=None):
             pass
 
-        def create_page(self, title, content=None, **_):
-            calls["created"].append(json_dumps(content))
+        def create_page(self, title, content=None, html_content=None, **_):
+            calls["created"].append(html_content or json_dumps(content))
             idx = len(calls["created"]) + 1
             return {"url": f"u{idx}", "path": f"p{idx}"}
 
-        def edit_page(self, path, title=None, content=None):
+        def edit_page(self, path, title=None, content=None, html_content=None):
             calls["edited"] += 1
             if path == "p1" and calls["edited"] == 1:
                 raise TelegraphException("CONTENT_TOO_BIG")
@@ -3133,13 +3133,13 @@ async def test_month_page_split_filters_past_events(tmp_path: Path, monkeypatch)
         def __init__(self, access_token=None):
             pass
 
-        def create_page(self, title, content=None, **_):
-            created.append(content)
+        def create_page(self, title, content=None, html_content=None, **_):
+            created.append(html_content or content)
             idx = len(created)
             return {"url": f"u{idx}", "path": f"p{idx}"}
 
-        def edit_page(self, path, title=None, content=None):
-            created.append(content)
+        def edit_page(self, path, title=None, content=None, html_content=None):
+            created.append(html_content or content)
 
     monkeypatch.setattr(main, "date", FakeDate)
 
@@ -3149,15 +3149,20 @@ async def test_month_page_split_filters_past_events(tmp_path: Path, monkeypatch)
     monkeypatch.setattr(
         "main.Telegraph", lambda access_token=None, domain=None: DummyTG()
     )
-    monkeypatch.setattr(main, "TELEGRAPH_PAGE_LIMIT", 10)
+    monkeypatch.setattr(main, "TELEGRAPH_LIMIT", 10)
 
     await main.sync_month_page(db, "2025-07")
 
     assert len(created) == 2
+    items = created[0]
+    if isinstance(items, str):
+        from telegraph.utils import html_to_nodes
+
+        items = html_to_nodes(items)
     titles = [
         c
-        for n in created[0]
-        if n.get("tag") == "h4"
+        for n in items
+        if isinstance(n, dict) and n.get("tag") == "h4"
         for c in n.get("children", [])
         if isinstance(c, str)
     ]
@@ -4707,10 +4712,10 @@ async def test_festival_auto_page_creation(tmp_path: Path, monkeypatch):
         def __init__(self, access_token=None):
             pass
 
-        def create_page(self, title, content=None):
+        def create_page(self, title, content=None, html_content=None, **_):
             return {"url": "http://tg", "path": "p"}
 
-        def edit_page(self, path, title=None, content=None):
+        def edit_page(self, path, title=None, content=None, html_content=None):
             pass
 
     monkeypatch.setenv("TELEGRAPH_TOKEN", "t")
@@ -4833,10 +4838,10 @@ async def test_festival_auto_page_creation(tmp_path: Path, monkeypatch):
         def __init__(self, access_token=None):
             pass
 
-        def create_page(self, title, content=None):
+        def create_page(self, title, content=None, html_content=None, **_):
             return {"url": "http://tg", "path": "p"}
 
-        def edit_page(self, path, title=None, content=None):
+        def edit_page(self, path, title=None, content=None, html_content=None):
             pass
 
     monkeypatch.setenv("TELEGRAPH_TOKEN", "t")
@@ -4959,10 +4964,10 @@ async def test_festival_auto_page_creation(tmp_path: Path, monkeypatch):
         def __init__(self, access_token=None):
             pass
 
-        def create_page(self, title, content=None):
+        def create_page(self, title, content=None, html_content=None, **_):
             return {"url": "http://tg", "path": "p"}
 
-        def edit_page(self, path, title=None, content=None):
+        def edit_page(self, path, title=None, content=None, html_content=None):
             pass
 
     monkeypatch.setenv("TELEGRAPH_TOKEN", "t")
@@ -5684,10 +5689,10 @@ async def test_festival_description_dash(tmp_path: Path, monkeypatch):
         def __init__(self, access_token=None):
             pass
 
-        def create_page(self, title, content=None):
+        def create_page(self, title, content=None, html_content=None, **_):
             return {"url": "http://tg", "path": "p"}
 
-        def edit_page(self, path, title=None, content=None):
+        def edit_page(self, path, title=None, content=None, html_content=None):
             pass
 
     monkeypatch.setenv("TELEGRAPH_TOKEN", "t")
