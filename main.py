@@ -37,7 +37,7 @@ import asyncio
 import contextlib
 import html
 from io import BytesIO
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import update
 from sqlmodel import Field, SQLModel, select
 import aiosqlite
@@ -46,6 +46,8 @@ import atexit
 from cachetools import TTLCache
 from markup import simple_md_to_html
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from db import Database
+from scheduler import setup_scheduler
 
 DEBUG = os.getenv("EVBOT_DEBUG") == "1"
 LOG_LVL = logging.DEBUG if DEBUG else logging.INFO
@@ -421,205 +423,6 @@ class Festival(SQLModel, table=True):
     vk_url: Optional[str] = None
     tg_url: Optional[str] = None
 
-
-class Database:
-    def __init__(self, path: str):
-        """Initialize async engine with WAL and connection pooling."""
-        self.engine = create_async_engine(
-            f"sqlite+aiosqlite:///{path}",
-            pool_size=5,
-            max_overflow=0,
-            connect_args={"timeout": 30, "isolation_level": None},
-            pool_pre_ping=True,
-        )
-
-    async def init(self):
-        async with self.engine.begin() as conn:
-            await conn.exec_driver_sql("PRAGMA journal_mode=WAL")
-            await conn.run_sync(SQLModel.metadata.create_all)
-            result = await conn.exec_driver_sql("PRAGMA table_info(event)")
-            cols = [r[1] for r in result.fetchall()]
-            if "telegraph_url" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE event ADD COLUMN telegraph_url VARCHAR"
-                )
-            if "ticket_price_min" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE event ADD COLUMN ticket_price_min INTEGER"
-                )
-            if "ticket_price_max" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE event ADD COLUMN ticket_price_max INTEGER"
-                )
-            if "ticket_link" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE event ADD COLUMN ticket_link VARCHAR"
-                )
-            if "source_post_url" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE event ADD COLUMN source_post_url VARCHAR"
-                )
-            if "source_vk_post_url" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE event ADD COLUMN source_vk_post_url VARCHAR"
-                )
-            if "is_free" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE event ADD COLUMN is_free BOOLEAN DEFAULT 0"
-                )
-            if "silent" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE event ADD COLUMN silent BOOLEAN DEFAULT 0"
-                )
-            if "telegraph_path" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE event ADD COLUMN telegraph_path VARCHAR"
-                )
-            if "event_type" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE event ADD COLUMN event_type VARCHAR"
-                )
-            if "emoji" not in cols:
-                await conn.exec_driver_sql("ALTER TABLE event ADD COLUMN emoji VARCHAR")
-            if "end_date" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE event ADD COLUMN end_date VARCHAR"
-                )
-            if "added_at" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE event ADD COLUMN added_at VARCHAR"
-                )
-            if "photo_count" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE event ADD COLUMN photo_count INTEGER DEFAULT 0"
-                )
-            if "pushkin_card" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE event ADD COLUMN pushkin_card BOOLEAN DEFAULT 0"
-                )
-            if "ics_url" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE event ADD COLUMN ics_url VARCHAR"
-                )
-            if "ics_post_url" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE event ADD COLUMN ics_post_url VARCHAR"
-                )
-            if "ics_post_id" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE event ADD COLUMN ics_post_id INTEGER"
-                )
-            if "source_chat_id" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE event ADD COLUMN source_chat_id INTEGER"
-                )
-            if "source_message_id" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE event ADD COLUMN source_message_id INTEGER"
-                )
-            if "creator_id" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE event ADD COLUMN creator_id INTEGER"
-                )
-
-            result = await conn.exec_driver_sql("PRAGMA table_info(user)")
-            cols = [r[1] for r in result.fetchall()]
-            if "is_partner" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE user ADD COLUMN is_partner BOOLEAN DEFAULT 0"
-                )
-            if "organization" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE user ADD COLUMN organization VARCHAR"
-                )
-            if "location" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE user ADD COLUMN location VARCHAR"
-                )
-            if "blocked" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE user ADD COLUMN blocked BOOLEAN DEFAULT 0"
-                )
-            if "last_partner_reminder" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE user ADD COLUMN last_partner_reminder VARCHAR"
-                )
-
-            result = await conn.exec_driver_sql("PRAGMA table_info(channel)")
-            cols = [r[1] for r in result.fetchall()]
-            if "daily_time" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE channel ADD COLUMN daily_time VARCHAR"
-                )
-            if "last_daily" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE channel ADD COLUMN last_daily VARCHAR"
-                )
-            if "is_asset" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE channel ADD COLUMN is_asset BOOLEAN DEFAULT 0"
-                )
-
-            result = await conn.exec_driver_sql("PRAGMA table_info(monthpage)")
-            cols = [r[1] for r in result.fetchall()]
-            if "url2" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE monthpage ADD COLUMN url2 VARCHAR"
-                )
-            if "path2" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE monthpage ADD COLUMN path2 VARCHAR"
-                )
-
-            result = await conn.exec_driver_sql("PRAGMA table_info(weekendpage)")
-            cols = [r[1] for r in result.fetchall()]
-            if "vk_post_url" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE weekendpage ADD COLUMN vk_post_url VARCHAR"
-                )
-
-            result = await conn.exec_driver_sql("PRAGMA table_info(festival)")
-            cols = [r[1] for r in result.fetchall()]
-            if "full_name" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE festival ADD COLUMN full_name VARCHAR"
-                )
-                await conn.exec_driver_sql(
-                    "UPDATE festival SET full_name = name"
-                )
-            if "photo_url" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE festival ADD COLUMN photo_url VARCHAR"
-                )
-            if "website_url" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE festival ADD COLUMN website_url VARCHAR"
-                )
-            if "vk_url" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE festival ADD COLUMN vk_url VARCHAR"
-                )
-            if "tg_url" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE festival ADD COLUMN tg_url VARCHAR"
-                )
-            if "start_date" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE festival ADD COLUMN start_date VARCHAR"
-                )
-            if "end_date" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE festival ADD COLUMN end_date VARCHAR"
-                )
-
-            if "vk_poll_url" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE festival ADD COLUMN vk_poll_url VARCHAR"
-                )
-
-    def get_session(self) -> AsyncSession:
-        """Create a new session with attributes kept after commit."""
-        return AsyncSession(self.engine, expire_on_commit=False)
 
 
 async def get_tz_offset(db: Database) -> str:
@@ -1081,22 +884,24 @@ async def notify_inactive_partners(
     return notified
 
 
-async def dump_database(path: str = DB_PATH) -> bytes:
-    """Return a SQL dump of the specified database."""
-    async with aiosqlite.connect(path, timeout=30) as conn:
-        lines: list[str] = []
-        async for line in conn.iterdump():
-            lines.append(line)
+async def dump_database(db: Database) -> bytes:
+    """Return a SQL dump using the shared connection."""
+    conn = await db.raw_conn()
+    lines: list[str] = []
+    async for line in conn.iterdump():
+        lines.append(line)
     return "\n".join(lines).encode("utf-8")
 
 
-async def restore_database(data: bytes, db: Database, path: str = DB_PATH):
+async def restore_database(data: bytes, db: Database):
     """Replace current database with the provided dump."""
+    path = db.path
     if os.path.exists(path):
         os.remove(path)
     async with aiosqlite.connect(path, timeout=30) as conn:
         await conn.executescript(data.decode("utf-8"))
         await conn.commit()
+        await conn.close()
     await db.init()
 
 
@@ -6575,12 +6380,7 @@ async def vk_poll_scheduler(db: Database, bot: Bot):
 
 
 def start_periodic_tasks(db: Database, bot: Bot) -> AsyncIOScheduler:
-    scheduler = AsyncIOScheduler()
-    scheduler.add_job(vk_scheduler, "interval", minutes=15, args=[db, bot])
-    scheduler.add_job(vk_poll_scheduler, "interval", minutes=15, args=[db, bot])
-    scheduler.add_job(cleanup_scheduler, "interval", minutes=15, args=[db, bot])
-    scheduler.add_job(page_update_scheduler, "interval", minutes=15, args=[db])
-    scheduler.add_job(partner_notification_scheduler, "interval", minutes=15, args=[db, bot])
+    scheduler = setup_scheduler(db, bot)
     scheduler.start()
     return scheduler
 
@@ -7182,7 +6982,7 @@ async def handle_dumpdb(message: types.Message, db: Database, bot: Bot):
         tz_setting = await session.get(Setting, "tz_offset")
         catbox_setting = await session.get(Setting, "catbox_enabled")
 
-    data = await dump_database(db.engine.url.database)
+    data = await dump_database(db)
     file = types.BufferedInputFile(data, filename="dump.sql")
     await bot.send_document(message.chat.id, file)
     token_exists = os.path.exists(TELEGRAPH_TOKEN_FILE)
@@ -7240,7 +7040,7 @@ async def handle_restore(message: types.Message, db: Database, bot: Bot):
         return
     bio = BytesIO()
     await bot.download(document.file_id, destination=bio)
-    await restore_database(bio.getvalue(), db, db.engine.url.database)
+    await restore_database(bio.getvalue(), db)
     await bot.send_message(message.chat.id, "Database restored")
 async def handle_edit_message(message: types.Message, db: Database, bot: Bot):
     state = editing_sessions.get(message.from_user.id)
