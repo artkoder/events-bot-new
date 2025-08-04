@@ -49,6 +49,22 @@ from cachetools import TTLCache
 DEBUG = os.getenv("EVBOT_DEBUG") == "1"
 LOG_LVL = logging.DEBUG if DEBUG else logging.INFO
 
+for noisy in ("aiosqlite", "markdown", "aiogram", "httpx"):
+    logging.getLogger(noisy).setLevel(
+        logging.INFO if DEBUG else logging.WARNING
+    )
+
+_md = markdown.Markdown(extensions=["nl2br", "fenced_code"])
+
+
+def render_md(txt: str) -> str:
+    return _md.convert(txt)
+
+
+_month_lock = asyncio.Lock()
+_month_next_run: float = 0.0
+
+
 def setup_logging() -> None:
     if not logging.getLogger().handlers:
         logging.basicConfig(level=LOG_LVL)
@@ -3909,10 +3925,9 @@ async def enqueue_add_event_raw(message: types.Message, db: Database, bot: Bot):
 async def add_event_queue_worker(db: Database, bot: Bot):
     """Background worker to process queued events sequentially."""
     while True:
-        size = add_event_queue.qsize()
-        if size > 0:
-            logging.info("add_event_queue_worker tick: size=%d", size)
-            kind, msg, using_session = await add_event_queue.get()
+        item = await add_event_queue.get()
+        try:
+            kind, msg, using_session = item
             task = asyncio.current_task()
             if task:
                 working.add(task)
@@ -3926,10 +3941,8 @@ async def add_event_queue_worker(db: Database, bot: Bot):
             finally:
                 if task:
                     working.discard(task)
-                add_event_queue.task_done()
-        await asyncio.sleep(
-            seconds_to_next_minute(datetime.now(timezone.utc))
-        )
+        finally:
+            add_event_queue.task_done()
 
 
 def format_day(day: date, tz: timezone) -> str:
@@ -4051,10 +4064,7 @@ def next_month(month: str) -> str:
 
 @lru_cache(maxsize=8)
 def md_to_html(text: str) -> str:
-    html_text = markdown.markdown(
-        text,
-        extensions=["markdown.extensions.fenced_code", "markdown.extensions.nl2br"],
-    )
+    html_text = render_md(text)
     # Telegraph API does not allow h1/h2 or Telegram-specific emoji tags
     html_text = re.sub(r"<(\/?)h[12]>", r"<\1h3>", html_text)
     html_text = re.sub(r"</?tg-emoji[^>]*>", "", html_text)
@@ -4837,164 +4847,173 @@ def _build_month_page_content_sync(
 
 
 async def sync_month_page(db: Database, month: str, update_links: bool = False):
-    logging.info("sync_month_page start: month=%s update_links=%s", month, update_links)
-    async with perf("sync_month_page"):
-        token = get_telegraph_token()
-        if not token:
-            logging.error("Telegraph token unavailable")
+    async with _month_lock:
+        global _month_next_run
+        now = _time.time()
+        if "PYTEST_CURRENT_TEST" not in os.environ and now < _month_next_run:
+            logging.debug("sync_month_page skipped, debounced")
             return
-        tg = Telegraph(access_token=token)
-        async with db.get_session() as session:
-            page = await session.get(MonthPage, month)
-            logging.debug("existing MonthPage: %s", page)
-            created = False
-            if not page:
-                page = MonthPage(month=month, url="", path="")
-                session.add(page)
-                await session.commit()
-                created = True
-                logging.debug("created MonthPage row for %s", month)
-
-        events, exhibitions, nav_pages = await get_month_data(db, month)
-        logging.debug(
-            "got month data: events=%d exhibitions=%d nav_pages=%d",
-            len(events),
-            len(exhibitions),
-            len(nav_pages),
+        _month_next_run = now + 60
+        logging.info(
+            "sync_month_page start: month=%s update_links=%s", month, update_links
         )
+        async with perf("sync_month_page"):
+            token = get_telegraph_token()
+            if not token:
+                logging.error("Telegraph token unavailable")
+                return
+            tg = Telegraph(access_token=token)
+            async with db.get_session() as session:
+                page = await session.get(MonthPage, month)
+                logging.debug("existing MonthPage: %s", page)
+                created = False
+                if not page:
+                    page = MonthPage(month=month, url="", path="")
+                    session.add(page)
+                    await session.commit()
+                    created = True
+                    logging.debug("created MonthPage row for %s", month)
 
-    async def commit_page() -> None:
-        async with db.get_session() as s:
-            db_page = await s.get(MonthPage, month)
-            db_page.url = page.url
-            db_page.path = page.path
-            db_page.url2 = page.url2
-            db_page.path2 = page.path2
-            await s.commit()
+            events, exhibitions, nav_pages = await get_month_data(db, month)
+            logging.debug(
+                "got month data: events=%d exhibitions=%d nav_pages=%d",
+                len(events),
+                len(exhibitions),
+                len(nav_pages),
+            )
 
-    async def split_and_update() -> None:
-        nonlocal created
-        logging.info("sync_month_page: splitting %s (events=%d)", month, len(events))
-        # Find maximum number of events that fit on the first page
-        low, high, best = 1, len(events) - 1, 1
-        while low <= high:
-            mid = (low + high) // 2
-            _, c, size_mid = await build_month_page_content(
+        async def commit_page() -> None:
+            async with db.get_session() as s:
+                db_page = await s.get(MonthPage, month)
+                db_page.url = page.url
+                db_page.path = page.path
+                db_page.url2 = page.url2
+                db_page.path2 = page.path2
+                await s.commit()
+    
+        async def split_and_update() -> None:
+            nonlocal created
+            logging.info("sync_month_page: splitting %s (events=%d)", month, len(events))
+            # Find maximum number of events that fit on the first page
+            low, high, best = 1, len(events) - 1, 1
+            while low <= high:
+                mid = (low + high) // 2
+                _, c, size_mid = await build_month_page_content(
+                    db,
+                    month,
+                    events[:mid],
+                    exhibitions,
+                    nav_pages,
+                    size_limit=TELEGRAPH_PAGE_LIMIT,
+                )
+                logging.debug(
+                    "split_and_update mid=%d size=%d limit=%d",
+                    mid,
+                    size_mid,
+                    TELEGRAPH_PAGE_LIMIT,
+                )
+                if size_mid <= TELEGRAPH_PAGE_LIMIT:
+                    best = mid
+                    low = mid + 1
+                else:
+                    high = mid - 1
+    
+            first = events[:best]
+            second = events[best:]
+            logging.debug(
+                "split_and_update best=%d first=%d second=%d", best, len(first), len(second)
+            )
+    
+            title2, content2, size2 = await build_month_page_content(
+                db, month, second, exhibitions, nav_pages
+            )
+            logging.debug("second page size=%d", size2)
+            if not page.path2:
+                logging.info("creating second page for %s", month)
+                data2 = await telegraph_create_page(tg, title2, content=content2)
+                page.url2 = data2.get("url")
+                page.path2 = data2.get("path")
+            else:
+                logging.info("updating second page for %s", month)
+                await telegraph_call(
+                    tg.edit_page, page.path2, title=title2, content=content2
+                )
+    
+            title1, content1, size1 = await build_month_page_content(
                 db,
                 month,
-                events[:mid],
-                exhibitions,
+                first,
+                [],
                 nav_pages,
-                size_limit=TELEGRAPH_PAGE_LIMIT,
+                continuation_url=page.url2,
             )
-            logging.debug(
-                "split_and_update mid=%d size=%d limit=%d",
-                mid,
-                size_mid,
-                TELEGRAPH_PAGE_LIMIT,
-            )
-            if size_mid <= TELEGRAPH_PAGE_LIMIT:
-                best = mid
-                low = mid + 1
-            else:
-                high = mid - 1
-
-        first = events[:best]
-        second = events[best:]
-        logging.debug(
-            "split_and_update best=%d first=%d second=%d", best, len(first), len(second)
-        )
-
-        title2, content2, size2 = await build_month_page_content(
-            db, month, second, exhibitions, nav_pages
-        )
-        logging.debug("second page size=%d", size2)
-        if not page.path2:
-            logging.info("creating second page for %s", month)
-            data2 = await telegraph_create_page(tg, title2, content=content2)
-            page.url2 = data2.get("url")
-            page.path2 = data2.get("path")
-        else:
-            logging.info("updating second page for %s", month)
-            await telegraph_call(
-                tg.edit_page, page.path2, title=title2, content=content2
-            )
-
-        title1, content1, size1 = await build_month_page_content(
-            db,
-            month,
-            first,
-            [],
-            nav_pages,
-            continuation_url=page.url2,
-        )
-        logging.debug("first page size=%d", size1)
-        if not page.path:
-            logging.info("creating first page for %s", month)
-            data1 = await telegraph_create_page(tg, title1, content=content1)
-            page.url = data1.get("url")
-            page.path = data1.get("path")
-            created = True
-        else:
-            logging.info("updating first page for %s", month)
-            await telegraph_call(
-                tg.edit_page, page.path, title=title1, content=content1
-            )
-        logging.info(
-            "%s month page %s split into two",
-            "Created" if created else "Edited",
-            month,
-        )
-        await commit_page()
-
-    logging.info("building month page for %s", month)
-    title, content, size = await build_month_page_content(
-        db, month, events, exhibitions, nav_pages
-    )
-    logging.debug("full page size=%d", size)
-
-    try:
-        if size <= TELEGRAPH_PAGE_LIMIT:
+            logging.debug("first page size=%d", size1)
             if not page.path:
-                logging.info("creating month page %s", month)
-                data = await telegraph_create_page(tg, title, content=content)
-                page.url = data.get("url")
-                page.path = data.get("path")
+                logging.info("creating first page for %s", month)
+                data1 = await telegraph_create_page(tg, title1, content=content1)
+                page.url = data1.get("url")
+                page.path = data1.get("path")
                 created = True
             else:
-                logging.info("updating month page %s", month)
+                logging.info("updating first page for %s", month)
                 await telegraph_call(
-                    tg.edit_page, page.path, title=title, content=content
+                    tg.edit_page, page.path, title=title1, content=content1
                 )
-            page.url2 = None
-            page.path2 = None
             logging.info(
-                "%s month page %s", "Created" if created else "Edited", month
+                "%s month page %s split into two",
+                "Created" if created else "Edited",
+                month,
             )
             await commit_page()
-        else:
-            logging.info(
-                "month page %s content too big (%d), splitting", month, size
-            )
-            await split_and_update()
-    except TelegraphException as e:
-        if "CONTENT_TOO_BIG" in str(e):
-            logging.warning("Month page %s too big, splitting", month)
-            await split_and_update()
-        else:
+    
+        logging.info("building month page for %s", month)
+        title, content, size = await build_month_page_content(
+            db, month, events, exhibitions, nav_pages
+        )
+        logging.debug("full page size=%d", size)
+    
+        try:
+            if size <= TELEGRAPH_PAGE_LIMIT:
+                if not page.path:
+                    logging.info("creating month page %s", month)
+                    data = await telegraph_create_page(tg, title, content=content)
+                    page.url = data.get("url")
+                    page.path = data.get("path")
+                    created = True
+                else:
+                    logging.info("updating month page %s", month)
+                    await telegraph_call(
+                        tg.edit_page, page.path, title=title, content=content
+                    )
+                page.url2 = None
+                page.path2 = None
+                logging.info(
+                    "%s month page %s", "Created" if created else "Edited", month
+                )
+                await commit_page()
+            else:
+                logging.info(
+                    "month page %s content too big (%d), splitting", month, size
+                )
+                await split_and_update()
+        except TelegraphException as e:
+            if "CONTENT_TOO_BIG" in str(e):
+                logging.warning("Month page %s too big, splitting", month)
+                await split_and_update()
+            else:
+                logging.error("Failed to sync month page %s: %s", month, e)
+        except Exception as e:
             logging.error("Failed to sync month page %s: %s", month, e)
-    except Exception as e:
-        logging.error("Failed to sync month page %s: %s", month, e)
-
-        if update_links or created:
-            async with db.get_session() as session:
-                result = await session.execute(select(MonthPage).order_by(MonthPage.month))
-                months = result.scalars().all()
-            for p in months:
-                if p.month != month:
-                    await sync_month_page(db, p.month, update_links=False)
-
-
+    
+            if update_links or created:
+                async with db.get_session() as session:
+                    result = await session.execute(select(MonthPage).order_by(MonthPage.month))
+                    months = result.scalars().all()
+                for p in months:
+                    if p.month != month:
+                        await sync_month_page(db, p.month, update_links=False)
+    
+    
 def weekend_start_for_date(d: date) -> date | None:
     if d.weekday() == 5:
         return d
