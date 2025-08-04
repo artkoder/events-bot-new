@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 
 import aiosqlite
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.pool import NullPool
 from sqlmodel import SQLModel
 
 
@@ -12,10 +13,8 @@ class Database:
         self.path = path
         self.engine = create_async_engine(
             f"sqlite+aiosqlite:///{path}",
-            pool_size=5,
-            max_overflow=0,
-            connect_args={"timeout": 30, "isolation_level": None},
-            pool_pre_ping=False,
+            poolclass=NullPool,
+            connect_args={"timeout": 15, "check_same_thread": False},
         )
         self._conn: aiosqlite.Connection | None = None
         self._lock = asyncio.Lock()
@@ -25,7 +24,7 @@ class Database:
         if self._conn is None:
             async with self._lock:
                 if self._conn is None:
-                    self._conn = await aiosqlite.connect(self.path, timeout=30)
+                    self._conn = await aiosqlite.connect(self.path, timeout=15)
                     await self._conn.execute("PRAGMA journal_mode=WAL")
                     await self._conn.execute("PRAGMA read_uncommitted = 1")
         return self._conn

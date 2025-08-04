@@ -43,6 +43,7 @@ from sqlmodel import Field, SQLModel, select
 import aiosqlite
 import gc
 import atexit
+import tracemalloc
 from cachetools import TTLCache
 from markup import simple_md_to_html
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -56,6 +57,15 @@ for noisy in ("aiogram", "httpx"):
     logging.getLogger(noisy).setLevel(
         logging.INFO if DEBUG else logging.WARNING
     )
+
+PROFILE = os.getenv("PROFILE") == "1"
+if PROFILE:
+    tracemalloc.start()
+
+
+def print_current_rss() -> None:
+    rss = psutil.Process().memory_info().rss / (1024 * 1024)
+    logging.info(f"Peak RSS: {rss:.0f} MB")
 
 
 _month_lock = asyncio.Lock()
@@ -6385,6 +6395,34 @@ def start_periodic_tasks(db: Database, bot: Bot) -> AsyncIOScheduler:
     return scheduler
 
 
+async def init_db_and_scheduler(
+    app: web.Application, db: Database, bot: Bot, webhook: str
+) -> None:
+    logging.info("Initializing database")
+    await db.init()
+    await get_tz_offset(db)
+    global CATBOX_ENABLED
+    CATBOX_ENABLED = await get_catbox_enabled(db)
+    global VK_PHOTOS_ENABLED
+    VK_PHOTOS_ENABLED = await get_vk_photos_enabled(db)
+    hook = webhook.rstrip("/") + "/webhook"
+    logging.info("Setting webhook to %s", hook)
+    try:
+        await bot.set_webhook(
+            hook,
+            allowed_updates=["message", "callback_query", "my_chat_member"],
+        )
+    except Exception as e:
+        logging.error("Failed to set webhook: %s", e)
+    app["daily_task"] = asyncio.create_task(daily_scheduler(db, bot))
+    app["scheduler"] = start_periodic_tasks(db, bot)
+    app["add_event_worker"] = asyncio.create_task(add_event_queue_worker(db, bot))
+    if DEBUG:
+        app["qstat_task"] = asyncio.create_task(_log_queue_stats())
+    gc.collect()
+    print_current_rss()
+
+
 async def build_events_message(db: Database, target_date: date, tz: timezone, creator_id: int | None = None):
     async with db.get_session() as session:
         stmt = select(Event).where(
@@ -7927,30 +7965,14 @@ def create_app() -> web.Application:
     SimpleRequestHandler(dp, bot).register(app, path="/webhook")
     setup_application(app, dp, bot=bot)
 
+    async def health_handler(request: web.Request) -> web.Response:
+        return web.json_response({"status": "ok"})
+
+    app.router.add_get("/healthz", health_handler)
+
     async def on_startup(app: web.Application):
-        logging.info("Initializing database")
-        await db.init()
-        await get_tz_offset(db)
-        global CATBOX_ENABLED
-        CATBOX_ENABLED = await get_catbox_enabled(db)
-        global VK_PHOTOS_ENABLED
-        VK_PHOTOS_ENABLED = await get_vk_photos_enabled(db)
-        hook = webhook.rstrip("/") + "/webhook"
-        logging.info("Setting webhook to %s", hook)
-        try:
-            await bot.set_webhook(
-                hook,
-                allowed_updates=["message", "callback_query", "my_chat_member"],
-            )
-        except Exception as e:
-            logging.error("Failed to set webhook: %s", e)
-        app["daily_task"] = asyncio.create_task(daily_scheduler(db, bot))
-        app["scheduler"] = start_periodic_tasks(db, bot)
-        app["add_event_worker"] = asyncio.create_task(
-            add_event_queue_worker(db, bot)
-        )
-        if DEBUG:
-            app["qstat_task"] = asyncio.create_task(_log_queue_stats())
+        loop = asyncio.get_running_loop()
+        loop.create_task(init_db_and_scheduler(app, db, bot, webhook))
 
     async def on_shutdown(app: web.Application):
         await bot.session.close()
@@ -7959,7 +7981,7 @@ def create_app() -> web.Application:
             with contextlib.suppress(Exception):
                 await app["daily_task"]
         if "scheduler" in app:
-            await app["scheduler"].shutdown()
+            await app["scheduler"].shutdown(wait=False)
         if "add_event_worker" in app:
             app["add_event_worker"].cancel()
             with contextlib.suppress(Exception):
