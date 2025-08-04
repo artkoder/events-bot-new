@@ -1759,6 +1759,8 @@ async def parse_event_via_4o(
         ],
         "temperature": 0,
     }
+    # ensure we start the network request with as little memory as possible
+    gc.collect()
     logging.info("Sending 4o parse request to %s", url)
     async with create_ipv4_session(ClientSession) as session:
         async def _call():
@@ -1777,6 +1779,7 @@ async def parse_event_via_4o(
     if logging.getLogger().isEnabledFor(logging.DEBUG):
         logging.debug("4o content snippet: %s", content[:1000])
     del data_raw
+    gc.collect()
     if content.startswith("```"):
         content = content.strip("`\n")
         if content.lower().startswith("json"):
@@ -3146,6 +3149,8 @@ async def add_events_from_text(
         "add_events_from_text start: len=%d source=%s", len(text), source_link
     )
     try:
+        # Free any lingering objects before heavy LLM call to reduce peak memory
+        gc.collect()
         logging.info("LLM parse start (%d chars)", len(text))
         llm_text = text
         if channel_title:
