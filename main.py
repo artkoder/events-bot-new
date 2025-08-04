@@ -119,7 +119,10 @@ add_event_sessions: TTLCache[int, bool] = TTLCache(maxsize=256, ttl=3600)
 events_date_sessions: TTLCache[int, bool] = TTLCache(maxsize=256, ttl=3600)
 
 # queue for background event processing
-add_event_queue: asyncio.Queue[tuple[str, types.Message, bool]] = asyncio.Queue()
+# limit the queue to avoid unbounded growth if parsing slows down
+add_event_queue: asyncio.Queue[tuple[str, types.Message, bool]] = asyncio.Queue(
+    maxsize=200
+)
 
 # toggle for uploading images to catbox
 CATBOX_ENABLED: bool = False
@@ -3755,7 +3758,17 @@ async def enqueue_add_event(message: types.Message, db: Database, bot: Bot):
     using_session = message.from_user.id in add_event_sessions
     if using_session:
         add_event_sessions.pop(message.from_user.id, None)
-    await add_event_queue.put(("regular", message, using_session))
+    try:
+        add_event_queue.put_nowait(("regular", message, using_session))
+    except asyncio.QueueFull:
+        logging.warning(
+            "enqueue_add_event queue full for user=%s", message.from_user.id
+        )
+        await bot.send_message(
+            message.chat.id,
+            "Очередь обработки переполнена, попробуйте позже",
+        )
+        return
     logging.info(
         "enqueue_add_event user=%s queue=%d",
         message.from_user.id,
@@ -3766,7 +3779,17 @@ async def enqueue_add_event(message: types.Message, db: Database, bot: Bot):
 
 async def enqueue_add_event_raw(message: types.Message, db: Database, bot: Bot):
     """Queue a raw event addition for background processing."""
-    await add_event_queue.put(("raw", message, False))
+    try:
+        add_event_queue.put_nowait(("raw", message, False))
+    except asyncio.QueueFull:
+        logging.warning(
+            "enqueue_add_event_raw queue full for user=%s", message.from_user.id
+        )
+        await bot.send_message(
+            message.chat.id,
+            "Очередь обработки переполнена, попробуйте позже",
+        )
+        return
     logging.info(
         "enqueue_add_event_raw user=%s queue=%d",
         message.from_user.id,
