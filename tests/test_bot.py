@@ -2334,7 +2334,7 @@ async def test_build_month_page_content(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(main, "datetime", FakeDatetime)
 
 
-    title, content = await main.build_month_page_content(db, "2025-07")
+    title, content, _ = await main.build_month_page_content(db, "2025-07")
     assert "июле 2025" in title
     assert "Полюбить Калининград Анонсы" in title
     assert any(n.get("tag") == "br" for n in content)
@@ -2359,7 +2359,7 @@ async def test_build_weekend_page_content(tmp_path: Path):
         )
         await session.commit()
 
-    title, content = await main.build_weekend_page_content(db, saturday.isoformat())
+    title, content, _ = await main.build_weekend_page_content(db, saturday.isoformat())
     assert "выходных" in title
     assert any(n.get("tag") == "h4" for n in content)
     intro = content[0]
@@ -2386,7 +2386,7 @@ async def test_build_weekend_page_content(tmp_path: Path):
         )
         await session.commit()
 
-    title2, _ = await main.build_weekend_page_content(db, cross.isoformat())
+    title2, _, _ = await main.build_weekend_page_content(db, cross.isoformat())
     assert "31 января" in title2 and "1 февраля" in title2
 
 
@@ -2416,7 +2416,7 @@ async def test_weekend_nav_and_exhibitions(tmp_path: Path):
         )
         await session.commit()
 
-    _, content = await main.build_weekend_page_content(db, saturday.isoformat())
+    _, content, _ = await main.build_weekend_page_content(db, saturday.isoformat())
     nav_blocks = [
         n
         for n in content
@@ -2471,7 +2471,7 @@ async def test_month_nav_and_exhibitions(tmp_path: Path):
         )
         await session.commit()
 
-    _, content = await main.build_month_page_content(db, "2025-07")
+    _, content, _ = await main.build_month_page_content(db, "2025-07")
     nav_blocks = [
         n
         for n in content
@@ -2624,7 +2624,7 @@ async def test_missing_added_at(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(main, "datetime", FakeDatetime)
 
 
-    title, content = await main.build_month_page_content(db, "2025-07")
+    title, content, _ = await main.build_month_page_content(db, "2025-07")
     assert any(n.get("tag") == "h4" for n in content)
 
 
@@ -2663,7 +2663,7 @@ async def test_event_title_link(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(main, "datetime", FakeDatetime)
 
 
-    _, content = await main.build_month_page_content(db, FUTURE_DATE[:7])
+    _, content, _ = await main.build_month_page_content(db, FUTURE_DATE[:7])
     h4 = next(n for n in content if n.get("tag") == "h4")
     children = h4["children"]
     assert any(isinstance(c, dict) and c.get("tag") == "a" for c in children)
@@ -2706,7 +2706,7 @@ async def test_emoji_not_duplicated(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(main, "datetime", FakeDatetime)
 
 
-    _, content = await main.build_month_page_content(db, FUTURE_DATE[:7])
+    _, content, _ = await main.build_month_page_content(db, FUTURE_DATE[:7])
     h4 = next(n for n in content if n.get("tag") == "h4")
     text = "".join(
         c if isinstance(c, str) else "".join(c.get("children", []))
@@ -2745,7 +2745,7 @@ async def test_spacing_after_headers(tmp_path: Path):
         )
         await session.commit()
 
-    _, content = await main.build_month_page_content(db, FUTURE_DATE[:7])
+    _, content, _ = await main.build_month_page_content(db, FUTURE_DATE[:7])
     idx = next(
         i
         for i, n in enumerate(content)
@@ -2788,7 +2788,7 @@ async def test_event_spacing(tmp_path: Path):
         )
         await session.commit()
 
-    _, content = await main.build_month_page_content(db, FUTURE_DATE[:7])
+    _, content, _ = await main.build_month_page_content(db, FUTURE_DATE[:7])
     indices = [i for i, n in enumerate(content) if n.get("tag") == "h4"]
     assert content[indices[0] + 1].get("tag") == "p"
 
@@ -3067,7 +3067,7 @@ async def test_current_month_omits_past_events(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(main, "datetime", FakeDatetime)
 
 
-    _, content = await main.build_month_page_content(db, "2025-07")
+    _, content, _ = await main.build_month_page_content(db, "2025-07")
     titles = [
         c
         for n in content
@@ -4058,7 +4058,7 @@ async def test_exhibition_future_not_listed(tmp_path: Path):
         )
         await session.commit()
 
-    _, content = await main.build_month_page_content(db, future_start[:7])
+    _, content, _ = await main.build_month_page_content(db, future_start[:7])
     found_in_exh = False
     exh_section = False
     for n in content:
@@ -4092,7 +4092,7 @@ async def test_past_exhibition_not_listed_in_events(tmp_path: Path):
         )
         await session.commit()
 
-    _, content = await main.build_month_page_content(db, past_start[:7])
+    _, content, _ = await main.build_month_page_content(db, past_start[:7])
     before_exh = True
     found = False
     for n in content:
@@ -4145,7 +4145,7 @@ async def test_exhibition_auto_year_end(tmp_path: Path, monkeypatch):
     assert ev.date == today.isoformat()
     assert ev.end_date == date(today.year, 12, 31).isoformat()
 
-    _, content = await main.build_month_page_content(db, today.strftime("%Y-%m"))
+    _, content, _ = await main.build_month_page_content(db, today.strftime("%Y-%m"))
     found = False
     exh_section = False
     for n in content:
@@ -4180,7 +4180,7 @@ async def test_month_links_future(tmp_path: Path, monkeypatch):
 
     monkeypatch.setattr(main, "date", FakeDate)
     monkeypatch.setattr(main, "datetime", FakeDatetime)
-    title, content = await main.build_month_page_content(db, "2025-07")
+    title, content, _ = await main.build_month_page_content(db, "2025-07")
     found = False
     for n in content:
         if (
@@ -4774,7 +4774,7 @@ async def test_month_page_festival_link(tmp_path: Path):
         )
         await session.commit()
 
-    title, content = await main.build_month_page_content(db, m)
+    title, content, _ = await main.build_month_page_content(db, m)
     assert "http://tg" in json_dumps(content)
 
 
@@ -4900,7 +4900,7 @@ async def test_month_page_festival_link(tmp_path: Path):
         )
         await session.commit()
 
-    title, content = await main.build_month_page_content(db, m)
+    title, content, _ = await main.build_month_page_content(db, m)
     assert "http://tg" in json_dumps(content)
 
 
@@ -5026,7 +5026,7 @@ async def test_month_page_festival_link(tmp_path: Path):
         )
         await session.commit()
 
-    title, content = await main.build_month_page_content(db, m)
+    title, content, _ = await main.build_month_page_content(db, m)
     assert "http://tg" in json_dumps(content)
 
 
@@ -5883,7 +5883,7 @@ async def test_month_page_festival_star(tmp_path: Path):
         )
         await session.commit()
 
-    _, content = await main.build_month_page_content(db, m)
+    _, content, _ = await main.build_month_page_content(db, m)
     fest_line = next(
         n
         for n in content

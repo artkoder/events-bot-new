@@ -23,7 +23,6 @@ import httpx
 
 from telegraph import Telegraph, TelegraphException
 
-from telegraph.api import json_dumps
 from functools import partial, lru_cache
 import asyncio
 import contextlib
@@ -131,6 +130,21 @@ _vk_user_token_bad: str | None = None
 # Telegraph API rejects pages over ~64&nbsp;kB. Use a slightly lower limit
 # to decide when month pages should be split into two parts.
 TELEGRAPH_PAGE_LIMIT = 60000
+
+def rough_size(nodes: Iterable[dict], limit: int | None = None) -> int:
+    """Return an approximate size of Telegraph nodes in bytes.
+
+    The calculation serializes each node individually and sums the byte lengths,
+    which avoids materialising the whole JSON representation at once.  If
+    ``limit`` is provided the iteration stops once the accumulated size exceeds
+    it.
+    """
+    total = 0
+    for n in nodes:
+        total += len(json.dumps(n, ensure_ascii=False).encode())
+        if limit is not None and total > limit:
+            break
+    return total
 
 # Timeout for Telegraph API operations (in seconds)
 TELEGRAPH_TIMEOUT = float(os.getenv("TELEGRAPH_TIMEOUT", "30"))
@@ -4490,7 +4504,8 @@ async def build_month_page_content(
     exhibitions: list[Event] | None = None,
     nav_pages: list[MonthPage] | None = None,
     continuation_url: str | None = None,
-) -> tuple[str, list]:
+    size_limit: int | None = None,
+) -> tuple[str, list, int]:
     if events is None or exhibitions is None or nav_pages is None:
         events, exhibitions, nav_pages = await get_month_data(db, month)
 
@@ -4506,6 +4521,7 @@ async def build_month_page_content(
         nav_pages,
         fest_map,
         continuation_url,
+        size_limit,
     )
 
 
@@ -4516,7 +4532,8 @@ def _build_month_page_content_sync(
     nav_pages: list[MonthPage],
     fest_map: dict[str, Festival],
     continuation_url: str | None,
-) -> tuple[str, list]:
+    size_limit: int | None,
+) -> tuple[str, list, int]:
     today = datetime.now(LOCAL_TZ).date()
     cutoff = (today - timedelta(days=30)).isoformat()
 
@@ -4540,6 +4557,22 @@ def _build_month_page_content_sync(
         by_day.setdefault(d, []).append(e)
 
     content: list[dict] = []
+    size = 0
+    exceeded = False
+
+    def add(node: dict):
+        nonlocal size, exceeded
+        size += rough_size((node,))
+        if size_limit is not None and size > size_limit:
+            exceeded = True
+            return
+        content.append(node)
+
+    def add_many(nodes: Iterable[dict]):
+        for n in nodes:
+            if exceeded:
+                break
+            add(n)
     intro = (
         f"Планируйте свой месяц заранее: интересные мероприятия Калининграда и 39 региона в {month_name_prepositional(month)} — от лекций и концертов до культурных шоу. "
     )
@@ -4551,19 +4584,23 @@ def _build_month_page_content_sync(
             "children": ["Полюбить Калининград Анонсы"],
         },
     ]
-    content.append({"tag": "p", "children": intro_nodes})
+    add({"tag": "p", "children": intro_nodes})
 
     for day in sorted(by_day):
+        if exceeded:
+            break
         if day.weekday() == 5:
-            content.append({"tag": "h3", "children": ["🟥🟥🟥 суббота 🟥🟥🟥"]})
+            add({"tag": "h3", "children": ["🟥🟥🟥 суббота 🟥🟥🟥"]})
         elif day.weekday() == 6:
-            content.append({"tag": "h3", "children": ["🟥🟥 воскресенье 🟥🟥"]})
-        content.append({"tag": "h3", "children": [f"🟥🟥🟥 {format_day_pretty(day)} 🟥🟥🟥"]})
-        content.append({"tag": "br"})
-        content.append({"tag": "p", "children": ["\u00a0"]})
+            add({"tag": "h3", "children": ["🟥🟥 воскресенье 🟥🟥"]})
+        add({"tag": "h3", "children": [f"🟥🟥🟥 {format_day_pretty(day)} 🟥🟥🟥"]})
+        add({"tag": "br"})
+        add({"tag": "p", "children": ["\u00a0"]})
         for ev in by_day[day]:
+            if exceeded:
+                break
             fest = fest_map.get(ev.festival or "")
-            content.extend(event_to_nodes(ev, fest, fest_icon=True))
+            add_many(event_to_nodes(ev, fest, fest_icon=True))
 
     future_pages = [p for p in nav_pages if p.month >= month]
     month_nav: list[dict] = []
@@ -4584,25 +4621,27 @@ def _build_month_page_content_sync(
 
     if nav_children:
         month_nav = [{"tag": "br"}, {"tag": "h4", "children": nav_children}]
-        content.extend(month_nav)
+        add_many(month_nav)
 
-    if exhibitions:
+    if exhibitions and not exceeded:
         if month_nav:
-            content.append({"tag": "br"})
-            content.append({"tag": "p", "children": ["\u00a0"]})
-        content.append({"tag": "h3", "children": ["Постоянные выставки"]})
-        content.append({"tag": "br"})
-        content.append({"tag": "p", "children": ["\u00a0"]})
+            add({"tag": "br"})
+            add({"tag": "p", "children": ["\u00a0"]})
+        add({"tag": "h3", "children": ["Постоянные выставки"]})
+        add({"tag": "br"})
+        add({"tag": "p", "children": ["\u00a0"]})
         for ev in exhibitions:
-            content.extend(exhibition_to_nodes(ev))
+            if exceeded:
+                break
+            add_many(exhibition_to_nodes(ev))
 
-    if month_nav:
-        content.extend(month_nav)
+    if month_nav and not exceeded:
+        add_many(month_nav)
 
-    if continuation_url:
-        content.append({"tag": "br"})
-        content.append({"tag": "p", "children": ["\u00a0"]})
-        content.append(
+    if continuation_url and not exceeded:
+        add({"tag": "br"})
+        add({"tag": "p", "children": ["\u00a0"]})
+        add(
             {
                 "tag": "h3",
                 "children": [
@@ -4618,7 +4657,7 @@ def _build_month_page_content_sync(
     title = (
         f"События Калининграда в {month_name_prepositional(month)}: полный анонс от Полюбить Калининград Анонсы"
     )
-    return title, content
+    return title, content, size
 
 
 async def sync_month_page(db: Database, month: str, update_links: bool = False):
@@ -4657,11 +4696,13 @@ async def sync_month_page(db: Database, month: str, update_links: bool = False):
                 low, high, best = 1, len(events) - 1, 1
                 while low <= high:
                     mid = (low + high) // 2
-                    _, c = await build_month_page_content(
-                        db, month, events[:mid], exhibitions, nav_pages
-                    )
-                    size_mid = await asyncio.to_thread(
-                        lambda: len(json_dumps(c).encode("utf-8"))
+                    _, c, size_mid = await build_month_page_content(
+                        db,
+                        month,
+                        events[:mid],
+                        exhibitions,
+                        nav_pages,
+                        size_limit=TELEGRAPH_PAGE_LIMIT,
                     )
                     logging.debug(
                         "split_and_update mid=%d size=%d limit=%d",
@@ -4681,11 +4722,8 @@ async def sync_month_page(db: Database, month: str, update_links: bool = False):
                     "split_and_update best=%d first=%d second=%d", best, len(first), len(second)
                 )
 
-                title2, content2 = await build_month_page_content(
+                title2, content2, size2 = await build_month_page_content(
                     db, month, second, exhibitions, nav_pages
-                )
-                size2 = await asyncio.to_thread(
-                    lambda: len(json_dumps(content2).encode("utf-8"))
                 )
                 logging.debug("second page size=%d", size2)
                 if not page.path2:
@@ -4699,11 +4737,13 @@ async def sync_month_page(db: Database, month: str, update_links: bool = False):
                         tg.edit_page, page.path2, title=title2, content=content2
                     )
 
-                title1, content1 = await build_month_page_content(
-                    db, month, first, [], nav_pages, continuation_url=page.url2
-                )
-                size1 = await asyncio.to_thread(
-                    lambda: len(json_dumps(content1).encode("utf-8"))
+                title1, content1, size1 = await build_month_page_content(
+                    db,
+                    month,
+                    first,
+                    [],
+                    nav_pages,
+                    continuation_url=page.url2,
                 )
                 logging.debug("first page size=%d", size1)
                 if not page.path:
@@ -4722,11 +4762,8 @@ async def sync_month_page(db: Database, month: str, update_links: bool = False):
                 await session.commit()
 
             logging.info("building month page for %s", month)
-            title, content = await build_month_page_content(
+            title, content, size = await build_month_page_content(
                 db, month, events, exhibitions, nav_pages
-            )
-            size = await asyncio.to_thread(
-                lambda: len(json_dumps(content).encode("utf-8"))
             )
             logging.debug("full page size=%d", size)
 
@@ -4790,7 +4827,9 @@ def next_weekend_start(d: date) -> date:
     return d + timedelta(days=days_ahead)
 
 
-async def build_weekend_page_content(db: Database, start: str) -> tuple[str, list]:
+async def build_weekend_page_content(
+    db: Database, start: str, size_limit: int | None = None
+) -> tuple[str, list, int]:
     saturday = date.fromisoformat(start)
     sunday = saturday + timedelta(days=1)
     days = [saturday, sunday]
@@ -4843,7 +4882,24 @@ async def build_weekend_page_content(db: Database, start: str) -> tuple[str, lis
         by_day.setdefault(d, []).append(e)
 
     content: list[dict] = []
-    content.append(
+    size = 0
+    exceeded = False
+
+    def add(node: dict):
+        nonlocal size, exceeded
+        size += rough_size((node,))
+        if size_limit is not None and size > size_limit:
+            exceeded = True
+            return
+        content.append(node)
+
+    def add_many(nodes: Iterable[dict]):
+        for n in nodes:
+            if exceeded:
+                break
+            add(n)
+
+    add(
         {
             "tag": "p",
             "children": [
@@ -4859,20 +4915,20 @@ async def build_weekend_page_content(db: Database, start: str) -> tuple[str, lis
     )
 
     for d in days:
-        if d not in by_day:
+        if exceeded or d not in by_day:
             continue
         if d.weekday() == 5:
-            content.append({"tag": "h3", "children": ["🟥🟥🟥 суббота 🟥🟥🟥"]})
+            add({"tag": "h3", "children": ["🟥🟥🟥 суббота 🟥🟥🟥"]})
         elif d.weekday() == 6:
-            content.append({"tag": "h3", "children": ["🟥🟥 воскресенье 🟥🟥"]})
-        content.append(
-            {"tag": "h3", "children": [f"🟥🟥🟥 {format_day_pretty(d)} 🟥🟥🟥"]}
-        )
-        content.append({"tag": "br"})
-        content.append({"tag": "p", "children": ["\u00a0"]})
+            add({"tag": "h3", "children": ["🟥🟥 воскресенье 🟥🟥"]})
+        add({"tag": "h3", "children": [f"🟥🟥🟥 {format_day_pretty(d)} 🟥🟥🟥"]})
+        add({"tag": "br"})
+        add({"tag": "p", "children": ["\u00a0"]})
         for ev in by_day[d]:
+            if exceeded:
+                break
             fest = fest_map.get(ev.festival or "")
-            content.extend(event_to_nodes(ev, fest, fest_icon=True))
+            add_many(event_to_nodes(ev, fest, fest_icon=True))
 
 
     weekend_nav: list[dict] = []
@@ -4891,7 +4947,7 @@ async def build_weekend_page_content(db: Database, start: str) -> tuple[str, lis
             if idx < len(future_weekends) - 1:
                 nav_children.append(" ")
         weekend_nav = [{"tag": "br"}, {"tag": "h4", "children": nav_children}]
-        content.extend(weekend_nav)
+        add_many(weekend_nav)
 
     month_nav: list[dict] = []
     cur_month = start[:7]
@@ -4904,28 +4960,30 @@ async def build_weekend_page_content(db: Database, start: str) -> tuple[str, lis
             if idx < len(future_months) - 1:
                 nav_children.append(" ")
         month_nav = [{"tag": "br"}, {"tag": "h4", "children": nav_children}]
-        content.extend(month_nav)
+        add_many(month_nav)
 
-    if exhibitions:
+    if exhibitions and not exceeded:
         if weekend_nav or month_nav:
-            content.append({"tag": "br"})
-            content.append({"tag": "p", "children": ["\u00a0"]})
-        content.append({"tag": "h3", "children": ["Постоянные выставки"]})
-        content.append({"tag": "br"})
-        content.append({"tag": "p", "children": ["\u00a0"]})
+            add({"tag": "br"})
+            add({"tag": "p", "children": ["\u00a0"]})
+        add({"tag": "h3", "children": ["Постоянные выставки"]})
+        add({"tag": "br"})
+        add({"tag": "p", "children": ["\u00a0"]})
         for ev in exhibitions:
-            content.extend(exhibition_to_nodes(ev))
+            if exceeded:
+                break
+            add_many(exhibition_to_nodes(ev))
 
-    if weekend_nav:
-        content.extend(weekend_nav)
-    if month_nav:
-        content.extend(month_nav)
+    if weekend_nav and not exceeded:
+        add_many(weekend_nav)
+    if month_nav and not exceeded:
+        add_many(month_nav)
 
     title = (
         "Чем заняться на выходных в Калининградской области "
         f"{format_weekend_range(saturday)}"
     )
-    return title, content
+    return title, content, size
 
 
 async def sync_weekend_page(
@@ -4944,7 +5002,7 @@ async def sync_weekend_page(
                 created = False
                 if not page:
                     # Create a placeholder page to obtain path and URL
-                    title, content = await build_weekend_page_content(db, start)
+                    title, content, _ = await build_weekend_page_content(db, start)
                     data = await telegraph_call(tg.create_page, title, content=content)
                     page = WeekendPage(
                         start=start, url=data.get("url"), path=data.get("path")
@@ -4954,7 +5012,7 @@ async def sync_weekend_page(
                     created = True
 
                 # Rebuild content including this page in navigation
-                title, content = await build_weekend_page_content(db, start)
+                title, content, _ = await build_weekend_page_content(db, start)
                 await telegraph_call(
                     tg.edit_page, page.path, title=title, content=content
                 )
