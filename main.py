@@ -35,6 +35,7 @@ from sqlalchemy import update
 from sqlmodel import Field, SQLModel, select
 import aiosqlite
 import gc
+import atexit
 from cachetools import TTLCache
 
 
@@ -126,6 +127,7 @@ CATBOX_ENABLED: bool = False
 VK_PHOTOS_ENABLED: bool = False
 _supabase_client: Client | None = None
 _vk_user_token_bad: str | None = None
+_vk_session: ClientSession | None = None
 
 # Telegraph API rejects pages over ~64&nbsp;kB. Use a slightly lower limit
 # to decide when month pages should be split into two parts.
@@ -672,6 +674,31 @@ async def set_vk_last_added(db: Database, value: str):
     await set_setting_value(db, "vk_last_added", value)
 
 
+async def close_vk_session() -> None:
+    global _vk_session
+    if _vk_session is not None:
+        with contextlib.suppress(Exception):
+            await _vk_session.close()
+        _vk_session = None
+
+
+def _close_vk_session_sync() -> None:
+    try:
+        asyncio.run(close_vk_session())
+    except Exception:
+        pass
+
+
+def get_vk_session() -> ClientSession:
+    global _vk_session
+    if _vk_session is None or _vk_session.closed:
+        connector = TCPConnector(family=socket.AF_INET)
+        timeout = ClientTimeout(total=HTTP_TIMEOUT)
+        _vk_session = ClientSession(connector=connector, timeout=timeout)
+        atexit.register(_close_vk_session_sync)
+    return _vk_session
+
+
 def _vk_user_token() -> str | None:
     """Return user token unless it was previously marked invalid."""
     token = os.getenv("VK_USER_TOKEN")
@@ -701,19 +728,20 @@ async def _vk_api(
         if VK_TOKEN:
             tokens.append(("group", VK_TOKEN))
     last_err: dict | None = None
+    session = get_vk_session()
     for kind, token in tokens:
         params["access_token"] = token
         params["v"] = "5.131"
         logging.info("calling VK API %s using %s token %s", method, kind, token)
-        async with create_ipv4_session(ClientSession) as session:
-            async def _call():
-                async with HTTP_SEMAPHORE:
-                    async with session.post(
-                        f"https://api.vk.com/method/{method}", data=params
-                    ) as resp:
-                        return await resp.json()
 
-            data = await asyncio.wait_for(_call(), HTTP_TIMEOUT)
+        async def _call():
+            async with HTTP_SEMAPHORE:
+                async with session.post(
+                    f"https://api.vk.com/method/{method}", data=params
+                ) as resp:
+                    return await resp.json()
+
+        data = await asyncio.wait_for(_call(), HTTP_TIMEOUT)
         if "error" not in data:
             return data
         last_err = data["error"]
@@ -798,6 +826,7 @@ def get_supabase_client() -> Client | None:
         options = ClientOptions()
         options.httpx_client = httpx.Client(timeout=HTTP_TIMEOUT)
         _supabase_client = create_client(SUPABASE_URL, SUPABASE_KEY, options=options)
+        atexit.register(close_supabase_client)
     return _supabase_client
 
 
@@ -7969,6 +7998,7 @@ def create_app() -> web.Application:
             app["add_event_worker"].cancel()
             with contextlib.suppress(Exception):
                 await app["add_event_worker"]
+        await close_vk_session()
         close_supabase_client()
 
     app.on_startup.append(on_startup)
