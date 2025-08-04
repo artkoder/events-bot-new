@@ -26,7 +26,6 @@ from telegraph import Telegraph, TelegraphException
 from functools import partial, lru_cache
 import asyncio
 import contextlib
-from contextlib import asynccontextmanager
 import html
 from io import BytesIO
 import markdown
@@ -36,7 +35,6 @@ from sqlmodel import Field, SQLModel, select
 import aiosqlite
 import gc
 import atexit
-import lzma
 from cachetools import TTLCache
 
 
@@ -132,6 +130,7 @@ VK_PHOTOS_ENABLED: bool = False
 _supabase_client: Client | None = None
 _vk_user_token_bad: str | None = None
 _vk_session: ClientSession | None = None
+_http_session: ClientSession | None = None
 
 # Telegraph API rejects pages over ~64&nbsp;kB. Use a slightly lower limit
 # to decide when month pages should be split into two parts.
@@ -162,7 +161,7 @@ ICS_POST_TIMEOUT = float(os.getenv("ICS_POST_TIMEOUT", "30"))
 HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "30"))
 
 # Limit concurrent HTTP requests
-HTTP_SEMAPHORE = asyncio.Semaphore(5)
+HTTP_SEMAPHORE = asyncio.Semaphore(2)
 
 # Timeout for OpenAI 4o requests (in seconds)
 FOUR_O_TIMEOUT = float(os.getenv("FOUR_O_TIMEOUT", "60"))
@@ -213,31 +212,6 @@ class IPv4AiohttpSession(AiohttpSession):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._connector_init["family"] = socket.AF_INET
-
-
-@asynccontextmanager
-async def create_ipv4_session(
-    session_cls: type[ClientSession] = ClientSession,
-):
-    """Yield ClientSession that forces IPv4 connections and closes it."""
-    connector = TCPConnector(family=socket.AF_INET)
-    timeout = ClientTimeout(total=HTTP_TIMEOUT)
-    try:
-        session = session_cls(connector=connector, timeout=timeout)
-    except TypeError:
-        try:
-            session = session_cls(timeout=timeout)
-        except TypeError:
-            session = session_cls()
-    try:
-        yield session
-    finally:
-        close = getattr(session, "close", None)
-        if close:
-            if asyncio.iscoroutinefunction(close):
-                await close()
-            else:
-                close()
 
 
 
@@ -703,6 +677,43 @@ def get_vk_session() -> ClientSession:
     return _vk_session
 
 
+async def close_http_session() -> None:
+    global _http_session
+    if _http_session is not None and not getattr(_http_session, "closed", True):
+        close = getattr(_http_session, "close", None)
+        if close:
+            if asyncio.iscoroutinefunction(close):
+                with contextlib.suppress(Exception):
+                    await close()
+            else:
+                with contextlib.suppress(Exception):
+                    close()
+        _http_session = None
+
+
+def _close_http_session_sync() -> None:
+    try:
+        asyncio.run(close_http_session())
+    except Exception:
+        pass
+
+
+def get_http_session() -> ClientSession:
+    global _http_session
+    if _http_session is None or getattr(_http_session, "closed", True):
+        connector = TCPConnector(family=socket.AF_INET)
+        timeout = ClientTimeout(total=HTTP_TIMEOUT)
+        try:
+            _http_session = ClientSession(connector=connector, timeout=timeout)
+        except TypeError:
+            try:
+                _http_session = ClientSession(timeout=timeout)
+            except TypeError:
+                _http_session = ClientSession()
+        atexit.register(_close_http_session_sync)
+    return _http_session
+
+
 def _vk_user_token() -> str | None:
     """Return user token unless it was previously marked invalid."""
     token = os.getenv("VK_USER_TOKEN")
@@ -781,30 +792,30 @@ async def upload_vk_photo(
             token=token,
         )
         upload_url = data["response"]["upload_url"]
-        async with create_ipv4_session(ClientSession) as session:
-            async def _download():
-                async with HTTP_SEMAPHORE:
-                    async with session.get(url) as resp:
-                        return await resp.read()
+        session = get_http_session()
+        async def _download():
+            async with HTTP_SEMAPHORE:
+                async with session.get(url) as resp:
+                    return await resp.read()
 
-            img_bytes = await asyncio.wait_for(_download(), HTTP_TIMEOUT)
-            form = FormData()
-            ctype = "image/jpeg"
-            kind = imghdr.what(None, img_bytes)
-            if kind:
-                ctype = f"image/{kind}"
-            form.add_field(
-                "photo",
-                img_bytes,
-                filename="image.jpg",
-                content_type=ctype,
-            )
-            async def _upload():
-                async with HTTP_SEMAPHORE:
-                    async with session.post(upload_url, data=form) as up:
-                        return await up.json()
+        img_bytes = await asyncio.wait_for(_download(), HTTP_TIMEOUT)
+        form = FormData()
+        ctype = "image/jpeg"
+        kind = imghdr.what(None, img_bytes)
+        if kind:
+            ctype = f"image/{kind}"
+        form.add_field(
+            "photo",
+            img_bytes,
+            filename="image.jpg",
+            content_type=ctype,
+        )
+        async def _upload():
+            async with HTTP_SEMAPHORE:
+                async with session.post(upload_url, data=form) as up:
+                    return await up.json()
 
-            upload_result = await asyncio.wait_for(_upload(), HTTP_TIMEOUT)
+        upload_result = await asyncio.wait_for(_upload(), HTTP_TIMEOUT)
         save = await _vk_api(
             "photos.saveWallPhoto",
             {
@@ -1048,45 +1059,45 @@ async def upload_to_catbox(images: list[tuple[bytes, str]]) -> tuple[list[str], 
     catbox_urls: list[str] = []
     catbox_msg = ""
     if CATBOX_ENABLED and images:
-        async with create_ipv4_session(ClientSession) as session:
-            for data, name in images[:3]:
-                if len(data) > 5 * 1024 * 1024:
-                    logging.warning("catbox skip %s: too large", name)
-                    catbox_msg += f"{name}: too large; "
-                    continue
-                if not imghdr.what(None, data):
-                    logging.warning("catbox skip %s: not image", name)
-                    catbox_msg += f"{name}: not image; "
-                    continue
-                try:
-                    form = FormData()
-                    form.add_field("reqtype", "fileupload")
-                    form.add_field("fileToUpload", data, filename=name)
-                    async def _upload():
-                        nonlocal catbox_msg
-                        async with HTTP_SEMAPHORE:
-                            async with session.post(
-                                "https://catbox.moe/user/api.php", data=form
-                            ) as resp:
-                                text_r = await resp.text()
-                                if resp.status == 200 and text_r.startswith("http"):
-                                    url = text_r.strip()
-                                    catbox_urls.append(url)
-                                    catbox_msg += "ok; "
-                                    logging.info("catbox uploaded %s", url)
-                                else:
-                                    catbox_msg += f"{name}: err {resp.status}; "
-                                    logging.error(
-                                        "catbox upload failed %s: %s %s",
-                                        name,
-                                        resp.status,
-                                        text_r,
-                                    )
+        session = get_http_session()
+        for data, name in images[:3]:
+            if len(data) > 5 * 1024 * 1024:
+                logging.warning("catbox skip %s: too large", name)
+                catbox_msg += f"{name}: too large; "
+                continue
+            if not imghdr.what(None, data):
+                logging.warning("catbox skip %s: not image", name)
+                catbox_msg += f"{name}: not image; "
+                continue
+            try:
+                form = FormData()
+                form.add_field("reqtype", "fileupload")
+                form.add_field("fileToUpload", data, filename=name)
+                async def _upload():
+                    nonlocal catbox_msg
+                    async with HTTP_SEMAPHORE:
+                        async with session.post(
+                            "https://catbox.moe/user/api.php", data=form
+                        ) as resp:
+                            text_r = await resp.text()
+                            if resp.status == 200 and text_r.startswith("http"):
+                                url = text_r.strip()
+                                catbox_urls.append(url)
+                                catbox_msg += "ok; "
+                                logging.info("catbox uploaded %s", url)
+                            else:
+                                catbox_msg += f"{name}: err {resp.status}; "
+                                logging.error(
+                                    "catbox upload failed %s: %s %s",
+                                    name,
+                                    resp.status,
+                                    text_r,
+                                )
 
-                    await asyncio.wait_for(_upload(), HTTP_TIMEOUT)
-                except Exception as e:
-                    catbox_msg += f"{name}: {e}; "
-                    logging.error("catbox error %s: %s", name, e)
+                await asyncio.wait_for(_upload(), HTTP_TIMEOUT)
+            except Exception as e:
+                catbox_msg += f"{name}: {e}; "
+                logging.error("catbox error %s: %s", name, e)
         catbox_msg = catbox_msg.strip("; ")
     elif images:
         catbox_msg = "disabled"
@@ -1705,8 +1716,8 @@ async def remove_calendar_button(event: Event, bot: Bot):
         logging.error("failed to remove calendar button: %s", e)
 
 
-@lru_cache(maxsize=8)
-def _prompt_cache(festival_key: tuple[str, ...] | None) -> bytes:
+@lru_cache()
+def _read_base_prompt() -> str:
     prompt_path = os.path.join("docs", "PROMPTS.md")
     with open(prompt_path, "r", encoding="utf-8") as f:
         prompt = f.read()
@@ -1718,14 +1729,20 @@ def _prompt_cache(festival_key: tuple[str, ...] | None) -> bytes:
             ]
         if locations:
             prompt += "\nKnown venues:\n" + "\n".join(locations)
+    return prompt
+
+
+@lru_cache(maxsize=2)
+def _prompt_cache(festival_key: tuple[str, ...] | None) -> str:
+    txt = _read_base_prompt()
     if festival_key:
-        prompt += "\nKnown festivals:\n" + "\n".join(festival_key)
-    return lzma.compress(prompt.encode("utf-8"))
+        txt += "\nKnown festivals:\n" + "\n".join(festival_key)
+    return txt
 
 
 def _build_prompt(festival_names: list[str] | None) -> str:
     key = tuple(sorted(festival_names)) if festival_names else None
-    return lzma.decompress(_prompt_cache(key)).decode("utf-8")
+    return _prompt_cache(key)
 
 
 async def parse_event_via_4o(
@@ -1762,14 +1779,14 @@ async def parse_event_via_4o(
     # ensure we start the network request with as little memory as possible
     gc.collect()
     logging.info("Sending 4o parse request to %s", url)
-    async with create_ipv4_session(ClientSession) as session:
-        async def _call():
-            async with HTTP_SEMAPHORE:
-                resp = await session.post(url, json=payload, headers=headers)
-                resp.raise_for_status()
-                return await resp.json()
+    session = get_http_session()
+    async def _call():
+        async with HTTP_SEMAPHORE:
+            resp = await session.post(url, json=payload, headers=headers)
+            resp.raise_for_status()
+            return await resp.json()
 
-        data_raw = await asyncio.wait_for(_call(), FOUR_O_TIMEOUT)
+    data_raw = await asyncio.wait_for(_call(), FOUR_O_TIMEOUT)
     content = (
         data_raw.get("choices", [{}])[0]
         .get("message", {})
@@ -1814,16 +1831,19 @@ async def ask_4o(text: str) -> str:
         "temperature": 0,
     }
     logging.info("Sending 4o ask request to %s", url)
-    async with create_ipv4_session(ClientSession) as session:
-        async def _call():
-            async with HTTP_SEMAPHORE:
-                resp = await session.post(url, json=payload, headers=headers)
-                resp.raise_for_status()
-                return await resp.json()
+    session = get_http_session()
+    async def _call():
+        async with HTTP_SEMAPHORE:
+            resp = await session.post(url, json=payload, headers=headers)
+            resp.raise_for_status()
+            return await resp.json()
 
-        data = await asyncio.wait_for(_call(), FOUR_O_TIMEOUT)
+    data = await asyncio.wait_for(_call(), FOUR_O_TIMEOUT)
     logging.debug("4o response: %s", data)
-    return data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+    content = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+    del data
+    gc.collect()
+    return content
 
 
 async def check_duplicate_via_4o(ev: Event, new: Event) -> Tuple[bool, str, str]:
