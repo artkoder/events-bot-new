@@ -188,6 +188,9 @@ add_event_sessions: TTLCache[int, bool] = TTLCache(maxsize=256, ttl=3600)
 # waiting for a date for events listing
 events_date_sessions: TTLCache[int, bool] = TTLCache(maxsize=256, ttl=3600)
 
+# cache for settings values to reduce DB hits
+settings_cache: TTLCache[str, str | None] = TTLCache(maxsize=128, ttl=300)
+
 # queue for background event processing
 # limit the queue to avoid unbounded growth if parsing slows down
 add_event_queue: asyncio.Queue[tuple[str, types.Message, bool]] = asyncio.Queue(
@@ -421,10 +424,13 @@ class Festival(SQLModel, table=True):
 
 class Database:
     def __init__(self, path: str):
-        """Initialize async engine with increased busy timeout."""
+        """Initialize async engine with WAL and connection pooling."""
         self.engine = create_async_engine(
             f"sqlite+aiosqlite:///{path}",
-            connect_args={"timeout": 30},
+            pool_size=5,
+            max_overflow=0,
+            connect_args={"timeout": 30, "isolation_level": None},
+            pool_pre_ping=True,
         )
 
     async def init(self):
@@ -677,9 +683,14 @@ async def set_vk_photos_enabled(db: Database, value: bool):
 
 
 async def get_setting_value(db: Database, key: str) -> str | None:
+    cached = settings_cache.get(key)
+    if cached is not None or key in settings_cache:
+        return cached
     async with db.get_session() as session:
         setting = await session.get(Setting, key)
-        return setting.value if setting else None
+        value = setting.value if setting else None
+    settings_cache[key] = value
+    return value
 
 
 async def set_setting_value(db: Database, key: str, value: str | None):
@@ -694,6 +705,10 @@ async def set_setting_value(db: Database, key: str, value: str | None):
             setting = Setting(key=key, value=value)
             session.add(setting)
         await session.commit()
+    if value is None:
+        settings_cache.pop(key, None)
+    else:
+        settings_cache[key] = value
 
 
 async def get_vk_group_id(db: Database) -> str | None:
