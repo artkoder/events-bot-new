@@ -27,6 +27,7 @@ from telegraph.api import json_dumps
 from functools import partial
 import asyncio
 import contextlib
+from contextlib import asynccontextmanager
 import html
 from io import BytesIO
 import markdown
@@ -36,7 +37,11 @@ from sqlmodel import Field, SQLModel, select
 import aiosqlite
 import gc
 
-logging.basicConfig(level=logging.INFO)
+
+def setup_logging() -> None:
+    if not logging.getLogger().handlers:
+        logging.basicConfig(level=logging.INFO)
+
 
 _weekend_page_locks: dict[str, asyncio.Lock] = {}
 _weekend_vk_locks: dict[str, asyncio.Lock] = {}
@@ -129,6 +134,9 @@ ICS_POST_TIMEOUT = float(os.getenv("ICS_POST_TIMEOUT", "30"))
 # Timeout for general HTTP requests (in seconds)
 HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "30"))
 
+# Limit concurrent HTTP requests
+HTTP_SEMAPHORE = asyncio.Semaphore(5)
+
 # Timeout for OpenAI 4o requests (in seconds)
 FOUR_O_TIMEOUT = float(os.getenv("FOUR_O_TIMEOUT", "60"))
 
@@ -162,6 +170,11 @@ async def telegraph_call(func, /, *args, retries: int = 3, **kwargs):
         raise TelegraphException("Telegraph request failed") from last_exc
 
 
+def seconds_to_next_minute(now: datetime) -> float:
+    next_minute = (now.replace(second=0, microsecond=0) + timedelta(minutes=1))
+    return (next_minute - now).total_seconds()
+
+
 # main menu buttons
 MENU_ADD_EVENT = "\u2795 Добавить событие"
 MENU_EVENTS = "\U0001f4c5 События"
@@ -175,17 +188,29 @@ class IPv4AiohttpSession(AiohttpSession):
         self._connector_init["family"] = socket.AF_INET
 
 
-def create_ipv4_session(session_cls: type[ClientSession] = ClientSession) -> ClientSession:
-    """Return ClientSession that forces IPv4 connections."""
+@asynccontextmanager
+async def create_ipv4_session(
+    session_cls: type[ClientSession] = ClientSession,
+):
+    """Yield ClientSession that forces IPv4 connections and closes it."""
     connector = TCPConnector(family=socket.AF_INET)
     timeout = ClientTimeout(total=HTTP_TIMEOUT)
     try:
-        return session_cls(connector=connector, timeout=timeout)
+        session = session_cls(connector=connector, timeout=timeout)
     except TypeError:
         try:
-            return session_cls(timeout=timeout)
+            session = session_cls(timeout=timeout)
         except TypeError:
-            return session_cls()
+            session = session_cls()
+    try:
+        yield session
+    finally:
+        close = getattr(session, "close", None)
+        if close:
+            if asyncio.iscoroutinefunction(close):
+                await close()
+            else:
+                close()
 
 
 
@@ -661,10 +686,11 @@ async def _vk_api(
         logging.info("calling VK API %s using %s token %s", method, kind, token)
         async with create_ipv4_session(ClientSession) as session:
             async def _call():
-                async with session.post(
-                    f"https://api.vk.com/method/{method}", data=params
-                ) as resp:
-                    return await resp.json()
+                async with HTTP_SEMAPHORE:
+                    async with session.post(
+                        f"https://api.vk.com/method/{method}", data=params
+                    ) as resp:
+                        return await resp.json()
 
             data = await asyncio.wait_for(_call(), HTTP_TIMEOUT)
         if "error" not in data:
@@ -704,8 +730,9 @@ async def upload_vk_photo(
         upload_url = data["response"]["upload_url"]
         async with create_ipv4_session(ClientSession) as session:
             async def _download():
-                async with session.get(url) as resp:
-                    return await resp.read()
+                async with HTTP_SEMAPHORE:
+                    async with session.get(url) as resp:
+                        return await resp.read()
 
             img_bytes = await asyncio.wait_for(_download(), HTTP_TIMEOUT)
             form = FormData()
@@ -720,8 +747,9 @@ async def upload_vk_photo(
                 content_type=ctype,
             )
             async def _upload():
-                async with session.post(upload_url, data=form) as up:
-                    return await up.json()
+                async with HTTP_SEMAPHORE:
+                    async with session.post(upload_url, data=form) as up:
+                        return await up.json()
 
             upload_result = await asyncio.wait_for(_upload(), HTTP_TIMEOUT)
         save = await _vk_api(
@@ -750,6 +778,14 @@ def get_supabase_client() -> Client | None:
         options.httpx_client = httpx.Client(timeout=HTTP_TIMEOUT)
         _supabase_client = create_client(SUPABASE_URL, SUPABASE_KEY, options=options)
     return _supabase_client
+
+
+def close_supabase_client() -> None:
+    global _supabase_client
+    if _supabase_client is not None:
+        with contextlib.suppress(Exception):
+            _supabase_client.postgrest.session.close()
+        _supabase_client = None
 
 
 async def get_festival(db: Database, name: str) -> Festival | None:
@@ -974,23 +1010,24 @@ async def upload_to_catbox(images: list[tuple[bytes, str]]) -> tuple[list[str], 
                     form.add_field("fileToUpload", data, filename=name)
                     async def _upload():
                         nonlocal catbox_msg
-                        async with session.post(
-                            "https://catbox.moe/user/api.php", data=form
-                        ) as resp:
-                            text_r = await resp.text()
-                            if resp.status == 200 and text_r.startswith("http"):
-                                url = text_r.strip()
-                                catbox_urls.append(url)
-                                catbox_msg += "ok; "
-                                logging.info("catbox uploaded %s", url)
-                            else:
-                                catbox_msg += f"{name}: err {resp.status}; "
-                                logging.error(
-                                    "catbox upload failed %s: %s %s",
-                                    name,
-                                    resp.status,
-                                    text_r,
-                                )
+                        async with HTTP_SEMAPHORE:
+                            async with session.post(
+                                "https://catbox.moe/user/api.php", data=form
+                            ) as resp:
+                                text_r = await resp.text()
+                                if resp.status == 200 and text_r.startswith("http"):
+                                    url = text_r.strip()
+                                    catbox_urls.append(url)
+                                    catbox_msg += "ok; "
+                                    logging.info("catbox uploaded %s", url)
+                                else:
+                                    catbox_msg += f"{name}: err {resp.status}; "
+                                    logging.error(
+                                        "catbox upload failed %s: %s %s",
+                                        name,
+                                        resp.status,
+                                        text_r,
+                                    )
 
                     await asyncio.wait_for(_upload(), HTTP_TIMEOUT)
                 except Exception as e:
@@ -1484,7 +1521,9 @@ async def upload_ics(event: Event, db: Database) -> str | None:
         path = f"Event-{event.id}.ics"
     try:
         logging.info("Uploading ICS to %s/%s", SUPABASE_BUCKET, path)
-        client.storage.from_(SUPABASE_BUCKET).upload(
+        storage = client.storage.from_(SUPABASE_BUCKET)
+        await asyncio.to_thread(
+            storage.upload,
             path,
             content.encode("utf-8"),
             {
@@ -1493,7 +1532,7 @@ async def upload_ics(event: Event, db: Database) -> str | None:
                 "upsert": "true",
             },
         )
-        url = client.storage.from_(SUPABASE_BUCKET).get_public_url(path)
+        url = await asyncio.to_thread(storage.get_public_url, path)
         logging.info("ICS uploaded: %s", url)
     except Exception as e:
         logging.error("Failed to upload ics: %s", e)
@@ -1573,7 +1612,8 @@ async def delete_ics(event: Event):
     path = event.ics_url.split("/")[-1]
     try:
         logging.info("Deleting ICS %s from %s", path, SUPABASE_BUCKET)
-        client.storage.from_(SUPABASE_BUCKET).remove([path])
+        storage = client.storage.from_(SUPABASE_BUCKET)
+        await asyncio.to_thread(storage.remove, [path])
     except Exception as e:
         logging.error("Failed to delete ics: %s", e)
 
@@ -1657,9 +1697,10 @@ async def parse_event_via_4o(
     logging.info("Sending 4o parse request to %s", url)
     async with create_ipv4_session(ClientSession) as session:
         async def _call():
-            resp = await session.post(url, json=payload, headers=headers)
-            resp.raise_for_status()
-            return await resp.json()
+            async with HTTP_SEMAPHORE:
+                resp = await session.post(url, json=payload, headers=headers)
+                resp.raise_for_status()
+                return await resp.json()
 
         data_raw = await asyncio.wait_for(_call(), FOUR_O_TIMEOUT)
     content = (
@@ -1707,9 +1748,10 @@ async def ask_4o(text: str) -> str:
     logging.info("Sending 4o ask request to %s", url)
     async with create_ipv4_session(ClientSession) as session:
         async def _call():
-            resp = await session.post(url, json=payload, headers=headers)
-            resp.raise_for_status()
-            return await resp.json()
+            async with HTTP_SEMAPHORE:
+                resp = await session.post(url, json=payload, headers=headers)
+                resp.raise_for_status()
+                return await resp.json()
 
         data = await asyncio.wait_for(_call(), FOUR_O_TIMEOUT)
     logging.debug("4o response: %s", data)
@@ -3794,7 +3836,9 @@ async def add_event_queue_worker(db: Database, bot: Bot):
                 logging.error("add_event_queue_worker error: %s", e)
             finally:
                 add_event_queue.task_done()
-        await asyncio.sleep(60)
+        await asyncio.sleep(
+            seconds_to_next_minute(datetime.now(timezone.utc))
+        )
 
 
 def format_day(day: date, tz: timezone) -> str:
@@ -4542,7 +4586,25 @@ async def build_month_page_content(
         res_f = await session.execute(select(Festival))
         fest_map = {f.name: f for f in res_f.scalars().all()}
 
+    return await asyncio.to_thread(
+        _build_month_page_content_sync,
+        month,
+        events,
+        exhibitions,
+        nav_pages,
+        fest_map,
+        continuation_url,
+    )
 
+
+def _build_month_page_content_sync(
+    month: str,
+    events: list[Event],
+    exhibitions: list[Event],
+    nav_pages: list[MonthPage],
+    fest_map: dict[str, Festival],
+    continuation_url: str | None,
+) -> tuple[str, list]:
     today = datetime.now(LOCAL_TZ).date()
     cutoff = (today - timedelta(days=30)).isoformat()
 
@@ -4552,17 +4614,9 @@ async def build_month_page_content(
 
     today_str = today.isoformat()
     events = [
-        e
-        for e in events
-        if not (e.event_type == "выставка" and e.date < today_str)
+        e for e in events if not (e.event_type == "выставка" and e.date < today_str)
     ]
-    exhibitions = [
-        e for e in exhibitions if e.end_date and e.date <= today_str
-    ]
-
-    async with db.get_session() as session:
-        res_f = await session.execute(select(Festival))
-        fest_map = {f.name: f for f in res_f.scalars().all()}
+    exhibitions = [e for e in exhibitions if e.end_date and e.date <= today_str]
 
     by_day: dict[date, list[Event]] = {}
     for e in events:
@@ -4574,7 +4628,9 @@ async def build_month_page_content(
         by_day.setdefault(d, []).append(e)
 
     content: list[dict] = []
-    intro = f"Планируйте свой месяц заранее: интересные мероприятия Калининграда и 39 региона в {month_name_prepositional(month)} — от лекций и концертов до культурных шоу. "
+    intro = (
+        f"Планируйте свой месяц заранее: интересные мероприятия Калининграда и 39 региона в {month_name_prepositional(month)} — от лекций и концертов до культурных шоу. "
+    )
     intro_nodes = [
         intro,
         {
@@ -4590,15 +4646,12 @@ async def build_month_page_content(
             content.append({"tag": "h3", "children": ["🟥🟥🟥 суббота 🟥🟥🟥"]})
         elif day.weekday() == 6:
             content.append({"tag": "h3", "children": ["🟥🟥 воскресенье 🟥🟥"]})
-        content.append(
-            {"tag": "h3", "children": [f"🟥🟥🟥 {format_day_pretty(day)} 🟥🟥🟥"]}
-        )
+        content.append({"tag": "h3", "children": [f"🟥🟥🟥 {format_day_pretty(day)} 🟥🟥🟥"]})
         content.append({"tag": "br"})
         content.append({"tag": "p", "children": ["\u00a0"]})
         for ev in by_day[day]:
             fest = fest_map.get(ev.festival or "")
             content.extend(event_to_nodes(ev, fest, fest_icon=True))
-
 
     future_pages = [p for p in nav_pages if p.month >= month]
     month_nav: list[dict] = []
@@ -4650,7 +4703,9 @@ async def build_month_page_content(
             }
         )
 
-    title = f"События Калининграда в {month_name_prepositional(month)}: полный анонс от Полюбить Калининград Анонсы"
+    title = (
+        f"События Калининграда в {month_name_prepositional(month)}: полный анонс от Полюбить Калининград Анонсы"
+    )
     return title, content
 
 
@@ -4693,7 +4748,9 @@ async def sync_month_page(db: Database, month: str, update_links: bool = False):
                     _, c = await build_month_page_content(
                         db, month, events[:mid], exhibitions, nav_pages
                     )
-                    size_mid = len(json_dumps(c).encode("utf-8"))
+                    size_mid = await asyncio.to_thread(
+                        lambda: len(json_dumps(c).encode("utf-8"))
+                    )
                     logging.debug(
                         "split_and_update mid=%d size=%d limit=%d",
                         mid,
@@ -4715,7 +4772,9 @@ async def sync_month_page(db: Database, month: str, update_links: bool = False):
                 title2, content2 = await build_month_page_content(
                     db, month, second, exhibitions, nav_pages
                 )
-                size2 = len(json_dumps(content2).encode("utf-8"))
+                size2 = await asyncio.to_thread(
+                    lambda: len(json_dumps(content2).encode("utf-8"))
+                )
                 logging.debug("second page size=%d", size2)
                 if not page.path2:
                     logging.info("creating second page for %s", month)
@@ -4731,7 +4790,9 @@ async def sync_month_page(db: Database, month: str, update_links: bool = False):
                 title1, content1 = await build_month_page_content(
                     db, month, first, [], nav_pages, continuation_url=page.url2
                 )
-                size1 = len(json_dumps(content1).encode("utf-8"))
+                size1 = await asyncio.to_thread(
+                    lambda: len(json_dumps(content1).encode("utf-8"))
+                )
                 logging.debug("first page size=%d", size1)
                 if not page.path:
                     logging.info("creating first page for %s", month)
@@ -4752,7 +4813,9 @@ async def sync_month_page(db: Database, month: str, update_links: bool = False):
             title, content = await build_month_page_content(
                 db, month, events, exhibitions, nav_pages
             )
-            size = len(json_dumps(content).encode("utf-8"))
+            size = await asyncio.to_thread(
+                lambda: len(json_dumps(content).encode("utf-8"))
+            )
             logging.debug("full page size=%d", size)
 
             try:
@@ -6137,20 +6200,20 @@ async def daily_scheduler(db: Database, bot: Bot):
                     await send_daily_announcement(db, bot, ch.channel_id, tz)
                 except Exception as e:
                     logging.error("daily send failed for %s: %s", ch.channel_id, e)
-        await asyncio.sleep(60)
+        await asyncio.sleep(seconds_to_next_minute(datetime.now(tz)))
 
 
 async def vk_scheduler(db: Database, bot: Bot):
     if not (VK_TOKEN or os.getenv("VK_USER_TOKEN")):
         return
     while True:
-        group_id = await get_vk_group_id(db)
-        if not group_id:
-            await asyncio.sleep(60)
-            continue
         offset = await get_tz_offset(db)
         tz = offset_to_timezone(offset)
         now = datetime.now(tz)
+        group_id = await get_vk_group_id(db)
+        if not group_id:
+            await asyncio.sleep(seconds_to_next_minute(now))
+            continue
         now_time = now.time().replace(second=0, microsecond=0)
         today_time = datetime.strptime(await get_vk_time_today(db), "%H:%M").time()
         added_time = datetime.strptime(await get_vk_time_added(db), "%H:%M").time()
@@ -6171,7 +6234,7 @@ async def vk_scheduler(db: Database, bot: Bot):
             except Exception as e:
                 logging.error("vk daily added failed: %s", e)
 
-        await asyncio.sleep(60)
+        await asyncio.sleep(seconds_to_next_minute(datetime.now(tz)))
 
 
 async def cleanup_old_events(db: Database, bot: Bot | None = None) -> int:
@@ -6225,7 +6288,7 @@ async def cleanup_scheduler(db: Database, bot: Bot):
                 logging.error("cleanup failed: %s", e)
                 await notify_superadmin(db, bot, f"Cleanup failed: {e}")
             last_run = now.date()
-        await asyncio.sleep(60)
+        await asyncio.sleep(seconds_to_next_minute(datetime.now(tz)))
 
 
 async def page_update_scheduler(db: Database):
@@ -6256,7 +6319,7 @@ async def page_update_scheduler(db: Database):
             except Exception as e:
                 logging.error("page update failed: %s", e)
             last_run = now.date()
-        await asyncio.sleep(60)
+        await asyncio.sleep(seconds_to_next_minute(datetime.now(tz)))
 
 
 async def partner_notification_scheduler(db: Database, bot: Bot):
@@ -6283,20 +6346,20 @@ async def partner_notification_scheduler(db: Database, bot: Bot):
                 logging.error("partner reminder failed: %s", e)
                 await notify_superadmin(db, bot, f"Partner reminder failed: {e}")
             last_run = now.date()
-        await asyncio.sleep(60)
+        await asyncio.sleep(seconds_to_next_minute(datetime.now(tz)))
 
 
 async def vk_poll_scheduler(db: Database, bot: Bot):
     if not (VK_TOKEN or os.getenv("VK_USER_TOKEN")):
         return
     while True:
-        group_id = await get_vk_group_id(db)
-        if not group_id:
-            await asyncio.sleep(60)
-            continue
         offset = await get_tz_offset(db)
         tz = offset_to_timezone(offset)
         now = datetime.now(tz)
+        group_id = await get_vk_group_id(db)
+        if not group_id:
+            await asyncio.sleep(seconds_to_next_minute(now))
+            continue
         async with db.get_session() as session:
             res_f = await session.execute(select(Festival))
             festivals = res_f.scalars().all()
@@ -6334,7 +6397,7 @@ async def vk_poll_scheduler(db: Database, bot: Bot):
                     await send_festival_poll(db, fest, group_id, bot)
                 except Exception as e:
                     logging.error("VK poll send failed for %s: %s", fest.name, e)
-        await asyncio.sleep(60)
+        await asyncio.sleep(seconds_to_next_minute(datetime.now(tz)))
 
 
 async def build_events_message(db: Database, target_date: date, tz: timezone, creator_id: int | None = None):
@@ -7648,6 +7711,7 @@ async def create_source_page(
 
 
 def create_app() -> web.Application:
+    setup_logging()
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is missing")
@@ -7935,6 +7999,7 @@ def create_app() -> web.Application:
             app["add_event_worker"].cancel()
             with contextlib.suppress(Exception):
                 await app["add_event_worker"]
+        close_supabase_client()
 
     app.on_startup.append(on_startup)
     app.on_shutdown.append(on_shutdown)
@@ -7943,7 +8008,7 @@ def create_app() -> web.Application:
 
 if __name__ == "__main__":
     import sys
-
+    setup_logging()
     if len(sys.argv) > 1 and sys.argv[1] == "test_telegraph":
         asyncio.run(telegraph_test())
     else:
