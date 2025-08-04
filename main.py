@@ -24,7 +24,7 @@ import httpx
 from telegraph import Telegraph, TelegraphException
 
 from telegraph.api import json_dumps
-from functools import partial
+from functools import partial, lru_cache
 import asyncio
 import contextlib
 from contextlib import asynccontextmanager
@@ -36,6 +36,7 @@ from sqlalchemy import update
 from sqlmodel import Field, SQLModel, select
 import aiosqlite
 import gc
+from cachetools import TTLCache
 
 
 def setup_logging() -> None:
@@ -43,8 +44,14 @@ def setup_logging() -> None:
         logging.basicConfig(level=logging.INFO)
 
 
-_weekend_page_locks: dict[str, asyncio.Lock] = {}
-_weekend_vk_locks: dict[str, asyncio.Lock] = {}
+@lru_cache(maxsize=20)
+def _weekend_page_lock(start: str) -> asyncio.Lock:
+    return asyncio.Lock()
+
+
+@lru_cache(maxsize=20)
+def _weekend_vk_lock(start: str) -> asyncio.Lock:
+    return asyncio.Lock()
 
 DB_PATH = os.getenv("DB_PATH", "/data/db.sqlite")
 TELEGRAPH_TOKEN_FILE = os.getenv("TELEGRAPH_TOKEN_FILE", "/data/telegraph_token.txt")
@@ -93,23 +100,23 @@ VK_POLL_OPTIONS = ["Пойду", "Подумаю", "Нет"]
 
 
 # user_id -> (event_id, field?) for editing session
-editing_sessions: dict[int, tuple[int, str | None]] = {}
+editing_sessions: TTLCache[int, tuple[int, str | None]] = TTLCache(maxsize=256, ttl=3600)
 # user_id -> channel_id for daily time editing
-daily_time_sessions: dict[int, int] = {}
+daily_time_sessions: TTLCache[int, int] = TTLCache(maxsize=256, ttl=3600)
 # waiting for VK group ID input
 vk_group_sessions: set[int] = set()
 # user_id -> section (today/added) for VK time update
-vk_time_sessions: dict[int, str] = {}
+vk_time_sessions: TTLCache[int, str] = TTLCache(maxsize=256, ttl=3600)
 
 # superadmin user_id -> pending partner user_id
-partner_info_sessions: dict[int, int] = {}
+partner_info_sessions: TTLCache[int, int] = TTLCache(maxsize=256, ttl=3600)
 # user_id -> (festival_id, field?) for festival editing
-festival_edit_sessions: dict[int, tuple[int, str | None]] = {}
+festival_edit_sessions: TTLCache[int, tuple[int, str | None]] = TTLCache(maxsize=256, ttl=3600)
 
 # pending event text/photo input
-add_event_sessions: set[int] = set()
+add_event_sessions: TTLCache[int, bool] = TTLCache(maxsize=256, ttl=3600)
 # waiting for a date for events listing
-events_date_sessions: set[int] = set()
+events_date_sessions: TTLCache[int, bool] = TTLCache(maxsize=256, ttl=3600)
 
 # queue for background event processing
 add_event_queue: asyncio.Queue[tuple[str, types.Message, bool]] = asyncio.Queue()
@@ -1874,7 +1881,7 @@ async def handle_events_date_message(message: types.Message, db: Database, bot: 
     if not day:
         await bot.send_message(message.chat.id, "Неверная дата")
         return
-    events_date_sessions.discard(message.from_user.id)
+    events_date_sessions.pop(message.from_user.id, None)
     async with db.get_session() as session:
         user = await session.get(User, message.from_user.id)
         if not user or user.blocked:
@@ -2531,7 +2538,7 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
         await callback.message.answer(text, reply_markup=markup)
         await callback.answer()
     elif data == "menuevt:date":
-        events_date_sessions.add(callback.from_user.id)
+        events_date_sessions[callback.from_user.id] = True
         await callback.message.answer("Введите дату")
         await callback.answer()
 
@@ -3799,7 +3806,7 @@ async def enqueue_add_event(message: types.Message, db: Database, bot: Bot):
     """Queue an event addition for background processing."""
     using_session = message.from_user.id in add_event_sessions
     if using_session:
-        add_event_sessions.discard(message.from_user.id)
+        add_event_sessions.pop(message.from_user.id, None)
     await add_event_queue.put(("regular", message, using_session))
     logging.info(
         "enqueue_add_event user=%s queue=%d",
@@ -5019,7 +5026,7 @@ async def build_weekend_page_content(db: Database, start: str) -> tuple[str, lis
 async def sync_weekend_page(
     db: Database, start: str, update_links: bool = False, post_vk: bool = True
 ):
-    lock = _weekend_page_locks.setdefault(start, asyncio.Lock())
+    lock = _weekend_page_lock(start)
     async with lock:
         token = get_telegraph_token()
         if not token:
@@ -5131,7 +5138,7 @@ async def build_weekend_vk_message(db: Database, start: str) -> str:
 
 
 async def sync_vk_weekend_post(db: Database, start: str, bot: Bot | None = None) -> None:
-    lock = _weekend_vk_locks.setdefault(start, asyncio.Lock())
+    lock = _weekend_vk_lock(start)
     async with lock:
         logging.info("sync_vk_weekend_post start for %s", start)
         group_id = VK_AFISHA_GROUP_ID
@@ -7134,7 +7141,7 @@ async def handle_add_event_start(message: types.Message, db: Database, bot: Bot)
         if not user or user.blocked:
             await bot.send_message(message.chat.id, "Not authorized")
             return
-    add_event_sessions.add(message.from_user.id)
+    add_event_sessions[message.from_user.id] = True
     logging.info(
         "handle_add_event_start session opened for user %s", message.from_user.id
     )
