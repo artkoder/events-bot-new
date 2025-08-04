@@ -45,6 +45,7 @@ import gc
 import atexit
 from cachetools import TTLCache
 from markup import simple_md_to_html
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 DEBUG = os.getenv("EVBOT_DEBUG") == "1"
 LOG_LVL = logging.DEBUG if DEBUG else logging.INFO
@@ -57,6 +58,11 @@ for noisy in ("aiogram", "httpx"):
 
 _month_lock = asyncio.Lock()
 _month_next_run: float = 0.0
+
+_cleanup_last_run: date | None = None
+_page_last_run: date | None = None
+_page_first_run = True
+_partner_last_run: date | None = None
 
 
 def setup_logging() -> None:
@@ -6375,35 +6381,31 @@ async def daily_scheduler(db: Database, bot: Bot):
 async def vk_scheduler(db: Database, bot: Bot):
     if not (VK_TOKEN or os.getenv("VK_USER_TOKEN")):
         return
-    while True:
-        offset = await get_tz_offset(db)
-        tz = offset_to_timezone(offset)
-        now = datetime.now(tz)
-        group_id = await get_vk_group_id(db)
-        if not group_id:
-            await asyncio.sleep(seconds_to_next_minute(now))
-            continue
-        now_time = now.time().replace(second=0, microsecond=0)
-        today_time = datetime.strptime(await get_vk_time_today(db), "%H:%M").time()
-        added_time = datetime.strptime(await get_vk_time_added(db), "%H:%M").time()
+    offset = await get_tz_offset(db)
+    tz = offset_to_timezone(offset)
+    now = datetime.now(tz)
+    group_id = await get_vk_group_id(db)
+    if not group_id:
+        return
+    now_time = now.time().replace(second=0, microsecond=0)
+    today_time = datetime.strptime(await get_vk_time_today(db), "%H:%M").time()
+    added_time = datetime.strptime(await get_vk_time_added(db), "%H:%M").time()
 
-        last_today = await get_vk_last_today(db)
-        if (last_today or "") != now.date().isoformat() and now_time >= today_time:
-            try:
-                await send_daily_announcement_vk(db, group_id, tz, section="today", bot=bot)
-                await set_vk_last_today(db, now.date().isoformat())
-            except Exception as e:
-                logging.error("vk daily today failed: %s", e)
+    last_today = await get_vk_last_today(db)
+    if (last_today or "") != now.date().isoformat() and now_time >= today_time:
+        try:
+            await send_daily_announcement_vk(db, group_id, tz, section="today", bot=bot)
+            await set_vk_last_today(db, now.date().isoformat())
+        except Exception as e:
+            logging.error("vk daily today failed: %s", e)
 
-        last_added = await get_vk_last_added(db)
-        if (last_added or "") != now.date().isoformat() and now_time >= added_time:
-            try:
-                await send_daily_announcement_vk(db, group_id, tz, section="added", bot=bot)
-                await set_vk_last_added(db, now.date().isoformat())
-            except Exception as e:
-                logging.error("vk daily added failed: %s", e)
-
-        await asyncio.sleep(seconds_to_next_minute(datetime.now(tz)))
+    last_added = await get_vk_last_added(db)
+    if (last_added or "") != now.date().isoformat() and now_time >= added_time:
+        try:
+            await send_daily_announcement_vk(db, group_id, tz, section="added", bot=bot)
+            await set_vk_last_added(db, now.date().isoformat())
+        except Exception as e:
+            logging.error("vk daily added failed: %s", e)
 
 
 async def cleanup_old_events(db: Database, bot: Bot | None = None) -> int:
@@ -6441,24 +6443,22 @@ async def cleanup_old_events(db: Database, bot: Bot | None = None) -> int:
 
 
 async def cleanup_scheduler(db: Database, bot: Bot):
-    last_run: date | None = None
-    while True:
-        offset = await get_tz_offset(db)
-        tz = offset_to_timezone(offset)
-        now = datetime.now(tz)
-        if now.time() >= time(3, 0) and now.date() != last_run:
-            try:
-                count = await cleanup_old_events(db, bot)
-                await notify_superadmin(
-                    db,
-                    bot,
-                    f"Cleanup completed: removed {count} events",
-                )
-            except Exception as e:
-                logging.error("cleanup failed: %s", e)
-                await notify_superadmin(db, bot, f"Cleanup failed: {e}")
-            last_run = now.date()
-        await asyncio.sleep(seconds_to_next_minute(datetime.now(tz)))
+    global _cleanup_last_run
+    offset = await get_tz_offset(db)
+    tz = offset_to_timezone(offset)
+    now = datetime.now(tz)
+    if now.time() >= time(3, 0) and now.date() != _cleanup_last_run:
+        try:
+            count = await cleanup_old_events(db, bot)
+            await notify_superadmin(
+                db,
+                bot,
+                f"Cleanup completed: removed {count} events",
+            )
+        except Exception as e:
+            logging.error("cleanup failed: %s", e)
+            await notify_superadmin(db, bot, f"Cleanup failed: {e}")
+        _cleanup_last_run = now.date()
 
 
 async def page_update_scheduler(db: Database):
@@ -6468,107 +6468,106 @@ async def page_update_scheduler(db: Database):
     first iteration skips syncing if the current time is well past the
     scheduled run window (01:00 local time).
     """
-    last_run: date | None = None
-    first = True
-    while True:
-        offset = await get_tz_offset(db)
-        tz = offset_to_timezone(offset)
-        now = datetime.now(tz)
-        if first:
-            first = False
-            # If the bot starts long after the scheduled time, assume today's
-            # pages are already up to date.
-            if now.time() >= time(2, 0):
-                last_run = now.date()
-        if now.time() >= time(1, 0) and now.date() != last_run:
-            try:
-                await sync_month_page(db, now.strftime("%Y-%m"))
-                w_start = weekend_start_for_date(now.date())
-                if w_start:
-                    await sync_weekend_page(db, w_start.isoformat())
-            except Exception as e:
-                logging.error("page update failed: %s", e)
-            last_run = now.date()
-        await asyncio.sleep(seconds_to_next_minute(datetime.now(tz)))
+    global _page_last_run, _page_first_run
+    offset = await get_tz_offset(db)
+    tz = offset_to_timezone(offset)
+    now = datetime.now(tz)
+    if _page_first_run:
+        _page_first_run = False
+        if now.time() >= time(2, 0):
+            _page_last_run = now.date()
+    if now.time() >= time(1, 0) and now.date() != _page_last_run:
+        try:
+            await sync_month_page(db, now.strftime("%Y-%m"))
+            w_start = weekend_start_for_date(now.date())
+            if w_start:
+                await sync_weekend_page(db, w_start.isoformat())
+        except Exception as e:
+            logging.error("page update failed: %s", e)
+        _page_last_run = now.date()
 
 
 async def partner_notification_scheduler(db: Database, bot: Bot):
     """Remind partners who haven't added events for a week."""
-    last_run: date | None = None
-    while True:
-        offset = await get_tz_offset(db)
-        tz = offset_to_timezone(offset)
-        now = datetime.now(tz)
-        if now.time() >= time(9, 0) and now.date() != last_run:
-            try:
-                async with perf("partner_reminders"):
-                    notified = await notify_inactive_partners(db, bot, tz)
-                if notified:
-                    names = ", ".join(
-                        f"@{u.username}" if u.username else str(u.user_id)
-                        for u in notified
-                    )
-                    await notify_superadmin(
-                        db, bot, f"Partner reminders sent to: {names}"
-                    )
-                else:
-                    await notify_superadmin(db, bot, "Partner reminders: none")
-            except Exception as e:
-                logging.error("partner reminder failed: %s", e)
-                await notify_superadmin(db, bot, f"Partner reminder failed: {e}")
-            last_run = now.date()
-        await asyncio.sleep(seconds_to_next_minute(datetime.now(tz)))
+    global _partner_last_run
+    offset = await get_tz_offset(db)
+    tz = offset_to_timezone(offset)
+    now = datetime.now(tz)
+    if now.time() >= time(9, 0) and now.date() != _partner_last_run:
+        try:
+            async with perf("partner_reminders"):
+                notified = await notify_inactive_partners(db, bot, tz)
+            if notified:
+                names = ", ".join(
+                    f"@{u.username}" if u.username else str(u.user_id)
+                    for u in notified
+                )
+                await notify_superadmin(
+                    db, bot, f"Partner reminders sent to: {names}"
+                )
+            else:
+                await notify_superadmin(db, bot, "Partner reminders: none")
+        except Exception as e:
+            logging.error("partner reminder failed: %s", e)
+            await notify_superadmin(db, bot, f"Partner reminder failed: {e}")
+        _partner_last_run = now.date()
 
 
 async def vk_poll_scheduler(db: Database, bot: Bot):
     if not (VK_TOKEN or os.getenv("VK_USER_TOKEN")):
         return
-    while True:
-        offset = await get_tz_offset(db)
-        tz = offset_to_timezone(offset)
-        now = datetime.now(tz)
-        group_id = await get_vk_group_id(db)
-        if not group_id:
-            await asyncio.sleep(seconds_to_next_minute(now))
+    offset = await get_tz_offset(db)
+    tz = offset_to_timezone(offset)
+    now = datetime.now(tz)
+    group_id = await get_vk_group_id(db)
+    if not group_id:
+        return
+    async with db.get_session() as session:
+        res_f = await session.execute(select(Festival))
+        festivals = res_f.scalars().all()
+        res_e = await session.execute(select(Event))
+        events = res_e.scalars().all()
+    ev_map: dict[str, list[Event]] = {}
+    for e in events:
+        if e.festival:
+            ev_map.setdefault(e.festival, []).append(e)
+    for fest in festivals:
+        if fest.vk_poll_url:
             continue
-        async with db.get_session() as session:
-            res_f = await session.execute(select(Festival))
-            festivals = res_f.scalars().all()
-            res_e = await session.execute(select(Event))
-            events = res_e.scalars().all()
-        ev_map: dict[str, list[Event]] = {}
-        for e in events:
-            if e.festival:
-                ev_map.setdefault(e.festival, []).append(e)
-        for fest in festivals:
-            if fest.vk_poll_url:
+        evs = ev_map.get(fest.name, [])
+        start, end = festival_dates(fest, evs)
+        if not start:
+            continue
+        first_time: time | None = None
+        for ev in evs:
+            if ev.date != start.isoformat():
                 continue
-            evs = ev_map.get(fest.name, [])
-            start, end = festival_dates(fest, evs)
-            if not start:
+            tr = parse_time_range(ev.time)
+            if tr:
+                if first_time is None or tr[0] < first_time:
+                    first_time = tr[0]
+        if first_time is None:
+            first_time = time(0, 0)
+        if first_time >= time(17, 0):
+            sched = datetime.combine(start, time(13, 0), tz)
+        else:
+            sched = datetime.combine(start - timedelta(days=1), time(21, 0), tz)
+        if now >= sched and now.date() <= (end or start):
+            try:
+                await send_festival_poll(db, fest, group_id, bot)
+            except Exception as e:
+                logging.error("VK poll send failed for %s: %s", fest.name, e)
 
-                continue
-            first_time: time | None = None
-            for ev in evs:
-                if ev.date != start.isoformat():
-                    continue
-                tr = parse_time_range(ev.time)
-                if tr:
-                    if first_time is None or tr[0] < first_time:
-                        first_time = tr[0]
-            if first_time is None:
-                first_time = time(0, 0)
-            if first_time >= time(17, 0):
-                sched = datetime.combine(start, time(13, 0), tz)
-            else:
-                sched = datetime.combine(start - timedelta(days=1), time(21, 0), tz)
-            if now >= sched and now.date() <= (end or start):
 
-                try:
-                    await send_festival_poll(db, fest, group_id, bot)
-                except Exception as e:
-                    logging.error("VK poll send failed for %s: %s", fest.name, e)
-        await asyncio.sleep(seconds_to_next_minute(datetime.now(tz)))
+def start_periodic_tasks(db: Database, bot: Bot) -> AsyncIOScheduler:
+    scheduler = AsyncIOScheduler()
+    scheduler.add_job(vk_scheduler, "interval", minutes=15, args=[db, bot])
+    scheduler.add_job(vk_poll_scheduler, "interval", minutes=15, args=[db, bot])
+    scheduler.add_job(cleanup_scheduler, "interval", minutes=15, args=[db, bot])
+    scheduler.add_job(page_update_scheduler, "interval", minutes=15, args=[db])
+    scheduler.add_job(partner_notification_scheduler, "interval", minutes=15, args=[db, bot])
+    scheduler.start()
+    return scheduler
 
 
 async def build_events_message(db: Database, target_date: date, tz: timezone, creator_id: int | None = None):
@@ -8131,13 +8130,7 @@ def create_app() -> web.Application:
         except Exception as e:
             logging.error("Failed to set webhook: %s", e)
         app["daily_task"] = asyncio.create_task(daily_scheduler(db, bot))
-        app["vk_task"] = asyncio.create_task(vk_scheduler(db, bot))
-        app["vk_poll_task"] = asyncio.create_task(vk_poll_scheduler(db, bot))
-        app["cleanup_task"] = asyncio.create_task(cleanup_scheduler(db, bot))
-        app["page_task"] = asyncio.create_task(page_update_scheduler(db))
-        app["partner_task"] = asyncio.create_task(
-            partner_notification_scheduler(db, bot)
-        )
+        app["scheduler"] = start_periodic_tasks(db, bot)
         app["add_event_worker"] = asyncio.create_task(
             add_event_queue_worker(db, bot)
         )
@@ -8150,26 +8143,8 @@ def create_app() -> web.Application:
             app["daily_task"].cancel()
             with contextlib.suppress(Exception):
                 await app["daily_task"]
-        if "vk_task" in app:
-            app["vk_task"].cancel()
-            with contextlib.suppress(Exception):
-                await app["vk_task"]
-        if "vk_poll_task" in app:
-            app["vk_poll_task"].cancel()
-            with contextlib.suppress(Exception):
-                await app["vk_poll_task"]
-        if "cleanup_task" in app:
-            app["cleanup_task"].cancel()
-            with contextlib.suppress(Exception):
-                await app["cleanup_task"]
-        if "page_task" in app:
-            app["page_task"].cancel()
-            with contextlib.suppress(Exception):
-                await app["page_task"]
-        if "partner_task" in app:
-            app["partner_task"].cancel()
-            with contextlib.suppress(Exception):
-                await app["partner_task"]
+        if "scheduler" in app:
+            await app["scheduler"].shutdown()
         if "add_event_worker" in app:
             app["add_event_worker"].cancel()
             with contextlib.suppress(Exception):
