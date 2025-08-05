@@ -231,6 +231,13 @@ class Database:
                     "ALTER TABLE festival ADD COLUMN vk_poll_url VARCHAR"
                 )
 
+            await conn.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS ix_events_date_city ON event(date, city)"
+            )
+            await conn.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS ix_events_added_at ON event(added_at)"
+            )
+
         # ensure shared connection is ready
         await self.raw_conn()
 

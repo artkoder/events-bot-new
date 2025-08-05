@@ -6,6 +6,27 @@ Debugging:
 
 import logging
 import os
+import time
+
+
+class DeduplicateFilter(logging.Filter):
+    """Limit repeating DEBUG messages to avoid log spam."""
+
+    def __init__(self, interval: float = 60.0) -> None:
+        super().__init__()
+        self.interval = interval
+        self.last_seen: dict[str, float] = {}
+
+    def filter(self, record: logging.LogRecord) -> bool:  # pragma: no cover - simple
+        if record.levelno > logging.DEBUG:
+            return True
+        msg = record.getMessage()
+        now = time.monotonic()
+        last = self.last_seen.get(msg, 0.0)
+        if now - last >= self.interval:
+            self.last_seen[msg] = now
+            return True
+        return False
 
 
 def configure_logging() -> None:
@@ -17,6 +38,7 @@ def configure_logging() -> None:
             logging.getLogger(noisy).setLevel(logging.WARNING)
     for noisy in ("aiogram", "httpx"):
         logging.getLogger(noisy).setLevel(logging.INFO if debug else logging.WARNING)
+    logging.getLogger().addFilter(DeduplicateFilter())
 
 
 configure_logging()
@@ -134,13 +156,18 @@ def perf_sync(name: str, **details):
         )
 
 
+_SPAN_THRESHOLDS = {"db": 1.0, "render": 1.0, "tg-send": 1.0, "healthz": 1.0}
+
+
 @asynccontextmanager
 async def span(label: str):
     start = _time.perf_counter()
     try:
         yield
     finally:
-        logging.debug("%s took %.2f s", label, _time.perf_counter() - start)
+        dt = _time.perf_counter() - start
+        if dt >= _SPAN_THRESHOLDS.get(label, 1.0):
+            logging.debug("%s took %.2f s", label, dt)
 
 
 @lru_cache(maxsize=20)
@@ -240,8 +267,10 @@ CATBOX_ENABLED: bool = False
 VK_PHOTOS_ENABLED: bool = False
 _supabase_client: "Client | None" = None  # type: ignore[name-defined]
 _vk_user_token_bad: str | None = None
-_vk_session: ClientSession | None = None
+_shared_session: ClientSession | None = None
+# backward-compatible aliases used in tests
 _http_session: ClientSession | None = None
+_vk_session: ClientSession | None = None
 
 # Telegraph API rejects pages over ~64&nbsp;kB. Use a slightly lower limit
 # to decide when month pages should be split into two parts.
@@ -308,7 +337,7 @@ async def telegraph_call(func, /, *args, retries: int = 3, **kwargs):
 
 
 async def telegraph_create_page(tg: Telegraph, *args, **kwargs):
-    async with perf("telegraph_create_page"):
+    async with span("tg-send"):
         return await telegraph_call(tg.create_page, *args, **kwargs)
 
 
@@ -473,66 +502,61 @@ async def set_vk_last_added(db: Database, value: str):
     await set_setting_value(db, "vk_last_added", value)
 
 
-async def close_vk_session() -> None:
-    global _vk_session
-    if _vk_session is not None:
+async def close_shared_session() -> None:
+    global _shared_session, _http_session, _vk_session
+    if _shared_session is not None and not _shared_session.closed:
         with contextlib.suppress(Exception):
-            await _vk_session.close()
-        _vk_session = None
+            await _shared_session.close()
+    _shared_session = _http_session = _vk_session = None
 
 
-def _close_vk_session_sync() -> None:
+def _close_shared_session_sync() -> None:
     try:
-        asyncio.run(close_vk_session())
+        asyncio.run(close_shared_session())
     except Exception:
         pass
+
+
+def _create_session() -> ClientSession:
+    connector = TCPConnector(family=socket.AF_INET, limit=100, keepalive_timeout=30)
+    timeout = ClientTimeout(total=HTTP_TIMEOUT)
+    try:
+        return ClientSession(connector=connector, timeout=timeout)
+    except TypeError:
+        try:
+            return ClientSession(timeout=timeout)
+        except TypeError:
+            return ClientSession()
+
+
+def get_shared_session() -> ClientSession:
+    global _shared_session, _http_session, _vk_session
+    if (
+        _shared_session is None
+        or getattr(_shared_session, "closed", False)
+        or _http_session is None
+        or _vk_session is None
+    ):
+        _shared_session = _create_session()
+        _http_session = _vk_session = _shared_session
+        atexit.register(_close_shared_session_sync)
+    return _shared_session
 
 
 def get_vk_session() -> ClientSession:
-    global _vk_session
-    if _vk_session is None or _vk_session.closed:
-        connector = TCPConnector(family=socket.AF_INET)
-        timeout = ClientTimeout(total=HTTP_TIMEOUT)
-        _vk_session = ClientSession(connector=connector, timeout=timeout)
-        atexit.register(_close_vk_session_sync)
-    return _vk_session
-
-
-async def close_http_session() -> None:
-    global _http_session
-    if _http_session is not None and not getattr(_http_session, "closed", True):
-        close = getattr(_http_session, "close", None)
-        if close:
-            if asyncio.iscoroutinefunction(close):
-                with contextlib.suppress(Exception):
-                    await close()
-            else:
-                with contextlib.suppress(Exception):
-                    close()
-        _http_session = None
-
-
-def _close_http_session_sync() -> None:
-    try:
-        asyncio.run(close_http_session())
-    except Exception:
-        pass
+    return get_shared_session()
 
 
 def get_http_session() -> ClientSession:
-    global _http_session
-    if _http_session is None or getattr(_http_session, "closed", True):
-        connector = TCPConnector(family=socket.AF_INET)
-        timeout = ClientTimeout(total=HTTP_TIMEOUT)
-        try:
-            _http_session = ClientSession(connector=connector, timeout=timeout)
-        except TypeError:
-            try:
-                _http_session = ClientSession(timeout=timeout)
-            except TypeError:
-                _http_session = ClientSession()
-        atexit.register(_close_http_session_sync)
-    return _http_session
+    return get_shared_session()
+
+
+async def close_vk_session() -> None:
+    await close_shared_session()
+
+
+async def close_http_session() -> None:
+    await close_shared_session()
 
 
 def _vk_user_token() -> str | None:
@@ -1396,7 +1420,7 @@ async def build_ics_content(db: Database, event: Event) -> str:
 
 
 async def upload_ics(event: Event, db: Database) -> str | None:
-    async with perf("supabase_upload_ics"):
+    async with span("tg-send"):
         client = get_supabase_client()
         if not client:
             logging.error("Supabase client not configured")
@@ -1726,12 +1750,13 @@ def get_telegraph_token() -> str | None:
 
 async def send_main_menu(bot: Bot, user: User | None, chat_id: int) -> None:
     """Show main menu buttons depending on user role."""
-    buttons = [
-        [types.KeyboardButton(text=MENU_ADD_EVENT)],
-        [types.KeyboardButton(text=MENU_EVENTS)],
-    ]
-    markup = types.ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
-    async with span("send_menu"):
+    async with span("render"):
+        buttons = [
+            [types.KeyboardButton(text=MENU_ADD_EVENT)],
+            [types.KeyboardButton(text=MENU_EVENTS)],
+        ]
+        markup = types.ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
+    async with span("tg-send"):
         await bot.send_message(chat_id, "Choose action", reply_markup=markup)
 
 
@@ -4438,20 +4463,22 @@ async def build_month_page_content(
     if events is None or exhibitions is None or nav_pages is None:
         events, exhibitions, nav_pages = await get_month_data(db, month)
 
-    async with db.get_session() as session:
-        res_f = await session.execute(select(Festival))
-        fest_map = {f.name: f for f in res_f.scalars().all()}
+    async with span("db"):
+        async with db.get_session() as session:
+            res_f = await session.execute(select(Festival))
+            fest_map = {f.name: f for f in res_f.scalars().all()}
 
-    title, content, size = await asyncio.to_thread(
-        _build_month_page_content_sync,
-        month,
-        events,
-        exhibitions,
-        nav_pages,
-        fest_map,
-        continuation_url,
-        size_limit,
-    )
+    async with span("render"):
+        title, content, size = await asyncio.to_thread(
+            _build_month_page_content_sync,
+            month,
+            events,
+            exhibitions,
+            nav_pages,
+            fest_map,
+            continuation_url,
+            size_limit,
+        )
     logging.info("build_month_page_content size=%d", size)
     return title, content, size
 
@@ -4989,56 +5016,58 @@ async def build_weekend_vk_message(db: Database, start: str) -> str:
     saturday = date.fromisoformat(start)
     sunday = saturday + timedelta(days=1)
     days = [saturday, sunday]
-    async with db.get_session() as session:
-        result = await session.execute(
-            select(Event)
-            .where(Event.date.in_([d.isoformat() for d in days]))
-            .order_by(Event.date, Event.time)
-        )
-        events = result.scalars().all()
-        res_w = await session.execute(select(WeekendPage).order_by(WeekendPage.start))
-        weekend_pages = res_w.scalars().all()
+    async with span("db"):
+        async with db.get_session() as session:
+            result = await session.execute(
+                select(Event)
+                .where(Event.date.in_([d.isoformat() for d in days]))
+                .order_by(Event.date, Event.time)
+            )
+            events = result.scalars().all()
+            res_w = await session.execute(select(WeekendPage).order_by(WeekendPage.start))
+            weekend_pages = res_w.scalars().all()
 
-    by_day: dict[date, list[Event]] = {}
-    for e in events:
-        if not e.source_vk_post_url:
-            continue
-        d = parse_iso_date(e.date)
-        if not d:
-            continue
-        by_day.setdefault(d, []).append(e)
+    async with span("render"):
+        by_day: dict[date, list[Event]] = {}
+        for e in events:
+            if not e.source_vk_post_url:
+                continue
+            d = parse_iso_date(e.date)
+            if not d:
+                continue
+            by_day.setdefault(d, []).append(e)
 
-    lines = [f"{format_weekend_range(saturday)} Афиша выходных"]
-    for d in days:
-        evs = by_day.get(d)
-        if not evs:
-            continue
-        lines.append(VK_BLANK_LINE)
-        lines.append(f"🟥🟥🟥 {format_day_pretty(d)} 🟥🟥🟥")
-        for ev in evs:
-            line = f"[{ev.source_vk_post_url}|{ev.title}]"
-            if ev.time:
-                line = f"{ev.time} | {line}"
-            lines.append(line)
+        lines = [f"{format_weekend_range(saturday)} Афиша выходных"]
+        for d in days:
+            evs = by_day.get(d)
+            if not evs:
+                continue
+            lines.append(VK_BLANK_LINE)
+            lines.append(f"🟥🟥🟥 {format_day_pretty(d)} 🟥🟥🟥")
+            for ev in evs:
+                line = f"[{ev.source_vk_post_url}|{ev.title}]"
+                if ev.time:
+                    line = f"{ev.time} | {line}"
+                lines.append(line)
 
-            location_parts = [p for p in [ev.location_name, ev.city] if p]
-            if location_parts:
-                lines.append(", ".join(location_parts))
+                location_parts = [p for p in [ev.location_name, ev.city] if p]
+                if location_parts:
+                    lines.append(", ".join(location_parts))
 
-    nav_pages = [w for w in weekend_pages if w.vk_post_url or w.start == start]
-    if nav_pages:
-        parts = []
-        for w in nav_pages:
-            label = format_weekend_range(date.fromisoformat(w.start))
-            if w.start == start or not w.vk_post_url:
-                parts.append(label)
-            else:
-                parts.append(f"[{w.vk_post_url}|{label}]")
-        lines.append(VK_BLANK_LINE)
-        lines.append(VK_BLANK_LINE)
-        lines.append(" ".join(parts))
+        nav_pages = [w for w in weekend_pages if w.vk_post_url or w.start == start]
+        if nav_pages:
+            parts = []
+            for w in nav_pages:
+                label = format_weekend_range(date.fromisoformat(w.start))
+                if w.start == start or not w.vk_post_url:
+                    parts.append(label)
+                else:
+                    parts.append(f"[{w.vk_post_url}|{label}]")
+            lines.append(VK_BLANK_LINE)
+            lines.append(VK_BLANK_LINE)
+            lines.append(" ".join(parts))
 
-    message = "\n".join(lines)
+        message = "\n".join(lines)
     logging.info(
         "build_weekend_vk_message built %d lines", len(lines)
     )
@@ -5732,7 +5761,8 @@ async def post_to_vk(
         }
         if attachments:
             params["attachments"] = ",".join(attachments)
-        data = await _vk_api("wall.post", params, db, bot, token=token)
+        async with span("tg-send"):
+            data = await _vk_api("wall.post", params, db, bot, token=token)
         post_id = data.get("response", {}).get("post_id")
         if post_id:
             url = f"https://vk.com/wall-{group_id.lstrip('-')}_{post_id}"
@@ -6131,29 +6161,34 @@ async def daily_scheduler(db: Database, bot: Bot):
 async def vk_scheduler(db: Database, bot: Bot):
     if not (VK_TOKEN or os.getenv("VK_USER_TOKEN")):
         return
-    offset = await get_tz_offset(db)
-    tz = offset_to_timezone(offset)
-    now = datetime.now(tz)
-    group_id = await get_vk_group_id(db)
-    if not group_id:
-        return
-    now_time = now.time().replace(second=0, microsecond=0)
-    today_time = datetime.strptime(await get_vk_time_today(db), "%H:%M").time()
-    added_time = datetime.strptime(await get_vk_time_added(db), "%H:%M").time()
+    async with span("db"):
+        offset = await get_tz_offset(db)
+        tz = offset_to_timezone(offset)
+        now = datetime.now(tz)
+        group_id = await get_vk_group_id(db)
+        if not group_id:
+            return
+        now_time = now.time().replace(second=0, microsecond=0)
+        today_time = datetime.strptime(await get_vk_time_today(db), "%H:%M").time()
+        added_time = datetime.strptime(await get_vk_time_added(db), "%H:%M").time()
+        last_today = await get_vk_last_today(db)
+        last_added = await get_vk_last_added(db)
 
-    last_today = await get_vk_last_today(db)
     if (last_today or "") != now.date().isoformat() and now_time >= today_time:
         try:
-            await send_daily_announcement_vk(db, group_id, tz, section="today", bot=bot)
-            await set_vk_last_today(db, now.date().isoformat())
+            async with span("tg-send"):
+                await send_daily_announcement_vk(db, group_id, tz, section="today", bot=bot)
+            async with span("db"):
+                await set_vk_last_today(db, now.date().isoformat())
         except Exception as e:
             logging.error("vk daily today failed: %s", e)
 
-    last_added = await get_vk_last_added(db)
     if (last_added or "") != now.date().isoformat() and now_time >= added_time:
         try:
-            await send_daily_announcement_vk(db, group_id, tz, section="added", bot=bot)
-            await set_vk_last_added(db, now.date().isoformat())
+            async with span("tg-send"):
+                await send_daily_announcement_vk(db, group_id, tz, section="added", bot=bot)
+            async with span("db"):
+                await set_vk_last_added(db, now.date().isoformat())
         except Exception as e:
             logging.error("vk daily added failed: %s", e)
 
@@ -6194,17 +6229,20 @@ async def cleanup_old_events(db: Database, bot: Bot | None = None) -> int:
 
 async def cleanup_scheduler(db: Database, bot: Bot):
     global _cleanup_last_run
-    offset = await get_tz_offset(db)
-    tz = offset_to_timezone(offset)
-    now = datetime.now(tz)
+    async with span("db"):
+        offset = await get_tz_offset(db)
+        tz = offset_to_timezone(offset)
+        now = datetime.now(tz)
     if now.time() >= time(3, 0) and now.date() != _cleanup_last_run:
         try:
-            count = await cleanup_old_events(db, bot)
-            await notify_superadmin(
-                db,
-                bot,
-                f"Cleanup completed: removed {count} events",
-            )
+            async with span("db"):
+                count = await cleanup_old_events(db, bot)
+            async with span("tg-send"):
+                await notify_superadmin(
+                    db,
+                    bot,
+                    f"Cleanup completed: removed {count} events",
+                )
         except Exception as e:
             logging.error("cleanup failed: %s", e)
             await notify_superadmin(db, bot, f"Cleanup failed: {e}")
@@ -6219,19 +6257,21 @@ async def page_update_scheduler(db: Database):
     scheduled run window (01:00 local time).
     """
     global _page_last_run, _page_first_run
-    offset = await get_tz_offset(db)
-    tz = offset_to_timezone(offset)
-    now = datetime.now(tz)
+    async with span("db"):
+        offset = await get_tz_offset(db)
+        tz = offset_to_timezone(offset)
+        now = datetime.now(tz)
     if _page_first_run:
         _page_first_run = False
         if now.time() >= time(2, 0):
             _page_last_run = now.date()
     if now.time() >= time(1, 0) and now.date() != _page_last_run:
         try:
-            await sync_month_page(db, now.strftime("%Y-%m"))
-            w_start = weekend_start_for_date(now.date())
-            if w_start:
-                await sync_weekend_page(db, w_start.isoformat())
+            async with span("tg-send"):
+                await sync_month_page(db, now.strftime("%Y-%m"))
+                w_start = weekend_start_for_date(now.date())
+                if w_start:
+                    await sync_weekend_page(db, w_start.isoformat())
         except Exception as e:
             logging.error("page update failed: %s", e)
         _page_last_run = now.date()
@@ -6240,23 +6280,26 @@ async def page_update_scheduler(db: Database):
 async def partner_notification_scheduler(db: Database, bot: Bot):
     """Remind partners who haven't added events for a week."""
     global _partner_last_run
-    offset = await get_tz_offset(db)
-    tz = offset_to_timezone(offset)
-    now = datetime.now(tz)
+    async with span("db"):
+        offset = await get_tz_offset(db)
+        tz = offset_to_timezone(offset)
+        now = datetime.now(tz)
     if now.time() >= time(9, 0) and now.date() != _partner_last_run:
         try:
-            async with perf("partner_reminders"):
+            async with span("db"):
                 notified = await notify_inactive_partners(db, bot, tz)
             if notified:
                 names = ", ".join(
                     f"@{u.username}" if u.username else str(u.user_id)
                     for u in notified
                 )
-                await notify_superadmin(
-                    db, bot, f"Partner reminders sent to: {names}"
-                )
+                async with span("tg-send"):
+                    await notify_superadmin(
+                        db, bot, f"Partner reminders sent to: {names}"
+                    )
             else:
-                await notify_superadmin(db, bot, "Partner reminders: none")
+                async with span("tg-send"):
+                    await notify_superadmin(db, bot, "Partner reminders: none")
         except Exception as e:
             logging.error("partner reminder failed: %s", e)
             await notify_superadmin(db, bot, f"Partner reminder failed: {e}")
@@ -6266,17 +6309,18 @@ async def partner_notification_scheduler(db: Database, bot: Bot):
 async def vk_poll_scheduler(db: Database, bot: Bot):
     if not (VK_TOKEN or os.getenv("VK_USER_TOKEN")):
         return
-    offset = await get_tz_offset(db)
-    tz = offset_to_timezone(offset)
-    now = datetime.now(tz)
-    group_id = await get_vk_group_id(db)
-    if not group_id:
-        return
-    async with db.get_session() as session:
-        res_f = await session.execute(select(Festival))
-        festivals = res_f.scalars().all()
-        res_e = await session.execute(select(Event))
-        events = res_e.scalars().all()
+    async with span("db"):
+        offset = await get_tz_offset(db)
+        tz = offset_to_timezone(offset)
+        now = datetime.now(tz)
+        group_id = await get_vk_group_id(db)
+        if not group_id:
+            return
+        async with db.get_session() as session:
+            res_f = await session.execute(select(Festival))
+            festivals = res_f.scalars().all()
+            res_e = await session.execute(select(Event))
+            events = res_e.scalars().all()
     ev_map: dict[str, list[Event]] = {}
     for e in events:
         if e.festival:
@@ -6304,7 +6348,8 @@ async def vk_poll_scheduler(db: Database, bot: Bot):
             sched = datetime.combine(start - timedelta(days=1), time(21, 0), tz)
         if now >= sched and now.date() <= (end or start):
             try:
-                await send_festival_poll(db, fest, group_id, bot)
+                async with span("tg-send"):
+                    await send_festival_poll(db, fest, group_id, bot)
             except Exception as e:
                 logging.error("VK poll send failed for %s: %s", fest.name, e)
 
@@ -7879,7 +7924,8 @@ def create_app() -> web.Application:
     setup_application(app, dp, bot=bot)
 
     async def health_handler(request: web.Request) -> web.Response:
-        return web.json_response({"status": "ok"})
+        async with span("healthz"):
+            return web.Response(text="ok")
 
     app.router.add_get("/healthz", health_handler)
 
