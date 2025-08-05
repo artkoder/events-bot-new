@@ -92,3 +92,86 @@ async def test_add_events_from_text_preserves_links(tmp_path: Path, monkeypatch)
     ev = res[0][0]
     assert "Регистрация (http://reg)" in ev.source_text
 
+
+@pytest.mark.asyncio
+async def test_sync_vk_source_post_appends_only_text(monkeypatch):
+    main.VK_AFISHA_GROUP_ID = "1"
+    event = main.Event(
+        title="Old",
+        description="",
+        date="2024-01-01",
+        time="00:00",
+        location_name="Old Place",
+    )
+    event.source_vk_post_url = "https://vk.com/wall-1_1"
+
+    existing = main.build_vk_source_message(event, "old text")
+
+    async def fake_vk_api(method, params, db=None, bot=None, token=None):
+        return {"response": [{"text": existing}]}
+
+    edited = {}
+
+    async def fake_edit(url, message, db=None, bot=None):
+        edited["text"] = message
+
+    monkeypatch.setattr(main, "_vk_api", fake_vk_api)
+    monkeypatch.setattr(main, "edit_vk_post", fake_edit)
+
+    event.title = "New"
+    event.location_name = "New Place"
+
+    url = await main.sync_vk_source_post(
+        event, "new text", None, None, append_text=True
+    )
+
+    assert url == "https://vk.com/wall-1_1"
+    msg = edited["text"]
+    lines = msg.splitlines()
+    assert lines[0] == "New"
+    assert "Old Place" not in msg
+    assert "old text" in msg
+    assert "new text" in msg
+    assert msg.count(main.CONTENT_SEPARATOR) == 1
+    assert lines.count("New") == 1
+
+
+@pytest.mark.asyncio
+async def test_sync_vk_source_post_updates_without_append(monkeypatch):
+    main.VK_AFISHA_GROUP_ID = "1"
+    event = main.Event(
+        title="Old Title",
+        description="",
+        date="2024-01-01",
+        time="00:00",
+        location_name="Place",
+    )
+    event.source_vk_post_url = "https://vk.com/wall-1_1"
+
+    existing = main.build_vk_source_message(event, "old text")
+
+    async def fake_vk_api(method, params, db=None, bot=None, token=None):
+        return {"response": [{"text": existing}]}
+
+    edited = {}
+
+    async def fake_edit(url, message, db=None, bot=None):
+        edited["text"] = message
+
+    monkeypatch.setattr(main, "_vk_api", fake_vk_api)
+    monkeypatch.setattr(main, "edit_vk_post", fake_edit)
+
+    event.title = "Updated Title"
+
+    url = await main.sync_vk_source_post(
+        event, "updated text", None, None, append_text=False
+    )
+
+    assert url == "https://vk.com/wall-1_1"
+    msg = edited["text"]
+    lines = msg.splitlines()
+    assert lines[0] == "Updated Title"
+    assert "old text" not in msg
+    assert "updated text" in msg
+    assert main.CONTENT_SEPARATOR not in msg
+
