@@ -50,7 +50,17 @@ from urllib.parse import urlparse, parse_qs
 import uuid
 import textwrap
 # тяжёлый стек подтягиваем только если понадобится
-from icalendar import Calendar, Event as IcsEvent
+Calendar = None
+IcsEvent = None
+
+
+def _load_icalendar() -> None:
+    global Calendar, IcsEvent
+    if Calendar is None or IcsEvent is None:  # pragma: no cover - simple
+        from icalendar import Calendar as _Calendar, Event as _IcsEvent
+
+        Calendar = _Calendar
+        IcsEvent = _IcsEvent
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
@@ -1326,6 +1336,7 @@ def parse_events_date(text: str, tz: timezone) -> date | None:
 
 async def build_ics_content(db: Database, event: Event) -> str:
     """Build an RFC 5545 compliant ICS string for an event."""
+    _load_icalendar()
     time_range = parse_time_range(event.time)
     if not time_range:
         raise ValueError("bad time")
@@ -4093,14 +4104,6 @@ def format_event_vk(
         e.description.strip(),
         flags=re.I,
     )
-    details_link = None
-    if vk_link:
-        details_link = vk_link
-    elif e.telegraph_url:
-        details_link = e.telegraph_url
-    if details_link:
-
-        desc = f"{desc}, [подробнее|{details_link}]"
 
     lines = [title]
     if festival:
@@ -4371,7 +4374,10 @@ def event_to_nodes(
     if body_md:
         html_text = md_to_html(body_md)
         nodes.extend(html_to_nodes(html_text))
-    nodes.append({"tag": "p", "children": ["\u00a0"]})
+    nodes.extend([
+        {"tag": "br"},
+        {"tag": "p", "children": ["\u00a0"]},
+    ])
     return nodes
 
 
@@ -4401,7 +4407,10 @@ def exhibition_to_nodes(e: Event) -> list[dict]:
     if body_md:
         html_text = md_to_html(body_md)
         nodes.extend(html_to_nodes(html_text))
-    nodes.append({"tag": "p", "children": ["\u00a0"]})
+    nodes.extend([
+        {"tag": "br"},
+        {"tag": "p", "children": ["\u00a0"]},
+    ])
     return nodes
 
 async def get_month_data(db: Database, month: str, *, fallback: bool = True):
@@ -5868,14 +5877,32 @@ def build_vk_source_message(
 
     lines.append(VK_BLANK_LINE)
 
+    date_part = event.date.split("..", 1)[0]
+    d = parse_iso_date(date_part)
+    if d:
+        day = format_day_pretty(d)
+    else:
+        logging.error("Invalid event date: %s", event.date)
+        day = event.date
+    lines.append(f"\U0001f4c5 {day} {event.time}")
+
+    loc = event.location_name
+    addr = event.location_address
+    if addr and event.city:
+        addr = strip_city_from_address(addr, event.city)
+    if addr:
+        loc += f", {addr}"
+    if event.city:
+        loc += f", #{event.city}"
+    lines.append(f"\U0001f4cd {loc}")
+
     if event.pushkin_card:
         lines.append("\u2705 Пушкинская карта")
 
     if event.is_free:
         lines.append("🟡 Бесплатно")
         if event.ticket_link:
-            lines.append("по регистрации")
-            lines.append(f"\U0001f39f {event.ticket_link}")
+            lines.append(f"\U0001f39f по регистрации {event.ticket_link}")
     elif event.ticket_link and (
         event.ticket_price_min is not None or event.ticket_price_max is not None
     ):
@@ -5888,11 +5915,10 @@ def build_vk_source_message(
                 else event.ticket_price_max
             )
             price = f"{val} руб." if val is not None else ""
-        lines.append(f"Билеты в источнике {price}".strip())
-        lines.append(f"\U0001f39f {event.ticket_link}")
+        info = f"Билеты в источнике {price}".strip()
+        lines.append(f"\U0001f39f {info} {event.ticket_link}".strip())
     elif event.ticket_link:
-        lines.append("по регистрации")
-        lines.append(f"\U0001f39f {event.ticket_link}")
+        lines.append(f"\U0001f39f по регистрации {event.ticket_link}")
     else:
         price = ""
         if (
@@ -5906,26 +5932,7 @@ def build_vk_source_message(
         elif event.ticket_price_max is not None:
             price = f"{event.ticket_price_max} руб."
         if price:
-            lines.append(f"Билеты {price}")
-
-    date_part = event.date.split("..", 1)[0]
-    d = parse_iso_date(date_part)
-    if d:
-        day = format_day_pretty(d)
-    else:
-        logging.error("Invalid event date: %s", event.date)
-        day = event.date
-    lines.append(f"{day} {event.time}")
-
-    loc = event.location_name
-    addr = event.location_address
-    if addr and event.city:
-        addr = strip_city_from_address(addr, event.city)
-    if addr:
-        loc += f", {addr}"
-    if event.city:
-        loc += f", #{event.city}"
-    lines.append(loc)
+            lines.append(f"\U0001f39f Билеты {price}")
 
     lines.append(VK_BLANK_LINE)
     lines.extend(text.strip().splitlines())

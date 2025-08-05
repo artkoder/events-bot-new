@@ -4493,7 +4493,7 @@ def test_format_event_vk_with_vk_link():
     text = main.format_event_vk(e)
     lines = text.splitlines()
     assert lines[0] == "[https://vk.com/wall-1_1|T]"
-    assert "[подробнее|https://vk.com/wall-1_1]" in text
+    assert "[подробнее|" not in text
     assert "t.me/page" not in text
 
 
@@ -4509,7 +4509,8 @@ def test_format_event_vk_fallback_link():
         telegraph_url="https://t.me/page",
     )
     text = main.format_event_vk(e)
-    assert "[подробнее|https://t.me/page]" in text
+    assert "[подробнее|" not in text
+    assert "t.me/page" not in text
 
 
 def test_format_event_vk_festival_link():
@@ -4544,7 +4545,7 @@ def test_format_event_vk_falls_back_to_source_vk_post_url():
     text = main.format_event_vk(e)
     lines = text.splitlines()
     assert lines[0] == "[https://vk.com/wall-1_1|T]"
-    assert "[подробнее|https://vk.com/wall-1_1]" in text
+    assert "[подробнее|" not in text
     assert "t.me/page" not in text
 
 
@@ -4564,7 +4565,7 @@ def test_format_event_vk_prefers_source_post_url():
     text = main.format_event_vk(e)
     lines = text.splitlines()
     assert lines[0] == "[https://vk.com/wall-1_2|T]"
-    assert "[подробнее|https://vk.com/wall-1_2]" in text
+    assert "[подробнее|" not in text
     assert "t.me/page" not in text
 
 
