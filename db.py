@@ -19,8 +19,6 @@ class Database:
         )
         self._conn: aiosqlite.Connection | None = None
         self._lock = asyncio.Lock()
-        self._session: AsyncSession | None = None
-        self._session_lock = asyncio.Lock()
 
     async def raw_conn(self) -> aiosqlite.Connection:
         """Return a shared aiosqlite connection."""
@@ -231,12 +229,9 @@ class Database:
     
     @asynccontextmanager
     async def get_session(self) -> AsyncSession:
-        if self._session is None:
-            async with self._session_lock:
-                if self._session is None:
-                    self._session = AsyncSession(self.engine, expire_on_commit=False)
+        session = AsyncSession(self.engine, expire_on_commit=False)
         try:
-            yield self._session
+            yield session
         finally:
-            await self._session.rollback()
+            await session.close()
 
