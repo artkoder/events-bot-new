@@ -1420,6 +1420,9 @@ async def build_ics_content(db: Database, event: Event) -> str:
 
 async def upload_ics(event: Event, db: Database) -> str | None:
     async with span("tg-send"):
+        if os.getenv("SUPABASE_DISABLED", "") or not (SUPABASE_URL and SUPABASE_KEY):
+            logging.debug("Supabase disabled")
+            return None
         client = get_supabase_client()
         if not client:
             logging.error("Supabase client not configured")
