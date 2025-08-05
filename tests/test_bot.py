@@ -2450,7 +2450,7 @@ async def test_weekend_nav_and_exhibitions(tmp_path: Path):
         for i, n in enumerate(content)
         if n.get("tag") == "h3" and "Постоянные" in "".join(n.get("children", []))
     )
-    assert content[idx_exh - 1].get("tag") == "p"
+    assert content[idx_exh - 1].get("tag") == "br"
     assert content[idx_exh - 2].get("tag") == "br"
 
 
@@ -2495,7 +2495,7 @@ async def test_month_nav_and_exhibitions(tmp_path: Path):
         for i, n in enumerate(content)
         if n.get("tag") == "h3" and "Постоянные" in "".join(n.get("children", []))
     )
-    assert content[idx_exh - 1].get("tag") == "p"
+    assert content[idx_exh - 1].get("tag") == "br"
     assert content[idx_exh - 2].get("tag") == "br"
 
 

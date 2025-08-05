@@ -4377,6 +4377,7 @@ def event_to_nodes(
     nodes.extend([
         {"tag": "br"},
         {"tag": "p", "children": ["\u00a0"]},
+
     ])
     return nodes
 
@@ -4410,6 +4411,7 @@ def exhibition_to_nodes(e: Event) -> list[dict]:
     nodes.extend([
         {"tag": "br"},
         {"tag": "p", "children": ["\u00a0"]},
+
     ])
     return nodes
 
@@ -4564,7 +4566,7 @@ def _build_month_page_content_sync(
             add({"tag": "h3", "children": ["🟥🟥 воскресенье 🟥🟥"]})
         add({"tag": "h3", "children": [f"🟥🟥🟥 {format_day_pretty(day)} 🟥🟥🟥"]})
         add({"tag": "br"})
-        add({"tag": "p", "children": ["\u00a0"]})
+        add({"tag": "br"})
         for ev in by_day[day]:
             if exceeded:
                 break
@@ -4595,10 +4597,10 @@ def _build_month_page_content_sync(
     if exhibitions and not exceeded:
         if month_nav:
             add({"tag": "br"})
-            add({"tag": "p", "children": ["\u00a0"]})
+            add({"tag": "br"})
         add({"tag": "h3", "children": ["Постоянные выставки"]})
         add({"tag": "br"})
-        add({"tag": "p", "children": ["\u00a0"]})
+        add({"tag": "br"})
         for ev in exhibitions:
             if exceeded:
                 break
@@ -4609,7 +4611,7 @@ def _build_month_page_content_sync(
 
     if continuation_url and not exceeded:
         add({"tag": "br"})
-        add({"tag": "p", "children": ["\u00a0"]})
+        add({"tag": "br"})
         add(
             {
                 "tag": "h3",
@@ -4887,7 +4889,7 @@ async def build_weekend_page_content(
                 add({"tag": "h3", "children": ["🟥🟥 воскресенье 🟥🟥"]})
             add({"tag": "h3", "children": [f"🟥🟥🟥 {format_day_pretty(d)} 🟥🟥🟥"]})
             add({"tag": "br"})
-            add({"tag": "p", "children": ["\u00a0"]})
+            add({"tag": "br"})
             for ev in by_day[d]:
                 if exceeded:
                     break
@@ -4928,10 +4930,10 @@ async def build_weekend_page_content(
         if exhibitions and not exceeded:
             if weekend_nav or month_nav:
                 add({"tag": "br"})
-                add({"tag": "p", "children": ["\u00a0"]})
+                add({"tag": "br"})
             add({"tag": "h3", "children": ["Постоянные выставки"]})
             add({"tag": "br"})
-            add({"tag": "p", "children": ["\u00a0"]})
+            add({"tag": "br"})
             for ev in exhibitions:
                 if exceeded:
                     break
