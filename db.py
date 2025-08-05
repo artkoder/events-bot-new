@@ -2,7 +2,11 @@ import asyncio
 from contextlib import asynccontextmanager
 
 import aiosqlite
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 from sqlalchemy.pool import NullPool
 
 from models import create_all
@@ -16,6 +20,10 @@ class Database:
             f"sqlite+aiosqlite:///{path}",
             poolclass=NullPool,
             connect_args={"timeout": 15, "check_same_thread": False},
+        )
+        self._session_factory = async_sessionmaker(
+            self.engine,
+            expire_on_commit=False,
         )
         self._conn: aiosqlite.Connection | None = None
         self._lock = asyncio.Lock()
@@ -229,9 +237,6 @@ class Database:
     
     @asynccontextmanager
     async def get_session(self) -> AsyncSession:
-        session = AsyncSession(self.engine, expire_on_commit=False)
-        try:
+        async with self._session_factory() as session:
             yield session
-        finally:
-            await session.close()
 
