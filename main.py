@@ -134,6 +134,15 @@ def perf_sync(name: str, **details):
         )
 
 
+@asynccontextmanager
+async def span(label: str):
+    start = _time.perf_counter()
+    try:
+        yield
+    finally:
+        logging.debug("%s took %.2f s", label, _time.perf_counter() - start)
+
+
 @lru_cache(maxsize=20)
 def _weekend_page_lock(start: str) -> asyncio.Lock:
     return asyncio.Lock()
@@ -1722,39 +1731,45 @@ async def send_main_menu(bot: Bot, user: User | None, chat_id: int) -> None:
         [types.KeyboardButton(text=MENU_EVENTS)],
     ]
     markup = types.ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
-    await bot.send_message(chat_id, "Choose action", reply_markup=markup)
+    async with span("send_menu"):
+        await bot.send_message(chat_id, "Choose action", reply_markup=markup)
 
 
 async def handle_start(message: types.Message, db: Database, bot: Bot):
-    async with db.get_session() as session:
-        result = await session.execute(select(User))
-        user_count = len(result.scalars().all())
-        user = await session.get(User, message.from_user.id)
-        if user:
-            if user.blocked:
-                await bot.send_message(message.chat.id, "Access denied")
-                return
-            if user.is_partner:
-                org = f" ({user.organization})" if user.organization else ""
-                await bot.send_message(message.chat.id, f"You are partner{org}")
-            else:
-                await bot.send_message(message.chat.id, "Bot is running")
-            await send_main_menu(bot, user, message.chat.id)
-            return
-        if user_count == 0:
-            session.add(
-                User(
-                    user_id=message.from_user.id,
-                    username=message.from_user.username,
-                    is_superadmin=True,
+    async with span("db-query"):
+        async with db.get_session() as session:
+            result = await session.execute(select(User))
+            user_count = len(result.scalars().all())
+            user = await session.get(User, message.from_user.id)
+            if user:
+                if user.blocked:
+                    msg = "Access denied"
+                    menu_user = None
+                else:
+                    if user.is_partner:
+                        org = f" ({user.organization})" if user.organization else ""
+                        msg = f"You are partner{org}"
+                    else:
+                        msg = "Bot is running"
+                    menu_user = user
+            elif user_count == 0:
+                session.add(
+                    User(
+                        user_id=message.from_user.id,
+                        username=message.from_user.username,
+                        is_superadmin=True,
+                    )
                 )
-            )
-            await session.commit()
-            await bot.send_message(message.chat.id, "You are superadmin")
-            new_user = await session.get(User, message.from_user.id)
-            await send_main_menu(bot, new_user, message.chat.id)
-        else:
-            await bot.send_message(message.chat.id, "Use /register to apply")
+                await session.commit()
+                msg = "You are superadmin"
+                menu_user = await session.get(User, message.from_user.id)
+            else:
+                msg = "Use /register to apply"
+                menu_user = None
+
+    await bot.send_message(message.chat.id, msg)
+    if menu_user:
+        await send_main_menu(bot, menu_user, message.chat.id)
 
 
 async def handle_menu(message: types.Message, db: Database, bot: Bot):
