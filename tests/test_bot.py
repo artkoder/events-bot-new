@@ -5081,6 +5081,8 @@ async def test_upload_ics_content_type(tmp_path: Path, monkeypatch):
 
     dummy = DummyClient()
     monkeypatch.setattr(main, "get_supabase_client", lambda: dummy)
+    monkeypatch.setattr(main, "SUPABASE_URL", "x")
+    monkeypatch.setattr(main, "SUPABASE_KEY", "y")
 
     url = await main.upload_ics(event, db)
     assert url.endswith(".ics")
@@ -5088,6 +5090,40 @@ async def test_upload_ics_content_type(tmp_path: Path, monkeypatch):
     assert opts["content-type"] == main.ICS_CONTENT_TYPE
     assert opts["content-disposition"].startswith("inline;")
     assert "filename=\"" in opts["content-disposition"]
+
+
+@pytest.mark.asyncio
+async def test_upload_ics_disabled(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    event = Event(
+        id=1,
+        title="T",
+        description="d",
+        source_text="s",
+        date=date.today().isoformat(),
+        time="10:00",
+        location_name="Hall",
+    )
+
+    called = {"v": False}
+
+    class DummyClient:
+        pass
+
+    def fake_client():
+        called["v"] = True
+        return DummyClient()
+
+    monkeypatch.setattr(main, "SUPABASE_URL", "x")
+    monkeypatch.setattr(main, "SUPABASE_KEY", "y")
+    monkeypatch.setattr(main, "get_supabase_client", fake_client)
+    monkeypatch.setenv("SUPABASE_DISABLED", "1")
+
+    url = await main.upload_ics(event, db)
+    assert url is None
+    assert called["v"] is False
 
 
 @pytest.mark.asyncio
