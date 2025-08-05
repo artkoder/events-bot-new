@@ -4376,7 +4376,8 @@ def event_to_nodes(
         nodes.extend(html_to_nodes(html_text))
     nodes.extend([
         {"tag": "br"},
-        {"tag": "br"},
+        {"tag": "p", "children": ["\u00a0"]},
+
     ])
     return nodes
 
@@ -4409,7 +4410,8 @@ def exhibition_to_nodes(e: Event) -> list[dict]:
         nodes.extend(html_to_nodes(html_text))
     nodes.extend([
         {"tag": "br"},
-        {"tag": "br"},
+        {"tag": "p", "children": ["\u00a0"]},
+
     ])
     return nodes
 
