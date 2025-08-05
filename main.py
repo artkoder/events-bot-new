@@ -2221,6 +2221,7 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                                 db,
                                 bot,
                                 ics_url=url,
+                                append_text=False,
                             )
                     month = event.date.split("..", 1)[0][:7]
                     await sync_month_page(db, month)
@@ -2266,6 +2267,7 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                             db,
                             bot,
                             ics_url=None,
+                            append_text=False,
                         )
                 month = event.date.split("..", 1)[0][:7]
                 await sync_month_page(db, month)
@@ -5857,16 +5859,9 @@ def _vk_expose_links(text: str) -> str:
     return text
 
 
-def build_vk_source_message(
-    event: Event,
-    text: str,
-    festival: Festival | None = None,
-    *,
-    ics_url: str | None = None,
-) -> str:
-    """Build detailed VK post for an event including original source text."""
+def build_vk_source_header(event: Event, festival: Festival | None = None) -> list[str]:
+    """Build header lines for VK source post with general event info."""
 
-    text = _vk_expose_links(text)
     lines: list[str] = [event.title]
 
     if festival:
@@ -5937,6 +5932,20 @@ def build_vk_source_message(
             lines.append(f"\U0001f39f Билеты {price}")
 
     lines.append(VK_BLANK_LINE)
+    return lines
+
+
+def build_vk_source_message(
+    event: Event,
+    text: str,
+    festival: Festival | None = None,
+    *,
+    ics_url: str | None = None,
+) -> str:
+    """Build detailed VK post for an event including original source text."""
+
+    text = _vk_expose_links(text)
+    lines = build_vk_source_header(event, festival)
     lines.extend(text.strip().splitlines())
     lines.append(VK_BLANK_LINE)
     if ics_url:
@@ -5953,6 +5962,7 @@ async def sync_vk_source_post(
     bot: Bot | None,
     *,
     ics_url: str | None = None,
+    append_text: bool = True,
 ) -> str | None:
     """Create or update VK source post for an event."""
     if not VK_AFISHA_GROUP_ID:
@@ -5965,7 +5975,7 @@ async def sync_vk_source_post(
                 select(Festival).where(Festival.name == event.festival)
             )
             festival = res.scalars().first()
-    message = build_vk_source_message(event, text, festival=festival, ics_url=ics_url)
+
     if event.source_vk_post_url:
         existing = ""
         try:
@@ -5982,8 +5992,50 @@ async def sync_vk_source_post(
                     existing = items[0].get("text", "")
         except Exception as e:
             logging.error("failed to fetch existing VK post: %s", e)
-        base = existing.split(VK_SOURCE_FOOTER)[0].rstrip()
-        new_message = f"{base}\n{CONTENT_SEPARATOR}\n{message}"
+
+        # Extract previous text versions
+        existing_main = existing.split(VK_SOURCE_FOOTER)[0].rstrip()
+        segments = existing_main.split(f"\n{CONTENT_SEPARATOR}\n") if existing_main else []
+        texts: list[str] = []
+        for seg in segments:
+            lines = seg.splitlines()
+            blanks = 0
+            i = 0
+            while i < len(lines):
+                if lines[i] == VK_BLANK_LINE:
+                    blanks += 1
+                    if blanks == 2:
+                        i += 1
+                        break
+                i += 1
+            lines = lines[i:]
+            if lines and lines[-1].startswith("Добавить в календарь"):
+                lines.pop()
+            while lines and lines[-1] == VK_BLANK_LINE:
+                lines.pop()
+            texts.append("\n".join(lines).strip())
+
+        text_clean = _vk_expose_links(text).strip()
+        if texts:
+            if append_text:
+                texts.append(text_clean)
+            else:
+                texts[-1] = text_clean
+        else:
+            texts = [text_clean]
+
+        header_lines = build_vk_source_header(event, festival)
+        new_lines = header_lines[:]
+        for idx, t in enumerate(texts):
+            if t:
+                new_lines.extend(t.splitlines())
+            new_lines.append(VK_BLANK_LINE)
+            if idx < len(texts) - 1:
+                new_lines.append(CONTENT_SEPARATOR)
+        if ics_url:
+            new_lines.append(f"Добавить в календарь {ics_url}")
+        new_lines.append(VK_SOURCE_FOOTER)
+        new_message = "\n".join(new_lines)
         await edit_vk_post(
             event.source_vk_post_url,
             new_message,
@@ -5993,6 +6045,9 @@ async def sync_vk_source_post(
         url = event.source_vk_post_url
         logging.info("sync_vk_source_post updated %s", url)
     else:
+        message = build_vk_source_message(
+            event, text, festival=festival, ics_url=ics_url
+        )
         url = await post_to_vk(
             VK_AFISHA_GROUP_ID,
             message,
@@ -7114,6 +7169,19 @@ async def handle_edit_message(message: types.Message, db: Database, bot: Bot):
     if new_fest and new_fest != old_fest:
         await sync_festival_page(db, new_fest)
         await sync_festival_vk_post(db, new_fest, bot)
+
+    if event.source_vk_post_url:
+        try:
+            await sync_vk_source_post(
+                event,
+                event.source_text,
+                db,
+                bot,
+                ics_url=event.ics_url,
+                append_text=False,
+            )
+        except Exception as e:
+            logging.error("failed to sync VK source post: %s", e)
 
     editing_sessions[message.from_user.id] = (eid, None)
     await show_edit_menu(message.from_user.id, event, bot)

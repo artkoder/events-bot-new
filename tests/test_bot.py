@@ -604,6 +604,59 @@ async def test_edit_boolean_fields(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_edit_updates_vk_source_post(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
+        return "https://t.me/test", "path"
+
+    monkeypatch.setattr("main.create_source_page", fake_create)
+
+    msg = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "M"},
+            "text": "/addevent_raw Party|2025-07-16|18:00|Club",
+        }
+    )
+    await handle_add_event_raw(msg, db, bot)
+
+    async with db.get_session() as session:
+        event = (await session.execute(select(Event))).scalars().first()
+        event.source_vk_post_url = "https://vk.com/wall-1_1"
+        await session.commit()
+
+    called: dict[str, Any] = {}
+
+    async def fake_sync(event_arg, text_arg, db=None, bot=None, **kwargs):
+        called["event"] = event_arg
+        called["text"] = text_arg
+        called["kwargs"] = kwargs
+        return "https://vk.com/wall-1_1"
+
+    monkeypatch.setattr(main, "sync_vk_source_post", fake_sync)
+
+    editing_sessions[1] = (event.id, "title")
+    edit_msg = types.Message.model_validate(
+        {
+            "message_id": 2,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "M"},
+            "text": "New Title",
+        }
+    )
+    await handle_edit_message(edit_msg, db, bot)
+
+    assert called["event"].title == "New Title"
+    assert called["kwargs"].get("append_text") is False
+
+
+@pytest.mark.asyncio
 async def test_events_list(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
