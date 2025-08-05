@@ -7170,6 +7170,19 @@ async def handle_edit_message(message: types.Message, db: Database, bot: Bot):
         await sync_festival_page(db, new_fest)
         await sync_festival_vk_post(db, new_fest, bot)
 
+    if event.source_vk_post_url:
+        try:
+            await sync_vk_source_post(
+                event,
+                event.source_text,
+                db,
+                bot,
+                ics_url=event.ics_url,
+                append_text=False,
+            )
+        except Exception as e:
+            logging.error("failed to sync VK source post: %s", e)
+
     editing_sessions[message.from_user.id] = (eid, None)
     await show_edit_menu(message.from_user.id, event, bot)
 
