@@ -6,7 +6,7 @@ Debugging:
 
 import logging
 import os
-import time
+import time as _time
 
 
 class DeduplicateFilter(logging.Filter):
@@ -21,7 +21,7 @@ class DeduplicateFilter(logging.Filter):
         if record.levelno > logging.DEBUG:
             return True
         msg = record.getMessage()
-        now = time.monotonic()
+        now = _time.monotonic()
         last = self.last_seen.get(msg, 0.0)
         if now - last >= self.interval:
             self.last_seen[msg] = now
@@ -44,7 +44,6 @@ def configure_logging() -> None:
 configure_logging()
 
 import psutil
-import time as _time
 from datetime import date, datetime, timedelta, timezone, time
 from typing import Optional, Tuple, Iterable, Any
 from urllib.parse import urlparse, parse_qs
