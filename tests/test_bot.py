@@ -4828,6 +4828,24 @@ async def test_add_festival_without_events(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_db_init_adds_festival_location(tmp_path: Path):
+    import sqlite3
+
+    path = tmp_path / "db.sqlite"
+    con = sqlite3.connect(path)
+    con.execute("CREATE TABLE festival (id INTEGER PRIMARY KEY, name VARCHAR)")
+    con.commit()
+    con.close()
+
+    db = Database(str(path))
+    await db.init()
+
+    result = await db.exec_driver_sql("PRAGMA table_info(festival)")
+    cols = [r[1] for r in result.fetchall()]
+    assert {"location_name", "location_address", "city"} <= set(cols)
+
+
+@pytest.mark.asyncio
 async def test_festdays_callback_creates_events(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()

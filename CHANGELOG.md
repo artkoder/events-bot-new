@@ -173,6 +173,8 @@
 
 - Announcements describing a festival without individual events now create a
   festival page and offer a button to generate day-by-day events later.
+- Existing databases automatically add location fields for festivals.
+
 
 
 
