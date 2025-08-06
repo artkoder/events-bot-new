@@ -48,9 +48,17 @@ class Database:
         finally:
             await conn.rollback()
 
+    async def exec_driver_sql(self, sql: str, *args, **kwargs):
+        async with self.engine.begin() as conn:
+            return await conn.exec_driver_sql(sql, *args, **kwargs)
+
     async def init(self):
         async with self.engine.begin() as conn:
-            await conn.exec_driver_sql("PRAGMA journal_mode=WAL")
+            if self.engine.url.get_backend_name() == "sqlite":
+                await conn.exec_driver_sql("PRAGMA journal_mode=WAL;")
+                await conn.exec_driver_sql("PRAGMA synchronous=NORMAL;")
+                await conn.exec_driver_sql("PRAGMA temp_store=MEMORY;")
+                await conn.exec_driver_sql("PRAGMA mmap_size=268435456;")
             await conn.run_sync(create_all)
             result = await conn.exec_driver_sql("PRAGMA table_info(event)")
             cols = [r[1] for r in result.fetchall()]
@@ -230,13 +238,6 @@ class Database:
                 await conn.exec_driver_sql(
                     "ALTER TABLE festival ADD COLUMN vk_poll_url VARCHAR"
                 )
-
-            await conn.exec_driver_sql(
-                "CREATE INDEX IF NOT EXISTS ix_events_date_city ON event(date, city)"
-            )
-            await conn.exec_driver_sql(
-                "CREATE INDEX IF NOT EXISTS ix_events_added_at ON event(added_at)"
-            )
 
         # ensure shared connection is ready
         await self.raw_conn()

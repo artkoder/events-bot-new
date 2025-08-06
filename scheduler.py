@@ -56,6 +56,17 @@ def startup(db, bot) -> AsyncIOScheduler:
             max_instances=1,
             args=[db, bot],
         )
+        _scheduler.add_job(
+            lambda: db.exec_driver_sql("PRAGMA optimize;"),
+            "cron",
+            hour="3",
+        )
+        _scheduler.add_job(
+            lambda: db.exec_driver_sql("VACUUM;"),
+            "cron",
+            day_of_week="sun",
+            hour="4",
+        )
         _scheduler.start()
     return _scheduler
 
