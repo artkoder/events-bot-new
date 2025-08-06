@@ -169,6 +169,11 @@
 
 - Event titles in VK daily announcements link to their VK posts when available.
 
+## v0.3.26 - Festival day creation
+
+- Announcements describing a festival without individual events now create a
+  festival page and offer a button to generate day-by-day events later.
+
 
 
 
