@@ -78,12 +78,13 @@ from telegraph import Telegraph, TelegraphException
 
 from functools import partial, lru_cache
 from contextlib import asynccontextmanager, contextmanager
+from collections import defaultdict
 import asyncio
 import contextlib
 import html
 from io import BytesIO
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import update
+from sqlalchemy import update, text
 from sqlmodel import select
 import aiosqlite
 import gc
@@ -104,6 +105,17 @@ from models import (
     Festival,
 )
 
+from span import span
+
+span.configure(
+    {
+        "db-query": 50,
+        "vk-call": 1000,
+        "telegraph-call": 1000,
+        "event_update_job": 5000,
+    }
+)
+
 DEBUG = os.getenv("EVBOT_DEBUG") == "1"
 
 
@@ -112,8 +124,8 @@ def print_current_rss() -> None:
     logging.info(f"Peak RSS: {rss:.0f} MB")
 
 
-_month_lock = asyncio.Lock()
-_month_next_run: float = 0.0
+_page_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+_month_next_run: dict[str, float] = defaultdict(float)
 
 _cleanup_last_run: date | None = None
 _page_last_run: date | None = None
@@ -163,25 +175,6 @@ def perf_sync(name: str, **details):
             end_rss - start_rss,
             end_t - start_t,
         )
-
-
-_SPAN_THRESHOLDS = {"db": 1.0, "render": 1.0, "tg-send": 1.0, "healthz": 1.0}
-
-
-@asynccontextmanager
-async def span(label: str):
-    start = _time.perf_counter()
-    try:
-        yield
-    finally:
-        dt = _time.perf_counter() - start
-        if dt >= _SPAN_THRESHOLDS.get(label, 1.0):
-            logging.debug("%s took %.2f s", label, dt)
-
-
-@lru_cache(maxsize=20)
-def _weekend_page_lock(start: str) -> asyncio.Lock:
-    return asyncio.Lock()
 
 
 @lru_cache(maxsize=20)
@@ -4633,33 +4626,31 @@ def _build_month_page_content_sync(
     return title, content, size
 
 
-async def sync_month_page(db: Database, month: str, update_links: bool = False):
-    async with _month_lock:
-        global _month_next_run
-        now = _time.time()
-        if "PYTEST_CURRENT_TEST" not in os.environ and now < _month_next_run:
-            logging.debug("sync_month_page skipped, debounced")
+async def _sync_month_page_inner(db: Database, month: str, update_links: bool = False):
+    now = _time.time()
+    if "PYTEST_CURRENT_TEST" not in os.environ and now < _month_next_run[month]:
+        logging.debug("sync_month_page skipped, debounced")
+        return
+    _month_next_run[month] = now + 60
+    logging.info(
+        "sync_month_page start: month=%s update_links=%s", month, update_links
+    )
+    async with perf("sync_month_page"):
+        token = get_telegraph_token()
+        if not token:
+            logging.error("Telegraph token unavailable")
             return
-        _month_next_run = now + 60
-        logging.info(
-            "sync_month_page start: month=%s update_links=%s", month, update_links
-        )
-        async with perf("sync_month_page"):
-            token = get_telegraph_token()
-            if not token:
-                logging.error("Telegraph token unavailable")
-                return
-            tg = Telegraph(access_token=token)
-            async with db.get_session() as session:
-                page = await session.get(MonthPage, month)
-                created = False
-                if not page:
-                    page = MonthPage(month=month, url="", path="")
-                    session.add(page)
-                    await session.commit()
-                    created = True
+        tg = Telegraph(access_token=token)
+        async with db.get_session() as session:
+            page = await session.get(MonthPage, month)
+            created = False
+            if not page:
+                page = MonthPage(month=month, url="", path="")
+                session.add(page)
+                await session.commit()
+                created = True
 
-            events, exhibitions, nav_pages = await get_month_data(db, month)
+        events, exhibitions, nav_pages = await get_month_data(db, month)
 
         async def commit_page() -> None:
             async with db.get_session() as s:
@@ -4774,8 +4765,13 @@ async def sync_month_page(db: Database, month: str, update_links: bool = False):
                 for p in months:
                     if p.month != month:
                         await sync_month_page(db, p.month, update_links=False)
-    
-    
+
+
+async def sync_month_page(db: Database, month: str, update_links: bool = False):
+    async with _page_locks[f"month:{month}"]:
+        await _sync_month_page_inner(db, month, update_links)
+
+
 def weekend_start_for_date(d: date) -> date | None:
     if d.weekday() == 5:
         return d
@@ -4961,7 +4957,7 @@ async def build_weekend_page_content(
     return title, content, size
 
 
-async def sync_weekend_page(
+async def _sync_weekend_page_inner(
     db: Database, start: str, update_links: bool = False, post_vk: bool = True
 ):
     token = get_telegraph_token()
@@ -4970,18 +4966,16 @@ async def sync_weekend_page(
         return
     tg = Telegraph(access_token=token)
 
-    lock = _weekend_page_lock(start)
-    async with lock:
-        async with db.get_session() as session:
-            page = await session.get(WeekendPage, start)
-            if not page:
-                page = WeekendPage(start=start, url="", path="")
-                session.add(page)
-                await session.commit()
-                created = True
-            else:
-                created = False
-            path = page.path
+    async with db.get_session() as session:
+        page = await session.get(WeekendPage, start)
+        if not page:
+            page = WeekendPage(start=start, url="", path="")
+            session.add(page)
+            await session.commit()
+            created = True
+        else:
+            created = False
+        path = page.path
 
     try:
         if not path:
@@ -5002,13 +4996,12 @@ async def sync_weekend_page(
         logging.error("Failed to sync weekend page %s: %s", start, e)
         return
 
-    async with lock:
-        async with db.get_session() as session:
-            db_page = await session.get(WeekendPage, start)
-            if db_page:
-                db_page.url = page.url
-                db_page.path = page.path
-                await session.commit()
+    async with db.get_session() as session:
+        db_page = await session.get(WeekendPage, start)
+        if db_page:
+            db_page.url = page.url
+            db_page.path = page.path
+            await session.commit()
 
     if post_vk:
         await sync_vk_weekend_post(db, start)
@@ -5024,6 +5017,13 @@ async def sync_weekend_page(
                 await sync_weekend_page(
                     db, w.start, update_links=False, post_vk=False
                 )
+
+
+async def sync_weekend_page(
+    db: Database, start: str, update_links: bool = False, post_vk: bool = True
+):
+    async with _page_locks[f"week:{start}"]:
+        await _sync_weekend_page_inner(db, start, update_links, post_vk)
 
 
 async def build_weekend_vk_message(db: Database, start: str) -> str:
@@ -6352,6 +6352,20 @@ async def partner_notification_scheduler(db: Database, bot: Bot):
         now = datetime.now(tz)
     if now.time() >= time(9, 0) and now.date() != _partner_last_run:
         try:
+            async with span("db-query"):
+                async with db.get_session() as session:
+                    await session.execute(
+                        text(
+                            "SELECT id, title FROM event "
+                            "WHERE festival IS NOT NULL "
+                            "AND date BETWEEN :start AND :end "
+                            "ORDER BY date"
+                        ),
+                        {
+                            "start": now.date().isoformat(),
+                            "end": (now.date() + timedelta(days=30)).isoformat(),
+                        },
+                    )
             async with span("db"):
                 notified = await notify_inactive_partners(db, bot, tz)
             if notified:
