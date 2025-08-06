@@ -743,6 +743,11 @@ async def ensure_festival(
     name: str,
     full_name: str | None = None,
     photo_url: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    location_name: str | None = None,
+    location_address: str | None = None,
+    city: str | None = None,
 ) -> Festival:
     """Return existing festival by name or create a new record."""
     async with db.get_session() as session:
@@ -756,11 +761,35 @@ async def ensure_festival(
             if full_name and not fest.full_name:
                 fest.full_name = full_name
                 updated = True
+            if start_date and not fest.start_date:
+                fest.start_date = start_date
+                updated = True
+            if end_date and not fest.end_date:
+                fest.end_date = end_date
+                updated = True
+            if location_name and not fest.location_name:
+                fest.location_name = location_name
+                updated = True
+            if location_address and not fest.location_address:
+                fest.location_address = location_address
+                updated = True
+            if city and not fest.city:
+                fest.city = city
+                updated = True
             if updated:
                 session.add(fest)
                 await session.commit()
             return fest
-        fest = Festival(name=name, full_name=full_name, photo_url=photo_url)
+        fest = Festival(
+            name=name,
+            full_name=full_name,
+            photo_url=photo_url,
+            start_date=start_date,
+            end_date=end_date,
+            location_name=location_name,
+            location_address=location_address,
+            city=city,
+        )
         session.add(fest)
         await session.commit()
         logging.info("created festival %s", name)
@@ -1667,13 +1696,19 @@ async def parse_event_via_4o(
     except json.JSONDecodeError:
         logging.error("Invalid JSON from 4o: %s", content)
         raise
+    festival = None
     if isinstance(data, dict):
+        festival = data.get("festival")
         if "events" in data and isinstance(data["events"], list):
+            parse_event_via_4o._festival = festival
             return data["events"]
+        parse_event_via_4o._festival = festival
         return [data]
     if isinstance(data, list):
+        parse_event_via_4o._festival = None
         return data
     logging.error("Unexpected 4o format: %s", data)
+    parse_event_via_4o._festival = None
     raise RuntimeError("bad 4o response")
 
 
@@ -2075,6 +2110,59 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
 
         await show_edit_menu(callback.from_user.id, event, bot)
         await callback.answer("Updated")
+    elif data.startswith("festdays:"):
+        fid = int(data.split(":")[1])
+        async with db.get_session() as session:
+            user = await session.get(User, callback.from_user.id)
+            fest = await session.get(Festival, fid)
+            if not fest or (user and user.blocked):
+                await callback.answer("Not authorized", show_alert=True)
+                return
+            start = parse_iso_date(fest.start_date or "")
+            end = parse_iso_date(fest.end_date or "")
+            if not start or not end:
+                await callback.answer("Dates missing", show_alert=True)
+                return
+            events: list[tuple[Event, bool]] = []
+            for i in range((end - start).days + 1):
+                day = start + timedelta(days=i)
+                event = Event(
+                    title=f"{fest.full_name or fest.name} - день {i+1}",
+                    description="",
+                    festival=fest.name,
+                    date=day.isoformat(),
+                    time="",
+                    location_name=fest.location_name or "",
+                    location_address=fest.location_address,
+                    city=fest.city,
+                    source_text="",
+                    creator_id=user.user_id if user else None,
+                )
+                saved, added = await upsert_event(session, event)
+                events.append((saved, added))
+            await session.commit()
+        for saved, added in events:
+            await sync_month_page(db, saved.date[:7])
+            d_saved = parse_iso_date(saved.date)
+            w_start = weekend_start_for_date(d_saved) if d_saved else None
+            if w_start:
+                await sync_weekend_page(db, w_start.isoformat())
+            await sync_festival_page(db, saved.festival)
+            asyncio.create_task(sync_festival_vk_post(db, saved.festival, bot))
+            lines = [
+                f"title: {saved.title}",
+                f"date: {saved.date}",
+                f"festival: {saved.festival}",
+            ]
+            if saved.location_name:
+                lines.append(f"location_name: {saved.location_name}")
+            if saved.city:
+                lines.append(f"city: {saved.city}")
+            await callback.message.answer("Event added\n" + "\n".join(lines))
+            async with db.get_session() as session:
+                user = await session.get(User, callback.from_user.id)
+            await notify_event_added(db, bot, user, saved, added)
+        await callback.answer("Done")
     elif data.startswith("festedit:"):
         fid = int(data.split(":")[1])
         async with db.get_session() as session:
@@ -3061,6 +3149,7 @@ async def add_events_from_text(
             else:
                 parsed = await parse_event_via_4o(llm_text)
 
+        festival_info = getattr(parse_event_via_4o, "_festival", None)
         logging.info("LLM returned %d events", len(parsed))
     except Exception as e:
         logging.error("LLM error: %s", e)
@@ -3074,6 +3163,41 @@ async def add_events_from_text(
     if media:
         images = [media] if isinstance(media, tuple) else list(media)
     catbox_urls, catbox_msg_global = await upload_to_catbox(images)
+
+    if festival_info:
+        fest_name = festival_info.get("name") or festival_info.get("festival")
+        start = canonicalize_date(festival_info.get("start_date") or festival_info.get("date"))
+        end = canonicalize_date(festival_info.get("end_date"))
+        loc_name = festival_info.get("location_name")
+        loc_addr = festival_info.get("location_address")
+        city = festival_info.get("city")
+        loc_addr = strip_city_from_address(loc_addr, city)
+        photo_u = catbox_urls[0] if catbox_urls else None
+        fest_obj = await ensure_festival(
+            db,
+            fest_name,
+            full_name=festival_info.get("full_name"),
+            photo_url=photo_u,
+            start_date=start,
+            end_date=end,
+            location_name=loc_name,
+            location_address=loc_addr,
+            city=city,
+        )
+        if not parsed:
+            await sync_festival_page(db, fest_obj.name)
+            asyncio.create_task(sync_festival_vk_post(db, fest_obj.name, bot))
+            lines = [f"festival: {fest_obj.name}"]
+            if fest_obj.start_date:
+                lines.append(f"start: {fest_obj.start_date}")
+            if fest_obj.end_date:
+                lines.append(f"end: {fest_obj.end_date}")
+            if fest_obj.location_name:
+                lines.append(f"location_name: {fest_obj.location_name}")
+            if fest_obj.city:
+                lines.append(f"city: {fest_obj.city}")
+            results.append((fest_obj, True, lines, "festival"))
+            logging.info("festival %s created without events", fest_obj.name)
     links_iter = iter(extract_links_from_html(html_text) if html_text else [])
     source_text_clean = re.sub(
         r"<[^>]+>", "", _vk_expose_links(html_text or text)
@@ -3461,6 +3585,23 @@ async def handle_add_event(
         return
     logging.info("handle_add_event parsed %d results", len(results))
     for saved, added, lines, status in results:
+        if isinstance(saved, Festival):
+            markup = types.InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        types.InlineKeyboardButton(
+                            text="Создать события по дням",
+                            callback_data=f"festdays:{saved.id}",
+                        )
+                    ]
+                ]
+            )
+            await bot.send_message(
+                message.chat.id,
+                "Festival added\n" + "\n".join(lines),
+                reply_markup=markup,
+            )
+            continue
         logging.info(
             "handle_add_event %s event id=%s", status, saved.id
         )
@@ -7958,6 +8099,7 @@ def create_app() -> web.Application:
         or c.data == "festeditdone"
         or c.data.startswith("festdel:")
         or c.data.startswith("setfest:")
+        or c.data.startswith("festdays:")
     ,
     )
     dp.message.register(tz_wrapper, Command("tz"))

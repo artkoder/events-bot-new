@@ -50,6 +50,10 @@ Guidelines:
   festival unless every date is explicitly detailed.
 - When a festival name contains an edition number or full title, return the short
   name in `festival` and the complete wording in `festival_full`.
+- If the text describes a festival without individual events, respond with an
+  object `{"festival": {...}, "events": []}`. The `festival` object should
+  include `name`, `full_name`, `start_date`, `end_date`, `location_name`,
+  `location_address` and `city` when available.
 - Respond with **plain JSON only** &mdash; do not wrap the output in code
   fences.
 

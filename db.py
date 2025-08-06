@@ -238,6 +238,18 @@ class Database:
                 await conn.exec_driver_sql(
                     "ALTER TABLE festival ADD COLUMN vk_poll_url VARCHAR"
                 )
+            if "location_name" not in cols:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE festival ADD COLUMN location_name VARCHAR"
+                )
+            if "location_address" not in cols:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE festival ADD COLUMN location_address VARCHAR"
+                )
+            if "city" not in cols:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE festival ADD COLUMN city VARCHAR"
+                )
 
         # ensure shared connection is ready
         await self.raw_conn()
