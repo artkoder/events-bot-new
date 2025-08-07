@@ -713,23 +713,6 @@ async def get_festival(db: Database, name: str) -> Festival | None:
         return result.scalar_one_or_none()
 
 
-async def ensure_festival(
-    db: Database, name: str, description: str | None = None
-) -> Festival:
-    async with db.get_session() as session:
-        result = await session.execute(
-            select(Festival).where(Festival.name == name)
-        )
-        fest = result.scalar_one_or_none()
-        if fest:
-            return fest
-        fest = Festival(name=name, description=description)
-        session.add(fest)
-        await session.commit()
-        logging.info("festival %s created", name)
-        return fest
-
-
 async def get_asset_channel(db: Database) -> Channel | None:
     async with db.get_session() as session:
         result = await session.execute(
@@ -748,6 +731,7 @@ async def ensure_festival(
     location_name: str | None = None,
     location_address: str | None = None,
     city: str | None = None,
+    source_text: str | None = None,
 ) -> Festival:
     """Return existing festival by name or create a new record."""
     async with db.get_session() as session:
@@ -776,6 +760,9 @@ async def ensure_festival(
             if city and not fest.city:
                 fest.city = city
                 updated = True
+            if source_text and not fest.source_text:
+                fest.source_text = source_text
+                updated = True
             if updated:
                 session.add(fest)
                 await session.commit()
@@ -789,6 +776,7 @@ async def ensure_festival(
             location_name=location_name,
             location_address=location_address,
             city=city,
+            source_text=source_text,
         )
         session.add(fest)
         await session.commit()
@@ -3163,6 +3151,10 @@ async def add_events_from_text(
     if media:
         images = [media] if isinstance(media, tuple) else list(media)
     catbox_urls, catbox_msg_global = await upload_to_catbox(images)
+    links_iter = iter(extract_links_from_html(html_text) if html_text else [])
+    source_text_clean = re.sub(
+        r"<[^>]+>", "", _vk_expose_links(html_text or text)
+    )
 
     if festival_info:
         fest_name = festival_info.get("name") or festival_info.get("festival")
@@ -3183,6 +3175,7 @@ async def add_events_from_text(
             location_name=loc_name,
             location_address=loc_addr,
             city=city,
+            source_text=source_text_clean,
         )
         if not parsed:
             await sync_festival_page(db, fest_obj.name)
@@ -3198,10 +3191,6 @@ async def add_events_from_text(
                 lines.append(f"city: {fest_obj.city}")
             results.append((fest_obj, True, lines, "festival"))
             logging.info("festival %s created without events", fest_obj.name)
-    links_iter = iter(extract_links_from_html(html_text) if html_text else [])
-    source_text_clean = re.sub(
-        r"<[^>]+>", "", _vk_expose_links(html_text or text)
-    )
     for data in parsed:
         logging.info(
             "processing event candidate: %s on %s %s",
@@ -5278,9 +5267,14 @@ async def sync_vk_weekend_post(db: Database, start: str, bot: Bot | None = None)
 
 async def generate_festival_description(fest: Festival, events: list[Event]) -> str:
     """Use LLM to craft a short festival blurb."""
-    texts = [e.source_text for e in events[:5]]
-    if fest.description:
-        texts.insert(0, fest.description)
+    texts: list[str] = []
+    if fest.source_text:
+        texts.append(fest.source_text)
+    elif fest.description:
+        texts.append(fest.description)
+    texts.extend(e.source_text for e in events[:5])
+    if not texts:
+        return ""
     prompt = (
         f"Напиши краткое описание фестиваля {fest.name}. "
         "Стиль профессионального журналиста в сфере мероприятий и культуры. "
