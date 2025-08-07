@@ -175,6 +175,11 @@
   festival page and offer a button to generate day-by-day events later.
 - Existing databases automatically add location fields for festivals.
 
+## v0.3.27 - Festival source text
+
+- Festival descriptions are generated from the full original post text.
+- Festival records store the original announcement in a new `source_text` field.
+
 
 
 

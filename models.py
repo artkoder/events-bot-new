@@ -113,6 +113,7 @@ class Festival(SQLModel, table=True):
     location_name: Optional[str] = None
     location_address: Optional[str] = None
     city: Optional[str] = None
+    source_text: Optional[str] = None
 
 
 def create_all(engine) -> None:

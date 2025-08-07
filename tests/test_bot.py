@@ -5919,6 +5919,43 @@ async def test_festival_description_dash(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_festival_description_uses_source_text(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.get_session() as session:
+        session.add(main.Festival(name="Jazz", source_text="Original festival text"))
+        session.add(
+            Event(
+                title="T",
+                description="",
+                source_text="Event only",
+                date=FUTURE_DATE,
+                time="18:00",
+                location_name="Hall",
+                festival="Jazz",
+            )
+        )
+        await session.commit()
+
+    captured: dict[str, str] = {}
+
+    async def fake_ask(prompt: str) -> str:
+        captured["prompt"] = prompt
+        return "Desc"
+
+    monkeypatch.setattr("main.ask_4o", fake_ask)
+
+    async with db.get_session() as session:
+        fest = (await session.execute(select(main.Festival))).scalars().first()
+        events = (await session.execute(select(Event))).scalars().all()
+
+    desc = await main.generate_festival_description(fest, events)
+    assert "Original festival text" in captured["prompt"]
+    assert desc == "Desc"
+
+
+@pytest.mark.asyncio
 async def test_fest_list_includes_links(tmp_path: Path):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
