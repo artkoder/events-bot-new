@@ -4187,6 +4187,86 @@ async def test_add_event_strips_city_from_address(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_add_events_from_text_syncs_pages_once(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    weekend_day = date.today()
+    while weekend_day.weekday() != 5:
+        weekend_day += timedelta(days=1)
+    weekend_str = weekend_day.isoformat()
+
+    async def fake_parse(text: str, source_channel: str | None = None) -> list[dict]:
+        return [
+            {
+                "title": "A",
+                "short_description": "d1",
+                "date": weekend_str,
+                "time": "10:00",
+                "location_name": "Hall",
+                "event_type": "лекция",
+                "emoji": None,
+                "is_free": True,
+            },
+            {
+                "title": "B",
+                "short_description": "d2",
+                "date": weekend_str,
+                "time": "12:00",
+                "location_name": "Hall",
+                "event_type": "лекция",
+                "emoji": None,
+                "is_free": True,
+            },
+        ]
+
+    async def fake_create(*args, db=None, **kwargs):
+        return "u", "p"
+
+    async def fake_upload_to_catbox(media):
+        return [], ""
+
+    called_months: list[str] = []
+    called_weekends: list[str] = []
+
+    async def fake_month(db_obj, month):
+        called_months.append(month)
+
+    async def fake_weekend(db_obj, start, update_links=True, post_vk=True):
+        called_weekends.append(start)
+
+    async def fake_sync_vk(*args, **kwargs):
+        return None
+
+    async def fake_upload_ics(*args, **kwargs):
+        return None
+
+    async def fake_post_ics_asset(*args, **kwargs):
+        return None
+
+    async def fake_add_calendar_button(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.create_source_page", fake_create)
+    monkeypatch.setattr("main.upload_to_catbox", fake_upload_to_catbox)
+    monkeypatch.setattr("main.sync_month_page", fake_month)
+    monkeypatch.setattr("main.sync_weekend_page", fake_weekend)
+    monkeypatch.setattr("main.sync_vk_source_post", fake_sync_vk)
+    monkeypatch.setattr("main.upload_ics", fake_upload_ics)
+    monkeypatch.setattr("main.post_ics_asset", fake_post_ics_asset)
+    monkeypatch.setattr("main.add_calendar_button", fake_add_calendar_button)
+
+    results = await main.add_events_from_text(db, "t", None, None, None)
+    assert len(results) == 2
+    assert called_months == [weekend_str[:7]]
+    assert called_weekends == [weekend_str]
+    async with db.get_session() as session:
+        res = await session.execute(select(Event))
+        assert len(res.scalars().all()) == 2
+
+
+@pytest.mark.asyncio
 async def test_festival_expands_dates(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
