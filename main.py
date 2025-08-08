@@ -4045,6 +4045,11 @@ def md_to_html(text: str) -> str:
     return html_text
 
 
+def telegraph_br() -> list[dict]:
+    """Return nodes for a blank line in Telegraph (<br>&nbsp;)."""
+    return [{"tag": "br"}, {"tag": "p", "children": ["\u00a0"]}]
+
+
 def extract_link_from_html(html_text: str) -> str | None:
     """Return a registration or ticket link from HTML if present."""
     pattern = re.compile(
@@ -4557,11 +4562,7 @@ def event_to_nodes(
     if body_md:
         html_text = md_to_html(body_md)
         nodes.extend(html_to_nodes(html_text))
-    nodes.extend([
-        {"tag": "br"},
-        {"tag": "p", "children": ["\u00a0"]},
-
-    ])
+    nodes.extend(telegraph_br())
     return nodes
 
 
@@ -4591,11 +4592,7 @@ def exhibition_to_nodes(e: Event) -> list[dict]:
     if body_md:
         html_text = md_to_html(body_md)
         nodes.extend(html_to_nodes(html_text))
-    nodes.extend([
-        {"tag": "br"},
-        {"tag": "p", "children": ["\u00a0"]},
-
-    ])
+    nodes.extend(telegraph_br())
     return nodes
 
 async def get_month_data(db: Database, month: str, *, fallback: bool = True):
@@ -4743,13 +4740,15 @@ def _build_month_page_content_sync(
     for day in sorted(by_day):
         if exceeded:
             break
+        add_many(telegraph_br())
         if day.weekday() == 5:
             add({"tag": "h3", "children": ["🟥🟥🟥 суббота 🟥🟥🟥"]})
+            add_many(telegraph_br())
         elif day.weekday() == 6:
             add({"tag": "h3", "children": ["🟥🟥 воскресенье 🟥🟥"]})
+            add_many(telegraph_br())
         add({"tag": "h3", "children": [f"🟥🟥🟥 {format_day_pretty(day)} 🟥🟥🟥"]})
-        add({"tag": "br"})
-        add({"tag": "br"})
+        add_many(telegraph_br())
         for ev in by_day[day]:
             if exceeded:
                 break
@@ -4774,27 +4773,26 @@ def _build_month_page_content_sync(
         nav_children = [month_name_nominative(month)]
 
     if nav_children:
-        month_nav = [{"tag": "br"}, {"tag": "h4", "children": nav_children}]
+        month_nav = [{"tag": "h4", "children": nav_children}]
+        add_many(telegraph_br())
         add_many(month_nav)
+        add_many(telegraph_br())
 
     if exhibitions and not exceeded:
-        if month_nav:
-            add({"tag": "br"})
-            add({"tag": "br"})
         add({"tag": "h3", "children": ["Постоянные выставки"]})
-        add({"tag": "br"})
-        add({"tag": "br"})
+        add_many(telegraph_br())
         for ev in exhibitions:
             if exceeded:
                 break
             add_many(exhibition_to_nodes(ev))
 
     if month_nav and not exceeded:
+        add_many(telegraph_br())
         add_many(month_nav)
+        add_many(telegraph_br())
 
     if continuation_url and not exceeded:
-        add({"tag": "br"})
-        add({"tag": "br"})
+        add_many(telegraph_br())
         add(
             {
                 "tag": "h3",
@@ -5122,13 +5120,15 @@ async def build_weekend_page_content(
         for d in days:
             if exceeded or d not in by_day:
                 continue
+            add_many(telegraph_br())
             if d.weekday() == 5:
                 add({"tag": "h3", "children": ["🟥🟥🟥 суббота 🟥🟥🟥"]})
+                add_many(telegraph_br())
             elif d.weekday() == 6:
                 add({"tag": "h3", "children": ["🟥🟥 воскресенье 🟥🟥"]})
+                add_many(telegraph_br())
             add({"tag": "h3", "children": [f"🟥🟥🟥 {format_day_pretty(d)} 🟥🟥🟥"]})
-            add({"tag": "br"})
-            add({"tag": "br"})
+            add_many(telegraph_br())
             for ev in by_day[d]:
                 if exceeded:
                     break
@@ -5150,8 +5150,10 @@ async def build_weekend_page_content(
                     )
                 if idx < len(future_weekends) - 1:
                     nav_children.append(" ")
-            weekend_nav = [{"tag": "br"}, {"tag": "h4", "children": nav_children}]
+            weekend_nav = [{"tag": "h4", "children": nav_children}]
+            add_many(telegraph_br())
             add_many(weekend_nav)
+            add_many(telegraph_br())
 
         month_nav: list[dict] = []
         cur_month = start[:7]
@@ -5163,25 +5165,27 @@ async def build_weekend_page_content(
                 nav_children.append({"tag": "a", "attrs": {"href": p.url}, "children": [name]})
                 if idx < len(future_months) - 1:
                     nav_children.append(" ")
-            month_nav = [{"tag": "br"}, {"tag": "h4", "children": nav_children}]
+            month_nav = [{"tag": "h4", "children": nav_children}]
+            add_many(telegraph_br())
             add_many(month_nav)
+            add_many(telegraph_br())
 
         if exhibitions and not exceeded:
-            if weekend_nav or month_nav:
-                add({"tag": "br"})
-                add({"tag": "br"})
             add({"tag": "h3", "children": ["Постоянные выставки"]})
-            add({"tag": "br"})
-            add({"tag": "br"})
+            add_many(telegraph_br())
             for ev in exhibitions:
                 if exceeded:
                     break
                 add_many(exhibition_to_nodes(ev))
 
         if weekend_nav and not exceeded:
+            add_many(telegraph_br())
             add_many(weekend_nav)
+            add_many(telegraph_br())
         if month_nav and not exceeded:
+            add_many(telegraph_br())
             add_many(month_nav)
+            add_many(telegraph_br())
 
         title = (
             "Чем заняться на выходных в Калининградской области "
