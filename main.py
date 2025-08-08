@@ -73,6 +73,7 @@ from difflib import SequenceMatcher
 import json
 import re
 import httpx
+import hashlib
 
 from telegraph import Telegraph, TelegraphException
 
@@ -307,6 +308,11 @@ def rough_size(nodes: Iterable[dict], limit: int | None = None) -> int:
             break
     return total
 
+
+def nodes_hash(nodes: list) -> str:
+    data = json.dumps(nodes, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(data.encode()).hexdigest()
+
 # Timeout for Telegraph API operations (in seconds)
 TELEGRAPH_TIMEOUT = float(os.getenv("TELEGRAPH_TIMEOUT", "30"))
 
@@ -318,6 +324,9 @@ HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "30"))
 
 # Limit concurrent HTTP requests
 HTTP_SEMAPHORE = asyncio.Semaphore(2)
+
+# Limit heavy operations like Telegraph/VK updates
+HEAVY_SEMAPHORE = asyncio.Semaphore(1)
 
 # Timeout for OpenAI 4o requests (in seconds)
 FOUR_O_TIMEOUT = float(os.getenv("FOUR_O_TIMEOUT", "60"))
@@ -342,7 +351,7 @@ async def telegraph_call(func, /, *args, retries: int = 3, **kwargs):
         except asyncio.TimeoutError as e:
             last_exc = e
             if attempt < retries - 1:
-                # exponential backoff: 1s, 2s, 4s ...
+                logging.warning("telegraph_call retry=%d", attempt + 1)
                 await asyncio.sleep(2**attempt)
                 continue
             raise TelegraphException("Telegraph request timed out") from e
@@ -697,10 +706,12 @@ async def upload_vk_photo(
 
 
 def get_supabase_client() -> "Client | None":  # type: ignore[name-defined]
-    if os.getenv("DISABLE_SUPABASE") == "1":
+    if os.getenv("SUPABASE_DISABLED") == "1" or not (
+        SUPABASE_URL and SUPABASE_KEY
+    ):
         return None
     global _supabase_client
-    if _supabase_client is None and SUPABASE_URL and SUPABASE_KEY:
+    if _supabase_client is None:
         from supabase import create_client, Client  # локальный импорт
         from supabase.client import ClientOptions
 
@@ -879,10 +890,11 @@ async def restore_database(data: bytes, db: Database):
     path = db.path
     if os.path.exists(path):
         os.remove(path)
-    async with aiosqlite.connect(path, timeout=30) as conn:
-        await conn.executescript(data.decode("utf-8"))
-        await conn.commit()
-        await conn.close()
+    conn = await db.raw_conn()
+    await conn.executescript(data.decode("utf-8"))
+    await conn.commit()
+    await conn.close()
+    db._conn = None  # type: ignore[attr-defined]
     await db.init()
 
 
@@ -1455,12 +1467,9 @@ async def build_ics_content(db: Database, event: Event) -> str:
 
 async def upload_ics(event: Event, db: Database) -> str | None:
     async with span("tg-send"):
-        if os.getenv("SUPABASE_DISABLED", "") or not (SUPABASE_URL and SUPABASE_KEY):
-            logging.debug("Supabase disabled")
-            return None
         client = get_supabase_client()
         if not client:
-            logging.error("Supabase client not configured")
+            logging.debug("Supabase disabled")
             return None
         if event.end_date:
             logging.info("skip ics for multi-day event %s", event.id)
@@ -2143,12 +2152,14 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                 saved, added = await upsert_event(session, event)
                 events.append((saved, added))
             await session.commit()
+        months: set[str] = set()
+        weekends: set[str] = set()
         for saved, added in events:
-            await sync_month_page(db, saved.date[:7])
+            months.add(saved.date[:7])
             d_saved = parse_iso_date(saved.date)
             w_start = weekend_start_for_date(d_saved) if d_saved else None
             if w_start:
-                await sync_weekend_page(db, w_start.isoformat())
+                weekends.add(w_start.isoformat())
             await sync_festival_page(db, saved.festival)
             asyncio.create_task(sync_festival_vk_post(db, saved.festival, bot))
             lines = [
@@ -2164,6 +2175,13 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
             async with db.get_session() as session:
                 user = await session.get(User, callback.from_user.id)
             await notify_event_added(db, bot, user, saved, added)
+
+        for m in months:
+            await sync_month_page(db, m)
+            await asyncio.sleep(0)
+        for w in weekends:
+            await sync_weekend_page(db, w)
+            await asyncio.sleep(0)
         await callback.answer("Done")
     elif data.startswith("festedit:"):
         fid = int(data.split(":")[1])
@@ -3300,6 +3318,8 @@ async def add_events_from_text(
                     copy_e.end_date = None
                     events_to_add.append(copy_e)
 
+        months_to_sync: set[str] = set()
+        weekends_to_sync: set[str] = set()
         for event in events_to_add:
             if not is_valid_url(event.ticket_link):
                 try:
@@ -3452,23 +3472,11 @@ async def add_events_from_text(
                             saved.source_vk_post_url = vk_url
                             session.add(saved)
                             await session.commit()
-            logging.info("syncing month page %s", saved.date[:7])
-            try:
-                await sync_month_page(db, saved.date[:7])
-            except Exception as e:
-                logging.error(
-                    "failed to sync month page %s: %s", saved.date[:7], e
-                )
+            months_to_sync.add(saved.date[:7])
             d_saved = parse_iso_date(saved.date)
             w_start = weekend_start_for_date(d_saved) if d_saved else None
             if w_start:
-                logging.info("syncing weekend page %s", w_start.isoformat())
-                try:
-                    await sync_weekend_page(db, w_start.isoformat())
-                except Exception as e:
-                    logging.error(
-                        "failed to sync weekend page %s: %s", w_start.isoformat(), e
-                    )
+                weekends_to_sync.add(w_start.isoformat())
             fest_obj = None
             if saved.festival:
                 logging.info("syncing festival %s", saved.festival)
@@ -3521,6 +3529,21 @@ async def add_events_from_text(
             status = "added" if added else "updated"
             results.append((saved, added, lines, status))
             first = False
+
+        for m in months_to_sync:
+            logging.info("syncing month page %s", m)
+            try:
+                await sync_month_page(db, m)
+            except Exception as e:
+                logging.error("failed to sync month page %s: %s", m, e)
+            await asyncio.sleep(0)
+        for w in weekends_to_sync:
+            logging.info("syncing weekend page %s", w)
+            try:
+                await sync_weekend_page(db, w)
+            except Exception as e:
+                logging.error("failed to sync weekend page %s: %s", w, e)
+            await asyncio.sleep(0)
     logging.info("add_events_from_text finished with %d results", len(results))
     del parsed
     gc.collect()
@@ -3862,6 +3885,7 @@ async def add_event_queue_worker(db: Database, bot: Bot):
     """Background worker to process queued events sequentially."""
     while True:
         item = await add_event_queue.get()
+        start = _time.perf_counter()
         try:
             kind, msg, using_session = item
             task = asyncio.current_task()
@@ -3888,6 +3912,8 @@ async def add_event_queue_worker(db: Database, bot: Bot):
                     working.discard(task)
         finally:
             add_event_queue.task_done()
+            dur = (_time.perf_counter() - start) * 1000
+            logging.info("add_event total=%.0f ms", dur)
 
 
 def format_day(day: date, tz: timezone) -> str:
@@ -4789,111 +4815,163 @@ def _build_month_page_content_sync(
 
 
 async def _sync_month_page_inner(db: Database, month: str, update_links: bool = False):
-    now = _time.time()
-    if "PYTEST_CURRENT_TEST" not in os.environ and now < _month_next_run[month]:
-        logging.debug("sync_month_page skipped, debounced")
-        return
-    _month_next_run[month] = now + 60
-    logging.info(
-        "sync_month_page start: month=%s update_links=%s", month, update_links
-    )
-    async with perf("sync_month_page"):
-        token = get_telegraph_token()
-        if not token:
-            logging.error("Telegraph token unavailable")
+    async with HEAVY_SEMAPHORE:
+        now = _time.time()
+        if "PYTEST_CURRENT_TEST" not in os.environ and now < _month_next_run[month]:
+            logging.debug("sync_month_page skipped, debounced")
             return
-        tg = Telegraph(access_token=token)
-        async with db.get_session() as session:
-            page = await session.get(MonthPage, month)
-            created = False
-            if not page:
-                page = MonthPage(month=month, url="", path="")
-                session.add(page)
-                await session.commit()
-                created = True
+        _month_next_run[month] = now + 60
+        logging.info(
+            "sync_month_page start: month=%s update_links=%s", month, update_links
+        )
+        async with perf("sync_month_page"):
+            token = get_telegraph_token()
+            if not token:
+                logging.error("Telegraph token unavailable")
+                return
+            tg = Telegraph(access_token=token)
+            async with db.get_session() as session:
+                page = await session.get(MonthPage, month)
+                created = False
+                if not page:
+                    page = MonthPage(month=month, url="", path="")
+                    session.add(page)
+                    await session.commit()
+                    created = True
 
-        events, exhibitions, nav_pages = await get_month_data(db, month)
+            events, exhibitions, nav_pages = await get_month_data(db, month)
 
-        async def commit_page() -> None:
-            async with db.get_session() as s:
-                db_page = await s.get(MonthPage, month)
-                db_page.url = page.url
-                db_page.path = page.path
-                db_page.url2 = page.url2
-                db_page.path2 = page.path2
-                await s.commit()
-        from telegraph.utils import nodes_to_html
+            async def commit_page() -> None:
+                async with db.get_session() as s:
+                    db_page = await s.get(MonthPage, month)
+                    db_page.url = page.url
+                    db_page.path = page.path
+                    db_page.url2 = page.url2
+                    db_page.path2 = page.path2
+                    db_page.content_hash = page.content_hash
+                    db_page.content_hash2 = page.content_hash2
+                    await s.commit()
+            from telegraph.utils import nodes_to_html
 
-        def split_events(total_size: int) -> tuple[list[Event], list[Event]]:
-            avg = total_size / len(events) if events else total_size
-            split_idx = max(1, int(TELEGRAPH_LIMIT // avg)) if events else 0
-            return events[:split_idx], events[split_idx:]
+            def split_events(total_size: int) -> tuple[list[Event], list[Event]]:
+                avg = total_size / len(events) if events else total_size
+                split_idx = max(1, int(TELEGRAPH_LIMIT // avg)) if events else 0
+                return events[:split_idx], events[split_idx:]
 
-        async def update_split(first: list[Event], second: list[Event]) -> None:
-            nonlocal created
-            title2, content2, _ = await build_month_page_content(
-                db, month, second, exhibitions, nav_pages
-            )
-            html2 = nodes_to_html(content2)
-            if not page.path2:
-                logging.info("creating second page for %s", month)
-                data2 = await telegraph_create_page(tg, title2, html_content=html2)
-                page.url2 = data2.get("url")
-                page.path2 = data2.get("path")
-            else:
-                logging.info("updating second page for %s", month)
-                await telegraph_call(
-                    tg.edit_page, page.path2, title=title2, html_content=html2
+            async def update_split(first: list[Event], second: list[Event]) -> None:
+                nonlocal created
+                title2, content2, _ = await build_month_page_content(
+                    db, month, second, exhibitions, nav_pages
                 )
+                hash2 = nodes_hash(content2)
+                if page.path2 and page.content_hash2 == hash2:
+                    logging.debug("telegraph_update skipped (no changes)")
+                else:
+                    html2 = nodes_to_html(content2)
+                    rough2 = rough_size(content2)
+                    if not page.path2:
+                        logging.info("creating second page for %s", month)
+                        data2 = await telegraph_create_page(tg, title2, html_content=html2)
+                        page.url2 = data2.get("url")
+                        page.path2 = data2.get("path")
+                    else:
+                        logging.info("updating second page for %s", month)
+                        start = _time.perf_counter()
+                        await telegraph_call(
+                            tg.edit_page, page.path2, title=title2, html_content=html2
+                        )
+                        dur = (_time.perf_counter() - start) * 1000
+                        logging.info("editPage %s done in %.0f ms", page.path2, dur)
+                    logging.debug(
+                        "telegraph_update page=%s nodes=%d bytes≈%d",
+                        page.path2,
+                        len(content2),
+                        rough2,
+                    )
+                    page.content_hash2 = hash2
+                    await asyncio.sleep(0)
 
-            title1, content1, _ = await build_month_page_content(
-                db,
-                month,
-                first,
-                [],
-                nav_pages,
-                continuation_url=page.url2,
-            )
-            html1 = nodes_to_html(content1)
-            if not page.path:
-                logging.info("creating first page for %s", month)
-                data1 = await telegraph_create_page(tg, title1, html_content=html1)
-                page.url = data1.get("url")
-                page.path = data1.get("path")
-                created = True
-            else:
-                logging.info("updating first page for %s", month)
-                await telegraph_call(
-                    tg.edit_page, page.path, title=title1, html_content=html1
+                title1, content1, _ = await build_month_page_content(
+                    db,
+                    month,
+                    first,
+                    [],
+                    nav_pages,
+                    continuation_url=page.url2,
                 )
-            logging.info(
-                "%s month page %s split into two",
-                "Created" if created else "Edited",
-                month,
-            )
-            await commit_page()
+                hash1 = nodes_hash(content1)
+                if page.path and page.content_hash == hash1:
+                    logging.debug("telegraph_update skipped (no changes)")
+                else:
+                    html1 = nodes_to_html(content1)
+                    rough1 = rough_size(content1)
+                    if not page.path:
+                        logging.info("creating first page for %s", month)
+                        data1 = await telegraph_create_page(tg, title1, html_content=html1)
+                        page.url = data1.get("url")
+                        page.path = data1.get("path")
+                        created = True
+                    else:
+                        logging.info("updating first page for %s", month)
+                        start = _time.perf_counter()
+                        await telegraph_call(
+                            tg.edit_page, page.path, title=title1, html_content=html1
+                        )
+                        dur = (_time.perf_counter() - start) * 1000
+                        logging.info("editPage %s done in %.0f ms", page.path, dur)
+                    logging.debug(
+                        "telegraph_update page=%s nodes=%d bytes≈%d",
+                        page.path,
+                        len(content1),
+                        rough1,
+                    )
+                    page.content_hash = hash1
+                    await asyncio.sleep(0)
+
+                logging.info(
+                    "%s month page %s split into two",
+                    "Created" if created else "Edited",
+                    month,
+                )
+                await commit_page()
 
         title, content, _ = await build_month_page_content(
             db, month, events, exhibitions, nav_pages
         )
+        hash_full = nodes_hash(content)
         html_full = nodes_to_html(content)
         size = len(html_full.encode())
 
         try:
             if size <= TELEGRAPH_LIMIT:
-                if not page.path:
-                    logging.info("creating month page %s", month)
-                    data = await telegraph_create_page(
-                        tg, title, html_content=html_full
-                    )
-                    page.url = data.get("url")
-                    page.path = data.get("path")
-                    created = True
+                if page.path and page.content_hash == hash_full:
+                    logging.debug("telegraph_update skipped (no changes)")
                 else:
-                    logging.info("updating month page %s", month)
-                    await telegraph_call(
-                        tg.edit_page, page.path, title=title, html_content=html_full
+                    if not page.path:
+                        logging.info("creating month page %s", month)
+                        data = await telegraph_create_page(
+                            tg, title, html_content=html_full
+                        )
+                        page.url = data.get("url")
+                        page.path = data.get("path")
+                        created = True
+                    else:
+                        logging.info("updating month page %s", month)
+                        start = _time.perf_counter()
+                        await telegraph_call(
+                            tg.edit_page, page.path, title=title, html_content=html_full
+                        )
+                        dur = (_time.perf_counter() - start) * 1000
+                        logging.info("editPage %s done in %.0f ms", page.path, dur)
+                    rough = rough_size(content)
+                    logging.debug(
+                        "telegraph_update page=%s nodes=%d bytes≈%d",
+                        page.path,
+                        len(content),
+                        rough,
                     )
+                    page.content_hash = hash_full
+                    page.content_hash2 = None
                 page.url2 = None
                 page.path2 = None
                 logging.info(
@@ -4927,6 +5005,7 @@ async def _sync_month_page_inner(db: Database, month: str, update_links: bool = 
                 for p in months:
                     if p.month != month:
                         await sync_month_page(db, p.month, update_links=False)
+                        await asyncio.sleep(0)
 
 
 async def sync_month_page(db: Database, month: str, update_links: bool = False):
@@ -5122,51 +5201,70 @@ async def build_weekend_page_content(
 async def _sync_weekend_page_inner(
     db: Database, start: str, update_links: bool = False, post_vk: bool = True
 ):
-    token = get_telegraph_token()
-    if not token:
-        logging.error("Telegraph token unavailable")
-        return
-    tg = Telegraph(access_token=token)
+    async with HEAVY_SEMAPHORE:
+        token = get_telegraph_token()
+        if not token:
+            logging.error("Telegraph token unavailable")
+            return
+        tg = Telegraph(access_token=token)
 
-    async with db.get_session() as session:
-        page = await session.get(WeekendPage, start)
-        if not page:
-            page = WeekendPage(start=start, url="", path="")
-            session.add(page)
-            await session.commit()
-            created = True
-        else:
-            created = False
-        path = page.path
+        async with db.get_session() as session:
+            page = await session.get(WeekendPage, start)
+            if not page:
+                page = WeekendPage(start=start, url="", path="")
+                session.add(page)
+                await session.commit()
+                created = True
+            else:
+                created = False
+            path = page.path
 
-    try:
-        if not path:
-            # Create placeholder page then update with navigation
+        try:
             title, content, _ = await build_weekend_page_content(db, start)
-            data = await telegraph_create_page(tg, title, content=content)
-            page.url = data.get("url")
-            page.path = data.get("path")
-            created = True
-            title, content, _ = await build_weekend_page_content(db, start)
-            await telegraph_call(tg.edit_page, page.path, title=title, content=content)
-        else:
-            title, content, _ = await build_weekend_page_content(db, start)
-            await telegraph_call(tg.edit_page, path, title=title, content=content)
-            page.path = path
-        logging.info("%s weekend page %s", "Created" if created else "Edited", start)
-    except Exception as e:
-        logging.error("Failed to sync weekend page %s: %s", start, e)
-        return
+            hash_new = nodes_hash(content)
+            if not path:
+                data = await telegraph_create_page(tg, title, content=content)
+                page.url = data.get("url")
+                page.path = data.get("path")
+                created = True
+                rough = rough_size(content)
+                logging.debug(
+                    "telegraph_update page=%s nodes=%d bytes≈%d",
+                    page.path,
+                    len(content),
+                    rough,
+                )
+                page.content_hash = hash_new
+            elif page.content_hash == hash_new:
+                logging.debug("telegraph_update skipped (no changes)")
+            else:
+                start_t = _time.perf_counter()
+                await telegraph_call(tg.edit_page, path, title=title, content=content)
+                dur = (_time.perf_counter() - start_t) * 1000
+                logging.info("editPage %s done in %.0f ms", path, dur)
+                rough = rough_size(content)
+                logging.debug(
+                    "telegraph_update page=%s nodes=%d bytes≈%d",
+                    path,
+                    len(content),
+                    rough,
+                )
+                page.content_hash = hash_new
+            logging.info("%s weekend page %s", "Created" if created else "Edited", start)
+        except Exception as e:
+            logging.error("Failed to sync weekend page %s: %s", start, e)
+            return
 
-    async with db.get_session() as session:
-        db_page = await session.get(WeekendPage, start)
-        if db_page:
-            db_page.url = page.url
-            db_page.path = page.path
-            await session.commit()
+        async with db.get_session() as session:
+            db_page = await session.get(WeekendPage, start)
+            if db_page:
+                db_page.url = page.url
+                db_page.path = page.path
+                db_page.content_hash = page.content_hash
+                await session.commit()
 
-    if post_vk:
-        await sync_vk_weekend_post(db, start)
+        if post_vk:
+            await sync_vk_weekend_post(db, start)
 
     if update_links or created:
         async with db.get_session() as session:
@@ -5179,6 +5277,7 @@ async def _sync_weekend_page_inner(
                 await sync_weekend_page(
                     db, w.start, update_links=False, post_vk=False
                 )
+                await asyncio.sleep(0)
 
 
 async def sync_weekend_page(
@@ -5254,47 +5353,48 @@ async def build_weekend_vk_message(db: Database, start: str) -> str:
 async def sync_vk_weekend_post(db: Database, start: str, bot: Bot | None = None) -> None:
     lock = _weekend_vk_lock(start)
     async with lock:
-        logging.info("sync_vk_weekend_post start for %s", start)
-        group_id = VK_AFISHA_GROUP_ID
-        if not group_id:
-            logging.info("sync_vk_weekend_post: VK group not configured")
-            return
-        async with db.get_session() as session:
-            page = await session.get(WeekendPage, start)
-        if not page:
-            logging.info("sync_vk_weekend_post: weekend page %s not found", start)
-            return
+        async with HEAVY_SEMAPHORE:
+            logging.info("sync_vk_weekend_post start for %s", start)
+            group_id = VK_AFISHA_GROUP_ID
+            if not group_id:
+                logging.info("sync_vk_weekend_post: VK group not configured")
+                return
+            async with db.get_session() as session:
+                page = await session.get(WeekendPage, start)
+            if not page:
+                logging.info("sync_vk_weekend_post: weekend page %s not found", start)
+                return
 
-        message = await build_weekend_vk_message(db, start)
-        logging.info("sync_vk_weekend_post message len=%d", len(message))
-        needs_new_post = not page.vk_post_url
-        if page.vk_post_url:
-            try:
-                updated = await edit_vk_post(page.vk_post_url, message, db, bot)
-                if updated:
-                    logging.info("sync_vk_weekend_post updated %s", page.vk_post_url)
-                else:
-                    logging.info(
-                        "sync_vk_weekend_post: no changes for %s", page.vk_post_url
-                    )
-            except Exception as e:
-                if "post or comment deleted" in str(e) or "Пост удалён" in str(e):
-                    logging.warning(
-                        "sync_vk_weekend_post: original VK post missing, creating new"
-                    )
-                    needs_new_post = True
-                else:
-                    logging.error("VK post error for weekend %s: %s", start, e)
-                    return
-        if needs_new_post:
-            url = await post_to_vk(group_id, message, db, bot)
-            if url:
-                async with db.get_session() as session:
-                    obj = await session.get(WeekendPage, start)
-                    if obj:
-                        obj.vk_post_url = url
-                        await session.commit()
-                logging.info("sync_vk_weekend_post created %s", url)
+            message = await build_weekend_vk_message(db, start)
+            logging.info("sync_vk_weekend_post message len=%d", len(message))
+            needs_new_post = not page.vk_post_url
+            if page.vk_post_url:
+                try:
+                    updated = await edit_vk_post(page.vk_post_url, message, db, bot)
+                    if updated:
+                        logging.info("sync_vk_weekend_post updated %s", page.vk_post_url)
+                    else:
+                        logging.info(
+                            "sync_vk_weekend_post: no changes for %s", page.vk_post_url
+                        )
+                except Exception as e:
+                    if "post or comment deleted" in str(e) or "Пост удалён" in str(e):
+                        logging.warning(
+                            "sync_vk_weekend_post: original VK post missing, creating new"
+                        )
+                        needs_new_post = True
+                    else:
+                        logging.error("VK post error for weekend %s: %s", start, e)
+                        return
+            if needs_new_post:
+                url = await post_to_vk(group_id, message, db, bot)
+                if url:
+                    async with db.get_session() as session:
+                        obj = await session.get(WeekendPage, start)
+                        if obj:
+                            obj.vk_post_url = url
+                            await session.commit()
+                    logging.info("sync_vk_weekend_post created %s", url)
 
 
 async def generate_festival_description(fest: Festival, events: list[Event]) -> str:
@@ -6135,94 +6235,97 @@ async def sync_vk_source_post(
     if not VK_AFISHA_GROUP_ID:
         return None
     logging.info("sync_vk_source_post start for event %s", event.id)
-    festival = None
-    if event.festival and db:
-        async with db.get_session() as session:
-            res = await session.execute(
-                select(Festival).where(Festival.name == event.festival)
-            )
-            festival = res.scalars().first()
-
-    if event.source_vk_post_url:
-        existing = ""
-        try:
-            ids = _vk_owner_and_post_id(event.source_vk_post_url)
-            if ids:
-                data = await _vk_api(
-                    "wall.getById",
-                    {"posts": f"{ids[0]}_{ids[1]}"},
-                    db,
-                    bot,
+    async with HEAVY_SEMAPHORE:
+        festival = None
+        if event.festival and db:
+            async with db.get_session() as session:
+                res = await session.execute(
+                    select(Festival).where(Festival.name == event.festival)
                 )
-                items = data.get("response") or []
-                if items:
-                    existing = items[0].get("text", "")
-        except Exception as e:
-            logging.error("failed to fetch existing VK post: %s", e)
+                festival = res.scalars().first()
 
-        # Extract previous text versions
-        existing_main = existing.split(VK_SOURCE_FOOTER)[0].rstrip()
-        segments = existing_main.split(f"\n{CONTENT_SEPARATOR}\n") if existing_main else []
-        texts: list[str] = []
-        for seg in segments:
-            lines = seg.splitlines()
-            blanks = 0
-            i = 0
-            while i < len(lines):
-                if lines[i] == VK_BLANK_LINE:
-                    blanks += 1
-                    if blanks == 2:
-                        i += 1
-                        break
-                i += 1
-            lines = lines[i:]
-            if lines and lines[-1].startswith("Добавить в календарь"):
-                lines.pop()
-            while lines and lines[-1] == VK_BLANK_LINE:
-                lines.pop()
-            texts.append("\n".join(lines).strip())
+        if event.source_vk_post_url:
+            existing = ""
+            try:
+                ids = _vk_owner_and_post_id(event.source_vk_post_url)
+                if ids:
+                    data = await _vk_api(
+                        "wall.getById",
+                        {"posts": f"{ids[0]}_{ids[1]}"},
+                        db,
+                        bot,
+                    )
+                    items = data.get("response") or []
+                    if items:
+                        existing = items[0].get("text", "")
+            except Exception as e:
+                logging.error("failed to fetch existing VK post: %s", e)
 
-        text_clean = _vk_expose_links(text).strip()
-        if texts:
-            if append_text:
-                texts.append(text_clean)
+            # Extract previous text versions
+            existing_main = existing.split(VK_SOURCE_FOOTER)[0].rstrip()
+            segments = (
+                existing_main.split(f"\n{CONTENT_SEPARATOR}\n") if existing_main else []
+            )
+            texts: list[str] = []
+            for seg in segments:
+                lines = seg.splitlines()
+                blanks = 0
+                i = 0
+                while i < len(lines):
+                    if lines[i] == VK_BLANK_LINE:
+                        blanks += 1
+                        if blanks == 2:
+                            i += 1
+                            break
+                    i += 1
+                lines = lines[i:]
+                if lines and lines[-1].startswith("Добавить в календарь"):
+                    lines.pop()
+                while lines and lines[-1] == VK_BLANK_LINE:
+                    lines.pop()
+                texts.append("\n".join(lines).strip())
+
+            text_clean = _vk_expose_links(text).strip()
+            if texts:
+                if append_text:
+                    texts.append(text_clean)
+                else:
+                    texts[-1] = text_clean
             else:
-                texts[-1] = text_clean
-        else:
-            texts = [text_clean]
+                texts = [text_clean]
 
-        header_lines = build_vk_source_header(event, festival)
-        new_lines = header_lines[:]
-        for idx, t in enumerate(texts):
-            if t:
-                new_lines.extend(t.splitlines())
-            new_lines.append(VK_BLANK_LINE)
-            if idx < len(texts) - 1:
-                new_lines.append(CONTENT_SEPARATOR)
-        if ics_url:
-            new_lines.append(f"Добавить в календарь {ics_url}")
-        new_lines.append(VK_SOURCE_FOOTER)
-        new_message = "\n".join(new_lines)
-        await edit_vk_post(
-            event.source_vk_post_url,
-            new_message,
-            db,
-            bot,
-        )
-        url = event.source_vk_post_url
-        logging.info("sync_vk_source_post updated %s", url)
-    else:
-        message = build_vk_source_message(
-            event, text, festival=festival, ics_url=ics_url
-        )
-        url = await post_to_vk(
-            VK_AFISHA_GROUP_ID,
-            message,
-            db,
-            bot,
-        )
-        if url:
-            logging.info("sync_vk_source_post created %s", url)
+            header_lines = build_vk_source_header(event, festival)
+            new_lines = header_lines[:]
+            for idx, t in enumerate(texts):
+                if t:
+                    new_lines.extend(t.splitlines())
+                new_lines.append(VK_BLANK_LINE)
+                if idx < len(texts) - 1:
+                    new_lines.append(CONTENT_SEPARATOR)
+            if ics_url:
+                new_lines.append(f"Добавить в календарь {ics_url}")
+            new_lines.append(VK_SOURCE_FOOTER)
+            new_message = "\n".join(new_lines)
+            await edit_vk_post(
+                event.source_vk_post_url,
+                new_message,
+                db,
+                bot,
+            )
+            url = event.source_vk_post_url
+            logging.info("sync_vk_source_post updated %s", url)
+        else:
+            message = build_vk_source_message(
+                event, text, festival=festival, ics_url=ics_url
+            )
+            url = await post_to_vk(
+                VK_AFISHA_GROUP_ID,
+                message,
+                db,
+                bot,
+            )
+            if url:
+                logging.info("sync_vk_source_post created %s", url)
     return url
 
 
@@ -6321,14 +6424,15 @@ async def send_daily_announcement_vk(
     now: datetime | None = None,
     bot: Bot | None = None,
 ):
-    section1, section2 = await build_daily_sections_vk(db, tz, now)
-    if section == "today":
-        await post_to_vk(group_id, section1, db, bot)
-    elif section == "added":
-        await post_to_vk(group_id, section2, db, bot)
-    else:
-        await post_to_vk(group_id, section1, db, bot)
-        await post_to_vk(group_id, section2, db, bot)
+    async with HEAVY_SEMAPHORE:
+        section1, section2 = await build_daily_sections_vk(db, tz, now)
+        if section == "today":
+            await post_to_vk(group_id, section1, db, bot)
+        elif section == "added":
+            await post_to_vk(group_id, section2, db, bot)
+        else:
+            await post_to_vk(group_id, section1, db, bot)
+            await post_to_vk(group_id, section2, db, bot)
 
 
 async def send_daily_announcement(
@@ -6340,21 +6444,22 @@ async def send_daily_announcement(
     record: bool = True,
     now: datetime | None = None,
 ):
-    posts = await build_daily_posts(db, tz, now)
-    for text, markup in posts:
-        try:
-            await bot.send_message(
-                channel_id,
-                text,
-                reply_markup=markup,
-                parse_mode="HTML",
-                disable_web_page_preview=True,
-            )
-        except Exception as e:
-            logging.error("daily send failed for %s: %s", channel_id, e)
-            if "message is too long" in str(e):
-                continue
-            raise
+    async with HEAVY_SEMAPHORE:
+        posts = await build_daily_posts(db, tz, now)
+        for text, markup in posts:
+            try:
+                await bot.send_message(
+                    channel_id,
+                    text,
+                    reply_markup=markup,
+                    parse_mode="HTML",
+                    disable_web_page_preview=True,
+                )
+            except Exception as e:
+                logging.error("daily send failed for %s: %s", channel_id, e)
+                if "message is too long" in str(e):
+                    continue
+                raise
     if record and now is None:
         async with db.get_session() as session:
             ch = await session.get(Channel, channel_id)

@@ -1,5 +1,8 @@
 from apscheduler.executors.asyncio import AsyncIOExecutor
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+import asyncio
+import logging
+import time as _time
 
 _scheduler: AsyncIOScheduler | None = None
 
@@ -56,16 +59,43 @@ def startup(db, bot) -> AsyncIOScheduler:
             max_instances=1,
             args=[db, bot],
         )
+        async def _maint(sql: str, op: str):
+            delay = 1
+            for attempt in range(3):
+                start = _time.perf_counter()
+                try:
+                    await db.exec_driver_sql(sql)
+                    dur = (_time.perf_counter() - start) * 1000
+                    logging.info("db_maintenance: %s done in %.0f ms", op, dur)
+                    break
+                except Exception as e:
+                    if "locked" in str(e).lower() and attempt < 2:
+                        await asyncio.sleep(delay)
+                        delay *= 2
+                        continue
+                    logging.error("db_maintenance %s failed: %s", op, e)
+                    break
+
         _scheduler.add_job(
-            lambda: db.exec_driver_sql("PRAGMA optimize;"),
+            _maint,
             "cron",
             hour="3",
+            args=["PRAGMA optimize;", "optimize"],
         )
         _scheduler.add_job(
-            lambda: db.exec_driver_sql("VACUUM;"),
+            _maint,
+            "cron",
+            hour="3",
+            minute="5",
+            args=["PRAGMA wal_checkpoint(TRUNCATE);", "wal_checkpoint"],
+        )
+        _scheduler.add_job(
+            _maint,
             "cron",
             day_of_week="sun",
             hour="4",
+            minute="30",
+            args=["VACUUM;", "vacuum"],
         )
         _scheduler.start()
     return _scheduler

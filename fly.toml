@@ -8,7 +8,7 @@ app = "events-bot-new"
 [env]
   PORT = "8080"
   PYTHONOPTIMIZE = "2"
-  DISABLE_SUPABASE = "1"
+  SUPABASE_DISABLED = "1"
 
 
 [[mounts]]

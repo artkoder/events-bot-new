@@ -84,6 +84,8 @@ class MonthPage(SQLModel, table=True):
     path: str
     url2: Optional[str] = None
     path2: Optional[str] = None
+    content_hash: Optional[str] = None
+    content_hash2: Optional[str] = None
 
 
 class WeekendPage(SQLModel, table=True):
@@ -92,6 +94,7 @@ class WeekendPage(SQLModel, table=True):
     url: str
     path: str
     vk_post_url: Optional[str] = None
+    content_hash: Optional[str] = None
 
 
 class Festival(SQLModel, table=True):

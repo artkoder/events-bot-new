@@ -1,4 +1,6 @@
 import asyncio
+import logging
+import time as _time
 from contextlib import asynccontextmanager
 
 import aiosqlite
@@ -49,8 +51,17 @@ class Database:
             await conn.rollback()
 
     async def exec_driver_sql(self, sql: str, *args, **kwargs):
+        start = _time.perf_counter()
         async with self.engine.begin() as conn:
-            return await conn.exec_driver_sql(sql, *args, **kwargs)
+            result = await conn.exec_driver_sql(sql, *args, **kwargs)
+            try:
+                rows = result.fetchall() if result.returns_rows else None
+            finally:
+                await result.close()
+        dur = (_time.perf_counter() - start) * 1000
+        if dur > 200:
+            logging.info("slow db exec %.0f ms: %s", dur, sql)
+        return rows
 
     async def init(self):
         async with self.engine.begin() as conn:
@@ -193,12 +204,24 @@ class Database:
                 await conn.exec_driver_sql(
                     "ALTER TABLE monthpage ADD COLUMN path2 VARCHAR"
                 )
+            if "content_hash" not in cols:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE monthpage ADD COLUMN content_hash TEXT"
+                )
+            if "content_hash2" not in cols:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE monthpage ADD COLUMN content_hash2 TEXT"
+                )
 
             result = await conn.exec_driver_sql("PRAGMA table_info(weekendpage)")
             cols = [r[1] for r in result.fetchall()]
             if "vk_post_url" not in cols:
                 await conn.exec_driver_sql(
                     "ALTER TABLE weekendpage ADD COLUMN vk_post_url VARCHAR"
+                )
+            if "content_hash" not in cols:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE weekendpage ADD COLUMN content_hash TEXT"
                 )
 
             result = await conn.exec_driver_sql("PRAGMA table_info(festival)")
@@ -250,6 +273,22 @@ class Database:
                 await conn.exec_driver_sql(
                     "ALTER TABLE festival ADD COLUMN city VARCHAR"
                 )
+
+            await conn.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS idx_event_date_time ON event(date, time)"
+            )
+            await conn.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS idx_event_type_dates ON event(event_type, date, end_date)"
+            )
+            await conn.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS idx_event_added_at ON event(added_at)"
+            )
+            await conn.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS idx_event_creator_added ON event(creator_id, added_at DESC)"
+            )
+            await conn.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS idx_event_city_date_time ON event(city, date, time)"
+            )
 
         # ensure shared connection is ready
         await self.raw_conn()

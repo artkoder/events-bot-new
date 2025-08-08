@@ -4884,7 +4884,7 @@ async def test_db_init_adds_festival_location(tmp_path: Path):
     await db.init()
 
     result = await db.exec_driver_sql("PRAGMA table_info(festival)")
-    cols = [r[1] for r in result.fetchall()]
+    cols = [r[1] for r in result]
     assert {"location_name", "location_address", "city"} <= set(cols)
 
 
