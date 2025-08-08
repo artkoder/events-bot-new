@@ -246,6 +246,20 @@ add_event_sessions: TTLCache[int, bool] = TTLCache(maxsize=256, ttl=3600)
 # waiting for a date for events listing
 events_date_sessions: TTLCache[int, bool] = TTLCache(maxsize=256, ttl=3600)
 
+# remove leading command like /addevent or /addevent@bot
+def strip_leading_cmd(text: str, cmds: tuple[str, ...] = ("addevent",)) -> str:
+    """Strip a leading command and following whitespace from *text*.
+
+    Handles optional ``@username`` after the command and any whitespace,
+    including newlines, that follows it.  Matching is case-insensitive and
+    spans across lines (``re.S``).
+    """
+
+    if not text:
+        return text
+    cmds_re = "|".join(re.escape(c) for c in cmds)
+    return re.sub(rf"^/({cmds_re})(@\w+)?\s*", "", text, flags=re.I | re.S)
+
 # cache for settings values to reduce DB hits
 settings_cache: TTLCache[str, str | None] = TTLCache(maxsize=128, ttl=300)
 
@@ -3521,6 +3535,7 @@ async def handle_add_event(
         "handle_add_event start: user=%s len=%d", message.from_user.id, len(text_raw)
     )
     if using_session:
+        text_raw = strip_leading_cmd(text_raw)
         text_content = text_raw
     else:
         parts = text_raw.split(maxsplit=1)
@@ -3541,8 +3556,8 @@ async def handle_add_event(
     if images:
         catbox_urls, catbox_msg = await upload_to_catbox(images)
     html_text = message.html_text or message.caption_html
-    if not using_session and html_text and html_text.startswith("/addevent"):
-        html_text = html_text[len("/addevent") :].lstrip()
+    if html_text:
+        html_text = strip_leading_cmd(html_text)
     source_link = None
     lines = text_content.splitlines()
     if lines and is_vk_wall_url(lines[0].strip()):
@@ -3570,7 +3585,11 @@ async def handle_add_event(
         await bot.send_message(message.chat.id, f"LLM error: {e}")
         return
     if not results:
-        await bot.send_message(message.chat.id, "LLM error")
+        await bot.send_message(
+            message.chat.id,
+            "Не удалось распознать событие. Пример:\n"
+            "Название | 21.08.2025 | 19:00 | Город, Адрес",
+        )
         return
     logging.info("handle_add_event parsed %d results", len(results))
     for saved, added, lines, status in results:
@@ -3806,9 +3825,13 @@ async def enqueue_add_event(message: types.Message, db: Database, bot: Bot):
             "Очередь обработки переполнена, попробуйте позже",
         )
         return
+    preview = (message.text or message.caption or "").strip().replace("\n", " ")[:80]
     logging.info(
-        "enqueue_add_event user=%s queue=%d",
+        "enqueue_add_event user=%s chat=%s kind=%s preview=%r queue=%d",
         message.from_user.id,
+        message.chat.id,
+        "regular",
+        preview,
         add_event_queue.qsize(),
     )
     await bot.send_message(message.chat.id, "Пост принят на обработку")
@@ -3849,8 +3872,17 @@ async def add_event_queue_worker(db: Database, bot: Bot):
                     await handle_add_event(msg, db, bot, using_session=using_session)
                 else:
                     await handle_add_event_raw(msg, db, bot)
-            except Exception as e:  # pragma: no cover - log unexpected errors
-                logging.error("add_event_queue_worker error: %s", e)
+            except Exception:  # pragma: no cover - log unexpected errors
+                logging.exception("add_event_queue_worker error")
+                try:
+                    await bot.send_message(
+                        msg.chat.id,
+                        "❌ Ошибка при обработке... Попробуйте ещё раз...",
+                    )
+                    if using_session:
+                        add_event_sessions[msg.from_user.id] = True
+                except Exception:
+                    logging.exception("add_event_queue_worker notify failed")
             finally:
                 if task:
                     working.discard(task)
@@ -7953,6 +7985,16 @@ def create_app() -> web.Application:
 
     async def add_event_wrapper(message: types.Message):
         logging.info("add_event_wrapper start: user=%s", message.from_user.id)
+        if message.from_user.id in add_event_sessions:
+            return
+        m = re.match(
+            r"^/addevent(?:@\w+)?\s+(.*)$",
+            message.text or "",
+            flags=re.I | re.S,
+        )
+        if not m or not m.group(1).strip():
+            await bot.send_message(message.chat.id, "Usage: /addevent <text>")
+            return
         async with perf("enqueue_add_event"):
             await enqueue_add_event(message, db, bot)
 
@@ -8097,6 +8139,9 @@ def create_app() -> web.Application:
     ,
     )
     dp.message.register(tz_wrapper, Command("tz"))
+    dp.message.register(
+        add_event_session_wrapper, lambda m: m.from_user.id in add_event_sessions
+    )
     dp.message.register(add_event_wrapper, Command("addevent"))
     dp.message.register(add_event_raw_wrapper, Command("addevent_raw"))
     dp.message.register(ask_4o_wrapper, Command("ask4o"))
@@ -8110,7 +8155,6 @@ def create_app() -> web.Application:
     dp.message.register(events_menu_wrapper, lambda m: m.text == MENU_EVENTS)
     dp.message.register(events_date_wrapper, lambda m: m.from_user.id in events_date_sessions)
     dp.message.register(add_event_start_wrapper, lambda m: m.text == MENU_ADD_EVENT)
-    dp.message.register(add_event_session_wrapper, lambda m: m.from_user.id in add_event_sessions)
     dp.message.register(vk_link_cmd_wrapper, Command("vklink"))
     dp.message.register(partner_info_wrapper, lambda m: m.from_user.id in partner_info_sessions)
     dp.message.register(channels_wrapper, Command("channels"))
