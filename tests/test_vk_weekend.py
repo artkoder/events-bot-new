@@ -3,7 +3,7 @@ from datetime import date, timedelta
 from pathlib import Path
 
 import main
-from main import Database, WeekendPage, Event, format_weekend_range
+from main import Database, WeekendPage, WeekPage, Event, format_weekend_range
 from sqlmodel import select
 
 
@@ -15,9 +15,39 @@ async def test_build_weekend_vk_message(tmp_path: Path):
     next_sat = sat + timedelta(days=7)
     async with db.get_session() as session:
         session.add(WeekendPage(start=sat.isoformat(), url='u1', path='p1'))
-        session.add(WeekendPage(start=next_sat.isoformat(), url='u2', path='p2', vk_post_url='https://vk.com/wall-1_2'))
-        session.add(Event(title='Party', description='d', source_text='s', date=sat.isoformat(), time='10:00', location_name='Club', city='Kaliningrad', source_vk_post_url='https://vk.com/wall-1_1'))
-        session.add(Event(title='NoVK', description='d', source_text='s', date=sat.isoformat(), time='11:00', location_name='Hall', city='Kaliningrad'))
+        session.add(
+            WeekendPage(
+                start=next_sat.isoformat(),
+                url='u2',
+                path='p2',
+                vk_post_url='https://vk.com/wall-1_2',
+            )
+        )
+        session.add(WeekPage(start=date(2025, 7, 7).isoformat()))
+        session.add(WeekPage(start=date(2025, 8, 4).isoformat(), vk_post_url='https://vk.com/wall-1_4'))
+        session.add(
+            Event(
+                title='Party',
+                description='d',
+                source_text='s',
+                date=sat.isoformat(),
+                time='10:00',
+                location_name='Club',
+                city='Kaliningrad',
+                source_vk_post_url='https://vk.com/wall-1_1',
+            )
+        )
+        session.add(
+            Event(
+                title='NoVK',
+                description='d',
+                source_text='s',
+                date=sat.isoformat(),
+                time='11:00',
+                location_name='Hall',
+                city='Kaliningrad',
+            )
+        )
         await session.commit()
     msg = await main.build_weekend_vk_message(db, sat.isoformat())
     assert '10:00 | [https://vk.com/wall-1_1|Party]' in msg
@@ -25,6 +55,7 @@ async def test_build_weekend_vk_message(tmp_path: Path):
     assert 'NoVK' not in msg
     assert f'[https://vk.com/wall-1_2|{format_weekend_range(next_sat)}]' in msg
     assert msg.splitlines()[0] == f'{format_weekend_range(sat)} Афиша выходных'
+    assert 'июль [https://vk.com/wall-1_4|август]' in msg
 
 
 @pytest.mark.asyncio
