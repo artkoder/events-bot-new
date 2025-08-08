@@ -6112,6 +6112,50 @@ async def test_fest_list_includes_links(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_add_festival_updates_other_pages(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    called_pages: list[str] = []
+    called_vk: list[str] = []
+
+    async def fake_sync_page(db, name):
+        called_pages.append(name)
+
+    async def fake_sync_vk(db, name, bot=None):
+        called_vk.append(name)
+
+    monkeypatch.setattr(main, "sync_festival_page", fake_sync_page)
+    monkeypatch.setattr(main, "sync_festival_vk_post", fake_sync_vk)
+
+    async def fake_upload(images):
+        return [], ""
+
+    monkeypatch.setattr(main, "upload_to_catbox", fake_upload)
+
+    async def fake_parse(text, *args, **kwargs):
+        fake_parse._festival = {
+            "name": "NewFest",
+            "start_date": FUTURE_DATE,
+            "location_name": "Park",
+            "city": "Town",
+        }
+        return []
+
+    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
+
+    async with db.get_session() as session:
+        session.add(main.Festival(name="OldFest"))
+        await session.commit()
+
+    await main.add_events_from_text(db, "text", None)
+    await asyncio.sleep(0)
+
+    assert set(called_pages) == {"NewFest", "OldFest"}
+    assert set(called_vk) == {"NewFest", "OldFest"}
+
+
+@pytest.mark.asyncio
 async def test_edit_festival_contacts(tmp_path: Path):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
@@ -6296,6 +6340,56 @@ async def test_festival_vk_message_period_location(tmp_path: Path):
     text = await main.build_festival_vk_message(db, fest)
     lines = text.splitlines()
     assert lines[0] == "Jazz XVIII"
+    assert "\U0001f4c5" in text or "📅" in text
+    assert "\U0001f4cd" in text or "📍" in text
+
+
+@pytest.mark.asyncio
+async def test_festival_page_no_events_shows_info(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.get_session() as session:
+        fest = main.Festival(
+            name="Solo",
+            start_date=FUTURE_DATE,
+            end_date=FUTURE_DATE,
+            location_name="Hall",
+            city="Town",
+        )
+        session.add(fest)
+        await session.commit()
+
+    async def fake_desc(fest, events):
+        return "Desc"
+
+    monkeypatch.setattr(main, "generate_festival_description", fake_desc)
+
+    title, content = await main.build_festival_page_content(db, fest)
+    dump = json_dumps(content)
+    assert "\ud83d\udcc5" in dump or "📅" in dump
+    assert "\ud83d\xdccd" in dump or "📍" in dump
+
+
+@pytest.mark.asyncio
+async def test_festival_vk_message_no_events(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.get_session() as session:
+        fest = main.Festival(
+            name="Solo",
+            full_name="Solo Fest",
+            start_date=FUTURE_DATE,
+            end_date=FUTURE_DATE,
+            location_name="Hall",
+            city="Town",
+            description="Desc",
+        )
+        session.add(fest)
+        await session.commit()
+
+    text = await main.build_festival_vk_message(db, fest)
     assert "\U0001f4c5" in text or "📅" in text
     assert "\U0001f4cd" in text or "📍" in text
 
