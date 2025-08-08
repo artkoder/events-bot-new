@@ -3237,6 +3237,8 @@ async def add_events_from_text(
                 lines.append(f"city: {fest_obj.city}")
             results.append((fest_obj, True, lines, "festival"))
             logging.info("festival %s created without events", fest_obj.name)
+    months_to_sync: set[str] = set()
+    weekends_to_sync: set[str] = set()
     for data in parsed:
         logging.info(
             "processing event candidate: %s on %s %s",
@@ -3331,9 +3333,6 @@ async def add_events_from_text(
                     copy_e.date = day.isoformat()
                     copy_e.end_date = None
                     events_to_add.append(copy_e)
-
-        months_to_sync: set[str] = set()
-        weekends_to_sync: set[str] = set()
         for event in events_to_add:
             if not is_valid_url(event.ticket_link):
                 try:
@@ -3543,21 +3542,20 @@ async def add_events_from_text(
             status = "added" if added else "updated"
             results.append((saved, added, lines, status))
             first = False
-
-        for m in months_to_sync:
-            logging.info("syncing month page %s", m)
-            try:
-                await sync_month_page(db, m)
-            except Exception as e:
-                logging.error("failed to sync month page %s: %s", m, e)
-            await asyncio.sleep(0)
-        for w in weekends_to_sync:
-            logging.info("syncing weekend page %s", w)
-            try:
-                await sync_weekend_page(db, w)
-            except Exception as e:
-                logging.error("failed to sync weekend page %s: %s", w, e)
-            await asyncio.sleep(0)
+    for m in months_to_sync:
+        logging.info("syncing month page %s", m)
+        try:
+            await sync_month_page(db, m)
+        except Exception as e:
+            logging.error("failed to sync month page %s: %s", m, e)
+        await asyncio.sleep(0)
+    for w in weekends_to_sync:
+        logging.info("syncing weekend page %s", w)
+        try:
+            await sync_weekend_page(db, w)
+        except Exception as e:
+            logging.error("failed to sync weekend page %s: %s", w, e)
+        await asyncio.sleep(0)
     logging.info("add_events_from_text finished with %d results", len(results))
     del parsed
     gc.collect()
