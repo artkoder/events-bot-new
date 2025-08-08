@@ -273,6 +273,10 @@ class Database:
                 await conn.exec_driver_sql(
                     "ALTER TABLE festival ADD COLUMN city VARCHAR"
                 )
+            if "source_text" not in cols:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE festival ADD COLUMN source_text TEXT"
+                )
 
             await conn.exec_driver_sql(
                 "CREATE INDEX IF NOT EXISTS idx_event_date_time ON event(date, time)"
