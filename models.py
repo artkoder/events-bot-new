@@ -97,6 +97,13 @@ class WeekendPage(SQLModel, table=True):
     content_hash: Optional[str] = None
 
 
+class WeekPage(SQLModel, table=True):
+    __table_args__ = {"extend_existing": True}
+    start: str = Field(primary_key=True)
+    vk_post_url: Optional[str] = None
+    content_hash: Optional[str] = None
+
+
 class Festival(SQLModel, table=True):
     __table_args__ = {"extend_existing": True}
     id: Optional[int] = Field(default=None, primary_key=True)

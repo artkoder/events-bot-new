@@ -103,6 +103,7 @@ from models import (
     Event,
     MonthPage,
     WeekendPage,
+    WeekPage,
     Festival,
 )
 
@@ -180,6 +181,11 @@ def perf_sync(name: str, **details):
 
 @lru_cache(maxsize=20)
 def _weekend_vk_lock(start: str) -> asyncio.Lock:
+    return asyncio.Lock()
+
+
+@lru_cache(maxsize=20)
+def _week_vk_lock(start: str) -> asyncio.Lock:
     return asyncio.Lock()
 
 DB_PATH = os.getenv("DB_PATH", "/data/db.sqlite")
@@ -3965,6 +3971,16 @@ def format_day_pretty(day: date) -> str:
     return f"{day.day} {MONTHS[day.month - 1]}"
 
 
+def format_week_range(monday: date) -> str:
+    sunday = monday + timedelta(days=6)
+    if monday.month == sunday.month:
+        return f"{monday.day}\u2013{sunday.day} {MONTHS[monday.month - 1]}"
+    return (
+        f"{monday.day} {MONTHS[monday.month - 1]} \u2013 "
+        f"{sunday.day} {MONTHS[sunday.month - 1]}"
+    )
+
+
 def format_weekend_range(saturday: date) -> str:
     """Return human-friendly weekend range like '12–13 июля'."""
     sunday = saturday + timedelta(days=1)
@@ -5011,6 +5027,17 @@ async def sync_month_page(db: Database, month: str, update_links: bool = False):
         await _sync_month_page_inner(db, month, update_links)
 
 
+def week_start_for_date(d: date) -> date:
+    return d - timedelta(days=d.weekday())
+
+
+def next_week_start(d: date) -> date:
+    w = week_start_for_date(d)
+    if d <= w:
+        return w
+    return w + timedelta(days=7)
+
+
 def weekend_start_for_date(d: date) -> date | None:
     if d.weekday() == 5:
         return d
@@ -5291,6 +5318,95 @@ async def sync_weekend_page(
         await _sync_weekend_page_inner(db, start, update_links, post_vk)
 
 
+def _build_month_vk_nav_lines(week_pages: list[WeekPage], cur_month: str) -> list[str]:
+    first_by_month: dict[str, WeekPage] = {}
+    for w in week_pages:
+        m = w.start[:7]
+        if m not in first_by_month or w.start < first_by_month[m].start:
+            first_by_month[m] = w
+    parts: list[str] = []
+    for m in sorted(first_by_month):
+        if m < cur_month:
+            continue
+        w = first_by_month[m]
+        label = month_name_nominative(m)
+        if m == cur_month or not w.vk_post_url:
+            parts.append(label)
+        else:
+            parts.append(f"[{w.vk_post_url}|{label}]")
+    return parts
+
+
+async def build_week_vk_message(db: Database, start: str) -> str:
+    logging.info("build_week_vk_message start for %s", start)
+    monday = date.fromisoformat(start)
+    days = [monday + timedelta(days=i) for i in range(7)]
+    async with span("db"):
+        async with db.get_session() as session:
+            result = await session.execute(
+                select(Event)
+                .where(Event.date.in_([d.isoformat() for d in days]))
+                .order_by(Event.date, Event.time)
+            )
+            events = result.scalars().all()
+            res_w = await session.execute(select(WeekPage).order_by(WeekPage.start))
+            week_pages = res_w.scalars().all()
+
+    async with span("render"):
+        by_day: dict[date, list[Event]] = {}
+        for e in events:
+            if not e.source_vk_post_url:
+                continue
+            d = parse_iso_date(e.date)
+            if not d:
+                continue
+            by_day.setdefault(d, []).append(e)
+
+        lines = [f"{format_week_range(monday)} Афиша недели"]
+        for d in days:
+            evs = by_day.get(d)
+            if not evs:
+                continue
+            lines.append(VK_BLANK_LINE)
+            lines.append(f"🟥🟥🟥 {format_day_pretty(d)} 🟥🟥🟥")
+            for ev in evs:
+                line = f"[{ev.source_vk_post_url}|{ev.title}]"
+                if ev.time:
+                    line = f"{ev.time} | {line}"
+                lines.append(line)
+
+                location_parts = [p for p in [ev.location_name, ev.city] if p]
+                if location_parts:
+                    lines.append(", ".join(location_parts))
+
+        nav_weeks = [
+            w
+            for w in week_pages
+            if w.start[:7] == start[:7] and (w.vk_post_url or w.start == start)
+        ]
+        if nav_weeks:
+            parts = []
+            for w in nav_weeks:
+                label = format_week_range(date.fromisoformat(w.start))
+                if w.start == start or not w.vk_post_url:
+                    parts.append(label)
+                else:
+                    parts.append(f"[{w.vk_post_url}|{label}]")
+            lines.append(VK_BLANK_LINE)
+            lines.append(VK_BLANK_LINE)
+            lines.append(" ".join(parts))
+
+        month_parts = _build_month_vk_nav_lines(week_pages, start[:7])
+        if month_parts:
+            lines.append(VK_BLANK_LINE)
+            lines.append(VK_BLANK_LINE)
+            lines.append(" ".join(month_parts))
+
+        message = "\n".join(lines)
+    logging.info("build_week_vk_message built %d lines", len(lines))
+    return message
+
+
 async def build_weekend_vk_message(db: Database, start: str) -> str:
     logging.info("build_weekend_vk_message start for %s", start)
     saturday = date.fromisoformat(start)
@@ -5306,6 +5422,8 @@ async def build_weekend_vk_message(db: Database, start: str) -> str:
             events = result.scalars().all()
             res_w = await session.execute(select(WeekendPage).order_by(WeekendPage.start))
             weekend_pages = res_w.scalars().all()
+            res_week = await session.execute(select(WeekPage).order_by(WeekPage.start))
+            week_pages = res_week.scalars().all()
 
     async with span("render"):
         by_day: dict[date, list[Event]] = {}
@@ -5346,6 +5464,12 @@ async def build_weekend_vk_message(db: Database, start: str) -> str:
             lines.append(VK_BLANK_LINE)
             lines.append(VK_BLANK_LINE)
             lines.append(" ".join(parts))
+
+        month_parts = _build_month_vk_nav_lines(week_pages, start[:7])
+        if month_parts:
+            lines.append(VK_BLANK_LINE)
+            lines.append(VK_BLANK_LINE)
+            lines.append(" ".join(month_parts))
 
         message = "\n".join(lines)
     logging.info(
@@ -5399,6 +5523,52 @@ async def sync_vk_weekend_post(db: Database, start: str, bot: Bot | None = None)
                             obj.vk_post_url = url
                             await session.commit()
                     logging.info("sync_vk_weekend_post created %s", url)
+
+
+async def sync_vk_week_post(db: Database, start: str, bot: Bot | None = None) -> None:
+    lock = _week_vk_lock(start)
+    async with lock:
+        async with HEAVY_SEMAPHORE:
+            logging.info("sync_vk_week_post start for %s", start)
+            group_id = VK_AFISHA_GROUP_ID
+            if not group_id:
+                logging.info("sync_vk_week_post: VK group not configured")
+                return
+            async with db.get_session() as session:
+                page = await session.get(WeekPage, start)
+
+            message = await build_week_vk_message(db, start)
+            logging.info("sync_vk_week_post message len=%d", len(message))
+            needs_new_post = not page or not page.vk_post_url
+            if page and page.vk_post_url:
+                try:
+                    updated = await edit_vk_post(page.vk_post_url, message, db, bot)
+                    if updated:
+                        logging.info("sync_vk_week_post updated %s", page.vk_post_url)
+                    else:
+                        logging.info(
+                            "sync_vk_week_post: no changes for %s", page.vk_post_url
+                        )
+                except Exception as e:
+                    if "post or comment deleted" in str(e) or "Пост удалён" in str(e):
+                        logging.warning(
+                            "sync_vk_week_post: original VK post missing, creating new"
+                        )
+                        needs_new_post = True
+                    else:
+                        logging.error("VK post error for week %s: %s", start, e)
+                        return
+            if needs_new_post:
+                url = await post_to_vk(group_id, message, db, bot)
+                if url:
+                    async with db.get_session() as session:
+                        obj = await session.get(WeekPage, start)
+                        if obj:
+                            obj.vk_post_url = url
+                        else:
+                            session.add(WeekPage(start=start, vk_post_url=url))
+                        await session.commit()
+                    logging.info("sync_vk_week_post created %s", url)
 
 
 async def generate_festival_description(fest: Festival, events: list[Event]) -> str:
