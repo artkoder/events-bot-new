@@ -1110,11 +1110,18 @@ def festival_dates(fest: Festival, events: Iterable[Event]) -> tuple[date | None
     return None, None
 
 
-def festival_location(events: Iterable[Event]) -> str | None:
+def festival_location(fest: Festival, events: Iterable[Event]) -> str | None:
     """Return display string for festival venue(s)."""
     pairs = {(e.location_name, e.city) for e in events if e.location_name}
     if not pairs:
-        return None
+        parts: list[str] = []
+        if fest.location_name:
+            parts.append(fest.location_name)
+        elif fest.location_address:
+            parts.append(fest.location_address)
+        if fest.city:
+            parts.append(f"#{fest.city}")
+        return ", ".join(parts) if parts else None
     names = sorted({name for name, _ in pairs})
     cities = {c for _, c in pairs if c}
     city_text = ""
@@ -3218,6 +3225,7 @@ async def add_events_from_text(
         if not parsed:
             await sync_festival_page(db, fest_obj.name)
             asyncio.create_task(sync_festival_vk_post(db, fest_obj.name, bot))
+            await sync_other_festivals(db, fest_obj.name, bot)
             lines = [f"festival: {fest_obj.name}"]
             if fest_obj.start_date:
                 lines.append(f"start: {fest_obj.start_date}")
@@ -5636,16 +5644,15 @@ async def build_festival_page_content(db: Database, fest: Festival) -> tuple[str
     if fest.photo_url:
         nodes.append({"tag": "img", "attrs": {"src": fest.photo_url}})
         nodes.append({"tag": "p", "children": ["\u00a0"]})
-    if events:
-        start, end = festival_dates(fest, events)
-        if start:
-            date_text = format_day_pretty(start)
-            if end and end != start:
-                date_text += f" - {format_day_pretty(end)}"
-            nodes.append({"tag": "p", "children": [f"\U0001f4c5 {date_text}"]})
-        loc_text = festival_location(events)
-        if loc_text:
-            nodes.append({"tag": "p", "children": [f"\U0001f4cd {loc_text}"]})
+    start, end = festival_dates(fest, events)
+    if start:
+        date_text = format_day_pretty(start)
+        if end and end != start:
+            date_text += f" - {format_day_pretty(end)}"
+        nodes.append({"tag": "p", "children": [f"\U0001f4c5 {date_text}"]})
+    loc_text = festival_location(fest, events)
+    if loc_text:
+        nodes.append({"tag": "p", "children": [f"\U0001f4cd {loc_text}"]})
     if fest.description:
         nodes.append({"tag": "p", "children": [fest.description]})
 
@@ -5766,17 +5773,16 @@ async def build_festival_vk_message(db: Database, fest: Festival) -> str:
         )
         events = res.scalars().all()
     lines = [fest.full_name or fest.name]
-    if events:
-        start, end = festival_date_range(events)
+    start, end = festival_dates(fest, events)
 
-        if start:
-            date_text = format_day_pretty(start)
-            if end and end != start:
-                date_text += f" - {format_day_pretty(end)}"
-            lines.append(f"\U0001f4c5 {date_text}")
-        loc_text = festival_location(events)
-        if loc_text:
-            lines.append(f"\U0001f4cd {loc_text}")
+    if start:
+        date_text = format_day_pretty(start)
+        if end and end != start:
+            date_text += f" - {format_day_pretty(end)}"
+        lines.append(f"\U0001f4c5 {date_text}")
+    loc_text = festival_location(fest, events)
+    if loc_text:
+        lines.append(f"\U0001f4cd {loc_text}")
     if fest.description:
         lines.append(fest.description)
     if fest.website_url or fest.vk_url or fest.tg_url:
@@ -5830,6 +5836,17 @@ async def sync_festival_vk_post(db: Database, name: str, bot: Bot | None = None)
             logging.info("created festival post %s: %s", name, url)
     except Exception as e:
         logging.error("VK post error for festival %s: %s", name, e)
+
+
+async def sync_other_festivals(db: Database, exclude: str, bot: Bot | None = None) -> None:
+    async with db.get_session() as session:
+        res = await session.execute(
+            select(Festival.name).where(Festival.name != exclude)
+        )
+        names = [r[0] for r in res.fetchall()]
+    for fname in names:
+        await sync_festival_page(db, fname)
+        asyncio.create_task(sync_festival_vk_post(db, fname, bot))
 
 
 async def send_festival_poll(
