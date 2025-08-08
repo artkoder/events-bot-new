@@ -7962,6 +7962,23 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
         logging.info("no events parsed from forwarded text")
         return
     for saved, added, lines, status in results:
+        if isinstance(saved, Festival):
+            markup = types.InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        types.InlineKeyboardButton(
+                            text="Создать события по дням",
+                            callback_data=f"festdays:{saved.id}",
+                        )
+                    ]
+                ]
+            )
+            await bot.send_message(
+                message.chat.id,
+                "Festival added\n" + "\n".join(lines),
+                reply_markup=markup,
+            )
+            continue
         buttons = []
         if (
             not saved.is_free

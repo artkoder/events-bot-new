@@ -1680,6 +1680,83 @@ async def test_forward_add_event_photo(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_forward_add_festival(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async def fake_parse(text: str, source_channel: str | None = None, festival_names=None) -> list[dict]:
+        return []
+
+    fake_parse._festival = {
+        "name": "Jazz",
+        "start_date": FUTURE_DATE,
+        "end_date": (date.fromisoformat(FUTURE_DATE) + timedelta(days=1)).isoformat(),
+        "location_name": "Hall",
+        "city": "Town",
+    }
+
+    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
+        return "https://t.me/page", "p"
+
+    async def fake_sync_festival_page(db_obj, name):
+        pass
+
+    async def fake_sync_vk(db_obj, name, bot_obj):
+        pass
+
+    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.create_source_page", fake_create)
+    monkeypatch.setattr(main, "sync_festival_page", fake_sync_festival_page)
+    monkeypatch.setattr(main, "sync_festival_vk_post", fake_sync_vk)
+
+    start_msg = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "/start",
+        }
+    )
+    await handle_start(start_msg, db, bot)
+
+    upd = DummyUpdate(-100123, "Chan")
+    await main.handle_my_chat_member(upd, db)
+
+    async with db.get_session() as session:
+        ch = await session.get(main.Channel, -100123)
+        ch.is_registered = True
+        await session.commit()
+
+    fwd_msg = types.Message.model_validate(
+        {
+            "message_id": 3,
+            "date": 0,
+            "forward_date": 0,
+            "forward_from_chat": {"id": -100123, "type": "channel", "username": "chan"},
+            "forward_from_message_id": 10,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "Some text",
+        }
+    )
+
+    await main.handle_forwarded(fwd_msg, db, bot)
+
+    async with db.get_session() as session:
+        fest = (await session.execute(select(Festival))).scalar_one()
+        fid = fest.id
+
+    markup = bot.messages[-1][2]["reply_markup"]
+    assert any(
+        btn.callback_data == f"festdays:{fid}"
+        for row in markup.inline_keyboard
+        for btn in row
+    )
+
+
+@pytest.mark.asyncio
 async def test_forward_unregistered(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
