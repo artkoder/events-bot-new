@@ -1244,6 +1244,49 @@ async def test_addevent_strips_command(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_addevent_session_strip_cmd(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    captured: dict[str, str] = {}
+
+    class Saved:
+        id = 1
+        is_free = True
+        ticket_price_min = None
+        ticket_price_max = None
+
+    async def fake_add_events_from_text(
+        db, text, source_link, html_text, media, raise_exc, creator_id, display_source, source_channel, bot
+    ):
+        captured["text"] = text
+        captured["html"] = html_text
+        return [(Saved(), True, ["ok"], "added")]
+
+    async def fake_notify(*args, **kwargs):
+        pass
+
+    monkeypatch.setattr(main, "add_events_from_text", fake_add_events_from_text)
+    monkeypatch.setattr(main, "notify_event_added", fake_notify)
+
+    msg = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "/addevent\nSome info",
+        }
+    )
+
+    await handle_add_event(msg, db, bot, using_session=True)
+
+    assert captured["text"] == "Some info"
+    assert captured["html"] == "Some info"
+
+
+@pytest.mark.asyncio
 async def test_addevent_vk_wall_link(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
