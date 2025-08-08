@@ -4771,9 +4771,11 @@ def _build_month_page_content_sync(
             add_many(telegraph_br())
         add({"tag": "h3", "children": [f"🟥🟥🟥 {format_day_pretty(day)} 🟥🟥🟥"]})
         add_many(telegraph_br())
-        for ev in by_day[day]:
+        for idx, ev in enumerate(by_day[day]):
             if exceeded:
                 break
+            if idx > 0:
+                add_many(telegraph_br())
             fest = fest_map.get(ev.festival or "")
             add_many(event_to_nodes(ev, fest, fest_icon=True))
 
