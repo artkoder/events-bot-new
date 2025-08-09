@@ -366,9 +366,10 @@ async def telegraph_call(func, /, *args, retries: int = 3, **kwargs):
     last_exc: Exception | None = None
     for attempt in range(retries):
         try:
-            return await asyncio.wait_for(
-                asyncio.to_thread(func, *args, **kwargs), TELEGRAPH_TIMEOUT
-            )
+            async with span("telegraph"):
+                return await asyncio.wait_for(
+                    asyncio.to_thread(func, *args, **kwargs), TELEGRAPH_TIMEOUT
+                )
         except asyncio.TimeoutError as e:
             last_exc = e
             if attempt < retries - 1:
@@ -383,8 +384,7 @@ async def telegraph_call(func, /, *args, retries: int = 3, **kwargs):
 
 
 async def telegraph_create_page(tg: Telegraph, *args, **kwargs):
-    async with span("tg-send"):
-        return await telegraph_call(tg.create_page, *args, **kwargs)
+    return await telegraph_call(tg.create_page, *args, **kwargs)
 
 
 def seconds_to_next_minute(now: datetime) -> float:
@@ -564,7 +564,13 @@ def _close_shared_session_sync() -> None:
 
 
 def _create_session() -> ClientSession:
-    connector = TCPConnector(family=socket.AF_INET, limit=100, keepalive_timeout=30)
+    connector = TCPConnector(
+        family=socket.AF_INET,
+        limit=10,
+        ttl_dns_cache=300,
+        limit_per_host=5,
+        keepalive_timeout=30,
+    )
     timeout = ClientTimeout(total=HTTP_TIMEOUT)
     try:
         return ClientSession(connector=connector, timeout=timeout)
@@ -647,7 +653,8 @@ async def _vk_api(
                 ) as resp:
                     return await resp.json()
 
-        data = await asyncio.wait_for(_call(), HTTP_TIMEOUT)
+        async with span("vk-send"):
+            data = await asyncio.wait_for(_call(), HTTP_TIMEOUT)
         if "error" not in data:
             return data
         last_err = data["error"]
@@ -685,9 +692,10 @@ async def upload_vk_photo(
         upload_url = data["response"]["upload_url"]
         session = get_http_session()
         async def _download():
-            async with HTTP_SEMAPHORE:
-                async with session.get(url) as resp:
-                    return await resp.read()
+            async with span("http"):
+                async with HTTP_SEMAPHORE:
+                    async with session.get(url) as resp:
+                        return await resp.read()
 
         img_bytes = await asyncio.wait_for(_download(), HTTP_TIMEOUT)
         form = FormData()
@@ -702,9 +710,10 @@ async def upload_vk_photo(
             content_type=ctype,
         )
         async def _upload():
-            async with HTTP_SEMAPHORE:
-                async with session.post(upload_url, data=form) as up:
-                    return await up.json()
+            async with span("http"):
+                async with HTTP_SEMAPHORE:
+                    async with session.post(upload_url, data=form) as up:
+                        return await up.json()
 
         upload_result = await asyncio.wait_for(_upload(), HTTP_TIMEOUT)
         save = await _vk_api(
@@ -845,7 +854,8 @@ async def notify_superadmin(db: Database, bot: Bot, text: str):
     if not admin_id:
         return
     try:
-        await bot.send_message(admin_id, text)
+        async with span("tg-send"):
+            await bot.send_message(admin_id, text)
     except Exception as e:
         logging.error("failed to notify superadmin: %s", e)
 
@@ -887,10 +897,11 @@ async def notify_inactive_partners(
             if (not last or last < cutoff) and (
                 not last_reminder or last_reminder < cutoff
             ):
-                await bot.send_message(
-                    p.user_id,
-                    "\u26a0\ufe0f Вы не добавляли мероприятия на прошлой неделе",
-                )
+                async with span("tg-send"):
+                    await bot.send_message(
+                        p.user_id,
+                        "\u26a0\ufe0f Вы не добавляли мероприятия на прошлой неделе",
+                    )
                 p.last_partner_reminder = now
                 notified.append(p)
         await session.commit()
@@ -958,7 +969,8 @@ async def extract_images(message: types.Message, bot: Bot) -> list[tuple[bytes, 
     images: list[tuple[bytes, str]] = []
     if message.photo:
         bio = BytesIO()
-        await bot.download(message.photo[-1].file_id, destination=bio)
+        async with span("tg-send"):
+            await bot.download(message.photo[-1].file_id, destination=bio)
         images.append((bio.getvalue(), "photo.jpg"))
     if (
         message.document
@@ -966,7 +978,8 @@ async def extract_images(message: types.Message, bot: Bot) -> list[tuple[bytes, 
         and message.document.mime_type.startswith("image/")
     ):
         bio = BytesIO()
-        await bot.download(message.document.file_id, destination=bio)
+        async with span("tg-send"):
+            await bot.download(message.document.file_id, destination=bio)
         name = message.document.file_name or "image.jpg"
         images.append((bio.getvalue(), name))
     return images[:3]
@@ -993,24 +1006,25 @@ async def upload_to_catbox(images: list[tuple[bytes, str]]) -> tuple[list[str], 
                 form.add_field("fileToUpload", data, filename=name)
                 async def _upload():
                     nonlocal catbox_msg
-                    async with HTTP_SEMAPHORE:
-                        async with session.post(
-                            "https://catbox.moe/user/api.php", data=form
-                        ) as resp:
-                            text_r = await resp.text()
-                            if resp.status == 200 and text_r.startswith("http"):
-                                url = text_r.strip()
-                                catbox_urls.append(url)
-                                catbox_msg += "ok; "
-                                logging.info("catbox uploaded %s", url)
-                            else:
-                                catbox_msg += f"{name}: err {resp.status}; "
-                                logging.error(
-                                    "catbox upload failed %s: %s %s",
-                                    name,
-                                    resp.status,
-                                    text_r,
-                                )
+                    async with span("http"):
+                        async with HTTP_SEMAPHORE:
+                            async with session.post(
+                                "https://catbox.moe/user/api.php", data=form
+                            ) as resp:
+                                text_r = await resp.text()
+                                if resp.status == 200 and text_r.startswith("http"):
+                                    url = text_r.strip()
+                                    catbox_urls.append(url)
+                                    catbox_msg += "ok; "
+                                    logging.info("catbox uploaded %s", url)
+                                else:
+                                    catbox_msg += f"{name}: err {resp.status}; "
+                                    logging.error(
+                                        "catbox upload failed %s: %s %s",
+                                        name,
+                                        resp.status,
+                                        text_r,
+                                    )
 
                 await asyncio.wait_for(_upload(), HTTP_TIMEOUT)
             except Exception as e:
@@ -1494,7 +1508,7 @@ async def build_ics_content(db: Database, event: Event) -> str:
 
 
 async def upload_ics(event: Event, db: Database) -> str | None:
-    async with span("tg-send"):
+    async with span("http"):
         client = get_supabase_client()
         if not client:
             logging.debug("Supabase disabled")
@@ -1607,7 +1621,8 @@ async def delete_ics(event: Event):
     try:
         logging.info("Deleting ICS %s from %s", path, SUPABASE_BUCKET)
         storage = client.storage.from_(SUPABASE_BUCKET)
-        await asyncio.to_thread(storage.remove, [path])
+        async with span("http"):
+            await asyncio.to_thread(storage.remove, [path])
     except Exception as e:
         logging.error("Failed to delete ics: %s", e)
 
@@ -1619,7 +1634,8 @@ async def delete_asset_post(event: Event, db: Database, bot: Bot):
     if not channel:
         return
     try:
-        await bot.delete_message(channel.channel_id, event.ics_post_id)
+        async with span("tg-send"):
+            await bot.delete_message(channel.channel_id, event.ics_post_id)
     except Exception as e:
         logging.error("failed to delete asset message: %s", e)
 
@@ -1629,11 +1645,12 @@ async def remove_calendar_button(event: Event, bot: Bot):
     if not (event.source_chat_id and event.source_message_id):
         return
     try:
-        await bot.edit_message_reply_markup(
-            chat_id=event.source_chat_id,
-            message_id=event.source_message_id,
-            reply_markup=None,
-        )
+        async with span("tg-send"):
+            await bot.edit_message_reply_markup(
+                chat_id=event.source_chat_id,
+                message_id=event.source_message_id,
+                reply_markup=None,
+            )
 
         logging.info(
             "calendar button removed for event %s post %s",
@@ -1710,10 +1727,11 @@ async def parse_event_via_4o(
     logging.info("Sending 4o parse request to %s", url)
     session = get_http_session()
     async def _call():
-        async with HTTP_SEMAPHORE:
-            resp = await session.post(url, json=payload, headers=headers)
-            resp.raise_for_status()
-            return await resp.json()
+        async with span("http"):
+            async with HTTP_SEMAPHORE:
+                resp = await session.post(url, json=payload, headers=headers)
+                resp.raise_for_status()
+                return await resp.json()
     async with perf("LLM_parse", size=len(user_msg)):
         data_raw = await asyncio.wait_for(_call(), FOUR_O_TIMEOUT)
     content = (
@@ -1768,10 +1786,11 @@ async def ask_4o(text: str) -> str:
     logging.info("Sending 4o ask request to %s", url)
     session = get_http_session()
     async def _call():
-        async with HTTP_SEMAPHORE:
-            resp = await session.post(url, json=payload, headers=headers)
-            resp.raise_for_status()
-            return await resp.json()
+        async with span("http"):
+            async with HTTP_SEMAPHORE:
+                resp = await session.post(url, json=payload, headers=headers)
+                resp.raise_for_status()
+                return await resp.json()
 
     data = await asyncio.wait_for(_call(), FOUR_O_TIMEOUT)
     logging.debug("4o response: %s", data)
@@ -6249,8 +6268,7 @@ async def post_to_vk(
         }
         if attachments:
             params["attachments"] = ",".join(attachments)
-        async with span("tg-send"):
-            data = await _vk_api("wall.post", params, db, bot, token=token)
+        data = await _vk_api("wall.post", params, db, bot, token=token)
         post_id = data.get("response", {}).get("post_id")
         if post_id:
             url = f"https://vk.com/wall-{group_id.lstrip('-')}_{post_id}"
@@ -6631,14 +6649,19 @@ async def send_daily_announcement_vk(
     bot: Bot | None = None,
 ):
     async with HEAVY_SEMAPHORE:
-        section1, section2 = await build_daily_sections_vk(db, tz, now)
+        async with span("db"):
+            section1, section2 = await build_daily_sections_vk(db, tz, now)
         if section == "today":
-            await post_to_vk(group_id, section1, db, bot)
+            async with span("vk-send"):
+                await post_to_vk(group_id, section1, db, bot)
         elif section == "added":
-            await post_to_vk(group_id, section2, db, bot)
+            async with span("vk-send"):
+                await post_to_vk(group_id, section2, db, bot)
         else:
-            await post_to_vk(group_id, section1, db, bot)
-            await post_to_vk(group_id, section2, db, bot)
+            async with span("vk-send"):
+                await post_to_vk(group_id, section1, db, bot)
+            async with span("vk-send"):
+                await post_to_vk(group_id, section2, db, bot)
 
 
 async def send_daily_announcement(
@@ -6654,13 +6677,14 @@ async def send_daily_announcement(
         posts = await build_daily_posts(db, tz, now)
         for text, markup in posts:
             try:
-                await bot.send_message(
-                    channel_id,
-                    text,
-                    reply_markup=markup,
-                    parse_mode="HTML",
-                    disable_web_page_preview=True,
-                )
+                async with span("tg-send"):
+                    await bot.send_message(
+                        channel_id,
+                        text,
+                        reply_markup=markup,
+                        parse_mode="HTML",
+                        disable_web_page_preview=True,
+                    )
             except Exception as e:
                 logging.error("daily send failed for %s: %s", channel_id, e)
                 if "message is too long" in str(e):
@@ -6720,8 +6744,7 @@ async def vk_scheduler(db: Database, bot: Bot):
 
     if (last_today or "") != now.date().isoformat() and now_time >= today_time:
         try:
-            async with span("tg-send"):
-                await send_daily_announcement_vk(db, group_id, tz, section="today", bot=bot)
+            await send_daily_announcement_vk(db, group_id, tz, section="today", bot=bot)
             async with span("db"):
                 await set_vk_last_today(db, now.date().isoformat())
         except Exception as e:
@@ -6729,8 +6752,7 @@ async def vk_scheduler(db: Database, bot: Bot):
 
     if (last_added or "") != now.date().isoformat() and now_time >= added_time:
         try:
-            async with span("tg-send"):
-                await send_daily_announcement_vk(db, group_id, tz, section="added", bot=bot)
+            await send_daily_announcement_vk(db, group_id, tz, section="added", bot=bot)
             async with span("db"):
                 await set_vk_last_added(db, now.date().isoformat())
         except Exception as e:
@@ -6746,8 +6768,9 @@ async def cleanup_old_events(db: Database, bot: Bot | None = None) -> int:
         tz = offset_to_timezone(offset)
         threshold = (datetime.now(tz) - timedelta(days=7)).date().isoformat()
         total = 0
-        async with db.get_session() as session:
-            stream = await session.stream_scalars(
+        async with span("db"):
+            async with db.get_session() as session:
+                stream = await session.stream_scalars(
                 select(Event)
                 .where(
                     (
@@ -6783,9 +6806,10 @@ async def _cleanup_batch(events: list[Event], db: Database, bot: Bot | None) -> 
             await delete_asset_post(event, db, bot)
             await remove_calendar_button(event, bot)
     if ids:
-        async with db.get_session() as session:
-            await session.execute(delete(Event).where(Event.id.in_(ids)))
-            await session.commit()
+        async with span("db"):
+            async with db.get_session() as session:
+                await session.execute(delete(Event).where(Event.id.in_(ids)))
+                await session.commit()
 
 
 async def cleanup_scheduler(db: Database, bot: Bot):
@@ -6796,8 +6820,7 @@ async def cleanup_scheduler(db: Database, bot: Bot):
         now = datetime.now(tz)
     if now.time() >= time(3, 0) and now.date() != _cleanup_last_run:
         try:
-            async with span("db"):
-                count = await cleanup_old_events(db, bot)
+            count = await cleanup_old_events(db, bot)
             async with span("tg-send"):
                 await notify_superadmin(
                     db,
@@ -6828,11 +6851,10 @@ async def page_update_scheduler(db: Database):
             _page_last_run = now.date()
     if now.time() >= time(1, 0) and now.date() != _page_last_run:
         try:
-            async with span("tg-send"):
-                await sync_month_page(db, now.strftime("%Y-%m"))
-                w_start = weekend_start_for_date(now.date())
-                if w_start:
-                    await sync_weekend_page(db, w_start.isoformat())
+            await sync_month_page(db, now.strftime("%Y-%m"))
+            w_start = weekend_start_for_date(now.date())
+            if w_start:
+                await sync_weekend_page(db, w_start.isoformat())
         except Exception as e:
             logging.error("page update failed: %s", e)
         _page_last_run = now.date()
@@ -6861,8 +6883,7 @@ async def partner_notification_scheduler(db: Database, bot: Bot):
                             "end": (now.date() + timedelta(days=30)).isoformat(),
                         },
                     )
-            async with span("db"):
-                notified = await notify_inactive_partners(db, bot, tz)
+            notified = await notify_inactive_partners(db, bot, tz)
             if notified:
                 names = ", ".join(
                     f"@{u.username}" if u.username else str(u.user_id)
@@ -6923,8 +6944,7 @@ async def vk_poll_scheduler(db: Database, bot: Bot):
             sched = datetime.combine(start - timedelta(days=1), time(21, 0), tz)
         if now >= sched and now.date() <= (end or start):
             try:
-                async with span("tg-send"):
-                    await send_festival_poll(db, fest, group_id, bot)
+                await send_festival_poll(db, fest, group_id, bot)
             except Exception as e:
                 logging.error("VK poll send failed for %s: %s", fest.name, e)
 
