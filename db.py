@@ -40,8 +40,7 @@ class LoggingAsyncSession(AsyncSession):
             return
         logging.warning("SLOW SQL %.0f ms: %s", duration, sql)
         try:
-            conn = await self.connection()
-            try:
+            async with self.bind.connect() as conn:
                 if params:
                     plan_res = await conn.exec_driver_sql(
                         f"EXPLAIN QUERY PLAN {sql}", params
@@ -52,8 +51,6 @@ class LoggingAsyncSession(AsyncSession):
                     )
                 plan = plan_res.fetchall()
                 await plan_res.close()
-            finally:
-                await conn.close()
             logging.warning("PLAN: %s", plan)
         except Exception as e:  # pragma: no cover - logging only
             logging.error("failed to explain query: %s", e)
