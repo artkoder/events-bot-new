@@ -63,6 +63,7 @@ def _load_icalendar() -> None:
         IcsEvent = _IcsEvent
 
 from aiogram import Bot, Dispatcher, types
+from safe_bot import SafeBot, BACKOFF_DELAYS
 from aiogram.filters import Command
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web, FormData, ClientSession, TCPConnector, ClientTimeout
@@ -645,7 +646,6 @@ async def _vk_api(
         params["access_token"] = token
         params["v"] = "5.131"
         logging.info("calling VK API %s using %s token %s", method, kind, token)
-
         async def _call():
             async with HTTP_SEMAPHORE:
                 async with session.post(
@@ -653,19 +653,45 @@ async def _vk_api(
                 ) as resp:
                     return await resp.json()
 
-        async with span("vk-send"):
-            data = await asyncio.wait_for(_call(), HTTP_TIMEOUT)
-        if "error" not in data:
-            return data
-        last_err = data["error"]
-        if kind == "user" and last_err.get("error_code") in {5, 27}:
-            global _vk_user_token_bad
-            if _vk_user_token_bad != token:
-                _vk_user_token_bad = token
-                if db and bot:
-                    await notify_superadmin(db, bot, "VK_USER_TOKEN expired")
-            continue
-        raise RuntimeError(f"VK error: {last_err}")
+        err: dict | None = None
+        last_msg: str | None = None
+        for attempt, delay in enumerate(BACKOFF_DELAYS, start=1):
+            async with span("vk-send"):
+                data = await asyncio.wait_for(_call(), HTTP_TIMEOUT)
+            if "error" not in data:
+                if attempt > 1 and last_msg:
+                    logging.warning(
+                        "vk api %s retried=%d last_error=%s",
+                        method,
+                        attempt - 1,
+                        last_msg,
+                    )
+                return data
+            err = data["error"]
+            msg = err.get("error_msg", "")
+            code = err.get("error_code")
+            if kind == "user" and code in {5, 27}:
+                global _vk_user_token_bad
+                if _vk_user_token_bad != token:
+                    _vk_user_token_bad = token
+                    if db and bot:
+                        await notify_superadmin(db, bot, "VK_USER_TOKEN expired")
+                break
+            if any(x in msg.lower() for x in ("already deleted", "already exists")):
+                logging.info("vk no-retry error: %s", msg)
+                return data
+            last_msg = msg
+            if attempt == len(BACKOFF_DELAYS):
+                logging.warning(
+                    "vk api %s failed after %d attempts: %s",
+                    method,
+                    attempt,
+                    msg,
+                )
+                break
+            await asyncio.sleep(delay)
+        last_err = err
+        continue
     if last_err:
         raise RuntimeError(f"VK error: {last_err}")
     raise RuntimeError("VK token missing")
@@ -8327,7 +8353,7 @@ def create_app() -> web.Application:
         raise RuntimeError("WEBHOOK_URL is missing")
 
     session = IPv4AiohttpSession()
-    bot = Bot(token, session=session)
+    bot = SafeBot(token, session=session)
     logging.info("DB_PATH=%s", DB_PATH)
     logging.info("FOUR_O_TOKEN found: %s", bool(os.getenv("FOUR_O_TOKEN")))
     dp = Dispatcher()
