@@ -8328,6 +8328,20 @@ def create_app() -> web.Application:
 
     session = IPv4AiohttpSession()
     bot = Bot(token, session=session)
+
+    _orig_send_message = bot.send_message
+    _send_counter = 1
+
+    async def logged_send_message(*args, **kwargs):
+        nonlocal _send_counter
+        t0 = _time.perf_counter()
+        result = await _orig_send_message(*args, **kwargs)
+        logging.debug("send #%d took %.2f s", _send_counter, _time.perf_counter() - t0)
+        _send_counter += 1
+        return result
+
+    bot.send_message = logged_send_message
+
     logging.info("DB_PATH=%s", DB_PATH)
     logging.info("FOUR_O_TOKEN found: %s", bool(os.getenv("FOUR_O_TOKEN")))
     dp = Dispatcher()
