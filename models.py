@@ -2,6 +2,7 @@ from datetime import datetime
 from typing import Optional
 
 from sqlmodel import Field, SQLModel
+from sqlalchemy import Index, text
 
 
 class User(SQLModel, table=True):
@@ -44,6 +45,18 @@ class Setting(SQLModel, table=True):
 
 
 class Event(SQLModel, table=True):
+    __table_args__ = (
+        Index("ix_event_date", "date"),
+        Index("ix_event_date_city", "date", "city"),
+        Index("ix_event_date_festival", "date", "festival"),
+        Index("ix_event_content_hash", "content_hash"),
+        Index(
+            "ix_event_telegraph_not_null",
+            "date",
+            sqlite_where=text("telegraph_url IS NOT NULL"),
+        ),
+    )
+
     id: Optional[int] = Field(default=None, primary_key=True)
     title: str
     description: str
@@ -75,6 +88,7 @@ class Event(SQLModel, table=True):
     creator_id: Optional[int] = None
     photo_count: int = 0
     added_at: datetime = Field(default_factory=datetime.utcnow)
+    content_hash: Optional[str] = None
 
 
 class MonthPage(SQLModel, table=True):

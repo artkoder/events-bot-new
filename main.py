@@ -85,7 +85,7 @@ import contextlib
 import html
 from io import BytesIO
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import update, text
+from sqlalchemy import update, text, delete
 from sqlmodel import select
 import aiosqlite
 import gc
@@ -6745,9 +6745,11 @@ async def cleanup_old_events(db: Database, bot: Bot | None = None) -> int:
         offset = await get_tz_offset(db)
         tz = offset_to_timezone(offset)
         threshold = (datetime.now(tz) - timedelta(days=7)).date().isoformat()
+        total = 0
         async with db.get_session() as session:
-            result = await session.execute(
-                select(Event).where(
+            stream = await session.stream_scalars(
+                select(Event)
+                .where(
                     (
                         Event.end_date.is_not(None)
                         & (Event.end_date < threshold)
@@ -6757,18 +6759,33 @@ async def cleanup_old_events(db: Database, bot: Bot | None = None) -> int:
                         & (Event.date < threshold)
                     )
                 )
+                .order_by(Event.id)
+                .execution_options(yield_per=500)
             )
-            events = result.scalars().all()
-            count = len(events)
-            for event in events:
-                await delete_ics(event)
-                if bot:
-                    await delete_asset_post(event, db, bot)
-                    await remove_calendar_button(event, bot)
-                await session.delete(event)
-            if events:
-                await session.commit()
-        return count
+            batch: list[Event] = []
+            async for event in stream:
+                batch.append(event)
+                if len(batch) >= 500:
+                    await _cleanup_batch(batch, db, bot)
+                    total += len(batch)
+                    batch.clear()
+            if batch:
+                await _cleanup_batch(batch, db, bot)
+                total += len(batch)
+        return total
+
+
+async def _cleanup_batch(events: list[Event], db: Database, bot: Bot | None) -> None:
+    ids = [e.id for e in events if e.id is not None]
+    for event in events:
+        await delete_ics(event)
+        if bot:
+            await delete_asset_post(event, db, bot)
+            await remove_calendar_button(event, bot)
+    if ids:
+        async with db.get_session() as session:
+            await session.execute(delete(Event).where(Event.id.in_(ids)))
+            await session.commit()
 
 
 async def cleanup_scheduler(db: Database, bot: Bot):
@@ -6874,15 +6891,15 @@ async def vk_poll_scheduler(db: Database, bot: Bot):
         group_id = await get_vk_group_id(db)
         if not group_id:
             return
+        ev_map: dict[str, list[Event]] = {}
         async with db.get_session() as session:
-            res_f = await session.execute(select(Festival))
-            festivals = res_f.scalars().all()
-            res_e = await session.execute(select(Event))
-            events = res_e.scalars().all()
-    ev_map: dict[str, list[Event]] = {}
-    for e in events:
-        if e.festival:
-            ev_map.setdefault(e.festival, []).append(e)
+            festivals = (await session.scalars(select(Festival))).all()
+            stream = await session.stream_scalars(
+                select(Event).execution_options(yield_per=500)
+            )
+            async for e in stream:
+                if e.festival:
+                    ev_map.setdefault(e.festival, []).append(e)
     for fest in festivals:
         if fest.vk_poll_url:
             continue

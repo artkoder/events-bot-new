@@ -34,6 +34,67 @@ async def vacuum(engine: AsyncEngine) -> None:
         await pragma(conn, "VACUUM")
 
 
+class LoggingAsyncSession(AsyncSession):
+    async def _log(self, sql: str, params, duration: float) -> None:
+        if duration <= 2000:
+            return
+        logging.warning("SLOW SQL %.0f ms: %s", duration, sql)
+        try:
+            async with self.connection() as conn:
+                if params:
+                    plan_res = await conn.exec_driver_sql(
+                        f"EXPLAIN QUERY PLAN {sql}", params
+                    )
+                else:
+                    plan_res = await conn.exec_driver_sql(
+                        f"EXPLAIN QUERY PLAN {sql}"
+                    )
+                plan = plan_res.fetchall()
+                await plan_res.close()
+            logging.warning("PLAN: %s", plan)
+        except Exception as e:  # pragma: no cover - logging only
+            logging.error("failed to explain query: %s", e)
+
+    async def execute(self, statement, params=None, *args, **kwargs):
+        compile_fn = getattr(statement, "compile", None)
+        if compile_fn:
+            sql = str(
+                compile_fn(
+                    self.bind.sync_engine if hasattr(self.bind, "sync_engine") else self.bind,
+                    compile_kwargs={
+                        "literal_binds": False,
+                        "render_postcompile": True,
+                    },
+                )
+            )
+        else:
+            sql = str(statement)
+        start = _time.perf_counter() * 1000
+        result = await super().execute(statement, params=params, *args, **kwargs)
+        dur = _time.perf_counter() * 1000 - start
+        await self._log(sql, params, dur)
+        return result
+
+    async def scalars(self, statement, params=None, *args, **kwargs):
+        compile_fn = getattr(statement, "compile", None)
+        if compile_fn:
+            sql = str(
+                compile_fn(
+                    self.bind.sync_engine if hasattr(self.bind, "sync_engine") else self.bind,
+                    compile_kwargs={
+                        "literal_binds": False,
+                        "render_postcompile": True,
+                    },
+                )
+            )
+        else:
+            sql = str(statement)
+        start = _time.perf_counter() * 1000
+        result = await super().scalars(statement, params=params, *args, **kwargs)
+        dur = _time.perf_counter() * 1000 - start
+        await self._log(sql, params, dur)
+        return result
+
 class Database:
     def __init__(self, path: str):
         """Initialize async engine and reusable aiosqlite connection."""
@@ -46,6 +107,7 @@ class Database:
         self._session_factory = async_sessionmaker(
             self.engine,
             expire_on_commit=False,
+            class_=LoggingAsyncSession,
         )
         self._conn: aiosqlite.Connection | None = None
         self._lock = asyncio.Lock()
@@ -57,6 +119,10 @@ class Database:
                 if self._conn is None:
                     self._conn = await aiosqlite.connect(self.path, timeout=15)
                     await self._conn.execute("PRAGMA journal_mode=WAL")
+                    await self._conn.execute("PRAGMA synchronous=NORMAL")
+                    await self._conn.execute("PRAGMA cache_size=-80000")
+                    await self._conn.execute("PRAGMA temp_store=MEMORY")
+                    await self._conn.execute("PRAGMA busy_timeout=5000")
                     await self._conn.execute("PRAGMA read_uncommitted = 1")
         return self._conn
 
@@ -78,9 +144,17 @@ class Database:
                 rows = result.fetchall() if result.returns_rows else None
             finally:
                 await result.close()
-        dur = (_time.perf_counter() - start) * 1000
-        if dur > 200:
-            logging.info("slow db exec %.0f ms: %s", dur, sql)
+            dur = (_time.perf_counter() - start) * 1000
+            if dur > 2000:
+                logging.warning("SLOW SQL %.0f ms: %s", dur, sql)
+                try:
+                    plan_res = await conn.exec_driver_sql(
+                        f"EXPLAIN QUERY PLAN {sql}", *args, **kwargs
+                    )
+                    plan = plan_res.fetchall()
+                finally:
+                    await plan_res.close()
+                logging.warning("PLAN: %s", plan)
         return rows
 
     async def init(self):
@@ -89,6 +163,8 @@ class Database:
                 await conn.exec_driver_sql("PRAGMA journal_mode=WAL;")
                 await conn.exec_driver_sql("PRAGMA synchronous=NORMAL;")
                 await conn.exec_driver_sql("PRAGMA temp_store=MEMORY;")
+                await conn.exec_driver_sql("PRAGMA cache_size=-80000;")
+                await conn.exec_driver_sql("PRAGMA busy_timeout=5000;")
                 await conn.exec_driver_sql("PRAGMA mmap_size=268435456;")
             await conn.run_sync(create_all)
             result = await conn.exec_driver_sql("PRAGMA table_info(event)")
@@ -174,6 +250,10 @@ class Database:
             if "creator_id" not in cols:
                 await conn.exec_driver_sql(
                     "ALTER TABLE event ADD COLUMN creator_id INTEGER"
+                )
+            if "content_hash" not in cols:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE event ADD COLUMN content_hash VARCHAR"
                 )
 
             result = await conn.exec_driver_sql("PRAGMA table_info(user)")
@@ -312,6 +392,24 @@ class Database:
             )
             await conn.exec_driver_sql(
                 "CREATE INDEX IF NOT EXISTS idx_event_city_date_time ON event(city, date, time)"
+            )
+            await conn.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS ix_event_date ON event(date)"
+            )
+            await conn.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS ix_event_date_city ON event(date, city)"
+            )
+            await conn.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS ix_event_date_festival ON event(date, festival)"
+            )
+            await conn.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS ix_event_content_hash ON event(content_hash)"
+            )
+            await conn.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS ix_week_page_start ON weekpage(start)"
+            )
+            await conn.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS ix_event_telegraph_not_null ON event(date) WHERE telegraph_url IS NOT NULL"
             )
 
         # ensure shared connection is ready
