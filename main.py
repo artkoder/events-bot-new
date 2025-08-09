@@ -277,11 +277,26 @@ add_event_queue: asyncio.Queue[tuple[str, types.Message, bool]] = asyncio.Queue(
 )
 working: set[asyncio.Task] = set()
 
-async def _log_queue_stats():
+
+async def _log_queue_stats(app: web.Application, db: Database, bot: Bot):
+    worker: asyncio.Task = app["add_event_worker"]
     while DEBUG:
+        alive = not worker.done()
         logging.debug(
-            "QSTAT add_event=%d workers=%d", add_event_queue.qsize(), len(working)
+            "QSTAT add_event=%d inflight_tasks=%d worker_alive=%s",
+            add_event_queue.qsize(),
+            len(working),
+            alive,
         )
+        if not alive and not worker.cancelled():
+            try:
+                exc = worker.exception()
+            except Exception as e:  # pragma: no cover - defensive
+                exc = e
+            logging.error("add_event_queue_worker crashed: %s", exc)
+            worker = asyncio.create_task(add_event_queue_worker(db, bot))
+            app["add_event_worker"] = worker
+            logging.info("add_event_queue_worker restarted")
         await asyncio.sleep(10)
 
 # toggle for uploading images to catbox
@@ -6920,7 +6935,7 @@ async def init_db_and_scheduler(
     scheduler_startup(db, bot)
     app["add_event_worker"] = asyncio.create_task(add_event_queue_worker(db, bot))
     if DEBUG:
-        app["qstat_task"] = asyncio.create_task(_log_queue_stats())
+        app["qstat_task"] = asyncio.create_task(_log_queue_stats(app, db, bot))
     gc.collect()
     print_current_rss()
 
@@ -8521,19 +8536,19 @@ def create_app() -> web.Application:
 
     async def on_shutdown(app: web.Application):
         await bot.session.close()
+        if "qstat_task" in app:
+            app["qstat_task"].cancel()
+            with contextlib.suppress(Exception):
+                await app["qstat_task"]
+        if "add_event_worker" in app:
+            app["add_event_worker"].cancel()
+            with contextlib.suppress(Exception):
+                await app["add_event_worker"]
         if "daily_task" in app:
             app["daily_task"].cancel()
             with contextlib.suppress(Exception):
                 await app["daily_task"]
         scheduler_cleanup()
-        if "add_event_worker" in app:
-            app["add_event_worker"].cancel()
-            with contextlib.suppress(Exception):
-                await app["add_event_worker"]
-        if "qstat_task" in app:
-            app["qstat_task"].cancel()
-            with contextlib.suppress(Exception):
-                await app["qstat_task"]
         await close_vk_session()
         close_supabase_client()
 
