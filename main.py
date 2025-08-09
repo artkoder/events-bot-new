@@ -1656,10 +1656,10 @@ async def delete_ics(event: Event):
 async def delete_asset_post(event: Event, db: Database, bot: Bot):
     if not event.ics_post_id:
         return
-    channel = await get_asset_channel(db)
-    if not channel:
-        return
     try:
+        channel = await get_asset_channel(db)
+        if not channel:
+            return
         async with span("tg-send"):
             await bot.delete_message(channel.channel_id, event.ics_post_id)
     except Exception as e:
