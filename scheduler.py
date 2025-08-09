@@ -3,6 +3,9 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import asyncio
 import logging
 import time as _time
+from functools import partial
+
+from db import optimize, wal_checkpoint_truncate, vacuum
 
 _scheduler: AsyncIOScheduler | None = None
 
@@ -17,7 +20,7 @@ def startup(db, bot) -> AsyncIOScheduler:
             job_defaults={
                 "max_instances": 1,
                 "coalesce": True,
-                "misfire_grace_time": 60,
+                "misfire_grace_time": 30,
             },
         )
 
@@ -73,50 +76,54 @@ def startup(db, bot) -> AsyncIOScheduler:
         replace_existing=True,
     )
 
-    async def _maint(sql: str, op: str):
-        delay = 1
-        for attempt in range(3):
-            start = _time.perf_counter()
-            try:
-                await db.exec_driver_sql(sql)
-                dur = (_time.perf_counter() - start) * 1000
-                logging.info("db_maintenance: %s done in %.0f ms", op, dur)
-                break
-            except Exception as e:
-                if "locked" in str(e).lower() and attempt < 2:
-                    await asyncio.sleep(delay)
-                    delay *= 2
-                    continue
-                logging.error("db_maintenance %s failed: %s", op, e)
-                break
+    async def _run_maintenance(job, name: str, timeout: float) -> None:
+        start = _time.perf_counter()
+        try:
+            await asyncio.wait_for(job(), timeout=timeout)
+            dur = (_time.perf_counter() - start) * 1000
+            logging.info("db_maintenance %s done in %.0f ms", name, dur)
+        except asyncio.TimeoutError:
+            logging.warning(
+                "db_maintenance %s timed out after %.1f s", name, timeout
+            )
+        except Exception:
+            logging.warning("db_maintenance %s failed", name, exc_info=True)
 
-    _scheduler.add_job(
-        _maint,
-        "cron",
-        id="db_optimize",
-        hour="3",
-        args=["PRAGMA optimize;", "optimize"],
-        replace_existing=True,
-    )
-    _scheduler.add_job(
-        _maint,
-        "cron",
-        id="db_wal_checkpoint",
-        hour="3",
-        minute="5",
-        args=["PRAGMA wal_checkpoint(TRUNCATE);", "wal_checkpoint"],
-        replace_existing=True,
-    )
-    _scheduler.add_job(
-        _maint,
-        "cron",
-        id="db_vacuum",
-        day_of_week="sun",
-        hour="4",
-        minute="30",
-        args=["VACUUM;", "vacuum"],
-        replace_existing=True,
-    )
+    if db is not None:
+        _scheduler.add_job(
+            _run_maintenance,
+            "interval",
+            id="db_optimize",
+            hours=1,
+            args=[partial(optimize, db.engine), "PRAGMA optimize", 10.0],
+            replace_existing=True,
+            max_instances=1,
+        )
+        _scheduler.add_job(
+            _run_maintenance,
+            "cron",
+            id="db_wal_checkpoint",
+            hour="3",
+            minute="5",
+            args=[
+                partial(wal_checkpoint_truncate, db.engine),
+                "PRAGMA wal_checkpoint(TRUNCATE)",
+                10.0,
+            ],
+            replace_existing=True,
+            max_instances=1,
+        )
+        _scheduler.add_job(
+            _run_maintenance,
+            "cron",
+            id="db_vacuum",
+            day_of_week="sun",
+            hour="4",
+            minute="30",
+            args=[partial(vacuum, db.engine), "VACUUM", 60.0],
+            replace_existing=True,
+            max_instances=1,
+        )
 
     if not _scheduler.running:
         _scheduler.start()

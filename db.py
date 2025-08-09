@@ -8,10 +8,30 @@ from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
+    AsyncEngine,
 )
 from sqlalchemy.pool import NullPool
 
 from models import create_all
+
+
+async def pragma(conn, sql: str) -> None:
+    await conn.exec_driver_sql(sql)
+
+
+async def wal_checkpoint_truncate(engine: AsyncEngine) -> None:
+    async with engine.begin() as conn:
+        await pragma(conn, "PRAGMA wal_checkpoint(TRUNCATE)")
+
+
+async def optimize(engine: AsyncEngine) -> None:
+    async with engine.begin() as conn:
+        await pragma(conn, "PRAGMA optimize")
+
+
+async def vacuum(engine: AsyncEngine) -> None:
+    async with engine.begin() as conn:
+        await pragma(conn, "VACUUM")
 
 
 class Database:
