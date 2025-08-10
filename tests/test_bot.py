@@ -1702,10 +1702,16 @@ async def test_forward_add_festival(tmp_path: Path, monkeypatch):
         return "https://t.me/page", "p"
 
     async def fake_sync_festival_page(db_obj, name):
-        pass
+        async with db_obj.get_session() as session:
+            fest = (await session.execute(select(main.Festival).where(main.Festival.name == name))).scalar_one()
+            fest.telegraph_url = "https://telegra.ph/test"
+            await session.commit()
 
     async def fake_sync_vk(db_obj, name, bot_obj):
-        pass
+        async with db_obj.get_session() as session:
+            fest = (await session.execute(select(main.Festival).where(main.Festival.name == name))).scalar_one()
+            fest.vk_post_url = "https://vk.com/wall-1_1"
+            await session.commit()
 
     monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
     monkeypatch.setattr("main.create_source_page", fake_create)
@@ -1749,6 +1755,10 @@ async def test_forward_add_festival(tmp_path: Path, monkeypatch):
     async with db.get_session() as session:
         fest = (await session.execute(select(Festival))).scalar_one()
         fid = fest.id
+
+    text = bot.messages[-1][1]
+    assert "telegraph: https://telegra.ph/test" in text
+    assert "vk_post: https://vk.com/wall-1_1" in text
 
     markup = bot.messages[-1][2]["reply_markup"]
     assert any(

@@ -3302,9 +3302,18 @@ async def add_events_from_text(
         )
         if not parsed:
             await sync_festival_page(db, fest_obj.name)
-            asyncio.create_task(sync_festival_vk_post(db, fest_obj.name, bot))
+            await sync_festival_vk_post(db, fest_obj.name, bot)
             asyncio.create_task(sync_other_festivals(db, fest_obj.name, bot))
+            async with db.get_session() as session:
+                res = await session.execute(
+                    select(Festival).where(Festival.name == fest_obj.name)
+                )
+                fest_obj = res.scalar_one_or_none()
             lines = [f"festival: {fest_obj.name}"]
+            if fest_obj.telegraph_url:
+                lines.append(f"telegraph: {fest_obj.telegraph_url}")
+            if fest_obj.vk_post_url:
+                lines.append(f"vk_post: {fest_obj.vk_post_url}")
             if fest_obj.start_date:
                 lines.append(f"start: {fest_obj.start_date}")
             if fest_obj.end_date:
@@ -3595,6 +3604,8 @@ async def add_events_from_text(
                 lines.append(f"festival: {saved.festival}")
                 if fest_obj and fest_obj.telegraph_url:
                     lines.append(f"festival_page: {fest_obj.telegraph_url}")
+                if fest_obj and fest_obj.vk_post_url:
+                    lines.append(f"festival_vk_post: {fest_obj.vk_post_url}")
 
             if saved.description:
                 lines.append(f"description: {saved.description}")
