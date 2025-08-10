@@ -244,7 +244,11 @@ async def test_partner_registration(tmp_path: Path):
             "message": {"message_id": 3, "date": 0, "chat": {"id": 1, "type": "private"}},
         }
     ).as_(bot)
-    async def dummy_answer(*args, **kwargs):
+    ans_msgs: list[str] = []
+
+    async def dummy_answer(text=None, **kwargs):
+        if text:
+            ans_msgs.append(text)
         return None
 
     object.__setattr__(cb, "answer", dummy_answer)
@@ -5063,24 +5067,28 @@ async def test_festdays_callback_creates_events(tmp_path: Path, monkeypatch):
     await db.init()
     bot = DummyBot("123:abc")
 
+    start_day = main.next_weekend_start(date.today())
     async with db.get_session() as session:
         fest = Festival(
             name="Jazz",
             full_name="Jazz Fest",
-            start_date=FUTURE_DATE,
-            end_date=(date.fromisoformat(FUTURE_DATE) + timedelta(days=1)).isoformat(),
+            start_date=start_day.isoformat(),
+            end_date=(start_day + timedelta(days=1)).isoformat(),
             location_name="Hall",
             city="Town",
+            telegraph_url="http://tg",
         )
         session.add(fest)
         await session.commit()
         fid = fest.id
 
+    month_calls: list[str] = []
     async def fake_sync_month_page(db_obj, month):
-        pass
+        month_calls.append(month)
 
+    weekend_calls: list[str] = []
     async def fake_sync_weekend_page(db_obj, start):
-        pass
+        weekend_calls.append(start)
 
     async def fake_sync_festival_page(db_obj, name, **kwargs):
         pass
@@ -5112,7 +5120,11 @@ async def test_festdays_callback_creates_events(tmp_path: Path, monkeypatch):
         }
     ).as_(bot)
 
-    async def dummy_answer(*args, **kwargs):
+    ans_msgs: list[str] = []
+
+    async def dummy_answer(text=None, **kwargs):
+        if text:
+            ans_msgs.append(text)
         return None
 
     object.__setattr__(cb, "answer", dummy_answer)
@@ -5124,6 +5136,53 @@ async def test_festdays_callback_creates_events(tmp_path: Path, monkeypatch):
         events = (await session.execute(select(Event))).scalars().all()
         assert len(events) == 2
         assert all(e.festival == "Jazz" for e in events)
+    assert len(month_calls) == 1
+    assert len(weekend_calls) == 1
+    assert any("http://tg" in m for m in ans_msgs)
+    assert any("Что дальше?" in m for m in ans_msgs)
+
+
+@pytest.mark.asyncio
+async def test_festdays_requires_dates(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async with db.get_session() as session:
+        fest = Festival(name="NoDates")
+        session.add(fest)
+        await session.commit()
+        fid = fest.id
+
+    cb = types.CallbackQuery.model_validate(
+        {
+            "id": "1",
+            "data": f"festdays:{fid}",
+            "from": {"id": 1, "is_bot": False, "first_name": "U"},
+            "chat_instance": "1",
+            "message": {
+                "message_id": 1,
+                "date": 0,
+                "chat": {"id": 1, "type": "private"},
+                "text": "stub",
+            },
+        }
+    ).as_(bot)
+
+    captured = {}
+
+    async def dummy_answer(text=None, **kwargs):
+        captured["text"] = text
+
+    object.__setattr__(cb, "answer", dummy_answer)
+    object.__setattr__(cb.message, "answer", dummy_answer)
+
+    await process_request(cb, db, bot)
+
+    assert (
+        captured.get("text")
+        == "Не задан период фестиваля. Сначала отредактируйте даты."
+    )
 
 
 
