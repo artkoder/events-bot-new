@@ -34,26 +34,34 @@ async def vacuum(engine: AsyncEngine) -> None:
         await pragma(conn, "VACUUM")
 
 
+async def explain_sql(
+    engine: AsyncEngine, sql: str, *args, timeout: float = 0.5, **kwargs
+) -> str:
+    async def _run() -> str:
+        async with engine.connect() as conn:
+            result = await conn.exec_driver_sql(
+                f"EXPLAIN QUERY PLAN {sql}", *args, **kwargs
+            )
+            try:
+                rows = result.fetchall()
+            finally:
+                result.close()
+            return "\n".join(" ".join(map(str, r)) for r in rows)
+
+    try:
+        return await asyncio.wait_for(_run(), timeout)
+    except Exception as e:  # pragma: no cover - logging only
+        return f"<explain failed: {e}>"
+
+
 class LoggingAsyncSession(AsyncSession):
     async def _log(self, sql: str, params, duration: float) -> None:
         if duration <= 2000:
             return
         logging.warning("SLOW SQL %.0f ms: %s", duration, sql)
-        try:
-            async with self.bind.connect() as conn:
-                if params:
-                    plan_res = await conn.exec_driver_sql(
-                        f"EXPLAIN QUERY PLAN {sql}", params
-                    )
-                else:
-                    plan_res = await conn.exec_driver_sql(
-                        f"EXPLAIN QUERY PLAN {sql}"
-                    )
-                plan = plan_res.fetchall()
-                await plan_res.close()
-            logging.warning("PLAN: %s", plan)
-        except Exception as e:  # pragma: no cover - logging only
-            logging.error("failed to explain query: %s", e)
+        args = (params,) if params is not None else ()
+        plan = await explain_sql(self.bind, sql, *args)
+        logging.warning("PLAN: %s", plan)
 
     async def execute(self, statement, params=None, *args, **kwargs):
         compile_fn = getattr(statement, "compile", None)
@@ -143,17 +151,11 @@ class Database:
             try:
                 rows = result.fetchall() if result.returns_rows else None
             finally:
-                await result.close()
+                result.close()
             dur = (_time.perf_counter() - start) * 1000
             if dur > 2000:
                 logging.warning("SLOW SQL %.0f ms: %s", dur, sql)
-                try:
-                    plan_res = await conn.exec_driver_sql(
-                        f"EXPLAIN QUERY PLAN {sql}", *args, **kwargs
-                    )
-                    plan = plan_res.fetchall()
-                finally:
-                    await plan_res.close()
+                plan = await explain_sql(self.engine, sql, *args, **kwargs)
                 logging.warning("PLAN: %s", plan)
         return rows
 
