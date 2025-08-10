@@ -633,17 +633,27 @@ def _vk_user_token() -> str | None:
     return None
 
 
+class VKAPIError(Exception):
+    """Exception raised for VK API errors."""
+
+    def __init__(self, code: int | None, message: str):
+        self.code = code
+        self.message = message
+        super().__init__(message)
+
+
 async def _vk_api(
     method: str,
     params: dict,
     db: Database | None = None,
     bot: Bot | None = None,
     token: str | None = None,
+    token_kind: str = "group",
 ) -> dict:
     """Call VK API with token fallback."""
     tokens: list[tuple[str, str]] = []
     if token:
-        tokens.append(("group", token))
+        tokens.append((token_kind, token))
     else:
         user_token = _vk_user_token()
         if user_token:
@@ -705,8 +715,8 @@ async def _vk_api(
         last_err = err
         continue
     if last_err:
-        raise RuntimeError(f"VK error: {last_err}")
-    raise RuntimeError("VK token missing")
+        raise VKAPIError(last_err.get("error_code"), last_err.get("error_msg", ""))
+    raise VKAPIError(None, "VK token missing")
 
 
 async def upload_vk_photo(
@@ -6008,7 +6018,7 @@ async def refresh_nav_on_all_festivals(
         await sync_festival_page(
             db, fname, refresh_nav_only=True, items=items
         )
-        asyncio.create_task(sync_festival_vk_post(db, fname, bot))
+        asyncio.create_task(sync_festival_vk_post(db, fname, bot, nav_only=True))
 
 
 async def build_festival_vk_message(db: Database, fest: Festival) -> str:
@@ -6048,7 +6058,9 @@ async def build_festival_vk_message(db: Database, fest: Festival) -> str:
     return "\n".join(lines)
 
 
-async def sync_festival_vk_post(db: Database, name: str, bot: Bot | None = None):
+async def sync_festival_vk_post(
+    db: Database, name: str, bot: Bot | None = None, *, nav_only: bool = False
+):
     group_id = await get_vk_group_id(db)
     if not group_id:
         return
@@ -6057,6 +6069,96 @@ async def sync_festival_vk_post(db: Database, name: str, bot: Bot | None = None)
         fest = res.scalar_one_or_none()
         if not fest:
             return
+
+    async def _try_edit(message: str, attachments: list[str] | None) -> bool | None:
+        if not fest.vk_post_url:
+            return False
+        for attempt in range(1, 4):
+            try:
+                await edit_vk_post(fest.vk_post_url, message, db, bot, attachments)
+                return True
+            except VKAPIError as e:
+                logging.warning(
+                    "Ошибка VK при редактировании (попытка %d из 3, код %s): %s",
+                    attempt,
+                    e.code,
+                    e.message,
+                )
+                if e.code in {213, 214} or "edit time expired" in e.message.lower():
+                    return False
+                if attempt == 3:
+                    return None
+                await asyncio.sleep(2 ** (attempt - 1))
+        return None
+
+    async def _try_post(message: str, attachments: list[str] | None) -> str | None:
+        for attempt in range(1, 4):
+            try:
+                url = await post_to_vk(group_id, message, db, bot, attachments)
+                if url:
+                    return url
+            except VKAPIError as e:
+                logging.warning(
+                    "Ошибка VK при публикации (попытка %d из 3, код %s): %s",
+                    attempt,
+                    e.code,
+                    e.message,
+                )
+            if attempt == 3:
+                return None
+            await asyncio.sleep(2 ** (attempt - 1))
+        return None
+
+    can_edit = True
+    if nav_only and fest.vk_post_url:
+        _, nav_lines = await build_festival_nav_block(db, exclude=fest.name)
+        if nav_lines:
+            ids = _vk_owner_and_post_id(fest.vk_post_url)
+            if not ids:
+                logging.error("invalid VK post url %s", fest.vk_post_url)
+                return
+            owner_id, post_id = ids
+            user_token = _vk_user_token()
+            if not user_token:
+                logging.error("VK_USER_TOKEN missing")
+                return
+            try:
+                data = await _vk_api(
+                    "wall.getById",
+                    {"posts": f"{owner_id}_{post_id}"},
+                    db,
+                    bot,
+                    token=user_token,
+                    token_kind="user",
+                )
+                text = data.get("response", [{}])[0].get("text", "")
+            except VKAPIError as e:
+                logging.error(
+                    "Не удалось получить пост VK для %s: код %s %s",
+                    name,
+                    e.code,
+                    e.message,
+                )
+                return
+            lines = text.split("\n")
+            idx = None
+            for i, line in enumerate(lines):
+                if line == "Ближайшие фестивали":
+                    idx = i
+                    if i > 0 and lines[i - 1] == VK_BLANK_LINE:
+                        idx -= 1
+                    break
+            base = lines[:idx] if idx is not None else lines
+            message = "\n".join(base + nav_lines)
+            res_edit = await _try_edit(message, None)
+            if res_edit is True:
+                logging.info("updated festival post %s on VK", name)
+                return
+            if res_edit is None:
+                logging.error("VK post error for festival %s", name)
+                return
+            can_edit = False  # editing not possible, create new post
+
     message = await build_festival_vk_message(db, fest)
     attachments: list[str] | None = None
     if fest.photo_url:
@@ -6066,20 +6168,27 @@ async def sync_festival_vk_post(db: Database, name: str, bot: Bot | None = None)
                 attachments = [photo_id]
         else:
             logging.info("VK photo posting disabled")
-    try:
-        if fest.vk_post_url:
-            await edit_vk_post(fest.vk_post_url, message, db, bot, attachments)
+
+    if fest.vk_post_url and can_edit:
+        res_edit = await _try_edit(message, attachments)
+        if res_edit is True:
             logging.info("updated festival post %s on VK", name)
-        else:
-            url = await post_to_vk(group_id, message, db, bot, attachments)
-            if url:
-                async with db.get_session() as session:
-                    fest = (await session.execute(select(Festival).where(Festival.name == name))).scalar_one()
-                    fest.vk_post_url = url
-                    await session.commit()
-            logging.info("created festival post %s: %s", name, url)
-    except Exception as e:
-        logging.error("VK post error for festival %s: %s", name, e)
+            return
+        if res_edit is None:
+            logging.error("VK post error for festival %s", name)
+            return
+
+    url = await _try_post(message, attachments)
+    if url:
+        async with db.get_session() as session:
+            fest_db = (
+                await session.execute(select(Festival).where(Festival.name == name))
+            ).scalar_one()
+            fest_db.vk_post_url = url
+            await session.commit()
+        logging.info("created festival post %s: %s", name, url)
+    else:
+        logging.error("VK post error for festival %s", name)
 
 
 async def send_festival_poll(
@@ -6449,7 +6558,6 @@ async def post_to_vk(
     db: Database | None = None,
     bot: Bot | None = None,
     attachments: list[str] | None = None,
-    token: str | None = None,
 ) -> str | None:
     if not group_id:
         return None
@@ -6467,7 +6575,9 @@ async def post_to_vk(
         }
         if attachments:
             params["attachments"] = ",".join(attachments)
-        data = await _vk_api("wall.post", params, db, bot, token=token)
+        data = await _vk_api(
+            "wall.post", params, db, bot, token=VK_TOKEN, token_kind="group"
+        )
         post_id = data.get("response", {}).get("post_id")
         if post_id:
             url = f"https://vk.com/wall-{group_id.lstrip('-')}_{post_id}"
@@ -6758,7 +6868,6 @@ async def edit_vk_post(
     db: Database | None = None,
     bot: Bot | None = None,
     attachments: list[str] | None = None,
-    token: str | None = None,
 ) -> bool:
     """Edit an existing VK post.
 
@@ -6780,13 +6889,17 @@ async def edit_vk_post(
     current: list[str] = []
     post_text = ""
     old_attachments: list[str] = []
+    user_token = _vk_user_token()
+    if not user_token:
+        raise VKAPIError(None, "VK_USER_TOKEN missing")
     try:
         data = await _vk_api(
             "wall.getById",
             {"posts": f"{owner_id}_{post_id}"},
             db,
             bot,
-            token=token,
+            token=user_token,
+            token_kind="user",
         )
         items = data.get("response") or []
         if items:
@@ -6811,7 +6924,7 @@ async def edit_vk_post(
         return False
     if current:
         params["attachments"] = ",".join(current)
-    await _vk_api("wall.edit", params, db, bot, token=token)
+    await _vk_api("wall.edit", params, db, bot, token=user_token, token_kind="user")
     logging.info("edit_vk_post done: %s", post_url)
     return True
 
