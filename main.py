@@ -6895,39 +6895,73 @@ async def vk_poll_scheduler(db: Database, bot: Bot):
             return
         ev_map: dict[str, list[Event]] = {}
         async with db.get_session() as session:
-            festivals = (await session.scalars(select(Festival))).all()
             stream = await session.stream_scalars(
                 select(Event).execution_options(yield_per=500)
             )
             async for e in stream:
                 if e.festival:
                     ev_map.setdefault(e.festival, []).append(e)
-    for fest in festivals:
-        if fest.vk_poll_url:
-            continue
-        evs = ev_map.get(fest.name, [])
-        start, end = festival_dates(fest, evs)
-        if not start:
-            continue
-        first_time: time | None = None
-        for ev in evs:
-            if ev.date != start.isoformat():
-                continue
-            tr = parse_time_range(ev.time)
-            if tr:
-                if first_time is None or tr[0] < first_time:
-                    first_time = tr[0]
-        if first_time is None:
-            first_time = time(0, 0)
-        if first_time >= time(17, 0):
-            sched = datetime.combine(start, time(13, 0), tz)
-        else:
-            sched = datetime.combine(start - timedelta(days=1), time(21, 0), tz)
-        if now >= sched and now.date() <= (end or start):
-            try:
-                await send_festival_poll(db, fest, group_id, bot)
-            except Exception as e:
-                logging.error("VK poll send failed for %s: %s", fest.name, e)
+
+            LIMIT = 1000
+            off = 0
+            while True:
+                result = await session.execute(
+                    select(
+                        Festival.id,
+                        Festival.name,
+                        Festival.start_date,
+                        Festival.end_date,
+                        Festival.vk_poll_url,
+                        Festival.vk_post_url,
+                    )
+                    .order_by(Festival.id)
+                    .limit(LIMIT)
+                    .offset(off)
+                )
+                rows = result.all()
+                if not rows:
+                    break
+                for (
+                    fest_id,
+                    name,
+                    start_date,
+                    end_date,
+                    vk_poll_url,
+                    vk_post_url,
+                ) in rows:
+                    if vk_poll_url:
+                        continue
+                    fest = Festival(
+                        id=fest_id,
+                        name=name,
+                        start_date=start_date,
+                        end_date=end_date,
+                        vk_poll_url=vk_poll_url,
+                        vk_post_url=vk_post_url,
+                    )
+                    evs = ev_map.get(name, [])
+                    start_dt, end_dt = festival_dates(fest, evs)
+                    if not start_dt:
+                        continue
+                    first_time: time | None = None
+                    for ev in evs:
+                        if ev.date != start_dt.isoformat():
+                            continue
+                        tr = parse_time_range(ev.time)
+                        if tr and (first_time is None or tr[0] < first_time):
+                            first_time = tr[0]
+                    if first_time is None:
+                        first_time = time(0, 0)
+                    if first_time >= time(17, 0):
+                        sched = datetime.combine(start_dt, time(13, 0), tz)
+                    else:
+                        sched = datetime.combine(start_dt - timedelta(days=1), time(21, 0), tz)
+                    if now >= sched and now.date() <= (end_dt or start_dt):
+                        try:
+                            await send_festival_poll(db, fest, group_id, bot)
+                        except Exception as e:
+                            logging.error("VK poll send failed for %s: %s", name, e)
+                off += LIMIT
 
 
 async def init_db_and_scheduler(

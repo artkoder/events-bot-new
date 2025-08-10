@@ -132,6 +132,7 @@ class Database:
                     await self._conn.execute("PRAGMA temp_store=MEMORY")
                     await self._conn.execute("PRAGMA busy_timeout=5000")
                     await self._conn.execute("PRAGMA read_uncommitted = 1")
+                    await self._conn.execute("PRAGMA mmap_size=134217728")
         return self._conn
 
     @asynccontextmanager
@@ -167,7 +168,7 @@ class Database:
                 await conn.exec_driver_sql("PRAGMA temp_store=MEMORY;")
                 await conn.exec_driver_sql("PRAGMA cache_size=-80000;")
                 await conn.exec_driver_sql("PRAGMA busy_timeout=5000;")
-                await conn.exec_driver_sql("PRAGMA mmap_size=268435456;")
+                await conn.exec_driver_sql("PRAGMA mmap_size=134217728;")
             await conn.run_sync(create_all)
             result = await conn.exec_driver_sql("PRAGMA table_info(event)")
             cols = [r[1] for r in result.fetchall()]
