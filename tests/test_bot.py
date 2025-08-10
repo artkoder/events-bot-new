@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 from aiogram import Bot, types
+from aiohttp import ClientOSError
 from sqlmodel import select
 from datetime import date, timedelta, timezone, datetime, time
 from typing import Any
@@ -5791,11 +5792,6 @@ async def test_forward_adds_calendar_button(tmp_path: Path, monkeypatch):
 async def test_cleanup_old_events(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
-    monkeypatch.setattr(
-        main,
-        "async_session",
-        async_sessionmaker(db.engine, expire_on_commit=False),
-    )
 
     old_date = (date.today() - timedelta(days=8)).isoformat()
     new_date = (date.today() + timedelta(days=1)).isoformat()
@@ -5823,7 +5819,7 @@ async def test_cleanup_old_events(tmp_path: Path, monkeypatch):
         old_id = old.id
         new_id = new.id
 
-    await main.cleanup_old_events()
+    await main.cleanup_old_events(db)
 
     async with db.get_session() as session:
         old_ev = await session.get(Event, old_id)
@@ -5837,15 +5833,59 @@ async def test_cleanup_old_events(tmp_path: Path, monkeypatch):
 async def test_cleanup_scheduler_logs(monkeypatch, caplog):
     called = {}
 
-    async def fake_cleanup():
+    async def fake_cleanup(db):
         called["done"] = True
         return 2
 
+    async def fake_notify(db, bot, text):
+        called["notified"] = text
+
     monkeypatch.setattr(main, "cleanup_old_events", fake_cleanup)
+    monkeypatch.setattr(main, "notify_superadmin", fake_notify)
     with caplog.at_level(logging.INFO):
-        await main.cleanup_scheduler()
+        await main.cleanup_scheduler(object(), object())
     assert called["done"]
+    assert called["notified"]
     assert any("cleanup_ok" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_notify_superadmin_retry(monkeypatch, caplog):
+    async def fake_get_superadmin_id(db):
+        return 1
+
+    class DummySession:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            pass
+
+    class FakeBot:
+        instances = []
+
+        def __init__(self, token, session=None):
+            self.token = token
+            self.session = session
+            self.calls = 0
+            FakeBot.instances.append(self)
+
+        async def send_message(self, chat_id, text):
+            self.calls += 1
+            if len(FakeBot.instances) == 1:
+                raise ClientOSError(0, "fail")
+            return True
+
+    monkeypatch.setattr(main, "get_superadmin_id", fake_get_superadmin_id)
+    monkeypatch.setattr(main, "SafeBot", FakeBot)
+    monkeypatch.setattr(main, "IPv4AiohttpSession", lambda **kw: DummySession())
+
+    bot = FakeBot("token")
+    with caplog.at_level(logging.WARNING):
+        await main.notify_superadmin(object(), bot, "hi")
+
+    assert len(FakeBot.instances) == 2
+    assert any("retry with fresh session" in r.message for r in caplog.records)
 
 
 @pytest.mark.asyncio

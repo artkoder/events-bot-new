@@ -59,6 +59,7 @@ def startup(db, bot) -> AsyncIOScheduler:
         "cron",
         id="cleanup_scheduler",
         minute="3,18,33,48",
+        args=[db, bot],
         replace_existing=True,
         max_instances=1,
         coalesce=True,

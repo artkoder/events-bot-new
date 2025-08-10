@@ -66,7 +66,15 @@ from aiogram import Bot, Dispatcher, types
 from safe_bot import SafeBot, BACKOFF_DELAYS
 from aiogram.filters import Command
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
-from aiohttp import web, FormData, ClientSession, TCPConnector, ClientTimeout
+from aiohttp import (
+    web,
+    FormData,
+    ClientSession,
+    TCPConnector,
+    ClientTimeout,
+    ClientOSError,
+    ServerDisconnectedError,
+)
 from aiogram.client.session.aiohttp import AiohttpSession
 import socket
 import imghdr
@@ -897,13 +905,24 @@ async def get_superadmin_id(db: Database) -> int | None:
 
 
 async def notify_superadmin(db: Database, bot: Bot, text: str):
-    """Send a message to the superadmin, ignoring failures."""
+    """Send a message to the superadmin with retry on network errors."""
     admin_id = await get_superadmin_id(db)
     if not admin_id:
         return
     try:
         async with span("tg-send"):
             await bot.send_message(admin_id, text)
+        return
+    except (ClientOSError, ServerDisconnectedError, asyncio.TimeoutError) as e:
+        logging.warning("notify_superadmin failed: %s; retry with fresh session", e)
+        timeout = ClientTimeout(total=HTTP_TIMEOUT)
+        async with IPv4AiohttpSession(timeout=timeout) as session:
+            fresh_bot = SafeBot(bot.token, session=session)
+            try:
+                async with span("tg-send"):
+                    await fresh_bot.send_message(admin_id, text)
+            except Exception as e2:
+                logging.error("failed to notify superadmin: %s", e2)
     except Exception as e:
         logging.error("failed to notify superadmin: %s", e)
 
@@ -7079,11 +7098,11 @@ async def vk_scheduler(db: Database, bot: Bot):
             logging.error("vk daily added failed: %s", e)
 
 
-async def cleanup_old_events(now_utc: datetime | None = None) -> int:
+async def cleanup_old_events(db: Database, now_utc: datetime | None = None) -> int:
     """Delete events that finished more than a week ago."""
     cutoff = (now_utc or datetime.utcnow()) - timedelta(days=7)
     cutoff_str = cutoff.date().isoformat()
-    async with async_session() as session:
+    async with db.get_session() as session:
         async with session.begin():
             res = await session.execute(
                 delete(Event).where(
@@ -7096,12 +7115,17 @@ async def cleanup_old_events(now_utc: datetime | None = None) -> int:
     return res.rowcount if res.rowcount and res.rowcount > 0 else 0
 
 
-async def cleanup_scheduler() -> None:
+async def cleanup_scheduler(db: Database, bot: Bot) -> None:
     try:
-        deleted = await cleanup_old_events()
+        deleted = await cleanup_old_events(db)
         logging.info("cleanup_ok deleted=%s", deleted)
     except Exception:
         logging.exception("cleanup_failed")
+        return
+    try:
+        await notify_superadmin(db, bot, f"Cleanup finished, deleted={deleted}")
+    except Exception as e:
+        logging.warning("cleanup notify failed: %s", e)
 
 
 async def page_update_scheduler(db: Database):
@@ -8636,7 +8660,7 @@ def create_app() -> web.Application:
     if not webhook:
         raise RuntimeError("WEBHOOK_URL is missing")
 
-    session = IPv4AiohttpSession()
+    session = IPv4AiohttpSession(timeout=ClientTimeout(total=HTTP_TIMEOUT))
     bot = SafeBot(token, session=session)
     logging.info("DB_PATH=%s", DB_PATH)
     logging.info("FOUR_O_TOKEN found: %s", bool(os.getenv("FOUR_O_TOKEN")))
