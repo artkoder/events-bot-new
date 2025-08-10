@@ -84,6 +84,7 @@ import json
 import re
 import httpx
 import hashlib
+import unicodedata
 
 from telegraph import Telegraph, TelegraphException
 
@@ -281,7 +282,74 @@ def strip_leading_cmd(text: str, cmds: tuple[str, ...] = ("addevent",)) -> str:
     if not text:
         return text
     cmds_re = "|".join(re.escape(c) for c in cmds)
-    return re.sub(rf"^/({cmds_re})(@\w+)?\s*", "", text, flags=re.I | re.S)
+    # allow NBSP after the command as whitespace
+    return re.sub(
+        rf"^/({cmds_re})(@\w+)?[\s\u00A0]*",
+        "",
+        text,
+        flags=re.I | re.S,
+    )
+
+
+def _strip_leading_arrows(text: str) -> str:
+    """Remove leading arrow emojis and related joiners."""
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if ch in (" ", "\t", "\n", "\r", "\u00A0"):
+            i += 1
+            continue
+        name = unicodedata.name(ch, "")
+        if "ARROW" in name:
+            i += 1
+            # skip variation selectors and ZWJ
+            while i < len(text) and ord(text[i]) in (0xFE0F, 0x200D):
+                i += 1
+            continue
+        break
+    return text[i:]
+
+
+def normalize_addevent_text(text: str) -> str:
+    """Normalize user-provided event text.
+
+    Replaces NBSP with regular spaces, normalizes newlines, strips leading
+    arrow emojis, joins lines and trims whitespace.
+    """
+
+    if not text:
+        return ""
+    text = text.replace("\u00A0", " ")
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = _strip_leading_arrows(text)
+    lines = [ln.strip() for ln in text.splitlines()]
+    return " ".join(lines).strip()
+
+
+async def send_usage_fast(bot: Bot, chat_id: int) -> None:
+    """Send Usage help with quick retry and background fallback."""
+
+    usage = "Usage: /addevent <text>"
+
+    async def _direct_send():
+        if isinstance(bot, SafeBot):
+            # bypass SafeBot retry logic
+            return await Bot.send_message(bot, chat_id, usage)
+        return await bot.send_message(chat_id, usage)
+
+    for attempt in range(2):
+        try:
+            await asyncio.wait_for(_direct_send(), timeout=1.0)
+            return
+        except Exception:
+            if attempt == 0:
+                continue
+
+            async def _bg() -> None:
+                with contextlib.suppress(Exception):
+                    await bot.send_message(chat_id, usage)
+
+            asyncio.create_task(_bg())
 
 # cache for settings values to reduce DB hits
 settings_cache: TTLCache[str, str | None] = TTLCache(maxsize=128, ttl=300)
@@ -8759,14 +8827,15 @@ def create_app() -> web.Application:
         logging.info("add_event_wrapper start: user=%s", message.from_user.id)
         if message.from_user.id in add_event_sessions:
             return
-        m = re.match(
-            r"^/addevent(?:@\w+)?\s+(.*)$",
-            message.text or "",
-            flags=re.I | re.S,
-        )
-        if not m or not m.group(1).strip():
-            await bot.send_message(message.chat.id, "Usage: /addevent <text>")
+
+        text = normalize_addevent_text(strip_leading_cmd(message.text or ""))
+        if not text:
+            text = normalize_addevent_text(strip_leading_cmd(message.caption or ""))
+        if not text:
+            logging.info("add_event_wrapper usage: empty input")
+            await send_usage_fast(bot, message.chat.id)
             return
+        message.text = f"/addevent {text}"
         async with perf("enqueue_add_event"):
             await enqueue_add_event(message, db, bot)
 
