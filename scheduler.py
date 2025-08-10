@@ -13,8 +13,8 @@ _scheduler: AsyncIOScheduler | None = None
 def startup(db, bot) -> AsyncIOScheduler:
     global _scheduler
     if _scheduler is None:
-        executor = AsyncIOExecutor()
-        executor._max_workers = 2
+        # Use a tiny async pool to limit memory overhead
+        executor = AsyncIOExecutor(max_workers=2)
         _scheduler = AsyncIOScheduler(
             executors={"default": executor},
             job_defaults={
