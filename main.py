@@ -2293,11 +2293,21 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
             start = parse_iso_date(fest.start_date or "")
             end = parse_iso_date(fest.end_date or "")
             if not start or not end:
-                await callback.answer("Dates missing", show_alert=True)
+                await callback.answer(
+                    "Не задан период фестиваля. Сначала отредактируйте даты.",
+                    show_alert=True,
+                )
                 return
+            logging.info("festdays start fid=%s name=%s", fid, fest.name)
             events: list[tuple[Event, bool]] = []
+            months: set[str] = set()
+            weekends: set[str] = set()
             for i in range((end - start).days + 1):
                 day = start + timedelta(days=i)
+                months.add(day.strftime("%Y-%m"))
+                w_start = weekend_start_for_date(day)
+                if w_start:
+                    weekends.add(w_start.isoformat())
                 event = Event(
                     title=f"{fest.full_name or fest.name} - день {i+1}",
                     description="",
@@ -2313,14 +2323,7 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                 saved, added = await upsert_event(session, event)
                 events.append((saved, added))
             await session.commit()
-        months: set[str] = set()
-        weekends: set[str] = set()
         for saved, added in events:
-            months.add(saved.date[:7])
-            d_saved = parse_iso_date(saved.date)
-            w_start = weekend_start_for_date(d_saved) if d_saved else None
-            if w_start:
-                weekends.add(w_start.isoformat())
             lines = [
                 f"title: {saved.title}",
                 f"date: {saved.date}",
@@ -2344,7 +2347,18 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
             asyncio.create_task(sync_month_page(db, m))
         for w in weekends:
             asyncio.create_task(sync_weekend_page(db, w))
-        await callback.answer("Done")
+        summary = [
+            f"Создано {len(events)} событий для {fest.name}.",
+        ]
+        if fest.telegraph_url:
+            summary.append(f"Страница фестиваля: {fest.telegraph_url}")
+        summary.append("Что дальше?")
+        await callback.message.answer("\n".join(summary))
+        await show_festival_edit_menu(callback.from_user.id, fest, bot)
+        logging.info(
+            "festdays created %d events for %s", len(events), fest.name
+        )
+        await callback.answer()
     elif data.startswith("festedit:"):
         fid = int(data.split(":")[1])
         async with db.get_session() as session:
@@ -3189,7 +3203,8 @@ async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
     candidates = (await session.execute(stmt)).scalars().all()
     for ev in candidates:
         if (
-            ev.location_name.strip().lower() == new.location_name.strip().lower()
+            (ev.location_name or "").strip().lower()
+            == (new.location_name or "").strip().lower()
             and (ev.location_address or "").strip().lower()
             == (new.location_address or "").strip().lower()
         ):
@@ -3198,7 +3213,9 @@ async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
             logging.info("upsert_event: updated event id=%s", ev.id)
             return ev, False
 
-        title_ratio = SequenceMatcher(None, ev.title.lower(), new.title.lower()).ratio()
+        title_ratio = SequenceMatcher(
+            None, (ev.title or "").lower(), (new.title or "").lower()
+        ).ratio()
         if title_ratio >= 0.9:
             _copy_fields(ev, new)
             await session.commit()
@@ -3206,7 +3223,8 @@ async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
             return ev, False
 
         if (
-            ev.location_name.strip().lower() == new.location_name.strip().lower()
+            (ev.location_name or "").strip().lower()
+            == (new.location_name or "").strip().lower()
             and (ev.location_address or "").strip().lower()
             == (new.location_address or "").strip().lower()
         ):
@@ -3215,7 +3233,9 @@ async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
             logging.info("upsert_event: updated event id=%s", ev.id)
             return ev, False
 
-        title_ratio = SequenceMatcher(None, ev.title.lower(), new.title.lower()).ratio()
+        title_ratio = SequenceMatcher(
+            None, (ev.title or "").lower(), (new.title or "").lower()
+        ).ratio()
         if title_ratio >= 0.9:
             _copy_fields(ev, new)
             await session.commit()
@@ -3223,7 +3243,8 @@ async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
             return ev, False
 
         if (
-            ev.location_name.strip().lower() == new.location_name.strip().lower()
+            (ev.location_name or "").strip().lower()
+            == (new.location_name or "").strip().lower()
             and (ev.location_address or "").strip().lower()
             == (new.location_address or "").strip().lower()
         ):
@@ -3232,7 +3253,9 @@ async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
             logging.info("upsert_event: updated event id=%s", ev.id)
             return ev, False
 
-        title_ratio = SequenceMatcher(None, ev.title.lower(), new.title.lower()).ratio()
+        title_ratio = SequenceMatcher(
+            None, (ev.title or "").lower(), (new.title or "").lower()
+        ).ratio()
         if title_ratio >= 0.9:
             _copy_fields(ev, new)
             await session.commit()
@@ -3240,7 +3263,8 @@ async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
             return ev, False
 
         if (
-            ev.location_name.strip().lower() == new.location_name.strip().lower()
+            (ev.location_name or "").strip().lower()
+            == (new.location_name or "").strip().lower()
             and (ev.location_address or "").strip().lower()
             == (new.location_address or "").strip().lower()
         ):
@@ -3249,9 +3273,13 @@ async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
             logging.info("upsert_event: updated event id=%s", ev.id)
             return ev, False
 
-        title_ratio = SequenceMatcher(None, ev.title.lower(), new.title.lower()).ratio()
+        title_ratio = SequenceMatcher(
+            None, (ev.title or "").lower(), (new.title or "").lower()
+        ).ratio()
         loc_ratio = SequenceMatcher(
-            None, ev.location_name.lower(), new.location_name.lower()
+            None,
+            (ev.location_name or "").lower(),
+            (new.location_name or "").lower(),
         ).ratio()
         if title_ratio >= 0.6 and loc_ratio >= 0.6:
             _copy_fields(ev, new)
