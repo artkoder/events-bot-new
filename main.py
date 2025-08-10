@@ -3303,7 +3303,7 @@ async def add_events_from_text(
         if not parsed:
             await sync_festival_page(db, fest_obj.name)
             asyncio.create_task(sync_festival_vk_post(db, fest_obj.name, bot))
-            await sync_other_festivals(db, fest_obj.name, bot)
+            asyncio.create_task(sync_other_festivals(db, fest_obj.name, bot))
             lines = [f"festival: {fest_obj.name}"]
             if fest_obj.start_date:
                 lines.append(f"start: {fest_obj.start_date}")
