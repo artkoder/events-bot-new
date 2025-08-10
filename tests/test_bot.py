@@ -13,6 +13,8 @@ import asyncio
 import main
 from telegraph.api import json_dumps
 from telegraph import TelegraphException
+import logging
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 
 from main import (
@@ -5720,14 +5722,11 @@ async def test_forward_adds_calendar_button(tmp_path: Path, monkeypatch):
 async def test_cleanup_old_events(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
-    bot = DummyBot("123:abc")
-
-    async def nop(*args, **kwargs):
-        pass
-
-    monkeypatch.setattr(main, "delete_ics", nop)
-    monkeypatch.setattr(main, "delete_asset_post", nop)
-    monkeypatch.setattr(main, "remove_calendar_button", nop)
+    monkeypatch.setattr(
+        main,
+        "async_session",
+        async_sessionmaker(db.engine, expire_on_commit=False),
+    )
 
     old_date = (date.today() - timedelta(days=8)).isoformat()
     new_date = (date.today() + timedelta(days=1)).isoformat()
@@ -5755,7 +5754,7 @@ async def test_cleanup_old_events(tmp_path: Path, monkeypatch):
         old_id = old.id
         new_id = new.id
 
-    await main.cleanup_old_events(db, bot)
+    await main.cleanup_old_events()
 
     async with db.get_session() as session:
         old_ev = await session.get(Event, old_id)
@@ -5766,53 +5765,18 @@ async def test_cleanup_old_events(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_cleanup_scheduler_notifies_superadmin(tmp_path: Path, monkeypatch):
-    db = Database(str(tmp_path / "db.sqlite"))
-    await db.init()
-    bot = DummyBot("123:abc")
+async def test_cleanup_scheduler_logs(monkeypatch, caplog):
+    called = {}
 
-    start_msg = types.Message.model_validate(
-        {
-            "message_id": 1,
-            "date": 0,
-            "chat": {"id": 1, "type": "private"},
-            "from": {"id": 1, "is_bot": False, "first_name": "A"},
-            "text": "/start",
-        }
-    )
-    await handle_start(start_msg, db, bot)
+    async def fake_cleanup():
+        called["done"] = True
+        return 2
 
-    async def nop(*args, **kwargs):
-        pass
-
-    monkeypatch.setattr(main, "delete_ics", nop)
-    monkeypatch.setattr(main, "delete_asset_post", nop)
-    monkeypatch.setattr(main, "remove_calendar_button", nop)
-
-    old_date = (date.today() - timedelta(days=8)).isoformat()
-    async with db.get_session() as session:
-        session.add(
-            Event(
-                title="Old",
-                description="",
-                date=old_date,
-                time="18:00",
-                location_name="P",
-                source_text="",
-            )
-        )
-        await session.commit()
-
-    class FakeDatetime(datetime):
-        @classmethod
-        def now(cls, tz=None):
-            return datetime.combine(date.today(), time(3, 5), tzinfo=tz)
-
-    monkeypatch.setattr(main, "datetime", FakeDatetime)
-    main._cleanup_last_run = None
-    await main.cleanup_scheduler(db, bot)
-
-    assert any("Cleanup completed" in m[1] for m in bot.messages)
+    monkeypatch.setattr(main, "cleanup_old_events", fake_cleanup)
+    with caplog.at_level(logging.INFO):
+        await main.cleanup_scheduler()
+    assert called["done"]
+    assert any("cleanup_ok" in r.message for r in caplog.records)
 
 
 @pytest.mark.asyncio

@@ -85,8 +85,9 @@ import asyncio
 import contextlib
 import html
 from io import BytesIO
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import update, text, delete
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy import update, text, delete, and_, or_
+from sqlalchemy.pool import NullPool
 from sqlmodel import select
 import aiosqlite
 import gc
@@ -129,8 +130,6 @@ def print_current_rss() -> None:
 
 _page_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 _month_next_run: dict[str, float] = defaultdict(float)
-
-_cleanup_last_run: date | None = None
 _page_last_run: date | None = None
 _page_first_run = True
 _partner_last_run: date | None = None
@@ -198,6 +197,11 @@ VK_TOKEN = os.getenv("VK_TOKEN")
 VK_USER_TOKEN = os.getenv("VK_USER_TOKEN")
 VK_AFISHA_GROUP_ID = os.getenv("VK_AFISHA_GROUP_ID")
 ICS_CONTENT_TYPE = "text/calendar; charset=utf-8"
+
+engine = create_async_engine(
+    f"sqlite+aiosqlite:///{DB_PATH}", poolclass=NullPool
+)
+async_session = async_sessionmaker(engine, expire_on_commit=False)
 ICS_CONTENT_DISP_TEMPLATE = 'inline; filename="{name}"'
 ICS_CALNAME = "kenigevents"
 
@@ -6785,78 +6789,29 @@ async def vk_scheduler(db: Database, bot: Bot):
             logging.error("vk daily added failed: %s", e)
 
 
-async def cleanup_old_events(db: Database, bot: Bot | None = None) -> int:
-    """Remove events that finished over a week ago.
-
-    Returns the number of deleted events."""
-    async with perf("cleanup_old_events"):
-        offset = await get_tz_offset(db)
-        tz = offset_to_timezone(offset)
-        threshold = (datetime.now(tz) - timedelta(days=7)).date().isoformat()
-        total = 0
-        async with span("db"):
-            async with db.get_session() as session:
-                stream = await session.stream_scalars(
-                select(Event)
-                .where(
-                    (
-                        Event.end_date.is_not(None)
-                        & (Event.end_date < threshold)
-                    )
-                    | (
-                        Event.end_date.is_(None)
-                        & (Event.date < threshold)
+async def cleanup_old_events(now_utc: datetime | None = None) -> int:
+    """Delete events that finished more than a week ago."""
+    cutoff = (now_utc or datetime.utcnow()) - timedelta(days=7)
+    cutoff_str = cutoff.date().isoformat()
+    async with async_session() as session:
+        async with session.begin():
+            res = await session.execute(
+                delete(Event).where(
+                    or_(
+                        and_(Event.end_date.is_not(None), Event.end_date < cutoff_str),
+                        and_(Event.end_date.is_(None), Event.date < cutoff_str),
                     )
                 )
-                .order_by(Event.id)
-                .execution_options(yield_per=500)
             )
-            batch: list[Event] = []
-            async for event in stream:
-                batch.append(event)
-                if len(batch) >= 500:
-                    await _cleanup_batch(batch, db, bot)
-                    total += len(batch)
-                    batch.clear()
-            if batch:
-                await _cleanup_batch(batch, db, bot)
-                total += len(batch)
-        return total
+    return res.rowcount if res.rowcount and res.rowcount > 0 else 0
 
 
-async def _cleanup_batch(events: list[Event], db: Database, bot: Bot | None) -> None:
-    ids = [e.id for e in events if e.id is not None]
-    for event in events:
-        await delete_ics(event)
-        if bot:
-            await delete_asset_post(event, db, bot)
-            await remove_calendar_button(event, bot)
-    if ids:
-        async with span("db"):
-            async with db.get_session() as session:
-                await session.execute(delete(Event).where(Event.id.in_(ids)))
-                await session.commit()
-
-
-async def cleanup_scheduler(db: Database, bot: Bot):
-    global _cleanup_last_run
-    async with span("db"):
-        offset = await get_tz_offset(db)
-        tz = offset_to_timezone(offset)
-        now = datetime.now(tz)
-    if now.time() >= time(3, 0) and now.date() != _cleanup_last_run:
-        try:
-            count = await cleanup_old_events(db, bot)
-            async with span("tg-send"):
-                await notify_superadmin(
-                    db,
-                    bot,
-                    f"Cleanup completed: removed {count} events",
-                )
-        except Exception as e:
-            logging.error("cleanup failed: %s", e)
-            await notify_superadmin(db, bot, f"Cleanup failed: {e}")
-        _cleanup_last_run = now.date()
+async def cleanup_scheduler() -> None:
+    try:
+        deleted = await cleanup_old_events()
+        logging.info("cleanup_ok deleted=%s", deleted)
+    except Exception:
+        logging.exception("cleanup_failed")
 
 
 async def page_update_scheduler(db: Database):
