@@ -618,6 +618,10 @@ async def close_http_session() -> None:
     await close_shared_session()
 
 
+def redact_token(tok: str) -> str:
+    return tok[:6] + "…" + tok[-4:] if tok and len(tok) > 10 else "<redacted>"
+
+
 def _vk_user_token() -> str | None:
     """Return user token unless it was previously marked invalid."""
     token = os.getenv("VK_USER_TOKEN")
@@ -651,7 +655,9 @@ async def _vk_api(
     for kind, token in tokens:
         params["access_token"] = token
         params["v"] = "5.131"
-        logging.info("calling VK API %s using %s token %s", method, kind, token)
+        logging.info(
+            "calling VK API %s using %s token %s", method, kind, redact_token(token)
+        )
         async def _call():
             async with HTTP_SEMAPHORE:
                 async with session.post(
