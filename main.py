@@ -6,6 +6,7 @@ Debugging:
 
 import logging
 import os
+import time
 import time as _time
 
 
@@ -843,8 +844,8 @@ async def ensure_festival(
     location_address: str | None = None,
     city: str | None = None,
     source_text: str | None = None,
-) -> Festival:
-    """Return existing festival by name or create a new record."""
+) -> tuple[Festival, bool]:
+    """Return festival and creation flag."""
     async with db.get_session() as session:
         res = await session.execute(select(Festival).where(Festival.name == name))
         fest = res.scalar_one_or_none()
@@ -877,7 +878,7 @@ async def ensure_festival(
             if updated:
                 session.add(fest)
                 await session.commit()
-            return fest
+            return fest, False
         fest = Festival(
             name=name,
             full_name=full_name,
@@ -892,7 +893,7 @@ async def ensure_festival(
         session.add(fest)
         await session.commit()
         logging.info("created festival %s", name)
-        return fest
+        return fest, True
 
 
 async def get_superadmin_id(db: Database) -> int | None:
@@ -1408,6 +1409,42 @@ async def build_festival_nav_block(
             else:
                 lines.append(fest.name)
     return nodes, lines
+
+
+_FEST_NAV_CACHE: dict[str, object] = {
+    "version": None,
+    "expires": 0.0,
+    "data": None,
+}
+
+
+async def build_festival_nav_block_cached(db: Database) -> tuple[list[dict], list[str]]:
+    """Cached variant of :func:`build_festival_nav_block`."""
+    try:
+        async with db.engine.connect() as conn:
+            result = await conn.exec_driver_sql(
+                "SELECT COUNT(*) AS c, MAX(updated_at) FROM festival"
+            )
+            row = result.first()
+            version = f"{row[0]}:{row[1]}"
+    except Exception:
+        version = None
+    now = time.time()
+    if version is None:
+        if _FEST_NAV_CACHE["data"] is not None and now < _FEST_NAV_CACHE["expires"]:
+            return _FEST_NAV_CACHE["data"]
+    else:
+        if (
+            _FEST_NAV_CACHE["data"] is not None
+            and _FEST_NAV_CACHE["version"] == version
+            and now < _FEST_NAV_CACHE["expires"]
+        ):
+            return _FEST_NAV_CACHE["data"]
+    data = await build_festival_nav_block(db)
+    _FEST_NAV_CACHE.update(
+        {"version": version, "data": data, "expires": now + 300}
+    )
+    return data
 
 
 ICS_LABEL = "Добавить в календарь на телефоне (ICS)"
@@ -2462,6 +2499,7 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
             await session.delete(fest)
             await session.commit()
             logging.info("festival %s deleted", fest.name)
+        asyncio.create_task(refresh_nav_on_all_festivals(db, bot=bot))
         await send_festivals_list(callback.message, db, bot, edit=True)
         await callback.answer("Deleted")
 
@@ -3431,7 +3469,7 @@ async def add_events_from_text(
         city = festival_info.get("city")
         loc_addr = strip_city_from_address(loc_addr, city)
         photo_u = catbox_urls[0] if catbox_urls else None
-        fest_obj = await ensure_festival(
+        fest_obj, created = await ensure_festival(
             db,
             fest_name,
             full_name=festival_info.get("full_name"),
@@ -3443,12 +3481,10 @@ async def add_events_from_text(
             city=city,
             source_text=source_text_clean,
         )
-        if not parsed:
+        if not parsed and created:
             await sync_festival_page(db, fest_obj.name)
             await sync_festival_vk_post(db, fest_obj.name, bot)
-            asyncio.create_task(
-                refresh_nav_on_all_festivals(db, bot=bot, exclude=fest_obj.name)
-            )
+            asyncio.create_task(refresh_nav_on_all_festivals(db, bot=bot))
             async with db.get_session() as session:
                 res = await session.execute(
                     select(Festival).where(Festival.name == fest_obj.name)
@@ -3528,12 +3564,14 @@ async def add_events_from_text(
 
         if base_event.festival:
             photo_u = catbox_urls[0] if catbox_urls else None
-            await ensure_festival(
+            _, created = await ensure_festival(
                 db,
                 base_event.festival,
                 full_name=data.get("festival_full"),
                 photo_url=photo_u,
             )
+            if created:
+                asyncio.create_task(refresh_nav_on_all_festivals(db, bot=bot))
 
         if base_event.event_type == "выставка" and not base_event.end_date:
             start_dt = parse_iso_date(base_event.date) or datetime.now(LOCAL_TZ).date()
@@ -6023,21 +6061,49 @@ async def sync_festival_page(
                 logging.info("synced festival page %s", name)
 
 
-async def refresh_nav_on_all_festivals(
-    db: Database, bot: Bot | None = None, *, exclude: str | None = None
-) -> None:
-    """Refresh navigation blocks on all festival pages and VK posts."""
-    items = await upcoming_festivals(db)
+async def refresh_nav_on_all_festivals(db: Database, bot: Bot | None = None) -> None:
+    """Refresh navigation on all festival pages and VK posts."""
     async with db.get_session() as session:
-        res = await session.execute(select(Festival.name))
-        names = [r[0] for r in res.fetchall()]
-    if exclude:
-        names = [n for n in names if n != exclude]
-    for fname in names:
-        await sync_festival_page(
-            db, fname, refresh_nav_only=True, items=items
+        res = await session.execute(
+            select(
+                Festival.id,
+                Festival.name,
+                Festival.telegraph_path,
+                Festival.vk_post_url,
+            )
         )
-        asyncio.create_task(sync_festival_vk_post(db, fname, bot, nav_only=True))
+        fests = res.all()
+
+    nav_nodes, nav_lines = await build_festival_nav_block_cached(db)
+    if not nav_nodes and not nav_lines:
+        return
+    from telegraph.utils import nodes_to_html
+
+    nav_html = nodes_to_html(nav_nodes)
+    token = get_telegraph_token()
+    tg = Telegraph(access_token=token) if token else None
+    sem = asyncio.Semaphore(3)
+
+    async def _process(fid, name, path, vk_url):
+        async with sem:
+            if tg and path:
+                try:
+                    page = await telegraph_call(tg.get_page, path, return_html=True)
+                    html_content = page.get("content") or page.get("content_html") or ""
+                    title = page.get("title") or name
+                    html_content = apply_festival_nav(html_content, nav_html)
+                    await telegraph_call(
+                        tg.edit_page, path, title=title, html_content=html_content
+                    )
+                    logging.info("updated festival page %s in Telegraph", name)
+                except Exception as e:
+                    logging.error("Failed to update festival page %s: %s", name, e)
+            if vk_url:
+                await sync_festival_vk_post(
+                    db, name, bot, nav_only=True, nav_lines=nav_lines
+                )
+
+    await asyncio.gather(*(_process(*row) for row in fests))
 
 
 async def build_festival_vk_message(db: Database, fest: Festival) -> str:
@@ -6078,7 +6144,12 @@ async def build_festival_vk_message(db: Database, fest: Festival) -> str:
 
 
 async def sync_festival_vk_post(
-    db: Database, name: str, bot: Bot | None = None, *, nav_only: bool = False
+    db: Database,
+    name: str,
+    bot: Bot | None = None,
+    *,
+    nav_only: bool = False,
+    nav_lines: list[str] | None = None,
 ):
     group_id = await get_vk_group_id(db)
     if not group_id:
@@ -6130,8 +6201,10 @@ async def sync_festival_vk_post(
 
     can_edit = True
     if nav_only and fest.vk_post_url:
-        _, nav_lines = await build_festival_nav_block(db, exclude=fest.name)
-        if nav_lines:
+        nav_lines_local = nav_lines
+        if nav_lines_local is None:
+            _, nav_lines_local = await build_festival_nav_block(db, exclude=fest.name)
+        if nav_lines_local:
             ids = _vk_owner_and_post_id(fest.vk_post_url)
             if not ids:
                 logging.error("invalid VK post url %s", fest.vk_post_url)
@@ -6168,7 +6241,7 @@ async def sync_festival_vk_post(
                         idx -= 1
                     break
             base = lines[:idx] if idx is not None else lines
-            message = "\n".join(base + nav_lines)
+            message = "\n".join(base + nav_lines_local)
             res_edit = await _try_edit(message, None)
             if res_edit is True:
                 logging.info("updated festival post %s on VK", name)
