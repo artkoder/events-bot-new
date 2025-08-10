@@ -918,11 +918,13 @@ async def notify_inactive_partners(
     now = datetime.utcnow()
     notified: list[User] = []
     async with db.get_session() as session:
-        res = await session.execute(
-            select(User).where(User.is_partner.is_(True), User.blocked.is_(False))
+        stream = await session.stream_scalars(
+            select(User)
+            .where(User.is_partner.is_(True), User.blocked.is_(False))
+            .execution_options(yield_per=100)
         )
-        partners = res.scalars().all()
-        for p in partners:
+        count = 0
+        async for p in stream:
             last = (
                 await session.execute(
                     select(Event.added_at)
@@ -942,7 +944,11 @@ async def notify_inactive_partners(
                     )
                 p.last_partner_reminder = now
                 notified.append(p)
+            count += 1
+            if count % 100 == 0:
+                await asyncio.sleep(0)
         await session.commit()
+    await asyncio.sleep(0)
     return notified
 
 
@@ -1700,7 +1706,7 @@ async def remove_calendar_button(event: Event, bot: Bot):
         logging.error("failed to remove calendar button: %s", e)
 
 
-@lru_cache()
+@lru_cache(maxsize=1)
 def _read_base_prompt() -> str:
     prompt_path = os.path.join("docs", "PROMPTS.md")
     with open(prompt_path, "r", encoding="utf-8") as f:
@@ -6743,24 +6749,32 @@ async def daily_scheduler(db: Database, bot: Bot):
         now = datetime.now(tz)
         now_time = now.time().replace(second=0, microsecond=0)
         async with db.get_session() as session:
-            result = await session.execute(
-                select(Channel).where(Channel.daily_time.is_not(None))
+            stream = await session.stream_scalars(
+                select(Channel)
+                .where(Channel.daily_time.is_not(None))
+                .execution_options(yield_per=100)
             )
-            channels = result.scalars().all()
-        for ch in channels:
-            if not ch.daily_time:
-                continue
-            try:
-                target_time = datetime.strptime(ch.daily_time, "%H:%M").time()
-            except ValueError:
-                continue
-            if (
-                ch.last_daily or ""
-            ) != now.date().isoformat() and now_time >= target_time:
+            count = 0
+            async for ch in stream:
+                if not ch.daily_time:
+                    continue
                 try:
-                    await send_daily_announcement(db, bot, ch.channel_id, tz)
-                except Exception as e:
-                    logging.error("daily send failed for %s: %s", ch.channel_id, e)
+                    target_time = datetime.strptime(ch.daily_time, "%H:%M").time()
+                except ValueError:
+                    continue
+                if (
+                    ch.last_daily or ""
+                ) != now.date().isoformat() and now_time >= target_time:
+                    try:
+                        await send_daily_announcement(db, bot, ch.channel_id, tz)
+                    except Exception as e:
+                        logging.error(
+                            "daily send failed for %s: %s", ch.channel_id, e
+                        )
+                count += 1
+                if count % 100 == 0:
+                    await asyncio.sleep(0)
+        await asyncio.sleep(0)
         await asyncio.sleep(seconds_to_next_minute(datetime.now(tz)))
 
 
@@ -6860,7 +6874,7 @@ async def partner_notification_scheduler(db: Database, bot: Bot):
         try:
             async with span("db-query"):
                 async with db.get_session() as session:
-                    await session.execute(
+                    stream = await session.stream(
                         text(
                             "SELECT id, title FROM event "
                             "WHERE festival IS NOT NULL "
@@ -6872,6 +6886,9 @@ async def partner_notification_scheduler(db: Database, bot: Bot):
                             "end": (now.date() + timedelta(days=30)).isoformat(),
                         },
                     )
+                    async for _ in stream:
+                        pass
+            await asyncio.sleep(0)
             notified = await notify_inactive_partners(db, bot, tz)
             if notified:
                 names = ", ".join(
@@ -6969,6 +6986,8 @@ async def vk_poll_scheduler(db: Database, bot: Bot):
                             await send_festival_poll(db, fest, group_id, bot)
                         except Exception as e:
                             logging.error("VK poll send failed for %s: %s", name, e)
+                del rows
+                await asyncio.sleep(0)
                 off += LIMIT
 
 

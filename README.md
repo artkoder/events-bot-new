@@ -77,6 +77,8 @@ export VK_USER_TOKEN=vk_user_token
    ```bash
    fly deploy
    ```
+   > **Note:** If the app's average memory (RSS) approaches ~140&nbsp;MB, consider
+   > upgrading the Fly machine's memory tier to avoid out-of-memory kills.
 
 ## Files
 - `docs/COMMANDS.md` – full list of bot commands.
