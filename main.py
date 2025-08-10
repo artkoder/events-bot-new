@@ -1308,9 +1308,69 @@ async def build_festivals_list_lines_vk(
     return lines
 
 
+async def build_festival_nav_block(
+    db: Database,
+    *,
+    exclude: str | None = None,
+    today: date | None = None,
+    items: list[tuple[date | None, date | None, Festival]] | None = None,
+) -> tuple[list[dict], list[str]]:
+    """Return navigation blocks for festival pages and VK posts."""
+    if today is None:
+        today = date.today()
+    if items is None:
+        items = await upcoming_festivals(db, today=today, exclude=exclude)
+    else:
+        if exclude:
+            items = [t for t in items if t[2].name != exclude]
+    if not items:
+        return [], []
+    groups: dict[str, list[Festival]] = {}
+    for start, end, fest in items:
+        if start and start <= today <= (end or start):
+            month = today.strftime("%Y-%m")
+        else:
+            month = (start or today).strftime("%Y-%m")
+        groups.setdefault(month, []).append(fest)
+
+    nodes: list[dict] = [
+        {"tag": "br"},
+        {"tag": "p", "children": ["\u00a0"]},
+        {"tag": "h3", "children": ["Ближайшие фестивали"]},
+    ]
+    lines: list[str] = [VK_BLANK_LINE, "Ближайшие фестивали"]
+    for month in sorted(groups.keys()):
+        month_name = month_name_nominative(month)
+        nodes.append({"tag": "h4", "children": [month_name]})
+        lines.append(month_name)
+        for fest in groups[month]:
+            if fest.telegraph_url:
+                nodes.append(
+                    {
+                        "tag": "p",
+                        "children": [
+                            {
+                                "tag": "a",
+                                "attrs": {"href": fest.telegraph_url},
+                                "children": [fest.name],
+                            }
+                        ],
+                    }
+                )
+            else:
+                nodes.append({"tag": "p", "children": [fest.name]})
+            if fest.vk_post_url:
+                lines.append(f"[{fest.vk_post_url}|{fest.name}]")
+            else:
+                lines.append(fest.name)
+    return nodes, lines
+
+
 ICS_LABEL = "Добавить в календарь на телефоне (ICS)"
 MONTH_NAV_START = "<!--month-nav-start-->"
 MONTH_NAV_END = "<!--month-nav-end-->"
+FEST_NAV_START = "<!-- NAV_START -->"
+FEST_NAV_END = "<!-- NAV_END -->"
 
 FOOTER_LINK_HTML = (
     '<p>&nbsp;</p>'
@@ -1372,6 +1432,16 @@ def apply_month_nav(html_content: str, html_block: str | None) -> str:
     if html_block:
         html_content += f"{MONTH_NAV_START}{html_block}{MONTH_NAV_END}"
     return html_content
+
+
+def apply_festival_nav(html_content: str, html_block: str) -> str:
+    """Replace the festival navigation block."""
+    start = html_content.find(FEST_NAV_START)
+    if start != -1:
+        end = html_content.find(FEST_NAV_END, start)
+        if end != -1:
+            html_content = html_content[:start] + html_content[end + len(FEST_NAV_END) :]
+    return f"{html_content}{FEST_NAV_START}{html_block}{FEST_NAV_END}"
 
 
 def apply_footer_link(html_content: str) -> str:
@@ -3304,7 +3374,9 @@ async def add_events_from_text(
         if not parsed:
             await sync_festival_page(db, fest_obj.name)
             await sync_festival_vk_post(db, fest_obj.name, bot)
-            asyncio.create_task(sync_other_festivals(db, fest_obj.name, bot))
+            asyncio.create_task(
+                refresh_nav_on_all_festivals(db, bot=bot, exclude=fest_obj.name)
+            )
             async with db.get_session() as session:
                 res = await session.execute(
                     select(Festival).where(Festival.name == fest_obj.name)
@@ -5800,17 +5872,23 @@ async def build_festival_page_content(db: Database, fest: Festival) -> tuple[str
         nodes.append({"tag": "h3", "children": ["Мероприятия фестиваля"]})
         for e in events:
             nodes.extend(event_to_nodes(e))
-    fest_list = await build_festivals_list_nodes(db, exclude=fest.name)
-    if fest_list:
-        nodes.append({"tag": "br"})
-        nodes.append({"tag": "p", "children": ["\u00a0"]})
-        nodes.extend(fest_list)
+    nav_nodes, _ = await build_festival_nav_block(db, exclude=fest.name)
+    if nav_nodes:
+        from telegraph.utils import nodes_to_html, html_to_nodes
+        nav_html = nodes_to_html(nav_nodes)
+        nav_block = f"{FEST_NAV_START}{nav_html}{FEST_NAV_END}"
+        nodes.extend(html_to_nodes(nav_block))
     title = fest.full_name or fest.name
     return title, nodes
 
 
-
-async def sync_festival_page(db: Database, name: str):
+async def sync_festival_page(
+    db: Database,
+    name: str,
+    *,
+    refresh_nav_only: bool = False,
+    items: list[tuple[date | None, date | None, Festival]] | None = None,
+):
     async with HEAVY_SEMAPHORE:
         token = get_telegraph_token()
         if not token:
@@ -5824,22 +5902,39 @@ async def sync_festival_page(db: Database, name: str):
             fest = result.scalar_one_or_none()
             if not fest:
                 return
-            title, content = await build_festival_page_content(db, fest)
+            title = fest.full_name or fest.name
             path = fest.telegraph_path
             url = fest.telegraph_url
-            await session.commit()
 
         try:
             created = False
-            if path:
-                await telegraph_call(tg.edit_page, path, title=title, content=content)
+            if refresh_nav_only and path:
+                nav_nodes, _ = await build_festival_nav_block(
+                    db, exclude=name, items=items
+                )
+                from telegraph.utils import nodes_to_html
+
+                nav_html = nodes_to_html(nav_nodes)
+                page = await telegraph_call(tg.get_page, path, return_html=True)
+                html_content = page.get("content") or page.get("content_html") or ""
+                html_content = apply_festival_nav(html_content, nav_html)
+                await telegraph_call(
+                    tg.edit_page, path, title=title, html_content=html_content
+                )
                 logging.info("updated festival page %s in Telegraph", name)
             else:
-                data = await telegraph_create_page(tg, title, content=content)
-                url = data.get("url")
-                path = data.get("path")
-                created = True
-                logging.info("created festival page %s: %s", name, url)
+                title, content = await build_festival_page_content(db, fest)
+                path = fest.telegraph_path
+                url = fest.telegraph_url
+                if path:
+                    await telegraph_call(tg.edit_page, path, title=title, content=content)
+                    logging.info("updated festival page %s in Telegraph", name)
+                else:
+                    data = await telegraph_create_page(tg, title, content=content)
+                    url = data.get("url")
+                    path = data.get("path")
+                    created = True
+                    logging.info("created festival page %s: %s", name, url)
         except Exception as e:
             logging.error("Failed to sync festival %s: %s", name, e)
             return
@@ -5855,6 +5950,22 @@ async def sync_festival_page(db: Database, name: str):
                 await session.commit()
                 logging.info("synced festival page %s", name)
 
+
+async def refresh_nav_on_all_festivals(
+    db: Database, bot: Bot | None = None, *, exclude: str | None = None
+) -> None:
+    """Refresh navigation blocks on all festival pages and VK posts."""
+    items = await upcoming_festivals(db)
+    async with db.get_session() as session:
+        res = await session.execute(select(Festival.name))
+        names = [r[0] for r in res.fetchall()]
+    if exclude:
+        names = [n for n in names if n != exclude]
+    for fname in names:
+        await sync_festival_page(
+            db, fname, refresh_nav_only=True, items=items
+        )
+        asyncio.create_task(sync_festival_vk_post(db, fname, bot))
 
 
 async def build_festival_vk_message(db: Database, fest: Festival) -> str:
@@ -5888,10 +5999,9 @@ async def build_festival_vk_message(db: Database, fest: Festival) -> str:
     for ev in events:
         lines.append(VK_BLANK_LINE)
         lines.append(format_event_vk(ev))
-    fest_lines = await build_festivals_list_lines_vk(db, exclude=fest.name)
-    if fest_lines:
-        lines.append(VK_BLANK_LINE)
-        lines.extend(fest_lines)
+    _, nav_lines = await build_festival_nav_block(db, exclude=fest.name)
+    if nav_lines:
+        lines.extend(nav_lines)
     return "\n".join(lines)
 
 
@@ -5927,17 +6037,6 @@ async def sync_festival_vk_post(db: Database, name: str, bot: Bot | None = None)
             logging.info("created festival post %s: %s", name, url)
     except Exception as e:
         logging.error("VK post error for festival %s: %s", name, e)
-
-
-async def sync_other_festivals(db: Database, exclude: str, bot: Bot | None = None) -> None:
-    async with db.get_session() as session:
-        res = await session.execute(
-            select(Festival.name).where(Festival.name != exclude)
-        )
-        names = [r[0] for r in res.fetchall()]
-    for fname in names:
-        await sync_festival_page(db, fname)
-        asyncio.create_task(sync_festival_vk_post(db, fname, bot))
 
 
 async def send_festival_poll(

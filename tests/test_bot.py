@@ -1701,7 +1701,7 @@ async def test_forward_add_festival(tmp_path: Path, monkeypatch):
     async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
         return "https://t.me/page", "p"
 
-    async def fake_sync_festival_page(db_obj, name):
+    async def fake_sync_festival_page(db_obj, name, **kwargs):
         async with db_obj.get_session() as session:
             fest = (await session.execute(select(main.Festival).where(main.Festival.name == name))).scalar_one()
             fest.telegraph_url = "https://telegra.ph/test"
@@ -5082,7 +5082,7 @@ async def test_festdays_callback_creates_events(tmp_path: Path, monkeypatch):
     async def fake_sync_weekend_page(db_obj, start):
         pass
 
-    async def fake_sync_festival_page(db_obj, name):
+    async def fake_sync_festival_page(db_obj, name, **kwargs):
         pass
 
     async def fake_sync_vk(db_obj, name, bot_obj):
@@ -6173,7 +6173,7 @@ async def test_add_festival_updates_other_pages(tmp_path: Path, monkeypatch):
     called_pages: list[str] = []
     called_vk: list[str] = []
 
-    async def fake_sync_page(db, name):
+    async def fake_sync_page(db, name, **kwargs):
         called_pages.append(name)
 
     async def fake_sync_vk(db, name, bot=None):
