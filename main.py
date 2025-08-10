@@ -136,6 +136,8 @@ _partner_last_run: date | None = None
 
 _P = psutil.Process(os.getpid())
 
+_startup_handler_registered = False
+
 @asynccontextmanager
 async def perf(name: str, **details):
     if not DEBUG:
@@ -8604,7 +8606,10 @@ def create_app() -> web.Application:
         await close_vk_session()
         close_supabase_client()
 
-    app.on_startup.append(on_startup)
+    global _startup_handler_registered
+    if not _startup_handler_registered:
+        app.on_startup.append(on_startup)
+        _startup_handler_registered = True
     app.on_shutdown.append(on_shutdown)
     return app
 

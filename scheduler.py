@@ -24,9 +24,6 @@ def startup(db, bot) -> AsyncIOScheduler:
             },
         )
 
-    if _scheduler.get_jobs():
-        return _scheduler
-
     from main import (
         vk_scheduler,
         vk_poll_scheduler,
@@ -42,6 +39,9 @@ def startup(db, bot) -> AsyncIOScheduler:
         minute="1,16,31,46",
         args=[db, bot],
         replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=30,
     )
     _scheduler.add_job(
         vk_poll_scheduler,
@@ -50,6 +50,9 @@ def startup(db, bot) -> AsyncIOScheduler:
         minute="2,17,32,47",
         args=[db, bot],
         replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=30,
     )
     _scheduler.add_job(
         cleanup_scheduler,
@@ -57,6 +60,9 @@ def startup(db, bot) -> AsyncIOScheduler:
         id="cleanup_scheduler",
         minute="3,18,33,48",
         replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=30,
     )
     _scheduler.add_job(
         page_update_scheduler,
@@ -65,6 +71,9 @@ def startup(db, bot) -> AsyncIOScheduler:
         minute="4,19,34,49",
         args=[db],
         replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=30,
     )
     _scheduler.add_job(
         partner_notification_scheduler,
@@ -73,6 +82,9 @@ def startup(db, bot) -> AsyncIOScheduler:
         minute="5,20,35,50",
         args=[db, bot],
         replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=30,
     )
 
     async def _run_maintenance(job, name: str, timeout: float) -> None:
@@ -97,6 +109,8 @@ def startup(db, bot) -> AsyncIOScheduler:
             args=[partial(optimize, db.engine), "PRAGMA optimize", 10.0],
             replace_existing=True,
             max_instances=1,
+            coalesce=True,
+            misfire_grace_time=30,
         )
         _scheduler.add_job(
             _run_maintenance,
@@ -111,6 +125,8 @@ def startup(db, bot) -> AsyncIOScheduler:
             ],
             replace_existing=True,
             max_instances=1,
+            coalesce=True,
+            misfire_grace_time=30,
         )
         _scheduler.add_job(
             _run_maintenance,
@@ -122,6 +138,8 @@ def startup(db, bot) -> AsyncIOScheduler:
             args=[partial(vacuum, db.engine), "VACUUM", 60.0],
             replace_existing=True,
             max_instances=1,
+            coalesce=True,
+            misfire_grace_time=30,
         )
 
     if not _scheduler.running:
