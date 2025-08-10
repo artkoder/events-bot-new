@@ -5811,48 +5811,49 @@ async def build_festival_page_content(db: Database, fest: Festival) -> tuple[str
 
 
 async def sync_festival_page(db: Database, name: str):
-    token = get_telegraph_token()
-    if not token:
-        logging.error("Telegraph token unavailable")
-        return
-    tg = Telegraph(access_token=token)
-    async with db.get_session() as session:
-        result = await session.execute(
-            select(Festival).where(Festival.name == name)
-        )
-        fest = result.scalar_one_or_none()
-        if not fest:
+    async with HEAVY_SEMAPHORE:
+        token = get_telegraph_token()
+        if not token:
+            logging.error("Telegraph token unavailable")
             return
-        title, content = await build_festival_page_content(db, fest)
-        path = fest.telegraph_path
-        url = fest.telegraph_url
-        await session.commit()
-
-    try:
-        created = False
-        if path:
-            await telegraph_call(tg.edit_page, path, title=title, content=content)
-            logging.info("updated festival page %s in Telegraph", name)
-        else:
-            data = await telegraph_create_page(tg, title, content=content)
-            url = data.get("url")
-            path = data.get("path")
-            created = True
-            logging.info("created festival page %s: %s", name, url)
-    except Exception as e:
-        logging.error("Failed to sync festival %s: %s", name, e)
-        return
-
-    async with db.get_session() as session:
-        result = await session.execute(
-            select(Festival).where(Festival.name == name)
-        )
-        fest_db = result.scalar_one_or_none()
-        if fest_db:
-            fest_db.telegraph_url = url
-            fest_db.telegraph_path = path
+        tg = Telegraph(access_token=token)
+        async with db.get_session() as session:
+            result = await session.execute(
+                select(Festival).where(Festival.name == name)
+            )
+            fest = result.scalar_one_or_none()
+            if not fest:
+                return
+            title, content = await build_festival_page_content(db, fest)
+            path = fest.telegraph_path
+            url = fest.telegraph_url
             await session.commit()
-            logging.info("synced festival page %s", name)
+
+        try:
+            created = False
+            if path:
+                await telegraph_call(tg.edit_page, path, title=title, content=content)
+                logging.info("updated festival page %s in Telegraph", name)
+            else:
+                data = await telegraph_create_page(tg, title, content=content)
+                url = data.get("url")
+                path = data.get("path")
+                created = True
+                logging.info("created festival page %s: %s", name, url)
+        except Exception as e:
+            logging.error("Failed to sync festival %s: %s", name, e)
+            return
+
+        async with db.get_session() as session:
+            result = await session.execute(
+                select(Festival).where(Festival.name == name)
+            )
+            fest_db = result.scalar_one_or_none()
+            if fest_db:
+                fest_db.telegraph_url = url
+                fest_db.telegraph_path = path
+                await session.commit()
+                logging.info("synced festival page %s", name)
 
 
 
