@@ -2251,8 +2251,6 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
             w_start = weekend_start_for_date(d_saved) if d_saved else None
             if w_start:
                 weekends.add(w_start.isoformat())
-            await sync_festival_page(db, saved.festival)
-            asyncio.create_task(sync_festival_vk_post(db, saved.festival, bot))
             lines = [
                 f"title: {saved.title}",
                 f"date: {saved.date}",
@@ -2266,13 +2264,16 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
             async with db.get_session() as session:
                 user = await session.get(User, callback.from_user.id)
             await notify_event_added(db, bot, user, saved, added)
+            if saved.festival:
+                asyncio.create_task(sync_festival_page(db, saved.festival))
+                asyncio.create_task(
+                    sync_festival_vk_post(db, saved.festival, bot)
+                )
 
         for m in months:
-            await sync_month_page(db, m)
-            await asyncio.sleep(0)
+            asyncio.create_task(sync_month_page(db, m))
         for w in weekends:
-            await sync_weekend_page(db, w)
-            await asyncio.sleep(0)
+            asyncio.create_task(sync_weekend_page(db, w))
         await callback.answer("Done")
     elif data.startswith("festedit:"):
         fid = int(data.split(":")[1])
