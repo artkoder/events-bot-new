@@ -86,7 +86,7 @@ import contextlib
 import html
 from io import BytesIO
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy import update, text, delete, and_, or_
+from sqlalchemy import update, text, delete, and_, or_, func
 from sqlalchemy.pool import NullPool
 from sqlmodel import select
 import aiosqlite
@@ -1208,34 +1208,49 @@ async def upcoming_festivals(
     *,
     today: date | None = None,
     exclude: str | None = None,
+    limit: int | None = None,
 ) -> list[tuple[date | None, date | None, Festival]]:
     """Return festivals that are current or upcoming."""
     if today is None:
         today = date.today()
+    today_str = today.isoformat()
     async with db.get_session() as session:
-        res_f = await session.execute(select(Festival))
-        fests = res_f.scalars().all()
-        res_e = await session.execute(select(Event))
-        events = res_e.scalars().all()
+        ev_dates = (
+            select(
+                Event.festival,
+                func.min(Event.date).label("start"),
+                func.max(func.coalesce(Event.end_date, Event.date)).label("end"),
+            )
+            .group_by(Event.festival)
+            .subquery()
+        )
 
-    ev_map: dict[str, list[Event]] = {}
-    for e in events:
-        if e.festival:
-            ev_map.setdefault(e.festival, []).append(e)
+        stmt = (
+            select(
+                Festival,
+                func.coalesce(Festival.start_date, ev_dates.c.start).label("start"),
+                func.coalesce(Festival.end_date, ev_dates.c.end).label("end"),
+            )
+            .outerjoin(ev_dates, ev_dates.c.festival == Festival.name)
+            .where(func.coalesce(Festival.end_date, ev_dates.c.end) >= today_str)
+        )
+        if exclude:
+            stmt = stmt.where(Festival.name != exclude)
+        stmt = stmt.order_by(func.coalesce(Festival.start_date, ev_dates.c.start))
+        if limit:
+            stmt = stmt.limit(limit)
+        rows = (await session.execute(stmt)).all()
 
     data: list[tuple[date | None, date | None, Festival]] = []
-    for fest in fests:
-        if exclude and fest.name == exclude:
-            continue
-        evs = ev_map.get(fest.name, [])
-        start, end = festival_dates(fest, evs)
-        if end and end < today:
-            continue
+    for fest, start_s, end_s in rows:
+        start = parse_iso_date(start_s) if start_s else None
+        end = parse_iso_date(end_s) if end_s else None
+        if not start and not end and fest.description:
+            start, end = festival_dates_from_text(fest.description)
+            end = end or start
         if not start and not end:
             continue
         data.append((start, end, fest))
-
-    data.sort(key=lambda t: t[0] or date.max)
     return data
 
 
@@ -1243,7 +1258,7 @@ async def build_festivals_list_nodes(
     db: Database, *, exclude: str | None = None, today: date | None = None
 ) -> list[dict]:
     """Return Telegraph nodes listing upcoming festivals."""
-    items = await upcoming_festivals(db, today=today, exclude=exclude)
+    items = await upcoming_festivals(db, today=today, exclude=exclude, limit=10)
     if not items:
         return []
     if today is None:
@@ -1283,7 +1298,7 @@ async def build_festivals_list_lines_vk(
     db: Database, *, exclude: str | None = None, today: date | None = None
 ) -> list[str]:
     """Return lines listing upcoming festivals for VK posts."""
-    items = await upcoming_festivals(db, today=today, exclude=exclude)
+    items = await upcoming_festivals(db, today=today, exclude=exclude, limit=10)
     if not items:
         return []
     if today is None:

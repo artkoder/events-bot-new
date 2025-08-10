@@ -46,7 +46,7 @@ class Setting(SQLModel, table=True):
 
 class Event(SQLModel, table=True):
     __table_args__ = (
-        Index("ix_event_date", "date"),
+        Index("idx_event_date", "date"),
         Index("ix_event_date_city", "date", "city"),
         Index("ix_event_date_festival", "date", "festival"),
         Index("ix_event_content_hash", "content_hash"),
@@ -119,7 +119,7 @@ class WeekPage(SQLModel, table=True):
 
 
 class Festival(SQLModel, table=True):
-    __table_args__ = {"extend_existing": True}
+    __table_args__ = (Index("idx_festival_name", "name"), {"extend_existing": True})
     id: Optional[int] = Field(default=None, primary_key=True)
     name: str
     full_name: Optional[str] = None

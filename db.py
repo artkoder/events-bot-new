@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import time as _time
 from contextlib import asynccontextmanager
 
@@ -13,6 +14,9 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.pool import NullPool
 
 from models import create_all
+
+
+DEBUG_SQL_PLAN = os.getenv("DEBUG_SQL_PLAN") == "1"
 
 
 async def pragma(conn, sql: str) -> None:
@@ -59,9 +63,10 @@ class LoggingAsyncSession(AsyncSession):
         if duration <= 2000:
             return
         logging.warning("SLOW SQL %.0f ms: %s", duration, sql)
-        args = (params,) if params is not None else ()
-        plan = await explain_sql(self.bind, sql, *args)
-        logging.warning("PLAN: %s", plan)
+        if DEBUG_SQL_PLAN:
+            args = (params,) if params is not None else ()
+            plan = await explain_sql(self.bind, sql, *args)
+            logging.warning("PLAN: %s", plan)
 
     async def execute(self, statement, params=None, *args, **kwargs):
         compile_fn = getattr(statement, "compile", None)
@@ -156,8 +161,9 @@ class Database:
             dur = (_time.perf_counter() - start) * 1000
             if dur > 2000:
                 logging.warning("SLOW SQL %.0f ms: %s", dur, sql)
-                plan = await explain_sql(self.engine, sql, *args, **kwargs)
-                logging.warning("PLAN: %s", plan)
+                if DEBUG_SQL_PLAN:
+                    plan = await explain_sql(self.engine, sql, *args, **kwargs)
+                    logging.warning("PLAN: %s", plan)
         return rows
 
     async def init(self):
@@ -382,7 +388,13 @@ class Database:
                 )
 
             await conn.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS idx_festival_name ON festival(name)"
+            )
+            await conn.exec_driver_sql(
                 "CREATE INDEX IF NOT EXISTS idx_event_date_time ON event(date, time)"
+            )
+            await conn.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS idx_event_festival_date_time ON event(festival, date, time)"
             )
             await conn.exec_driver_sql(
                 "CREATE INDEX IF NOT EXISTS idx_event_type_dates ON event(event_type, date, end_date)"
@@ -397,7 +409,7 @@ class Database:
                 "CREATE INDEX IF NOT EXISTS idx_event_city_date_time ON event(city, date, time)"
             )
             await conn.exec_driver_sql(
-                "CREATE INDEX IF NOT EXISTS ix_event_date ON event(date)"
+                "CREATE INDEX IF NOT EXISTS idx_event_date ON event(date)"
             )
             await conn.exec_driver_sql(
                 "CREATE INDEX IF NOT EXISTS ix_event_date_city ON event(date, city)"
