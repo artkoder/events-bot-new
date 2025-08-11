@@ -1,8 +1,10 @@
 from datetime import datetime
+from enum import Enum
 from typing import Optional
 
 from sqlmodel import Field, SQLModel
-from sqlalchemy import Index, text
+from sqlalchemy import Column, Index, JSON, text
+from sqlalchemy.types import Enum as SAEnum
 
 
 class User(SQLModel, table=True):
@@ -142,6 +144,39 @@ class Festival(SQLModel, table=True):
     location_address: Optional[str] = None
     city: Optional[str] = None
     source_text: Optional[str] = None
+
+
+class JobTask(str, Enum):
+    telegraph_build = "telegraph_build"
+    vk_sync = "vk_sync"
+    month_pages = "month_pages"
+    weekend_pages = "weekend_pages"
+
+
+class JobStatus(str, Enum):
+    pending = "pending"
+    running = "running"
+    done = "done"
+    error = "error"
+
+
+class JobOutbox(SQLModel, table=True):
+    __table_args__ = (
+        Index("ix_job_outbox_event_task", "event_id", "task"),
+        {"extend_existing": True},
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    event_id: int
+    task: JobTask = Field(sa_column=Column(SAEnum(JobTask)))
+    payload: dict | None = Field(default=None, sa_column=Column(JSON))
+    status: JobStatus = Field(
+        default=JobStatus.pending, sa_column=Column(SAEnum(JobStatus))
+    )
+    attempts: int = 0
+    last_error: Optional[str] = None
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    next_run_at: datetime = Field(default_factory=datetime.utcnow)
 
 
 def create_all(engine) -> None:
