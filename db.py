@@ -269,6 +269,7 @@ class Database:
         conn = await self._ensure_conn()
         yield conn
 
+    @asynccontextmanager
     async def get_session(self):
         from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
         from sqlalchemy.orm import sessionmaker
@@ -281,7 +282,8 @@ class Database:
             self._sessionmaker = sessionmaker(
                 self._orm_engine, expire_on_commit=False, class_=AsyncSession
             )
-        return self._sessionmaker()
+        async with self._sessionmaker() as session:
+            yield session
 
     @property
     def engine(self):
