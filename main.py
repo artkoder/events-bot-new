@@ -476,6 +476,20 @@ def nodes_hash(nodes: list) -> str:
     data = json.dumps(nodes, ensure_ascii=False, sort_keys=True)
     return hashlib.sha256(data.encode()).hexdigest()
 
+
+def slugify(text: str) -> str:
+    """Return a simple ASCII slug for the given ``text``.
+
+    Non-alphanumeric characters are replaced with ``-`` and the result is
+    lower‑cased.  If the slug becomes empty, ``"page"`` is returned to avoid
+    invalid Telegraph paths.
+    """
+
+    text_norm = unicodedata.normalize("NFKD", text)
+    text_ascii = text_norm.encode("ascii", "ignore").decode()
+    slug = re.sub(r"[^a-zA-Z0-9]+", "-", text_ascii).strip("-").lower()
+    return slug or "page"
+
 # Timeout for Telegraph API operations (in seconds)
 TELEGRAPH_TIMEOUT = float(os.getenv("TELEGRAPH_TIMEOUT", "30"))
 
@@ -1918,9 +1932,25 @@ async def post_ics_asset(event: Event, db: Database, bot: Bot) -> tuple[str, int
     file = types.BufferedInputFile(content.encode("utf-8"), filename=name)
     caption = build_asset_caption(event, d)
 
-    logging.info("posting ics asset to channel %s with caption %s", channel.channel_id, caption.replace('\n', ' | '))
+    logging.info(
+        "posting ics asset to channel %s with caption %s",
+        channel.channel_id,
+        caption.replace("\n", " | "),
+    )
 
     try:
+        if event.ics_post_id:
+            media = types.InputMediaDocument(
+                media=file, caption=caption, parse_mode="HTML"
+            )
+            await bot.edit_message_media(
+                chat_id=channel.channel_id,
+                message_id=event.ics_post_id,
+                media=media,
+            )
+            url = build_channel_post_url(channel, event.ics_post_id)
+            logging.info("updated ics in asset channel: %s", url)
+            return url, event.ics_post_id
         msg = await bot.send_document(
             channel.channel_id,
             file,
@@ -4382,7 +4412,9 @@ async def update_telegraph_event_page(event_id: int, db: Database, bot: Bot | No
             if ics:
                 ev.ics_url = ics
         extra = {"display_link": False} if ev.source_post_url else {}
-        if ev.telegraph_url and ev.telegraph_path:
+        start_date = (ev.date or "").split("..", 1)[0]
+        path = f"{slugify(ev.title or 'event')}-{start_date}" if start_date else slugify(ev.title or 'event')
+        if ev.telegraph_url and ev.telegraph_path == path:
             try:
                 await update_source_page(
                     ev.telegraph_path,
@@ -4406,12 +4438,13 @@ async def update_telegraph_event_page(event_id: int, db: Database, bot: Bot | No
             ev.ics_url,
             db,
             catbox_urls=[],
+            path=path,
             **extra,
         )
         if res:
-            url, path = res[:2]
+            url, created_path = res[:2]
             ev.telegraph_url = url
-            ev.telegraph_path = path
+            ev.telegraph_path = created_path
             session.add(ev)
             await session.commit()
 
@@ -9196,6 +9229,7 @@ async def create_source_page(
     *,
     display_link: bool = True,
     catbox_urls: list[str] | None = None,
+    path: str | None = None,
 ) -> tuple[str, str, str, int] | None:
     """Create a Telegraph page with the original event text."""
     token = get_telegraph_token()
@@ -9255,7 +9289,9 @@ async def create_source_page(
         html_content = apply_month_nav(html_content, nav_html)
     html_content = apply_footer_link(html_content)
     try:
-        page = await telegraph_create_page(tg, title, html_content=html_content)
+        page = await telegraph_create_page(
+            tg, title, html_content=html_content, path=path
+        )
     except Exception as e:
         logging.error("Failed to create telegraph page: %s", e)
         return None
