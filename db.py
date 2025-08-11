@@ -179,14 +179,24 @@ async def explain_sql(
 
 
 class LoggingAsyncSession(AsyncSession):
-    async def _log(self, sql: str, params, duration: float) -> None:
+    async def _log(
+        self,
+        sql: str,
+        params,
+        duration: float,
+        rowcount: int,
+        plan: str | None,
+    ) -> None:
         if duration <= 2000:
             return
-        logging.warning("SLOW SQL %.0f ms: %s", duration, sql)
-        if DEBUG_SQL_PLAN:
-            args = (params,) if params is not None else ()
-            plan = await explain_sql(self.bind, sql, *args)
-            logging.warning("PLAN: %s", plan)
+        idx_count = plan.count("USING INDEX") if plan else 0
+        logging.warning(
+            "SLOW SQL %.0f ms rows=%s indexes=%s: %s",
+            duration,
+            rowcount,
+            idx_count,
+            sql,
+        )
 
     async def execute(self, statement, params=None, *args, **kwargs):
         compile_fn = getattr(statement, "compile", None)
@@ -205,7 +215,11 @@ class LoggingAsyncSession(AsyncSession):
         start = _time.perf_counter() * 1000
         result = await super().execute(statement, params=params, *args, **kwargs)
         dur = _time.perf_counter() * 1000 - start
-        await self._log(sql, params, dur)
+        plan = None
+        if dur > 2000:
+            args = (params,) if params is not None else ()
+            plan = await explain_sql(self.bind, sql, *args)
+        await self._log(sql, params, dur, getattr(result, "rowcount", -1), plan)
         return result
 
     async def scalars(self, statement, params=None, *args, **kwargs):
@@ -225,7 +239,12 @@ class LoggingAsyncSession(AsyncSession):
         start = _time.perf_counter() * 1000
         result = await super().scalars(statement, params=params, *args, **kwargs)
         dur = _time.perf_counter() * 1000 - start
-        await self._log(sql, params, dur)
+        plan = None
+        if dur > 2000:
+            args = (params,) if params is not None else ()
+            plan = await explain_sql(self.bind, sql, *args)
+        rowcount = getattr(getattr(result, "raw", None), "rowcount", -1)
+        await self._log(sql, params, dur, rowcount, plan)
         return result
 
 class Database:

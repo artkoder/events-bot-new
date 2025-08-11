@@ -4337,6 +4337,16 @@ async def _run_due_jobs_once(
             obj.updated_at = datetime.utcnow()
             session.add(obj)
             await session.commit()
+        run_id = uuid.uuid4().hex
+        attempt = job.attempts + 1
+        logging.info(
+            "TASK_START event=%s task=%s run_id=%s attempt=%d",
+            job.event_id,
+            job.task.value,
+            run_id,
+            attempt,
+        )
+        start = _time.perf_counter()
         try:
             handler = JOB_HANDLERS[job.task]
             async with span(
@@ -4346,10 +4356,31 @@ async def _run_due_jobs_once(
             link = await _job_result_link(job.task, job.event_id, db)
             status = JobStatus.done
             err = None
+            took_ms = (_time.perf_counter() - start) * 1000
+            short = link or "ok"
+            logging.info(
+                "TASK_DONE event=%s task=%s run_id=%s attempt=%d took_ms=%.0f result=%s",
+                job.event_id,
+                job.task.value,
+                run_id,
+                attempt,
+                took_ms,
+                short,
+            )
         except Exception as exc:  # pragma: no cover - log and backoff
+            took_ms = (_time.perf_counter() - start) * 1000
+            err = str(exc)
+            logging.error(
+                "TASK_FAIL event=%s task=%s run_id=%s attempt=%d took_ms=%.0f err=\"%s\"",
+                job.event_id,
+                job.task.value,
+                run_id,
+                attempt,
+                took_ms,
+                err.splitlines()[0],
+            )
             logging.exception("job %s failed", job.id)
             status = JobStatus.error
-            err = str(exc)
             link = None
         async with db.get_session() as session:
             obj = await session.get(JobOutbox, job.id)
@@ -4376,12 +4407,50 @@ async def _run_due_jobs_once(
     return processed
 
 
+async def _log_job_outbox_stats(db: Database) -> None:
+    now = datetime.utcnow()
+    async with db.get_session() as session:
+        cnt_rows = await session.execute(
+            select(JobOutbox.status, func.count()).group_by(JobOutbox.status)
+        )
+        counts = {s: c for s, c in cnt_rows.all()}
+        avg_age_res = await session.execute(
+            select(
+                func.avg(
+                    func.strftime('%s', 'now') - func.strftime('%s', JobOutbox.updated_at)
+                )
+            ).where(JobOutbox.status == JobStatus.pending)
+        )
+        avg_age = avg_age_res.scalar() or 0
+        lag_res = await session.execute(
+            select(func.min(JobOutbox.next_run_at)).where(
+                JobOutbox.status == JobStatus.pending
+            )
+        )
+        next_run = lag_res.scalar()
+    lag = (now - next_run).total_seconds() if next_run else 0
+    if lag < 0:
+        lag = 0
+    logging.info(
+        "WORKER_STATE pending=%d running=%d error=%d avg_age_s=%.1f lag_s=%.1f",
+        counts.get(JobStatus.pending, 0),
+        counts.get(JobStatus.running, 0),
+        counts.get(JobStatus.error, 0),
+        avg_age,
+        lag,
+    )
+
+
 async def job_outbox_worker(db: Database, bot: Bot, interval: float = 2.0):
+    last_log = 0.0
     while True:
         try:
             await _run_due_jobs_once(db, bot)
         except Exception:  # pragma: no cover - log unexpected errors
             logging.exception("job_outbox_worker cycle failed")
+        if _time.monotonic() - last_log >= 30.0:
+            await _log_job_outbox_stats(db)
+            last_log = _time.monotonic()
         await asyncio.sleep(interval)
 
 
@@ -8507,7 +8576,33 @@ async def handle_last_errors(message: types.Message, db: Database, bot: Bot):
         lines.append(
             f"{e['time'].strftime('%H:%M:%S')} {e['type']} {e['where']}"
         )
-    await bot.send_message(message.chat.id, "\n".join(lines) or "No errors")
+        await bot.send_message(message.chat.id, "\n".join(lines) or "No errors")
+
+
+async def handle_debug(message: types.Message, db: Database, bot: Bot):
+    async with db.get_session() as session:
+        user = await session.get(User, message.from_user.id)
+        if not user or not user.is_superadmin:
+            await bot.send_message(message.chat.id, "Not authorized")
+            return
+    parts = (message.text or "").split()
+    if len(parts) < 2 or parts[1] != "queue":
+        await bot.send_message(message.chat.id, "Usage: /debug queue")
+        return
+    async with db.get_session() as session:
+        task_rows = await session.execute(
+            select(JobOutbox.task, func.count()).group_by(JobOutbox.task)
+        )
+        event_rows = await session.execute(
+            select(JobOutbox.event_id, func.count()).group_by(JobOutbox.event_id)
+        )
+    lines = ["tasks:"]
+    for task, cnt in task_rows.all():
+        lines.append(f"{task.value}: {cnt}")
+    lines.append("events:")
+    for eid, cnt in event_rows.all():
+        lines.append(f"{eid}: {cnt}")
+    await bot.send_message(message.chat.id, "\n".join(lines))
 
 
 async def handle_stats(message: types.Message, db: Database, bot: Bot):
@@ -9453,6 +9548,9 @@ def create_app() -> web.Application:
     async def last_errors_wrapper(message: types.Message):
         await handle_last_errors(message, db, bot)
 
+    async def debug_wrapper(message: types.Message):
+        await handle_debug(message, db, bot)
+
     dp.message.register(start_wrapper, Command("start"))
     dp.message.register(register_wrapper, Command("register"))
     dp.message.register(requests_wrapper, Command("requests"))
@@ -9526,6 +9624,7 @@ def create_app() -> web.Application:
     dp.message.register(status_wrapper, Command("status"))
     dp.message.register(trace_wrapper, Command("trace"))
     dp.message.register(last_errors_wrapper, Command("last_errors"))
+    dp.message.register(debug_wrapper, Command("debug"))
     dp.message.register(users_wrapper, Command("users"))
     dp.message.register(dumpdb_wrapper, Command("dumpdb"))
     dp.message.register(restore_wrapper, Command("restore"))
