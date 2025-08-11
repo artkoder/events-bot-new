@@ -641,6 +641,26 @@ async def set_vk_last_added(db: Database, value: str):
     await set_setting_value(db, "vk_last_added", value)
 
 
+async def get_section_hash(db: Database, page_key: str, section_key: str) -> str | None:
+    rows = await db.exec_driver_sql(
+        "SELECT hash FROM page_section_cache WHERE page_key=? AND section_key=?",
+        (page_key, section_key),
+    )
+    return rows[0][0] if rows else None
+
+
+async def set_section_hash(db: Database, page_key: str, section_key: str, h: str) -> None:
+    await db.exec_driver_sql(
+        """
+        INSERT INTO page_section_cache(page_key, section_key, hash)
+        VALUES(?, ?, ?)
+        ON CONFLICT(page_key, section_key)
+        DO UPDATE SET hash=excluded.hash, updated_at=CURRENT_TIMESTAMP
+        """,
+        (page_key, section_key, h),
+    )
+
+
 async def close_shared_session() -> None:
     global _shared_session, _http_session, _vk_session
     if _shared_session is not None and not _shared_session.closed:

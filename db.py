@@ -389,6 +389,21 @@ class Database:
                 )
 
             await conn.exec_driver_sql(
+                """
+                CREATE TABLE IF NOT EXISTS page_section_cache(
+                  page_key TEXT NOT NULL,
+                  section_key TEXT NOT NULL,
+                  hash TEXT NOT NULL,
+                  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                  PRIMARY KEY(page_key, section_key)
+                )
+                """
+            )
+            await conn.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS idx_psc_page ON page_section_cache(page_key)"
+            )
+
+            await conn.exec_driver_sql(
                 "CREATE INDEX IF NOT EXISTS idx_festival_name ON festival(name)"
             )
             await conn.exec_driver_sql(
