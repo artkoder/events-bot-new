@@ -1,626 +1,314 @@
+from __future__ import annotations
+
 import asyncio
 import logging
 import os
-import random
-import time as _time
 from contextlib import asynccontextmanager
-import sqlite3
 
 import aiosqlite
-from sqlalchemy.ext.asyncio import (
-    AsyncSession,
-    async_sessionmaker,
-    create_async_engine,
-    AsyncEngine,
-)
-from sqlalchemy.pool import NullPool
-
-from models import create_all
 
 
-DEBUG_SQL_PLAN = os.getenv("DEBUG_SQL_PLAN") == "1"
-DB_WARN_MS = int(os.getenv("DB_WARN_MS", "200"))
-
-
-def db_trace(op_name: str):
-    def decorator(fn):
-        async def wrapper(*args, **kwargs):
-            self_obj = args[0] if args else None
-            connection_reopened = False
-            if self_obj and hasattr(self_obj, "_ensure_connection"):
-                connection_reopened = await self_obj._ensure_connection()
-
-            start = _time.perf_counter()
-            locked_retries = 0
-            while True:
-                try:
-                    result = await fn(*args, **kwargs)
-                    break
-                except (sqlite3.ProgrammingError, sqlite3.OperationalError) as e:
-                    msg = str(e)
-                    if "Connection closed" in msg and self_obj and hasattr(self_obj, "_ensure_connection"):
-                        reopened = await self_obj._ensure_connection()
-                        connection_reopened = connection_reopened or reopened
-                        continue
-                    if "database is locked" in msg:
-                        locked_retries += 1
-                        if locked_retries >= 3 or (_time.perf_counter() - start) >= 3:
-                            raise
-                        await asyncio.sleep(0.1 + random.random() * 0.1)
-                        continue
-                    raise
-
-            took_ms = (_time.perf_counter() - start) * 1000
-
-            rows = None
-            try:
-                if isinstance(result, (list, tuple)):
-                    rows = len(result)
-                elif hasattr(result, "rowcount") and result.rowcount is not None:
-                    rows = result.rowcount
-                elif result is None:
-                    rows = 0
-            except Exception:
-                rows = None
-
-            logging.info(
-                "op=%s took_ms=%.0f rows=%s locked_retries=%d connection_reopened=%s",
-                op_name,
-                took_ms,
-                rows if rows is not None else "-",
-                locked_retries,
-                connection_reopened,
-            )
-
-            sql_text = kwargs.get("sql")
-            if sql_text is None:
-                if self_obj is not None:
-                    if len(args) > 1 and isinstance(args[1], str):
-                        sql_text = args[1]
-                elif args and isinstance(args[0], str):
-                    sql_text = args[0]
-
-            if sql_text and took_ms > DB_WARN_MS:
-                sql_short = sql_text.replace("\n", " ")[:200]
-                if DEBUG_SQL_PLAN and self_obj and hasattr(self_obj, "engine"):
-                    try:
-                        plan = await explain_sql(self_obj.engine, sql_text)
-                        logging.warning(
-                            "slow_query took_ms=%.0f sql=%s plan=%s",
-                            took_ms,
-                            sql_short,
-                            plan.replace("\n", " ")[:200],
-                        )
-                    except Exception as e:  # pragma: no cover - logging only
-                        logging.warning(
-                            "slow_query took_ms=%.0f sql=%s plan_failed=%s",
-                            took_ms,
-                            sql_short,
-                            e,
-                        )
-                else:
-                    logging.warning(
-                        "slow_query took_ms=%.0f sql=%s",
-                        took_ms,
-                        sql_short,
-                    )
-
-            return result
-
-        return wrapper
-
-    return decorator
-
-
-@db_trace("db_checkpoint")
-async def db_checkpoint(engine: AsyncEngine):
+async def _add_column(conn, table: str, col_def: str) -> None:
     try:
-        async with engine.begin() as conn:
-            result = await conn.exec_driver_sql("PRAGMA wal_checkpoint(TRUNCATE)")
-            try:
-                rows = result.fetchall()
-            finally:
-                result.close()
-        logging.info("db_checkpoint result=%s", rows)
-        return rows
-    except Exception as e:  # pragma: no cover - logging only
-        logging.exception("db_checkpoint error=%s", e)
-        raise
+        await conn.execute(f"ALTER TABLE {table} ADD COLUMN {col_def}")
+    except Exception as e:
+        if "duplicate column name" not in str(e).lower():
+            raise
 
-
-# backward compatibility
-wal_checkpoint_truncate = db_checkpoint
-
-
-@db_trace("pragma_optimize")
-async def pragma_optimize(engine: AsyncEngine):
-    try:
-        async with engine.begin() as conn:
-            result = await conn.exec_driver_sql("PRAGMA optimize")
-            try:
-                rows = result.fetchall()
-            finally:
-                result.close()
-        logging.info("pragma_optimize result=%s", rows)
-        return rows
-    except Exception as e:  # pragma: no cover - logging only
-        logging.exception("pragma_optimize error=%s", e)
-        raise
-
-
-# backward compatibility
-optimize = pragma_optimize
-
-
-@db_trace("vacuum")
-async def vacuum(engine: AsyncEngine):
-    async with engine.begin() as conn:
-        await conn.exec_driver_sql("VACUUM")
-
-
-async def explain_sql(
-    engine: AsyncEngine, sql: str, *args, timeout: float = 0.5, **kwargs
-) -> str:
-    async def _run() -> str:
-        async with engine.connect() as conn:
-            result = await conn.exec_driver_sql(
-                f"EXPLAIN QUERY PLAN {sql}", *args, **kwargs
-            )
-            try:
-                rows = result.fetchall()
-            finally:
-                result.close()
-            return "\n".join(" ".join(map(str, r)) for r in rows)
-
-    try:
-        return await asyncio.wait_for(_run(), timeout)
-    except Exception as e:  # pragma: no cover - logging only
-        return f"<explain failed: {e}>"
-
-
-class LoggingAsyncSession(AsyncSession):
-    async def _log(
-        self,
-        sql: str,
-        params,
-        duration: float,
-        rowcount: int,
-        plan: str | None,
-    ) -> None:
-        if duration <= 2000:
-            return
-        idx_count = plan.count("USING INDEX") if plan else 0
-        logging.warning(
-            "SLOW SQL %.0f ms rows=%s indexes=%s: %s",
-            duration,
-            rowcount,
-            idx_count,
-            sql,
-        )
-
-    async def execute(self, statement, params=None, *args, **kwargs):
-        compile_fn = getattr(statement, "compile", None)
-        if compile_fn:
-            sql = str(
-                compile_fn(
-                    self.bind.sync_engine if hasattr(self.bind, "sync_engine") else self.bind,
-                    compile_kwargs={
-                        "literal_binds": False,
-                        "render_postcompile": True,
-                    },
-                )
-            )
-        else:
-            sql = str(statement)
-        start = _time.perf_counter() * 1000
-        result = await super().execute(statement, params=params, *args, **kwargs)
-        dur = _time.perf_counter() * 1000 - start
-        plan = None
-        if dur > 2000:
-            args = (params,) if params is not None else ()
-            plan = await explain_sql(self.bind, sql, *args)
-        await self._log(sql, params, dur, getattr(result, "rowcount", -1), plan)
-        return result
-
-    async def scalars(self, statement, params=None, *args, **kwargs):
-        compile_fn = getattr(statement, "compile", None)
-        if compile_fn:
-            sql = str(
-                compile_fn(
-                    self.bind.sync_engine if hasattr(self.bind, "sync_engine") else self.bind,
-                    compile_kwargs={
-                        "literal_binds": False,
-                        "render_postcompile": True,
-                    },
-                )
-            )
-        else:
-            sql = str(statement)
-        start = _time.perf_counter() * 1000
-        result = await super().scalars(statement, params=params, *args, **kwargs)
-        dur = _time.perf_counter() * 1000 - start
-        plan = None
-        if dur > 2000:
-            args = (params,) if params is not None else ()
-            plan = await explain_sql(self.bind, sql, *args)
-        rowcount = getattr(getattr(result, "raw", None), "rowcount", -1)
-        await self._log(sql, params, dur, rowcount, plan)
-        return result
 
 class Database:
     def __init__(self, path: str):
-        """Initialize async engine and reusable aiosqlite connection."""
         self.path = path
-        self.engine = create_async_engine(
-            f"sqlite+aiosqlite:///{path}",
-            poolclass=NullPool,
-            connect_args={"timeout": 15, "check_same_thread": False},
-        )
-        self._session_factory = async_sessionmaker(
-            self.engine,
-            expire_on_commit=False,
-            class_=LoggingAsyncSession,
-        )
         self._conn: aiosqlite.Connection | None = None
-        self._lock = asyncio.Lock()
+        self._orm_engine = None
+        self._sessionmaker = None
 
-    async def _ensure_connection(self) -> bool:
-        reopened = False
-        if self._conn is None or not getattr(self._conn, "_running", False):
-            async with self._lock:
-                if self._conn is None or not getattr(self._conn, "_running", False):
-                    if self._conn is not None:
-                        try:
-                            await self._conn.close()
-                        except Exception:
-                            pass
-                    self._conn = await aiosqlite.connect(self.path, timeout=15)
-                    await self._conn.execute("PRAGMA journal_mode=WAL")
-                    await self._conn.execute("PRAGMA synchronous=NORMAL")
-                    await self._conn.execute("PRAGMA cache_size=-40000")
-                    await self._conn.execute("PRAGMA temp_store=MEMORY")
-                    await self._conn.execute("PRAGMA busy_timeout=5000")
-                    await self._conn.execute("PRAGMA read_uncommitted = 1")
-                    await self._conn.execute("PRAGMA mmap_size=134217728")
-                    reopened = True
-        if reopened:
-            logging.info("connection_reopened=True")
-        return reopened
+    async def init(self) -> None:
+        async with aiosqlite.connect(self.path) as conn:
+            await conn.execute("PRAGMA journal_mode=WAL")
+            await conn.execute("PRAGMA synchronous=NORMAL")
+            await conn.execute("PRAGMA foreign_keys=ON")
+            await conn.execute("PRAGMA temp_store=MEMORY")
+            await conn.execute("PRAGMA cache_size=-40000")
+            await conn.execute("PRAGMA busy_timeout=5000")
+            await conn.execute("PRAGMA mmap_size=134217728")
 
-    async def raw_conn(self) -> aiosqlite.Connection:
-        """Return a shared aiosqlite connection."""
-        await self._ensure_connection()
-        assert self._conn is not None
-        return self._conn
-
-    @asynccontextmanager
-    async def read_only(self):
-        """Context manager for read-only transactions."""
-        conn = await self.raw_conn()
-        await conn.execute("BEGIN")
-        try:
-            yield conn
-        finally:
-            await conn.rollback()
-
-    @db_trace("exec_driver_sql")
-    async def exec_driver_sql(self, sql: str, *args, **kwargs):
-        async with self.engine.begin() as conn:
-            result = await conn.exec_driver_sql(sql, *args, **kwargs)
-            try:
-                rows = result.fetchall() if result.returns_rows else None
-            finally:
-                result.close()
-        return rows
-
-    async def init(self):
-        async with self.engine.begin() as conn:
-            if self.engine.url.get_backend_name() == "sqlite":
-                await conn.exec_driver_sql("PRAGMA journal_mode=WAL;")
-                await conn.exec_driver_sql("PRAGMA synchronous=NORMAL;")
-                await conn.exec_driver_sql("PRAGMA temp_store=MEMORY;")
-                await conn.exec_driver_sql("PRAGMA cache_size=-40000;")
-                await conn.exec_driver_sql("PRAGMA busy_timeout=5000;")
-                await conn.exec_driver_sql("PRAGMA mmap_size=134217728;")
-            await conn.run_sync(create_all)
-            result = await conn.exec_driver_sql("PRAGMA table_info(event)")
-            event_cols = [r[1] for r in result.fetchall()]
-            cols = event_cols
-            if "telegraph_url" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE event ADD COLUMN telegraph_url VARCHAR"
-                )
-            if "ticket_price_min" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE event ADD COLUMN ticket_price_min INTEGER"
-                )
-            if "ticket_price_max" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE event ADD COLUMN ticket_price_max INTEGER"
-                )
-            if "ticket_link" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE event ADD COLUMN ticket_link VARCHAR"
-                )
-            if "source_post_url" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE event ADD COLUMN source_post_url VARCHAR"
-                )
-            if "source_vk_post_url" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE event ADD COLUMN source_vk_post_url VARCHAR"
-                )
-            if "is_free" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE event ADD COLUMN is_free BOOLEAN DEFAULT 0"
-                )
-            if "silent" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE event ADD COLUMN silent BOOLEAN DEFAULT 0"
-                )
-            if "telegraph_path" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE event ADD COLUMN telegraph_path VARCHAR"
-                )
-            if "event_type" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE event ADD COLUMN event_type VARCHAR"
-                )
-            if "emoji" not in cols:
-                await conn.exec_driver_sql("ALTER TABLE event ADD COLUMN emoji VARCHAR")
-            if "end_date" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE event ADD COLUMN end_date VARCHAR"
-                )
-            if "added_at" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE event ADD COLUMN added_at VARCHAR"
-                )
-            if "photo_count" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE event ADD COLUMN photo_count INTEGER DEFAULT 0"
-                )
-            if "pushkin_card" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE event ADD COLUMN pushkin_card BOOLEAN DEFAULT 0"
-                )
-            if "ics_url" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE event ADD COLUMN ics_url VARCHAR"
-                )
-            if "ics_post_url" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE event ADD COLUMN ics_post_url VARCHAR"
-                )
-            if "ics_post_id" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE event ADD COLUMN ics_post_id INTEGER"
-                )
-            if "source_chat_id" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE event ADD COLUMN source_chat_id INTEGER"
-                )
-            if "source_message_id" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE event ADD COLUMN source_message_id INTEGER"
-                )
-            if "creator_id" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE event ADD COLUMN creator_id INTEGER"
-                )
-            if "content_hash" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE event ADD COLUMN content_hash VARCHAR"
-                )
-
-            result = await conn.exec_driver_sql("PRAGMA table_info(user)")
-            cols = [r[1] for r in result.fetchall()]
-            if "is_partner" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE user ADD COLUMN is_partner BOOLEAN DEFAULT 0"
-                )
-            if "organization" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE user ADD COLUMN organization VARCHAR"
-                )
-            if "location" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE user ADD COLUMN location VARCHAR"
-                )
-            if "blocked" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE user ADD COLUMN blocked BOOLEAN DEFAULT 0"
-                )
-            if "last_partner_reminder" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE user ADD COLUMN last_partner_reminder VARCHAR"
-                )
-
-            result = await conn.exec_driver_sql("PRAGMA table_info(channel)")
-            cols = [r[1] for r in result.fetchall()]
-            if "daily_time" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE channel ADD COLUMN daily_time VARCHAR"
-                )
-            if "last_daily" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE channel ADD COLUMN last_daily VARCHAR"
-                )
-            if "is_asset" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE channel ADD COLUMN is_asset BOOLEAN DEFAULT 0"
-                )
-
-            result = await conn.exec_driver_sql("PRAGMA table_info(monthpage)")
-            cols = [r[1] for r in result.fetchall()]
-            if "url2" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE monthpage ADD COLUMN url2 VARCHAR"
-                )
-            if "path2" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE monthpage ADD COLUMN path2 VARCHAR"
-                )
-            if "content_hash" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE monthpage ADD COLUMN content_hash TEXT"
-                )
-            if "content_hash2" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE monthpage ADD COLUMN content_hash2 TEXT"
-                )
-
-            result = await conn.exec_driver_sql("PRAGMA table_info(weekendpage)")
-            cols = [r[1] for r in result.fetchall()]
-            if "vk_post_url" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE weekendpage ADD COLUMN vk_post_url VARCHAR"
-                )
-            if "content_hash" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE weekendpage ADD COLUMN content_hash TEXT"
-                )
-
-            result = await conn.exec_driver_sql("PRAGMA table_info(festival)")
-            cols = [r[1] for r in result.fetchall()]
-            if "full_name" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE festival ADD COLUMN full_name VARCHAR"
-                )
-                await conn.exec_driver_sql(
-                    "UPDATE festival SET full_name = name"
-                )
-            if "photo_url" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE festival ADD COLUMN photo_url VARCHAR"
-                )
-            if "website_url" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE festival ADD COLUMN website_url VARCHAR"
-                )
-            if "vk_url" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE festival ADD COLUMN vk_url VARCHAR"
-                )
-            if "tg_url" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE festival ADD COLUMN tg_url VARCHAR"
-                )
-            if "start_date" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE festival ADD COLUMN start_date VARCHAR"
-                )
-            if "end_date" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE festival ADD COLUMN end_date VARCHAR"
-                )
-            if "vk_poll_url" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE festival ADD COLUMN vk_poll_url VARCHAR"
-                )
-            if "location_name" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE festival ADD COLUMN location_name VARCHAR"
-                )
-            if "location_address" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE festival ADD COLUMN location_address VARCHAR"
-                )
-            if "city" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE festival ADD COLUMN city VARCHAR"
-                )
-            if "source_text" not in cols:
-                await conn.exec_driver_sql(
-                    "ALTER TABLE festival ADD COLUMN source_text TEXT"
-                )
-
-            await conn.exec_driver_sql(
+            await conn.execute(
                 """
-                CREATE TABLE IF NOT EXISTS page_section_cache(
-                  page_key TEXT NOT NULL,
-                  section_key TEXT NOT NULL,
-                  hash TEXT NOT NULL,
-                  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                  PRIMARY KEY(page_key, section_key)
+                CREATE TABLE IF NOT EXISTS user(
+                    user_id INTEGER PRIMARY KEY,
+                    username TEXT,
+                    is_superadmin BOOLEAN DEFAULT 0,
+                    is_partner BOOLEAN DEFAULT 0,
+                    organization TEXT,
+                    location TEXT,
+                    blocked BOOLEAN DEFAULT 0,
+                    last_partner_reminder TIMESTAMP
                 )
                 """
             )
-            await conn.exec_driver_sql(
+
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS pendinguser(
+                    user_id INTEGER PRIMARY KEY,
+                    username TEXT,
+                    requested_at TIMESTAMP
+                )
+                """
+            )
+
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS rejecteduser(
+                    user_id INTEGER PRIMARY KEY,
+                    username TEXT,
+                    rejected_at TIMESTAMP
+                )
+                """
+            )
+
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS channel(
+                    channel_id INTEGER PRIMARY KEY,
+                    title TEXT,
+                    username TEXT,
+                    is_admin BOOLEAN DEFAULT 0,
+                    is_registered BOOLEAN DEFAULT 0,
+                    is_asset BOOLEAN DEFAULT 0,
+                    daily_time TEXT,
+                    last_daily TEXT
+                )
+                """
+            )
+
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS setting(
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                )
+                """
+            )
+
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS event(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title TEXT NOT NULL,
+                    description TEXT NOT NULL,
+                    festival TEXT,
+                    date TEXT NOT NULL,
+                    time TEXT NOT NULL,
+                    location_name TEXT NOT NULL,
+                    location_address TEXT,
+                    city TEXT,
+                    ticket_price_min INTEGER,
+                    ticket_price_max INTEGER,
+                    ticket_link TEXT,
+                    event_type TEXT,
+                    emoji TEXT,
+                    end_date TEXT,
+                    is_free BOOLEAN DEFAULT 0,
+                    pushkin_card BOOLEAN DEFAULT 0,
+                    silent BOOLEAN DEFAULT 0,
+                    telegraph_path TEXT,
+                    source_text TEXT NOT NULL,
+                    telegraph_url TEXT,
+                    ics_url TEXT,
+                    source_post_url TEXT,
+                    source_vk_post_url TEXT,
+                    ics_post_url TEXT,
+                    ics_post_id INTEGER,
+                    source_chat_id INTEGER,
+                    source_message_id INTEGER,
+                    creator_id INTEGER,
+                    photo_count INTEGER DEFAULT 0,
+                    added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    content_hash TEXT
+                )
+                """
+            )
+
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS monthpage(
+                    month TEXT PRIMARY KEY,
+                    url TEXT NOT NULL,
+                    path TEXT NOT NULL,
+                    url2 TEXT,
+                    path2 TEXT,
+                    content_hash TEXT,
+                    content_hash2 TEXT
+                )
+                """
+            )
+
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS weekendpage(
+                    start TEXT PRIMARY KEY,
+                    url TEXT NOT NULL,
+                    path TEXT NOT NULL,
+                    vk_post_url TEXT,
+                    content_hash TEXT
+                )
+                """
+            )
+
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS weekpage(
+                    start TEXT PRIMARY KEY,
+                    vk_post_url TEXT,
+                    content_hash TEXT
+                )
+                """
+            )
+
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS festival(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    full_name TEXT,
+                    description TEXT,
+                    start_date TEXT,
+                    end_date TEXT,
+                    telegraph_url TEXT,
+                    telegraph_path TEXT,
+                    vk_post_url TEXT,
+                    vk_poll_url TEXT,
+                    photo_url TEXT,
+                    website_url TEXT,
+                    vk_url TEXT,
+                    tg_url TEXT,
+                    location_name TEXT,
+                    location_address TEXT,
+                    city TEXT,
+                    source_text TEXT
+                )
+                """
+            )
+
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS joboutbox(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_id INTEGER NOT NULL,
+                    task TEXT NOT NULL,
+                    payload TEXT,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    attempts INTEGER DEFAULT 0,
+                    last_error TEXT,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    next_run_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS page_section_cache(
+                    page_key TEXT NOT NULL,
+                    section_key TEXT NOT NULL,
+                    hash TEXT NOT NULL,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY(page_key, section_key)
+                )
+                """
+            )
+            await conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_psc_page ON page_section_cache(page_key)"
             )
 
-            await conn.exec_driver_sql(
+            await conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_festival_name ON festival(name)"
             )
-            await conn.exec_driver_sql(
-                "CREATE INDEX IF NOT EXISTS idx_event_date_time ON event(date, time)"
-            )
-            await conn.exec_driver_sql(
-                "CREATE INDEX IF NOT EXISTS idx_event_festival_date_time ON event(festival, date, time)"
-            )
-            await conn.exec_driver_sql(
-                "CREATE INDEX IF NOT EXISTS idx_event_type_dates ON event(event_type, date, end_date)"
-            )
-            await conn.exec_driver_sql(
-                "CREATE INDEX IF NOT EXISTS idx_event_added_at ON event(added_at)"
-            )
-            await conn.exec_driver_sql(
-                "CREATE INDEX IF NOT EXISTS idx_event_creator_added ON event(creator_id, added_at DESC)"
-            )
-            await conn.exec_driver_sql(
-                "CREATE INDEX IF NOT EXISTS idx_event_city_date_time ON event(city, date, time)"
-            )
-            await conn.exec_driver_sql(
+            await conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_event_date ON event(date)"
             )
-            await conn.exec_driver_sql(
+            await conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_event_end_date ON event(end_date)"
             )
-            await conn.exec_driver_sql(
+            await conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_event_city ON event(city)"
             )
-            await conn.exec_driver_sql(
+            await conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_event_type ON event(event_type)"
             )
-            await conn.exec_driver_sql(
+            await conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_event_is_free ON event(is_free)"
             )
-            if "month" in event_cols:
-                await conn.exec_driver_sql(
-                    "CREATE INDEX IF NOT EXISTS idx_event_month ON event(month)"
-                )
-            await conn.exec_driver_sql(
+            await conn.execute(
                 "CREATE INDEX IF NOT EXISTS ix_event_date_city ON event(date, city)"
             )
-            await conn.exec_driver_sql(
+            await conn.execute(
                 "CREATE INDEX IF NOT EXISTS ix_event_date_festival ON event(date, festival)"
             )
-            await conn.exec_driver_sql(
+            await conn.execute(
                 "CREATE INDEX IF NOT EXISTS ix_event_content_hash ON event(content_hash)"
             )
-            await conn.exec_driver_sql(
-                "CREATE INDEX IF NOT EXISTS ix_week_page_start ON weekpage(start)"
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_event_date_time ON event(date, time)"
             )
-            await conn.exec_driver_sql(
-                "CREATE INDEX IF NOT EXISTS ix_event_telegraph_not_null ON event(date) WHERE telegraph_url IS NOT NULL"
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_event_festival_date_time ON event(festival, date, time)"
             )
 
-        # ensure shared connection is ready
-        await self.raw_conn()
+            await conn.commit()
 
-    
-    @asynccontextmanager
-    async def get_session(self) -> AsyncSession:
-        async with self._session_factory() as session:
-            yield session
+    async def _ensure_conn(self) -> aiosqlite.Connection:
+        if self._conn is None:
+            self._conn = await aiosqlite.connect(self.path, timeout=15)
+        return self._conn
 
     @asynccontextmanager
-    async def ensure_connection(self):
-        """Ensure the shared connection is open."""
-        await self._ensure_connection()
-        try:
-            yield
-        finally:
-            pass
+    async def raw_conn(self):
+        conn = await self._ensure_conn()
+        yield conn
+
+    async def get_session(self):
+        from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+        from sqlalchemy.orm import sessionmaker
+
+        if self._orm_engine is None:
+            self._orm_engine = create_async_engine(
+                f"sqlite+aiosqlite:///{self.path}", future=True
+            )
+        if self._sessionmaker is None:
+            self._sessionmaker = sessionmaker(
+                self._orm_engine, expire_on_commit=False, class_=AsyncSession
+            )
+        return self._sessionmaker()
+
+    @property
+    def engine(self):
+        from sqlalchemy.ext.asyncio import create_async_engine
+
+        if self._orm_engine is None:
+            self._orm_engine = create_async_engine(
+                f"sqlite+aiosqlite:///{self.path}", future=True
+            )
+        return self._orm_engine
+
+
+async def wal_checkpoint_truncate(engine):
+    async with engine.begin() as conn:
+        result = await conn.exec_driver_sql("PRAGMA wal_checkpoint(TRUNCATE)")
+        rows = result.fetchall()
+    logging.info("db_checkpoint result=%s", rows)
+    return rows
+
+
+async def optimize(engine):
+    async with engine.begin() as conn:
+        await conn.exec_driver_sql("PRAGMA optimize")
+
+
+async def vacuum(engine):
+    async with engine.begin() as conn:
+        await conn.exec_driver_sql("VACUUM")
+
 

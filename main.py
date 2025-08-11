@@ -4,6 +4,8 @@ Debugging:
     Logs will include ▶/■ markers with RSS & duration.
 """
 
+from __future__ import annotations
+
 import logging
 import os
 import time
@@ -96,10 +98,6 @@ import random
 import html
 import sqlite3
 from io import BytesIO
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy import update, text, delete, and_, or_, func
-from sqlalchemy.pool import NullPool
-from sqlmodel import select
 import aiosqlite
 import gc
 import atexit
@@ -108,21 +106,41 @@ from markup import simple_md_to_html, DAY_START, DAY_END
 from sections import replace_between_markers, content_hash
 from db import Database
 from scheduler import startup as scheduler_startup, cleanup as scheduler_cleanup
-from models import (
-    User,
-    PendingUser,
-    RejectedUser,
-    Channel,
-    Setting,
-    Event,
-    MonthPage,
-    WeekendPage,
-    WeekPage,
-    Festival,
-    JobOutbox,
-    JobTask,
-    JobStatus,
-)
+
+
+def __getattr__(name: str):
+    if name in {
+        "User",
+        "PendingUser",
+        "RejectedUser",
+        "Channel",
+        "Setting",
+        "Event",
+        "MonthPage",
+        "WeekendPage",
+        "WeekPage",
+        "Festival",
+        "JobOutbox",
+        "JobTask",
+        "JobStatus",
+    }:
+        from models import (
+            User,
+            PendingUser,
+            RejectedUser,
+            Channel,
+            Setting,
+            Event,
+            MonthPage,
+            WeekendPage,
+            WeekPage,
+            Festival,
+            JobOutbox,
+            JobTask,
+            JobStatus,
+        )
+        return locals()[name]
+    raise AttributeError(name)
 
 from span import span
 
@@ -273,11 +291,6 @@ VK_TOKEN = os.getenv("VK_TOKEN")
 VK_USER_TOKEN = os.getenv("VK_USER_TOKEN")
 VK_AFISHA_GROUP_ID = os.getenv("VK_AFISHA_GROUP_ID")
 ICS_CONTENT_TYPE = "text/calendar; charset=utf-8"
-
-engine = create_async_engine(
-    f"sqlite+aiosqlite:///{DB_PATH}", poolclass=NullPool
-)
-async_session = async_sessionmaker(engine, expire_on_commit=False)
 ICS_CONTENT_DISP_TEMPLATE = 'inline; filename="{name}"'
 ICS_CALNAME = "kenigevents"
 
@@ -316,23 +329,23 @@ VK_POLL_OPTIONS = ["Пойду", "Подумаю", "Нет"]
 
 
 # user_id -> (event_id, field?) for editing session
-editing_sessions: TTLCache[int, tuple[int, str | None]] = TTLCache(maxsize=256, ttl=3600)
+editing_sessions: TTLCache[int, tuple[int, str | None]] = TTLCache(maxsize=64, ttl=3600)
 # user_id -> channel_id for daily time editing
-daily_time_sessions: TTLCache[int, int] = TTLCache(maxsize=256, ttl=3600)
+daily_time_sessions: TTLCache[int, int] = TTLCache(maxsize=64, ttl=3600)
 # waiting for VK group ID input
 vk_group_sessions: set[int] = set()
 # user_id -> section (today/added) for VK time update
-vk_time_sessions: TTLCache[int, str] = TTLCache(maxsize=256, ttl=3600)
+vk_time_sessions: TTLCache[int, str] = TTLCache(maxsize=64, ttl=3600)
 
 # superadmin user_id -> pending partner user_id
-partner_info_sessions: TTLCache[int, int] = TTLCache(maxsize=256, ttl=3600)
+partner_info_sessions: TTLCache[int, int] = TTLCache(maxsize=64, ttl=3600)
 # user_id -> (festival_id, field?) for festival editing
-festival_edit_sessions: TTLCache[int, tuple[int, str | None]] = TTLCache(maxsize=256, ttl=3600)
+festival_edit_sessions: TTLCache[int, tuple[int, str | None]] = TTLCache(maxsize=64, ttl=3600)
 
 # pending event text/photo input
-add_event_sessions: TTLCache[int, bool] = TTLCache(maxsize=256, ttl=3600)
+add_event_sessions: TTLCache[int, bool] = TTLCache(maxsize=64, ttl=3600)
 # waiting for a date for events listing
-events_date_sessions: TTLCache[int, bool] = TTLCache(maxsize=256, ttl=3600)
+events_date_sessions: TTLCache[int, bool] = TTLCache(maxsize=64, ttl=3600)
 
 # remove leading command like /addevent or /addevent@bot
 def strip_leading_cmd(text: str, cmds: tuple[str, ...] = ("addevent",)) -> str:
@@ -416,7 +429,7 @@ async def send_usage_fast(bot: Bot, chat_id: int) -> None:
             asyncio.create_task(_bg())
 
 # cache for settings values to reduce DB hits
-settings_cache: TTLCache[str, str | None] = TTLCache(maxsize=128, ttl=300)
+settings_cache: TTLCache[str, str | None] = TTLCache(maxsize=64, ttl=300)
 
 # queue for background event processing
 # limit the queue to avoid unbounded growth if parsing slows down
@@ -619,61 +632,61 @@ def build_channel_post_url(ch: Channel, message_id: int) -> str:
 
 
 async def get_tz_offset(db: Database) -> str:
-    async with db.get_session() as session:
-        result = await session.get(Setting, "tz_offset")
-        offset = result.value if result else "+00:00"
+    async with db.raw_conn() as conn:
+        row = await conn.execute_fetchone(
+            "SELECT value FROM setting WHERE key='tz_offset'"
+        )
+    offset = row[0] if row else "+00:00"
     global LOCAL_TZ
     LOCAL_TZ = offset_to_timezone(offset)
     return offset
 
 
 async def set_tz_offset(db: Database, value: str):
-    async with db.get_session() as session:
-        setting = await session.get(Setting, "tz_offset")
-        if setting:
-            setting.value = value
-        else:
-            setting = Setting(key="tz_offset", value=value)
-            session.add(setting)
-        await session.commit()
+    async with db.raw_conn() as conn:
+        await conn.execute(
+            "INSERT OR REPLACE INTO setting(key, value) VALUES('tz_offset', ?)",
+            (value,),
+        )
+        await conn.commit()
     global LOCAL_TZ
     LOCAL_TZ = offset_to_timezone(value)
 
 
 async def get_catbox_enabled(db: Database) -> bool:
-    async with db.get_session() as session:
-        setting = await session.get(Setting, "catbox_enabled")
-        return setting.value == "1" if setting else False
+    async with db.raw_conn() as conn:
+        row = await conn.execute_fetchone(
+            "SELECT value FROM setting WHERE key='catbox_enabled'"
+        )
+    return bool(row and row[0] == "1")
 
 
 async def set_catbox_enabled(db: Database, value: bool):
-    async with db.get_session() as session:
-        setting = await session.get(Setting, "catbox_enabled")
-        if setting:
-            setting.value = "1" if value else "0"
-        else:
-            setting = Setting(key="catbox_enabled", value="1" if value else "0")
-            session.add(setting)
-        await session.commit()
+    async with db.raw_conn() as conn:
+        await conn.execute(
+            "INSERT OR REPLACE INTO setting(key, value) VALUES('catbox_enabled', ?)",
+            ("1" if value else "0",),
+        )
+        await conn.commit()
     global CATBOX_ENABLED
     CATBOX_ENABLED = value
 
 
 async def get_vk_photos_enabled(db: Database) -> bool:
-    async with db.get_session() as session:
-        setting = await session.get(Setting, "vk_photos_enabled")
-        return setting.value == "1" if setting else False
+    async with db.raw_conn() as conn:
+        row = await conn.execute_fetchone(
+            "SELECT value FROM setting WHERE key='vk_photos_enabled'"
+        )
+    return bool(row and row[0] == "1")
 
 
 async def set_vk_photos_enabled(db: Database, value: bool):
-    async with db.get_session() as session:
-        setting = await session.get(Setting, "vk_photos_enabled")
-        if setting:
-            setting.value = "1" if value else "0"
-        else:
-            setting = Setting(key="vk_photos_enabled", value="1" if value else "0")
-            session.add(setting)
-        await session.commit()
+    async with db.raw_conn() as conn:
+        await conn.execute(
+            "INSERT OR REPLACE INTO setting(key, value) VALUES('vk_photos_enabled', ?)",
+            ("1" if value else "0",),
+        )
+        await conn.commit()
     global VK_PHOTOS_ENABLED
     VK_PHOTOS_ENABLED = value
 
@@ -4284,10 +4297,10 @@ BACKOFF_SCHEDULE = [30, 120, 600, 3600]
 
 
 TASK_LABELS = {
-    JobTask.telegraph_build: "Telegraph",
-    JobTask.vk_sync: "VK",
-    JobTask.month_pages: "Страницы месяца",
-    JobTask.weekend_pages: "Выходные",
+    "telegraph_build": "Telegraph",
+    "vk_sync": "VK",
+    "month_pages": "Страницы месяца",
+    "weekend_pages": "Выходные",
 }
 
 
@@ -4379,7 +4392,7 @@ async def _run_due_jobs_once(
         )
         start = _time.perf_counter()
         try:
-            handler = JOB_HANDLERS[job.task]
+            handler = JOB_HANDLERS[job.task.value]
             async with span(
                 "event_pipeline", step=job.task.value, event_id=job.event_id
             ):
@@ -4428,7 +4441,7 @@ async def _run_due_jobs_once(
                 session.add(obj)
                 await session.commit()
         if notify:
-            text = TASK_LABELS[job.task] + (" ✅" if status == JobStatus.done else " ❌")
+            text = TASK_LABELS[job.task.value] + (" ✅" if status == JobStatus.done else " ❌")
             if status == JobStatus.done and link:
                 text += f" {link}"
             elif status == JobStatus.error and err:
@@ -4745,10 +4758,10 @@ async def job_sync_vk_source_post(event_id: int, db: Database, bot: Bot | None) 
 
 
 JOB_HANDLERS = {
-    JobTask.telegraph_build: update_telegraph_event_page,
-    JobTask.vk_sync: job_sync_vk_source_post,
-    JobTask.month_pages: update_month_pages_for,
-    JobTask.weekend_pages: update_weekend_pages_for,
+    "telegraph_build": update_telegraph_event_page,
+    "vk_sync": job_sync_vk_source_post,
+    "month_pages": update_month_pages_for,
+    "weekend_pages": update_weekend_pages_for,
 }
 
 
@@ -6875,6 +6888,9 @@ async def build_daily_posts(
     tz: timezone,
     now: datetime | None = None,
 ) -> list[tuple[str, types.InlineKeyboardMarkup | None]]:
+    from sqlmodel import select
+    from models import Event, WeekendPage, MonthPage, Festival
+
     if now is None:
         now = datetime.now(tz)
     today = now.date()
@@ -7674,47 +7690,51 @@ async def send_daily_announcement(
                     continue
                 raise
     if record and now is None:
-        async with db.get_session() as session:
-            ch = await session.get(Channel, channel_id)
-            if ch:
-                ch.last_daily = (now or datetime.now(tz)).date().isoformat()
-                await session.commit()
+        async with db.raw_conn() as conn:
+            await conn.execute(
+                "UPDATE channel SET last_daily=? WHERE channel_id=?",
+                ((now or datetime.now(tz)).date().isoformat(), channel_id),
+            )
+            await conn.commit()
 
 
 async def daily_scheduler(db: Database, bot: Bot):
+    import asyncio, logging, datetime as dt
+
+    log = logging.getLogger(__name__)
     while True:
+        log.info("daily_scheduler: start")
         offset = await get_tz_offset(db)
         tz = offset_to_timezone(offset)
-        now = datetime.now(tz)
+        now = dt.datetime.now(tz)
         now_time = now.time().replace(second=0, microsecond=0)
-        async with db.get_session() as session:
-            stream = await session.stream_scalars(
-                select(Channel)
-                .where(Channel.daily_time.is_not(None))
-                .execution_options(yield_per=100)
+        async with db.raw_conn() as conn:
+            conn.row_factory = __import__("sqlite3").Row
+            rows = await conn.execute_fetchall(
+                """
+                SELECT channel_id, daily_time, last_daily
+                FROM channel
+                WHERE daily_time IS NOT NULL
+                """
             )
-            count = 0
-            async for ch in stream:
-                if not ch.daily_time:
-                    continue
+        for r in rows:
+            if not r["daily_time"]:
+                continue
+            try:
+                target_time = dt.datetime.strptime(r["daily_time"], "%H:%M").time()
+            except ValueError:
+                continue
+            if (r["last_daily"] or "") != now.date().isoformat() and now_time >= target_time:
                 try:
-                    target_time = datetime.strptime(ch.daily_time, "%H:%M").time()
-                except ValueError:
-                    continue
-                if (
-                    ch.last_daily or ""
-                ) != now.date().isoformat() and now_time >= target_time:
-                    try:
-                        await send_daily_announcement(db, bot, ch.channel_id, tz)
-                    except Exception as e:
-                        logging.error(
-                            "daily send failed for %s: %s", ch.channel_id, e
-                        )
-                count += 1
-                if count % 100 == 0:
-                    await asyncio.sleep(0)
-        await asyncio.sleep(0)
-        await asyncio.sleep(seconds_to_next_minute(datetime.now(tz)))
+                    await send_daily_announcement(db, bot, r["channel_id"], tz)
+                except Exception as e:
+                    log.exception(
+                        "daily_scheduler: channel %s failed: %s",
+                        r["channel_id"],
+                        e,
+                    )
+        log.info("daily_scheduler: done")
+        await asyncio.sleep(seconds_to_next_minute(dt.datetime.now(tz)))
 
 
 async def vk_scheduler(db: Database, bot: Bot, run_id: str | None = None):
@@ -8001,7 +8021,9 @@ async def init_db_and_scheduler(
     if DEBUG:
         app["qstat_task"] = asyncio.create_task(_log_queue_stats(app, db, bot))
     gc.collect()
-    print_current_rss()
+    import resource, os
+    rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+    logging.info("BOOT_OK rss=%.1f MB pid=%s", rss_mb, os.getpid())
 
 
 async def build_events_message(db: Database, target_date: date, tz: timezone, creator_id: int | None = None):
@@ -8526,7 +8548,7 @@ async def send_job_status(chat_id: int, event_id: int, db: Database, bot: Bot) -
         link = await _job_result_link(j.task, event_id, db)
         result = link if j.status == JobStatus.done else (j.last_error or "")
         lines.append(
-            f"{TASK_LABELS[j.task]} | {j.status.value} | {j.attempts} | {j.updated_at:%H:%M:%S} | {result}"
+            f"{TASK_LABELS[j.task.value]} | {j.status.value} | {j.attempts} | {j.updated_at:%H:%M:%S} | {result}"
         )
     markup = types.InlineKeyboardMarkup(
         inline_keyboard=[
