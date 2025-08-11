@@ -46,7 +46,7 @@ configure_logging()
 
 import psutil
 from datetime import date, datetime, timedelta, timezone, time
-from typing import Optional, Tuple, Iterable, Any
+from typing import Optional, Tuple, Iterable, Any, Callable, Awaitable
 from urllib.parse import urlparse, parse_qs
 import uuid
 import textwrap
@@ -2383,7 +2383,28 @@ async def handle_requests(message: types.Message, db: Database, bot: Bot):
 
 async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot):
     data = callback.data
-    if data.startswith("approve") or data.startswith("reject") or data.startswith("partner"):
+    if data.startswith("requeue:"):
+        eid = int(data.split(":", 1)[1])
+        now = datetime.utcnow()
+        async with db.get_session() as session:
+            res = await session.execute(
+                select(JobOutbox).where(
+                    JobOutbox.event_id == eid, JobOutbox.status == JobStatus.error
+                )
+            )
+            jobs = res.scalars().all()
+            for j in jobs:
+                j.status = JobStatus.pending
+                j.attempts += 1
+                j.updated_at = now
+                j.next_run_at = now
+                session.add(j)
+            await session.commit()
+        await callback.answer("Перезапущено")
+        await run_event_update_jobs(
+            db, bot, notify_chat_id=callback.message.chat.id, event_id=eid
+        )
+    elif data.startswith("approve") or data.startswith("reject") or data.startswith("partner"):
         uid = int(data.split(":", 1)[1])
         async with db.get_session() as session:
             p = await session.get(PendingUser, uid)
@@ -3942,7 +3963,7 @@ async def handle_add_event(
             display_source=False if source_link else True,
             source_channel=None,
 
-            bot=bot,
+            bot=None,
         )
     except Exception as e:
         await bot.send_message(message.chat.id, f"LLM error: {e}")
@@ -4009,6 +4030,13 @@ async def handle_add_event(
             reply_markup=markup,
         )
         await notify_event_added(db, bot, user, saved, added)
+        await bot.send_message(
+            message.chat.id,
+            f"Публикация запущена: Telegraph ⏳, VK ⏳, Страницы месяца ⏳, Выходные ⏳. Статус: /status {saved.id}",
+        )
+        await run_event_update_jobs(
+            db, bot, notify_chat_id=message.chat.id, event_id=saved.id
+        )
     logging.info("handle_add_event finished for user %s", message.from_user.id)
 
 
@@ -4056,7 +4084,6 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
         event, added = await upsert_event(session, event)
 
     await schedule_event_update_tasks(db, event)
-    await run_event_update_jobs(db, bot)
     lines = [
         f"title: {event.title}",
         f"date: {event.date}",
@@ -4098,6 +4125,13 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
         reply_markup=markup,
     )
     await notify_event_added(db, bot, user, event, added)
+    await bot.send_message(
+        message.chat.id,
+        f"Публикация запущена: Telegraph ⏳, VK ⏳, Страницы месяца ⏳, Выходные ⏳. Статус: /status {event.id}",
+    )
+    await run_event_update_jobs(
+        db, bot, notify_chat_id=message.chat.id, event_id=event.id
+    )
     logging.info("handle_add_event_raw finished for user %s", message.from_user.id)
 
 
@@ -4188,6 +4222,40 @@ async def add_event_queue_worker(db: Database, bot: Bot):
 BACKOFF_SCHEDULE = [30, 120, 600, 3600]
 
 
+TASK_LABELS = {
+    JobTask.telegraph_build: "Telegraph",
+    JobTask.vk_sync: "VK",
+    JobTask.month_pages: "Страницы месяца",
+    JobTask.weekend_pages: "Выходные",
+}
+
+
+async def _job_result_link(task: JobTask, event_id: int, db: Database) -> str | None:
+    async with db.get_session() as session:
+        ev = await session.get(Event, event_id)
+        if not ev:
+            return None
+        if task == JobTask.telegraph_build:
+            return ev.telegraph_url
+        if task == JobTask.vk_sync:
+            return ev.source_vk_post_url
+        if task == JobTask.month_pages:
+            d = parse_iso_date(ev.date.split("..", 1)[0])
+            month_key = d.strftime("%Y-%m") if d else None
+            if month_key:
+                page = await session.get(MonthPage, month_key)
+                return page.url if page else None
+            return None
+        if task == JobTask.weekend_pages:
+            d = parse_iso_date(ev.date.split("..", 1)[0])
+            w_start = weekend_start_for_date(d) if d else None
+            if w_start:
+                page = await session.get(WeekendPage, w_start.isoformat())
+                return page.url if page else None
+            return None
+    return None
+
+
 async def reconcile_job_outbox(db: Database) -> None:
     now = datetime.utcnow()
     async with db.get_session() as session:
@@ -4199,7 +4267,12 @@ async def reconcile_job_outbox(db: Database) -> None:
         await session.commit()
 
 
-async def _run_due_jobs_once(db: Database, bot: Bot) -> int:
+async def _run_due_jobs_once(
+    db: Database,
+    bot: Bot,
+    notify: Callable[[str], Awaitable[None]] | None = None,
+    only_event: int | None = None,
+) -> int:
     now = datetime.utcnow()
     async with db.get_session() as session:
         stmt = (
@@ -4210,6 +4283,8 @@ async def _run_due_jobs_once(db: Database, bot: Bot) -> int:
             )
             .order_by(JobOutbox.id)
         )
+        if only_event is not None:
+            stmt = stmt.where(JobOutbox.event_id == only_event)
         jobs = (await session.execute(stmt)).scalars().all()
     processed = 0
     for job in jobs:
@@ -4238,12 +4313,14 @@ async def _run_due_jobs_once(db: Database, bot: Bot) -> int:
                 "event_pipeline", step=job.task.value, event_id=job.event_id
             ):
                 await handler(job.event_id, db, bot)
+            link = await _job_result_link(job.task, job.event_id, db)
             status = JobStatus.done
             err = None
         except Exception as exc:  # pragma: no cover - log and backoff
             logging.exception("job %s failed", job.id)
             status = JobStatus.error
             err = str(exc)
+            link = None
         async with db.get_session() as session:
             obj = await session.get(JobOutbox, job.id)
             if obj:
@@ -4258,6 +4335,13 @@ async def _run_due_jobs_once(db: Database, bot: Bot) -> int:
                     obj.next_run_at = datetime.utcnow() + timedelta(seconds=delay)
                 session.add(obj)
                 await session.commit()
+        if notify:
+            text = TASK_LABELS[job.task] + (" ✅" if status == JobStatus.done else " ❌")
+            if status == JobStatus.done and link:
+                text += f" {link}"
+            elif status == JobStatus.error and err:
+                text += f" {err.splitlines()[0]}"
+            await notify(text)
         processed += 1
     return processed
 
@@ -4271,8 +4355,20 @@ async def job_outbox_worker(db: Database, bot: Bot, interval: float = 2.0):
         await asyncio.sleep(interval)
 
 
-async def run_event_update_jobs(db: Database, bot: Bot) -> None:
-    while await _run_due_jobs_once(db, bot):
+async def run_event_update_jobs(
+    db: Database,
+    bot: Bot,
+    *,
+    notify_chat_id: int | None = None,
+    event_id: int | None = None,
+) -> None:
+    async def notifier(text: str) -> None:
+        if notify_chat_id is not None:
+            await bot.send_message(notify_chat_id, text)
+
+    while await _run_due_jobs_once(
+        db, bot, notifier if notify_chat_id is not None else None, event_id
+    ):
         await asyncio.sleep(0)
 
 
@@ -8234,6 +8330,33 @@ async def collect_festival_telegraph_stats(db: Database) -> list[str]:
     return [f"{name}: {views}" for name, views in stats]
 
 
+async def send_job_status(chat_id: int, event_id: int, db: Database, bot: Bot) -> None:
+    async with db.get_session() as session:
+        stmt = select(JobOutbox).where(JobOutbox.event_id == event_id).order_by(JobOutbox.id)
+        jobs = (await session.execute(stmt)).scalars().all()
+    if not jobs:
+        await bot.send_message(chat_id, "Нет задач")
+        return
+    lines = ["task | status | attempts | updated | result"]
+    for j in jobs:
+        link = await _job_result_link(j.task, event_id, db)
+        result = link if j.status == JobStatus.done else (j.last_error or "")
+        lines.append(
+            f"{TASK_LABELS[j.task]} | {j.status.value} | {j.attempts} | {j.updated_at:%H:%M:%S} | {result}"
+        )
+    markup = types.InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                types.InlineKeyboardButton(
+                    text="🔁 Перезапустить невыполненные",
+                    callback_data=f"requeue:{event_id}",
+                )
+            ]
+        ]
+    )
+    await bot.send_message(chat_id, "\n".join(lines), reply_markup=markup)
+
+
 async def fetch_vk_post_stats(
     post_url: str, db: Database | None = None, bot: Bot | None = None
 ) -> tuple[int | None, int | None]:
@@ -8286,6 +8409,10 @@ async def collect_festival_vk_stats(db: Database) -> list[str]:
 
 
 async def handle_status(message: types.Message, db: Database, bot: Bot):
+    parts = (message.text or "").split()
+    if len(parts) > 1 and parts[1].isdigit():
+        await send_job_status(message.chat.id, int(parts[1]), db, bot)
+        return
     async with db.get_session() as session:
         user = await session.get(User, message.from_user.id)
         if not user or not user.is_superadmin:
@@ -8835,7 +8962,7 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
         creator_id=user.user_id,
         source_channel=channel_name,
 
-        bot=bot,
+        bot=None,
 
     )
     logging.info("forward parsed %d events", len(results))
@@ -8890,6 +9017,13 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
                 reply_markup=markup,
             )
             await notify_event_added(db, bot, user, saved, added)
+            await bot.send_message(
+                message.chat.id,
+                f"Публикация запущена: Telegraph ⏳, VK ⏳, Страницы месяца ⏳, Выходные ⏳. Статус: /status {saved.id}",
+            )
+            await run_event_update_jobs(
+                db, bot, notify_chat_id=message.chat.id, event_id=saved.id
+            )
         except Exception as e:
             logging.error("failed to send event response: %s", e)
 
@@ -9323,6 +9457,7 @@ def create_app() -> web.Application:
         or c.data.startswith("festdel:")
         or c.data.startswith("setfest:")
         or c.data.startswith("festdays:")
+        or c.data.startswith("requeue:")
     ,
     )
     dp.message.register(tz_wrapper, Command("tz"))

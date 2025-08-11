@@ -29,6 +29,9 @@ from main import (
     Festival,
     MonthPage,
     WeekendPage,
+    JobOutbox,
+    JobTask,
+    JobStatus,
     create_app,
     handle_register,
     handle_start,
@@ -6885,5 +6888,151 @@ async def test_festival_dates_manual(tmp_path: Path):
     start, end = festival_dates(fest, [])
     assert start == date(2025, 8, 1)
     assert end == date(2025, 8, 3)
+
+
+@pytest.mark.asyncio
+async def test_publication_plan_and_updates(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    weekend_day = date.today()
+    while weekend_day.weekday() != 5:
+        weekend_day += timedelta(days=1)
+    weekend_str = weekend_day.isoformat()
+
+    async def fake_tele(event_id, db_obj, bot_obj):
+        async with db_obj.get_session() as s:
+            ev = await s.get(Event, event_id)
+            ev.telegraph_url = "t"
+            s.add(ev)
+            await s.commit()
+
+    async def fake_vk(event_id, db_obj, bot_obj):
+        async with db_obj.get_session() as s:
+            ev = await s.get(Event, event_id)
+            ev.source_vk_post_url = "v"
+            s.add(ev)
+            await s.commit()
+
+    async def fake_month(event_id, db_obj, bot_obj):
+        async with db_obj.get_session() as s:
+            ev = await s.get(Event, event_id)
+            key = ev.date[:7]
+            s.merge(MonthPage(month=key, url="m", path="p"))
+            await s.commit()
+
+    async def fake_week(event_id, db_obj, bot_obj):
+        async with db_obj.get_session() as s:
+            ev = await s.get(Event, event_id)
+            start = main.weekend_start_for_date(main.parse_iso_date(ev.date))
+            s.merge(WeekendPage(start=start.isoformat(), url="w", path="p"))
+            await s.commit()
+
+    monkeypatch.setitem(main.JOB_HANDLERS, JobTask.telegraph_build, fake_tele)
+    monkeypatch.setitem(main.JOB_HANDLERS, JobTask.vk_sync, fake_vk)
+    monkeypatch.setitem(main.JOB_HANDLERS, JobTask.month_pages, fake_month)
+    monkeypatch.setitem(main.JOB_HANDLERS, JobTask.weekend_pages, fake_week)
+
+    msg = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "M"},
+            "text": f"/addevent_raw Party|{weekend_str}|18:00|Club",
+        }
+    )
+
+    await main.handle_add_event_raw(msg, db, bot)
+
+    texts = [m[1] for m in bot.messages]
+    assert "Публикация запущена" in texts[1]
+    assert "Telegraph ✅ t" in texts[2]
+    assert "VK ✅ v" in texts[3]
+    assert "Страницы месяца ✅ m" in texts[4]
+    assert "Выходные ✅ w" in texts[5]
+
+
+@pytest.mark.asyncio
+async def test_status_and_requeue(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async def noop(*args, **kwargs):
+        return None
+
+    for task in list(main.JOB_HANDLERS):
+        monkeypatch.setitem(main.JOB_HANDLERS, task, noop)
+
+    weekend_day = date.today()
+    while weekend_day.weekday() != 5:
+        weekend_day += timedelta(days=1)
+    weekend_str = weekend_day.isoformat()
+
+    msg = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "M"},
+            "text": f"/addevent_raw Party|{weekend_str}|18:00|Club",
+        }
+    )
+
+    await main.handle_add_event_raw(msg, db, bot)
+
+    async with db.get_session() as session:
+        ev = (await session.execute(select(Event))).scalars().first()
+        job = (
+            await session.execute(
+                select(JobOutbox).where(
+                    JobOutbox.event_id == ev.id,
+                    JobOutbox.task == JobTask.telegraph_build,
+                )
+            )
+        ).scalars().one()
+        job.status = JobStatus.error
+        job.last_error = "fail"
+        job.attempts = 1
+        await session.commit()
+
+    status_msg = types.Message.model_validate(
+        {
+            "message_id": 2,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "M"},
+            "text": f"/status {ev.id}",
+        }
+    )
+    await main.handle_status(status_msg, db, bot)
+    text = bot.messages[-1][1].lower()
+    assert "telegraph" in text and "error" in text
+    markup = bot.messages[-1][2]["reply_markup"]
+    assert any(
+        btn.callback_data == f"requeue:{ev.id}"
+        for row in markup.inline_keyboard
+        for btn in row
+    )
+
+    async def fake_run(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(main, "run_event_update_jobs", fake_run)
+    cb = types.CallbackQuery.model_validate(
+        {
+            "id": "1",
+            "from": {"id": 1, "is_bot": False, "first_name": "M"},
+            "message": {"message_id": 3, "date": 0, "chat": {"id": 1, "type": "private"}},
+            "data": f"requeue:{ev.id}",
+        }
+    )
+    await main.process_request(cb, db, bot)
+    async with db.get_session() as session:
+        job = await session.get(JobOutbox, job.id)
+        assert job.status == JobStatus.pending
+        assert job.attempts == 2
 
 
