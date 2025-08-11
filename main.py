@@ -91,7 +91,7 @@ from net import http_call
 
 from functools import partial, lru_cache
 from contextlib import asynccontextmanager, contextmanager
-from collections import defaultdict
+from collections import defaultdict, deque
 import asyncio
 import contextlib
 import random
@@ -151,6 +151,55 @@ _partner_last_run: date | None = None
 _P = psutil.Process(os.getpid())
 
 _startup_handler_registered = False
+
+# in-memory diagnostic buffers
+START_TIME = _time.time()
+LOG_BUFFER: deque[tuple[datetime, str, str]] = deque(maxlen=200)
+ERROR_BUFFER: deque[dict[str, Any]] = deque(maxlen=50)
+JOB_HISTORY: deque[dict[str, Any]] = deque(maxlen=20)
+LAST_RUN_ID: str | None = None
+
+
+class MemoryLogHandler(logging.Handler):
+    """Store recent log records in memory for diagnostics."""
+
+    _job_id_re = re.compile(r"job_id=(\S+)")
+    _run_id_re = re.compile(r"run_id=(\S+)")
+    _took_re = re.compile(r"took_ms=(\d+)")
+
+    def emit(self, record: logging.LogRecord) -> None:  # pragma: no cover - simple
+        msg = record.getMessage()
+        ts = datetime.utcnow()
+        LOG_BUFFER.append((ts, record.levelname, msg))
+        if record.levelno >= logging.ERROR:
+            err_type = record.exc_info[0].__name__ if record.exc_info else record.levelname
+            ERROR_BUFFER.append(
+                {
+                    "time": ts,
+                    "type": err_type,
+                    "where": f"{record.pathname}:{record.lineno}",
+                    "message": msg,
+                }
+            )
+        if msg.startswith("JOB_EXECUTED") or msg.startswith("JOB_ERROR"):
+            job_id = self._job_id_re.search(msg)
+            run_id = self._run_id_re.search(msg)
+            took = self._took_re.search(msg)
+            status = "ok" if msg.startswith("JOB_EXECUTED") else "err"
+            JOB_HISTORY.append(
+                {
+                    "id": job_id.group(1) if job_id else "?",
+                    "when": ts,
+                    "status": status,
+                    "took_ms": int(took.group(1)) if took else 0,
+                }
+            )
+            if run_id:
+                global LAST_RUN_ID
+                LAST_RUN_ID = run_id.group(1)
+
+
+logging.getLogger().addHandler(MemoryLogHandler())
 
 @asynccontextmanager
 async def perf(name: str, **details):
@@ -8158,6 +8207,71 @@ async def collect_festival_vk_stats(db: Database) -> list[str]:
     return [f"{name}: {views}, {reach}" for name, views, reach in stats]
 
 
+async def handle_status(message: types.Message, db: Database, bot: Bot):
+    async with db.get_session() as session:
+        user = await session.get(User, message.from_user.id)
+        if not user or not user.is_superadmin:
+            await bot.send_message(message.chat.id, "Not authorized")
+            return
+    uptime = time.time() - START_TIME
+    rss = psutil.Process().memory_info().rss / (1024 * 1024)
+    qlen = add_event_queue.qsize()
+    jobs = list(JOB_HISTORY)[-5:]
+    lines = [
+        f"uptime: {int(uptime)}s",
+        f"rss_mb: {rss:.0f}",
+        f"queue_len: {qlen}",
+    ]
+    if jobs:
+        lines.append("last_jobs:")
+        for j in reversed(jobs):
+            when = j["when"].strftime("%H:%M:%S")
+            lines.append(f"- {j['id']} {when} {j['status']} {j['took_ms']}ms")
+    if LAST_RUN_ID:
+        lines.append(f"last_run_id: {LAST_RUN_ID}")
+    await bot.send_message(message.chat.id, "\n".join(lines))
+
+
+async def handle_trace(message: types.Message, db: Database, bot: Bot):
+    async with db.get_session() as session:
+        user = await session.get(User, message.from_user.id)
+        if not user or not user.is_superadmin:
+            await bot.send_message(message.chat.id, "Not authorized")
+            return
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2:
+        await bot.send_message(message.chat.id, "Usage: /trace <run_id>")
+        return
+    run_id = parts[1].strip()
+    lines = []
+    for ts, level, msg in LOG_BUFFER:
+        if run_id in msg:
+            lines.append(f"{ts.strftime('%H:%M:%S')} {level[0]} {msg}")
+    await bot.send_message(message.chat.id, "\n".join(lines) or "No trace")
+
+
+async def handle_last_errors(message: types.Message, db: Database, bot: Bot):
+    async with db.get_session() as session:
+        user = await session.get(User, message.from_user.id)
+        if not user or not user.is_superadmin:
+            await bot.send_message(message.chat.id, "Not authorized")
+            return
+    parts = message.text.split()
+    count = 5
+    if len(parts) > 1:
+        try:
+            count = min(int(parts[1]), len(ERROR_BUFFER))
+        except Exception:
+            pass
+    errs = list(ERROR_BUFFER)[-count:]
+    lines = []
+    for e in reversed(errs):
+        lines.append(
+            f"{e['time'].strftime('%H:%M:%S')} {e['type']} {e['where']}"
+        )
+    await bot.send_message(message.chat.id, "\n".join(lines) or "No errors")
+
+
 async def handle_stats(message: types.Message, db: Database, bot: Bot):
     parts = message.text.split()
     mode = parts[1] if len(parts) > 1 else ""
@@ -9082,6 +9196,15 @@ def create_app() -> web.Application:
         logging.info("vk_link_cmd_wrapper start: user=%s", message.from_user.id)
         await handle_vk_link_command(message, db, bot)
 
+    async def status_wrapper(message: types.Message):
+        await handle_status(message, db, bot)
+
+    async def trace_wrapper(message: types.Message):
+        await handle_trace(message, db, bot)
+
+    async def last_errors_wrapper(message: types.Message):
+        await handle_last_errors(message, db, bot)
+
     dp.message.register(start_wrapper, Command("start"))
     dp.message.register(register_wrapper, Command("register"))
     dp.message.register(requests_wrapper, Command("requests"))
@@ -9151,6 +9274,9 @@ def create_app() -> web.Application:
 
     dp.message.register(pages_wrapper, Command("pages"))
     dp.message.register(stats_wrapper, Command("stats"))
+    dp.message.register(status_wrapper, Command("status"))
+    dp.message.register(trace_wrapper, Command("trace"))
+    dp.message.register(last_errors_wrapper, Command("last_errors"))
     dp.message.register(users_wrapper, Command("users"))
     dp.message.register(dumpdb_wrapper, Command("dumpdb"))
     dp.message.register(restore_wrapper, Command("restore"))
