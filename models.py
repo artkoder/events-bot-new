@@ -47,6 +47,10 @@ class Setting(SQLModel, table=True):
 class Event(SQLModel, table=True):
     __table_args__ = (
         Index("idx_event_date", "date"),
+        Index("idx_event_end_date", "end_date"),
+        Index("idx_event_city", "city"),
+        Index("idx_event_type", "event_type"),
+        Index("idx_event_is_free", "is_free"),
         Index("ix_event_date_city", "date", "city"),
         Index("ix_event_date_festival", "date", "festival"),
         Index("ix_event_content_hash", "content_hash"),
