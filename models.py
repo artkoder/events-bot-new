@@ -163,6 +163,7 @@ class JobStatus(str, Enum):
 class JobOutbox(SQLModel, table=True):
     __table_args__ = (
         Index("ix_job_outbox_event_task", "event_id", "task"),
+        Index("ix_job_outbox_status_next_run_at", "status", "next_run_at"),
         {"extend_existing": True},
     )
 
