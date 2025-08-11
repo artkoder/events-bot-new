@@ -121,6 +121,9 @@ from models import (
     WeekendPage,
     WeekPage,
     Festival,
+    JobOutbox,
+    JobTask,
+    JobStatus,
 )
 
 from span import span
@@ -415,8 +418,6 @@ add_event_queue: asyncio.Queue[tuple[str, types.Message, bool]] = asyncio.Queue(
 working: set[asyncio.Task] = set()
 
 # queue for post-commit event update jobs
-event_update_queue: asyncio.Queue[tuple[str, int]] = asyncio.Queue()
-EVENT_UPDATE_SEMAPHORE = asyncio.Semaphore(2)
 
 
 async def _log_queue_stats(app: web.Application, db: Database, bot: Bot):
@@ -3587,18 +3588,53 @@ async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
     return new, True
 
 
-async def schedule_event_update_tasks(ev: Event) -> None:
+async def enqueue_job(
+    db: Database, event_id: int, task: JobTask, payload: dict | None = None
+) -> None:
+    async with db.get_session() as session:
+        stmt = select(JobOutbox).where(
+            JobOutbox.event_id == event_id, JobOutbox.task == task
+        )
+        res = await session.execute(stmt)
+        job = res.scalar_one_or_none()
+        now = datetime.utcnow()
+        if job and job.status in {
+            JobStatus.pending,
+            JobStatus.running,
+            JobStatus.done,
+        }:
+            return
+        if job:
+            job.status = JobStatus.pending
+            job.payload = payload
+            job.attempts = 0
+            job.last_error = None
+            job.updated_at = now
+            job.next_run_at = now
+            session.add(job)
+        else:
+            session.add(
+                JobOutbox(
+                    event_id=event_id,
+                    task=task,
+                    payload=payload,
+                    status=JobStatus.pending,
+                    updated_at=now,
+                    next_run_at=now,
+                )
+            )
+        await session.commit()
+
+
+async def schedule_event_update_tasks(db: Database, ev: Event) -> None:
     eid = ev.id
-    await event_update_queue.put(("update_telegraph_event_page", eid))
-    if ev.festival:
-        await event_update_queue.put(("update_festival_nav_if_needed", eid))
-    await event_update_queue.put(("sync_vk_source_post", eid))
-    await event_update_queue.put(("update_month_pages_for", eid))
+    await enqueue_job(db, eid, JobTask.telegraph_build)
+    await enqueue_job(db, eid, JobTask.vk_sync)
+    await enqueue_job(db, eid, JobTask.month_pages)
     d = parse_iso_date(ev.date)
     w_start = weekend_start_for_date(d) if d else None
     if w_start:
-        await event_update_queue.put(("update_weekend_pages_for", eid))
-    await event_update_queue.put(("pipeline_done", eid))
+        await enqueue_job(db, eid, JobTask.weekend_pages)
     logging.info("scheduled event tasks for %s", eid)
 
 
@@ -3824,7 +3860,7 @@ async def add_events_from_text(
                 "event %s with id %s", "added" if added else "updated", saved.id
             )
 
-            await schedule_event_update_tasks(saved)
+            await schedule_event_update_tasks(db, saved)
             lines = [
                 f"title: {saved.title}",
                 f"date: {saved.date}",
@@ -4019,9 +4055,8 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
     async with db.get_session() as session:
         event, added = await upsert_event(session, event)
 
-    await schedule_event_update_tasks(event)
-    if os.getenv("EVENT_UPDATE_SYNC") == "1":
-        await run_event_update_jobs(db, bot)
+    await schedule_event_update_tasks(db, event)
+    await run_event_update_jobs(db, bot)
     lines = [
         f"title: {event.title}",
         f"date: {event.date}",
@@ -4150,43 +4185,95 @@ async def add_event_queue_worker(db: Database, bot: Bot):
             logging.info("add_event total=%.0f ms", dur)
 
 
-async def _run_event_update_task(
-    name: str, event_id: int, db: Database, bot: Bot, timeout: float = 30.0
-) -> None:
-    func = EVENT_UPDATE_TASKS[name]
-    for attempt in range(3):
-        try:
-            async with span("event_pipeline", step=name, event_id=event_id):
-                await asyncio.wait_for(func(event_id, db, bot), timeout=timeout)
-            break
-        except Exception as exc:
-            delay = (2 ** attempt) + random.random()
-            logging.warning(
-                "PIPELINE_FAIL step=%s event=%s error=%s retry=%d",
-                name,
-                event_id,
-                exc,
-                attempt,
+BACKOFF_SCHEDULE = [30, 120, 600, 3600]
+
+
+async def reconcile_job_outbox(db: Database) -> None:
+    now = datetime.utcnow()
+    async with db.get_session() as session:
+        await session.execute(
+            update(JobOutbox)
+            .where(JobOutbox.status == JobStatus.running)
+            .values(status=JobStatus.error, next_run_at=now, updated_at=now)
+        )
+        await session.commit()
+
+
+async def _run_due_jobs_once(db: Database, bot: Bot) -> int:
+    now = datetime.utcnow()
+    async with db.get_session() as session:
+        stmt = (
+            select(JobOutbox)
+            .where(
+                JobOutbox.status.in_([JobStatus.pending, JobStatus.error]),
+                JobOutbox.next_run_at <= now,
             )
-            await asyncio.sleep(delay)
+            .order_by(JobOutbox.id)
+        )
+        jobs = (await session.execute(stmt)).scalars().all()
+    processed = 0
+    for job in jobs:
+        async with db.get_session() as session:
+            exists_stmt = (
+                select(JobOutbox.id)
+                .where(
+                    JobOutbox.event_id == job.event_id,
+                    JobOutbox.id < job.id,
+                    JobOutbox.status.in_([JobStatus.pending, JobStatus.running]),
+                )
+                .limit(1)
+            )
+            if (await session.execute(exists_stmt)).first():
+                continue
+            obj = await session.get(JobOutbox, job.id)
+            if not obj or obj.status not in (JobStatus.pending, JobStatus.error):
+                continue
+            obj.status = JobStatus.running
+            obj.updated_at = datetime.utcnow()
+            session.add(obj)
+            await session.commit()
+        try:
+            handler = JOB_HANDLERS[job.task]
+            async with span(
+                "event_pipeline", step=job.task.value, event_id=job.event_id
+            ):
+                await handler(job.event_id, db, bot)
+            status = JobStatus.done
+            err = None
+        except Exception as exc:  # pragma: no cover - log and backoff
+            logging.exception("job %s failed", job.id)
+            status = JobStatus.error
+            err = str(exc)
+        async with db.get_session() as session:
+            obj = await session.get(JobOutbox, job.id)
+            if obj:
+                obj.status = status
+                obj.last_error = err
+                obj.updated_at = datetime.utcnow()
+                if status == JobStatus.done:
+                    obj.next_run_at = datetime.utcnow()
+                else:
+                    obj.attempts += 1
+                    delay = BACKOFF_SCHEDULE[min(obj.attempts - 1, len(BACKOFF_SCHEDULE) - 1)]
+                    obj.next_run_at = datetime.utcnow() + timedelta(seconds=delay)
+                session.add(obj)
+                await session.commit()
+        processed += 1
+    return processed
 
 
-async def event_update_queue_worker(db: Database, bot: Bot):
+async def job_outbox_worker(db: Database, bot: Bot, interval: float = 2.0):
     while True:
-        name, event_id = await event_update_queue.get()
-        async with EVENT_UPDATE_SEMAPHORE:
-            await _run_event_update_task(name, event_id, db, bot)
-        event_update_queue.task_done()
+        try:
+            await _run_due_jobs_once(db, bot)
+        except Exception:  # pragma: no cover - log unexpected errors
+            logging.exception("job_outbox_worker cycle failed")
+        await asyncio.sleep(interval)
 
 
 async def run_event_update_jobs(db: Database, bot: Bot) -> None:
-    """Run all pending event update jobs sequentially (for tests)."""
-    while not event_update_queue.empty():
-        name, event_id = await event_update_queue.get()
-        try:
-            await _run_event_update_task(name, event_id, db, bot)
-        finally:
-            event_update_queue.task_done()
+    while await _run_due_jobs_once(db, bot):
+        await asyncio.sleep(0)
 
 
 async def update_telegraph_event_page(event_id: int, db: Database, bot: Bot | None) -> None:
@@ -4314,12 +4401,6 @@ async def update_month_pages_for(event_id: int, db: Database, bot: Bot | None) -
     if not ev:
         return
 
-    token = get_telegraph_token()
-    if not token:
-        logging.error("Telegraph token unavailable")
-        return
-    tg = Telegraph(access_token=token)
-
     start_date = parse_iso_date(ev.date.split("..", 1)[0])
     end_date = None
     if ".." in ev.date:
@@ -4335,9 +4416,19 @@ async def update_month_pages_for(event_id: int, db: Database, bot: Bot | None) -
             for i in range(1, span_days + 1):
                 dates.append(start_date + timedelta(days=i))
 
+    token = get_telegraph_token()
+    if not token:
+        logging.error("Telegraph token unavailable")
+        for d in dates:
+            await sync_month_page(db, d.strftime("%Y-%m"))
+        return
+    tg = Telegraph(access_token=token)
+
     for d in dates:
         month_key = d.strftime("%Y-%m")
-        await patch_month_page_for_date(db, tg, month_key, d)
+        changed = await patch_month_page_for_date(db, tg, month_key, d)
+        if not changed:
+            await sync_month_page(db, month_key)
 
 
 async def update_weekend_pages_for(event_id: int, db: Database, bot: Bot | None) -> None:
@@ -4373,25 +4464,11 @@ async def job_sync_vk_source_post(event_id: int, db: Database, bot: Bot | None) 
                 await session.commit()
 
 
-async def log_pipeline_done(event_id: int, db: Database, bot: Bot | None) -> None:
-    async with db.get_session() as session:
-        ev = await session.get(Event, event_id)
-    if ev:
-        logging.info(
-            "PIPELINE_DONE event=%s telegraph=%s vk=%s",
-            ev.id,
-            ev.telegraph_url,
-            ev.source_vk_post_url,
-        )
-
-
-EVENT_UPDATE_TASKS = {
-    "update_telegraph_event_page": update_telegraph_event_page,
-    "update_month_pages_for": update_month_pages_for,
-    "update_weekend_pages_for": update_weekend_pages_for,
-    "update_festival_nav_if_needed": update_festival_nav_if_needed,
-    "sync_vk_source_post": job_sync_vk_source_post,
-    "pipeline_done": log_pipeline_done,
+JOB_HANDLERS = {
+    JobTask.telegraph_build: update_telegraph_event_page,
+    JobTask.vk_sync: job_sync_vk_source_post,
+    JobTask.month_pages: update_month_pages_for,
+    JobTask.weekend_pages: update_weekend_pages_for,
 }
 
 
@@ -5727,7 +5804,7 @@ async def build_weekend_page_content(
 
 
 async def _sync_weekend_page_inner(
-    db: Database, start: str, update_links: bool = False, post_vk: bool = True
+    db: Database, start: str, update_links: bool = True, post_vk: bool = True
 ):
     async with HEAVY_SEMAPHORE:
         token = get_telegraph_token()
@@ -5763,7 +5840,7 @@ async def _sync_weekend_page_inner(
                     rough,
                 )
                 page.content_hash = hash_new
-            elif page.content_hash == hash_new:
+            elif page.content_hash == hash_new and not update_links:
                 logging.debug("telegraph_update skipped (no changes)")
             else:
                 start_t = _time.perf_counter()
@@ -5803,13 +5880,13 @@ async def _sync_weekend_page_inner(
         for w in weekends:
             if w.start != start:
                 await sync_weekend_page(
-                    db, w.start, update_links=False, post_vk=False
+                    db, w.start, update_links=True, post_vk=False
                 )
                 await asyncio.sleep(0)
 
 
 async def sync_weekend_page(
-    db: Database, start: str, update_links: bool = False, post_vk: bool = True
+    db: Database, start: str, update_links: bool = True, post_vk: bool = True
 ):
     async with _page_locks[f"week:{start}"]:
         await _sync_weekend_page_inner(db, start, update_links, post_vk)
@@ -7639,10 +7716,8 @@ async def init_db_and_scheduler(
     app["daily_task"] = asyncio.create_task(daily_scheduler(db, bot))
     scheduler_startup(db, bot)
     app["add_event_worker"] = asyncio.create_task(add_event_queue_worker(db, bot))
-    app["event_update_workers"] = [
-        asyncio.create_task(event_update_queue_worker(db, bot))
-        for _ in range(2)
-    ]
+    await reconcile_job_outbox(db)
+    app["job_worker"] = asyncio.create_task(job_outbox_worker(db, bot))
     if DEBUG:
         app["qstat_task"] = asyncio.create_task(_log_queue_stats(app, db, bot))
     gc.collect()
@@ -9331,12 +9406,10 @@ def create_app() -> web.Application:
             app["add_event_worker"].cancel()
             with contextlib.suppress(Exception):
                 await app["add_event_worker"]
-        if "event_update_workers" in app:
-            for t in app["event_update_workers"]:
-                t.cancel()
-            for t in app["event_update_workers"]:
-                with contextlib.suppress(Exception):
-                    await t
+        if "job_worker" in app:
+            app["job_worker"].cancel()
+            with contextlib.suppress(Exception):
+                await app["job_worker"]
         if "daily_task" in app:
             app["daily_task"].cancel()
             with contextlib.suppress(Exception):
