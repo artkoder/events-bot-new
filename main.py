@@ -441,6 +441,10 @@ HEAVY_SEMAPHORE = asyncio.Semaphore(1)
 # Timeout for OpenAI 4o requests (in seconds)
 FOUR_O_TIMEOUT = float(os.getenv("FOUR_O_TIMEOUT", "60"))
 
+# Limit prompt/response sizes for LLM calls (characters)
+FOUR_O_PROMPT_LIMIT = int(os.getenv("FOUR_O_PROMPT_LIMIT", "4000"))
+FOUR_O_RESPONSE_LIMIT = int(os.getenv("FOUR_O_RESPONSE_LIMIT", "1000"))
+
 
 # Run blocking Telegraph API calls with a timeout and simple retries
 async def telegraph_call(func, /, *args, retries: int = 3, **kwargs):
@@ -2038,7 +2042,13 @@ async def parse_event_via_4o(
     raise RuntimeError("bad 4o response")
 
 
-async def ask_4o(text: str) -> str:
+async def ask_4o(
+    text: str,
+    *,
+    system_prompt: str | None = None,
+    response_format: dict | None = None,
+    max_tokens: int = 1000,
+) -> str:
     token = os.getenv("FOUR_O_TOKEN")
     if not token:
         raise RuntimeError("FOUR_O_TOKEN is missing")
@@ -2047,13 +2057,23 @@ async def ask_4o(text: str) -> str:
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
     }
-    payload = {
+    if len(text) > FOUR_O_PROMPT_LIMIT:
+        text = text[:FOUR_O_PROMPT_LIMIT]
+    messages = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": text})
+    payload: dict[str, Any] = {
         "model": "gpt-4o",
-        "messages": [{"role": "user", "content": text}],
+        "messages": messages,
         "temperature": 0,
+        "max_tokens": max_tokens,
     }
+    if response_format is not None:
+        payload["response_format"] = response_format
     logging.info("Sending 4o ask request to %s", url)
     session = get_http_session()
+
     async def _call():
         async with span("http"):
             async with HTTP_SEMAPHORE:
@@ -2063,7 +2083,14 @@ async def ask_4o(text: str) -> str:
 
     data = await asyncio.wait_for(_call(), FOUR_O_TIMEOUT)
     logging.debug("4o response: %s", data)
-    content = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+    content = (
+        data.get("choices", [{}])[0]
+        .get("message", {})
+        .get("content", "")
+        .strip()
+    )
+    if len(content) > FOUR_O_RESPONSE_LIMIT:
+        content = content[:FOUR_O_RESPONSE_LIMIT]
     del data
     gc.collect()
     return content
@@ -2078,17 +2105,33 @@ async def check_duplicate_via_4o(ev: Event, new: Event) -> Tuple[bool, str, str]
         f"Title: {new.title}\nDescription: {new.description}\nLocation: {new.location_name} {new.location_address}\n"
         'Are these the same event? Respond with JSON {"duplicate": true|false, "title": "", "short_description": ""}.'
     )
+    start = _time.perf_counter()
     try:
-        ans = await ask_4o(prompt)
-        data = json.loads(ans)
-        return (
-            bool(data.get("duplicate")),
-            data.get("title", ""),
-            data.get("short_description", ""),
+        ans = await ask_4o(
+            prompt,
+            system_prompt=(
+                'Return a JSON object {"duplicate": true|false, "title": "", '
+                '"short_description": ""} and nothing else.'
+            ),
+            response_format={"type": "json_object"},
+            max_tokens=200,
         )
-    except Exception as e:
-        logging.error("Duplicate check failed: %s", e)
-        return False, "", ""
+        ans = ans.strip()
+        if ans.startswith("```"):
+            ans = re.sub(r'^```[a-zA-Z]*\n', '', ans)
+            if ans.endswith("```"):
+                ans = ans[:-3]
+            ans = ans.strip()
+        data = json.loads(ans)
+        dup = bool(data.get("duplicate"))
+        title = data.get("title", "")
+        desc = data.get("short_description", "")
+    except Exception as e:  # pragma: no cover - simple
+        logging.warning("duplicate check invalid JSON: %s", e)
+        dup, title, desc = False, "", ""
+    latency = _time.perf_counter() - start
+    logging.info("duplicate check: %s, %.3f", dup, latency)
+    return dup, title, desc
 
 
 def get_telegraph_token() -> str | None:

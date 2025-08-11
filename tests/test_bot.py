@@ -3908,6 +3908,67 @@ async def test_llm_duplicate_check(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_duplicate_check_handles_fenced_json(monkeypatch, caplog):
+    ev = Event(
+        title="Old",
+        description="d",
+        date=FUTURE_DATE,
+        time="20:00",
+        location_name="Hall",
+        source_text="",
+    )
+    new = Event(
+        title="Old",
+        description="d",
+        date=FUTURE_DATE,
+        time="20:00",
+        location_name="Hall",
+        source_text="",
+    )
+
+    async def fake_ask(prompt: str, **kwargs) -> str:
+        return "```json\n{\"duplicate\": true, \"title\": \"T\", \"short_description\": \"S\"}\n```"
+
+    monkeypatch.setattr(main, "ask_4o", fake_ask)
+    dup, title, desc = await main.check_duplicate_via_4o(ev, new)
+    assert dup is True
+    assert title == "T"
+    assert desc == "S"
+
+
+@pytest.mark.asyncio
+async def test_duplicate_check_handles_bad_json(monkeypatch, caplog):
+    ev = Event(
+        title="Old",
+        description="d",
+        date=FUTURE_DATE,
+        time="20:00",
+        location_name="Hall",
+        source_text="",
+    )
+    new = Event(
+        title="New",
+        description="d",
+        date=FUTURE_DATE,
+        time="20:00",
+        location_name="Hall",
+        source_text="",
+    )
+
+    async def fake_ask(prompt: str, **kwargs) -> str:
+        return "not a json"
+
+    monkeypatch.setattr(main, "ask_4o", fake_ask)
+    with caplog.at_level(logging.INFO):
+        dup, title, desc = await main.check_duplicate_via_4o(ev, new)
+    assert dup is False
+    assert title == ""
+    assert desc == ""
+    assert "duplicate check invalid JSON" in caplog.text
+    assert "duplicate check: False" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_extract_ticket_link(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
