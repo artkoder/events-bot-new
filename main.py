@@ -3593,6 +3593,12 @@ async def schedule_event_update_tasks(ev: Event) -> None:
     if ev.festival:
         await event_update_queue.put(("update_festival_nav_if_needed", eid))
     await event_update_queue.put(("sync_vk_source_post", eid))
+    await event_update_queue.put(("update_month_pages_for", eid))
+    d = parse_iso_date(ev.date)
+    w_start = weekend_start_for_date(d) if d else None
+    if w_start:
+        await event_update_queue.put(("update_weekend_pages_for", eid))
+    await event_update_queue.put(("pipeline_done", eid))
     logging.info("scheduled event tasks for %s", eid)
 
 
@@ -3705,8 +3711,6 @@ async def add_events_from_text(
                 lines.append(f"city: {fest_obj.city}")
             results.append((fest_obj, True, lines, "festival"))
             logging.info("festival %s created without events", fest_obj.name)
-    month_events: dict[str, int] = {}
-    weekend_events: dict[str, int] = {}
     for data in parsed:
         logging.info(
             "processing event candidate: %s on %s %s",
@@ -3821,11 +3825,6 @@ async def add_events_from_text(
             )
 
             await schedule_event_update_tasks(saved)
-            month_events.setdefault(saved.date[:7], saved.id)
-            d_saved = parse_iso_date(saved.date)
-            w_start = weekend_start_for_date(d_saved) if d_saved else None
-            if w_start:
-                weekend_events.setdefault(w_start.isoformat(), saved.id)
             lines = [
                 f"title: {saved.title}",
                 f"date: {saved.date}",
@@ -3851,10 +3850,6 @@ async def add_events_from_text(
             status = "added" if added else "updated"
             results.append((saved, added, lines, status))
             first = False
-    for eid in month_events.values():
-        await event_update_queue.put(("update_month_pages_for", eid))
-    for eid in weekend_events.values():
-        await event_update_queue.put(("update_weekend_pages_for", eid))
     if os.getenv("EVENT_UPDATE_SYNC") == "1" and bot is not None:
         await run_event_update_jobs(db, bot)
     logging.info("add_events_from_text finished with %d results", len(results))
@@ -4025,11 +4020,6 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
         event, added = await upsert_event(session, event)
 
     await schedule_event_update_tasks(event)
-    await event_update_queue.put(("update_month_pages_for", event.id))
-    d = parse_iso_date(event.date)
-    w_start = weekend_start_for_date(d) if d else None
-    if w_start:
-        await event_update_queue.put(("update_weekend_pages_for", event.id))
     if os.getenv("EVENT_UPDATE_SYNC") == "1":
         await run_event_update_jobs(db, bot)
     lines = [
@@ -4166,13 +4156,13 @@ async def _run_event_update_task(
     func = EVENT_UPDATE_TASKS[name]
     for attempt in range(3):
         try:
-            async with span("event_update_job", task=name, event_id=event_id):
+            async with span("event_pipeline", step=name, event_id=event_id):
                 await asyncio.wait_for(func(event_id, db, bot), timeout=timeout)
             break
         except Exception as exc:
             delay = (2 ** attempt) + random.random()
             logging.warning(
-                "event_update_job %s event=%s error=%s retry=%d",
+                "PIPELINE_FAIL step=%s event=%s error=%s retry=%d",
                 name,
                 event_id,
                 exc,
@@ -4194,7 +4184,7 @@ async def run_event_update_jobs(db: Database, bot: Bot) -> None:
     while not event_update_queue.empty():
         name, event_id = await event_update_queue.get()
         try:
-            await EVENT_UPDATE_TASKS[name](event_id, db, bot)
+            await _run_event_update_task(name, event_id, db, bot)
         finally:
             event_update_queue.task_done()
 
@@ -4383,12 +4373,25 @@ async def job_sync_vk_source_post(event_id: int, db: Database, bot: Bot | None) 
                 await session.commit()
 
 
+async def log_pipeline_done(event_id: int, db: Database, bot: Bot | None) -> None:
+    async with db.get_session() as session:
+        ev = await session.get(Event, event_id)
+    if ev:
+        logging.info(
+            "PIPELINE_DONE event=%s telegraph=%s vk=%s",
+            ev.id,
+            ev.telegraph_url,
+            ev.source_vk_post_url,
+        )
+
+
 EVENT_UPDATE_TASKS = {
     "update_telegraph_event_page": update_telegraph_event_page,
     "update_month_pages_for": update_month_pages_for,
     "update_weekend_pages_for": update_weekend_pages_for,
     "update_festival_nav_if_needed": update_festival_nav_if_needed,
     "sync_vk_source_post": job_sync_vk_source_post,
+    "pipeline_done": log_pipeline_done,
 }
 
 
