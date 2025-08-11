@@ -3954,8 +3954,6 @@ async def add_events_from_text(
             logging.info(
                 "event %s with id %s", "added" if added else "updated", saved.id
             )
-
-            await schedule_event_update_tasks(db, saved)
             lines = [
                 f"title: {saved.title}",
                 f"date: {saved.date}",
@@ -3981,8 +3979,6 @@ async def add_events_from_text(
             status = "added" if added else "updated"
             results.append((saved, added, lines, status))
             first = False
-    if os.getenv("EVENT_UPDATE_SYNC") == "1" and bot is not None:
-        await run_event_update_jobs(db, bot)
     logging.info("add_events_from_text finished with %d results", len(results))
     del parsed
     gc.collect()
@@ -4104,13 +4100,7 @@ async def handle_add_event(
             reply_markup=markup,
         )
         await notify_event_added(db, bot, user, saved, added)
-        await bot.send_message(
-            message.chat.id,
-            f"Публикация запущена: Telegraph ⏳, VK ⏳, Страницы месяца ⏳, Выходные ⏳. Статус: /status {saved.id}",
-        )
-        await run_event_update_jobs(
-            db, bot, notify_chat_id=message.chat.id, event_id=saved.id
-        )
+        await publish_event_progress(saved, db, bot, message.chat.id)
     logging.info("handle_add_event finished for user %s", message.from_user.id)
 
 
@@ -4156,8 +4146,6 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
     )
     async with db.get_session() as session:
         event, added = await upsert_event(session, event)
-
-    await schedule_event_update_tasks(db, event)
     lines = [
         f"title: {event.title}",
         f"date: {event.date}",
@@ -4199,13 +4187,7 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
         reply_markup=markup,
     )
     await notify_event_added(db, bot, user, event, added)
-    await bot.send_message(
-        message.chat.id,
-        f"Публикация запущена: Telegraph ⏳, VK ⏳, Страницы месяца ⏳, Выходные ⏳. Статус: /status {event.id}",
-    )
-    await run_event_update_jobs(
-        db, bot, notify_chat_id=message.chat.id, event_id=event.id
-    )
+    await publish_event_progress(event, db, bot, message.chat.id)
     logging.info("handle_add_event_raw finished for user %s", message.from_user.id)
 
 
@@ -4520,11 +4502,13 @@ async def run_event_update_jobs(
         await asyncio.sleep(0)
 
 
-async def update_telegraph_event_page(event_id: int, db: Database, bot: Bot | None) -> None:
+async def update_telegraph_event_page(
+    event_id: int, db: Database, bot: Bot | None
+) -> str | None:
     async with db.get_session() as session:
         ev = await session.get(Event, event_id)
         if not ev:
-            return
+            return None
         if not ev.ics_url:
             ics = await upload_ics(ev, db)
             if ics:
@@ -4543,7 +4527,7 @@ async def update_telegraph_event_page(event_id: int, db: Database, bot: Bot | No
                     catbox_urls=[],
                 )
                 await session.commit()
-                return
+                return ev.telegraph_url
             except Exception:
                 await session.rollback()
                 raise
@@ -4565,6 +4549,8 @@ async def update_telegraph_event_page(event_id: int, db: Database, bot: Bot | No
             ev.telegraph_path = created_path
             session.add(ev)
             await session.commit()
+            return url
+        return ev.telegraph_url
 
 
 async def patch_month_page_for_date(db: Database, telegraph: Telegraph, month_key: str, d: date) -> bool:
@@ -4694,6 +4680,53 @@ async def update_festival_nav_if_needed(event_id: int, db: Database, bot: Bot | 
         ev = await session.get(Event, event_id)
     if ev and ev.festival:
         await refresh_nav_on_all_festivals(db, bot)
+
+
+async def publish_event_progress(event: Event, db: Database, bot: Bot, chat_id: int) -> None:
+    await bot.send_message(chat_id, "Событие сохранено. Публикую…")
+
+    telegraph_url: str | None = None
+    try:
+        logging.info("publish telegraph start event=%s", event.id)
+        telegraph_url = await update_telegraph_event_page(event.id, db, bot)
+        if telegraph_url:
+            await bot.send_message(chat_id, f"Telegraph: OK {telegraph_url}")
+        else:
+            await bot.send_message(chat_id, "Telegraph: FAIL — no url")
+    except Exception as e:
+        logging.exception("telegraph publish failed for %s", event.id)
+        reason = str(e).splitlines()[0]
+        await bot.send_message(chat_id, f"Telegraph: FAIL — {reason}")
+
+    try:
+        logging.info("publish vk start event=%s", event.id)
+        vk_url = await sync_vk_source_post(
+            event, event.source_text, db, bot, ics_url=event.ics_url
+        )
+        if vk_url:
+            await bot.send_message(chat_id, f"VK: OK {vk_url}")
+        else:
+            await bot.send_message(chat_id, "VK: OK")
+    except Exception as e:
+        logging.exception("vk publish failed for %s", event.id)
+        reason = str(e).splitlines()[0]
+        await bot.send_message(chat_id, f"VK: FAIL — {reason}")
+
+    try:
+        logging.info("publish pages start event=%s", event.id)
+        start = _time.perf_counter()
+        await update_month_pages_for(event.id, db, bot)
+        await update_weekend_pages_for(event.id, db, bot)
+        dur = _time.perf_counter() - start
+        await bot.send_message(
+            chat_id, f"Страницы месяца/выходных: OK ({dur:.1f} сек)"
+        )
+    except Exception as e:
+        logging.exception("pages publish failed for %s", event.id)
+        reason = str(e).splitlines()[0]
+        await bot.send_message(chat_id, f"Страницы месяца/выходных: FAIL — {reason}")
+
+    await bot.send_message(chat_id, "Готово" if telegraph_url else "Не опубликовано")
 
 
 async def job_sync_vk_source_post(event_id: int, db: Database, bot: Bot | None) -> None:
@@ -9194,13 +9227,7 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
                 reply_markup=markup,
             )
             await notify_event_added(db, bot, user, saved, added)
-            await bot.send_message(
-                message.chat.id,
-                f"Публикация запущена: Telegraph ⏳, VK ⏳, Страницы месяца ⏳, Выходные ⏳. Статус: /status {saved.id}",
-            )
-            await run_event_update_jobs(
-                db, bot, notify_chat_id=message.chat.id, event_id=saved.id
-            )
+            await publish_event_progress(saved, db, bot, message.chat.id)
         except Exception as e:
             logging.error("failed to send event response: %s", e)
 
