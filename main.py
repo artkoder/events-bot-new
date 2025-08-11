@@ -95,6 +95,7 @@ import asyncio
 import contextlib
 import random
 import html
+import sqlite3
 from io import BytesIO
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy import update, text, delete, and_, or_, func
@@ -7290,7 +7291,7 @@ async def daily_scheduler(db: Database, bot: Bot):
         await asyncio.sleep(seconds_to_next_minute(datetime.now(tz)))
 
 
-async def vk_scheduler(db: Database, bot: Bot):
+async def vk_scheduler(db: Database, bot: Bot, run_id: str | None = None):
     if not (VK_TOKEN or os.getenv("VK_USER_TOKEN")):
         return
     async with span("db"):
@@ -7346,20 +7347,53 @@ async def cleanup_old_events(db: Database, now_utc: datetime | None = None) -> i
     return deleted
 
 
-async def cleanup_scheduler(db: Database, bot: Bot) -> None:
-    try:
-        deleted = await cleanup_old_events(db)
-        logging.info("cleanup_ok deleted=%s", deleted)
-    except Exception:
-        logging.exception("cleanup_failed")
-        return
-    try:
-        await notify_superadmin(db, bot, f"Cleanup finished, deleted={deleted}")
-    except Exception as e:
-        logging.warning("cleanup notify failed: %s", e)
+async def cleanup_scheduler(
+    db: Database, bot: Bot, run_id: str | None = None
+) -> None:
+    retries = [0.8, 2.0]
+    attempt = 0
+    while True:
+        try:
+            start = _time.perf_counter()
+            async with db.ensure_connection():
+                deleted = await cleanup_old_events(db)
+            db_took_ms = (_time.perf_counter() - start) * 1000
+            logging.info(
+                "cleanup_ok run_id=%s deleted_count=%s scanned=%s db_took_ms=%.0f commit_ms=0",
+                run_id,
+                deleted,
+                0,
+                db_took_ms,
+            )
+            try:
+                await notify_superadmin(
+                    db, bot, f"Cleanup finished, deleted={deleted}"
+                )
+            except Exception as e:
+                logging.warning("cleanup notify failed: %s", e)
+            break
+        except (sqlite3.ProgrammingError, sqlite3.OperationalError) as e:
+            msg = str(e)
+            if "Connection closed" in msg or "database is locked" in msg:
+                if attempt < len(retries):
+                    delay = retries[attempt]
+                    attempt += 1
+                    logging.warning(
+                        "cleanup_retry run_id=%s delay=%.1fs error=%s",
+                        run_id,
+                        delay,
+                        e,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+            logging.error("Cleanup failed: %s", e)
+            break
+        except Exception as e:
+            logging.error("Cleanup failed: %s", e)
+            break
 
 
-async def page_update_scheduler(db: Database):
+async def page_update_scheduler(db: Database, run_id: str | None = None):
     """Refresh month and weekend Telegraph pages after midnight.
 
     To avoid unnecessary API calls after a manual restart during the day the
@@ -7386,7 +7420,7 @@ async def page_update_scheduler(db: Database):
         _page_last_run = now.date()
 
 
-async def partner_notification_scheduler(db: Database, bot: Bot):
+async def partner_notification_scheduler(db: Database, bot: Bot, run_id: str | None = None):
     """Remind partners who haven't added events for a week."""
     global _partner_last_run
     async with span("db"):
@@ -7431,7 +7465,7 @@ async def partner_notification_scheduler(db: Database, bot: Bot):
         _partner_last_run = now.date()
 
 
-async def vk_poll_scheduler(db: Database, bot: Bot):
+async def vk_poll_scheduler(db: Database, bot: Bot, run_id: str | None = None):
     if not (VK_TOKEN or os.getenv("VK_USER_TOKEN")):
         return
     async with span("db"):

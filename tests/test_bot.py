@@ -16,6 +16,8 @@ from telegraph.api import json_dumps
 from telegraph import TelegraphException
 import logging
 from sqlalchemy.ext.asyncio import async_sessionmaker
+import sqlite3
+import contextlib
 
 
 from main import (
@@ -5920,11 +5922,45 @@ async def test_cleanup_scheduler_logs(monkeypatch, caplog):
 
     monkeypatch.setattr(main, "cleanup_old_events", fake_cleanup)
     monkeypatch.setattr(main, "notify_superadmin", fake_notify)
+
+    class DummyDB:
+        @contextlib.asynccontextmanager
+        async def ensure_connection(self):
+            yield
+
     with caplog.at_level(logging.INFO):
-        await main.cleanup_scheduler(object(), object())
+        await main.cleanup_scheduler(DummyDB(), object(), run_id="r1")
     assert called["done"]
     assert called["notified"]
-    assert any("cleanup_ok" in r.message for r in caplog.records)
+    assert any("cleanup_ok run_id=r1" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_cleanup_scheduler_retry(monkeypatch, caplog):
+    attempts = {}
+
+    async def fake_cleanup(db):
+        attempts["count"] = attempts.get("count", 0) + 1
+        if attempts["count"] == 1:
+            raise sqlite3.ProgrammingError("Connection closed")
+        return 1
+
+    async def fake_notify(db, bot, text):
+        pass
+
+    monkeypatch.setattr(main, "cleanup_old_events", fake_cleanup)
+    monkeypatch.setattr(main, "notify_superadmin", fake_notify)
+
+    class DummyDB:
+        @contextlib.asynccontextmanager
+        async def ensure_connection(self):
+            yield
+
+    with caplog.at_level(logging.INFO):
+        await main.cleanup_scheduler(DummyDB(), object(), run_id="r2")
+    assert attempts["count"] == 2
+    assert any("cleanup_retry run_id=r2" in r.message for r in caplog.records)
+    assert any("cleanup_ok run_id=r2" in r.message for r in caplog.records)
 
 
 @pytest.mark.asyncio

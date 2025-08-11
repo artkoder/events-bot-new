@@ -3,6 +3,7 @@ import logging
 import os
 import time as _time
 from contextlib import asynccontextmanager
+import sqlite3
 
 import aiosqlite
 from sqlalchemy.ext.asyncio import (
@@ -467,4 +468,19 @@ class Database:
     async def get_session(self) -> AsyncSession:
         async with self._session_factory() as session:
             yield session
+
+    @asynccontextmanager
+    async def ensure_connection(self):
+        """Ensure the shared connection is usable, resetting on failures."""
+        try:
+            yield
+        except (sqlite3.ProgrammingError, sqlite3.OperationalError) as e:
+            if "Connection closed" in str(e):
+                if self._conn is not None:
+                    try:
+                        await self._conn.close()
+                    except Exception:
+                        pass
+                self._conn = None
+            raise
 
