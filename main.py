@@ -78,7 +78,6 @@ from aiohttp import (
 )
 from aiogram.client.session.aiohttp import AiohttpSession
 import socket
-import imghdr
 from difflib import SequenceMatcher
 import json
 import re
@@ -505,6 +504,24 @@ HTTP_SEMAPHORE = asyncio.Semaphore(2)
 # Limit heavy operations like Telegraph/VK updates
 HEAVY_SEMAPHORE = asyncio.Semaphore(1)
 
+# Maximum size (in bytes) for downloaded files
+MAX_DOWNLOAD_SIZE = int(os.getenv("MAX_DOWNLOAD_SIZE", str(5 * 1024 * 1024)))
+
+
+def detect_image_type(data: bytes) -> str | None:
+    """Return image subtype based on magic numbers."""
+    if data.startswith(b"\xff\xd8\xff"):
+        return "jpeg"
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "png"
+    if data.startswith(b"GIF87a") or data.startswith(b"GIF89a"):
+        return "gif"
+    if data.startswith(b"BM"):
+        return "bmp"
+    if data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+        return "webp"
+    return None
+
 # Timeout for OpenAI 4o requests (in seconds)
 FOUR_O_TIMEOUT = float(os.getenv("FOUR_O_TIMEOUT", "60"))
 
@@ -558,11 +575,24 @@ MENU_EVENTS = "\U0001f4c5 События"
 
 
 class IPv4AiohttpSession(AiohttpSession):
-    """Aiohttp session that forces IPv4 connections."""
+    """Aiohttp session that forces IPv4 and reuses the shared ClientSession."""
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self._connector_init["family"] = socket.AF_INET
+        self._connector_init.update(
+            family=socket.AF_INET,
+            limit=6,
+            limit_per_host=3,
+            ttl_dns_cache=300,
+            keepalive_timeout=30,
+        )
+
+    async def create_session(self) -> ClientSession:
+        self._session = get_shared_session()
+        return self._session
+
+    async def close(self) -> None:  # pragma: no cover - cleanup
+        await close_shared_session()
 
 
 
@@ -746,9 +776,9 @@ def _close_shared_session_sync() -> None:
 def _create_session() -> ClientSession:
     connector = TCPConnector(
         family=socket.AF_INET,
-        limit=10,
+        limit=6,
         ttl_dns_cache=300,
-        limit_per_host=5,
+        limit_per_host=3,
         keepalive_timeout=30,
     )
     timeout = ClientTimeout(total=HTTP_TIMEOUT)
@@ -919,12 +949,17 @@ async def upload_vk_photo(
             async with span("http"):
                 async with HTTP_SEMAPHORE:
                     async with session.get(url) as resp:
-                        return await resp.read()
+                        if resp.content_length and resp.content_length > MAX_DOWNLOAD_SIZE:
+                            raise ValueError("file too large")
+                        data = await resp.content.read(MAX_DOWNLOAD_SIZE + 1)
+                        if len(data) > MAX_DOWNLOAD_SIZE:
+                            raise ValueError("file too large")
+                        return data
 
         img_bytes = await asyncio.wait_for(_download(), HTTP_TIMEOUT)
         form = FormData()
         ctype = "image/jpeg"
-        kind = imghdr.what(None, img_bytes)
+        kind = detect_image_type(img_bytes)
         if kind:
             ctype = f"image/{kind}"
         form.add_field(
@@ -1237,7 +1272,7 @@ async def upload_to_catbox(images: list[tuple[bytes, str]]) -> tuple[list[str], 
                 logging.warning("catbox skip %s: too large", name)
                 catbox_msg += f"{name}: too large; "
                 continue
-            if not imghdr.what(None, data):
+            if not detect_image_type(data):
                 logging.warning("catbox skip %s: not image", name)
                 catbox_msg += f"{name}: not image; "
                 continue
@@ -4214,12 +4249,14 @@ async def enqueue_add_event_raw(message: types.Message, db: Database, bot: Bot):
     await bot.send_message(message.chat.id, "Пост принят на обработку")
 
 
-async def add_event_queue_worker(db: Database, bot: Bot):
-    """Background worker to process queued events sequentially."""
-    while True:
-        item = await add_event_queue.get()
-        start = _time.perf_counter()
-        try:
+async def add_event_queue_worker(db: Database, bot: Bot, limit: int = 2):
+    """Background worker to process queued events with limited concurrency."""
+
+    sem = asyncio.Semaphore(limit)
+
+    async def _process(item: tuple[str, types.Message, bool]) -> None:
+        async with sem:
+            start = _time.perf_counter()
             kind, msg, using_session = item
             task = asyncio.current_task()
             if task:
@@ -4238,15 +4275,18 @@ async def add_event_queue_worker(db: Database, bot: Bot):
                     )
                     if using_session:
                         add_event_sessions[msg.from_user.id] = True
-                except Exception:
+                except Exception:  # pragma: no cover - notify fail
                     logging.exception("add_event_queue_worker notify failed")
             finally:
                 if task:
                     working.discard(task)
-        finally:
-            add_event_queue.task_done()
-            dur = (_time.perf_counter() - start) * 1000
-            logging.info("add_event total=%.0f ms", dur)
+                add_event_queue.task_done()
+                dur = (_time.perf_counter() - start) * 1000
+                logging.info("add_event total=%.0f ms", dur)
+
+    while True:
+        item = await add_event_queue.get()
+        asyncio.create_task(_process(item))
 
 
 BACKOFF_SCHEDULE = [30, 120, 600, 3600]

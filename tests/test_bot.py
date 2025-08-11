@@ -1103,7 +1103,7 @@ async def test_create_source_page_photo_catbox(monkeypatch):
     )
     monkeypatch.setattr(main, "ClientSession", DummySession)
     monkeypatch.setattr(main, "CATBOX_ENABLED", True)
-    monkeypatch.setattr(main, "imghdr", type("X", (), {"what": lambda *a, **k: "jpeg"}))
+    monkeypatch.setattr(main, "detect_image_type", lambda *a, **k: "jpeg")
 
     res = await main.create_source_page(
         "Title", "text", None, media=(b"img", "photo.jpg")

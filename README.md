@@ -77,8 +77,15 @@ export VK_USER_TOKEN=vk_user_token
    ```bash
    fly deploy
    ```
-   > **Note:** If the app's average memory (RSS) approaches ~140&nbsp;MB, consider
-   > upgrading the Fly machine's memory tier to avoid out-of-memory kills.
+   > **Note:** If the app's average memory (RSS) approaches ~140&nbsp;MB, choose a
+   > larger memory tier to avoid out-of-memory kills. On Apps V2 use `fly scale
+   > memory 512`; on Machines:
+   > `fly machines update -m 512 -c shared-cpu-1x <machine-id>`.
+
+4. Optional tuning:
+   - Enable swap if needed (for example `--swap 256`).
+   - The app exposes a `/healthz` endpoint used by Fly health checks.
+   - Avoid heavy requests at startup; warm caches lazily in background workers.
 
 ## Files
 - `docs/COMMANDS.md` – full list of bot commands.
