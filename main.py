@@ -87,6 +87,7 @@ import hashlib
 import unicodedata
 
 from telegraph import Telegraph, TelegraphException
+from net import http_call
 
 from functools import partial, lru_cache
 from contextlib import asynccontextmanager, contextmanager
@@ -777,11 +778,14 @@ async def _vk_api(
             "calling VK API %s using %s token %s", method, kind, redact_token(token)
         )
         async def _call():
-            async with HTTP_SEMAPHORE:
-                async with session.post(
-                    f"https://api.vk.com/method/{method}", data=params
-                ) as resp:
-                    return await resp.json()
+            resp = await http_call(
+                f"vk.{method}",
+                "POST",
+                f"https://api.vk.com/method/{method}",
+                timeout=HTTP_TIMEOUT,
+                data=params,
+            )
+            return resp.json()
 
         err: dict | None = None
         last_msg: str | None = None
@@ -6826,9 +6830,22 @@ async def post_to_vk(
         post_id = data.get("response", {}).get("post_id")
         if post_id:
             url = f"https://vk.com/wall-{group_id.lstrip('-')}_{post_id}"
-            logging.info("post_to_vk success: %s", url)
+            logging.info(
+                "post_to_vk ok group=%s post_id=%s len=%d attachments=%d",
+                group_id,
+                post_id,
+                len(message),
+                len(attachments or []),
+            )
             return url
-        logging.error("post_to_vk failed for group %s", group_id)
+        err_code = data.get("error", {}).get("error_code") if isinstance(data, dict) else None
+        logging.error(
+            "post_to_vk fail group=%s code=%s len=%d attachments=%d",
+            group_id,
+            err_code,
+            len(message),
+            len(attachments or []),
+        )
         return None
 
 
