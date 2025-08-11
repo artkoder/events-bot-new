@@ -1433,7 +1433,7 @@ async def build_festivals_list_lines_vk(
     return lines
 
 
-async def build_festival_nav_block(
+async def _build_festival_nav_block(
     db: Database,
     *,
     exclude: str | None = None,
@@ -1494,47 +1494,38 @@ async def build_festival_nav_block(
     return nodes, lines
 
 
-_FEST_NAV_CACHE: dict[str, object] = {
-    "version": None,
-    "expires": 0.0,
-    "data": None,
-}
+async def build_festivals_nav_block(
+    db: Database,
+) -> tuple[str, list[str], bool]:
+    """Return cached navigation HTML and lines for all festivals.
 
+    Stores HTML fragment and its hash in the ``setting`` table.
+    Returns ``html``, ``lines`` and a boolean flag indicating whether
+    the cached fragment changed.
+    """
+    nodes, lines = await _build_festival_nav_block(db)
+    from telegraph.utils import nodes_to_html
 
-async def build_festival_nav_block_cached(db: Database) -> tuple[list[dict], list[str]]:
-    """Cached variant of :func:`build_festival_nav_block`."""
-    try:
-        async with db.engine.connect() as conn:
-            result = await conn.exec_driver_sql(
-                "SELECT COUNT(*) AS c, MAX(updated_at) FROM festival"
-            )
-            row = result.first()
-            version = f"{row[0]}:{row[1]}"
-    except Exception:
-        version = None
-    now = time.time()
-    if version is None:
-        if _FEST_NAV_CACHE["data"] is not None and now < _FEST_NAV_CACHE["expires"]:
-            return _FEST_NAV_CACHE["data"]
+    html = nodes_to_html(nodes) if nodes else ""
+    new_hash = hashlib.sha256(html.encode("utf-8")).hexdigest()
+    old_hash = await get_setting_value(db, "fest_nav_hash")
+    if old_hash != new_hash:
+        await set_setting_value(db, "fest_nav_hash", new_hash)
+        await set_setting_value(db, "fest_nav_html", html)
+        changed = True
     else:
-        if (
-            _FEST_NAV_CACHE["data"] is not None
-            and _FEST_NAV_CACHE["version"] == version
-            and now < _FEST_NAV_CACHE["expires"]
-        ):
-            return _FEST_NAV_CACHE["data"]
-    data = await build_festival_nav_block(db)
-    _FEST_NAV_CACHE.update(
-        {"version": version, "data": data, "expires": now + 300}
-    )
-    return data
+        cached_html = await get_setting_value(db, "fest_nav_html")
+        if cached_html is not None:
+            html = cached_html
+        changed = False
+    return html, lines, changed
 
 
 ICS_LABEL = "Добавить в календарь на телефоне (ICS)"
 MONTH_NAV_START = "<!--month-nav-start-->"
 MONTH_NAV_END = "<!--month-nav-end-->"
-FEST_NAV_START = "<!-- NAV_START -->"
-FEST_NAV_END = "<!-- NAV_END -->"
+FEST_NAV_START = "<!-- FEST_NAV_START -->"
+FEST_NAV_END = "<!-- FEST_NAV_END -->"
 
 FOOTER_LINK_HTML = (
     '<p>&nbsp;</p>'
@@ -2487,6 +2478,8 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                 saved, added = await upsert_event(session, event)
                 events.append((saved, added))
             await session.commit()
+        async with db.get_session() as session:
+            notify_user = await session.get(User, callback.from_user.id)
         for saved, added in events:
             lines = [
                 f"title: {saved.title}",
@@ -2498,14 +2491,11 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
             if saved.city:
                 lines.append(f"city: {saved.city}")
             await callback.message.answer("Event added\n" + "\n".join(lines))
-            async with db.get_session() as session:
-                user = await session.get(User, callback.from_user.id)
-            await notify_event_added(db, bot, user, saved, added)
-            if saved.festival:
-                asyncio.create_task(sync_festival_page(db, saved.festival))
-                asyncio.create_task(
-                    sync_festival_vk_post(db, saved.festival, bot)
-                )
+            await notify_event_added(db, bot, notify_user, saved, added)
+
+        asyncio.create_task(sync_festival_page(db, fest.name))
+        asyncio.create_task(sync_festival_vk_post(db, fest.name, bot))
+        asyncio.create_task(refresh_nav_on_all_festivals(db, bot=bot))
 
         for m in months:
             asyncio.create_task(sync_month_page(db, m))
@@ -5967,7 +5957,7 @@ async def build_festival_page_content(db: Database, fest: Festival) -> tuple[str
         nodes.append({"tag": "h3", "children": ["Мероприятия фестиваля"]})
         for e in events:
             nodes.extend(event_to_nodes(e))
-    nav_nodes, _ = await build_festival_nav_block(db, exclude=fest.name)
+    nav_nodes, _ = await _build_festival_nav_block(db, exclude=fest.name)
     if nav_nodes:
         from telegraph.utils import nodes_to_html, html_to_nodes
         nav_html = nodes_to_html(nav_nodes)
@@ -6004,12 +5994,7 @@ async def sync_festival_page(
         try:
             created = False
             if refresh_nav_only and path:
-                nav_nodes, _ = await build_festival_nav_block(
-                    db, exclude=name, items=items
-                )
-                from telegraph.utils import nodes_to_html
-
-                nav_html = nodes_to_html(nav_nodes)
+                nav_html, _, _ = await build_festivals_nav_block(db)
                 page = await telegraph_call(tg.get_page, path, return_html=True)
                 html_content = page.get("content") or page.get("content_html") or ""
                 html_content = apply_festival_nav(html_content, nav_html)
@@ -6059,12 +6044,9 @@ async def refresh_nav_on_all_festivals(db: Database, bot: Bot | None = None) -> 
         )
         fests = res.all()
 
-    nav_nodes, nav_lines = await build_festival_nav_block_cached(db)
-    if not nav_nodes and not nav_lines:
+    nav_html, nav_lines, changed = await build_festivals_nav_block(db)
+    if not changed:
         return
-    from telegraph.utils import nodes_to_html
-
-    nav_html = nodes_to_html(nav_nodes)
     token = get_telegraph_token()
     tg = Telegraph(access_token=token) if token else None
     sem = asyncio.Semaphore(3)
@@ -6122,7 +6104,7 @@ async def build_festival_vk_message(db: Database, fest: Festival) -> str:
     for ev in events:
         lines.append(VK_BLANK_LINE)
         lines.append(format_event_vk(ev))
-    _, nav_lines = await build_festival_nav_block(db, exclude=fest.name)
+    _, nav_lines = await _build_festival_nav_block(db, exclude=fest.name)
     if nav_lines:
         lines.extend(nav_lines)
     return "\n".join(lines)
@@ -6188,7 +6170,7 @@ async def sync_festival_vk_post(
     if nav_only and fest.vk_post_url:
         nav_lines_local = nav_lines
         if nav_lines_local is None:
-            _, nav_lines_local = await build_festival_nav_block(db, exclude=fest.name)
+            _, nav_lines_local = await _build_festival_nav_block(db, exclude=fest.name)
         if nav_lines_local:
             ids = _vk_owner_and_post_id(fest.vk_post_url)
             if not ids:
