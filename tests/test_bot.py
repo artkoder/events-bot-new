@@ -54,8 +54,9 @@ from main import (
     festival_dates,
     send_festival_poll,
     notify_inactive_partners,
-
 )
+
+REAL_SYNC_WEEKEND_PAGE = main.sync_weekend_page
 
 
 @pytest.fixture(autouse=True)
@@ -2717,6 +2718,15 @@ async def test_sync_weekend_page_first_creation_includes_nav(
 ):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
+    call_count = 0
+
+    async def wrapper(db2, start, update_links=True, post_vk=True):
+        nonlocal call_count
+        call_count += 1
+        ul = update_links if call_count == 1 else False
+        await REAL_SYNC_WEEKEND_PAGE(db2, start, ul, post_vk)
+
+    monkeypatch.setattr(main, "sync_weekend_page", wrapper)
 
     saturday = date(2025, 7, 12)
     next_sat = saturday + timedelta(days=7)
@@ -2778,6 +2788,15 @@ async def test_sync_weekend_page_first_creation_includes_nav(
 async def test_sync_weekend_page_updates_other_pages(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
+    call_count = 0
+
+    async def wrapper(db2, start, update_links=True, post_vk=True):
+        nonlocal call_count
+        call_count += 1
+        ul = update_links if call_count == 1 else False
+        await REAL_SYNC_WEEKEND_PAGE(db2, start, ul, post_vk)
+
+    monkeypatch.setattr(main, "sync_weekend_page", wrapper)
 
     saturday = date(2025, 7, 12)
     next_sat = saturday + timedelta(days=7)
@@ -3472,6 +3491,48 @@ async def test_update_source_page_ics(monkeypatch):
     await main.update_source_page_ics("p", "T", "http://x")
     assert "Добавить в календарь" in edited.get("html", "")
     await main.update_source_page_ics("p", "T", None)
+
+
+@pytest.mark.asyncio
+async def test_update_telegraph_event_page_deterministic(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    event = Event(
+        id=1,
+        title="My Event",
+        description="d",
+        source_text="src",
+        date="2024-05-01",
+        time="00:00",
+        location_name="Place",
+    )
+    async with db.get_session() as session:
+        session.add(event)
+        await session.commit()
+
+    created_paths: list[str] = []
+    updated_paths: list[str] = []
+
+    async def fake_upload(ev, db_obj):
+        return None
+
+    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, path=None, **kwargs):
+        created_paths.append(path)
+        return "url", path
+
+    async def fake_update(path, title, new_html, media=None, db=None, catbox_urls=None):
+        updated_paths.append(path)
+
+    monkeypatch.setattr(main, "upload_ics", fake_upload)
+    monkeypatch.setattr(main, "create_source_page", fake_create)
+    monkeypatch.setattr(main, "update_source_page", fake_update)
+
+    await main.update_telegraph_event_page(1, db, None)
+    await main.update_telegraph_event_page(1, db, None)
+
+    assert created_paths == ["my-event-2024-05-01"]
+    assert updated_paths == ["my-event-2024-05-01"]
     assert "Добавить в календарь" not in edited.get("html", "")
 
 
@@ -5751,6 +5812,52 @@ async def test_post_ics_asset_caption(tmp_path: Path, monkeypatch):
     day = main.format_day_pretty(date(2025, 7, 18))
     assert f"<b>Concert</b>" in caption
     assert f"<i>{day} 19:00 Сигнал, Леонова 22, #Калининград</i>" in caption
+
+
+@pytest.mark.asyncio
+async def test_post_ics_asset_updates_existing(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    ch = main.Channel(channel_id=-1002, title="Asset", is_admin=True, is_asset=True)
+    async with db.get_session() as session:
+        session.add(ch)
+        await session.commit()
+
+    event = Event(
+        id=1,
+        title="Concert",
+        description="desc",
+        source_text="s",
+        date="2025-07-18",
+        time="19:00",
+        location_name="Hall",
+        ics_post_id=42,
+        ics_post_url="http://t.me/x/42",
+    )
+
+    async def fake_build(db2, ev):
+        return "ICS"
+
+    monkeypatch.setattr(main, "build_ics_content", fake_build)
+
+    edited: dict[str, tuple[int, int]] = {}
+
+    async def fake_edit_media(self, chat_id, message_id, media):
+        edited["call"] = (chat_id, message_id)
+
+    async def fake_send_document(self, *a, **k):
+        raise AssertionError("send_document should not be called")
+
+    monkeypatch.setattr(DummyBot, "edit_message_media", fake_edit_media, raising=False)
+    monkeypatch.setattr(DummyBot, "send_document", fake_send_document, raising=False)
+
+    url, msg_id = await main.post_ics_asset(event, db, bot)
+
+    assert edited["call"] == (ch.channel_id, 42)
+    assert url == main.build_channel_post_url(ch, 42)
+    assert msg_id == 42
 
 
 @pytest.mark.asyncio
