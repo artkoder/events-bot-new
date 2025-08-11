@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import random
 import time as _time
 from contextlib import asynccontextmanager
 import sqlite3
@@ -18,25 +19,143 @@ from models import create_all
 
 
 DEBUG_SQL_PLAN = os.getenv("DEBUG_SQL_PLAN") == "1"
+DB_WARN_MS = int(os.getenv("DB_WARN_MS", "200"))
 
 
-async def pragma(conn, sql: str) -> None:
-    await conn.exec_driver_sql(sql)
+def db_trace(op_name: str):
+    def decorator(fn):
+        async def wrapper(*args, **kwargs):
+            self_obj = args[0] if args else None
+            connection_reopened = False
+            if self_obj and hasattr(self_obj, "_ensure_connection"):
+                connection_reopened = await self_obj._ensure_connection()
+
+            start = _time.perf_counter()
+            locked_retries = 0
+            while True:
+                try:
+                    result = await fn(*args, **kwargs)
+                    break
+                except (sqlite3.ProgrammingError, sqlite3.OperationalError) as e:
+                    msg = str(e)
+                    if "Connection closed" in msg and self_obj and hasattr(self_obj, "_ensure_connection"):
+                        reopened = await self_obj._ensure_connection()
+                        connection_reopened = connection_reopened or reopened
+                        continue
+                    if "database is locked" in msg:
+                        locked_retries += 1
+                        if locked_retries >= 3 or (_time.perf_counter() - start) >= 3:
+                            raise
+                        await asyncio.sleep(0.1 + random.random() * 0.1)
+                        continue
+                    raise
+
+            took_ms = (_time.perf_counter() - start) * 1000
+
+            rows = None
+            try:
+                if isinstance(result, (list, tuple)):
+                    rows = len(result)
+                elif hasattr(result, "rowcount") and result.rowcount is not None:
+                    rows = result.rowcount
+                elif result is None:
+                    rows = 0
+            except Exception:
+                rows = None
+
+            logging.info(
+                "op=%s took_ms=%.0f rows=%s locked_retries=%d connection_reopened=%s",
+                op_name,
+                took_ms,
+                rows if rows is not None else "-",
+                locked_retries,
+                connection_reopened,
+            )
+
+            sql_text = kwargs.get("sql")
+            if sql_text is None:
+                if self_obj is not None:
+                    if len(args) > 1 and isinstance(args[1], str):
+                        sql_text = args[1]
+                elif args and isinstance(args[0], str):
+                    sql_text = args[0]
+
+            if sql_text and took_ms > DB_WARN_MS:
+                sql_short = sql_text.replace("\n", " ")[:200]
+                if DEBUG_SQL_PLAN and self_obj and hasattr(self_obj, "engine"):
+                    try:
+                        plan = await explain_sql(self_obj.engine, sql_text)
+                        logging.warning(
+                            "slow_query took_ms=%.0f sql=%s plan=%s",
+                            took_ms,
+                            sql_short,
+                            plan.replace("\n", " ")[:200],
+                        )
+                    except Exception as e:  # pragma: no cover - logging only
+                        logging.warning(
+                            "slow_query took_ms=%.0f sql=%s plan_failed=%s",
+                            took_ms,
+                            sql_short,
+                            e,
+                        )
+                else:
+                    logging.warning(
+                        "slow_query took_ms=%.0f sql=%s",
+                        took_ms,
+                        sql_short,
+                    )
+
+            return result
+
+        return wrapper
+
+    return decorator
 
 
-async def wal_checkpoint_truncate(engine: AsyncEngine) -> None:
+@db_trace("db_checkpoint")
+async def db_checkpoint(engine: AsyncEngine):
+    try:
+        async with engine.begin() as conn:
+            result = await conn.exec_driver_sql("PRAGMA wal_checkpoint(TRUNCATE)")
+            try:
+                rows = result.fetchall()
+            finally:
+                result.close()
+        logging.info("db_checkpoint result=%s", rows)
+        return rows
+    except Exception as e:  # pragma: no cover - logging only
+        logging.exception("db_checkpoint error=%s", e)
+        raise
+
+
+# backward compatibility
+wal_checkpoint_truncate = db_checkpoint
+
+
+@db_trace("pragma_optimize")
+async def pragma_optimize(engine: AsyncEngine):
+    try:
+        async with engine.begin() as conn:
+            result = await conn.exec_driver_sql("PRAGMA optimize")
+            try:
+                rows = result.fetchall()
+            finally:
+                result.close()
+        logging.info("pragma_optimize result=%s", rows)
+        return rows
+    except Exception as e:  # pragma: no cover - logging only
+        logging.exception("pragma_optimize error=%s", e)
+        raise
+
+
+# backward compatibility
+optimize = pragma_optimize
+
+
+@db_trace("vacuum")
+async def vacuum(engine: AsyncEngine):
     async with engine.begin() as conn:
-        await pragma(conn, "PRAGMA wal_checkpoint(TRUNCATE)")
-
-
-async def optimize(engine: AsyncEngine) -> None:
-    async with engine.begin() as conn:
-        await pragma(conn, "PRAGMA optimize")
-
-
-async def vacuum(engine: AsyncEngine) -> None:
-    async with engine.begin() as conn:
-        await pragma(conn, "VACUUM")
+        await conn.exec_driver_sql("VACUUM")
 
 
 async def explain_sql(
@@ -126,11 +245,16 @@ class Database:
         self._conn: aiosqlite.Connection | None = None
         self._lock = asyncio.Lock()
 
-    async def raw_conn(self) -> aiosqlite.Connection:
-        """Return a shared aiosqlite connection."""
-        if self._conn is None:
+    async def _ensure_connection(self) -> bool:
+        reopened = False
+        if self._conn is None or not getattr(self._conn, "_running", False):
             async with self._lock:
-                if self._conn is None:
+                if self._conn is None or not getattr(self._conn, "_running", False):
+                    if self._conn is not None:
+                        try:
+                            await self._conn.close()
+                        except Exception:
+                            pass
                     self._conn = await aiosqlite.connect(self.path, timeout=15)
                     await self._conn.execute("PRAGMA journal_mode=WAL")
                     await self._conn.execute("PRAGMA synchronous=NORMAL")
@@ -139,6 +263,15 @@ class Database:
                     await self._conn.execute("PRAGMA busy_timeout=5000")
                     await self._conn.execute("PRAGMA read_uncommitted = 1")
                     await self._conn.execute("PRAGMA mmap_size=134217728")
+                    reopened = True
+        if reopened:
+            logging.info("connection_reopened=True")
+        return reopened
+
+    async def raw_conn(self) -> aiosqlite.Connection:
+        """Return a shared aiosqlite connection."""
+        await self._ensure_connection()
+        assert self._conn is not None
         return self._conn
 
     @asynccontextmanager
@@ -151,20 +284,14 @@ class Database:
         finally:
             await conn.rollback()
 
+    @db_trace("exec_driver_sql")
     async def exec_driver_sql(self, sql: str, *args, **kwargs):
-        start = _time.perf_counter()
         async with self.engine.begin() as conn:
             result = await conn.exec_driver_sql(sql, *args, **kwargs)
             try:
                 rows = result.fetchall() if result.returns_rows else None
             finally:
                 result.close()
-            dur = (_time.perf_counter() - start) * 1000
-            if dur > 2000:
-                logging.warning("SLOW SQL %.0f ms: %s", dur, sql)
-                if DEBUG_SQL_PLAN:
-                    plan = await explain_sql(self.engine, sql, *args, **kwargs)
-                    logging.warning("PLAN: %s", plan)
         return rows
 
     async def init(self):
@@ -471,16 +598,10 @@ class Database:
 
     @asynccontextmanager
     async def ensure_connection(self):
-        """Ensure the shared connection is usable, resetting on failures."""
+        """Ensure the shared connection is open."""
+        await self._ensure_connection()
         try:
             yield
-        except (sqlite3.ProgrammingError, sqlite3.OperationalError) as e:
-            if "Connection closed" in str(e):
-                if self._conn is not None:
-                    try:
-                        await self._conn.close()
-                    except Exception:
-                        pass
-                self._conn = None
-            raise
+        finally:
+            pass
 
