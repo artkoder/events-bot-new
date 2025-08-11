@@ -1325,7 +1325,10 @@ async def upcoming_festivals(
 
         stmt = (
             select(
-                Festival,
+                Festival.id,
+                Festival.name,
+                Festival.telegraph_path,
+                Festival.vk_post_url,
                 func.coalesce(Festival.start_date, ev_dates.c.start).label("start"),
                 func.coalesce(Festival.end_date, ev_dates.c.end).label("end"),
             )
@@ -1337,17 +1340,18 @@ async def upcoming_festivals(
         stmt = stmt.order_by(func.coalesce(Festival.start_date, ev_dates.c.start))
         if limit:
             stmt = stmt.limit(limit)
+        start_t = _time.perf_counter()
         rows = (await session.execute(stmt)).all()
+        dur = (_time.perf_counter() - start_t) * 1000
+        logging.debug("db upcoming_festivals took %.1f ms", dur)
 
     data: list[tuple[date | None, date | None, Festival]] = []
-    for fest, start_s, end_s in rows:
+    for fid, name, path, vk_url, start_s, end_s in rows:
         start = parse_iso_date(start_s) if start_s else None
         end = parse_iso_date(end_s) if end_s else None
-        if not start and not end and fest.description:
-            start, end = festival_dates_from_text(fest.description)
-            end = end or start
         if not start and not end:
             continue
+        fest = Festival(id=fid, name=name, telegraph_path=path, vk_post_url=vk_url)
         data.append((start, end, fest))
     return data
 
@@ -1374,14 +1378,17 @@ async def build_festivals_list_nodes(
     for month in sorted(groups.keys()):
         nodes.append({"tag": "h4", "children": [month_name_nominative(month)]})
         for fest in groups[month]:
-            if fest.telegraph_url:
+            url = fest.telegraph_url
+            if not url and fest.telegraph_path:
+                url = f"https://telegra.ph/{fest.telegraph_path}"
+            if url:
                 nodes.append(
                     {
                         "tag": "p",
                         "children": [
                             {
                                 "tag": "a",
-                                "attrs": {"href": fest.telegraph_url},
+                                "attrs": {"href": url},
                                 "children": [fest.name],
                             }
                         ],
@@ -1457,14 +1464,17 @@ async def build_festival_nav_block(
         nodes.append({"tag": "h4", "children": [month_name]})
         lines.append(month_name)
         for fest in groups[month]:
-            if fest.telegraph_url:
+            url = fest.telegraph_url
+            if not url and fest.telegraph_path:
+                url = f"https://telegra.ph/{fest.telegraph_path}"
+            if url:
                 nodes.append(
                     {
                         "tag": "p",
                         "children": [
                             {
                                 "tag": "a",
-                                "attrs": {"href": fest.telegraph_url},
+                                "attrs": {"href": url},
                                 "children": [fest.name],
                             }
                         ],
@@ -7245,15 +7255,21 @@ async def cleanup_old_events(db: Database, now_utc: datetime | None = None) -> i
     cutoff_str = cutoff.date().isoformat()
     async with db.get_session() as session:
         async with session.begin():
-            res = await session.execute(
+            start_t = _time.perf_counter()
+            res1 = await session.execute(
                 delete(Event).where(
-                    or_(
-                        and_(Event.end_date.is_not(None), Event.end_date < cutoff_str),
-                        and_(Event.end_date.is_(None), Event.date < cutoff_str),
-                    )
+                    Event.end_date.is_not(None), Event.end_date < cutoff_str
                 )
             )
-    return res.rowcount if res.rowcount and res.rowcount > 0 else 0
+            res2 = await session.execute(
+                delete(Event).where(
+                    Event.end_date.is_(None), Event.date < cutoff_str
+                )
+            )
+        dur = (_time.perf_counter() - start_t) * 1000
+        logging.debug("db cleanup_old_events took %.1f ms", dur)
+    deleted = (res1.rowcount or 0) + (res2.rowcount or 0)
+    return deleted
 
 
 async def cleanup_scheduler(db: Database, bot: Bot) -> None:

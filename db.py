@@ -133,7 +133,7 @@ class Database:
                     self._conn = await aiosqlite.connect(self.path, timeout=15)
                     await self._conn.execute("PRAGMA journal_mode=WAL")
                     await self._conn.execute("PRAGMA synchronous=NORMAL")
-                    await self._conn.execute("PRAGMA cache_size=-80000")
+                    await self._conn.execute("PRAGMA cache_size=-40000")
                     await self._conn.execute("PRAGMA temp_store=MEMORY")
                     await self._conn.execute("PRAGMA busy_timeout=5000")
                     await self._conn.execute("PRAGMA read_uncommitted = 1")
@@ -172,12 +172,13 @@ class Database:
                 await conn.exec_driver_sql("PRAGMA journal_mode=WAL;")
                 await conn.exec_driver_sql("PRAGMA synchronous=NORMAL;")
                 await conn.exec_driver_sql("PRAGMA temp_store=MEMORY;")
-                await conn.exec_driver_sql("PRAGMA cache_size=-80000;")
+                await conn.exec_driver_sql("PRAGMA cache_size=-40000;")
                 await conn.exec_driver_sql("PRAGMA busy_timeout=5000;")
                 await conn.exec_driver_sql("PRAGMA mmap_size=134217728;")
             await conn.run_sync(create_all)
             result = await conn.exec_driver_sql("PRAGMA table_info(event)")
-            cols = [r[1] for r in result.fetchall()]
+            event_cols = [r[1] for r in result.fetchall()]
+            cols = event_cols
             if "telegraph_url" not in cols:
                 await conn.exec_driver_sql(
                     "ALTER TABLE event ADD COLUMN telegraph_url VARCHAR"
@@ -411,6 +412,22 @@ class Database:
             await conn.exec_driver_sql(
                 "CREATE INDEX IF NOT EXISTS idx_event_date ON event(date)"
             )
+            await conn.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS idx_event_end_date ON event(end_date)"
+            )
+            await conn.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS idx_event_city ON event(city)"
+            )
+            await conn.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS idx_event_type ON event(event_type)"
+            )
+            await conn.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS idx_event_is_free ON event(is_free)"
+            )
+            if "month" in event_cols:
+                await conn.exec_driver_sql(
+                    "CREATE INDEX IF NOT EXISTS idx_event_month ON event(month)"
+                )
             await conn.exec_driver_sql(
                 "CREATE INDEX IF NOT EXISTS ix_event_date_city ON event(date, city)"
             )
