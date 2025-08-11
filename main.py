@@ -633,9 +633,10 @@ def build_channel_post_url(ch: Channel, message_id: int) -> str:
 
 async def get_tz_offset(db: Database) -> str:
     async with db.raw_conn() as conn:
-        row = await conn.execute_fetchone(
+        cursor = await conn.execute(
             "SELECT value FROM setting WHERE key='tz_offset'"
         )
+        row = await cursor.fetchone()
     offset = row[0] if row else "+00:00"
     global LOCAL_TZ
     LOCAL_TZ = offset_to_timezone(offset)
@@ -655,9 +656,10 @@ async def set_tz_offset(db: Database, value: str):
 
 async def get_catbox_enabled(db: Database) -> bool:
     async with db.raw_conn() as conn:
-        row = await conn.execute_fetchone(
+        cursor = await conn.execute(
             "SELECT value FROM setting WHERE key='catbox_enabled'"
         )
+        row = await cursor.fetchone()
     return bool(row and row[0] == "1")
 
 
@@ -674,9 +676,10 @@ async def set_catbox_enabled(db: Database, value: bool):
 
 async def get_vk_photos_enabled(db: Database) -> bool:
     async with db.raw_conn() as conn:
-        row = await conn.execute_fetchone(
+        cursor = await conn.execute(
             "SELECT value FROM setting WHERE key='vk_photos_enabled'"
         )
+        row = await cursor.fetchone()
     return bool(row and row[0] == "1")
 
 
