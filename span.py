@@ -12,30 +12,21 @@ class _Span:
     def configure(self, thresholds: dict[str, int | float]) -> None:
         self._thresholds.update(thresholds)
 
-    def __call__(self, label: str | None = None, **meta):
-        if label is None and "task" in meta:
-            label = str(meta.pop("task"))
-        if label is None:
-            raise TypeError("label is required")
-
+    def __call__(self, label: str, **_):
         span = self
 
         class _Ctx:
-            def __init__(self, label: str, meta: dict[str, Any]):
+            def __init__(self, label: str):
                 self.label = label
-                self.meta = meta
                 self.start = 0.0
 
             def _enter(self) -> None:
                 self.start = time.perf_counter()
-                span._stack.append(span.extra)
-                span.extra = {**span.extra, **self.meta}
-                logging.debug("SPAN_START label=%s meta=%s", self.label, self.meta)
+                logging.debug("SPAN_START label=%s", self.label)
 
             def _exit(self) -> None:
                 dt = (time.perf_counter() - self.start) * 1000
                 logging.debug("SPAN_DONE label=%s dur_ms=%.0f", self.label, dt)
-                span.extra = span._stack.pop()
 
             def __enter__(self):
                 self._enter()
@@ -53,7 +44,7 @@ class _Span:
                 self._exit()
                 return False
 
-        return _Ctx(label, meta)
+        return _Ctx(label)
 
 
 span = _Span()
@@ -71,25 +62,21 @@ if __name__ == "__main__":
 
     # Sync span
     with span("sync", foo=1):
-        assert span.extra["foo"] == 1
-    assert span.extra == {}
+        pass
     log = stream.getvalue()
     assert "SPAN_START label=sync" in log
-    assert "meta={'foo': 1}" in log
     assert "SPAN_DONE label=sync" in log
     stream.truncate(0)
     stream.seek(0)
 
-    # Async span with task label
+    # Async span
     async def main() -> None:
-        async with span(task="async", bar=2):
-            assert span.extra["bar"] == 2
-        assert span.extra == {}
+        async with span("async", bar=2):
+            pass
 
     asyncio.run(main())
     log = stream.getvalue()
     assert "SPAN_START label=async" in log
-    assert "meta={'bar': 2}" in log
     assert "SPAN_DONE label=async" in log
 
     print("OK")

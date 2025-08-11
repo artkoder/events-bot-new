@@ -1,11 +1,10 @@
 import asyncio
 import gc
 
-import psutil
 import pytest
 
 from db import Database
-from main import print_current_rss
+from main import print_current_rss, _current_rss_mb
 
 
 @pytest.mark.skip("RSS check is intended for manual runs")
@@ -16,6 +15,6 @@ async def test_startup_rss(tmp_path, caplog):
     with caplog.at_level("INFO"):
         gc.collect()
         print_current_rss()
-    rss = psutil.Process().memory_info().rss / (1024 * 1024)
+    rss = _current_rss_mb()
     assert rss < 130
     assert any("Peak RSS" in r.message for r in caplog.records)

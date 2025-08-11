@@ -44,7 +44,6 @@ def configure_logging() -> None:
 
 configure_logging()
 
-import psutil
 from datetime import date, datetime, timedelta, timezone, time
 from typing import Optional, Tuple, Iterable, Any, Callable, Awaitable
 from urllib.parse import urlparse, parse_qs
@@ -139,8 +138,20 @@ span.configure(
 DEBUG = os.getenv("EVBOT_DEBUG") == "1"
 
 
+def _current_rss_mb() -> int:
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) // 1024
+    except FileNotFoundError:  # pragma: no cover - non-Linux
+        import resource
+        return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // 1024
+    return 0
+
+
 def print_current_rss() -> None:
-    rss = psutil.Process().memory_info().rss / (1024 * 1024)
+    rss = _current_rss_mb()
     logging.info(f"Peak RSS: {rss:.0f} MB")
 
 
@@ -149,8 +160,6 @@ _month_next_run: dict[str, float] = defaultdict(float)
 _page_last_run: date | None = None
 _page_first_run = True
 _partner_last_run: date | None = None
-
-_P = psutil.Process(os.getpid())
 
 _startup_handler_registered = False
 
@@ -209,13 +218,13 @@ async def perf(name: str, **details):
         yield
         return
     start_t = _time.perf_counter()
-    start_rss = _P.memory_info().rss // 2**20
+    start_rss = _current_rss_mb()
     logging.debug("▶ %s START %s MB %s", name, start_rss, details)
     try:
         yield
     finally:
         end_t = _time.perf_counter()
-        end_rss = _P.memory_info().rss // 2**20
+        end_rss = _current_rss_mb()
         logging.debug(
             "■ %s END   %s MB Δ%+d MB  dur=%.3f s",
             name,
@@ -230,13 +239,13 @@ def perf_sync(name: str, **details):
         yield
         return
     start_t = _time.perf_counter()
-    start_rss = _P.memory_info().rss // 2**20
+    start_rss = _current_rss_mb()
     logging.debug("▶ %s START %s MB %s", name, start_rss, details)
     try:
         yield
     finally:
         end_t = _time.perf_counter()
-        end_rss = _P.memory_info().rss // 2**20
+        end_rss = _current_rss_mb()
         logging.debug(
             "■ %s END   %s MB Δ%+d MB  dur=%.3f s",
             name,
@@ -8561,7 +8570,7 @@ async def handle_status(message: types.Message, db: Database, bot: Bot):
             await bot.send_message(message.chat.id, "Not authorized")
             return
     uptime = time.time() - START_TIME
-    rss = psutil.Process().memory_info().rss / (1024 * 1024)
+    rss = _current_rss_mb()
     qlen = add_event_queue.qsize()
     jobs = list(JOB_HISTORY)[-5:]
     lines = [
