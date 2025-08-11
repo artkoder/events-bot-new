@@ -21,7 +21,7 @@ class SafeBot(Bot):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         # cache chat_id/message_id -> (text, markup_repr, date)
-        self._cache: TTLCache = TTLCache(maxsize=1024, ttl=3 * 24 * 3600)
+        self._cache: TTLCache = TTLCache(maxsize=64, ttl=3 * 24 * 3600)
 
     async def _call(self, func, *args, **kwargs):
         last_exc: Exception | None = None
