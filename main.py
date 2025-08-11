@@ -93,6 +93,7 @@ from contextlib import asynccontextmanager, contextmanager
 from collections import defaultdict
 import asyncio
 import contextlib
+import random
 import html
 from io import BytesIO
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -360,6 +361,10 @@ add_event_queue: asyncio.Queue[tuple[str, types.Message, bool]] = asyncio.Queue(
     maxsize=200
 )
 working: set[asyncio.Task] = set()
+
+# queue for post-commit event update jobs
+event_update_queue: asyncio.Queue[tuple[str, int]] = asyncio.Queue()
+EVENT_UPDATE_SEMAPHORE = asyncio.Semaphore(2)
 
 
 async def _log_queue_stats(app: web.Application, db: Database, bot: Bot):
@@ -3474,6 +3479,15 @@ async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
     return new, True
 
 
+async def schedule_event_update_tasks(ev: Event) -> None:
+    eid = ev.id
+    await event_update_queue.put(("update_telegraph_event_page", eid))
+    if ev.festival:
+        await event_update_queue.put(("update_festival_nav_if_needed", eid))
+    await event_update_queue.put(("sync_vk_source_post", eid))
+    logging.info("scheduled event tasks for %s", eid)
+
+
 async def add_events_from_text(
     db: Database,
     text: str,
@@ -3583,8 +3597,8 @@ async def add_events_from_text(
                 lines.append(f"city: {fest_obj.city}")
             results.append((fest_obj, True, lines, "festival"))
             logging.info("festival %s created without events", fest_obj.name)
-    months_to_sync: set[str] = set()
-    weekends_to_sync: set[str] = set()
+    month_events: dict[str, int] = {}
+    weekend_events: dict[str, int] = {}
     for data in parsed:
         logging.info(
             "processing event candidate: %s on %s %s",
@@ -3698,159 +3712,12 @@ async def add_events_from_text(
                 "event %s with id %s", "added" if added else "updated", saved.id
             )
 
-            media_arg = None
-            upload_info = catbox_msg_global if first else ""
-            photo_count = saved.photo_count
-            if saved.telegraph_url and saved.telegraph_path:
-                upload_info, added_count = await update_source_page(
-                    saved.telegraph_path,
-                    saved.title or "Event",
-                    html_text or text,
-                    media_arg,
-                    db,
-                    catbox_urls=catbox_urls,
-                )
-                if added_count:
-                    photo_count += added_count
-                    async with db.get_session() as session:
-                        saved.photo_count = photo_count
-                        session.add(saved)
-                        await session.commit()
-                if not saved.description:
-                    try:
-                        await update_event_description(saved, db)
-                    except Exception as e:
-                        logging.error(
-                            "failed to update event %s description: %s", saved.id, e
-                        )
-                if is_vk_wall_url(source_link):
-                    vk_url = source_link
-                else:
-                    vk_url = await sync_vk_source_post(
-                        saved,
-                        saved.source_text,
-                        db,
-                        bot,
-                        ics_url=saved.ics_url,
-                    )
-                if vk_url:
-                    async with db.get_session() as session:
-                        saved.source_vk_post_url = vk_url
-                        session.add(saved)
-                        await session.commit()
-            else:
-                if not saved.ics_url:
-                    ics = await upload_ics(saved, db)
-                    if ics:
-                        logging.info("ICS saved for event %s: %s", saved.id, ics)
-                        async with db.get_session() as session:
-                            obj = await session.get(Event, saved.id)
-                            if obj:
-                                obj.ics_url = ics
-                                await session.commit()
-                                saved.ics_url = ics
-
-                if bot and saved.ics_url and not saved.ics_post_url:
-                    try:
-                        posted = await asyncio.wait_for(
-                            post_ics_asset(saved, db, bot), ICS_POST_TIMEOUT
-                        )
-                    except Exception as e:
-                        logging.error("failed to post ics asset: %s", e)
-                        posted = None
-                    if posted:
-                        url_p, msg_id = posted
-                        logging.info(
-                            "asset post %s for event %s", url_p, saved.id
-                        )
-                        async with db.get_session() as session:
-                            obj = await session.get(Event, saved.id)
-                            if obj:
-                                obj.ics_post_url = url_p
-                                obj.ics_post_id = msg_id
-                                await session.commit()
-                                saved.ics_post_url = url_p
-                                saved.ics_post_id = msg_id
-                        await add_calendar_button(saved, db, bot)
-                        logging.info(
-                            "calendar button added for event %s", saved.id
-                        )
-                        if saved.telegraph_path:
-                            await update_source_page_ics(
-                                saved.telegraph_path,
-                                saved.title or "Event",
-                                saved.ics_url,
-                            )
-                            if not is_vk_wall_url(source_link):
-                                await sync_vk_source_post(
-                                    saved,
-                                    saved.source_text,
-                                    db,
-                                    bot,
-                                    ics_url=saved.ics_url,
-                                )
-                extra_kwargs = {"display_link": False} if not display_source else {}
-                res = await create_source_page(
-                    saved.title or "Event",
-                    saved.source_text,
-                    source_link,
-                    html_text,
-                    None,
-                    saved.ics_url,
-                    db,
-                    catbox_urls=catbox_urls,
-                    **extra_kwargs,
-                )
-                if res:
-                    if len(res) == 4:
-                        url, path, _, photo_count = res
-                    elif len(res) == 3:
-                        url, path, _ = res
-                        photo_count = 0
-                    else:
-                        url, path = res
-                        photo_count = 0
-                    upload_info = catbox_msg_global if first else ""
-                    logging.info("telegraph page %s", url)
-                    async with db.get_session() as session:
-                        saved.telegraph_url = url
-                        saved.telegraph_path = path
-                        saved.photo_count = photo_count
-                        session.add(saved)
-                        await session.commit()
-                    if is_vk_wall_url(source_link):
-                        vk_url = source_link
-                    else:
-                        vk_url = await sync_vk_source_post(
-                            saved,
-                            saved.source_text,
-                            db,
-                            bot,
-                            ics_url=saved.ics_url,
-                        )
-                    if vk_url:
-                        async with db.get_session() as session:
-                            saved.source_vk_post_url = vk_url
-                            session.add(saved)
-                            await session.commit()
-            months_to_sync.add(saved.date[:7])
+            await schedule_event_update_tasks(saved)
+            month_events.setdefault(saved.date[:7], saved.id)
             d_saved = parse_iso_date(saved.date)
             w_start = weekend_start_for_date(d_saved) if d_saved else None
             if w_start:
-                weekends_to_sync.add(w_start.isoformat())
-            fest_obj = None
-            if saved.festival:
-                logging.info("syncing festival %s", saved.festival)
-                await sync_festival_page(db, saved.festival)
-                asyncio.create_task(sync_festival_vk_post(db, saved.festival, bot))
-                async with db.get_session() as session:
-                    res = await session.execute(
-                        select(Festival).where(Festival.name == saved.festival)
-                    )
-                    fest_obj = res.scalar_one_or_none()
-            await asyncio.sleep(0)
-
-
+                weekend_events.setdefault(w_start.isoformat(), saved.id)
             lines = [
                 f"title: {saved.title}",
                 f"date: {saved.date}",
@@ -3863,11 +3730,6 @@ async def add_events_from_text(
                 lines.append(f"city: {saved.city}")
             if saved.festival:
                 lines.append(f"festival: {saved.festival}")
-                if fest_obj and fest_obj.telegraph_url:
-                    lines.append(f"festival_page: {fest_obj.telegraph_url}")
-                if fest_obj and fest_obj.vk_post_url:
-                    lines.append(f"festival_vk_post: {fest_obj.vk_post_url}")
-
             if saved.description:
                 lines.append(f"description: {saved.description}")
             if saved.event_type:
@@ -3878,34 +3740,15 @@ async def add_events_from_text(
                 lines.append(f"price_max: {saved.ticket_price_max}")
             if saved.ticket_link:
                 lines.append(f"ticket_link: {saved.ticket_link}")
-            if saved.telegraph_url:
-                lines.append(f"telegraph: {saved.telegraph_url}")
-            if saved.source_vk_post_url:
-                if is_vk_wall_url(saved.source_post_url):
-                    lines.append(f"vk_weekend_post: {saved.source_vk_post_url}")
-                else:
-                    lines.append(f"vk_source: {saved.source_vk_post_url}")
-            elif is_vk_wall_url(saved.source_post_url):
-                lines.append(f"Vk: {saved.source_post_url}")
-            if upload_info:
-                lines.append(f"catbox: {upload_info}")
             status = "added" if added else "updated"
             results.append((saved, added, lines, status))
             first = False
-    for m in months_to_sync:
-        logging.info("syncing month page %s", m)
-        try:
-            await sync_month_page(db, m)
-        except Exception as e:
-            logging.error("failed to sync month page %s: %s", m, e)
-        await asyncio.sleep(0)
-    for w in weekends_to_sync:
-        logging.info("syncing weekend page %s", w)
-        try:
-            await sync_weekend_page(db, w)
-        except Exception as e:
-            logging.error("failed to sync weekend page %s: %s", w, e)
-        await asyncio.sleep(0)
+    for eid in month_events.values():
+        await event_update_queue.put(("update_month_pages_for", eid))
+    for eid in weekend_events.values():
+        await event_update_queue.put(("update_weekend_pages_for", eid))
+    if os.getenv("EVENT_UPDATE_SYNC") == "1" and bot is not None:
+        await run_event_update_jobs(db, bot)
     logging.info("add_events_from_text finished with %d results", len(results))
     del parsed
     gc.collect()
@@ -3936,10 +3779,6 @@ async def handle_add_event(
     creator_id = user.user_id if user else message.from_user.id
     images = await extract_images(message, bot)
     media = images if images else None
-    catbox_urls: list[str] | None = None
-    catbox_msg = ""
-    if images:
-        catbox_urls, catbox_msg = await upload_to_catbox(images)
     html_text = message.html_text or message.caption_html
     if html_text:
         html_text = strip_leading_cmd(html_text)
@@ -4059,10 +3898,6 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
         return
     images = await extract_images(message, bot)
     media = images if images else None
-    catbox_urls: list[str] | None = None
-    catbox_msg = ""
-    if images:
-        catbox_urls, catbox_msg = await upload_to_catbox(images)
     html_text = message.html_text or message.caption_html
     if html_text and html_text.startswith("/addevent_raw"):
         html_text = html_text[len("/addevent_raw") :].lstrip()
@@ -4081,81 +3916,20 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
     async with db.get_session() as session:
         event, added = await upsert_event(session, event)
 
-    if not event.ics_url:
-        ics = await upload_ics(event, db)
-        if ics:
-            async with db.get_session() as session:
-                obj = await session.get(Event, event.id)
-                if obj:
-                    obj.ics_url = ics
-                    await session.commit()
-                    event.ics_url = ics
-
-    res = await create_source_page(
-        event.title or "Event",
-        event.source_text,
-        None,
-        html_text or event.source_text,
-        None,
-        event.ics_url,
-        db,
-        catbox_urls=catbox_urls,
-    )
-    upload_info = catbox_msg
-    photo_count = 0
-    if res:
-        if len(res) == 4:
-            url, path, upload_info, photo_count = res
-        elif len(res) == 3:
-            url, path, upload_info = res
-            photo_count = 0
-        else:
-            url, path = res
-            upload_info = ""
-            photo_count = 0
-        async with db.get_session() as session:
-            event.telegraph_url = url
-            event.telegraph_path = path
-            event.photo_count = photo_count
-            session.add(event)
-            await session.commit()
-        if is_vk_wall_url(event.source_post_url):
-            vk_url = event.source_post_url
-        else:
-            vk_url = await sync_vk_source_post(
-                event,
-                event.source_text,
-                db,
-                bot,
-                ics_url=event.ics_url,
-            )
-        if vk_url:
-            async with db.get_session() as session:
-                event.source_vk_post_url = vk_url
-                session.add(event)
-                await session.commit()
-    await sync_month_page(db, event.date[:7])
+    await schedule_event_update_tasks(event)
+    await event_update_queue.put(("update_month_pages_for", event.id))
     d = parse_iso_date(event.date)
     w_start = weekend_start_for_date(d) if d else None
     if w_start:
-        await sync_weekend_page(db, w_start.isoformat())
+        await event_update_queue.put(("update_weekend_pages_for", event.id))
+    if os.getenv("EVENT_UPDATE_SYNC") == "1":
+        await run_event_update_jobs(db, bot)
     lines = [
         f"title: {event.title}",
         f"date: {event.date}",
         f"time: {event.time}",
         f"location_name: {event.location_name}",
     ]
-    if event.telegraph_url:
-        lines.append(f"telegraph: {event.telegraph_url}")
-    if event.source_vk_post_url:
-        if is_vk_wall_url(event.source_post_url):
-            lines.append(f"vk_weekend_post: {event.source_vk_post_url}")
-        else:
-            lines.append(f"vk_source: {event.source_vk_post_url}")
-    elif is_vk_wall_url(event.source_post_url):
-        lines.append(f"Vk: {event.source_post_url}")
-    if upload_info:
-        lines.append(f"catbox: {upload_info}")
     status = "added" if added else "updated"
     logging.info("handle_add_event_raw %s event id=%s", status, event.id)
     buttons_first: list[types.InlineKeyboardButton] = []
@@ -4276,6 +4050,139 @@ async def add_event_queue_worker(db: Database, bot: Bot):
             add_event_queue.task_done()
             dur = (_time.perf_counter() - start) * 1000
             logging.info("add_event total=%.0f ms", dur)
+
+
+async def _run_event_update_task(
+    name: str, event_id: int, db: Database, bot: Bot, timeout: float = 30.0
+) -> None:
+    func = EVENT_UPDATE_TASKS[name]
+    for attempt in range(3):
+        try:
+            async with span("event_update_job", task=name, event_id=event_id):
+                await asyncio.wait_for(func(event_id, db, bot), timeout=timeout)
+            break
+        except Exception as exc:
+            delay = (2 ** attempt) + random.random()
+            logging.warning(
+                "event_update_job %s event=%s error=%s retry=%d",
+                name,
+                event_id,
+                exc,
+                attempt,
+            )
+            await asyncio.sleep(delay)
+
+
+async def event_update_queue_worker(db: Database, bot: Bot):
+    while True:
+        name, event_id = await event_update_queue.get()
+        async with EVENT_UPDATE_SEMAPHORE:
+            await _run_event_update_task(name, event_id, db, bot)
+        event_update_queue.task_done()
+
+
+async def run_event_update_jobs(db: Database, bot: Bot) -> None:
+    """Run all pending event update jobs sequentially (for tests)."""
+    while not event_update_queue.empty():
+        name, event_id = await event_update_queue.get()
+        try:
+            await EVENT_UPDATE_TASKS[name](event_id, db, bot)
+        finally:
+            event_update_queue.task_done()
+
+
+async def update_telegraph_event_page(event_id: int, db: Database, bot: Bot | None) -> None:
+    async with db.get_session() as session:
+        ev = await session.get(Event, event_id)
+        if not ev:
+            return
+        if not ev.ics_url:
+            ics = await upload_ics(ev, db)
+            if ics:
+                ev.ics_url = ics
+        extra = {"display_link": False} if ev.source_post_url else {}
+        if ev.telegraph_url and ev.telegraph_path:
+            try:
+                await update_source_page(
+                    ev.telegraph_path,
+                    ev.title or "Event",
+                    ev.source_text,
+                    None,
+                    db,
+                    catbox_urls=[],
+                )
+                await session.commit()
+                return
+            except Exception:
+                await session.rollback()
+                raise
+        res = await create_source_page(
+            ev.title or "Event",
+            ev.source_text,
+            ev.source_post_url,
+            ev.source_text,
+            None,
+            ev.ics_url,
+            db,
+            catbox_urls=[],
+            **extra,
+        )
+        if res:
+            url, path = res[:2]
+            ev.telegraph_url = url
+            ev.telegraph_path = path
+            session.add(ev)
+            await session.commit()
+
+
+async def update_month_pages_for(event_id: int, db: Database, bot: Bot | None) -> None:
+    async with db.get_session() as session:
+        ev = await session.get(Event, event_id)
+    if not ev:
+        return
+    await sync_month_page(db, ev.date[:7])
+
+
+async def update_weekend_pages_for(event_id: int, db: Database, bot: Bot | None) -> None:
+    async with db.get_session() as session:
+        ev = await session.get(Event, event_id)
+    if not ev:
+        return
+    d = parse_iso_date(ev.date)
+    w_start = weekend_start_for_date(d) if d else None
+    if w_start:
+        await sync_weekend_page(db, w_start.isoformat())
+
+
+async def update_festival_nav_if_needed(event_id: int, db: Database, bot: Bot | None) -> None:
+    async with db.get_session() as session:
+        ev = await session.get(Event, event_id)
+    if ev and ev.festival:
+        await refresh_nav_on_all_festivals(db, bot)
+
+
+async def job_sync_vk_source_post(event_id: int, db: Database, bot: Bot | None) -> None:
+    async with db.get_session() as session:
+        ev = await session.get(Event, event_id)
+    if not ev or is_vk_wall_url(ev.source_post_url):
+        return
+    vk_url = await sync_vk_source_post(ev, ev.source_text, db, bot, ics_url=ev.ics_url)
+    if vk_url:
+        async with db.get_session() as session:
+            obj = await session.get(Event, event_id)
+            if obj:
+                obj.source_vk_post_url = vk_url
+                session.add(obj)
+                await session.commit()
+
+
+EVENT_UPDATE_TASKS = {
+    "update_telegraph_event_page": update_telegraph_event_page,
+    "update_month_pages_for": update_month_pages_for,
+    "update_weekend_pages_for": update_weekend_pages_for,
+    "update_festival_nav_if_needed": update_festival_nav_if_needed,
+    "sync_vk_source_post": job_sync_vk_source_post,
+}
 
 
 def format_day(day: date, tz: timezone) -> str:
@@ -7462,6 +7369,10 @@ async def init_db_and_scheduler(
     app["daily_task"] = asyncio.create_task(daily_scheduler(db, bot))
     scheduler_startup(db, bot)
     app["add_event_worker"] = asyncio.create_task(add_event_queue_worker(db, bot))
+    app["event_update_workers"] = [
+        asyncio.create_task(event_update_queue_worker(db, bot))
+        for _ in range(2)
+    ]
     if DEBUG:
         app["qstat_task"] = asyncio.create_task(_log_queue_stats(app, db, bot))
     gc.collect()
@@ -9073,6 +8984,12 @@ def create_app() -> web.Application:
             app["add_event_worker"].cancel()
             with contextlib.suppress(Exception):
                 await app["add_event_worker"]
+        if "event_update_workers" in app:
+            for t in app["event_update_workers"]:
+                t.cancel()
+            for t in app["event_update_workers"]:
+                with contextlib.suppress(Exception):
+                    await t
         if "daily_task" in app:
             app["daily_task"].cancel()
             with contextlib.suppress(Exception):

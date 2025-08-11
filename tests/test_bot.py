@@ -64,6 +64,23 @@ def _mock_sync_vk_source_post(monkeypatch):
 def _reset_http_session(monkeypatch):
     monkeypatch.setattr(main, "_http_session", None)
 
+
+@pytest.fixture(autouse=True)
+def _sync_event_updates(monkeypatch):
+    monkeypatch.setenv("EVENT_UPDATE_SYNC", "1")
+
+
+@pytest.fixture(autouse=True)
+def _mock_page_sync(monkeypatch):
+    async def fake_month(db_obj, month):
+        return None
+
+    async def fake_weekend(db_obj, start):
+        return None
+
+    monkeypatch.setattr(main, "sync_month_page", fake_month)
+    monkeypatch.setattr(main, "sync_weekend_page", fake_weekend)
+
 FUTURE_DATE = (date.today() + timedelta(days=10)).isoformat()
 
 
