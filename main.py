@@ -104,7 +104,8 @@ import aiosqlite
 import gc
 import atexit
 from cachetools import TTLCache
-from markup import simple_md_to_html
+from markup import simple_md_to_html, DAY_START, DAY_END
+from sections import replace_between_markers, content_hash
 from db import Database
 from scheduler import startup as scheduler_startup, cleanup as scheduler_cleanup
 from models import (
@@ -4188,12 +4189,111 @@ async def update_telegraph_event_page(event_id: int, db: Database, bot: Bot | No
             await session.commit()
 
 
+async def patch_month_page_for_date(db: Database, telegraph: Telegraph, month_key: str, d: date) -> bool:
+    """Patch a single day's section on a month page if it changed."""
+    page_key = f"telegraph:month:{month_key}"
+    section_key = f"day:{d.isoformat()}"
+    start = _time.perf_counter()
+
+    async with db.get_session() as session:
+        page = await session.get(MonthPage, month_key)
+        if not page or not page.path:
+            return False
+        result = await session.execute(
+            select(Event)
+            .where(Event.date.like(f"{d.isoformat()}%"))
+            .order_by(Event.time)
+        )
+        events = result.scalars().all()
+        fest_names = [e.festival for e in events if e.festival]
+        fest_map: dict[str, Festival] = {}
+        if fest_names:
+            res_f = await session.execute(
+                select(Festival).where(Festival.name.in_(fest_names))
+            )
+            fest_map = {f.name: f for f in res_f.scalars().all()}
+
+    for ev in events:
+        if ev.festival:
+            setattr(ev, "_festival", fest_map.get(ev.festival))
+
+    html_section = render_month_day_section(d, events)
+    new_hash = content_hash(html_section)
+    old_hash = await get_section_hash(db, page_key, section_key)
+    if new_hash == old_hash:
+        dur = (_time.perf_counter() - start) * 1000
+        logging.info(
+            "month_patch page_key=%s day=%s changed=False dur=%.0fms",
+            page_key,
+            d.isoformat(),
+            dur,
+        )
+        return False
+
+    async def tg_call(func, /, *args, **kwargs):
+        last: Exception | None = None
+        for attempt in range(2):
+            try:
+                return await asyncio.wait_for(
+                    asyncio.to_thread(func, *args, **kwargs), 7
+                )
+            except Exception as e:
+                last = e
+                if attempt == 0:
+                    await asyncio.sleep(random.uniform(0, 1))
+                    continue
+                raise
+
+    page_data = await tg_call(telegraph.get_page, page.path, return_html=True)
+    html_content = page_data.get("content") or page_data.get("content_html") or ""
+    title = page_data.get("title") or month_key
+    updated_html = replace_between_markers(
+        html_content, DAY_START(d), DAY_END(d), html_section
+    )
+    await tg_call(
+        telegraph.edit_page, page.path, title=title, html_content=updated_html
+    )
+    await set_section_hash(db, page_key, section_key, new_hash)
+    dur = (_time.perf_counter() - start) * 1000
+    logging.info(
+        "month_patch page_key=%s day=%s changed=True dur=%.0fms",
+        page_key,
+        d.isoformat(),
+        dur,
+    )
+    return True
+
+
 async def update_month_pages_for(event_id: int, db: Database, bot: Bot | None) -> None:
     async with db.get_session() as session:
         ev = await session.get(Event, event_id)
     if not ev:
         return
-    await sync_month_page(db, ev.date[:7])
+
+    token = get_telegraph_token()
+    if not token:
+        logging.error("Telegraph token unavailable")
+        return
+    tg = Telegraph(access_token=token)
+
+    start_date = parse_iso_date(ev.date.split("..", 1)[0])
+    end_date = None
+    if ".." in ev.date:
+        end_part = ev.date.split("..", 1)[1]
+        end_date = parse_iso_date(end_part)
+    elif ev.end_date:
+        end_date = parse_iso_date(ev.end_date.split("..", 1)[0])
+    dates: list[date] = []
+    if start_date:
+        dates.append(start_date)
+        if end_date and end_date >= start_date:
+            span_days = min((end_date - start_date).days, 30)
+            for i in range(1, span_days + 1):
+                dates.append(start_date + timedelta(days=i))
+
+    for d in dates:
+        month_key = d.strftime("%Y-%m")
+        await patch_month_page_for_date(db, tg, month_key, d)
 
 
 async def update_weekend_pages_for(event_id: int, db: Database, bot: Bot | None) -> None:
@@ -4926,6 +5026,28 @@ def exhibition_to_nodes(e: Event) -> list[dict]:
         nodes.extend(html_to_nodes(html_text))
     nodes.extend(telegraph_br())
     return nodes
+
+
+def render_month_day_section(d: date, events: list[Event]) -> str:
+    """Return HTML snippet for a single day on a month page."""
+    from telegraph.utils import nodes_to_html
+
+    nodes: list[dict] = []
+    nodes.extend(telegraph_br())
+    if d.weekday() == 5:
+        nodes.append({"tag": "h3", "children": ["🟥🟥🟥 суббота 🟥🟥🟥"]})
+        nodes.extend(telegraph_br())
+    elif d.weekday() == 6:
+        nodes.append({"tag": "h3", "children": ["🟥🟥 воскресенье 🟥🟥"]})
+        nodes.extend(telegraph_br())
+    nodes.append({"tag": "h3", "children": [f"🟥🟥🟥 {format_day_pretty(d)} 🟥🟥🟥"]})
+    nodes.extend(telegraph_br())
+    for idx, ev in enumerate(events):
+        if idx > 0:
+            nodes.extend(telegraph_br())
+        fest = getattr(ev, "_festival", None)
+        nodes.extend(event_to_nodes(ev, fest, fest_icon=True))
+    return nodes_to_html(nodes)
 
 async def get_month_data(db: Database, month: str, *, fallback: bool = True):
     """Return events, exhibitions and nav pages for the given month."""
