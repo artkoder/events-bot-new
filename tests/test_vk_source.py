@@ -3,6 +3,17 @@ from pathlib import Path
 import main
 
 
+@pytest.fixture(autouse=True)
+def _sync_event_updates(monkeypatch):
+    monkeypatch.setenv("EVENT_UPDATE_SYNC", "1")
+    async def fake_month(db_obj, month):
+        return None
+    async def fake_weekend(db_obj, start):
+        return None
+    monkeypatch.setattr(main, "sync_month_page", fake_month)
+    monkeypatch.setattr(main, "sync_weekend_page", fake_weekend)
+
+
 @pytest.mark.asyncio
 async def test_sync_vk_source_post_includes_calendar_link(monkeypatch):
     main.VK_AFISHA_GROUP_ID = "1"
