@@ -5457,6 +5457,31 @@ def exhibition_to_nodes(e: Event) -> list[dict]:
     return nodes
 
 
+def add_day_sections(
+    days: Iterable[date],
+    by_day: dict[date, list[Event]],
+    fest_map: dict[str, Festival],
+    add_many: Callable[[Iterable[dict]], None],
+):
+    """Append event sections grouped by day to Telegraph content."""
+    for d in days:
+        events = by_day.get(d)
+        if not events:
+            continue
+        add_many(telegraph_br())
+        if d.weekday() == 5:
+            add_many([{ "tag": "h3", "children": ["🟥🟥🟥 суббота 🟥🟥🟥"] }])
+            add_many(telegraph_br())
+        elif d.weekday() == 6:
+            add_many([{ "tag": "h3", "children": ["🟥🟥 воскресенье 🟥🟥"] }])
+            add_many(telegraph_br())
+        add_many([{ "tag": "h3", "children": [f"🟥🟥🟥 {format_day_pretty(d)} 🟥🟥🟥"] }])
+        add_many(telegraph_br())
+        for ev in events:
+            fest = fest_map.get(ev.festival or "")
+            add_many(event_to_nodes(ev, fest, fest_icon=True))
+
+
 def render_month_day_section(d: date, events: list[Event]) -> str:
     """Return HTML snippet for a single day on a month page."""
     from telegraph.utils import nodes_to_html
@@ -5620,25 +5645,7 @@ def _build_month_page_content_sync(
     ]
     add({"tag": "p", "children": intro_nodes})
 
-    for day in sorted(by_day):
-        if exceeded:
-            break
-        add_many(telegraph_br())
-        if day.weekday() == 5:
-            add({"tag": "h3", "children": ["🟥🟥🟥 суббота 🟥🟥🟥"]})
-            add_many(telegraph_br())
-        elif day.weekday() == 6:
-            add({"tag": "h3", "children": ["🟥🟥 воскресенье 🟥🟥"]})
-            add_many(telegraph_br())
-        add({"tag": "h3", "children": [f"🟥🟥🟥 {format_day_pretty(day)} 🟥🟥🟥"]})
-        add_many(telegraph_br())
-        for idx, ev in enumerate(by_day[day]):
-            if exceeded:
-                break
-            if idx > 0:
-                add_many(telegraph_br())
-            fest = fest_map.get(ev.festival or "")
-            add_many(event_to_nodes(ev, fest, fest_icon=True))
+    add_day_sections(sorted(by_day), by_day, fest_map, add_many)
 
     future_pages = [p for p in nav_pages if p.month >= month]
     month_nav: list[dict] = []
@@ -5659,9 +5666,6 @@ def _build_month_page_content_sync(
 
     if nav_children:
         month_nav = [{"tag": "h4", "children": nav_children}]
-        add_many(telegraph_br())
-        add_many(month_nav)
-        add_many(telegraph_br())
 
     if exhibitions and not exceeded:
         add({"tag": "h3", "children": ["Постоянные выставки"]})
@@ -6015,23 +6019,7 @@ async def build_weekend_page_content(
         }
     )
 
-    for d in days:
-        if exceeded or d not in by_day:
-            continue
-        add_many(telegraph_br())
-        if d.weekday() == 5:
-            add({"tag": "h3", "children": ["🟥🟥🟥 суббота 🟥🟥🟥"]})
-            add_many(telegraph_br())
-        elif d.weekday() == 6:
-            add({"tag": "h3", "children": ["🟥🟥 воскресенье 🟥🟥"]})
-            add_many(telegraph_br())
-        add({"tag": "h3", "children": [f"🟥🟥🟥 {format_day_pretty(d)} 🟥🟥🟥"]})
-        add_many(telegraph_br())
-        for ev in by_day[d]:
-            if exceeded:
-                break
-            fest = fest_map.get(ev.festival or "")
-            add_many(event_to_nodes(ev, fest, fest_icon=True))
+    add_day_sections(days, by_day, fest_map, add_many)
 
     weekend_nav: list[dict] = []
     future_weekends = [w for w in weekend_pages if w.start >= start]
@@ -6049,9 +6037,6 @@ async def build_weekend_page_content(
             if idx < len(future_weekends) - 1:
                 nav_children.append(" ")
         weekend_nav = [{"tag": "h4", "children": nav_children}]
-        add_many(telegraph_br())
-        add_many(weekend_nav)
-        add_many(telegraph_br())
 
     month_nav: list[dict] = []
     cur_month = start[:7]
@@ -6064,9 +6049,6 @@ async def build_weekend_page_content(
             if idx < len(future_months) - 1:
                 nav_children.append(" ")
         month_nav = [{"tag": "h4", "children": nav_children}]
-        add_many(telegraph_br())
-        add_many(month_nav)
-        add_many(telegraph_br())
 
     if exhibitions and not exceeded:
         add({"tag": "h3", "children": ["Постоянные выставки"]})
@@ -9434,7 +9416,7 @@ async def build_source_page_content(
     else:
         html_content += f"<p><strong>{html.escape(title)}</strong></p>"
     for url in urls:
-        html_content += f'<img src="{html.escape(url)}"/><p></p>'
+        html_content += f'<figure><img src="{html.escape(url)}"/></figure>'
     html_content = apply_ics_link(html_content, ics_url)
     if html_text:
         html_text = strip_title(html_text)

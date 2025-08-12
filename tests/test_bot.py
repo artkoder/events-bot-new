@@ -2632,7 +2632,7 @@ async def test_weekend_nav_and_exhibitions(tmp_path: Path):
             for c in n.get("children", [])
         )
     ]
-    assert len(nav_blocks) == 2
+    assert len(nav_blocks) == 1
     first_block_children = nav_blocks[0]["children"]
     assert not isinstance(first_block_children[0], dict)
 
@@ -2652,7 +2652,6 @@ async def test_weekend_nav_and_exhibitions(tmp_path: Path):
         if n.get("tag") == "h3" and "Постоянные" in "".join(n.get("children", []))
     )
     assert content[idx_exh - 1].get("tag") == "p"
-    assert content[idx_exh - 2].get("tag") == "br"
 
 
 @pytest.mark.asyncio
@@ -2687,7 +2686,7 @@ async def test_month_nav_and_exhibitions(tmp_path: Path):
             for c in n.get("children", [])
         )
     ]
-    assert len(nav_blocks) == 2
+    assert len(nav_blocks) == 1
     first_block_children = nav_blocks[0]["children"]
     assert not isinstance(first_block_children[0], dict)
 
@@ -2697,7 +2696,6 @@ async def test_month_nav_and_exhibitions(tmp_path: Path):
         if n.get("tag") == "h3" and "Постоянные" in "".join(n.get("children", []))
     )
     assert content[idx_exh - 1].get("tag") == "p"
-    assert content[idx_exh - 2].get("tag") == "br"
 
 
 @pytest.mark.asyncio
