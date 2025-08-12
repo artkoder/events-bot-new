@@ -125,12 +125,14 @@ class Database:
                     source_chat_id INTEGER,
                     source_message_id INTEGER,
                     creator_id INTEGER,
+                    photo_urls JSON,
                     photo_count INTEGER DEFAULT 0,
                     added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     content_hash TEXT
                 )
                 """
             )
+            await _add_column(conn, "event", "photo_urls JSON")
 
             await conn.execute(
                 """

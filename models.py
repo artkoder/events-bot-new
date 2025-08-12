@@ -92,6 +92,7 @@ class Event(SQLModel, table=True):
     source_chat_id: Optional[int] = None
     source_message_id: Optional[int] = None
     creator_id: Optional[int] = None
+    photo_urls: list[str] = Field(default_factory=list, sa_column=Column(JSON))
     photo_count: int = 0
     added_at: datetime = Field(default_factory=datetime.utcnow)
     content_hash: Optional[str] = None
