@@ -180,6 +180,11 @@
 - Festival descriptions are generated from the full original post text.
 - Festival records store the original announcement in a new `source_text` field.
 
+## v0.3.28 - VK user token
+
+- VK posting now uses a user token. Set `VK_USER_TOKEN` with `wall,groups,offline` scopes.
+- The group token `VK_TOKEN` is optional and used only as a fallback.
+
 
 
 

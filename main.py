@@ -7199,6 +7199,8 @@ async def post_to_vk(
     db: Database | None = None,
     bot: Bot | None = None,
     attachments: list[str] | None = None,
+    token: str | None = None,
+    token_kind: str = "group",
 ) -> str | None:
     if not group_id:
         return None
@@ -7217,9 +7219,7 @@ async def post_to_vk(
         params["attachments"] = ",".join(attachments)
     if DEBUG:
         mem_info("VK post before")
-    data = await _vk_api(
-        "wall.post", params, db, bot, token=VK_TOKEN, token_kind="group"
-    )
+    data = await _vk_api("wall.post", params, db, bot, token=token, token_kind=token_kind)
     if DEBUG:
         mem_info("VK post after")
     post_id = data.get("response", {}).get("post_id")
