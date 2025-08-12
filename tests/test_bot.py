@@ -3523,15 +3523,14 @@ async def test_update_telegraph_event_page_deterministic(tmp_path: Path, monkeyp
 async def test_create_source_page_adds_nav(tmp_path: Path, monkeypatch):
     captured = {}
 
-    class DummyTG:
-        def create_page(self, title, html_content=None, **_):
-            captured["html"] = html_content
-            return {"url": "https://telegra.ph/test", "path": "p"}
+    async def fake_create_page(tg, title, author_name=None, content=None, **_):
+        captured["content"] = content
+        return {"url": "https://telegra.ph/test", "path": "p"}
 
     monkeypatch.setenv("TELEGRAPH_TOKEN", "t")
-    monkeypatch.setattr(
-        "main.Telegraph", lambda access_token=None, domain=None: DummyTG()
-    )
+    monkeypatch.setattr(main, "telegraph_create_page", fake_create_page)
+    from telegraph import utils as t_utils
+    monkeypatch.setattr(t_utils, "html_to_nodes", lambda html: [{"tag": "raw", "children": [html]}])
 
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
@@ -3541,7 +3540,9 @@ async def test_create_source_page_adds_nav(tmp_path: Path, monkeypatch):
         await session.commit()
 
     res = await main.create_source_page("T", "text", None, db=db)
-    assert "u1" in captured.get("html", "")
+    raw_html = captured["content"][0]["children"][0]
+    assert "u1" not in raw_html
+    assert "u2" in raw_html
     assert res[0] == "https://telegra.ph/test"
 
 

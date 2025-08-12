@@ -1748,8 +1748,13 @@ def apply_footer_link(html_content: str) -> str:
 
 
 async def build_month_nav_html(db: Database) -> str:
+    cur_month = datetime.now(LOCAL_TZ).strftime("%Y-%m")
     async with db.get_session() as session:
-        result = await session.execute(select(MonthPage).order_by(MonthPage.month))
+        result = await session.execute(
+            select(MonthPage)
+            .where(MonthPage.month >= cur_month)
+            .order_by(MonthPage.month)
+        )
         months = result.scalars().all()
     if not months:
         return ""
@@ -3538,6 +3543,8 @@ def _copy_fields(dst: Event, src: Event) -> None:
         "end_date",
         "is_free",
         "pushkin_card",
+        "photo_urls",
+        "photo_count",
     ):
         setattr(dst, f, getattr(src, f))
 
@@ -3889,6 +3896,8 @@ async def add_events_from_text(
             source_chat_id=source_chat_id,
             source_message_id=source_message_id,
             creator_id=creator_id,
+            photo_count=len(catbox_urls),
+            photo_urls=catbox_urls,
         )
 
         base_event.event_type = normalize_event_type(
@@ -4553,7 +4562,7 @@ async def update_telegraph_event_page(
             ev.ics_url,
             db,
             display_link=display_link,
-            catbox_urls=[],
+            catbox_urls=ev.photo_urls,
         )
         from telegraph.utils import html_to_nodes
 
