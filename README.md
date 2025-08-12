@@ -39,11 +39,11 @@ browse upcoming announcements. The command accepts dates like `2025-07-10`,
   # Optional: provide Telegraph token. If omitted, the bot creates an account
   # automatically and saves the token to /data/telegraph_token.txt.
   export TELEGRAPH_TOKEN=your_telegraph_token
-  # Optional: post daily announcements to VK
+  # User access token for VK posts (scopes: wall,groups,offline)
+  export VK_USER_TOKEN=vk_user_token
+  # Optional: group token used as a fallback
   export VK_TOKEN=vk_group_token
-  # Optional: user access token for VK posts with images
-export VK_USER_TOKEN=vk_user_token
-# Sending images to VK is disabled by default. Use /vkphotos to enable it.
+  # Sending images to VK is disabled by default. Use /vkphotos to enable it.
  python main.py
    ```
 
@@ -67,10 +67,10 @@ export VK_USER_TOKEN=vk_user_token
    # Optional: use your own Telegraph token. If not set, a new account will be
    # created on first run and the token saved to the data volume.
    fly secrets set TELEGRAPH_TOKEN=<token>
-   # Optional: post daily announcements to VK
-   fly secrets set VK_TOKEN=<token>
-   # Optional: user access token for VK posts with images
+   # User access token for VK posts (scopes: wall,groups,offline)
    fly secrets set VK_USER_TOKEN=<token>
+   # Optional: group token used as a fallback
+   fly secrets set VK_TOKEN=<token>
    # Sending images to VK is disabled by default. Toggle with /vkphotos.
    ```
 3. Deploy:

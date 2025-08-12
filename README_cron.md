@@ -11,7 +11,8 @@ The bot uses APScheduler to run periodic maintenance tasks every 15 minutes. Eac
 
 ## Environment variables
 
-- `VK_TOKEN` or `VK_USER_TOKEN` – enable posting to VK.
+- `VK_USER_TOKEN` – user token for VK posts (scopes: wall,groups,offline).
+- `VK_TOKEN` – optional group token used as a fallback.
 - `EVBOT_DEBUG` – enables extra logging and queue statistics.
 
 All jobs are lightweight and finish in under a few seconds so that the bot remains responsive.
