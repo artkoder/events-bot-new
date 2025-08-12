@@ -23,7 +23,7 @@ ticket_price_max  - maximum ticket price as integer or null
 ticket_link       - URL for purchasing tickets **or** registration form if present
 is_free           - true if explicitly stated the event is free
 pushkin_card     - true if the event accepts the Пушкинская карта
-event_type       - one of: спектакль, выставка, концерт, ярмарка, лекция, встреча
+event_type       - one of: спектакль, выставка, концерт, ярмарка, лекция, встреча, кинопоказ
 emoji            - an optional emoji representing the event
 end_date         - end date for multi-day events or null
 When a range is provided, put the start date in `date` and the end date in `end_date`.
