@@ -1,24 +1,34 @@
 """Shared HTTP utilities with logging and retry/sanitizing."""
 import asyncio
+import json
 import logging
 import random
 import re
 import time
 from typing import Any
 
-import httpx
+from aiohttp import ClientSession, TCPConnector
 
-_client: httpx.AsyncClient | None = None
+_connector: TCPConnector | None = None
+_session: ClientSession | None = None
 
 
-def _get_client() -> httpx.AsyncClient:
-    global _client
-    if _client is None:
-        _client = httpx.AsyncClient(
-            timeout=None,
-            limits=httpx.Limits(max_keepalive_connections=5, max_connections=10),
-        )
-    return _client
+class _Response:
+    def __init__(self, status: int, headers: dict[str, str], body: bytes) -> None:
+        self.status_code = status
+        self.headers = headers
+        self.content = body
+
+    def json(self) -> Any:
+        return json.loads(self.content.decode("utf-8"))
+
+
+def _get_session() -> ClientSession:
+    global _session, _connector
+    if _session is None or _session.closed:
+        _connector = TCPConnector(limit=10)
+        _session = ClientSession(connector=_connector)
+    return _session
 
 
 def _sanitize_url(url: str) -> str:
@@ -36,9 +46,9 @@ async def http_call(
     retries: int = 1,
     backoff: float = 1.0,
     **kwargs: Any,
-) -> httpx.Response:
+) -> _Response:
     """Perform HTTP request with logging and basic retry."""
-    client = _get_client()
+    session = _get_session()
     data = kwargs.get("data") or kwargs.get("json")
     bytes_out = 0
     if data is not None:
@@ -50,33 +60,33 @@ async def http_call(
     for attempt in range(1, retries + 1):
         start = time.perf_counter()
         try:
-            resp = await client.request(method, url, timeout=timeout, **kwargs)
-            body = resp.content
-            took_ms = int((time.perf_counter() - start) * 1000)
-            rate = {k: v for k, v in resp.headers.items() if "rate" in k.lower()}
-            logging.info(
-                "http_call %s attempt=%d status=%s took_ms=%d in=%d out=%d %s%s",
-                name,
-                attempt,
-                resp.status_code,
-                took_ms,
-                len(body),
-                bytes_out,
-                f"rate={rate} " if rate else "",
-                _sanitize_url(url),
-            )
-            if resp.status_code in {429} or resp.status_code >= 500:
-                if attempt < retries:
-                    delay = backoff * (2 ** (attempt - 1)) + random.random() * backoff
-                    logging.warning(
-                        "http_call %s retry in %.2fs due to status %s",
-                        name,
-                        delay,
-                        resp.status_code,
-                    )
-                    await asyncio.sleep(delay)
-                    continue
-            return resp
+            async with session.request(method, url, timeout=timeout, **kwargs) as resp:
+                body = await resp.read()
+                took_ms = int((time.perf_counter() - start) * 1000)
+                rate = {k: v for k, v in resp.headers.items() if "rate" in k.lower()}
+                logging.info(
+                    "http_call %s attempt=%d status=%s took_ms=%d in=%d out=%d %s%s",
+                    name,
+                    attempt,
+                    resp.status,
+                    took_ms,
+                    len(body),
+                    bytes_out,
+                    f"rate={rate} " if rate else "",
+                    _sanitize_url(url),
+                )
+                if resp.status in {429} or resp.status >= 500:
+                    if attempt < retries:
+                        delay = backoff * (2 ** (attempt - 1)) + random.random() * backoff
+                        logging.warning(
+                            "http_call %s retry in %.2fs due to status %s",
+                            name,
+                            delay,
+                            resp.status,
+                        )
+                        await asyncio.sleep(delay)
+                        continue
+                return _Response(resp.status, dict(resp.headers), body)
         except Exception as e:  # pragma: no cover
             took_ms = int((time.perf_counter() - start) * 1000)
             logging.warning(

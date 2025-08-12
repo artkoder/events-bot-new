@@ -105,7 +105,6 @@ def startup(db, bot) -> AsyncIOScheduler:
         vk_scheduler,
         vk_poll_scheduler,
         cleanup_scheduler,
-        page_update_scheduler,
         partner_notification_scheduler,
     )
 
@@ -135,19 +134,9 @@ def startup(db, bot) -> AsyncIOScheduler:
         _job_wrapper("cleanup_scheduler", cleanup_scheduler),
         "cron",
         id="cleanup_scheduler",
-        minute="3,18,33,48",
+        hour="2",
+        minute="7",
         args=[db, bot],
-        replace_existing=True,
-        max_instances=1,
-        coalesce=True,
-        misfire_grace_time=30,
-    )
-    _scheduler.add_job(
-        _job_wrapper("page_update_scheduler", page_update_scheduler),
-        "cron",
-        id="page_update_scheduler",
-        minute="4,19,34,49",
-        args=[db],
         replace_existing=True,
         max_instances=1,
         coalesce=True,
