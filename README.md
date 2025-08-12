@@ -100,6 +100,8 @@ export VK_USER_TOKEN=vk_user_token
 Each added event stores the original announcement text in a Telegraph page. The link is shown when the event is added and in the `/events` listing. Events may also contain ticket prices and a purchase link. Use the edit button in `/events` to change any field.
 Links from the announcement text are preserved on the Telegraph page whenever possible so readers can follow the original sources.
 If the original message contains photos (under 5&nbsp;MB), they are uploaded to Catbox and displayed on the Telegraph page.
+The project uses `telegraph>=2.2.0`. `create_page` returns the page `url` and `path`;
+only `edit_page(path=...)` accepts a `path` argument when updating existing pages.
 Editing an event lets you create or delete an ICS file for calendars. The file is uploaded to Supabase when `SUPABASE_URL` and `SUPABASE_KEY` are set. Files are named `Event-<id>-dd-mm-yyyy.ics` and include a link back to the event. Set `SUPABASE_BUCKET` if you use a bucket name other than `events-ics`.
 When a calendar file exists the Telegraph page shows a link right under the title image: "📅 Добавить в календарь на телефоне (ICS)".
 Events may note support for the Пушкинская карта, shown as a separate line in postings.

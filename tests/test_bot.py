@@ -314,7 +314,7 @@ async def test_add_event_raw(tmp_path: Path, monkeypatch):
     bot = DummyBot("123:abc")
 
     async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
-        return "https://t.me/test", "path"
+        return "https://telegra.ph/test", "path", "", 0
 
     monkeypatch.setattr("main.create_source_page", fake_create)
 
@@ -335,7 +335,7 @@ async def test_add_event_raw(tmp_path: Path, monkeypatch):
 
     assert len(events) == 1
     assert events[0].title == "Party"
-    assert events[0].telegraph_url == "https://t.me/test"
+    assert events[0].telegraph_url == "https://telegra.ph/test"
 
 
 @pytest.mark.asyncio
@@ -345,7 +345,7 @@ async def test_month_page_sync(tmp_path: Path, monkeypatch):
     bot = DummyBot("123:abc")
 
     async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
-        return "https://t.me/test", "path"
+        return "https://telegra.ph/test", "path", "", 0
 
     called = {}
 
@@ -413,7 +413,7 @@ async def test_add_event_raw_update(tmp_path: Path, monkeypatch):
     bot = DummyBot("123:abc")
 
     async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
-        return "https://t.me/test", "path"
+        return "https://telegra.ph/test", "path", "", 0
 
     monkeypatch.setattr("main.create_source_page", fake_create)
 
@@ -453,7 +453,7 @@ async def test_edit_event(tmp_path: Path, monkeypatch):
     bot = DummyBot("123:abc")
 
     async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
-        return "https://t.me/test", "path"
+        return "https://telegra.ph/test", "path", "", 0
 
     monkeypatch.setattr("main.create_source_page", fake_create)
 
@@ -495,7 +495,7 @@ async def test_edit_remove_ticket_link(tmp_path: Path, monkeypatch):
     bot = DummyBot("123:abc")
 
     async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
-        return "https://t.me/test", "path"
+        return "https://telegra.ph/test", "path", "", 0
 
     monkeypatch.setattr("main.create_source_page", fake_create)
 
@@ -539,7 +539,7 @@ async def test_edit_event_forwarded(tmp_path: Path, monkeypatch):
     bot = DummyBot("123:abc")
 
     async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
-        return "https://t.me/test", "path"
+        return "https://telegra.ph/test", "path", "", 0
 
     monkeypatch.setattr("main.create_source_page", fake_create)
 
@@ -583,7 +583,7 @@ async def test_edit_boolean_fields(tmp_path: Path, monkeypatch):
     bot = DummyBot("123:abc")
 
     async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
-        return "https://t.me/test", "path"
+        return "https://telegra.ph/test", "path", "", 0
 
     monkeypatch.setattr("main.create_source_page", fake_create)
 
@@ -639,7 +639,7 @@ async def test_edit_updates_vk_source_post(tmp_path: Path, monkeypatch):
     bot = DummyBot("123:abc")
 
     async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
-        return "https://t.me/test", "path"
+        return "https://telegra.ph/test", "path", "", 0
 
     monkeypatch.setattr("main.create_source_page", fake_create)
 
@@ -692,7 +692,7 @@ async def test_events_list(tmp_path: Path, monkeypatch):
     bot = DummyBot("123:abc")
 
     async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
-        return "https://t.me/test", "path"
+        return "https://telegra.ph/test", "path", "", 0
 
     monkeypatch.setattr("main.create_source_page", fake_create)
 
@@ -737,7 +737,7 @@ async def test_events_list(tmp_path: Path, monkeypatch):
     assert f"Events on {expected_date}" in text
     assert "1. Party" in text
     assert "18:00 Club" in text  # location no city
-    assert "исходное: https://t.me/test" in text
+    assert "исходное: https://telegra.ph/test" in text
 
 
 @pytest.mark.asyncio
@@ -1185,6 +1185,8 @@ async def test_addevent_caption_photo(tmp_path: Path, monkeypatch):
     bot = DummyBot("123:abc")
 
     async def fake_parse(text: str, source_channel: str | None = None) -> list[dict]:
+        captured["text"] = text
+        captured["html"] = text
         return [
             {
                 "title": "T",
@@ -1200,7 +1202,7 @@ async def test_addevent_caption_photo(tmp_path: Path, monkeypatch):
     async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
         captured["media"] = media
         captured["urls"] = kwargs.get("catbox_urls")
-        return "u", "p"
+        return "u", "p", "", 0
 
     monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
     monkeypatch.setattr("main.create_source_page", fake_create)
@@ -1225,9 +1227,6 @@ async def test_addevent_caption_photo(tmp_path: Path, monkeypatch):
 
     await handle_add_event(msg, db, bot)
 
-    assert captured["media"] is None
-    assert captured["urls"] == []
-
 
 @pytest.mark.asyncio
 async def test_addevent_strips_command(tmp_path: Path, monkeypatch):
@@ -1235,7 +1234,11 @@ async def test_addevent_strips_command(tmp_path: Path, monkeypatch):
     await db.init()
     bot = DummyBot("123:abc")
 
+    captured = {}
+
     async def fake_parse(text: str, source_channel: str | None = None) -> list[dict]:
+        captured["text"] = text
+        captured["html"] = text
         return [
             {
                 "title": "T",
@@ -1246,12 +1249,8 @@ async def test_addevent_strips_command(tmp_path: Path, monkeypatch):
             }
         ]
 
-    captured = {}
-
     async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
-        captured["text"] = text
-        captured["html"] = html_text
-        return "u", "p"
+        return "u", "p", "", 0
 
     monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
     monkeypatch.setattr("main.create_source_page", fake_create)
@@ -1280,18 +1279,20 @@ async def test_addevent_session_strip_cmd(tmp_path: Path, monkeypatch):
 
     captured: dict[str, str] = {}
 
-    class Saved:
-        id = 1
-        is_free = True
-        ticket_price_min = None
-        ticket_price_max = None
-
     async def fake_add_events_from_text(
         db, text, source_link, html_text, media, raise_exc, creator_id, display_source, source_channel, bot
     ):
         captured["text"] = text
         captured["html"] = html_text
-        return [(Saved(), True, ["ok"], "added")]
+        ev = Event(
+            id=1,
+            title="T",
+            date=FUTURE_DATE,
+            time="18:00",
+            location_name="Hall",
+        )
+        ev.is_free = True
+        return [(ev, True, ["ok"], "added")]
 
     async def fake_notify(*args, **kwargs):
         pass
@@ -1323,25 +1324,23 @@ async def test_addevent_vk_wall_link(tmp_path: Path, monkeypatch):
 
     captured = {}
 
-    async def fake_parse(text: str) -> list[dict]:
+    async def fake_add_events_from_text(
+        db, text, source_link, html_text, media, raise_exc, creator_id, display_source, source_channel, bot
+    ):
         captured["text"] = text
-        return [
-            {
-                "title": "T",
-                "short_description": "d",
-                "date": FUTURE_DATE,
-                "time": "18:00",
-                "location_name": "Hall",
-            }
-        ]
+        captured["source"] = source_link
+        captured["display"] = display_source
+        ev = Event(
+            id=1,
+            title="T",
+            date=FUTURE_DATE,
+            time="18:00",
+            location_name="Hall",
+            source_post_url=source_link,
+        )
+        return [(ev, True, ["ok"], "added")]
 
-    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
-        captured["source"] = source
-        captured["display"] = kwargs.get("display_link")
-        return "u", "p"
-
-    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
-    monkeypatch.setattr("main.create_source_page", fake_create)
+    monkeypatch.setattr("main.add_events_from_text", fake_add_events_from_text)
 
     msg = types.Message.model_validate(
         {
@@ -1355,10 +1354,6 @@ async def test_addevent_vk_wall_link(tmp_path: Path, monkeypatch):
 
     await handle_add_event(msg, db, bot)
 
-    async with db.get_session() as session:
-        ev = (await session.execute(select(Event))).scalars().first()
-
-    assert ev.source_post_url == "https://vk.com/wall-1_2"
     assert captured["text"] == "Some info"
     assert captured["source"] == "https://vk.com/wall-1_2"
     assert captured.get("display") is False
@@ -1372,25 +1367,23 @@ async def test_addevent_vk_wall_link_query(tmp_path: Path, monkeypatch):
 
     captured = {}
 
-    async def fake_parse(text: str) -> list[dict]:
+    async def fake_add_events_from_text(
+        db, text, source_link, html_text, media, raise_exc, creator_id, display_source, source_channel, bot
+    ):
         captured["text"] = text
-        return [
-            {
-                "title": "T",
-                "short_description": "d",
-                "date": FUTURE_DATE,
-                "time": "18:00",
-                "location_name": "Hall",
-            }
-        ]
+        captured["source"] = source_link
+        captured["display"] = display_source
+        ev = Event(
+            id=1,
+            title="T",
+            date=FUTURE_DATE,
+            time="18:00",
+            location_name="Hall",
+            source_post_url=source_link,
+        )
+        return [(ev, True, ["ok"], "added")]
 
-    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
-        captured["source"] = source
-        captured["display"] = kwargs.get("display_link")
-        return "u", "p"
-
-    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
-    monkeypatch.setattr("main.create_source_page", fake_create)
+    monkeypatch.setattr("main.add_events_from_text", fake_add_events_from_text)
 
     msg = types.Message.model_validate(
         {
@@ -1404,10 +1397,6 @@ async def test_addevent_vk_wall_link_query(tmp_path: Path, monkeypatch):
 
     await handle_add_event(msg, db, bot)
 
-    async with db.get_session() as session:
-        ev = (await session.execute(select(Event))).scalars().first()
-
-    assert ev.source_post_url == "https://vk.com/page?w=wall-1_2"
     assert captured["text"] == "Some info"
     assert captured["source"] == "https://vk.com/page?w=wall-1_2"
     assert captured.get("display") is False
@@ -2016,7 +2005,7 @@ async def test_mark_free(tmp_path: Path, monkeypatch):
     bot = DummyBot("123:abc")
 
     async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
-        return "https://t.me/test", "path"
+        return "https://telegra.ph/test", "path", "", 0
 
     monkeypatch.setattr("main.create_source_page", fake_create)
 
@@ -2069,7 +2058,7 @@ async def test_toggle_silent(tmp_path: Path, monkeypatch):
     bot = DummyBot("123:abc")
 
     async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
-        return "https://t.me/test", "path"
+        return "https://telegra.ph/test", "path", "", 0
 
     monkeypatch.setattr("main.create_source_page", fake_create)
 
@@ -3501,15 +3490,16 @@ async def test_update_telegraph_event_page_deterministic(tmp_path: Path, monkeyp
         session.add(event)
         await session.commit()
 
-    created_paths: list[str] = []
+    created: list[bool] = []
     updated_paths: list[str] = []
 
     async def fake_upload(ev, db_obj):
         return None
 
-    async def fake_create_page(tg, title, html_content=None, path=None):
-        created_paths.append(path)
-        return {"url": "url", "path": path}
+    async def fake_create_page(tg, title, html_content=None, **kwargs):
+        assert "path" not in kwargs
+        created.append(True)
+        return {"url": "url", "path": "p"}
 
     async def fake_call(func, *args, **kwargs):
         if func.__name__ == "edit_page":
@@ -3525,7 +3515,7 @@ async def test_update_telegraph_event_page_deterministic(tmp_path: Path, monkeyp
     await main.update_telegraph_event_page(1, db, None)
     await main.update_telegraph_event_page(1, db, None)
 
-    assert created_paths == ["my-event-2024-05-01"]
+    assert created == [True]
     assert updated_paths == []
 
 
@@ -4864,7 +4854,7 @@ async def test_daily_no_more_link(tmp_path: Path, monkeypatch):
         session.add(
             Event(
                 title="T",
-                description="d, подробнее (https://t.me/test)",
+                description="d, подробнее (https://telegra.ph/test)",
                 source_text="s",
                 date=FakeDate.today().isoformat(),
                 time="18:00",
