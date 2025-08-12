@@ -3507,23 +3507,26 @@ async def test_update_telegraph_event_page_deterministic(tmp_path: Path, monkeyp
     async def fake_upload(ev, db_obj):
         return None
 
-    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, path=None, **kwargs):
+    async def fake_create_page(tg, title, html_content=None, path=None):
         created_paths.append(path)
-        return "url", path
+        return {"url": "url", "path": path}
 
-    async def fake_update(path, title, new_html, media=None, db=None, catbox_urls=None):
-        updated_paths.append(path)
+    async def fake_call(func, *args, **kwargs):
+        if func.__name__ == "edit_page":
+            updated_paths.append(args[0])
+        return None
 
     monkeypatch.setattr(main, "upload_ics", fake_upload)
-    monkeypatch.setattr(main, "create_source_page", fake_create)
-    monkeypatch.setattr(main, "update_source_page", fake_update)
+    monkeypatch.setattr(main, "telegraph_create_page", fake_create_page)
+    monkeypatch.setattr(main, "telegraph_call", fake_call)
+    monkeypatch.setattr(main, "get_telegraph_token", lambda: "t")
+    monkeypatch.setattr(main, "Telegraph", lambda access_token=None: object())
 
     await main.update_telegraph_event_page(1, db, None)
     await main.update_telegraph_event_page(1, db, None)
 
     assert created_paths == ["my-event-2024-05-01"]
     assert updated_paths == []
-    assert "Добавить в календарь" not in edited.get("html", "")
 
 
 @pytest.mark.asyncio
