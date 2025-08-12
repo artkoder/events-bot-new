@@ -90,7 +90,6 @@ from telegraph import Telegraph, TelegraphException
 from net import http_call
 
 from functools import partial, lru_cache
-from contextlib import asynccontextmanager, contextmanager
 from collections import defaultdict, deque
 import asyncio
 import contextlib
@@ -106,41 +105,33 @@ from markup import simple_md_to_html, DAY_START, DAY_END
 from sections import replace_between_markers, content_hash
 from db import Database
 from scheduler import startup as scheduler_startup, cleanup as scheduler_cleanup
+from sqlalchemy import select as sa_select, update as sa_update, delete as sa_delete, text, func
+try:
+    from sqlmodel import select as sm_select
+except Exception:
+    sm_select = None
+
+select = sm_select or sa_select
+update = sa_update
+delete = sa_delete
+
+from models import (
+    User,
+    PendingUser,
+    RejectedUser,
+    Channel,
+    Setting,
+    Event,
+    MonthPage,
+    WeekendPage,
+    WeekPage,
+    Festival,
+    JobOutbox,
+    JobTask,
+    JobStatus,
+)
 
 
-def __getattr__(name: str):
-    if name in {
-        "User",
-        "PendingUser",
-        "RejectedUser",
-        "Channel",
-        "Setting",
-        "Event",
-        "MonthPage",
-        "WeekendPage",
-        "WeekPage",
-        "Festival",
-        "JobOutbox",
-        "JobTask",
-        "JobStatus",
-    }:
-        from models import (
-            User,
-            PendingUser,
-            RejectedUser,
-            Channel,
-            Setting,
-            Event,
-            MonthPage,
-            WeekendPage,
-            WeekPage,
-            Festival,
-            JobOutbox,
-            JobTask,
-            JobStatus,
-        )
-        return locals()[name]
-    raise AttributeError(name)
 
 from span import span
 
@@ -154,23 +145,6 @@ span.configure(
 )
 
 DEBUG = os.getenv("EVBOT_DEBUG") == "1"
-
-
-def _current_rss_mb() -> int:
-    try:
-        with open("/proc/self/status") as f:
-            for line in f:
-                if line.startswith("VmRSS:"):
-                    return int(line.split()[1]) // 1024
-    except FileNotFoundError:  # pragma: no cover - non-Linux
-        import resource
-        return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // 1024
-    return 0
-
-
-def print_current_rss() -> None:
-    rss = _current_rss_mb()
-    logging.info(f"Peak RSS: {rss:.0f} MB")
 
 
 _page_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
@@ -230,47 +204,6 @@ class MemoryLogHandler(logging.Handler):
 
 logging.getLogger().addHandler(MemoryLogHandler())
 
-@asynccontextmanager
-async def perf(name: str, **details):
-    if not DEBUG:
-        yield
-        return
-    start_t = _time.perf_counter()
-    start_rss = _current_rss_mb()
-    logging.debug("▶ %s START %s MB %s", name, start_rss, details)
-    try:
-        yield
-    finally:
-        end_t = _time.perf_counter()
-        end_rss = _current_rss_mb()
-        logging.debug(
-            "■ %s END   %s MB Δ%+d MB  dur=%.3f s",
-            name,
-            end_rss,
-            end_rss - start_rss,
-            end_t - start_t,
-        )
-
-@contextmanager
-def perf_sync(name: str, **details):
-    if not DEBUG:
-        yield
-        return
-    start_t = _time.perf_counter()
-    start_rss = _current_rss_mb()
-    logging.debug("▶ %s START %s MB %s", name, start_rss, details)
-    try:
-        yield
-    finally:
-        end_t = _time.perf_counter()
-        end_rss = _current_rss_mb()
-        logging.debug(
-            "■ %s END   %s MB Δ%+d MB  dur=%.3f s",
-            name,
-            end_rss,
-            end_rss - start_rss,
-            end_t - start_t,
-        )
 
 
 @lru_cache(maxsize=20)
@@ -2171,8 +2104,7 @@ async def parse_event_via_4o(
                 resp = await session.post(url, json=payload, headers=headers)
                 resp.raise_for_status()
                 return await resp.json()
-    async with perf("LLM_parse", size=len(user_msg)):
-        data_raw = await asyncio.wait_for(_call(), FOUR_O_TIMEOUT)
+    data_raw = await asyncio.wait_for(_call(), FOUR_O_TIMEOUT)
     content = (
         data_raw.get("choices", [{}])[0]
         .get("message", {})
@@ -5708,20 +5640,19 @@ async def _sync_month_page_inner(db: Database, month: str, update_links: bool = 
         logging.info(
             "sync_month_page start: month=%s update_links=%s", month, update_links
         )
-        async with perf("sync_month_page"):
-            token = get_telegraph_token()
-            if not token:
-                logging.error("Telegraph token unavailable")
-                return
-            tg = Telegraph(access_token=token)
-            async with db.get_session() as session:
-                page = await session.get(MonthPage, month)
-                created = False
-                if not page:
-                    page = MonthPage(month=month, url="", path="")
-                    session.add(page)
-                    await session.commit()
-                    created = True
+        token = get_telegraph_token()
+        if not token:
+            logging.error("Telegraph token unavailable")
+            return
+        tg = Telegraph(access_token=token)
+        async with db.get_session() as session:
+            page = await session.get(MonthPage, month)
+            created = False
+            if not page:
+                page = MonthPage(month=month, url="", path="")
+                session.add(page)
+                await session.commit()
+                created = True
 
             events, exhibitions, nav_pages = await get_month_data(db, month)
 
@@ -5929,165 +5860,164 @@ def next_weekend_start(d: date) -> date:
 async def build_weekend_page_content(
     db: Database, start: str, size_limit: int | None = None
 ) -> tuple[str, list, int]:
-    async with perf("build_weekend_page_content"):
-        saturday = date.fromisoformat(start)
-        sunday = saturday + timedelta(days=1)
-        days = [saturday, sunday]
-        async with db.get_session() as session:
-            result = await session.execute(
-                select(Event)
-                .where(Event.date.in_([d.isoformat() for d in days]))
-                .order_by(Event.date, Event.time)
-            )
-            events = result.scalars().all()
+    saturday = date.fromisoformat(start)
+    sunday = saturday + timedelta(days=1)
+    days = [saturday, sunday]
+    async with db.get_session() as session:
+        result = await session.execute(
+            select(Event)
+            .where(Event.date.in_([d.isoformat() for d in days]))
+            .order_by(Event.date, Event.time)
+        )
+        events = result.scalars().all()
 
-            ex_res = await session.execute(
-                select(Event)
-                .where(
-                    Event.event_type == "выставка",
-                    Event.end_date.is_not(None),
-                    Event.date <= sunday.isoformat(),
-                    Event.end_date >= saturday.isoformat(),
+        ex_res = await session.execute(
+            select(Event)
+            .where(
+                Event.event_type == "выставка",
+                Event.end_date.is_not(None),
+                Event.date <= sunday.isoformat(),
+                Event.end_date >= saturday.isoformat(),
+            )
+            .order_by(Event.date)
+        )
+        exhibitions = ex_res.scalars().all()
+
+        res_w = await session.execute(select(WeekendPage).order_by(WeekendPage.start))
+        weekend_pages = res_w.scalars().all()
+        res_m = await session.execute(select(MonthPage).order_by(MonthPage.month))
+        month_pages = res_m.scalars().all()
+        res_f = await session.execute(select(Festival))
+        fest_map = {f.name: f for f in res_f.scalars().all()}
+
+    today = datetime.now(LOCAL_TZ).date()
+    events = [
+        e
+        for e in events
+        if (
+            (e.end_date and e.end_date >= today.isoformat())
+            or (not e.end_date and e.date >= today.isoformat())
+        )
+    ]
+
+    async with db.get_session() as session:
+        res_f = await session.execute(select(Festival))
+        fest_map = {f.name: f for f in res_f.scalars().all()}
+
+    by_day: dict[date, list[Event]] = {}
+    for e in events:
+        d = parse_iso_date(e.date)
+        if not d:
+            continue
+        by_day.setdefault(d, []).append(e)
+
+    content: list[dict] = []
+    size = 0
+    exceeded = False
+
+    def add(node: dict):
+        nonlocal size, exceeded
+        size += rough_size((node,))
+        if size_limit is not None and size > size_limit:
+            exceeded = True
+            return
+        content.append(node)
+
+    def add_many(nodes: Iterable[dict]):
+        for n in nodes:
+            if exceeded:
+                break
+            add(n)
+
+    add(
+        {
+            "tag": "p",
+            "children": [
+                "Вот что рекомендуют ",
+                {
+                    "tag": "a",
+                    "attrs": {"href": "https://t.me/kenigevents"},
+                    "children": ["Полюбить Калининград Анонсы"],
+                },
+                " чтобы провести выходные ярко: события Калининградской области и 39 региона — концерты, спектакли, фестивали.",
+            ],
+        }
+    )
+
+    for d in days:
+        if exceeded or d not in by_day:
+            continue
+        add_many(telegraph_br())
+        if d.weekday() == 5:
+            add({"tag": "h3", "children": ["🟥🟥🟥 суббота 🟥🟥🟥"]})
+            add_many(telegraph_br())
+        elif d.weekday() == 6:
+            add({"tag": "h3", "children": ["🟥🟥 воскресенье 🟥🟥"]})
+            add_many(telegraph_br())
+        add({"tag": "h3", "children": [f"🟥🟥🟥 {format_day_pretty(d)} 🟥🟥🟥"]})
+        add_many(telegraph_br())
+        for ev in by_day[d]:
+            if exceeded:
+                break
+            fest = fest_map.get(ev.festival or "")
+            add_many(event_to_nodes(ev, fest, fest_icon=True))
+
+    weekend_nav: list[dict] = []
+    future_weekends = [w for w in weekend_pages if w.start >= start]
+    if future_weekends:
+        nav_children = []
+        for idx, w in enumerate(future_weekends):
+            s = date.fromisoformat(w.start)
+            label = format_weekend_range(s)
+            if w.start == start:
+                nav_children.append(label)
+            else:
+                nav_children.append(
+                    {"tag": "a", "attrs": {"href": w.url}, "children": [label]}
                 )
-                .order_by(Event.date)
-            )
-            exhibitions = ex_res.scalars().all()
+            if idx < len(future_weekends) - 1:
+                nav_children.append(" ")
+        weekend_nav = [{"tag": "h4", "children": nav_children}]
+        add_many(telegraph_br())
+        add_many(weekend_nav)
+        add_many(telegraph_br())
 
-            res_w = await session.execute(select(WeekendPage).order_by(WeekendPage.start))
-            weekend_pages = res_w.scalars().all()
-            res_m = await session.execute(select(MonthPage).order_by(MonthPage.month))
-            month_pages = res_m.scalars().all()
-            res_f = await session.execute(select(Festival))
-            fest_map = {f.name: f for f in res_f.scalars().all()}
+    month_nav: list[dict] = []
+    cur_month = start[:7]
+    future_months = [m for m in month_pages if m.month >= cur_month]
+    if future_months:
+        nav_children = []
+        for idx, p in enumerate(future_months):
+            name = month_name_nominative(p.month)
+            nav_children.append({"tag": "a", "attrs": {"href": p.url}, "children": [name]})
+            if idx < len(future_months) - 1:
+                nav_children.append(" ")
+        month_nav = [{"tag": "h4", "children": nav_children}]
+        add_many(telegraph_br())
+        add_many(month_nav)
+        add_many(telegraph_br())
 
-        today = datetime.now(LOCAL_TZ).date()
-        events = [
-            e
-            for e in events
-            if (
-                (e.end_date and e.end_date >= today.isoformat())
-                or (not e.end_date and e.date >= today.isoformat())
-            )
-        ]
+    if exhibitions and not exceeded:
+        add({"tag": "h3", "children": ["Постоянные выставки"]})
+        add_many(telegraph_br())
+        for ev in exhibitions:
+            if exceeded:
+                break
+            add_many(exhibition_to_nodes(ev))
 
-        async with db.get_session() as session:
-            res_f = await session.execute(select(Festival))
-            fest_map = {f.name: f for f in res_f.scalars().all()}
+    if weekend_nav and not exceeded:
+        add_many(telegraph_br())
+        add_many(weekend_nav)
+        add_many(telegraph_br())
+    if month_nav and not exceeded:
+        add_many(telegraph_br())
+        add_many(month_nav)
+        add_many(telegraph_br())
 
-        by_day: dict[date, list[Event]] = {}
-        for e in events:
-            d = parse_iso_date(e.date)
-            if not d:
-                continue
-            by_day.setdefault(d, []).append(e)
-
-        content: list[dict] = []
-        size = 0
-        exceeded = False
-
-        def add(node: dict):
-            nonlocal size, exceeded
-            size += rough_size((node,))
-            if size_limit is not None and size > size_limit:
-                exceeded = True
-                return
-            content.append(node)
-
-        def add_many(nodes: Iterable[dict]):
-            for n in nodes:
-                if exceeded:
-                    break
-                add(n)
-
-        add(
-            {
-                "tag": "p",
-                "children": [
-                    "Вот что рекомендуют ",
-                    {
-                        "tag": "a",
-                        "attrs": {"href": "https://t.me/kenigevents"},
-                        "children": ["Полюбить Калининград Анонсы"],
-                    },
-                    " чтобы провести выходные ярко: события Калининградской области и 39 региона — концерты, спектакли, фестивали.",
-                ],
-            }
-        )
-
-        for d in days:
-            if exceeded or d not in by_day:
-                continue
-            add_many(telegraph_br())
-            if d.weekday() == 5:
-                add({"tag": "h3", "children": ["🟥🟥🟥 суббота 🟥🟥🟥"]})
-                add_many(telegraph_br())
-            elif d.weekday() == 6:
-                add({"tag": "h3", "children": ["🟥🟥 воскресенье 🟥🟥"]})
-                add_many(telegraph_br())
-            add({"tag": "h3", "children": [f"🟥🟥🟥 {format_day_pretty(d)} 🟥🟥🟥"]})
-            add_many(telegraph_br())
-            for ev in by_day[d]:
-                if exceeded:
-                    break
-                fest = fest_map.get(ev.festival or "")
-                add_many(event_to_nodes(ev, fest, fest_icon=True))
-
-        weekend_nav: list[dict] = []
-        future_weekends = [w for w in weekend_pages if w.start >= start]
-        if future_weekends:
-            nav_children = []
-            for idx, w in enumerate(future_weekends):
-                s = date.fromisoformat(w.start)
-                label = format_weekend_range(s)
-                if w.start == start:
-                    nav_children.append(label)
-                else:
-                    nav_children.append(
-                        {"tag": "a", "attrs": {"href": w.url}, "children": [label]}
-                    )
-                if idx < len(future_weekends) - 1:
-                    nav_children.append(" ")
-            weekend_nav = [{"tag": "h4", "children": nav_children}]
-            add_many(telegraph_br())
-            add_many(weekend_nav)
-            add_many(telegraph_br())
-
-        month_nav: list[dict] = []
-        cur_month = start[:7]
-        future_months = [m for m in month_pages if m.month >= cur_month]
-        if future_months:
-            nav_children = []
-            for idx, p in enumerate(future_months):
-                name = month_name_nominative(p.month)
-                nav_children.append({"tag": "a", "attrs": {"href": p.url}, "children": [name]})
-                if idx < len(future_months) - 1:
-                    nav_children.append(" ")
-            month_nav = [{"tag": "h4", "children": nav_children}]
-            add_many(telegraph_br())
-            add_many(month_nav)
-            add_many(telegraph_br())
-
-        if exhibitions and not exceeded:
-            add({"tag": "h3", "children": ["Постоянные выставки"]})
-            add_many(telegraph_br())
-            for ev in exhibitions:
-                if exceeded:
-                    break
-                add_many(exhibition_to_nodes(ev))
-
-        if weekend_nav and not exceeded:
-            add_many(telegraph_br())
-            add_many(weekend_nav)
-            add_many(telegraph_br())
-        if month_nav and not exceeded:
-            add_many(telegraph_br())
-            add_many(month_nav)
-            add_many(telegraph_br())
-
-        title = (
-            "Чем заняться на выходных в Калининградской области "
-            f"{format_weekend_range(saturday)}"
-        )
+    title = (
+        "Чем заняться на выходных в Калининградской области "
+        f"{format_weekend_range(saturday)}"
+    )
     if DEBUG:
         from telegraph.utils import nodes_to_html
         html = nodes_to_html(content)
@@ -6891,7 +6821,6 @@ async def build_daily_posts(
     tz: timezone,
     now: datetime | None = None,
 ) -> list[tuple[str, types.InlineKeyboardMarkup | None]]:
-    from sqlmodel import select
     from models import Event, WeekendPage, MonthPage, Festival
 
     if now is None:
@@ -7238,43 +7167,42 @@ async def post_to_vk(
 ) -> str | None:
     if not group_id:
         return None
-    async with perf("post_to_vk", size=len(message)):
+    logging.info(
+        "post_to_vk start: group=%s len=%d attachments=%d",
+        group_id,
+        len(message),
+        len(attachments or []),
+    )
+    params = {
+        "owner_id": f"-{group_id.lstrip('-')}",
+        "from_group": 1,
+        "message": message,
+    }
+    if attachments:
+        params["attachments"] = ",".join(attachments)
+    data = await _vk_api(
+        "wall.post", params, db, bot, token=VK_TOKEN, token_kind="group"
+    )
+    post_id = data.get("response", {}).get("post_id")
+    if post_id:
+        url = f"https://vk.com/wall-{group_id.lstrip('-')}_{post_id}"
         logging.info(
-            "post_to_vk start: group=%s len=%d attachments=%d",
+            "post_to_vk ok group=%s post_id=%s len=%d attachments=%d",
             group_id,
+            post_id,
             len(message),
             len(attachments or []),
         )
-        params = {
-            "owner_id": f"-{group_id.lstrip('-')}",
-            "from_group": 1,
-            "message": message,
-        }
-        if attachments:
-            params["attachments"] = ",".join(attachments)
-        data = await _vk_api(
-            "wall.post", params, db, bot, token=VK_TOKEN, token_kind="group"
-        )
-        post_id = data.get("response", {}).get("post_id")
-        if post_id:
-            url = f"https://vk.com/wall-{group_id.lstrip('-')}_{post_id}"
-            logging.info(
-                "post_to_vk ok group=%s post_id=%s len=%d attachments=%d",
-                group_id,
-                post_id,
-                len(message),
-                len(attachments or []),
-            )
-            return url
-        err_code = data.get("error", {}).get("error_code") if isinstance(data, dict) else None
-        logging.error(
-            "post_to_vk fail group=%s code=%s len=%d attachments=%d",
-            group_id,
-            err_code,
-            len(message),
-            len(attachments or []),
-        )
-        return None
+        return url
+    err_code = data.get("error", {}).get("error_code") if isinstance(data, dict) else None
+    logging.error(
+        "post_to_vk fail group=%s code=%s len=%d attachments=%d",
+        group_id,
+        err_code,
+        len(message),
+        len(attachments or []),
+    )
+    return None
 
 
 async def create_vk_poll(
@@ -8024,9 +7952,7 @@ async def init_db_and_scheduler(
     if DEBUG:
         app["qstat_task"] = asyncio.create_task(_log_queue_stats(app, db, bot))
     gc.collect()
-    import resource, os
-    rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
-    logging.info("BOOT_OK rss=%.1f MB pid=%s", rss_mb, os.getpid())
+    logging.info("BOOT_OK pid=%s", os.getpid())
 
 
 async def build_events_message(db: Database, target_date: date, tz: timezone, creator_id: int | None = None):
@@ -8628,12 +8554,10 @@ async def handle_status(message: types.Message, db: Database, bot: Bot):
             await bot.send_message(message.chat.id, "Not authorized")
             return
     uptime = time.time() - START_TIME
-    rss = _current_rss_mb()
     qlen = add_event_queue.qsize()
     jobs = list(JOB_HISTORY)[-5:]
     lines = [
         f"uptime: {int(uptime)}s",
-        f"rss_mb: {rss:.0f}",
         f"queue_len: {qlen}",
     ]
     if jobs:
@@ -9539,13 +9463,11 @@ def create_app() -> web.Application:
             await send_usage_fast(bot, message.chat.id)
             return
         message.text = f"/addevent {text}"
-        async with perf("enqueue_add_event"):
-            await enqueue_add_event(message, db, bot)
+        await enqueue_add_event(message, db, bot)
 
     async def add_event_raw_wrapper(message: types.Message):
         logging.info("add_event_raw_wrapper start: user=%s", message.from_user.id)
-        async with perf("enqueue_add_event_raw"):
-            await enqueue_add_event_raw(message, db, bot)
+        await enqueue_add_event_raw(message, db, bot)
 
     async def ask_4o_wrapper(message: types.Message):
         await handle_ask_4o(message, db, bot)
