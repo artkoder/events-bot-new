@@ -195,6 +195,45 @@ class MemoryLogHandler(logging.Handler):
 logging.getLogger().addHandler(MemoryLogHandler())
 
 
+_last_rss: int | None = None
+
+
+def mem_info(label: str = "", update: bool = True) -> tuple[int, int]:
+    try:
+        import psutil  # type: ignore
+
+        rss = psutil.Process().memory_info().rss
+    except Exception:
+        rss = 0
+        try:
+            with open("/proc/self/status") as f:
+                for line in f:
+                    if line.startswith("VmRSS:"):
+                        rss = int(line.split()[1]) * 1024
+                        break
+        except FileNotFoundError:
+            pass
+    global _last_rss
+    prev = _last_rss or rss
+    delta = rss - prev
+    if update:
+        _last_rss = rss
+    if DEBUG:
+        logging.info(
+            "MEM rss=%.1f MB (Δ%.1f MB)%s",
+            rss / (1024**2),
+            delta / (1024**2),
+            f" {label}" if label else "",
+        )
+    return rss, delta
+
+
+def normalize_telegraph_url(url: str | None) -> str | None:
+    if url and url.startswith("https://t.me/"):
+        return url.replace("https://t.me/", "https://telegra.ph/")
+    return url
+
+
 
 @lru_cache(maxsize=20)
 def _weekend_vk_lock(start: str) -> asyncio.Lock:
@@ -482,10 +521,15 @@ async def telegraph_call(func, /, *args, retries: int = 3, **kwargs):
     last_exc: Exception | None = None
     for attempt in range(retries):
         try:
+            if DEBUG:
+                mem_info(f"{func.__name__} before")
             async with span("telegraph"):
-                return await asyncio.wait_for(
+                res = await asyncio.wait_for(
                     asyncio.to_thread(func, *args, **kwargs), TELEGRAPH_TIMEOUT
                 )
+            if DEBUG:
+                mem_info(f"{func.__name__} after")
+            return res
         except asyncio.TimeoutError as e:
             last_exc = e
             if attempt < retries - 1:
@@ -887,6 +931,8 @@ async def upload_vk_photo(
     if not url:
         return None
     try:
+        if DEBUG:
+            mem_info("VK upload before")
         data = await _vk_api(
             "photos.getWallUploadServer",
             {"group_id": group_id.lstrip("-")},
@@ -939,6 +985,8 @@ async def upload_vk_photo(
             token=token,
         )
         info = save["response"][0]
+        if DEBUG:
+            mem_info("VK upload after")
         return f"photo{info['owner_id']}_{info['id']}"
     except Exception as e:
         logging.error("VK photo upload failed: %s", e)
@@ -3690,6 +3738,8 @@ async def add_events_from_text(
     try:
         # Free any lingering objects before heavy LLM call to reduce peak memory
         gc.collect()
+        if DEBUG:
+            mem_info("LLM before")
         logging.info("LLM parse start (%d chars)", len(text))
         llm_text = text
         if channel_title:
@@ -3710,6 +3760,8 @@ async def add_events_from_text(
             else:
                 parsed = await parse_event_via_4o(llm_text)
 
+        if DEBUG:
+            mem_info("LLM after")
         festival_info = getattr(parse_event_via_4o, "_festival", None)
         logging.info("LLM returned %d events", len(parsed))
     except Exception as e:
@@ -3915,6 +3967,32 @@ async def add_events_from_text(
     return results
 
 
+def _event_lines(ev: Event) -> list[str]:
+    lines = [
+        f"title: {ev.title}",
+        f"date: {ev.date}",
+        f"time: {ev.time}",
+        f"location_name: {ev.location_name}",
+    ]
+    if ev.location_address:
+        lines.append(f"location_address: {ev.location_address}")
+    if ev.city:
+        lines.append(f"city: {ev.city}")
+    if ev.festival:
+        lines.append(f"festival: {ev.festival}")
+    if ev.description:
+        lines.append(f"description: {ev.description}")
+    if ev.event_type:
+        lines.append(f"type: {ev.event_type}")
+    if ev.ticket_price_min is not None:
+        lines.append(f"price_min: {ev.ticket_price_min}")
+    if ev.ticket_price_max is not None:
+        lines.append(f"price_max: {ev.ticket_price_max}")
+    if ev.ticket_link:
+        lines.append(f"ticket_link: {ev.ticket_link}")
+    return lines
+
+
 async def handle_add_event(
     message: types.Message, db: Database, bot: Bot, *, using_session: bool = False
 ):
@@ -3976,27 +4054,34 @@ async def handle_add_event(
         )
         return
     logging.info("handle_add_event parsed %d results", len(results))
+    grouped: dict[int, tuple[Event, bool]] = {}
+    fest_msgs: list[tuple[Festival, list[str]]] = []
     for saved, added, lines, status in results:
         if isinstance(saved, Festival):
-            markup = types.InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [
-                        types.InlineKeyboardButton(
-                            text="Создать события по дням",
-                            callback_data=f"festdays:{saved.id}",
-                        )
-                    ]
-                ]
-            )
-            await bot.send_message(
-                message.chat.id,
-                "Festival added\n" + "\n".join(lines),
-                reply_markup=markup,
-            )
+            fest_msgs.append((saved, lines))
             continue
-        logging.info(
-            "handle_add_event %s event id=%s", status, saved.id
+        info = grouped.get(saved.id)
+        if info:
+            grouped[saved.id] = (saved, info[1] or added)
+        else:
+            grouped[saved.id] = (saved, added)
+
+    for fest, lines in fest_msgs:
+        markup = types.InlineKeyboardMarkup(
+            inline_keyboard=[[types.InlineKeyboardButton(
+                text="Создать события по дням",
+                callback_data=f"festdays:{fest.id}")]]
         )
+        await bot.send_message(
+            message.chat.id,
+            "Festival added\n" + "\n".join(lines),
+            reply_markup=markup,
+        )
+
+    for saved, added in grouped.values():
+        status = "added" if added else "updated"
+        logging.info("handle_add_event %s event id=%s", status, saved.id)
+        lines = _event_lines(saved)
         buttons_first: list[types.InlineKeyboardButton] = []
         if (
             not saved.is_free
@@ -4464,18 +4549,12 @@ async def update_telegraph_event_page(
             logging.error("Telegraph token unavailable")
             await session.commit()
             return ev.telegraph_url
-        tg = Telegraph(access_token=token)
+        tg = Telegraph(access_token=token, domain="telegra.ph")
         if not ev.telegraph_path:
-            start_date = (ev.date or "").split("..", 1)[0]
-            path = (
-                f"{slugify(ev.title or 'event')}-{start_date}"
-                if start_date
-                else slugify(ev.title or 'event')
-            )
             data = await telegraph_create_page(
-                tg, ev.title or "Event", html_content=html_content, path=path
+                tg, ev.title or "Event", html_content=html_content
             )
-            ev.telegraph_url = data.get("url")
+            ev.telegraph_url = normalize_telegraph_url(data.get("url"))
             ev.telegraph_path = data.get("path")
         else:
             await telegraph_call(
@@ -4592,7 +4671,7 @@ async def update_month_pages_for(event_id: int, db: Database, bot: Bot | None) -
         for d in dates:
             await sync_month_page(db, d.strftime("%Y-%m"))
         return
-    tg = Telegraph(access_token=token)
+    tg = Telegraph(access_token=token, domain="telegra.ph")
 
     for d in dates:
         month_key = d.strftime("%Y-%m")
@@ -5595,11 +5674,13 @@ async def _sync_month_page_inner(db: Database, month: str, update_links: bool = 
         logging.info(
             "sync_month_page start: month=%s update_links=%s", month, update_links
         )
+        if DEBUG:
+            mem_info("month page before")
         token = get_telegraph_token()
         if not token:
             logging.error("Telegraph token unavailable")
             return
-        tg = Telegraph(access_token=token)
+        tg = Telegraph(access_token=token, domain="telegra.ph")
         async with db.get_session() as session:
             page = await session.get(MonthPage, month)
             created = False
@@ -5642,7 +5723,7 @@ async def _sync_month_page_inner(db: Database, month: str, update_links: bool = 
                     if not page.path2:
                         logging.info("creating second page for %s", month)
                         data2 = await telegraph_create_page(tg, title2, html_content=html2)
-                        page.url2 = data2.get("url")
+                        page.url2 = normalize_telegraph_url(data2.get("url"))
                         page.path2 = data2.get("path")
                     else:
                         logging.info("updating second page for %s", month)
@@ -5678,7 +5759,7 @@ async def _sync_month_page_inner(db: Database, month: str, update_links: bool = 
                     if not page.path:
                         logging.info("creating first page for %s", month)
                         data1 = await telegraph_create_page(tg, title1, html_content=html1)
-                        page.url = data1.get("url")
+                        page.url = normalize_telegraph_url(data1.get("url"))
                         page.path = data1.get("path")
                         created = True
                     else:
@@ -5722,7 +5803,7 @@ async def _sync_month_page_inner(db: Database, month: str, update_links: bool = 
                         data = await telegraph_create_page(
                             tg, title, html_content=html_full
                         )
-                        page.url = data.get("url")
+                        page.url = normalize_telegraph_url(data.get("url"))
                         page.path = data.get("path")
                         created = True
                     else:
@@ -5776,6 +5857,8 @@ async def _sync_month_page_inner(db: Database, month: str, update_links: bool = 
                     if p.month != month:
                         await sync_month_page(db, p.month, update_links=False)
                         await asyncio.sleep(0)
+        if DEBUG:
+            mem_info("month page after")
 
 
 async def sync_month_page(db: Database, month: str, update_links: bool = False):
@@ -5988,11 +6071,13 @@ async def _sync_weekend_page_inner(
     db: Database, start: str, update_links: bool = True, post_vk: bool = True
 ):
     async with HEAVY_SEMAPHORE:
+        if DEBUG:
+            mem_info("weekend page before")
         token = get_telegraph_token()
         if not token:
             logging.error("Telegraph token unavailable")
             return
-        tg = Telegraph(access_token=token)
+        tg = Telegraph(access_token=token, domain="telegra.ph")
         from telegraph.utils import nodes_to_html
 
         async with db.get_session() as session:
@@ -6012,7 +6097,7 @@ async def _sync_weekend_page_inner(
             hash_new = content_hash(html)
             if not path:
                 data = await telegraph_create_page(tg, title, content=content)
-                page.url = data.get("url")
+                page.url = normalize_telegraph_url(data.get("url"))
                 page.path = data.get("path")
                 created = True
                 rough = rough_size(content)
@@ -6053,6 +6138,8 @@ async def _sync_weekend_page_inner(
 
         if post_vk:
             await sync_vk_weekend_post(db, start)
+        if DEBUG:
+            mem_info("weekend page after")
 
 
 async def sync_weekend_page(
@@ -6468,7 +6555,7 @@ async def sync_festival_page(
         if not token:
             logging.error("Telegraph token unavailable")
             return
-        tg = Telegraph(access_token=token)
+        tg = Telegraph(access_token=token, domain="telegra.ph")
         async with db.get_session() as session:
             result = await session.execute(
                 select(Festival).where(Festival.name == name)
@@ -6500,7 +6587,7 @@ async def sync_festival_page(
                     logging.info("updated festival page %s in Telegraph", name)
                 else:
                     data = await telegraph_create_page(tg, title, content=content)
-                    url = data.get("url")
+                    url = normalize_telegraph_url(data.get("url"))
                     path = data.get("path")
                     created = True
                     logging.info("created festival page %s: %s", name, url)
@@ -6537,7 +6624,7 @@ async def refresh_nav_on_all_festivals(db: Database, bot: Bot | None = None) -> 
     if not changed:
         return
     token = get_telegraph_token()
-    tg = Telegraph(access_token=token) if token else None
+    tg = Telegraph(access_token=token, domain="telegra.ph") if token else None
     for fid, name, path, vk_url in fests:
         if tg and path:
             try:
@@ -7119,9 +7206,13 @@ async def post_to_vk(
     }
     if attachments:
         params["attachments"] = ",".join(attachments)
+    if DEBUG:
+        mem_info("VK post before")
     data = await _vk_api(
         "wall.post", params, db, bot, token=VK_TOKEN, token_kind="group"
     )
+    if DEBUG:
+        mem_info("VK post after")
     post_id = data.get("response", {}).get("post_id")
     if post_id:
         url = f"https://vk.com/wall-{group_id.lstrip('-')}_{post_id}"
@@ -8595,6 +8686,11 @@ async def handle_stats(message: types.Message, db: Database, bot: Bot):
     await bot.send_message(message.chat.id, "\n".join(lines) if lines else "No data")
 
 
+async def handle_mem(message: types.Message, db: Database, bot: Bot):
+    rss, _ = mem_info(update=False)
+    await bot.send_message(message.chat.id, f"RSS: {rss / (1024**2):.1f} MB")
+
+
 async def handle_dumpdb(message: types.Message, db: Database, bot: Bot):
     async with db.get_session() as session:
         user = await session.get(User, message.from_user.id)
@@ -9120,7 +9216,7 @@ async def telegraph_test():
     if not token:
         print("Unable to obtain Telegraph token")
         return
-    tg = Telegraph(access_token=token)
+    tg = Telegraph(access_token=token, domain="telegra.ph")
     page = await telegraph_call(
         tg.create_page, "Test Page", html_content="<p>test</p>"
     )
@@ -9147,7 +9243,7 @@ async def update_source_page(
     if not token:
         logging.error("Telegraph token unavailable")
         return "token missing"
-    tg = Telegraph(access_token=token)
+    tg = Telegraph(access_token=token, domain="telegra.ph")
     try:
         logging.info("Fetching telegraph page %s", path)
         page = await telegraph_call(tg.get_page, path, return_html=True)
@@ -9191,7 +9287,7 @@ async def update_source_page_ics(path: str, title: str, url: str | None):
     if not token:
         logging.error("Telegraph token unavailable")
         return
-    tg = Telegraph(access_token=token)
+    tg = Telegraph(access_token=token, domain="telegra.ph")
     try:
         logging.info("Editing telegraph ICS for %s", path)
         page = await telegraph_call(tg.get_page, path, return_html=True)
@@ -9211,7 +9307,7 @@ async def get_source_page_text(path: str) -> str:
     if not token:
         logging.error("Telegraph token unavailable")
         return ""
-    tg = Telegraph(access_token=token)
+    tg = Telegraph(access_token=token, domain="telegra.ph")
     try:
         page = await telegraph_call(tg.get_page, path, return_html=True)
     except Exception as e:
@@ -9341,14 +9437,13 @@ async def create_source_page(
     *,
     display_link: bool = True,
     catbox_urls: list[str] | None = None,
-    path: str | None = None,
 ) -> tuple[str, str, str, int] | None:
     """Create a Telegraph page with the original event text."""
     token = get_telegraph_token()
     if not token:
         logging.error("Telegraph token unavailable")
         return None
-    tg = Telegraph(access_token=token)
+    tg = Telegraph(access_token=token, domain="telegra.ph")
     html_content, catbox_msg, uploaded = await build_source_page_content(
         title,
         text,
@@ -9361,14 +9456,13 @@ async def create_source_page(
         catbox_urls=catbox_urls,
     )
     try:
-        page = await telegraph_create_page(
-            tg, title, html_content=html_content, path=path
-        )
+        page = await telegraph_create_page(tg, title, html_content=html_content)
     except Exception as e:
         logging.error("Failed to create telegraph page: %s", e)
         return None
-    logging.info("Created telegraph page %s", page.get("url"))
-    return page.get("url"), page.get("path"), catbox_msg, uploaded
+    url = normalize_telegraph_url(page.get("url"))
+    logging.info("Created telegraph page %s", url)
+    return url, page.get("path"), catbox_msg, uploaded
 
 
 def create_app() -> web.Application:
@@ -9526,6 +9620,9 @@ def create_app() -> web.Application:
     async def debug_wrapper(message: types.Message):
         await handle_debug(message, db, bot)
 
+    async def mem_wrapper(message: types.Message):
+        await handle_mem(message, db, bot)
+
     dp.message.register(start_wrapper, Command("start"))
     dp.message.register(register_wrapper, Command("register"))
     dp.message.register(requests_wrapper, Command("requests"))
@@ -9600,6 +9697,7 @@ def create_app() -> web.Application:
     dp.message.register(trace_wrapper, Command("trace"))
     dp.message.register(last_errors_wrapper, Command("last_errors"))
     dp.message.register(debug_wrapper, Command("debug"))
+    dp.message.register(mem_wrapper, Command("mem"))
     dp.message.register(users_wrapper, Command("users"))
     dp.message.register(dumpdb_wrapper, Command("dumpdb"))
     dp.message.register(restore_wrapper, Command("restore"))
