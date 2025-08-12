@@ -1331,6 +1331,17 @@ def strip_city_from_address(address: str | None, city: str | None) -> str | None
     return addr
 
 
+def normalize_event_type(
+    title: str, description: str, event_type: str | None
+) -> str | None:
+    """Return corrected event type, marking film screenings as ``кинопоказ``."""
+    text = f"{title} {description}".lower()
+    if event_type in (None, "", "спектакль"):
+        if any(word in text for word in ("кино", "фильм", "кинопоказ", "киносеанс")):
+            return "кинопоказ"
+    return event_type
+
+
 def canonicalize_date(value: str) -> str | None:
     """Return ISO date string if value parses as date or ``None``."""
     value = value.split("..", 1)[0].strip()
@@ -3878,6 +3889,10 @@ async def add_events_from_text(
             source_chat_id=source_chat_id,
             source_message_id=source_message_id,
             creator_id=creator_id,
+        )
+
+        base_event.event_type = normalize_event_type(
+            base_event.title, base_event.description, base_event.event_type
         )
 
         if base_event.festival:

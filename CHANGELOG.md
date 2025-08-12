@@ -185,6 +185,10 @@
 - VK posting now uses a user token. Set `VK_USER_TOKEN` with `wall,groups,offline` scopes.
 - The group token `VK_TOKEN` is optional and used only as a fallback.
 
+## v0.3.29 - Film screenings
+
+- Added support for `кинопоказ` event type and automatic detection of film screenings.
+
 
 
 
