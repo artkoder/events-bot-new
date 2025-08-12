@@ -12,7 +12,7 @@ class _Span:
     def configure(self, thresholds: dict[str, int | float]) -> None:
         self._thresholds.update(thresholds)
 
-    def __call__(self, label: str, **_):
+    def __call__(self, label: str, **kwargs):
         span = self
 
         class _Ctx:

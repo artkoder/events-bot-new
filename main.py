@@ -105,15 +105,7 @@ from markup import simple_md_to_html, DAY_START, DAY_END
 from sections import replace_between_markers, content_hash
 from db import Database
 from scheduler import startup as scheduler_startup, cleanup as scheduler_cleanup
-from sqlalchemy import select as sa_select, update as sa_update, delete as sa_delete, text, func
-try:
-    from sqlmodel import select as sm_select
-except Exception:
-    sm_select = None
-
-select = sm_select or sa_select
-update = sa_update
-delete = sa_delete
+from sqlalchemy import select, update, delete, text, func
 
 from models import (
     User,
@@ -369,21 +361,20 @@ settings_cache: TTLCache[str, str | None] = TTLCache(maxsize=64, ttl=300)
 add_event_queue: asyncio.Queue[tuple[str, types.Message, bool]] = asyncio.Queue(
     maxsize=200
 )
-working: set[asyncio.Task] = set()
 
 # queue for post-commit event update jobs
 
 
-async def _log_queue_stats(app: web.Application, db: Database, bot: Bot):
+async def _watch_add_event_worker(app: web.Application, db: Database, bot: Bot):
     worker: asyncio.Task = app["add_event_worker"]
-    while DEBUG:
+    while True:
         alive = not worker.done()
-        logging.debug(
-            "QSTAT add_event=%d inflight_tasks=%d worker_alive=%s",
-            add_event_queue.qsize(),
-            len(working),
-            alive,
-        )
+        if DEBUG:
+            logging.debug(
+                "QSTAT add_event=%d worker_alive=%s",
+                add_event_queue.qsize(),
+                alive,
+            )
         if not alive and not worker.cancelled():
             try:
                 exc = worker.exception()
@@ -4189,43 +4180,31 @@ async def enqueue_add_event_raw(message: types.Message, db: Database, bot: Bot):
 
 
 async def add_event_queue_worker(db: Database, bot: Bot, limit: int = 2):
-    """Background worker to process queued events with limited concurrency."""
-
-    sem = asyncio.Semaphore(limit)
-
-    async def _process(item: tuple[str, types.Message, bool]) -> None:
-        async with sem:
-            start = _time.perf_counter()
-            kind, msg, using_session = item
-            task = asyncio.current_task()
-            if task:
-                working.add(task)
-            try:
-                if kind == "regular":
-                    await handle_add_event(msg, db, bot, using_session=using_session)
-                else:
-                    await handle_add_event_raw(msg, db, bot)
-            except Exception:  # pragma: no cover - log unexpected errors
-                logging.exception("add_event_queue_worker error")
-                try:
-                    await bot.send_message(
-                        msg.chat.id,
-                        "❌ Ошибка при обработке... Попробуйте ещё раз...",
-                    )
-                    if using_session:
-                        add_event_sessions[msg.from_user.id] = True
-                except Exception:  # pragma: no cover - notify fail
-                    logging.exception("add_event_queue_worker notify failed")
-            finally:
-                if task:
-                    working.discard(task)
-                add_event_queue.task_done()
-                dur = (_time.perf_counter() - start) * 1000
-                logging.info("add_event total=%.0f ms", dur)
+    """Background worker to process queued events sequentially."""
 
     while True:
-        item = await add_event_queue.get()
-        asyncio.create_task(_process(item))
+        kind, msg, using_session = await add_event_queue.get()
+        start = _time.perf_counter()
+        try:
+            if kind == "regular":
+                await handle_add_event(msg, db, bot, using_session=using_session)
+            else:
+                await handle_add_event_raw(msg, db, bot)
+        except Exception:  # pragma: no cover - log unexpected errors
+            logging.exception("add_event_queue_worker error")
+            try:
+                await bot.send_message(
+                    msg.chat.id,
+                    "❌ Ошибка при обработке... Попробуйте ещё раз...",
+                )
+                if using_session:
+                    add_event_sessions[msg.from_user.id] = True
+            except Exception:  # pragma: no cover - notify fail
+                logging.exception("add_event_queue_worker notify failed")
+        finally:
+            add_event_queue.task_done()
+            dur = (_time.perf_counter() - start) * 1000
+            logging.info("add_event total=%.0f ms", dur)
 
 
 BACKOFF_SCHEDULE = [30, 120, 600, 3600]
@@ -6594,28 +6573,23 @@ async def refresh_nav_on_all_festivals(db: Database, bot: Bot | None = None) -> 
         return
     token = get_telegraph_token()
     tg = Telegraph(access_token=token) if token else None
-    sem = asyncio.Semaphore(3)
-
-    async def _process(fid, name, path, vk_url):
-        async with sem:
-            if tg and path:
-                try:
-                    page = await telegraph_call(tg.get_page, path, return_html=True)
-                    html_content = page.get("content") or page.get("content_html") or ""
-                    title = page.get("title") or name
-                    html_content = apply_festival_nav(html_content, nav_html)
-                    await telegraph_call(
-                        tg.edit_page, path, title=title, html_content=html_content
-                    )
-                    logging.info("updated festival page %s in Telegraph", name)
-                except Exception as e:
-                    logging.error("Failed to update festival page %s: %s", name, e)
-            if vk_url:
-                await sync_festival_vk_post(
-                    db, name, bot, nav_only=True, nav_lines=nav_lines
+    for fid, name, path, vk_url in fests:
+        if tg and path:
+            try:
+                page = await telegraph_call(tg.get_page, path, return_html=True)
+                html_content = page.get("content") or page.get("content_html") or ""
+                title = page.get("title") or name
+                html_content = apply_festival_nav(html_content, nav_html)
+                await telegraph_call(
+                    tg.edit_page, path, title=title, html_content=html_content
                 )
-
-    await asyncio.gather(*(_process(*row) for row in fests))
+                logging.info("updated festival page %s in Telegraph", name)
+            except Exception as e:
+                logging.error("Failed to update festival page %s: %s", name, e)
+        if vk_url:
+            await sync_festival_vk_post(
+                db, name, bot, nav_only=True, nav_lines=nav_lines
+            )
 
 
 async def build_festival_vk_message(db: Database, fest: Festival) -> str:
@@ -7944,13 +7918,9 @@ async def init_db_and_scheduler(
         )
     except Exception as e:
         logging.error("Failed to set webhook: %s", e)
-    app["daily_task"] = asyncio.create_task(daily_scheduler(db, bot))
     scheduler_startup(db, bot)
     app["add_event_worker"] = asyncio.create_task(add_event_queue_worker(db, bot))
-    await reconcile_job_outbox(db)
-    app["job_worker"] = asyncio.create_task(job_outbox_worker(db, bot))
-    if DEBUG:
-        app["qstat_task"] = asyncio.create_task(_log_queue_stats(app, db, bot))
+    app["add_event_watch"] = asyncio.create_task(_watch_add_event_worker(app, db, bot))
     gc.collect()
     logging.info("BOOT_OK pid=%s", os.getpid())
 
@@ -9691,22 +9661,14 @@ def create_app() -> web.Application:
 
     async def on_shutdown(app: web.Application):
         await bot.session.close()
-        if "qstat_task" in app:
-            app["qstat_task"].cancel()
+        if "add_event_watch" in app:
+            app["add_event_watch"].cancel()
             with contextlib.suppress(Exception):
-                await app["qstat_task"]
+                await app["add_event_watch"]
         if "add_event_worker" in app:
             app["add_event_worker"].cancel()
             with contextlib.suppress(Exception):
                 await app["add_event_worker"]
-        if "job_worker" in app:
-            app["job_worker"].cancel()
-            with contextlib.suppress(Exception):
-                await app["job_worker"]
-        if "daily_task" in app:
-            app["daily_task"].cancel()
-            with contextlib.suppress(Exception):
-                await app["daily_task"]
         scheduler_cleanup()
         await close_vk_session()
         close_supabase_client()
