@@ -202,11 +202,14 @@ class Database:
                     status TEXT NOT NULL DEFAULT 'pending',
                     attempts INTEGER DEFAULT 0,
                     last_error TEXT,
+                    last_result TEXT,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     next_run_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
                 """
             )
+
+            await _add_column(conn, "joboutbox", "last_result TEXT")
 
             await conn.execute(
                 """

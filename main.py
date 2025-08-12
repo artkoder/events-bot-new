@@ -4196,9 +4196,9 @@ BACKOFF_SCHEDULE = [30, 120, 600, 3600]
 
 
 TASK_LABELS = {
-    "telegraph_build": "Telegraph",
+    "telegraph_build": "Telegraph (событие)",
     "vk_sync": "VK",
-    "month_pages": "Страницы месяца",
+    "month_pages": "Страница месяца",
     "weekend_pages": "Выходные",
     "festival_pages": "Фестиваль",
 }
@@ -4326,13 +4326,19 @@ async def _run_due_jobs_once(
             logging.exception("job %s failed", job.id)
             status = JobStatus.error
             link = None
+        text = None
         async with db.get_session() as session:
             obj = await session.get(JobOutbox, job.id)
+            send = True
             if obj:
+                prev = obj.last_result
                 obj.status = status
                 obj.last_error = err
                 obj.updated_at = datetime.utcnow()
                 if status == JobStatus.done:
+                    if link == prev:
+                        send = False
+                    obj.last_result = link
                     obj.next_run_at = datetime.utcnow()
                 else:
                     obj.attempts += 1
@@ -4340,13 +4346,17 @@ async def _run_due_jobs_once(
                     obj.next_run_at = datetime.utcnow() + timedelta(seconds=delay)
                 session.add(obj)
                 await session.commit()
-        if notify:
-            text = TASK_LABELS[job.task.value] + (" ✅" if status == JobStatus.done else " ❌")
-            if status == JobStatus.done and link:
-                text += f" {link}"
-            elif status == JobStatus.error and err:
-                text += f" {err.splitlines()[0]}"
-            await notify(text)
+            if notify and send:
+                label = TASK_LABELS[job.task.value]
+                if status == JobStatus.done:
+                    text = f"{label}: OK"
+                    if link:
+                        text += f" — {link}"
+                elif status == JobStatus.error:
+                    err_short = err.splitlines()[0] if err else ""
+                    text = f"{label}: ERROR: {err_short}"
+                if text:
+                    await notify(text)
         processed += 1
     return processed
 
