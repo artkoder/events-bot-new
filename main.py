@@ -640,6 +640,15 @@ async def set_setting_value(db: Database, key: str, value: str | None):
         settings_cache[key] = value
 
 
+async def get_partner_last_run(db: Database) -> date | None:
+    val = await get_setting_value(db, "partner_last_run")
+    return date.fromisoformat(val) if val else None
+
+
+async def set_partner_last_run(db: Database, d: date) -> None:
+    await set_setting_value(db, "partner_last_run", d.isoformat())
+
+
 async def get_vk_group_id(db: Database) -> str | None:
     return await get_setting_value(db, "vk_group_id")
 
@@ -7729,12 +7738,12 @@ async def nightly_page_sync(db: Database, run_id: str | None = None) -> None:
 
 async def partner_notification_scheduler(db: Database, bot: Bot, run_id: str | None = None):
     """Remind partners who haven't added events for a week."""
-    global _partner_last_run
     async with span("db"):
         offset = await get_tz_offset(db)
         tz = offset_to_timezone(offset)
         now = datetime.now(tz)
-    if now.time() >= time(9, 0) and now.date() != _partner_last_run:
+        last_run = await get_partner_last_run(db)
+    if now.time() >= time(9, 0) and (last_run is None or last_run != now.date()):
         try:
             async with span("db-query"):
                 async with db.get_session() as session:
@@ -7764,12 +7773,11 @@ async def partner_notification_scheduler(db: Database, bot: Bot, run_id: str | N
                         db, bot, f"Partner reminders sent to: {names}"
                     )
             else:
-                async with span("tg-send"):
-                    await notify_superadmin(db, bot, "Partner reminders: none")
+                logging.info("Partner reminders: none")
+            await set_partner_last_run(db, now.date())
         except Exception as e:
             logging.error("partner reminder failed: %s", e)
             await notify_superadmin(db, bot, f"Partner reminder failed: {e}")
-        _partner_last_run = now.date()
 
 
 async def vk_poll_scheduler(db: Database, bot: Bot, run_id: str | None = None):

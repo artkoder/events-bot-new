@@ -148,7 +148,7 @@ def startup(db, bot) -> AsyncIOScheduler:
         _job_wrapper("partner_notification_scheduler", partner_notification_scheduler),
         "cron",
         id="partner_notification_scheduler",
-        minute="5,20,35,50",
+        minute="5",
         args=[db, bot],
         replace_existing=True,
         max_instances=1,
