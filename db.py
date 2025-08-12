@@ -6,6 +6,7 @@ import os
 from contextlib import asynccontextmanager
 
 import aiosqlite
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 
 async def _add_column(conn, table: str, col_def: str) -> None:
@@ -191,6 +192,9 @@ class Database:
                 )
                 """
             )
+            await _add_column(conn, "festival", "location_name TEXT")
+            await _add_column(conn, "festival", "location_address TEXT")
+            await _add_column(conn, "festival", "city TEXT")
 
             await conn.execute(
                 """
@@ -297,6 +301,16 @@ class Database:
                 f"sqlite+aiosqlite:///{self.path}", future=True
             )
         return self._orm_engine
+
+    async def exec_driver_sql(
+        self, sql: str, params: tuple | dict | None = None
+    ):
+        async with self.engine.begin() as conn:  # type: AsyncConnection
+            result = await conn.exec_driver_sql(sql, params or ())
+            try:
+                return result.fetchall()
+            except Exception:
+                return []
 
 
 async def wal_checkpoint_truncate(engine):

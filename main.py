@@ -4540,6 +4540,9 @@ async def update_telegraph_event_page(
             display_link=display_link,
             catbox_urls=[],
         )
+        from telegraph.utils import html_to_nodes
+
+        nodes = html_to_nodes(html_content)
         new_hash = content_hash(html_content)
         if ev.content_hash == new_hash and ev.telegraph_url:
             await session.commit()
@@ -4549,19 +4552,25 @@ async def update_telegraph_event_page(
             logging.error("Telegraph token unavailable")
             await session.commit()
             return ev.telegraph_url
-        tg = Telegraph(access_token=token, domain="telegra.ph")
+        tg = Telegraph(access_token=token)
+        title = ev.title or "Event"
         if not ev.telegraph_path:
             data = await telegraph_create_page(
-                tg, ev.title or "Event", html_content=html_content
+                tg,
+                title=title,
+                author_name="Полюбить Калининград Анонсы",
+                content=nodes,
+                return_content=False,
             )
             ev.telegraph_url = normalize_telegraph_url(data.get("url"))
             ev.telegraph_path = data.get("path")
         else:
             await telegraph_call(
                 tg.edit_page,
-                ev.telegraph_path,
-                title=ev.title or "Event",
-                html_content=html_content,
+                path=ev.telegraph_path,
+                title=title,
+                content=nodes,
+                return_content=False,
             )
         ev.content_hash = new_hash
         session.add(ev)
@@ -9439,11 +9448,24 @@ async def create_source_page(
     catbox_urls: list[str] | None = None,
 ) -> tuple[str, str, str, int] | None:
     """Create a Telegraph page with the original event text."""
+    if db:
+        from models import Event
+        from sqlalchemy import select
+
+        async with db.get_session() as session:
+            res = await session.execute(
+                select(Event.telegraph_url, Event.telegraph_path).where(
+                    Event.source_text == text
+                )
+            )
+            existing = res.first()
+            if existing and existing.telegraph_path:
+                return existing.telegraph_url, existing.telegraph_path, "", 0
     token = get_telegraph_token()
     if not token:
         logging.error("Telegraph token unavailable")
         return None
-    tg = Telegraph(access_token=token, domain="telegra.ph")
+    tg = Telegraph(access_token=token)
     html_content, catbox_msg, uploaded = await build_source_page_content(
         title,
         text,
@@ -9455,8 +9477,17 @@ async def create_source_page(
         display_link=display_link,
         catbox_urls=catbox_urls,
     )
+    from telegraph.utils import html_to_nodes
+
+    nodes = html_to_nodes(html_content)
     try:
-        page = await telegraph_create_page(tg, title, html_content=html_content)
+        page = await telegraph_create_page(
+            tg,
+            title=title,
+            author_name="Полюбить Калининград Анонсы",
+            content=nodes,
+            return_content=False,
+        )
     except Exception as e:
         logging.error("Failed to create telegraph page: %s", e)
         return None
