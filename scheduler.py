@@ -92,13 +92,13 @@ def startup(db, bot) -> AsyncIOScheduler:
     if _scheduler is None:
         # AsyncIOExecutor has no configuration options; use default settings
         executor = AsyncIOExecutor()
-        _scheduler = AsyncIOScheduler(
-            executors={"default": executor},
+        _scheduler = AsyncIOScheduler(executors={"default": executor}, timezone="UTC")
+        _scheduler.configure(
             job_defaults={
                 "max_instances": 1,
                 "coalesce": True,
                 "misfire_grace_time": 30,
-            },
+            }
         )
 
     from main import (
