@@ -177,6 +177,7 @@ class JobOutbox(SQLModel, table=True):
     )
     attempts: int = 0
     last_error: Optional[str] = None
+    last_result: Optional[str] = None
     updated_at: datetime = Field(default_factory=datetime.utcnow)
     next_run_at: datetime = Field(default_factory=datetime.utcnow)
 
