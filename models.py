@@ -151,6 +151,7 @@ class JobTask(str, Enum):
     vk_sync = "vk_sync"
     month_pages = "month_pages"
     weekend_pages = "weekend_pages"
+    festival_pages = "festival_pages"
 
 
 class JobStatus(str, Enum):

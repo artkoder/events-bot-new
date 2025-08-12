@@ -29,6 +29,8 @@ from main import (
     Festival,
     MonthPage,
     WeekendPage,
+    JobOutbox,
+    JobTask,
     create_app,
     handle_register,
     handle_start,
@@ -2782,18 +2784,9 @@ async def test_sync_weekend_page_first_creation_includes_nav(
 
 
 @pytest.mark.asyncio
-async def test_sync_weekend_page_updates_other_pages(tmp_path: Path, monkeypatch):
+async def test_sync_weekend_page_no_cross_updates(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
-    call_count = 0
-
-    async def wrapper(db2, start, update_links=True, post_vk=True):
-        nonlocal call_count
-        call_count += 1
-        ul = update_links if call_count == 1 else False
-        await REAL_SYNC_WEEKEND_PAGE(db2, start, ul, post_vk)
-
-    monkeypatch.setattr(main, "sync_weekend_page", wrapper)
 
     saturday = date(2025, 7, 12)
     next_sat = saturday + timedelta(days=7)
@@ -2819,7 +2812,7 @@ async def test_sync_weekend_page_updates_other_pages(tmp_path: Path, monkeypatch
 
     await main.sync_weekend_page(db, saturday.isoformat())
 
-    assert ("edit", "p2") in edits
+    assert ("edit", "p2") not in edits
 
 
 @pytest.mark.asyncio
@@ -3529,7 +3522,7 @@ async def test_update_telegraph_event_page_deterministic(tmp_path: Path, monkeyp
     await main.update_telegraph_event_page(1, db, None)
 
     assert created_paths == ["my-event-2024-05-01"]
-    assert updated_paths == ["my-event-2024-05-01"]
+    assert updated_paths == []
     assert "Добавить в календарь" not in edited.get("html", "")
 
 
@@ -4345,7 +4338,7 @@ async def test_add_event_strips_city_from_address(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_add_events_from_text_syncs_pages_once(tmp_path: Path, monkeypatch):
+async def test_add_events_from_text_schedules_pages(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
 
@@ -4384,15 +4377,6 @@ async def test_add_events_from_text_syncs_pages_once(tmp_path: Path, monkeypatch
     async def fake_upload_to_catbox(media):
         return [], ""
 
-    called_months: list[str] = []
-    called_weekends: list[str] = []
-
-    async def fake_month(db_obj, month):
-        called_months.append(month)
-
-    async def fake_weekend(db_obj, start, update_links=True, post_vk=True):
-        called_weekends.append(start)
-
     async def fake_sync_vk(*args, **kwargs):
         return None
 
@@ -4408,8 +4392,6 @@ async def test_add_events_from_text_syncs_pages_once(tmp_path: Path, monkeypatch
     monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
     monkeypatch.setattr("main.create_source_page", fake_create)
     monkeypatch.setattr("main.upload_to_catbox", fake_upload_to_catbox)
-    monkeypatch.setattr("main.sync_month_page", fake_month)
-    monkeypatch.setattr("main.sync_weekend_page", fake_weekend)
     monkeypatch.setattr("main.sync_vk_source_post", fake_sync_vk)
     monkeypatch.setattr("main.upload_ics", fake_upload_ics)
     monkeypatch.setattr("main.post_ics_asset", fake_post_ics_asset)
@@ -4417,8 +4399,12 @@ async def test_add_events_from_text_syncs_pages_once(tmp_path: Path, monkeypatch
 
     results = await main.add_events_from_text(db, "t", None, None, None)
     assert len(results) == 2
-    assert called_months == [weekend_str[:7]]
-    assert called_weekends == [weekend_str]
+    async with db.get_session() as session:
+        stmt = select(JobOutbox.task).order_by(JobOutbox.id)
+        res = await session.execute(stmt)
+        tasks = [row[0] for row in res.all()]
+    assert tasks.count(JobTask.month_pages) == 2
+    assert tasks.count(JobTask.weekend_pages) == 2
     async with db.get_session() as session:
         res = await session.execute(select(Event))
         assert len(res.scalars().all()) == 2
@@ -7006,9 +6992,19 @@ async def test_publication_plan_and_updates(tmp_path: Path, monkeypatch):
     weekend_str = weekend_day.isoformat()
 
     async def fake_tg(eid, db_obj, bot_obj):
+        async with db_obj.get_session() as session:
+            ev = await session.get(Event, eid)
+            ev.telegraph_url = "t"
+            session.add(ev)
+            await session.commit()
         return "t"
 
     async def fake_vk(ev, text, db_obj, bot_obj, ics_url=None):
+        async with db_obj.get_session() as session:
+            obj = await session.get(Event, ev.id)
+            obj.source_vk_post_url = "v"
+            session.add(obj)
+            await session.commit()
         return "v"
 
     async def fake_month(event_id, db_obj, bot_obj):
@@ -7036,9 +7032,10 @@ async def test_publication_plan_and_updates(tmp_path: Path, monkeypatch):
 
     texts = [m[1] for m in bot.messages]
     assert texts[1] == "Событие сохранено. Публикую…"
-    assert texts[2] == "Telegraph: OK t"
-    assert texts[3] == "VK: OK v"
-    assert texts[4].startswith("Страницы месяца/выходных: OK")
-    assert texts[5] == "Готово"
+    assert texts[2] == "Telegraph ✅ t"
+    assert texts[3] == "VK ✅ v"
+    assert texts[4].startswith("Страницы месяца ✅")
+    assert texts[5].startswith("Выходные ✅")
+    assert texts[6] == "Готово"
 
 

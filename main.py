@@ -2608,14 +2608,8 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                 return
             logging.info("festdays start fid=%s name=%s", fid, fest.name)
             events: list[tuple[Event, bool]] = []
-            months: set[str] = set()
-            weekends: set[str] = set()
             for i in range((end - start).days + 1):
                 day = start + timedelta(days=i)
-                months.add(day.strftime("%Y-%m"))
-                w_start = weekend_start_for_date(day)
-                if w_start:
-                    weekends.add(w_start.isoformat())
                 event = Event(
                     title=f"{fest.full_name or fest.name} - день {i+1}",
                     description="",
@@ -2629,6 +2623,7 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                     creator_id=user.user_id if user else None,
                 )
                 saved, added = await upsert_event(session, event)
+                await schedule_event_update_tasks(db, saved)
                 events.append((saved, added))
             await session.commit()
         async with db.get_session() as session:
@@ -2648,12 +2643,6 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
 
         asyncio.create_task(sync_festival_page(db, fest.name))
         asyncio.create_task(sync_festival_vk_post(db, fest.name, bot))
-        asyncio.create_task(refresh_nav_on_all_festivals(db, bot=bot))
-
-        for m in months:
-            asyncio.create_task(sync_month_page(db, m))
-        for w in weekends:
-            asyncio.create_task(sync_weekend_page(db, w))
         summary = [
             f"Создано {len(events)} событий для {fest.name}.",
         ]
@@ -2725,7 +2714,6 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
             await session.delete(fest)
             await session.commit()
             logging.info("festival %s deleted", fest.name)
-        asyncio.create_task(refresh_nav_on_all_festivals(db, bot=bot))
         await send_festivals_list(callback.message, db, bot, edit=True)
         await callback.answer("Deleted")
 
@@ -3663,12 +3651,15 @@ async def enqueue_job(
 async def schedule_event_update_tasks(db: Database, ev: Event) -> None:
     eid = ev.id
     await enqueue_job(db, eid, JobTask.telegraph_build)
-    await enqueue_job(db, eid, JobTask.vk_sync)
+    if not is_vk_wall_url(ev.source_post_url):
+        await enqueue_job(db, eid, JobTask.vk_sync)
     await enqueue_job(db, eid, JobTask.month_pages)
     d = parse_iso_date(ev.date)
     w_start = weekend_start_for_date(d) if d else None
     if w_start:
         await enqueue_job(db, eid, JobTask.weekend_pages)
+    if ev.festival:
+        await enqueue_job(db, eid, JobTask.festival_pages)
     logging.info("scheduled event tasks for %s", eid)
 
 
@@ -3760,7 +3751,6 @@ async def add_events_from_text(
         if not parsed and created:
             await sync_festival_page(db, fest_obj.name)
             await sync_festival_vk_post(db, fest_obj.name, bot)
-            asyncio.create_task(refresh_nav_on_all_festivals(db, bot=bot))
             async with db.get_session() as session:
                 res = await session.execute(
                     select(Festival).where(Festival.name == fest_obj.name)
@@ -3838,14 +3828,12 @@ async def add_events_from_text(
 
         if base_event.festival:
             photo_u = catbox_urls[0] if catbox_urls else None
-            _, created = await ensure_festival(
+            await ensure_festival(
                 db,
                 base_event.festival,
                 full_name=data.get("festival_full"),
                 photo_url=photo_u,
             )
-            if created:
-                asyncio.create_task(refresh_nav_on_all_festivals(db, bot=bot))
 
         if base_event.event_type == "выставка" and not base_event.end_date:
             start_dt = parse_iso_date(base_event.date) or datetime.now(LOCAL_TZ).date()
@@ -3893,6 +3881,7 @@ async def add_events_from_text(
             logging.info(
                 "event %s with id %s", "added" if added else "updated", saved.id
             )
+            await schedule_event_update_tasks(db, saved)
             lines = [
                 f"title: {saved.title}",
                 f"date: {saved.date}",
@@ -4085,6 +4074,7 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
     )
     async with db.get_session() as session:
         event, added = await upsert_event(session, event)
+    await schedule_event_update_tasks(db, event)
     lines = [
         f"title: {event.title}",
         f"date: {event.date}",
@@ -4215,6 +4205,7 @@ TASK_LABELS = {
     "vk_sync": "VK",
     "month_pages": "Страницы месяца",
     "weekend_pages": "Выходные",
+    "festival_pages": "Фестиваль",
 }
 
 
@@ -4436,6 +4427,9 @@ async def update_telegraph_event_page(
         ev = await session.get(Event, event_id)
         if not ev:
             return None
+        new_hash = content_hash(ev.source_text or "")
+        if ev.content_hash == new_hash and ev.telegraph_url:
+            return ev.telegraph_url
         if not ev.ics_url:
             ics = await upload_ics(ev, db)
             if ics:
@@ -4474,9 +4468,13 @@ async def update_telegraph_event_page(
             url, created_path = res[:2]
             ev.telegraph_url = url
             ev.telegraph_path = created_path
+            ev.content_hash = new_hash
             session.add(ev)
             await session.commit()
             return url
+        ev.content_hash = new_hash
+        session.add(ev)
+        await session.commit()
         return ev.telegraph_url
 
 
@@ -4602,58 +4600,19 @@ async def update_weekend_pages_for(event_id: int, db: Database, bot: Bot | None)
         await sync_weekend_page(db, w_start.isoformat())
 
 
-async def update_festival_nav_if_needed(event_id: int, db: Database, bot: Bot | None) -> None:
+async def update_festival_pages_for_event(event_id: int, db: Database, bot: Bot | None) -> None:
     async with db.get_session() as session:
         ev = await session.get(Event, event_id)
-    if ev and ev.festival:
-        await refresh_nav_on_all_festivals(db, bot)
+    if not ev or not ev.festival:
+        return
+    await sync_festival_page(db, ev.festival)
+    await sync_festival_vk_post(db, ev.festival, bot)
 
 
 async def publish_event_progress(event: Event, db: Database, bot: Bot, chat_id: int) -> None:
     await bot.send_message(chat_id, "Событие сохранено. Публикую…")
-
-    telegraph_url: str | None = None
-    try:
-        logging.info("publish telegraph start event=%s", event.id)
-        telegraph_url = await update_telegraph_event_page(event.id, db, bot)
-        if telegraph_url:
-            await bot.send_message(chat_id, f"Telegraph: OK {telegraph_url}")
-        else:
-            await bot.send_message(chat_id, "Telegraph: FAIL — no url")
-    except Exception as e:
-        logging.exception("telegraph publish failed for %s", event.id)
-        reason = str(e).splitlines()[0]
-        await bot.send_message(chat_id, f"Telegraph: FAIL — {reason}")
-
-    try:
-        logging.info("publish vk start event=%s", event.id)
-        vk_url = await sync_vk_source_post(
-            event, event.source_text, db, bot, ics_url=event.ics_url
-        )
-        if vk_url:
-            await bot.send_message(chat_id, f"VK: OK {vk_url}")
-        else:
-            await bot.send_message(chat_id, "VK: OK")
-    except Exception as e:
-        logging.exception("vk publish failed for %s", event.id)
-        reason = str(e).splitlines()[0]
-        await bot.send_message(chat_id, f"VK: FAIL — {reason}")
-
-    try:
-        logging.info("publish pages start event=%s", event.id)
-        start = _time.perf_counter()
-        await update_month_pages_for(event.id, db, bot)
-        await update_weekend_pages_for(event.id, db, bot)
-        dur = _time.perf_counter() - start
-        await bot.send_message(
-            chat_id, f"Страницы месяца/выходных: OK ({dur:.1f} сек)"
-        )
-    except Exception as e:
-        logging.exception("pages publish failed for %s", event.id)
-        reason = str(e).splitlines()[0]
-        await bot.send_message(chat_id, f"Страницы месяца/выходных: FAIL — {reason}")
-
-    await bot.send_message(chat_id, "Готово" if telegraph_url else "Не опубликовано")
+    await run_event_update_jobs(db, bot, notify_chat_id=chat_id, event_id=event.id)
+    await bot.send_message(chat_id, "Готово")
 
 
 async def job_sync_vk_source_post(event_id: int, db: Database, bot: Bot | None) -> None:
@@ -4661,14 +4620,18 @@ async def job_sync_vk_source_post(event_id: int, db: Database, bot: Bot | None) 
         ev = await session.get(Event, event_id)
     if not ev or is_vk_wall_url(ev.source_post_url):
         return
+    new_hash = content_hash(ev.source_text or "")
+    if ev.content_hash == new_hash and ev.source_vk_post_url:
+        return
     vk_url = await sync_vk_source_post(ev, ev.source_text, db, bot, ics_url=ev.ics_url)
-    if vk_url:
-        async with db.get_session() as session:
-            obj = await session.get(Event, event_id)
-            if obj:
+    async with db.get_session() as session:
+        obj = await session.get(Event, event_id)
+        if obj:
+            if vk_url:
                 obj.source_vk_post_url = vk_url
-                session.add(obj)
-                await session.commit()
+            obj.content_hash = new_hash
+            session.add(obj)
+            await session.commit()
 
 
 JOB_HANDLERS = {
@@ -4676,6 +4639,7 @@ JOB_HANDLERS = {
     "vk_sync": job_sync_vk_source_post,
     "month_pages": update_month_pages_for,
     "weekend_pages": update_weekend_pages_for,
+    "festival_pages": update_festival_pages_for_event,
 }
 
 
@@ -6075,19 +6039,6 @@ async def _sync_weekend_page_inner(
 
         if post_vk:
             await sync_vk_weekend_post(db, start)
-
-    if update_links or created:
-        async with db.get_session() as session:
-            result = await session.execute(
-                select(WeekendPage).order_by(WeekendPage.start)
-            )
-            weekends = result.scalars().all()
-        for w in weekends:
-            if w.start != start:
-                await sync_weekend_page(
-                    db, w.start, update_links=True, post_vk=False
-                )
-                await asyncio.sleep(0)
 
 
 async def sync_weekend_page(
