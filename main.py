@@ -417,11 +417,6 @@ def rough_size(nodes: Iterable[dict], limit: int | None = None) -> int:
     return total
 
 
-def nodes_hash(nodes: list) -> str:
-    data = json.dumps(nodes, ensure_ascii=False, sort_keys=True)
-    return hashlib.sha256(data.encode()).hexdigest()
-
-
 def slugify(text: str) -> str:
     """Return a simple ASCII slug for the given ``text``.
 
@@ -4427,32 +4422,12 @@ async def update_telegraph_event_page(
         ev = await session.get(Event, event_id)
         if not ev:
             return None
-        new_hash = content_hash(ev.source_text or "")
-        if ev.content_hash == new_hash and ev.telegraph_url:
-            return ev.telegraph_url
         if not ev.ics_url:
             ics = await upload_ics(ev, db)
             if ics:
                 ev.ics_url = ics
-        extra = {"display_link": False} if ev.source_post_url else {}
-        start_date = (ev.date or "").split("..", 1)[0]
-        path = f"{slugify(ev.title or 'event')}-{start_date}" if start_date else slugify(ev.title or 'event')
-        if ev.telegraph_url and ev.telegraph_path == path:
-            try:
-                await update_source_page(
-                    ev.telegraph_path,
-                    ev.title or "Event",
-                    ev.source_text,
-                    None,
-                    db,
-                    catbox_urls=[],
-                )
-                await session.commit()
-                return ev.telegraph_url
-            except Exception:
-                await session.rollback()
-                raise
-        res = await create_source_page(
+        display_link = False if ev.source_post_url else True
+        html_content, _, _ = await build_source_page_content(
             ev.title or "Event",
             ev.source_text,
             ev.source_post_url,
@@ -4460,18 +4435,38 @@ async def update_telegraph_event_page(
             None,
             ev.ics_url,
             db,
+            display_link=display_link,
             catbox_urls=[],
-            path=path,
-            **extra,
         )
-        if res:
-            url, created_path = res[:2]
-            ev.telegraph_url = url
-            ev.telegraph_path = created_path
-            ev.content_hash = new_hash
-            session.add(ev)
+        new_hash = content_hash(html_content)
+        if ev.content_hash == new_hash and ev.telegraph_url:
             await session.commit()
-            return url
+            return ev.telegraph_url
+        token = get_telegraph_token()
+        if not token:
+            logging.error("Telegraph token unavailable")
+            await session.commit()
+            return ev.telegraph_url
+        tg = Telegraph(access_token=token)
+        if not ev.telegraph_path:
+            start_date = (ev.date or "").split("..", 1)[0]
+            path = (
+                f"{slugify(ev.title or 'event')}-{start_date}"
+                if start_date
+                else slugify(ev.title or 'event')
+            )
+            data = await telegraph_create_page(
+                tg, ev.title or "Event", html_content=html_content, path=path
+            )
+            ev.telegraph_url = data.get("url")
+            ev.telegraph_path = data.get("path")
+        else:
+            await telegraph_call(
+                tg.edit_page,
+                ev.telegraph_path,
+                title=ev.title or "Event",
+                html_content=html_content,
+            )
         ev.content_hash = new_hash
         session.add(ev)
         await session.commit()
@@ -5621,11 +5616,11 @@ async def _sync_month_page_inner(db: Database, month: str, update_links: bool = 
                 title2, content2, _ = await build_month_page_content(
                     db, month, second, exhibitions, nav_pages
                 )
-                hash2 = nodes_hash(content2)
+                html2 = nodes_to_html(content2)
+                hash2 = content_hash(html2)
                 if page.path2 and page.content_hash2 == hash2:
                     logging.debug("telegraph_update skipped (no changes)")
                 else:
-                    html2 = nodes_to_html(content2)
                     rough2 = rough_size(content2)
                     if not page.path2:
                         logging.info("creating second page for %s", month)
@@ -5657,11 +5652,11 @@ async def _sync_month_page_inner(db: Database, month: str, update_links: bool = 
                     nav_pages,
                     continuation_url=page.url2,
                 )
-                hash1 = nodes_hash(content1)
+                html1 = nodes_to_html(content1)
+                hash1 = content_hash(html1)
                 if page.path and page.content_hash == hash1:
                     logging.debug("telegraph_update skipped (no changes)")
                 else:
-                    html1 = nodes_to_html(content1)
                     rough1 = rough_size(content1)
                     if not page.path:
                         logging.info("creating first page for %s", month)
@@ -5696,8 +5691,8 @@ async def _sync_month_page_inner(db: Database, month: str, update_links: bool = 
         title, content, _ = await build_month_page_content(
             db, month, events, exhibitions, nav_pages
         )
-        hash_full = nodes_hash(content)
         html_full = nodes_to_html(content)
+        hash_full = content_hash(html_full)
         size = len(html_full.encode())
 
         try:
@@ -5981,6 +5976,7 @@ async def _sync_weekend_page_inner(
             logging.error("Telegraph token unavailable")
             return
         tg = Telegraph(access_token=token)
+        from telegraph.utils import nodes_to_html
 
         async with db.get_session() as session:
             page = await session.get(WeekendPage, start)
@@ -5995,7 +5991,8 @@ async def _sync_weekend_page_inner(
 
         try:
             title, content, _ = await build_weekend_page_content(db, start)
-            hash_new = nodes_hash(content)
+            html = nodes_to_html(content)
+            hash_new = content_hash(html)
             if not path:
                 data = await telegraph_create_page(tg, title, content=content)
                 page.url = data.get("url")
@@ -9259,6 +9256,64 @@ async def update_event_description(event: Event, db: Database) -> None:
             logging.info("stored description for event %s", event.id)
 
 
+async def build_source_page_content(
+    title: str,
+    text: str,
+    source_url: str | None,
+    html_text: str | None = None,
+    media: list[tuple[bytes, str]] | tuple[bytes, str] | None = None,
+    ics_url: str | None = None,
+    db: Database | None = None,
+    *,
+    display_link: bool = True,
+    catbox_urls: list[str] | None = None,
+) -> tuple[str, str, int]:
+    html_content = ""
+    def strip_title(line_text: str) -> str:
+        lines = line_text.splitlines()
+        if lines and lines[0].strip() == title.strip():
+            return "\n".join(lines[1:]).lstrip()
+        return line_text
+    images: list[tuple[bytes, str]] = []
+    if media:
+        images = [media] if isinstance(media, tuple) else list(media)
+    if catbox_urls is not None:
+        urls = list(catbox_urls)
+        catbox_msg = ""
+    else:
+        urls, catbox_msg = await upload_to_catbox(images)
+    if source_url and display_link:
+        html_content += (
+            f'<p><a href="{html.escape(source_url)}"><strong>{html.escape(title)}</strong></a></p>'
+        )
+    else:
+        html_content += f"<p><strong>{html.escape(title)}</strong></p>"
+    for url in urls:
+        html_content += f'<img src="{html.escape(url)}"/><p></p>'
+    html_content = apply_ics_link(html_content, ics_url)
+    if html_text:
+        html_text = strip_title(html_text)
+        html_text = normalize_hashtag_dates(html_text)
+        cleaned = re.sub(r"</?tg-emoji[^>]*>", "", html_text)
+        cleaned = cleaned.replace(
+            "\U0001f193\U0001f193\U0001f193\U0001f193", "Бесплатно"
+        )
+        html_content += f"<p>{cleaned.replace('\n', '<br/>')}</p>"
+    else:
+        clean_text = strip_title(text)
+        clean_text = normalize_hashtag_dates(clean_text)
+        clean_text = clean_text.replace(
+            "\U0001f193\U0001f193\U0001f193\U0001f193", "Бесплатно"
+        )
+        paragraphs = [f"<p>{html.escape(line)}</p>" for line in clean_text.splitlines()]
+        html_content += "".join(paragraphs)
+    if db:
+        nav_html = await build_month_nav_html(db)
+        html_content = apply_month_nav(html_content, nav_html)
+    html_content = apply_footer_link(html_content)
+    return html_content, catbox_msg, len(urls)
+
+
 async def create_source_page(
     title: str,
     text: str,
@@ -9278,57 +9333,17 @@ async def create_source_page(
         logging.error("Telegraph token unavailable")
         return None
     tg = Telegraph(access_token=token)
-    html_content = ""
-
-    def strip_title(line_text: str) -> str:
-        lines = line_text.splitlines()
-        if lines and lines[0].strip() == title.strip():
-            return "\n".join(lines[1:]).lstrip()
-        return line_text
-
-    images: list[tuple[bytes, str]] = []
-    if media:
-        images = [media] if isinstance(media, tuple) else list(media)
-    if catbox_urls is not None:
-        urls = list(catbox_urls)
-        catbox_msg = ""
-    else:
-        urls, catbox_msg = await upload_to_catbox(images)
-
-    if source_url and display_link:
-        html_content += (
-            f'<p><a href="{html.escape(source_url)}"><strong>'
-            f"{html.escape(title)}</strong></a></p>"
-        )
-    else:
-        html_content += f"<p><strong>{html.escape(title)}</strong></p>"
-
-    for url in urls:
-        html_content += f'<img src="{html.escape(url)}"/><p></p>'
-
-    html_content = apply_ics_link(html_content, ics_url)
-
-    if html_text:
-        html_text = strip_title(html_text)
-        html_text = normalize_hashtag_dates(html_text)
-        cleaned = re.sub(r"</?tg-emoji[^>]*>", "", html_text)
-        cleaned = cleaned.replace(
-            "\U0001f193\U0001f193\U0001f193\U0001f193", "Бесплатно"
-        )
-        html_content += f"<p>{cleaned.replace('\n', '<br/>')}</p>"
-    else:
-        clean_text = strip_title(text)
-        clean_text = normalize_hashtag_dates(clean_text)
-        clean_text = clean_text.replace(
-            "\U0001f193\U0001f193\U0001f193\U0001f193", "Бесплатно"
-        )
-        paragraphs = [f"<p>{html.escape(line)}</p>" for line in clean_text.splitlines()]
-        html_content += "".join(paragraphs)
-
-    if db:
-        nav_html = await build_month_nav_html(db)
-        html_content = apply_month_nav(html_content, nav_html)
-    html_content = apply_footer_link(html_content)
+    html_content, catbox_msg, uploaded = await build_source_page_content(
+        title,
+        text,
+        source_url,
+        html_text,
+        media,
+        ics_url,
+        db,
+        display_link=display_link,
+        catbox_urls=catbox_urls,
+    )
     try:
         page = await telegraph_create_page(
             tg, title, html_content=html_content, path=path
@@ -9337,7 +9352,7 @@ async def create_source_page(
         logging.error("Failed to create telegraph page: %s", e)
         return None
     logging.info("Created telegraph page %s", page.get("url"))
-    return page.get("url"), page.get("path"), catbox_msg, len(urls)
+    return page.get("url"), page.get("path"), catbox_msg, uploaded
 
 
 def create_app() -> web.Application:
