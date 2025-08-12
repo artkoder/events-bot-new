@@ -141,8 +141,6 @@ DEBUG = os.getenv("EVBOT_DEBUG") == "1"
 
 _page_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 _month_next_run: dict[str, float] = defaultdict(float)
-_page_last_run: date | None = None
-_page_first_run = True
 _partner_last_run: date | None = None
 
 _startup_handler_registered = False
@@ -7702,31 +7700,31 @@ async def cleanup_scheduler(
             break
 
 
-async def page_update_scheduler(db: Database, run_id: str | None = None):
-    """Refresh month and weekend Telegraph pages after midnight.
+async def nightly_page_sync(db: Database, run_id: str | None = None) -> None:
+    """Rebuild all stored month and weekend pages once per night.
 
-    To avoid unnecessary API calls after a manual restart during the day the
-    first iteration skips syncing if the current time is well past the
-    scheduled run window (01:00 local time).
+    The job is optional and disabled by default. It is intended for manual
+    activation via an environment variable when a full resync of pages is
+    required.
     """
-    global _page_last_run, _page_first_run
     async with span("db"):
-        offset = await get_tz_offset(db)
-        tz = offset_to_timezone(offset)
-        now = datetime.now(tz)
-    if _page_first_run:
-        _page_first_run = False
-        if now.time() >= time(2, 0):
-            _page_last_run = now.date()
-    if now.time() >= time(1, 0) and now.date() != _page_last_run:
+        async with db.get_session() as session:
+            months = (
+                await session.exec(select(MonthPage.month))
+            ).scalars().all()
+            weekends = (
+                await session.exec(select(WeekendPage.start))
+            ).scalars().all()
+    for month in months:
         try:
-            await sync_month_page(db, now.strftime("%Y-%m"))
-            w_start = weekend_start_for_date(now.date())
-            if w_start:
-                await sync_weekend_page(db, w_start.isoformat())
-        except Exception as e:
-            logging.error("page update failed: %s", e)
-        _page_last_run = now.date()
+            await sync_month_page(db, month, update_links=False)
+        except Exception as e:  # pragma: no cover - log and continue
+            logging.error("nightly_page_sync month %s failed: %s", month, e)
+    for start in weekends:
+        try:
+            await sync_weekend_page(db, start, update_links=False, post_vk=False)
+        except Exception as e:  # pragma: no cover - log and continue
+            logging.error("nightly_page_sync weekend %s failed: %s", start, e)
 
 
 async def partner_notification_scheduler(db: Database, bot: Bot, run_id: str | None = None):

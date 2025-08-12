@@ -11,6 +11,7 @@ import logging
 import time as _time
 from functools import partial
 from uuid import uuid4
+import os
 
 from db import optimize, wal_checkpoint_truncate, vacuum
 
@@ -106,6 +107,7 @@ def startup(db, bot) -> AsyncIOScheduler:
         vk_poll_scheduler,
         cleanup_scheduler,
         partner_notification_scheduler,
+        nightly_page_sync,
     )
 
     _scheduler.add_job(
@@ -153,6 +155,20 @@ def startup(db, bot) -> AsyncIOScheduler:
         coalesce=True,
         misfire_grace_time=30,
     )
+
+    if os.getenv("ENABLE_NIGHTLY_PAGE_SYNC") == "1":
+        _scheduler.add_job(
+            _job_wrapper("nightly_page_sync", nightly_page_sync),
+            "cron",
+            id="nightly_page_sync",
+            hour="2",
+            minute="30",
+            args=[db],
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=30,
+        )
 
     async def _run_maintenance(job, name: str, timeout: float, run_id: str | None = None) -> None:
         start = _time.perf_counter()
