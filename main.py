@@ -4956,7 +4956,7 @@ def md_to_html(text: str) -> str:
 
 def telegraph_br() -> list[dict]:
     """Return nodes for a blank line in Telegraph (<br>&nbsp;)."""
-    return [{"tag": "br"}, {"tag": "p", "children": ["\u00a0"]}]
+    return [{"tag": "br"}, {"tag": "span", "children": ["\u00a0"]}]
 
 
 def extract_link_from_html(html_text: str) -> str | None:
@@ -5544,12 +5544,10 @@ def render_month_day_section(d: date, events: list[Event]) -> str:
         nodes.extend(telegraph_br())
     nodes.append({"tag": "h3", "children": [f"🟥🟥🟥 {format_day_pretty(d)} 🟥🟥🟥"]})
     nodes.extend(telegraph_br())
-    for idx, ev in enumerate(events):
-        if idx > 0:
-            nodes.extend(telegraph_br())
+    for ev in events:
         fest = getattr(ev, "_festival", None)
         nodes.extend(event_to_nodes(ev, fest, fest_icon=True))
-    return nodes_to_html(nodes)
+    return nodes_to_html(nodes).replace("<span>\u00a0</span>", "\u00a0")
 
 async def get_month_data(db: Database, month: str, *, fallback: bool = True):
     """Return events, exhibitions and nav pages for the given month."""
