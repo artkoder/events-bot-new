@@ -18,11 +18,11 @@ def simple_md_to_html(text: str) -> str:
     return text.replace('\n', '<br>')
 
 
-DAY_START = lambda d: f"<!-- DAY:{d} START -->"
-DAY_END = lambda d: f"<!-- DAY:{d} END -->"
-WEND_START = lambda key: f"<!-- WEEKEND:{key} START -->"
-WEND_END = lambda key: f"<!-- WEEKEND:{key} END -->"
-PERM_START = "<!-- PERMANENT_EXHIBITIONS START -->"
-PERM_END = "<!-- PERMANENT_EXHIBITIONS END -->"
-FESTNAV_START = "<!-- FEST_NAV_START -->"
-FESTNAV_END = "<!-- FEST_NAV_END -->"
+DAY_START = lambda d: f"<!--DAY:{d} START-->"
+DAY_END = lambda d: f"<!--DAY:{d} END-->"
+WEND_START = lambda key: f"<!--WEEKEND:{key} START-->"
+WEND_END = lambda key: f"<!--WEEKEND:{key} END-->"
+PERM_START = "<!--PERMANENT_EXHIBITIONS START-->"
+PERM_END = "<!--PERMANENT_EXHIBITIONS END-->"
+FESTNAV_START = "<!--FEST_NAV_START-->"
+FESTNAV_END = "<!--FEST_NAV_END-->"

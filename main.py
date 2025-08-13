@@ -4665,15 +4665,24 @@ async def patch_month_page_for_date(db: Database, telegraph: Telegraph, month_ke
     title = page_data.get("title") or month_key
     start_marker = DAY_START(d)
     end_marker = DAY_END(d)
+    legacy_start = f"<!-- DAY:{d.isoformat()} START -->"
+    legacy_end = f"<!-- DAY:{d.isoformat()} END -->"
     if start_marker in html_content and end_marker in html_content:
         updated_html = replace_between_markers(
             html_content, start_marker, end_marker, html_section
+        )
+    elif legacy_start in html_content and legacy_end in html_content:
+        updated_html = replace_between_markers(
+            html_content, legacy_start, legacy_end, html_section
+        )
+        updated_html = updated_html.replace(legacy_start, start_marker).replace(
+            legacy_end, end_marker
         )
     else:
         # insert a new day in chronological order before permanent sections
         import re as _re
 
-        day_re = _re.compile(r"<!-- DAY:(\d{4}-\d{2}-\d{2}) START -->")
+        day_re = _re.compile(r"<!--\s*DAY:(\d{4}-\d{2}-\d{2}) START\s*-->")
         insert_pos = None
         for m in day_re.finditer(html_content):
             try:
@@ -4685,6 +4694,8 @@ async def patch_month_page_for_date(db: Database, telegraph: Telegraph, month_ke
                 break
         if insert_pos is None:
             perm_pos = html_content.find(PERM_START)
+            if perm_pos == -1:
+                perm_pos = html_content.find("<!-- PERMANENT_EXHIBITIONS START -->")
             insert_pos = perm_pos if perm_pos != -1 else len(html_content)
         new_block = start_marker + html_section + end_marker
         html_content = html_content[:insert_pos] + new_block + html_content[insert_pos:]
