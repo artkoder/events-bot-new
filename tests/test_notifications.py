@@ -47,23 +47,26 @@ async def test_progress_notifications(tmp_path, monkeypatch):
 
     await schedule_event_update_tasks(db, ev)
 
-    async def noop(eid, db_obj, bot_obj):
-        return None
+    async def ok_handler(eid, db_obj, bot_obj):
+        return True
 
-    monkeypatch.setattr(main, "update_telegraph_event_page", noop)
-    monkeypatch.setattr(main, "job_sync_vk_source_post", noop)
-    monkeypatch.setattr(main, "update_month_pages_for", noop)
-    monkeypatch.setattr(main, "update_weekend_pages_for", noop)
-    monkeypatch.setattr(main, "update_festival_pages_for_event", noop)
+    async def nochange_handler(eid, db_obj, bot_obj):
+        return False
+
+    monkeypatch.setattr(main, "update_telegraph_event_page", ok_handler)
+    monkeypatch.setattr(main, "job_sync_vk_source_post", ok_handler)
+    monkeypatch.setattr(main, "update_month_pages_for", nochange_handler)
+    monkeypatch.setattr(main, "update_weekend_pages_for", ok_handler)
+    monkeypatch.setattr(main, "update_festival_pages_for_event", ok_handler)
     monkeypatch.setattr(
         main,
         "JOB_HANDLERS",
         {
-            "telegraph_build": noop,
-            "vk_sync": noop,
-            "month_pages": noop,
-            "weekend_pages": noop,
-            "festival_pages": noop,
+            "telegraph_build": ok_handler,
+            "vk_sync": ok_handler,
+            "month_pages": nochange_handler,
+            "weekend_pages": ok_handler,
+            "festival_pages": ok_handler,
         },
     )
 
@@ -81,7 +84,7 @@ async def test_progress_notifications(tmp_path, monkeypatch):
     await run_event_update_jobs(db, bot, notify_chat_id=1, event_id=ev.id)
 
     assert "Telegraph (событие): OK — http://t" in bot.messages
-    assert "Страница месяца: OK — http://m" in bot.messages
+    assert "Страница месяца: без изменений" in bot.messages
     assert "Выходные: OK — http://w" in bot.messages
     assert "VK: OK — http://v" in bot.messages
 
