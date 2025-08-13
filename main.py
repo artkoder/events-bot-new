@@ -101,7 +101,7 @@ import aiosqlite
 import gc
 import atexit
 from cachetools import TTLCache
-from markup import simple_md_to_html, DAY_START, DAY_END
+from markup import simple_md_to_html, DAY_START, DAY_END, PERM_START
 from sections import replace_between_markers, content_hash
 from db import Database
 from scheduler import startup as scheduler_startup, cleanup as scheduler_cleanup
@@ -4663,9 +4663,32 @@ async def patch_month_page_for_date(db: Database, telegraph: Telegraph, month_ke
     page_data = await tg_call(telegraph.get_page, page.path, return_html=True)
     html_content = page_data.get("content") or page_data.get("content_html") or ""
     title = page_data.get("title") or month_key
-    updated_html = replace_between_markers(
-        html_content, DAY_START(d), DAY_END(d), html_section
-    )
+    start_marker = DAY_START(d)
+    end_marker = DAY_END(d)
+    if start_marker in html_content and end_marker in html_content:
+        updated_html = replace_between_markers(
+            html_content, start_marker, end_marker, html_section
+        )
+    else:
+        # insert a new day in chronological order before permanent sections
+        import re as _re
+
+        day_re = _re.compile(r"<!-- DAY:(\d{4}-\d{2}-\d{2}) START -->")
+        insert_pos = None
+        for m in day_re.finditer(html_content):
+            try:
+                existing = date.fromisoformat(m.group(1))
+            except Exception:  # pragma: no cover - invalid marker
+                continue
+            if d < existing:
+                insert_pos = m.start()
+                break
+        if insert_pos is None:
+            perm_pos = html_content.find(PERM_START)
+            insert_pos = perm_pos if perm_pos != -1 else len(html_content)
+        new_block = start_marker + html_section + end_marker
+        html_content = html_content[:insert_pos] + new_block + html_content[insert_pos:]
+        updated_html = html_content
     await tg_call(
         telegraph.edit_page, page.path, title=title, html_content=updated_html
     )
