@@ -4689,9 +4689,20 @@ async def patch_month_page_for_date(db: Database, telegraph: Telegraph, month_ke
         new_block = start_marker + html_section + end_marker
         html_content = html_content[:insert_pos] + new_block + html_content[insert_pos:]
         updated_html = html_content
-    await tg_call(
-        telegraph.edit_page, page.path, title=title, html_content=updated_html
-    )
+    try:
+        await tg_call(
+            telegraph.edit_page, page.path, title=title, html_content=updated_html
+        )
+    except TelegraphException as e:
+        if "CONTENT_TOO_BIG" in str(e):
+            logging.warning(
+                "month_patch page_key=%s day=%s content too big, rebuilding",
+                page_key,
+                d.isoformat(),
+            )
+            await sync_month_page(db, month_key)
+        else:
+            raise
     await set_section_hash(db, page_key, section_key, new_hash)
     dur = (_time.perf_counter() - start) * 1000
     logging.info(
