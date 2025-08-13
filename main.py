@@ -3088,13 +3088,16 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
         cid = int(data.split(":")[1])
         offset = await get_tz_offset(db)
         tz = offset_to_timezone(offset)
-        await send_daily_announcement(db, bot, cid, tz, record=False)
+        now = None
+        logging.info("manual daily send: channel=%s now=%s", cid, (now or datetime.now(tz)))
+        await send_daily_announcement(db, bot, cid, tz, record=False, now=now)
         await callback.answer("Sent")
     elif data.startswith("dailysendtom:"):
         cid = int(data.split(":")[1])
         offset = await get_tz_offset(db)
         tz = offset_to_timezone(offset)
         now = datetime.now(tz) + timedelta(days=1)
+        logging.info("manual daily send: channel=%s now=%s", cid, (now or datetime.now(tz)))
         await send_daily_announcement(db, bot, cid, tz, record=False, now=now)
         await callback.answer("Sent")
     elif data == "vkset":
@@ -7989,6 +7992,7 @@ async def init_db_and_scheduler(
     except Exception as e:
         logging.error("Failed to set webhook: %s", e)
     scheduler_startup(db, bot)
+    app["daily_scheduler"] = asyncio.create_task(daily_scheduler(db, bot))
     app["add_event_worker"] = asyncio.create_task(add_event_queue_worker(db, bot))
     app["add_event_watch"] = asyncio.create_task(_watch_add_event_worker(app, db, bot))
     gc.collect()
@@ -9786,6 +9790,10 @@ def create_app() -> web.Application:
             app["add_event_worker"].cancel()
             with contextlib.suppress(Exception):
                 await app["add_event_worker"]
+        if "daily_scheduler" in app:
+            app["daily_scheduler"].cancel()
+            with contextlib.suppress(Exception):
+                await app["daily_scheduler"]
         scheduler_cleanup()
         await close_vk_session()
         close_supabase_client()
