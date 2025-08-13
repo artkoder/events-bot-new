@@ -2651,7 +2651,10 @@ async def test_weekend_nav_and_exhibitions(tmp_path: Path):
         for i, n in enumerate(content)
         if n.get("tag") == "h3" and "Постоянные" in "".join(n.get("children", []))
     )
-    assert content[idx_exh - 1].get("tag") == "p"
+    prev_idx = idx_exh - 1
+    while prev_idx >= 0 and not isinstance(content[prev_idx], dict):
+        prev_idx -= 1
+    assert content[prev_idx].get("tag") == "p"
 
 
 @pytest.mark.asyncio
@@ -2695,7 +2698,10 @@ async def test_month_nav_and_exhibitions(tmp_path: Path):
         for i, n in enumerate(content)
         if n.get("tag") == "h3" and "Постоянные" in "".join(n.get("children", []))
     )
-    assert content[idx_exh - 1].get("tag") == "p"
+    prev_idx = idx_exh - 1
+    while prev_idx >= 0 and not isinstance(content[prev_idx], dict):
+        prev_idx -= 1
+    assert content[prev_idx].get("tag") == "p"
 
 
 @pytest.mark.asyncio

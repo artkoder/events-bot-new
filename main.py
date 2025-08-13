@@ -101,7 +101,7 @@ import aiosqlite
 import gc
 import atexit
 from cachetools import TTLCache
-from markup import simple_md_to_html, DAY_START, DAY_END, PERM_START
+from markup import simple_md_to_html, DAY_START, DAY_END, PERM_START, PERM_END
 from sections import replace_between_markers, content_hash
 from db import Database
 from scheduler import startup as scheduler_startup, cleanup as scheduler_cleanup
@@ -4696,7 +4696,20 @@ async def patch_month_page_for_date(db: Database, telegraph: Telegraph, month_ke
             perm_pos = html_content.find(PERM_START)
             if perm_pos == -1:
                 perm_pos = html_content.find("<!-- PERMANENT_EXHIBITIONS START -->")
-            insert_pos = perm_pos if perm_pos != -1 else len(html_content)
+            if perm_pos != -1:
+                insert_pos = perm_pos
+                logging.info(
+                    "month_patch page_key=%s day=%s fallback=perm_before",
+                    page_key,
+                    d.isoformat(),
+                )
+            else:
+                insert_pos = len(html_content)
+                logging.warning(
+                    "month_patch page_key=%s day=%s fallback=end",
+                    page_key,
+                    d.isoformat(),
+                )
         new_block = start_marker + html_section + end_marker
         html_content = html_content[:insert_pos] + new_block + html_content[insert_pos:]
         updated_html = html_content
@@ -4957,6 +4970,11 @@ def md_to_html(text: str) -> str:
 def telegraph_br() -> list[dict]:
     """Return nodes for a blank line in Telegraph (<br>&nbsp;)."""
     return [{"tag": "br"}, {"tag": "span", "children": ["\u00a0"]}]
+
+
+def unescape_html_comments(html: str) -> str:
+    """Convert escaped HTML comments back to real comments."""
+    return html.replace("&lt;!--", "<!--").replace("--&gt;", "-->")
 
 
 def extract_link_from_html(html_text: str) -> str | None:
@@ -5510,12 +5528,16 @@ def add_day_sections(
     by_day: dict[date, list[Event]],
     fest_map: dict[str, Festival],
     add_many: Callable[[Iterable[dict]], None],
+    *,
+    use_markers: bool = False,
 ):
     """Append event sections grouped by day to Telegraph content."""
     for d in days:
         events = by_day.get(d)
         if not events:
             continue
+        if use_markers:
+            add_many([DAY_START(d)])
         add_many(telegraph_br())
         if d.weekday() == 5:
             add_many([{ "tag": "h3", "children": ["🟥🟥🟥 суббота 🟥🟥🟥"] }])
@@ -5528,6 +5550,8 @@ def add_day_sections(
         for ev in events:
             fest = fest_map.get(ev.festival or "")
             add_many(event_to_nodes(ev, fest, fest_icon=True))
+        if use_markers:
+            add_many([DAY_END(d)])
 
 
 def render_month_day_section(d: date, events: list[Event]) -> str:
@@ -5691,7 +5715,7 @@ def _build_month_page_content_sync(
     ]
     add({"tag": "p", "children": intro_nodes})
 
-    add_day_sections(sorted(by_day), by_day, fest_map, add_many)
+    add_day_sections(sorted(by_day), by_day, fest_map, add_many, use_markers=True)
 
     future_pages = [p for p in nav_pages if p.month >= month]
     month_nav: list[dict] = []
@@ -5714,12 +5738,14 @@ def _build_month_page_content_sync(
         month_nav = [{"tag": "h4", "children": nav_children}]
 
     if exhibitions and not exceeded:
+        add_many([PERM_START])
         add({"tag": "h3", "children": ["Постоянные выставки"]})
         add_many(telegraph_br())
         for ev in exhibitions:
             if exceeded:
                 break
             add_many(exhibition_to_nodes(ev))
+        add_many([PERM_END])
 
     if month_nav and not exceeded:
         add_many(telegraph_br())
@@ -5797,7 +5823,7 @@ async def _sync_month_page_inner(db: Database, month: str, update_links: bool = 
                 title2, content2, _ = await build_month_page_content(
                     db, month, second, exhibitions, nav_pages
                 )
-                html2 = nodes_to_html(content2)
+                html2 = unescape_html_comments(nodes_to_html(content2))
                 hash2 = content_hash(html2)
                 if page.path2 and page.content_hash2 == hash2:
                     logging.debug("telegraph_update skipped (no changes)")
@@ -5833,7 +5859,7 @@ async def _sync_month_page_inner(db: Database, month: str, update_links: bool = 
                     nav_pages,
                     continuation_url=page.url2,
                 )
-                html1 = nodes_to_html(content1)
+                html1 = unescape_html_comments(nodes_to_html(content1))
                 hash1 = content_hash(html1)
                 if page.path and page.content_hash == hash1:
                     logging.debug("telegraph_update skipped (no changes)")
@@ -5872,7 +5898,7 @@ async def _sync_month_page_inner(db: Database, month: str, update_links: bool = 
         title, content, _ = await build_month_page_content(
             db, month, events, exhibitions, nav_pages
         )
-        html_full = nodes_to_html(content)
+        html_full = unescape_html_comments(nodes_to_html(content))
         hash_full = content_hash(html_full)
         size = len(html_full.encode())
 
