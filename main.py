@@ -4410,17 +4410,23 @@ async def _run_due_jobs_once(
             attempt,
         )
         start = _time.perf_counter()
+        changed = True
         try:
             handler = JOB_HANDLERS[job.task.value]
             async with span(
                 "event_pipeline", step=job.task.value, event_id=job.event_id
             ):
-                await handler(job.event_id, db, bot)
-            link = await _job_result_link(job.task, job.event_id, db)
+                res = await handler(job.event_id, db, bot)
+            changed = res if isinstance(res, bool) else True
+            link = (
+                await _job_result_link(job.task, job.event_id, db)
+                if changed
+                else None
+            )
             status = JobStatus.done
             err = None
             took_ms = (_time.perf_counter() - start) * 1000
-            short = link or "ok"
+            short = link or ("ok" if changed else "nochange")
             logging.info(
                 "TASK_DONE event=%s task=%s run_id=%s attempt=%d took_ms=%.0f result=%s",
                 job.event_id,
@@ -4455,9 +4461,10 @@ async def _run_due_jobs_once(
                 obj.last_error = err
                 obj.updated_at = datetime.utcnow()
                 if status == JobStatus.done:
-                    if link == prev:
+                    cur_res = link if (changed and link) else ("ok" if changed else "nochange")
+                    if cur_res == prev:
                         send = False
-                    obj.last_result = link
+                    obj.last_result = cur_res
                     obj.next_run_at = datetime.utcnow()
                 else:
                     obj.attempts += 1
@@ -4468,9 +4475,12 @@ async def _run_due_jobs_once(
             if notify and send:
                 label = TASK_LABELS[job.task.value]
                 if status == JobStatus.done:
-                    text = f"{label}: OK"
-                    if link:
-                        text += f" — {link}"
+                    if changed:
+                        text = f"{label}: OK"
+                        if link:
+                            text += f" — {link}"
+                    else:
+                        text = f"{label}: без изменений"
                 elif status == JobStatus.error:
                     err_short = err.splitlines()[0] if err else ""
                     text = f"{label}: ERROR: {err_short}"
@@ -4668,11 +4678,22 @@ async def patch_month_page_for_date(db: Database, telegraph: Telegraph, month_ke
     end_marker = DAY_END(d)
     legacy_start = f"<!-- DAY:{d.isoformat()} START -->"
     legacy_end = f"<!-- DAY:{d.isoformat()} END -->"
-    if start_marker in html_content and end_marker in html_content:
+    marker_type = "new" if start_marker in html_content and end_marker in html_content else (
+        "legacy" if legacy_start in html_content and legacy_end in html_content else "none"
+    )
+    logging.info(
+        "month_patch page_key=%s day=%s markers=%s",
+        page_key,
+        d.isoformat(),
+        marker_type,
+    )
+    branch = "replace"
+    if marker_type == "new":
         updated_html = replace_between_markers(
             html_content, start_marker, end_marker, html_section
         )
-    elif legacy_start in html_content and legacy_end in html_content:
+    elif marker_type == "legacy":
+        branch = "migrate"
         updated_html = replace_between_markers(
             html_content, legacy_start, legacy_end, html_section
         )
@@ -4680,6 +4701,7 @@ async def patch_month_page_for_date(db: Database, telegraph: Telegraph, month_ke
             legacy_end, end_marker
         )
     else:
+        branch = "fallback"
         logging.warning(
             "month_patch page_key=%s day=%s markers_missing",
             page_key,
@@ -4687,6 +4709,7 @@ async def patch_month_page_for_date(db: Database, telegraph: Telegraph, month_ke
         )
         pretty_header = f"🟥🟥🟥 {format_day_pretty(d)} 🟥🟥🟥"
         if pretty_header in html_content:
+            branch = "rebuild"
             logging.warning(
                 "month_patch page_key=%s day=%s header_present_rebuild",
                 page_key,
@@ -4696,9 +4719,10 @@ async def patch_month_page_for_date(db: Database, telegraph: Telegraph, month_ke
             await set_section_hash(db, page_key, section_key, new_hash)
             dur = (_time.perf_counter() - start) * 1000
             logging.info(
-                "month_patch page_key=%s day=%s changed=True dur=%.0fms",
+                "month_patch page_key=%s day=%s branch=%s changed=True dur=%.0fms",
                 page_key,
                 d.isoformat(),
+                branch,
                 dur,
             )
             return True
@@ -4753,15 +4777,16 @@ async def patch_month_page_for_date(db: Database, telegraph: Telegraph, month_ke
     await set_section_hash(db, page_key, section_key, new_hash)
     dur = (_time.perf_counter() - start) * 1000
     logging.info(
-        "month_patch page_key=%s day=%s changed=True dur=%.0fms",
+        "month_patch page_key=%s day=%s branch=%s changed=True dur=%.0fms",
         page_key,
         d.isoformat(),
+        branch,
         dur,
     )
     return True
 
 
-async def update_month_pages_for(event_id: int, db: Database, bot: Bot | None) -> None:
+async def update_month_pages_for(event_id: int, db: Database, bot: Bot | None) -> bool:
     async with db.get_session() as session:
         ev = await session.get(Event, event_id)
     if not ev:
@@ -4787,14 +4812,16 @@ async def update_month_pages_for(event_id: int, db: Database, bot: Bot | None) -
         logging.error("Telegraph token unavailable")
         for d in dates:
             await sync_month_page(db, d.strftime("%Y-%m"))
-        return
+        return True
     tg = Telegraph(access_token=token, domain="telegra.ph")
 
+    changed_any = False
     for d in dates:
         month_key = d.strftime("%Y-%m")
         changed = await patch_month_page_for_date(db, tg, month_key, d)
-        if not changed:
-            await sync_month_page(db, month_key)
+        if changed:
+            changed_any = True
+    return changed_any
 
 
 async def update_weekend_pages_for(event_id: int, db: Database, bot: Bot | None) -> None:

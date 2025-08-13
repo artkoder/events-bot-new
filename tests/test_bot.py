@@ -6922,26 +6922,37 @@ async def test_publication_plan_and_updates(tmp_path: Path, monkeypatch):
             ev.telegraph_url = "t"
             session.add(ev)
             await session.commit()
-        return "t"
+            return "t"
 
-    async def fake_vk(ev, text, db_obj, bot_obj, ics_url=None):
+    async def fake_vk_job(event_id, db_obj, bot_obj):
         async with db_obj.get_session() as session:
-            obj = await session.get(Event, ev.id)
+            obj = await session.get(Event, event_id)
             obj.source_vk_post_url = "v"
             session.add(obj)
             await session.commit()
-        return "v"
+        return True
 
     async def fake_month(event_id, db_obj, bot_obj):
-        return None
+        return True
 
     async def fake_week(event_id, db_obj, bot_obj):
-        return None
+        return True
 
     monkeypatch.setattr(main, "update_telegraph_event_page", fake_tg)
-    monkeypatch.setattr(main, "sync_vk_source_post", fake_vk)
+    monkeypatch.setattr(main, "job_sync_vk_source_post", fake_vk_job)
     monkeypatch.setattr(main, "update_month_pages_for", fake_month)
     monkeypatch.setattr(main, "update_weekend_pages_for", fake_week)
+    monkeypatch.setattr(
+        main,
+        "JOB_HANDLERS",
+        {
+            "telegraph_build": fake_tg,
+            "vk_sync": fake_vk_job,
+            "month_pages": fake_month,
+            "weekend_pages": fake_week,
+            "festival_pages": fake_week,
+        },
+    )
 
     msg = types.Message.model_validate(
         {
@@ -6956,11 +6967,11 @@ async def test_publication_plan_and_updates(tmp_path: Path, monkeypatch):
     await main.handle_add_event_raw(msg, db, bot)
 
     texts = [m[1] for m in bot.messages]
-    assert texts[1] == "Событие сохранено. Публикую…"
-    assert texts[2] == "Telegraph ✅ t"
-    assert texts[3] == "VK ✅ v"
-    assert texts[4].startswith("Страницы месяца ✅")
-    assert texts[5].startswith("Выходные ✅")
-    assert texts[6] == "Готово"
+    assert "Событие сохранено. Публикую…" in texts
+    assert "Telegraph (событие): OK — t" in texts
+    assert "VK: OK — v" in texts
+    assert any(t.startswith("Страница месяца: OK") for t in texts)
+    assert any(t.startswith("Выходные: OK") for t in texts)
+    assert texts[-1] == "Готово"
 
 
