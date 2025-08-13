@@ -100,3 +100,97 @@ async def test_patch_month_page_handles_content_too_big(tmp_path, monkeypatch):
     assert called is True
     h = await main.get_section_hash(db, "telegraph:month:2025-08", "day:2025-08-15")
     assert h is not None
+
+
+@pytest.mark.asyncio
+async def test_patch_month_page_handles_escaped_legacy_markers(tmp_path):
+    db = main.Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    async with db.get_session() as session:
+        session.add(main.MonthPage(month="2025-08", url="u", path="p"))
+        session.add(
+            main.Event(
+                title="Concert",
+                description="desc",
+                date="2025-08-15",
+                time="12:00",
+                location_name="loc",
+                source_text="src",
+            )
+        )
+        await session.commit()
+
+    html = (
+        "Intro"
+        + "<!-- DAY:2025-08-15 START -->OLD<!-- DAY:2025-08-15 END -->"
+        + PERM_START
+        + "perm"
+        + PERM_END
+    )
+    html = html.replace("<!--", "&lt;!--").replace("-->", "--&gt;")
+
+    class FakeTelegraph:
+        def __init__(self):
+            self.edited_html = None
+
+        def get_page(self, path, return_html=True):
+            assert path == "p"
+            return {"content_html": html, "title": "Title"}
+
+        def edit_page(self, path, title, html_content):
+            self.edited_html = html_content
+            return {"path": path}
+
+    tg = FakeTelegraph()
+    changed = await main.patch_month_page_for_date(db, tg, "2025-08", date(2025, 8, 15))
+    assert changed is True
+    result = tg.edited_html
+    assert result.count(DAY_START("2025-08-15")) == 1
+    assert "OLD" not in result
+    assert "<!-- DAY:2025-08-15 START -->" not in result
+    assert result.index(DAY_START("2025-08-15")) < result.index(PERM_START)
+    assert "&lt;!--" not in result
+
+
+@pytest.mark.asyncio
+async def test_patch_month_page_rebuilds_when_header_without_markers(tmp_path, monkeypatch):
+    db = main.Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    async with db.get_session() as session:
+        session.add(main.MonthPage(month="2025-08", url="u", path="p"))
+        session.add(
+            main.Event(
+                title="Concert",
+                description="desc",
+                date="2025-08-15",
+                time="12:00",
+                location_name="loc",
+                source_text="src",
+            )
+        )
+        await session.commit()
+
+    header = f"<h3>🟥🟥🟥 {main.format_day_pretty(date(2025, 8, 15))} 🟥🟥🟥</h3>"
+    html = header + PERM_START + "perm" + PERM_END
+    html = html.replace("<!--", "&lt;!--").replace("-->", "--&gt;")
+
+    class FakeTelegraph:
+        def get_page(self, path, return_html=True):
+            assert path == "p"
+            return {"content_html": html, "title": "Title"}
+
+        def edit_page(self, path, title, html_content):
+            raise AssertionError("edit_page should not be called")
+
+    called = False
+
+    async def fake_sync(db_obj, month_key, update_links=False):
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(main, "sync_month_page", fake_sync)
+
+    tg = FakeTelegraph()
+    changed = await main.patch_month_page_for_date(db, tg, "2025-08", date(2025, 8, 15))
+    assert changed is True
+    assert called is True

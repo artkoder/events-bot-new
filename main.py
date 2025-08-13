@@ -4662,6 +4662,7 @@ async def patch_month_page_for_date(db: Database, telegraph: Telegraph, month_ke
 
     page_data = await tg_call(telegraph.get_page, page.path, return_html=True)
     html_content = page_data.get("content") or page_data.get("content_html") or ""
+    html_content = unescape_html_comments(html_content)
     title = page_data.get("title") or month_key
     start_marker = DAY_START(d)
     end_marker = DAY_END(d)
@@ -4679,6 +4680,28 @@ async def patch_month_page_for_date(db: Database, telegraph: Telegraph, month_ke
             legacy_end, end_marker
         )
     else:
+        logging.warning(
+            "month_patch page_key=%s day=%s markers_missing",
+            page_key,
+            d.isoformat(),
+        )
+        pretty_header = f"🟥🟥🟥 {format_day_pretty(d)} 🟥🟥🟥"
+        if pretty_header in html_content:
+            logging.warning(
+                "month_patch page_key=%s day=%s header_present_rebuild",
+                page_key,
+                d.isoformat(),
+            )
+            await sync_month_page(db, month_key)
+            await set_section_hash(db, page_key, section_key, new_hash)
+            dur = (_time.perf_counter() - start) * 1000
+            logging.info(
+                "month_patch page_key=%s day=%s changed=True dur=%.0fms",
+                page_key,
+                d.isoformat(),
+                dur,
+            )
+            return True
         # insert a new day in chronological order before permanent sections
         import re as _re
 
