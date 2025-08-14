@@ -4817,20 +4817,28 @@ async def update_month_pages_for(event_id: int, db: Database, bot: Bot | None) -
             for i in range(1, span_days + 1):
                 dates.append(start_date + timedelta(days=i))
 
+    # group all affected days by month to ensure month pages exist
+    months: dict[str, list[date]] = {}
+    for d in dates:
+        months.setdefault(d.strftime("%Y-%m"), []).append(d)
+
     token = get_telegraph_token()
     if not token:
         logging.error("Telegraph token unavailable")
-        for d in dates:
-            await sync_month_page(db, d.strftime("%Y-%m"))
+        for month in months:
+            await sync_month_page(db, month)
         return True
+
     tg = Telegraph(access_token=token, domain="telegra.ph")
 
     changed_any = False
-    for d in dates:
-        month_key = d.strftime("%Y-%m")
-        changed = await patch_month_page_for_date(db, tg, month_key, d)
-        if changed:
-            changed_any = True
+    for month, month_dates in months.items():
+        # ensure the month page is created before attempting a patch
+        await sync_month_page(db, month)
+        for d in month_dates:
+            changed = await patch_month_page_for_date(db, tg, month, d)
+            if changed:
+                changed_any = True
     return changed_any
 
 
