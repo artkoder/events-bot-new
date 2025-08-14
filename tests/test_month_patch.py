@@ -96,7 +96,7 @@ async def test_patch_month_page_handles_content_too_big(tmp_path, monkeypatch):
 
     tg = FakeTelegraph()
     changed = await main.patch_month_page_for_date(db, tg, "2025-08", date(2025, 8, 15))
-    assert changed is True
+    assert changed == "rebuild"
     assert called is True
     h = await main.get_section_hash(db, "telegraph:month:2025-08", "day:2025-08-15")
     assert h is not None
