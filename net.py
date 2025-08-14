@@ -106,3 +106,23 @@ async def http_call(
                 continue
             raise
     raise last_exc if last_exc else RuntimeError("http_call failed")
+
+
+async def telegraph_upload(data: bytes, filename: str) -> str | None:
+    """Upload an image to Telegraph and return full URL."""
+    session = _get_session()
+    from aiohttp import FormData
+
+    form = FormData()
+    form.add_field("file", data, filename=filename)
+    async with session.post("https://telegra.ph/upload", data=form) as resp:
+        try:
+            body = await resp.json()
+        except Exception:
+            body = await resp.text()
+        if resp.status == 200 and isinstance(body, list) and body and "src" in body[0]:
+            return "https://telegra.ph" + body[0]["src"]
+        logging.error(
+            "telegraph upload failed %s: %s %s", filename, resp.status, body
+        )
+        return None

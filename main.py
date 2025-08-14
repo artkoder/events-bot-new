@@ -87,7 +87,7 @@ import hashlib
 import unicodedata
 
 from telegraph import Telegraph, TelegraphException
-from net import http_call
+from net import http_call, telegraph_upload
 
 from functools import partial, lru_cache
 from collections import defaultdict, deque
@@ -1260,9 +1260,12 @@ async def extract_images(message: types.Message, bot: Bot) -> list[tuple[bytes, 
     return images[:3]
 
 
-async def upload_to_catbox(images: list[tuple[bytes, str]]) -> tuple[list[str], str]:
-    """Upload images to Catbox and return URLs with status message."""
+async def upload_images(
+    images: list[tuple[bytes, str]]
+) -> tuple[list[str], list[str], str]:
+    """Upload images to Catbox with Telegraph fallback."""
     catbox_urls: list[str] = []
+    tg_urls: list[str] = []
     catbox_msg = ""
     if CATBOX_ENABLED and images:
         session = get_http_session()
@@ -1275,12 +1278,13 @@ async def upload_to_catbox(images: list[tuple[bytes, str]]) -> tuple[list[str], 
                 logging.warning("catbox skip %s: not image", name)
                 catbox_msg += f"{name}: not image; "
                 continue
-            try:
-                form = FormData()
-                form.add_field("reqtype", "fileupload")
-                form.add_field("fileToUpload", data, filename=name)
-                async def _upload():
-                    nonlocal catbox_msg
+            uploaded = False
+            delays = [0.7, 1.5, 3.0]
+            for attempt, delay in enumerate(delays, 1):
+                try:
+                    form = FormData()
+                    form.add_field("reqtype", "fileupload")
+                    form.add_field("fileToUpload", data, filename=name)
                     async with span("http"):
                         async with HTTP_SEMAPHORE:
                             async with session.post(
@@ -1292,23 +1296,31 @@ async def upload_to_catbox(images: list[tuple[bytes, str]]) -> tuple[list[str], 
                                     catbox_urls.append(url)
                                     catbox_msg += "ok; "
                                     logging.info("catbox uploaded %s", url)
-                                else:
-                                    catbox_msg += f"{name}: err {resp.status}; "
-                                    logging.error(
-                                        "catbox upload failed %s: %s %s",
-                                        name,
-                                        resp.status,
-                                        text_r,
-                                    )
-
-                await asyncio.wait_for(_upload(), HTTP_TIMEOUT)
-            except Exception as e:
-                catbox_msg += f"{name}: {e}; "
-                logging.error("catbox error %s: %s", name, e)
+                                    uploaded = True
+                                    break
+                                logging.warning(
+                                    "catbox upload failed %s: %s %s", name, resp.status, text_r
+                                )
+                                if resp.status in {412, 429} or resp.status >= 500:
+                                    if attempt < len(delays):
+                                        await asyncio.sleep(delay)
+                                        continue
+                except Exception as e:
+                    logging.error("catbox error %s: %s", name, e)
+                break
+            if not uploaded:
+                url = await telegraph_upload(data, name)
+                if url:
+                    tg_urls.append(url)
+                    catbox_msg += "tg ok; "
+                    logging.info("telegraph uploaded %s", url)
+                else:
+                    catbox_msg += f"{name}: both failed; "
+                    logging.error("both uploads failed for %s", name)
         catbox_msg = catbox_msg.strip("; ")
     elif images:
         catbox_msg = "disabled"
-    return catbox_urls, catbox_msg
+    return catbox_urls, tg_urls, catbox_msg
 
 
 def normalize_hashtag_dates(text: str) -> str:
@@ -1597,11 +1609,9 @@ async def _build_festival_nav_block(
             month = (start or today).strftime("%Y-%m")
         groups.setdefault(month, []).append(fest)
 
-    nodes: list[dict] = [
-        {"tag": "br"},
-        {"tag": "p", "children": ["\u00a0"]},
-        {"tag": "h3", "children": ["Ближайшие фестивали"]},
-    ]
+    nodes: list[dict] = []
+    nodes.extend(telegraph_br())
+    nodes.append({"tag": "h3", "children": ["Ближайшие фестивали"]})
     lines: list[str] = [VK_BLANK_LINE, "Ближайшие фестивали"]
     for month in sorted(groups.keys()):
         month_name = month_name_nominative(month)
@@ -3796,7 +3806,7 @@ async def add_events_from_text(
     images: list[tuple[bytes, str]] = []
     if media:
         images = [media] if isinstance(media, tuple) else list(media)
-    catbox_urls, catbox_msg_global = await upload_to_catbox(images)
+    catbox_urls, tg_urls, catbox_msg_global = await upload_images(images)
     links_iter = iter(extract_links_from_html(html_text) if html_text else [])
     source_text_clean = re.sub(
         r"<[^>]+>", "", _vk_expose_links(html_text or text)
@@ -3810,7 +3820,7 @@ async def add_events_from_text(
         loc_addr = festival_info.get("location_address")
         city = festival_info.get("city")
         loc_addr = strip_city_from_address(loc_addr, city)
-        photo_u = catbox_urls[0] if catbox_urls else None
+        photo_u = (catbox_urls or tg_urls)[0] if (catbox_urls or tg_urls) else None
         fest_obj, created = await ensure_festival(
             db,
             fest_name,
@@ -3899,8 +3909,8 @@ async def add_events_from_text(
             source_chat_id=source_chat_id,
             source_message_id=source_message_id,
             creator_id=creator_id,
-            photo_count=len(catbox_urls),
-            photo_urls=catbox_urls,
+            photo_count=len(catbox_urls or tg_urls),
+            photo_urls=catbox_urls or tg_urls,
         )
 
         base_event.event_type = normalize_event_type(
@@ -3908,7 +3918,7 @@ async def add_events_from_text(
         )
 
         if base_event.festival:
-            photo_u = catbox_urls[0] if catbox_urls else None
+            photo_u = (catbox_urls or tg_urls)[0] if (catbox_urls or tg_urls) else None
             await ensure_festival(
                 db,
                 base_event.festival,
@@ -4417,12 +4427,15 @@ async def _run_due_jobs_once(
                 "event_pipeline", step=job.task.value, event_id=job.event_id
             ):
                 res = await handler(job.event_id, db, bot)
+            rebuild = isinstance(res, str) and res == "rebuild"
             changed = res if isinstance(res, bool) else True
             link = (
                 await _job_result_link(job.task, job.event_id, db)
                 if changed
                 else None
             )
+            if rebuild and link:
+                link += " (forced rebuild)"
             status = JobStatus.done
             err = None
             took_ms = (_time.perf_counter() - start) * 1000
@@ -4701,75 +4714,22 @@ async def patch_month_page_for_date(db: Database, telegraph: Telegraph, month_ke
             legacy_end, end_marker
         )
     else:
-        branch = "fallback"
+        branch = "rebuild"
         logging.warning(
-            "month_patch page_key=%s day=%s markers_missing",
+            "month_patch page_key=%s day=%s markers_missing", page_key, d.isoformat()
+        )
+        await sync_month_page(db, month_key)
+        await set_section_hash(db, page_key, section_key, new_hash)
+        dur = (_time.perf_counter() - start) * 1000
+        logging.info(
+            "month_patch page_key=%s day=%s branch=%s changed=True dur=%.0fms",
             page_key,
             d.isoformat(),
+            branch,
+            dur,
         )
-        pretty_header = f"🟥🟥🟥 {format_day_pretty(d)} 🟥🟥🟥"
-        if pretty_header in html_content:
-            branch = "rebuild"
-            logging.warning(
-                "month_patch page_key=%s day=%s header_present_rebuild",
-                page_key,
-                d.isoformat(),
-            )
-            await sync_month_page(db, month_key)
-            async with db.get_session() as session:
-                refreshed = await session.get(MonthPage, month_key)
-            page_data = await tg_call(
-                telegraph.get_page, refreshed.path, return_html=True
-            )
-            html_content = unescape_html_comments(
-                page_data.get("content") or page_data.get("content_html") or ""
-            )
-            if start_marker not in html_content or end_marker not in html_content:
-                raise RuntimeError("day markers missing after rebuild")
-            await set_section_hash(db, page_key, section_key, new_hash)
-            dur = (_time.perf_counter() - start) * 1000
-            logging.info(
-                "month_patch page_key=%s day=%s branch=%s changed=True dur=%.0fms",
-                page_key,
-                d.isoformat(),
-                branch,
-                dur,
-            )
-            return True
-        # insert a new day in chronological order before permanent sections
-        import re as _re
-
-        day_re = _re.compile(r"<!--\s*DAY:(\d{4}-\d{2}-\d{2}) START\s*-->")
-        insert_pos = None
-        for m in day_re.finditer(html_content):
-            try:
-                existing = date.fromisoformat(m.group(1))
-            except Exception:  # pragma: no cover - invalid marker
-                continue
-            if d < existing:
-                insert_pos = m.start()
-                break
-        if insert_pos is None:
-            perm_pos = html_content.find(PERM_START)
-            if perm_pos == -1:
-                perm_pos = html_content.find("<!-- PERMANENT_EXHIBITIONS START -->")
-            if perm_pos != -1:
-                insert_pos = perm_pos
-                logging.info(
-                    "month_patch page_key=%s day=%s fallback=perm_before",
-                    page_key,
-                    d.isoformat(),
-                )
-            else:
-                insert_pos = len(html_content)
-                logging.warning(
-                    "month_patch page_key=%s day=%s fallback=end",
-                    page_key,
-                    d.isoformat(),
-                )
-        new_block = start_marker + html_section + end_marker
-        html_content = html_content[:insert_pos] + new_block + html_content[insert_pos:]
-        updated_html = html_content
+        return "rebuild"
+    updated_html = lint_telegraph_html(updated_html)
     try:
         await tg_call(
             telegraph.edit_page, page.path, title=title, html_content=updated_html
@@ -4832,6 +4792,7 @@ async def update_month_pages_for(event_id: int, db: Database, bot: Bot | None) -
     tg = Telegraph(access_token=token, domain="telegra.ph")
 
     changed_any = False
+    rebuild_any = False
     for month, month_dates in months.items():
         # ensure the month page is created before attempting a patch
         await sync_month_page(db, month)
@@ -4839,7 +4800,9 @@ async def update_month_pages_for(event_id: int, db: Database, bot: Bot | None) -
             changed = await patch_month_page_for_date(db, tg, month, d)
             if changed:
                 changed_any = True
-    return changed_any
+                if changed == "rebuild":
+                    rebuild_any = True
+    return "rebuild" if rebuild_any else changed_any
 
 
 async def update_weekend_pages_for(event_id: int, db: Database, bot: Bot | None) -> None:
@@ -5036,8 +4999,16 @@ def md_to_html(text: str) -> str:
 
 
 def telegraph_br() -> list[dict]:
-    """Return nodes for a blank line in Telegraph using only allowed tags."""
-    return [{"tag": "br"}, {"tag": "br"}]
+    """Return a safe blank line for Telegraph rendering."""
+    return [{"tag": "p", "children": ["\u00A0"]}]
+
+
+_DISALLOWED_TAGS_RE = re.compile(r"</?(?:span|div|style|script)[^>]*>", re.IGNORECASE)
+
+
+def lint_telegraph_html(html: str) -> str:
+    """Strip tags that Telegraph does not allow."""
+    return _DISALLOWED_TAGS_RE.sub("", html)
 
 
 def unescape_html_comments(html: str) -> str:
@@ -5639,7 +5610,7 @@ def render_month_day_section(d: date, events: list[Event]) -> str:
     for ev in events:
         fest = getattr(ev, "_festival", None)
         nodes.extend(event_to_nodes(ev, fest, fest_icon=True))
-    return nodes_to_html(nodes).replace("<span>\u00a0</span>", "\u00a0")
+    return nodes_to_html(nodes)
 
 async def get_month_data(db: Database, month: str, *, fallback: bool = True):
     """Return events, exhibitions and nav pages for the given month."""
@@ -6637,9 +6608,7 @@ async def build_festival_page_content(db: Database, fest: Festival) -> tuple[str
         nodes.append({"tag": "p", "children": [fest.description]})
 
     if fest.website_url or fest.vk_url or fest.tg_url:
-        nodes.append({"tag": "br"})
-        nodes.append({"tag": "p", "children": ["\u00a0"]})
-
+        nodes.extend(telegraph_br())
         nodes.append({"tag": "h3", "children": ["Контакты фестиваля"]})
         if fest.website_url:
             nodes.append(
@@ -6685,8 +6654,7 @@ async def build_festival_page_content(db: Database, fest: Festival) -> tuple[str
             )
 
     if events:
-        nodes.append({"tag": "br"})
-        nodes.append({"tag": "p", "children": ["\u00a0"]})
+        nodes.extend(telegraph_br())
         nodes.append({"tag": "h3", "children": ["Мероприятия фестиваля"]})
         for e in events:
             nodes.extend(event_to_nodes(e))
@@ -9412,8 +9380,11 @@ async def update_source_page(
             images = [media] if isinstance(media, tuple) else list(media)
         if catbox_urls is not None:
             urls = list(catbox_urls)
+            catbox_msg = ""
+            tg_urls: list[str] = []
         else:
-            urls, catbox_msg = await upload_to_catbox(images)
+            catbox_urls, tg_urls, catbox_msg = await upload_images(images)
+            urls = catbox_urls or tg_urls
         for url in urls:
             html_content += f'<img src="{html.escape(url)}"/><p></p>'
         new_html = normalize_hashtag_dates(new_html)
@@ -9428,6 +9399,7 @@ async def update_source_page(
             nav_html = await build_month_nav_html(db)
             html_content = apply_month_nav(html_content, nav_html)
         html_content = apply_footer_link(html_content)
+        html_content = lint_telegraph_html(html_content)
         logging.info("Editing telegraph page %s", path)
         await telegraph_call(
             tg.edit_page, path, title=title, html_content=html_content
@@ -9551,7 +9523,8 @@ async def build_source_page_content(
         urls = list(catbox_urls)
         catbox_msg = ""
     else:
-        urls, catbox_msg = await upload_to_catbox(images)
+        catbox_urls, tg_urls, catbox_msg = await upload_images(images)
+        urls = catbox_urls or tg_urls
     if source_url and display_link:
         html_content += (
             f'<p><a href="{html.escape(source_url)}"><strong>{html.escape(title)}</strong></a></p>'
@@ -9581,6 +9554,7 @@ async def build_source_page_content(
         nav_html = await build_month_nav_html(db)
         html_content = apply_month_nav(html_content, nav_html)
     html_content = apply_footer_link(html_content)
+    html_content = lint_telegraph_html(html_content)
     return html_content, catbox_msg, len(urls)
 
 

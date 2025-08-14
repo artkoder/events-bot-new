@@ -2543,7 +2543,7 @@ async def test_build_month_page_content(tmp_path: Path, monkeypatch):
     title, content, _ = await main.build_month_page_content(db, "2025-07")
     assert "июле 2025" in title
     assert "Полюбить Калининград Анонсы" in title
-    assert any(n.get("tag") == "br" for n in content)
+    assert any(n.get("tag") == "p" and n.get("children") == ["\u00a0"] for n in content)
 
 
 @pytest.mark.asyncio
@@ -4378,8 +4378,8 @@ async def test_add_events_from_text_schedules_pages(tmp_path: Path, monkeypatch)
     async def fake_create(*args, db=None, **kwargs):
         return "u", "p"
 
-    async def fake_upload_to_catbox(media):
-        return [], ""
+    async def fake_upload_images(media):
+        return [], [], ""
 
     async def fake_sync_vk(*args, **kwargs):
         return None
@@ -4395,7 +4395,7 @@ async def test_add_events_from_text_schedules_pages(tmp_path: Path, monkeypatch)
 
     monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
     monkeypatch.setattr("main.create_source_page", fake_create)
-    monkeypatch.setattr("main.upload_to_catbox", fake_upload_to_catbox)
+    monkeypatch.setattr("main.upload_images", fake_upload_images)
     monkeypatch.setattr("main.sync_vk_source_post", fake_sync_vk)
     monkeypatch.setattr("main.upload_ics", fake_upload_ics)
     monkeypatch.setattr("main.post_ics_asset", fake_post_ics_asset)
@@ -6420,9 +6420,9 @@ async def test_add_festival_updates_other_pages(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(main, "sync_festival_vk_post", fake_sync_vk)
 
     async def fake_upload(images):
-        return [], ""
+        return [], [], ""
 
-    monkeypatch.setattr(main, "upload_to_catbox", fake_upload)
+    monkeypatch.setattr(main, "upload_images", fake_upload)
 
     async def fake_parse(text, *args, **kwargs):
         fake_parse._festival = {
