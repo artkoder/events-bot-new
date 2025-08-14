@@ -99,3 +99,52 @@ async def test_progress_notifications(tmp_path, monkeypatch):
 
     await run_event_update_jobs(db, bot, notify_chat_id=1, event_id=ev.id)
     assert bot.messages == []
+
+
+@pytest.mark.asyncio
+async def test_progress_notifications_error(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot()
+
+    ev = Event(
+        title="t",
+        description="d",
+        date="2025-01-04",
+        time="12:00",
+        location_name="loc",
+        source_text="src",
+    )
+    async with db.get_session() as session:
+        session.add(ev)
+        await session.commit()
+        await session.refresh(ev)
+
+    await schedule_event_update_tasks(db, ev)
+
+    async def ok_handler(eid, db_obj, bot_obj):
+        return True
+
+    async def err_handler(eid, db_obj, bot_obj):
+        raise Exception("boom")
+
+    monkeypatch.setattr(main, "update_telegraph_event_page", ok_handler)
+    monkeypatch.setattr(main, "job_sync_vk_source_post", ok_handler)
+    monkeypatch.setattr(main, "update_month_pages_for", err_handler)
+    monkeypatch.setattr(main, "update_weekend_pages_for", ok_handler)
+    monkeypatch.setattr(main, "update_festival_pages_for_event", ok_handler)
+    monkeypatch.setattr(
+        main,
+        "JOB_HANDLERS",
+        {
+            "telegraph_build": ok_handler,
+            "vk_sync": ok_handler,
+            "month_pages": err_handler,
+            "weekend_pages": ok_handler,
+            "festival_pages": ok_handler,
+        },
+    )
+
+    await run_event_update_jobs(db, bot, notify_chat_id=1, event_id=ev.id)
+
+    assert any(m.startswith("Страница месяца: ERROR: boom") for m in bot.messages)

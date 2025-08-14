@@ -171,13 +171,17 @@ async def test_patch_month_page_rebuilds_when_header_without_markers(tmp_path, m
         await session.commit()
 
     header = f"<h3>🟥🟥🟥 {main.format_day_pretty(date(2025, 8, 15))} 🟥🟥🟥</h3>"
-    html = header + PERM_START + "perm" + PERM_END
-    html = html.replace("<!--", "&lt;!--").replace("-->", "--&gt;")
+    html_state = {
+        "value": header + PERM_START + "perm" + PERM_END
+    }
+    html_state["value"] = html_state["value"].replace("<!--", "&lt;!--").replace(
+        "-->", "--&gt;"
+    )
 
     class FakeTelegraph:
         def get_page(self, path, return_html=True):
             assert path == "p"
-            return {"content_html": html, "title": "Title"}
+            return {"content_html": html_state["value"], "title": "Title"}
 
         def edit_page(self, path, title, html_content):
             raise AssertionError("edit_page should not be called")
@@ -187,6 +191,14 @@ async def test_patch_month_page_rebuilds_when_header_without_markers(tmp_path, m
     async def fake_sync(db_obj, month_key, update_links=False):
         nonlocal called
         called = True
+        html_state["value"] = (
+            DAY_START("2025-08-15")
+            + "new"
+            + DAY_END("2025-08-15")
+            + PERM_START
+            + "perm"
+            + PERM_END
+        )
 
     monkeypatch.setattr(main, "sync_month_page", fake_sync)
 

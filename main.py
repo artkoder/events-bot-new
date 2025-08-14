@@ -4716,6 +4716,16 @@ async def patch_month_page_for_date(db: Database, telegraph: Telegraph, month_ke
                 d.isoformat(),
             )
             await sync_month_page(db, month_key)
+            async with db.get_session() as session:
+                refreshed = await session.get(MonthPage, month_key)
+            page_data = await tg_call(
+                telegraph.get_page, refreshed.path, return_html=True
+            )
+            html_content = unescape_html_comments(
+                page_data.get("content") or page_data.get("content_html") or ""
+            )
+            if start_marker not in html_content or end_marker not in html_content:
+                raise RuntimeError("day markers missing after rebuild")
             await set_section_hash(db, page_key, section_key, new_hash)
             dur = (_time.perf_counter() - start) * 1000
             logging.info(
@@ -5018,8 +5028,8 @@ def md_to_html(text: str) -> str:
 
 
 def telegraph_br() -> list[dict]:
-    """Return nodes for a blank line in Telegraph (<br>&nbsp;)."""
-    return [{"tag": "br"}, {"tag": "span", "children": ["\u00a0"]}]
+    """Return nodes for a blank line in Telegraph using only allowed tags."""
+    return [{"tag": "br"}, {"tag": "br"}]
 
 
 def unescape_html_comments(html: str) -> str:
@@ -6003,6 +6013,7 @@ async def _sync_month_page_inner(db: Database, month: str, update_links: bool = 
                 await update_split(first, second)
             else:
                 logging.error("Failed to sync month page %s: %s", month, e)
+                raise
         except Exception as e:
             logging.error("Failed to sync month page %s: %s", month, e)
 
@@ -6016,6 +6027,7 @@ async def _sync_month_page_inner(db: Database, month: str, update_links: bool = 
                     if p.month != month:
                         await sync_month_page(db, p.month, update_links=False)
                         await asyncio.sleep(0)
+            raise
         if DEBUG:
             mem_info("month page after")
 
