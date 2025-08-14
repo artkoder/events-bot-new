@@ -3136,17 +3136,23 @@ async def test_sync_month_page_error(tmp_path: Path, monkeypatch):
         session.add(main.MonthPage(month="2025-07", url="u", path="p"))
         await session.commit()
 
-    class DummyTG:
-        def edit_page(self, *args, **kwargs):
-            raise Exception("fail")
+    from telegraph import TelegraphException
+
+    async def fail_call(*args, **kwargs):
+        raise TelegraphException("fail")
 
     monkeypatch.setattr("main.get_telegraph_token", lambda: "t")
+    class DummyTG:
+        def edit_page(self, *args, **kwargs):
+            pass
+
     monkeypatch.setattr(
         "main.Telegraph", lambda access_token=None, domain=None: DummyTG()
     )
+    monkeypatch.setattr(main, "telegraph_call", fail_call)
 
-    # Should not raise
-    await main.sync_month_page(db, "2025-07")
+    with pytest.raises(TelegraphException, match="fail"):
+        await main._sync_month_page_inner(db, "2025-07")
 
 
 @pytest.mark.asyncio
