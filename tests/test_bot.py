@@ -2543,7 +2543,7 @@ async def test_build_month_page_content(tmp_path: Path, monkeypatch):
     title, content, _ = await main.build_month_page_content(db, "2025-07")
     assert "июле 2025" in title
     assert "Полюбить Калининград Анонсы" in title
-    assert any(n.get("tag") == "p" and n.get("children") == ["\u00a0"] for n in content)
+    assert any(n.get("tag") == "br" for n in content)
 
 
 @pytest.mark.asyncio
@@ -2658,7 +2658,7 @@ async def test_weekend_nav_and_exhibitions(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_month_nav_and_exhibitions(tmp_path: Path):
+async def test_month_nav_and_exhibitions(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
 
@@ -2678,6 +2678,19 @@ async def test_month_nav_and_exhibitions(tmp_path: Path):
             )
         )
         await session.commit()
+
+    class FakeDate(date):
+        @classmethod
+        def today(cls):
+            return date(2025, 7, 10)
+
+    class FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2025, 7, 10, 12, 0, tzinfo=tz)
+
+    monkeypatch.setattr(main, "date", FakeDate)
+    monkeypatch.setattr(main, "datetime", FakeDatetime)
 
     _, content, _ = await main.build_month_page_content(db, "2025-07")
     nav_blocks = [
@@ -4479,6 +4492,47 @@ async def test_exhibition_future_not_listed(tmp_path: Path):
             if any("Expo" in str(c) for c in n.get("children", [])):
                 found_in_exh = True
     assert not found_in_exh
+
+
+@pytest.mark.asyncio
+async def test_past_exhibition_not_listed(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    class FakeDate(date):
+        @classmethod
+        def today(cls):
+            return date(2025, 8, 16)
+
+    class FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2025, 8, 16, 12, 0, tzinfo=tz)
+
+    monkeypatch.setattr(main, "date", FakeDate)
+    monkeypatch.setattr(main, "datetime", FakeDatetime)
+
+    async with db.get_session() as session:
+        session.add(
+            Event(
+                title="OldExpo",
+                description="d",
+                source_text="s",
+                date="2025-08-01",
+                end_date="2025-08-10",
+                time="10:00",
+                location_name="Hall",
+                event_type="выставка",
+            )
+        )
+        await session.commit()
+
+    _, content, _ = await main.build_month_page_content(db, "2025-08")
+    found = any(
+        n.get("tag") == "h4" and any("OldExpo" in str(c) for c in n.get("children", []))
+        for n in content
+    )
+    assert not found
 
 
 @pytest.mark.asyncio
@@ -6549,14 +6603,14 @@ async def test_festival_page_contacts_and_dates(tmp_path: Path):
         for i, n in enumerate(content)
         if n.get("tag") == "h3" and "Контакты" in "".join(n.get("children", []))
     )
-    assert content[idx_contacts - 1].get("tag") == "p"
+    assert content[idx_contacts - 1].get("tag") == "br"
     assert content[idx_contacts - 2].get("tag") == "br"
     idx_events = next(
         i
         for i, n in enumerate(content)
         if n.get("tag") == "h3" and "Мероприятия" in "".join(n.get("children", []))
     )
-    assert content[idx_events - 1].get("tag") == "p"
+    assert content[idx_events - 1].get("tag") == "br"
     assert content[idx_events - 2].get("tag") == "br"
 
 

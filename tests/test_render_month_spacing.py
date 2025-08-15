@@ -22,13 +22,13 @@ def test_render_month_day_section_has_blank_lines():
     ]
     html = main.render_month_day_section(date(2025, 1, 15), events)
     day_end = html.index("</h3>") + len("</h3>")
-    assert html[day_end:].startswith("<p>\u00a0</p><h4>")
-    assert "<p>\u00a0</p><p>\u00a0</p>" not in html
+    assert html[day_end:].startswith("<br/><br/><h4>")
+    assert "<br/><br/><br/>" not in html
 
 
 def test_telegraph_br_no_span():
     from telegraph.utils import nodes_to_html
 
     html = nodes_to_html(main.telegraph_br())
-    assert html == "<p>\u00a0</p>"
+    assert html == "<br/><br/>"
     assert "<span" not in html

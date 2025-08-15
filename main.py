@@ -4723,11 +4723,11 @@ async def patch_month_page_for_date(db: Database, telegraph: Telegraph, month_ke
             res_f = await session.execute(
                 select(Festival).where(Festival.name.in_(fest_names))
             )
-            fest_map = {f.name: f for f in res_f.scalars().all()}
+            fest_map = {f.name.casefold(): f for f in res_f.scalars().all()}
 
     for ev in events:
         if ev.festival:
-            setattr(ev, "_festival", fest_map.get(ev.festival))
+            setattr(ev, "_festival", fest_map.get(ev.festival.casefold()))
 
     html_section = render_month_day_section(d, events)
     new_hash = content_hash(html_section)
@@ -4995,10 +4995,10 @@ def format_weekend_range(saturday: date) -> str:
     """Return human-friendly weekend range like '12–13 июля'."""
     sunday = saturday + timedelta(days=1)
     if saturday.month == sunday.month:
-        return f"{saturday.day}\u2013{sunday.day} {MONTHS[saturday.month - 1]}"
+        return f"{saturday.day}\u2013{sunday.day}\u00A0{MONTHS[saturday.month - 1]}"
     return (
-        f"{saturday.day} {MONTHS[saturday.month - 1]} \u2013 "
-        f"{sunday.day} {MONTHS[sunday.month - 1]}"
+        f"{saturday.day}\u00A0{MONTHS[saturday.month - 1]} \u2013 "
+        f"{sunday.day}\u00A0{MONTHS[sunday.month - 1]}"
     )
 
 
@@ -5073,7 +5073,7 @@ def md_to_html(text: str) -> str:
 
 def telegraph_br() -> list[dict]:
     """Return a safe blank line for Telegraph rendering."""
-    return [{"tag": "p", "children": ["\u00A0"]}]
+    return [{"tag": "br"}, {"tag": "br"}]
 
 
 _DISALLOWED_TAGS_RE = re.compile(r"</?(?:span|div|style|script)[^>]*>", re.IGNORECASE)
@@ -5579,8 +5579,7 @@ def event_to_nodes(
     if festival or e.festival:
         fest = festival
         if fest is None and e.festival:
-            # caller typically provides the object
-            pass
+            fest = getattr(e, "_festival", None)
         if fest:
             prefix = "✨ " if fest_icon else ""
             if fest.telegraph_url:
@@ -5660,7 +5659,7 @@ def add_day_sections(
         add_many([{ "tag": "h3", "children": [f"🟥🟥🟥 {format_day_pretty(d)} 🟥🟥🟥"] }])
         add_many(telegraph_br())
         for ev in events:
-            fest = fest_map.get(ev.festival or "")
+            fest = fest_map.get((ev.festival or "").casefold())
             add_many(event_to_nodes(ev, fest, fest_icon=True))
         if use_markers:
             add_many([DAY_END(d)])
@@ -5720,7 +5719,7 @@ async def get_month_data(db: Database, month: str, *, fallback: bool = True):
         cutoff = (today - timedelta(days=30)).isoformat()
         events = [e for e in events if e.date.split("..", 1)[0] >= today_str]
         exhibitions = [
-            e for e in exhibitions if e.end_date and e.end_date >= cutoff
+            e for e in exhibitions if e.end_date and e.end_date >= today_str
         ]
 
     if not exhibitions and fallback:
@@ -5749,7 +5748,7 @@ async def build_month_page_content(
     async with span("db"):
         async with db.get_session() as session:
             res_f = await session.execute(select(Festival))
-            fest_map = {f.name: f for f in res_f.scalars().all()}
+            fest_map = {f.name.casefold(): f for f in res_f.scalars().all()}
 
     async with span("render"):
         title, content, size = await asyncio.to_thread(
@@ -5776,17 +5775,18 @@ def _build_month_page_content_sync(
     size_limit: int | None,
 ) -> tuple[str, list, int]:
     today = datetime.now(LOCAL_TZ).date()
+    today_str = today.isoformat()
     cutoff = (today - timedelta(days=30)).isoformat()
 
     if month == today.strftime("%Y-%m"):
-        events = [e for e in events if e.date.split("..", 1)[0] >= cutoff]
-        exhibitions = [e for e in exhibitions if e.end_date and e.end_date >= cutoff]
-
-    today_str = today.isoformat()
+        events = [e for e in events if e.date.split("..", 1)[0] >= today_str]
+        exhibitions = [e for e in exhibitions if e.end_date and e.end_date >= today_str]
     events = [
         e for e in events if not (e.event_type == "выставка" and e.date < today_str)
     ]
-    exhibitions = [e for e in exhibitions if e.end_date and e.date <= today_str]
+    exhibitions = [
+        e for e in exhibitions if e.end_date and e.date <= today_str and e.end_date >= today_str
+    ]
 
     by_day: dict[date, list[Event]] = {}
     for e in events:
@@ -6149,7 +6149,7 @@ async def build_weekend_page_content(
         res_m = await session.execute(select(MonthPage).order_by(MonthPage.month))
         month_pages = res_m.scalars().all()
         res_f = await session.execute(select(Festival))
-        fest_map = {f.name: f for f in res_f.scalars().all()}
+        fest_map = {f.name.casefold(): f for f in res_f.scalars().all()}
 
     today = datetime.now(LOCAL_TZ).date()
     events = [
@@ -6163,7 +6163,7 @@ async def build_weekend_page_content(
 
     async with db.get_session() as session:
         res_f = await session.execute(select(Festival))
-        fest_map = {f.name: f for f in res_f.scalars().all()}
+        fest_map = {f.name.casefold(): f for f in res_f.scalars().all()}
 
     by_day: dict[date, list[Event]] = {}
     for e in events:
@@ -7146,7 +7146,7 @@ async def build_daily_posts(
                 e,
                 highlight=True,
                 weekend_url=w_url,
-                festival=fest_map.get(e.festival or ""),
+                festival=fest_map.get((e.festival or "").casefold()),
             )
         )
     lines1.append("")
@@ -7168,7 +7168,7 @@ async def build_daily_posts(
             format_event_daily(
                 e,
                 weekend_url=w_url,
-                festival=fest_map.get(e.festival or ""),
+                festival=fest_map.get((e.festival or "").casefold()),
             )
         )
     section2 = "\n".join(lines2)
@@ -7316,7 +7316,7 @@ async def build_daily_sections_vk(
                 e,
                 highlight=True,
                 weekend_url=w_url,
-                festival=fest_map.get(e.festival or ""),
+                festival=fest_map.get((e.festival or "").casefold()),
             )
         )
         lines1.append(VK_EVENT_SEPARATOR)
@@ -7362,7 +7362,7 @@ async def build_daily_sections_vk(
             format_event_vk(
                 e,
                 weekend_url=w_url,
-                festival=fest_map.get(e.festival or ""),
+                festival=fest_map.get((e.festival or "").casefold()),
             )
         )
         lines2.append(VK_EVENT_SEPARATOR)
