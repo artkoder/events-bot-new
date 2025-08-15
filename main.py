@@ -101,7 +101,7 @@ import aiosqlite
 import gc
 import atexit
 from cachetools import TTLCache
-from markup import simple_md_to_html, DAY_START, DAY_END, PERM_START, PERM_END
+from markup import simple_md_to_html, telegraph_br, DAY_START, DAY_END, PERM_START, PERM_END
 from sections import replace_between_markers, content_hash
 from db import Database
 from scheduler import startup as scheduler_startup, cleanup as scheduler_cleanup
@@ -5069,12 +5069,6 @@ def md_to_html(text: str) -> str:
     html_text = re.sub(r"<(\/?)h[12]>", r"<\1h3>", html_text)
     html_text = re.sub(r"</?tg-emoji[^>]*>", "", html_text)
     return html_text
-
-
-def telegraph_br() -> list[dict]:
-    """Return a safe blank line for Telegraph rendering."""
-    return [{"tag": "br"}, {"tag": "br"}]
-
 
 _DISALLOWED_TAGS_RE = re.compile(r"</?(?:span|div|style|script)[^>]*>", re.IGNORECASE)
 

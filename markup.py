@@ -18,6 +18,11 @@ def simple_md_to_html(text: str) -> str:
     return text.replace('\n', '<br>')
 
 
+def telegraph_br() -> list[dict]:
+    """Return a safe blank line for Telegraph rendering."""
+    return [{"tag": "p", "children": ["\u00A0"]}]
+
+
 class Marker(str):
     """Str subclass that mimics dict.get for test compatibility."""
 
