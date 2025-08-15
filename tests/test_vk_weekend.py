@@ -56,6 +56,7 @@ async def test_build_weekend_vk_message(tmp_path: Path):
     assert f'[https://vk.com/wall-1_2|{format_weekend_range(next_sat)}]' in msg
     assert msg.splitlines()[0] == f'{format_weekend_range(sat)} Афиша выходных'
     assert 'июль [https://vk.com/wall-1_4|август]' in msg
+    assert '\xa0' in format_weekend_range(sat)
 
 
 @pytest.mark.asyncio
