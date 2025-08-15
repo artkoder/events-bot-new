@@ -395,9 +395,13 @@ settings_cache: TTLCache[str, str | None] = TTLCache(maxsize=64, ttl=300)
 
 # queue for background event processing
 # limit the queue to avoid unbounded growth if parsing slows down
-add_event_queue: asyncio.Queue[tuple[str, types.Message, bool]] = asyncio.Queue(
+add_event_queue: asyncio.Queue[tuple[str, types.Message, bool, int]] = asyncio.Queue(
     maxsize=200
 )
+ADD_EVENT_TIMEOUT = int(os.getenv("ADD_EVENT_TIMEOUT", "180"))
+ADD_EVENT_RETRY_DELAYS = [30, 60, 120]  # сек
+ADD_EVENT_MAX_ATTEMPTS = len(ADD_EVENT_RETRY_DELAYS) + 1
+_ADD_EVENT_LAST_DEQUEUE_TS: float = 0.0
 
 # queue for post-commit event update jobs
 
@@ -412,6 +416,7 @@ async def _watch_add_event_worker(app: web.Application, db: Database, bot: Bot):
                 add_event_queue.qsize(),
                 alive,
             )
+        # воркер умер — перезапускаем
         if not alive and not worker.cancelled():
             try:
                 exc = worker.exception()
@@ -421,6 +426,23 @@ async def _watch_add_event_worker(app: web.Application, db: Database, bot: Bot):
             worker = asyncio.create_task(add_event_queue_worker(db, bot))
             app["add_event_worker"] = worker
             logging.info("add_event_queue_worker restarted")
+        # воркер жив, но очередь не разгребается слишком долго -> «stalled»
+        else:
+            try:
+                stalled_for = _time.monotonic() - _ADD_EVENT_LAST_DEQUEUE_TS
+            except Exception:
+                stalled_for = 0
+            if add_event_queue.qsize() > 0 and stalled_for > 120:
+                logging.error(
+                    "add_event_queue stalled for %.0fs; restarting worker",
+                    stalled_for,
+                )
+                worker.cancel()
+                with contextlib.suppress(Exception):
+                    await worker
+                worker = asyncio.create_task(add_event_queue_worker(db, bot))
+                app["add_event_worker"] = worker
+                _ADD_EVENT_LAST_DEQUEUE_TS = _time.monotonic()
         await asyncio.sleep(10)
 
 # toggle for uploading images to catbox
@@ -479,8 +501,12 @@ HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "30"))
 # Limit concurrent HTTP requests
 HTTP_SEMAPHORE = asyncio.Semaphore(2)
 
-# Limit heavy operations like Telegraph/VK updates
+# Глобальный «тяжёлый» семафор оставляем для редких CPU-тяжёлых секций,
+# но сетевые вызовы ограничиваем узкими шлюзами:
 HEAVY_SEMAPHORE = asyncio.Semaphore(1)
+TG_SEND_SEMAPHORE = asyncio.Semaphore(int(os.getenv("TG_SEND_CONCURRENCY", "2")))
+VK_SEMAPHORE = asyncio.Semaphore(int(os.getenv("VK_CONCURRENCY", "1")))
+TELEGRAPH_SEMAPHORE = asyncio.Semaphore(int(os.getenv("TELEGRAPH_CONCURRENCY", "1")))
 
 # Maximum size (in bytes) for downloaded files
 MAX_DOWNLOAD_SIZE = int(os.getenv("MAX_DOWNLOAD_SIZE", str(5 * 1024 * 1024)))
@@ -523,10 +549,11 @@ async def telegraph_call(func, /, *args, retries: int = 3, **kwargs):
         try:
             if DEBUG:
                 mem_info(f"{func.__name__} before")
-            async with span("telegraph"):
-                res = await asyncio.wait_for(
-                    asyncio.to_thread(func, *args, **kwargs), TELEGRAPH_TIMEOUT
-                )
+            async with TELEGRAPH_SEMAPHORE:
+                async with span("telegraph"):
+                    res = await asyncio.wait_for(
+                        asyncio.to_thread(func, *args, **kwargs), TELEGRAPH_TIMEOUT
+                    )
             if DEBUG:
                 mem_info(f"{func.__name__} after")
             return res
@@ -879,8 +906,9 @@ async def _vk_api(
         err: dict | None = None
         last_msg: str | None = None
         for attempt, delay in enumerate(BACKOFF_DELAYS, start=1):
-            async with span("vk-send"):
-                data = await asyncio.wait_for(_call(), HTTP_TIMEOUT)
+            async with VK_SEMAPHORE:
+                async with span("vk-send"):
+                    data = await asyncio.wait_for(_call(), HTTP_TIMEOUT)
             if "error" not in data:
                 if attempt > 1 and last_msg:
                     logging.warning(
@@ -1185,10 +1213,10 @@ async def notify_inactive_partners(
 
 async def dump_database(db: Database) -> bytes:
     """Return a SQL dump using the shared connection."""
-    conn = await db.raw_conn()
-    lines: list[str] = []
-    async for line in conn.iterdump():
-        lines.append(line)
+    async with db.raw_conn() as conn:
+        lines: list[str] = []
+        async for line in conn.iterdump():
+            lines.append(line)
     return "\n".join(lines).encode("utf-8")
 
 
@@ -4250,7 +4278,7 @@ async def enqueue_add_event(message: types.Message, db: Database, bot: Bot):
     if using_session:
         add_event_sessions.pop(message.from_user.id, None)
     try:
-        add_event_queue.put_nowait(("regular", message, using_session))
+        add_event_queue.put_nowait(("regular", message, using_session, 0))
     except asyncio.QueueFull:
         logging.warning(
             "enqueue_add_event queue full for user=%s", message.from_user.id
@@ -4275,7 +4303,7 @@ async def enqueue_add_event(message: types.Message, db: Database, bot: Bot):
 async def enqueue_add_event_raw(message: types.Message, db: Database, bot: Bot):
     """Queue a raw event addition for background processing."""
     try:
-        add_event_queue.put_nowait(("raw", message, False))
+        add_event_queue.put_nowait(("raw", message, False, 0))
     except asyncio.QueueFull:
         logging.warning(
             "enqueue_add_event_raw queue full for user=%s", message.from_user.id
@@ -4294,16 +4322,36 @@ async def enqueue_add_event_raw(message: types.Message, db: Database, bot: Bot):
 
 
 async def add_event_queue_worker(db: Database, bot: Bot, limit: int = 2):
-    """Background worker to process queued events sequentially."""
+    """Background worker to process queued events with timeout & retries."""
 
+    global _ADD_EVENT_LAST_DEQUEUE_TS
     while True:
-        kind, msg, using_session = await add_event_queue.get()
+        kind, msg, using_session, attempts = await add_event_queue.get()
+        _ADD_EVENT_LAST_DEQUEUE_TS = _time.monotonic()
         start = _time.perf_counter()
+        timed_out = False
         try:
-            if kind == "regular":
-                await handle_add_event(msg, db, bot, using_session=using_session)
-            else:
-                await handle_add_event_raw(msg, db, bot)
+            async def _run():
+                if kind == "regular":
+                    await handle_add_event(msg, db, bot, using_session=using_session)
+                else:
+                    await handle_add_event_raw(msg, db, bot)
+            await asyncio.wait_for(_run(), timeout=ADD_EVENT_TIMEOUT)
+        except asyncio.TimeoutError:
+            timed_out = True
+            logging.error(
+                "add_event timeout user=%s attempt=%d",
+                getattr(msg.from_user, "id", None),
+                attempts + 1,
+            )
+            try:
+                await bot.send_message(
+                    msg.chat.id,
+                    f"Задача зависла (таймаут {ADD_EVENT_TIMEOUT} c). "
+                    f"Снята и будет повторена. Попытка {attempts+1}/{ADD_EVENT_MAX_ATTEMPTS}.",
+                )
+            except Exception:
+                logging.warning("notify timeout failed")
         except Exception:  # pragma: no cover - log unexpected errors
             logging.exception("add_event_queue_worker error")
             try:
@@ -4316,9 +4364,34 @@ async def add_event_queue_worker(db: Database, bot: Bot, limit: int = 2):
             except Exception:  # pragma: no cover - notify fail
                 logging.exception("add_event_queue_worker notify failed")
         finally:
+            dur = (_time.perf_counter() - start) * 1000.0
+            logging.info("add_event_queue item done in %.0f ms", dur)
             add_event_queue.task_done()
-            dur = (_time.perf_counter() - start) * 1000
-            logging.info("add_event total=%.0f ms", dur)
+
+        if timed_out and attempts + 1 < ADD_EVENT_MAX_ATTEMPTS:
+            delay = ADD_EVENT_RETRY_DELAYS[min(attempts, len(ADD_EVENT_RETRY_DELAYS) - 1)]
+            async def _requeue() -> None:
+                await asyncio.sleep(delay)
+                try:
+                    add_event_queue.put_nowait((kind, msg, using_session, attempts + 1))
+                    logging.info(
+                        "add_event requeued user=%s attempt=%d delay=%s",
+                        getattr(msg.from_user, "id", None),
+                        attempts + 2,
+                        delay,
+                    )
+                except asyncio.QueueFull:
+                    logging.error("requeue failed: queue full")
+            asyncio.create_task(_requeue())
+        elif timed_out:
+            try:
+                await bot.send_message(
+                    msg.chat.id,
+                    "Задача по добавлению события не выполнена после повторов. "
+                    "Попробуйте ещё раз позже.",
+                )
+            except Exception:
+                pass
 
 
 BACKOFF_SCHEDULE = [30, 120, 600, 3600]
@@ -6440,94 +6513,92 @@ async def build_weekend_vk_message(db: Database, start: str) -> str:
 async def sync_vk_weekend_post(db: Database, start: str, bot: Bot | None = None) -> None:
     lock = _weekend_vk_lock(start)
     async with lock:
-        async with HEAVY_SEMAPHORE:
-            logging.info("sync_vk_weekend_post start for %s", start)
-            group_id = VK_AFISHA_GROUP_ID
-            if not group_id:
-                logging.info("sync_vk_weekend_post: VK group not configured")
-                return
-            async with db.get_session() as session:
-                page = await session.get(WeekendPage, start)
-            if not page:
-                logging.info("sync_vk_weekend_post: weekend page %s not found", start)
-                return
+        logging.info("sync_vk_weekend_post start for %s", start)
+        group_id = VK_AFISHA_GROUP_ID
+        if not group_id:
+            logging.info("sync_vk_weekend_post: VK group not configured")
+            return
+        async with db.get_session() as session:
+            page = await session.get(WeekendPage, start)
+        if not page:
+            logging.info("sync_vk_weekend_post: weekend page %s not found", start)
+            return
 
-            message = await build_weekend_vk_message(db, start)
-            logging.info("sync_vk_weekend_post message len=%d", len(message))
-            needs_new_post = not page.vk_post_url
-            if page.vk_post_url:
-                try:
-                    updated = await edit_vk_post(page.vk_post_url, message, db, bot)
-                    if updated:
-                        logging.info("sync_vk_weekend_post updated %s", page.vk_post_url)
-                    else:
-                        logging.info(
-                            "sync_vk_weekend_post: no changes for %s", page.vk_post_url
-                        )
-                except Exception as e:
-                    if "post or comment deleted" in str(e) or "Пост удалён" in str(e):
-                        logging.warning(
-                            "sync_vk_weekend_post: original VK post missing, creating new"
-                        )
-                        needs_new_post = True
-                    else:
-                        logging.error("VK post error for weekend %s: %s", start, e)
-                        return
-            if needs_new_post:
-                url = await post_to_vk(group_id, message, db, bot)
-                if url:
-                    async with db.get_session() as session:
-                        obj = await session.get(WeekendPage, start)
-                        if obj:
-                            obj.vk_post_url = url
-                            await session.commit()
-                    logging.info("sync_vk_weekend_post created %s", url)
+        message = await build_weekend_vk_message(db, start)
+        logging.info("sync_vk_weekend_post message len=%d", len(message))
+        needs_new_post = not page.vk_post_url
+        if page.vk_post_url:
+            try:
+                updated = await edit_vk_post(page.vk_post_url, message, db, bot)
+                if updated:
+                    logging.info("sync_vk_weekend_post updated %s", page.vk_post_url)
+                else:
+                    logging.info(
+                        "sync_vk_weekend_post: no changes for %s", page.vk_post_url
+                    )
+            except Exception as e:
+                if "post or comment deleted" in str(e) or "Пост удалён" in str(e):
+                    logging.warning(
+                        "sync_vk_weekend_post: original VK post missing, creating new"
+                    )
+                    needs_new_post = True
+                else:
+                    logging.error("VK post error for weekend %s: %s", start, e)
+                    return
+        if needs_new_post:
+            url = await post_to_vk(group_id, message, db, bot)
+            if url:
+                async with db.get_session() as session:
+                    obj = await session.get(WeekendPage, start)
+                    if obj:
+                        obj.vk_post_url = url
+                        await session.commit()
+                logging.info("sync_vk_weekend_post created %s", url)
 
 
 async def sync_vk_week_post(db: Database, start: str, bot: Bot | None = None) -> None:
     lock = _week_vk_lock(start)
     async with lock:
-        async with HEAVY_SEMAPHORE:
-            logging.info("sync_vk_week_post start for %s", start)
-            group_id = VK_AFISHA_GROUP_ID
-            if not group_id:
-                logging.info("sync_vk_week_post: VK group not configured")
-                return
-            async with db.get_session() as session:
-                page = await session.get(WeekPage, start)
+        logging.info("sync_vk_week_post start for %s", start)
+        group_id = VK_AFISHA_GROUP_ID
+        if not group_id:
+            logging.info("sync_vk_week_post: VK group not configured")
+            return
+        async with db.get_session() as session:
+            page = await session.get(WeekPage, start)
 
-            message = await build_week_vk_message(db, start)
-            logging.info("sync_vk_week_post message len=%d", len(message))
-            needs_new_post = not page or not page.vk_post_url
-            if page and page.vk_post_url:
-                try:
-                    updated = await edit_vk_post(page.vk_post_url, message, db, bot)
-                    if updated:
-                        logging.info("sync_vk_week_post updated %s", page.vk_post_url)
+        message = await build_week_vk_message(db, start)
+        logging.info("sync_vk_week_post message len=%d", len(message))
+        needs_new_post = not page or not page.vk_post_url
+        if page and page.vk_post_url:
+            try:
+                updated = await edit_vk_post(page.vk_post_url, message, db, bot)
+                if updated:
+                    logging.info("sync_vk_week_post updated %s", page.vk_post_url)
+                else:
+                    logging.info(
+                        "sync_vk_week_post: no changes for %s", page.vk_post_url
+                    )
+            except Exception as e:
+                if "post or comment deleted" in str(e) or "Пост удалён" in str(e):
+                    logging.warning(
+                        "sync_vk_week_post: original VK post missing, creating new"
+                    )
+                    needs_new_post = True
+                else:
+                    logging.error("VK post error for week %s: %s", start, e)
+                    return
+        if needs_new_post:
+            url = await post_to_vk(group_id, message, db, bot)
+            if url:
+                async with db.get_session() as session:
+                    obj = await session.get(WeekPage, start)
+                    if obj:
+                        obj.vk_post_url = url
                     else:
-                        logging.info(
-                            "sync_vk_week_post: no changes for %s", page.vk_post_url
-                        )
-                except Exception as e:
-                    if "post or comment deleted" in str(e) or "Пост удалён" in str(e):
-                        logging.warning(
-                            "sync_vk_week_post: original VK post missing, creating new"
-                        )
-                        needs_new_post = True
-                    else:
-                        logging.error("VK post error for week %s: %s", start, e)
-                        return
-            if needs_new_post:
-                url = await post_to_vk(group_id, message, db, bot)
-                if url:
-                    async with db.get_session() as session:
-                        obj = await session.get(WeekPage, start)
-                        if obj:
-                            obj.vk_post_url = url
-                        else:
-                            session.add(WeekPage(start=start, vk_post_url=url))
-                        await session.commit()
-                    logging.info("sync_vk_week_post created %s", url)
+                        session.add(WeekPage(start=start, vk_post_url=url))
+                    await session.commit()
+                logging.info("sync_vk_week_post created %s", url)
 
 
 async def generate_festival_description(fest: Festival, events: list[Event]) -> str:
@@ -7541,97 +7612,96 @@ async def sync_vk_source_post(
     if not VK_AFISHA_GROUP_ID:
         return None
     logging.info("sync_vk_source_post start for event %s", event.id)
-    async with HEAVY_SEMAPHORE:
-        festival = None
-        if event.festival and db:
-            async with db.get_session() as session:
-                res = await session.execute(
-                    select(Festival).where(Festival.name == event.festival)
+    festival = None
+    if event.festival and db:
+        async with db.get_session() as session:
+            res = await session.execute(
+                select(Festival).where(Festival.name == event.festival)
+            )
+            festival = res.scalars().first()
+
+    if event.source_vk_post_url:
+        existing = ""
+        try:
+            ids = _vk_owner_and_post_id(event.source_vk_post_url)
+            if ids:
+                data = await _vk_api(
+                    "wall.getById",
+                    {"posts": f"{ids[0]}_{ids[1]}"},
+                    db,
+                    bot,
                 )
-                festival = res.scalars().first()
+                items = data.get("response") or []
+                if items:
+                    existing = items[0].get("text", "")
+        except Exception as e:
+            logging.error("failed to fetch existing VK post: %s", e)
 
-        if event.source_vk_post_url:
-            existing = ""
-            try:
-                ids = _vk_owner_and_post_id(event.source_vk_post_url)
-                if ids:
-                    data = await _vk_api(
-                        "wall.getById",
-                        {"posts": f"{ids[0]}_{ids[1]}"},
-                        db,
-                        bot,
-                    )
-                    items = data.get("response") or []
-                    if items:
-                        existing = items[0].get("text", "")
-            except Exception as e:
-                logging.error("failed to fetch existing VK post: %s", e)
+        # Extract previous text versions
+        existing_main = existing.split(VK_SOURCE_FOOTER)[0].rstrip()
+        segments = (
+            existing_main.split(f"\n{CONTENT_SEPARATOR}\n") if existing_main else []
+        )
+        texts: list[str] = []
+        for seg in segments:
+            lines = seg.splitlines()
+            blanks = 0
+            i = 0
+            while i < len(lines):
+                if lines[i] == VK_BLANK_LINE:
+                    blanks += 1
+                    if blanks == 2:
+                        i += 1
+                        break
+                i += 1
+            lines = lines[i:]
+            if lines and lines[-1].startswith("Добавить в календарь"):
+                lines.pop()
+            while lines and lines[-1] == VK_BLANK_LINE:
+                lines.pop()
+            texts.append("\n".join(lines).strip())
 
-            # Extract previous text versions
-            existing_main = existing.split(VK_SOURCE_FOOTER)[0].rstrip()
-            segments = (
-                existing_main.split(f"\n{CONTENT_SEPARATOR}\n") if existing_main else []
-            )
-            texts: list[str] = []
-            for seg in segments:
-                lines = seg.splitlines()
-                blanks = 0
-                i = 0
-                while i < len(lines):
-                    if lines[i] == VK_BLANK_LINE:
-                        blanks += 1
-                        if blanks == 2:
-                            i += 1
-                            break
-                    i += 1
-                lines = lines[i:]
-                if lines and lines[-1].startswith("Добавить в календарь"):
-                    lines.pop()
-                while lines and lines[-1] == VK_BLANK_LINE:
-                    lines.pop()
-                texts.append("\n".join(lines).strip())
-
-            text_clean = _vk_expose_links(text).strip()
-            if texts:
-                if append_text:
-                    texts.append(text_clean)
-                else:
-                    texts[-1] = text_clean
+        text_clean = _vk_expose_links(text).strip()
+        if texts:
+            if append_text:
+                texts.append(text_clean)
             else:
-                texts = [text_clean]
-
-            header_lines = build_vk_source_header(event, festival)
-            new_lines = header_lines[:]
-            for idx, t in enumerate(texts):
-                if t:
-                    new_lines.extend(t.splitlines())
-                new_lines.append(VK_BLANK_LINE)
-                if idx < len(texts) - 1:
-                    new_lines.append(CONTENT_SEPARATOR)
-            if ics_url:
-                new_lines.append(f"Добавить в календарь {ics_url}")
-            new_lines.append(VK_SOURCE_FOOTER)
-            new_message = "\n".join(new_lines)
-            await edit_vk_post(
-                event.source_vk_post_url,
-                new_message,
-                db,
-                bot,
-            )
-            url = event.source_vk_post_url
-            logging.info("sync_vk_source_post updated %s", url)
+                texts[-1] = text_clean
         else:
-            message = build_vk_source_message(
-                event, text, festival=festival, ics_url=ics_url
-            )
-            url = await post_to_vk(
-                VK_AFISHA_GROUP_ID,
-                message,
-                db,
-                bot,
-            )
-            if url:
-                logging.info("sync_vk_source_post created %s", url)
+            texts = [text_clean]
+
+        header_lines = build_vk_source_header(event, festival)
+        new_lines = header_lines[:]
+        for idx, t in enumerate(texts):
+            if t:
+                new_lines.extend(t.splitlines())
+            new_lines.append(VK_BLANK_LINE)
+            if idx < len(texts) - 1:
+                new_lines.append(CONTENT_SEPARATOR)
+        if ics_url:
+            new_lines.append(f"Добавить в календарь {ics_url}")
+        new_lines.append(VK_SOURCE_FOOTER)
+        new_message = "\n".join(new_lines)
+        await edit_vk_post(
+            event.source_vk_post_url,
+            new_message,
+            db,
+            bot,
+        )
+        url = event.source_vk_post_url
+        logging.info("sync_vk_source_post updated %s", url)
+    else:
+        message = build_vk_source_message(
+            event, text, festival=festival, ics_url=ics_url
+        )
+        url = await post_to_vk(
+            VK_AFISHA_GROUP_ID,
+            message,
+            db,
+            bot,
+        )
+        if url:
+            logging.info("sync_vk_source_post created %s", url)
     return url
 
 
@@ -7733,20 +7803,20 @@ async def send_daily_announcement_vk(
     now: datetime | None = None,
     bot: Bot | None = None,
 ):
-    async with HEAVY_SEMAPHORE:
-        async with span("db"):
-            section1, section2 = await build_daily_sections_vk(db, tz, now)
-        if section == "today":
-            async with span("vk-send"):
-                await post_to_vk(group_id, section1, db, bot)
-        elif section == "added":
-            async with span("vk-send"):
-                await post_to_vk(group_id, section2, db, bot)
-        else:
-            async with span("vk-send"):
-                await post_to_vk(group_id, section1, db, bot)
-            async with span("vk-send"):
-                await post_to_vk(group_id, section2, db, bot)
+    # сборка постов/текста — вне семафоров
+    async with span("db"):
+        section1, section2 = await build_daily_sections_vk(db, tz, now)
+    if section == "today":
+        async with span("vk-send"):
+            await post_to_vk(group_id, section1, db, bot)
+    elif section == "added":
+        async with span("vk-send"):
+            await post_to_vk(group_id, section2, db, bot)
+    else:
+        async with span("vk-send"):
+            await post_to_vk(group_id, section1, db, bot)
+        async with span("vk-send"):
+            await post_to_vk(group_id, section2, db, bot)
 
 
 async def send_daily_announcement(
@@ -7758,10 +7828,16 @@ async def send_daily_announcement(
     record: bool = True,
     now: datetime | None = None,
 ):
-    async with HEAVY_SEMAPHORE:
-        posts = await build_daily_posts(db, tz, now)
-        for text, markup in posts:
-            try:
+    # 1) Собираем контент вне любых семафоров
+    posts = await build_daily_posts(db, tz, now)
+    if not posts:
+        logging.info("daily: no posts for channel=%s; skip last_daily", channel_id)
+        return
+    # 2) Отправляем с «узким» шлюзом TG, чтобы не блокировать систему целиком
+    sent = 0
+    for text, markup in posts:
+        try:
+            async with TG_SEND_SEMAPHORE:
                 async with span("tg-send"):
                     await bot.send_message(
                         channel_id,
@@ -7770,12 +7846,14 @@ async def send_daily_announcement(
                         parse_mode="HTML",
                         disable_web_page_preview=True,
                     )
-            except Exception as e:
-                logging.error("daily send failed for %s: %s", channel_id, e)
-                if "message is too long" in str(e):
-                    continue
-                raise
-    if record and now is None:
+            sent += 1
+        except Exception as e:
+            logging.error("daily send failed for %s: %s", channel_id, e)
+            if "message is too long" in str(e):
+                continue
+            raise
+    # 3) Отмечаем только если что-то реально ушло
+    if record and now is None and sent > 0:
         async with db.raw_conn() as conn:
             await conn.execute(
                 "UPDATE channel SET last_daily=? WHERE channel_id=?",
@@ -7810,9 +7888,15 @@ async def daily_scheduler(db: Database, bot: Bot):
                 target_time = dt.datetime.strptime(r["daily_time"], "%H:%M").time()
             except ValueError:
                 continue
-            if (r["last_daily"] or "") != now.date().isoformat() and now_time >= target_time:
+            due = (r["last_daily"] or "") != now.date().isoformat() and now_time >= target_time
+            logging.info(
+                "daily_scheduler: channel=%s due=%s last_daily=%s now=%s target=%s",
+                r["channel_id"], due, r["last_daily"], now_time, target_time
+            )
+            if due:
                 try:
-                    await send_daily_announcement(db, bot, r["channel_id"], tz)
+                    # не блокируем цикл планировщика — отправляем в фоне
+                    asyncio.create_task(send_daily_announcement(db, bot, r["channel_id"], tz))
                 except Exception as e:
                     log.exception(
                         "daily_scheduler: channel %s failed: %s",
