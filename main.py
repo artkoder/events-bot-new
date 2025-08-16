@@ -5339,11 +5339,13 @@ def format_event_vk(
     if e.pushkin_card:
         lines.append("\u2705 Пушкинская карта")
 
+    show_ticket_link = not vk_link
     if e.is_free:
         lines.append("🟡 Бесплатно")
         if e.ticket_link:
             lines.append("по регистрации")
-            lines.append(f"\U0001f39f {e.ticket_link}")
+            if show_ticket_link:
+                lines.append(f"\U0001f39f {e.ticket_link}")
     elif e.ticket_link and (
         e.ticket_price_min is not None or e.ticket_price_max is not None
     ):
@@ -5352,11 +5354,15 @@ def format_event_vk(
         else:
             val = e.ticket_price_min if e.ticket_price_min is not None else e.ticket_price_max
             price = f"{val} руб." if val is not None else ""
-        lines.append(f"Билеты в источнике {price}".strip())
-        lines.append(f"\U0001f39f {e.ticket_link}")
+        if show_ticket_link:
+            lines.append(f"Билеты в источнике {price}".strip())
+            lines.append(f"\U0001f39f {e.ticket_link}")
+        else:
+            lines.append(f"Билеты {price}".strip())
     elif e.ticket_link:
         lines.append("по регистрации")
-        lines.append(f"\U0001f39f {e.ticket_link}")
+        if show_ticket_link:
+            lines.append(f"\U0001f39f {e.ticket_link}")
     else:
         price = ""
         if (
@@ -7242,9 +7248,19 @@ async def build_daily_sections_vk(
         wpage = await session.get(WeekendPage, w_start.isoformat())
         res_w_all = await session.execute(select(WeekendPage))
         weekend_map = {w.start: w for w in res_w_all.scalars().all()}
+        res_week_all = await session.execute(select(WeekPage))
+        week_pages = res_week_all.scalars().all()
         cur_month = today.strftime("%Y-%m")
-        mp_cur = await session.get(MonthPage, cur_month)
-        mp_next = await session.get(MonthPage, next_month(cur_month))
+
+        def closest_week_page(month: str, ref: date) -> WeekPage | None:
+            candidates = [w for w in week_pages if w.start[:7] == month and w.vk_post_url]
+            if not candidates:
+                return None
+            return min(candidates, key=lambda w: abs(date.fromisoformat(w.start) - ref))
+
+        week_cur = closest_week_page(cur_month, today)
+        next_month_str = next_month(cur_month)
+        week_next = closest_week_page(next_month_str, date.fromisoformat(f"{next_month_str}-01"))
 
         new_events = (
             await session.execute(
@@ -7304,7 +7320,7 @@ async def build_daily_sections_vk(
         if d and d.weekday() == 5:
             w = weekend_map.get(d.isoformat())
             if w:
-                w_url = w.url
+                w_url = w.vk_post_url
         lines1.append(
             format_event_vk(
                 e,
@@ -7317,23 +7333,21 @@ async def build_daily_sections_vk(
     if events_today:
         lines1.pop()
     link_lines: list[str] = []
-    if wpage:
+    if wpage and wpage.vk_post_url:
         sunday = w_start + timedelta(days=1)
         prefix = f"(+{weekend_count}) " if weekend_count else ""
         link_lines.append(
-            f"{prefix}выходные {w_start.day} {sunday.day} {MONTHS[w_start.month - 1]}: {wpage.url}"
-
+            f"{prefix}выходные {w_start.day} {sunday.day} {MONTHS[w_start.month - 1]}: {wpage.vk_post_url}"
         )
-    if mp_cur:
+    if week_cur:
         prefix = f"(+{cur_count}) " if cur_count else ""
         link_lines.append(
-            f"{prefix}{month_name_nominative(cur_month)}: {mp_cur.url}"
-
+            f"{prefix}{month_name_nominative(cur_month)}: {week_cur.vk_post_url}"
         )
-    if mp_next:
+    if week_next:
         prefix = f"(+{next_count}) " if next_count else ""
         link_lines.append(
-            f"{prefix}{month_name_nominative(next_month(cur_month))}: {mp_next.url}"
+            f"{prefix}{month_name_nominative(next_month_str)}: {week_next.vk_post_url}"
         )
     if link_lines:
         lines1.append(VK_EVENT_SEPARATOR)
@@ -7351,7 +7365,7 @@ async def build_daily_sections_vk(
         if d and d.weekday() == 5:
             w = weekend_map.get(d.isoformat())
             if w:
-                w_url = w.url
+                w_url = w.vk_post_url
         lines2.append(
             format_event_vk(
                 e,
