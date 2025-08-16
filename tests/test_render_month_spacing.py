@@ -1,6 +1,7 @@
 from datetime import date
 
 import main
+from telegraph.utils import nodes_to_html
 from models import Event
 
 
@@ -25,8 +26,6 @@ def test_render_month_day_section_has_blank_lines():
 
 
 def test_telegraph_br_no_span():
-    from telegraph.utils import nodes_to_html
-
     html = nodes_to_html(main.telegraph_br())
     assert html == "<p>\u00A0</p>"
     assert "<span" not in html
@@ -34,3 +33,10 @@ def test_telegraph_br_no_span():
 
 def test_lint_preserves_nbsp():
     assert main.lint_telegraph_html("<p>&nbsp;</p>") == "<p>&nbsp;</p>"
+
+
+def test_event_to_nodes_ends_with_blank_paragraph():
+    event = make_event("C", "2025-01-15", "12:00")
+    nodes = main.event_to_nodes(event)
+    assert nodes[-1] == main.telegraph_br()[0]
+    assert nodes_to_html(nodes).endswith("<p>\u00A0</p>")
