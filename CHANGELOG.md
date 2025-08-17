@@ -189,6 +189,10 @@
 
 - Added support for `кинопоказ` event type and automatic detection of film screenings.
 
+## v0.3.30 - Festival ticket links
+
+- Festival records support a `ticket_url` and VK/Telegraph festival posts show a ticket icon and link below the location.
+
 
 
 

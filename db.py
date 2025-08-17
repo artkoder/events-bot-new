@@ -187,6 +187,7 @@ class Database:
                     website_url TEXT,
                     vk_url TEXT,
                     tg_url TEXT,
+                    ticket_url TEXT,
                     location_name TEXT,
                     location_address TEXT,
                     city TEXT,
@@ -197,6 +198,7 @@ class Database:
             await _add_column(conn, "festival", "location_name TEXT")
             await _add_column(conn, "festival", "location_address TEXT")
             await _add_column(conn, "festival", "city TEXT")
+            await _add_column(conn, "festival", "ticket_url TEXT")
 
             await conn.execute(
                 """
