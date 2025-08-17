@@ -204,5 +204,5 @@ async def test_patch_month_page_rebuilds_when_header_without_markers(tmp_path, m
 
     tg = FakeTelegraph()
     changed = await main.patch_month_page_for_date(db, tg, "2025-08", date(2025, 8, 15))
-    assert changed is True
+    assert changed == "rebuild"
     assert called is True
