@@ -89,19 +89,37 @@ def _mock_page_sync(monkeypatch):
 FUTURE_DATE = (date.today() + timedelta(days=10)).isoformat()
 
 
+class DummyMessage:
+    def __init__(self, message_id: int):
+        self.message_id = message_id
+
+
 class DummyBot(Bot):
     def __init__(self, token: str):
         super().__init__(token)
         self.messages = []
         self.edits = []
+        self.text_edits = []
+        self._msg_id = 0
 
     async def send_message(self, chat_id, text, **kwargs):
         self.messages.append((chat_id, text, kwargs))
+        self._msg_id += 1
+        return DummyMessage(self._msg_id)
 
     async def edit_message_reply_markup(
         self, chat_id: int | None = None, message_id: int | None = None, **kwargs
     ):
         self.edits.append((chat_id, message_id, kwargs))
+
+    async def edit_message_text(
+        self,
+        text,
+        chat_id: int | None = None,
+        message_id: int | None = None,
+        **kwargs,
+    ):
+        self.text_edits.append((chat_id, message_id, text, kwargs))
 
     async def download(self, file_id, destination):
         destination.write(b"img")
@@ -7091,12 +7109,14 @@ async def test_publication_plan_and_updates(tmp_path: Path, monkeypatch):
     await main.handle_add_event_raw(msg, db, bot)
 
     texts = [m[1] for m in bot.messages]
-    assert "Событие сохранено. Публикую…" in texts
-    assert "Telegraph (событие): OK — t" in texts
-    assert "VK: OK — v" in texts
-    assert any(t.startswith("Страница месяца: OK") for t in texts)
-    assert any(t.startswith("Неделя: OK") for t in texts)
-    assert any(t.startswith("Выходные: OK") for t in texts)
-    assert texts[-1] == "Готово"
+    assert any("Идёт процесс публикации" in t for t in texts)
+    assert bot.text_edits
+    final_text = bot.text_edits[-1][2]
+    assert final_text.startswith("Готово")
+    assert "✅ Telegraph (событие) — t" in final_text
+    assert "✅ VK — v" in final_text
+    assert "✅ Страница месяца" in final_text
+    assert "✅ Неделя" in final_text
+    assert "✅ Выходные" in final_text
 
 

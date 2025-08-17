@@ -15,6 +15,7 @@ from main import (
     JobTask,
     schedule_event_update_tasks,
     run_event_update_jobs,
+    publish_event_progress,
 )
 
 
@@ -213,3 +214,89 @@ async def test_progress_notifications_error(tmp_path, monkeypatch):
     await run_event_update_jobs(db, bot, notify_chat_id=1, event_id=ev.id)
 
     assert any(m.startswith("Страница месяца: ERROR: boom") for m in bot.messages)
+
+
+class ProgBot:
+    def __init__(self):
+        self.messages = []
+        self.edits = []
+        self._mid = 0
+
+    async def send_message(self, chat_id, text, **kwargs):
+        self.messages.append(text)
+        self._mid += 1
+        class M:
+            pass
+
+        m = M()
+        m.message_id = self._mid
+        return m
+
+    async def edit_message_text(self, text, chat_id=None, message_id=None, **kwargs):
+        self.edits.append(text)
+
+
+@pytest.mark.asyncio
+async def test_publish_event_progress_single_message(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    ev = Event(
+        title="t",
+        description="d",
+        date="2025-01-04",
+        time="12:00",
+        location_name="loc",
+        source_text="src",
+    )
+    async with db.get_session() as session:
+        session.add(ev)
+        await session.commit()
+        await session.refresh(ev)
+
+    async with db.get_session() as session:
+        session.add_all(
+            [
+                JobOutbox(event_id=ev.id, task=JobTask.telegraph_build),
+                JobOutbox(event_id=ev.id, task=JobTask.vk_sync),
+                JobOutbox(event_id=ev.id, task=JobTask.week_pages),
+            ]
+        )
+        await session.commit()
+
+    async def ok_handler(eid, db_obj, bot_obj):
+        return True
+
+    monkeypatch.setattr(main, "update_telegraph_event_page", ok_handler)
+    monkeypatch.setattr(main, "job_sync_vk_source_post", ok_handler)
+    monkeypatch.setattr(main, "update_week_pages_for", ok_handler)
+    monkeypatch.setattr(
+        main,
+        "JOB_HANDLERS",
+        {
+            "telegraph_build": ok_handler,
+            "vk_sync": ok_handler,
+            "week_pages": ok_handler,
+        },
+    )
+
+    async def fake_link(task, eid, db_obj):
+        mapping = {
+            JobTask.telegraph_build: "http://t",
+            JobTask.vk_sync: "http://v",
+            JobTask.week_pages: "http://wk",
+        }
+        return mapping.get(task)
+
+    monkeypatch.setattr(main, "_job_result_link", fake_link)
+
+    bot = ProgBot()
+    await publish_event_progress(ev, db, bot, chat_id=1)
+
+    assert any("Идёт процесс публикации" in m for m in bot.messages)
+    assert bot.edits
+    final = bot.edits[-1]
+    assert final.startswith("Готово")
+    assert "✅ Telegraph (событие) — http://t" in final
+    assert "✅ VK — http://v" in final
+    assert "✅ Неделя — http://wk" in final
