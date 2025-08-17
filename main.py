@@ -6484,7 +6484,11 @@ async def build_weekend_vk_message(db: Database, start: str) -> str:
                 if location_parts:
                     lines.append(", ".join(location_parts))
 
-        nav_pages = [w for w in weekend_pages if w.vk_post_url or w.start == start]
+        nav_pages = [
+            w
+            for w in weekend_pages
+            if w.start >= start and (w.vk_post_url or w.start == start)
+        ]
         if nav_pages:
             parts = []
             for w in nav_pages:
@@ -7334,21 +7338,17 @@ async def build_daily_sections_vk(
         lines1.pop()
     link_lines: list[str] = []
     if wpage and wpage.vk_post_url:
-        sunday = w_start + timedelta(days=1)
+        label = f"выходные {format_weekend_range(w_start)}"
         prefix = f"(+{weekend_count}) " if weekend_count else ""
-        link_lines.append(
-            f"{prefix}выходные {w_start.day} {sunday.day} {MONTHS[w_start.month - 1]}: {wpage.vk_post_url}"
-        )
+        link_lines.append(f"{prefix}[{wpage.vk_post_url}|{label}]")
     if week_cur:
+        label = month_name_nominative(cur_month)
         prefix = f"(+{cur_count}) " if cur_count else ""
-        link_lines.append(
-            f"{prefix}{month_name_nominative(cur_month)}: {week_cur.vk_post_url}"
-        )
+        link_lines.append(f"{prefix}[{week_cur.vk_post_url}|{label}]")
     if week_next:
+        label = month_name_nominative(next_month_str)
         prefix = f"(+{next_count}) " if next_count else ""
-        link_lines.append(
-            f"{prefix}{month_name_nominative(next_month_str)}: {week_next.vk_post_url}"
-        )
+        link_lines.append(f"{prefix}[{week_next.vk_post_url}|{label}]")
     if link_lines:
         lines1.append(VK_EVENT_SEPARATOR)
         lines1.extend(link_lines)

@@ -13,7 +13,16 @@ async def test_build_weekend_vk_message(tmp_path: Path):
     await db.init()
     sat = date(2025, 7, 12)
     next_sat = sat + timedelta(days=7)
+    prev_sat = sat - timedelta(days=7)
     async with db.get_session() as session:
+        session.add(
+            WeekendPage(
+                start=prev_sat.isoformat(),
+                url='u_prev',
+                path='p_prev',
+                vk_post_url='https://vk.com/wall-1_prev',
+            )
+        )
         session.add(WeekendPage(start=sat.isoformat(), url='u1', path='p1'))
         session.add(
             WeekendPage(
@@ -54,6 +63,8 @@ async def test_build_weekend_vk_message(tmp_path: Path):
 
     assert 'NoVK' not in msg
     assert f'[https://vk.com/wall-1_2|{format_weekend_range(next_sat)}]' in msg
+    assert 'https://vk.com/wall-1_prev' not in msg
+    assert format_weekend_range(prev_sat) not in msg
     assert msg.splitlines()[0] == f'{format_weekend_range(sat)} Афиша выходных'
     assert 'июль [https://vk.com/wall-1_4|август]' in msg
     assert '\xa0' in format_weekend_range(sat)

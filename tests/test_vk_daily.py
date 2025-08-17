@@ -1,9 +1,17 @@
-import pytest
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+import pytest
+
 import main
-from main import Database, WeekendPage, WeekPage, Event
+from main import (
+    Database,
+    WeekendPage,
+    WeekPage,
+    Event,
+    format_weekend_range,
+    month_name_nominative,
+)
 
 
 @pytest.mark.asyncio
@@ -56,7 +64,12 @@ async def test_build_daily_sections_vk_links(tmp_path: Path):
     sec1, _ = await main.build_daily_sections_vk(
         db, timezone.utc, now=datetime(2025, 7, 10, tzinfo=timezone.utc)
     )
-    assert "https://vk.com/wall-1_2" in sec1
-    assert "https://vk.com/wall-1_3" in sec1
-    assert "https://vk.com/wall-1_4" in sec1
+    label_weekend = f"выходные {format_weekend_range(w_start)}"
+    assert f"[https://vk.com/wall-1_2|{label_weekend}]" in sec1
+    assert (
+        f"[https://vk.com/wall-1_3|{month_name_nominative('2025-07')}]" in sec1
+    )
+    assert (
+        f"[https://vk.com/wall-1_4|{month_name_nominative('2025-08')}]" in sec1
+    )
     assert "u1" not in sec1
