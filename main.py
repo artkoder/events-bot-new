@@ -1775,14 +1775,31 @@ def apply_month_nav(html_content: str, html_block: str | None) -> str:
     return html_content
 
 
-def apply_festival_nav(html_content: str, html_block: str) -> str:
-    """Replace the festival navigation block."""
+def apply_festival_nav(html_content: str, html_block: str) -> tuple[str, str]:
+    """Insert or replace festival navigation block and Telegram footer.
+
+    Returns updated HTML and the strategy used: ``"markers"`` when existing
+    HTML comment markers were found (or when simply appending) and
+    ``"fallback_h3"`` when we had to fall back to the legacy
+    ``<h3>Ближайшие фестивали</h3>`` heading.
+    """
+
+    strategy = "markers"
     start = html_content.find(FEST_NAV_START)
     if start != -1:
         end = html_content.find(FEST_NAV_END, start)
         if end != -1:
             html_content = html_content[:start] + html_content[end + len(FEST_NAV_END) :]
-    return f"{html_content}{FEST_NAV_START}{html_block}{FEST_NAV_END}"
+    else:
+        heading = "<h3>Ближайшие фестивали</h3>"
+        idx = html_content.rfind(heading)
+        if idx != -1:
+            strategy = "fallback_h3"
+            html_content = html_content[:idx]
+
+    html_content = f"{html_content}{FEST_NAV_START}{html_block}{FEST_NAV_END}"
+    html_content = apply_footer_link(html_content)
+    return html_content, strategy
 
 
 def apply_footer_link(html_content: str) -> str:
@@ -5193,6 +5210,21 @@ def unescape_html_comments(html: str) -> str:
     return html.replace("&lt;!--", "<!--").replace("--&gt;", "-->")
 
 
+async def check_month_page_markers(tg, path: str) -> None:
+    """Fetch a month page and warn if DAY markers are missing."""
+    try:
+        page = await telegraph_call(tg.get_page, path, return_html=True)
+    except Exception as e:
+        logging.error("check_month_page_markers failed: %s", e)
+        return
+    html = page.get("content") or page.get("content_html") or ""
+    html = unescape_html_comments(html)
+    if "<!--DAY" in html:
+        logging.info("month_rebuild_markers_present")
+    else:
+        logging.warning("month_rebuild_markers_missing")
+
+
 def extract_link_from_html(html_text: str) -> str | None:
     """Return a registration or ticket link from HTML if present."""
     pattern = re.compile(
@@ -6190,6 +6222,10 @@ async def _sync_month_page_inner(db: Database, month: str, update_links: bool = 
                         await sync_month_page(db, p.month, update_links=False)
                         await asyncio.sleep(0)
             raise
+        if page.path:
+            await check_month_page_markers(tg, page.path)
+        if page.path2:
+            await check_month_page_markers(tg, page.path2)
         if DEBUG:
             mem_info("month page after")
 
@@ -6892,11 +6928,20 @@ async def sync_festival_page(
                 nav_html, _, _ = await build_festivals_nav_block(db)
                 page = await telegraph_call(tg.get_page, path, return_html=True)
                 html_content = page.get("content") or page.get("content_html") or ""
-                html_content = apply_festival_nav(html_content, nav_html)
-                await telegraph_call(
-                    tg.edit_page, path, title=title, html_content=html_content
-                )
-                logging.info("updated festival page %s in Telegraph", name)
+                new_html, strategy = apply_festival_nav(html_content, nav_html)
+                if new_html != html_content:
+                    await telegraph_call(
+                        tg.edit_page, path, title=title, html_content=new_html
+                    )
+                    logging.info(
+                        "updated festival page %s in Telegraph", name,
+                        extra={"marker_strategy": strategy, "action": "edited", "target": "tg", "path": path},
+                    )
+                else:
+                    logging.info(
+                        "festival page %s navigation unchanged", name,
+                        extra={"marker_strategy": strategy, "action": "skipped_nochange", "target": "tg", "path": path},
+                    )
             else:
                 title, content = await build_festival_page_content(db, fest)
                 path = fest.telegraph_path
@@ -6957,11 +7002,20 @@ async def refresh_nav_on_all_festivals(
                 page = await telegraph_call(tg.get_page, path, return_html=True)
                 html_content = page.get("content") or page.get("content_html") or ""
                 title = page.get("title") or name
-                html_content = apply_festival_nav(html_content, nav_html)
-                await telegraph_call(
-                    tg.edit_page, path, title=title, html_content=html_content
-                )
-                logging.info("updated festival page %s in Telegraph", name)
+                new_html, strategy = apply_festival_nav(html_content, nav_html)
+                if new_html != html_content:
+                    await telegraph_call(
+                        tg.edit_page, path, title=title, html_content=new_html
+                    )
+                    logging.info(
+                        "updated festival page %s in Telegraph", name,
+                        extra={"marker_strategy": strategy, "action": "edited", "target": "tg", "path": path},
+                    )
+                else:
+                    logging.info(
+                        "festival page %s navigation unchanged", name,
+                        extra={"marker_strategy": strategy, "action": "skipped_nochange", "target": "tg", "path": path},
+                    )
             except Exception as e:
                 logging.error("Failed to update festival page %s: %s", name, e)
         if vk_url:
