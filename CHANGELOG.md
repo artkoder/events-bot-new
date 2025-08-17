@@ -193,6 +193,10 @@
 
 - Festival records support a `ticket_url` and VK/Telegraph festival posts show a ticket icon and link below the location.
 
+## v0.3.31 - Unified publish progress
+
+- Event publication statuses now appear in one updating message with inline status icons.
+
 
 
 

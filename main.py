@@ -4458,7 +4458,7 @@ async def reconcile_job_outbox(db: Database) -> None:
 async def _run_due_jobs_once(
     db: Database,
     bot: Bot,
-    notify: Callable[[str], Awaitable[None]] | None = None,
+    notify: Callable[[JobTask, JobStatus, bool, str | None, str | None], Awaitable[None]] | None = None,
     only_event: int | None = None,
 ) -> int:
     now = datetime.utcnow()
@@ -4571,19 +4571,7 @@ async def _run_due_jobs_once(
                 session.add(obj)
                 await session.commit()
             if notify and send:
-                label = TASK_LABELS[job.task.value]
-                if status == JobStatus.done:
-                    if changed:
-                        text = f"{label}: OK"
-                        if link:
-                            text += f" — {link}"
-                    else:
-                        text = f"{label}: без изменений"
-                elif status == JobStatus.error:
-                    err_short = err.splitlines()[0] if err else ""
-                    text = f"{label}: ERROR: {err_short}"
-                if text:
-                    await notify(text)
+                await notify(job.task, status, changed, link, err)
         processed += 1
     return processed
 
@@ -4642,8 +4630,26 @@ async def run_event_update_jobs(
     notify_chat_id: int | None = None,
     event_id: int | None = None,
 ) -> None:
-    async def notifier(text: str) -> None:
-        if notify_chat_id is not None:
+    async def notifier(
+        task: JobTask,
+        status: JobStatus,
+        changed: bool,
+        link: str | None,
+        err: str | None,
+    ) -> None:
+        label = TASK_LABELS[task.value]
+        text = None
+        if status == JobStatus.done:
+            if changed:
+                text = f"{label}: OK"
+                if link:
+                    text += f" — {link}"
+            else:
+                text = f"{label}: без изменений"
+        elif status == JobStatus.error:
+            err_short = err.splitlines()[0] if err else ""
+            text = f"{label}: ERROR: {err_short}"
+        if notify_chat_id is not None and text:
             await bot.send_message(notify_chat_id, text)
 
     while await _run_due_jobs_once(
@@ -4922,9 +4928,73 @@ async def update_festival_pages_for_event(event_id: int, db: Database, bot: Bot 
 
 
 async def publish_event_progress(event: Event, db: Database, bot: Bot, chat_id: int) -> None:
-    await bot.send_message(chat_id, "Событие сохранено. Публикую…")
-    await run_event_update_jobs(db, bot, notify_chat_id=chat_id, event_id=event.id)
-    await bot.send_message(chat_id, "Готово")
+    async with db.get_session() as session:
+        jobs = (
+            await session.execute(
+                select(JobOutbox.task).where(JobOutbox.event_id == event.id)
+            )
+        ).scalars().all()
+    tasks = [job for job in jobs if job.value in TASK_LABELS]
+    progress: dict[JobTask, dict[str, str]] = {
+        t: {"icon": "\U0001f504", "suffix": ""} for t in tasks
+    }
+    lines = [f"\U0001f504 {TASK_LABELS[t.value]}" for t in tasks]
+    head = "Идёт процесс публикации, ждите"
+    text = head if not lines else head + "\n" + "\n".join(lines)
+    msg = await bot.send_message(chat_id, text)
+
+    async def updater(
+        task: JobTask,
+        status: JobStatus,
+        changed: bool,
+        link: str | None,
+        err: str | None,
+    ) -> None:
+        if task not in progress:
+            return
+        if status == JobStatus.done:
+            icon = "✅"
+            if changed:
+                suffix = f" — {link}" if link else ""
+            else:
+                suffix = " — без изменений"
+        else:
+            icon = "❌"
+            suffix = f" — {err.splitlines()[0] if err else ''}"
+        progress[task] = {"icon": icon, "suffix": suffix}
+        all_done = all(info["icon"] != "\U0001f504" for info in progress.values())
+        head = "Готово" if all_done else "Идёт процесс публикации, ждите"
+        lines = [
+            f"{info['icon']} {TASK_LABELS[t.value]}{info['suffix']}" for t, info in progress.items()
+        ]
+        text = head if not lines else head + "\n" + "\n".join(lines)
+        await bot.edit_message_text(
+            text,
+            chat_id=chat_id,
+            message_id=msg.message_id,
+        )
+
+    while await _run_due_jobs_once(db, bot, updater, event.id):
+        await asyncio.sleep(0)
+
+    if progress:
+        all_done = all(info["icon"] != "\U0001f504" for info in progress.values())
+        head = "Готово" if all_done else "Идёт процесс публикации, ждите"
+        lines = [
+            f"{info['icon']} {TASK_LABELS[t.value]}{info['suffix']}" for t, info in progress.items()
+        ]
+        text = head if not lines else head + "\n" + "\n".join(lines)
+        await bot.edit_message_text(
+            text,
+            chat_id=chat_id,
+            message_id=msg.message_id,
+        )
+    else:
+        await bot.edit_message_text(
+            "Готово",
+            chat_id=chat_id,
+            message_id=msg.message_id,
+        )
 
 
 async def job_sync_vk_source_post(event_id: int, db: Database, bot: Bot | None) -> None:
