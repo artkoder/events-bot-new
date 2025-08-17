@@ -108,8 +108,8 @@ from markup import (
     DAY_END,
     PERM_START,
     PERM_END,
-    FESTNAV_START,
-    FESTNAV_END,
+    FEST_NAV_START,
+    FEST_NAV_END,
 )
 from sections import replace_between_markers, content_hash
 from db import Database
@@ -1797,12 +1797,23 @@ def apply_festival_nav(html_content: str, nav_html: str | Iterable[str]) -> tupl
         nav_html = "".join(nav_html)
     nav_hash = content_hash(nav_html)
     nav_block = f"<!--NAV_HASH:{nav_hash}-->{nav_html}"
+    legacy_start = "<!-- FEST_NAV_START -->"
+    legacy_end = "<!-- FEST_NAV_END -->"
+    legacy_replaced = False
+    if legacy_start in html_content or legacy_end in html_content:
+        html_content = html_content.replace(legacy_start, FEST_NAV_START).replace(
+            legacy_end, FEST_NAV_END
+        )
+        legacy_replaced = True
 
-    start = html_content.find(FESTNAV_START)
-    end = html_content.find(FESTNAV_END, start + len(FESTNAV_START)) if start != -1 else -1
+    start = html_content.find(FEST_NAV_START)
+    end = html_content.find(FEST_NAV_END, start + len(FEST_NAV_START)) if start != -1 else -1
     if start != -1 and end != -1:
-        current = html_content[start + len(FESTNAV_START) : end]
+        current = html_content[start + len(FEST_NAV_START) : end]
         if content_hash(current) == content_hash(nav_block):
+            if legacy_replaced:
+                html_content = apply_footer_link(html_content)
+                return html_content, True
             return html_content, False
     else:
         heading = "<h3>Ближайшие фестивали</h3>"
@@ -1810,7 +1821,7 @@ def apply_festival_nav(html_content: str, nav_html: str | Iterable[str]) -> tupl
         if idx != -1:
             html_content = html_content[:idx]
 
-    html_content = replace_between_markers(html_content, FESTNAV_START, FESTNAV_END, nav_block)
+    html_content = replace_between_markers(html_content, FEST_NAV_START, FEST_NAV_END, nav_block)
     html_content = apply_footer_link(html_content)
     return html_content, True
 
@@ -1818,7 +1829,7 @@ def apply_festival_nav(html_content: str, nav_html: str | Iterable[str]) -> tupl
 def apply_footer_link(html_content: str) -> str:
     """Ensure the Telegram channel link footer is present once."""
     pattern = re.compile(
-        r'<p><a href="https://t\.me/kenigevents">[^<]+</a></p><p>(?:&nbsp;|&#8203;)</p>'
+        r'(?:<p>(?:&nbsp;|&#8203;)</p>)?<p><a href="https://t\.me/kenigevents">[^<]+</a></p><p>(?:&nbsp;|&#8203;)</p>'
     )
     html_content = pattern.sub("", html_content).rstrip()
     return html_content + FOOTER_LINK_HTML
@@ -6937,7 +6948,7 @@ async def build_festival_page_content(db: Database, fest: Festival) -> tuple[str
     if nav_nodes:
         from telegraph.utils import nodes_to_html, html_to_nodes
         nav_html = nodes_to_html(nav_nodes)
-        nav_block = f"{FESTNAV_START}{nav_html}{FESTNAV_END}"
+        nav_block = f"{FEST_NAV_START}{nav_html}{FEST_NAV_END}"
         nodes.extend(html_to_nodes(nav_block))
     title = fest.full_name or fest.name
     return title, nodes
