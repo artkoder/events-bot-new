@@ -4976,9 +4976,9 @@ async def publish_event_progress(event: Event, db: Database, bot: Bot, chat_id: 
         ]
         text = head if not lines else head + "\n" + "\n".join(lines)
         await bot.edit_message_text(
-            text,
             chat_id=chat_id,
             message_id=msg.message_id,
+            text=text,
         )
 
     while await _run_due_jobs_once(db, bot, updater, event.id):
@@ -4992,15 +4992,15 @@ async def publish_event_progress(event: Event, db: Database, bot: Bot, chat_id: 
         ]
         text = head if not lines else head + "\n" + "\n".join(lines)
         await bot.edit_message_text(
-            text,
             chat_id=chat_id,
             message_id=msg.message_id,
+            text=text,
         )
     else:
         await bot.edit_message_text(
-            "Готово",
             chat_id=chat_id,
             message_id=msg.message_id,
+            text="Готово",
         )
 
 
