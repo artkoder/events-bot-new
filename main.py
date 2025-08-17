@@ -4925,6 +4925,13 @@ async def update_festival_pages_for_event(event_id: int, db: Database, bot: Bot 
         return
     await sync_festival_page(db, ev.festival)
     await sync_festival_vk_post(db, ev.festival, bot)
+    nav_html, nav_lines, changed = await build_festivals_nav_block(db)
+    if changed:
+        asyncio.create_task(
+            refresh_nav_on_all_festivals(
+                db, bot, nav_html=nav_html, nav_lines=nav_lines
+            )
+        )
 
 
 async def publish_event_progress(event: Event, db: Database, bot: Bot, chat_id: int) -> None:
@@ -6910,7 +6917,13 @@ async def sync_festival_page(
                 logging.info("synced festival page %s", name)
 
 
-async def refresh_nav_on_all_festivals(db: Database, bot: Bot | None = None) -> None:
+async def refresh_nav_on_all_festivals(
+    db: Database,
+    bot: Bot | None = None,
+    *,
+    nav_html: str | None = None,
+    nav_lines: list[str] | None = None,
+) -> None:
     """Refresh navigation on all festival pages and VK posts."""
     async with db.get_session() as session:
         res = await session.execute(
@@ -6923,9 +6936,10 @@ async def refresh_nav_on_all_festivals(db: Database, bot: Bot | None = None) -> 
         )
         fests = res.all()
 
-    nav_html, nav_lines, changed = await build_festivals_nav_block(db)
-    if not changed:
-        return
+    if nav_html is None or nav_lines is None:
+        nav_html, nav_lines, changed = await build_festivals_nav_block(db)
+        if not changed:
+            return
     token = get_telegraph_token()
     tg = Telegraph(access_token=token, domain="telegra.ph") if token else None
     for fid, name, path, vk_url in fests:
