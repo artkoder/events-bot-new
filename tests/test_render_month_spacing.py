@@ -22,21 +22,21 @@ def test_render_month_day_section_has_blank_lines():
         make_event("B", "2025-01-15", "13:00"),
     ]
     html = main.render_month_day_section(date(2025, 1, 15), events)
-    assert "<p>\u00A0</p><h4>" in html
+    assert "<p>\u200B</p><h4>" in html
 
 
 def test_telegraph_br_no_span():
     html = nodes_to_html(main.telegraph_br())
-    assert html == "<p>\u00A0</p>"
+    assert html == "<p>\u200B</p>"
     assert "<span" not in html
 
 
-def test_lint_preserves_nbsp():
-    assert main.lint_telegraph_html("<p>&nbsp;</p>") == "<p>&nbsp;</p>"
+def test_lint_preserves_zwsp():
+    assert main.lint_telegraph_html("<p>&#8203;</p>") == "<p>&#8203;</p>"
 
 
 def test_event_to_nodes_ends_with_blank_paragraph():
     event = make_event("C", "2025-01-15", "12:00")
     nodes = main.event_to_nodes(event)
     assert nodes[-1] == main.telegraph_br()[0]
-    assert nodes_to_html(nodes).endswith("<p>\u00A0</p>")
+    assert nodes_to_html(nodes).endswith("<p>\u200B</p>")

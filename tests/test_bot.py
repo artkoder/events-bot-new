@@ -3445,7 +3445,7 @@ async def test_update_source_page_footer(monkeypatch):
     await main.update_source_page("p", "T", "text")
     html = edited.get("html", "")
     assert "Полюбить Калининград Анонсы" in html
-    assert "&nbsp;" in html
+    assert "&#8203;" in html
 
 
 @pytest.mark.asyncio
@@ -3571,22 +3571,10 @@ async def test_create_source_page_adds_nav(tmp_path: Path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_create_source_page_footer(monkeypatch):
-    captured = {}
-
-    class DummyTG:
-        def create_page(self, title, html_content=None, **_):
-            captured["html"] = html_content
-            return {"url": "https://telegra.ph/test", "path": "p"}
-
     monkeypatch.setenv("TELEGRAPH_TOKEN", "t")
-    monkeypatch.setattr(
-        "main.Telegraph", lambda access_token=None, domain=None: DummyTG()
-    )
-
-    await main.create_source_page("T", "text", None)
-    html = captured.get("html", "")
+    html, _, _ = await main.build_source_page_content("T", "text", None, None, None, None, None)
     assert "Полюбить Калининград Анонсы" in html
-    assert "&nbsp;" in html
+    assert "&#8203;" in html
 
 
 @pytest.mark.asyncio
