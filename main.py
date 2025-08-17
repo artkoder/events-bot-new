@@ -451,6 +451,7 @@ CATBOX_ENABLED: bool = False
 VK_PHOTOS_ENABLED: bool = False
 _supabase_client: "Client | None" = None  # type: ignore[name-defined]
 _vk_user_token_bad: str | None = None
+_vk_captcha_needed: bool = False
 _shared_session: ClientSession | None = None
 # backward-compatible aliases used in tests
 _http_session: ClientSession | None = None
@@ -876,6 +877,9 @@ async def _vk_api(
     token_kind: str = "group",
 ) -> dict:
     """Call VK API with token fallback."""
+    global _vk_captcha_needed
+    if _vk_captcha_needed:
+        raise VKAPIError(14, "Captcha needed")
     tokens: list[tuple[str, str]] = []
     if token:
         tokens.append((token_kind, token))
@@ -921,6 +925,11 @@ async def _vk_api(
             err = data["error"]
             msg = err.get("error_msg", "")
             code = err.get("error_code")
+            if code == 14:
+                _vk_captcha_needed = True
+                if db and bot:
+                    await notify_superadmin(db, bot, "VK captcha needed")
+                raise VKAPIError(code, msg)
             if kind == "user" and code in {5, 27}:
                 global _vk_user_token_bad
                 if _vk_user_token_bad != token:
