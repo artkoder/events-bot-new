@@ -37,5 +37,6 @@ WEND_START = lambda key: Marker(f"<!--WEEKEND:{key} START-->")
 WEND_END = lambda key: Marker(f"<!--WEEKEND:{key} END-->")
 PERM_START: Marker = Marker("<!--PERMANENT_EXHIBITIONS START-->")
 PERM_END: Marker = Marker("<!--PERMANENT_EXHIBITIONS END-->")
-FEST_NAV_START: Marker = Marker("<!--FEST_NAV_START-->")
-FEST_NAV_END: Marker = Marker("<!--FEST_NAV_END-->")
+# Canonical festival navigation markers used across the project
+FEST_NAV_START: Marker = Marker("<!--fest-nav-start-->")
+FEST_NAV_END: Marker = Marker("<!--fest-nav-end-->")

@@ -1797,13 +1797,14 @@ def apply_festival_nav(html_content: str, nav_html: str | Iterable[str]) -> tupl
         nav_html = "".join(nav_html)
     nav_hash = content_hash(nav_html)
     nav_block = f"<!--NAV_HASH:{nav_hash}-->{nav_html}"
-    legacy_start = "<!-- FEST_NAV_START -->"
-    legacy_end = "<!-- FEST_NAV_END -->"
+    legacy_start_variants = ["<!-- FEST_NAV_START -->", "<!--FEST_NAV_START-->"]
+    legacy_end_variants = ["<!-- FEST_NAV_END -->", "<!--FEST_NAV_END-->"]
     legacy_replaced = False
-    if legacy_start in html_content or legacy_end in html_content:
-        html_content = html_content.replace(legacy_start, FEST_NAV_START).replace(
-            legacy_end, FEST_NAV_END
-        )
+    if any(v in html_content for v in legacy_start_variants + legacy_end_variants):
+        for v in legacy_start_variants:
+            html_content = html_content.replace(v, FEST_NAV_START)
+        for v in legacy_end_variants:
+            html_content = html_content.replace(v, FEST_NAV_END)
         legacy_replaced = True
 
     start = html_content.find(FEST_NAV_START)
@@ -7216,6 +7217,7 @@ async def sync_festival_vk_post(
                     name,
                     e.code,
                     e.message,
+                    extra={"action": "error", "target": "vk", "url": fest.vk_post_url},
                 )
                 return
             lines = text.split("\n")
@@ -7228,12 +7230,24 @@ async def sync_festival_vk_post(
                     break
             base = lines[:idx] if idx is not None else lines
             message = "\n".join(base + nav_lines_local)
+            if message == text:
+                logging.info(
+                    "festival post %s navigation unchanged", name,
+                    extra={"action": "skipped_nochange", "target": "vk", "url": fest.vk_post_url},
+                )
+                return
             res_edit = await _try_edit(message, None)
             if res_edit is True:
-                logging.info("updated festival post %s on VK", name)
+                logging.info(
+                    "updated festival post %s on VK", name,
+                    extra={"action": "edited", "target": "vk", "url": fest.vk_post_url},
+                )
                 return
             if res_edit is None:
-                logging.error("VK post error for festival %s", name)
+                logging.error(
+                    "VK post error for festival %s", name,
+                    extra={"action": "error", "target": "vk", "url": fest.vk_post_url},
+                )
                 return
             can_edit = False  # editing not possible, create new post
 
@@ -7250,10 +7264,16 @@ async def sync_festival_vk_post(
     if fest.vk_post_url and can_edit:
         res_edit = await _try_edit(message, attachments)
         if res_edit is True:
-            logging.info("updated festival post %s on VK", name)
+            logging.info(
+                "updated festival post %s on VK", name,
+                extra={"action": "edited", "target": "vk", "url": fest.vk_post_url},
+            )
             return
         if res_edit is None:
-            logging.error("VK post error for festival %s", name)
+            logging.error(
+                "VK post error for festival %s", name,
+                extra={"action": "error", "target": "vk", "url": fest.vk_post_url},
+            )
             return
 
     url = await _try_post(message, attachments)
@@ -7264,9 +7284,15 @@ async def sync_festival_vk_post(
             ).scalar_one()
             fest_db.vk_post_url = url
             await session.commit()
-        logging.info("created festival post %s: %s", name, url)
+        logging.info(
+            "created festival post %s: %s", name, url,
+            extra={"action": "edited", "target": "vk", "url": url},
+        )
     else:
-        logging.error("VK post error for festival %s", name)
+        logging.error(
+            "VK post error for festival %s", name,
+            extra={"action": "error", "target": "vk", "url": fest.vk_post_url},
+        )
 
 
 async def send_festival_poll(
