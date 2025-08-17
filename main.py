@@ -3378,6 +3378,8 @@ async def send_festivals_list(message: types.Message, db: Database, bot: Bot, ed
             parts.append(f"vk: {f.vk_url}")
         if f.tg_url:
             parts.append(f"tg: {f.tg_url}")
+        if f.ticket_url:
+            parts.append(f"ticket: {f.ticket_url}")
         lines.append(" ".join(parts))
     keyboard = [
         [
@@ -6701,10 +6703,13 @@ async def build_festival_page_content(db: Database, fest: Festival) -> tuple[str
     loc_text = festival_location(fest, events)
     if loc_text:
         nodes.append({"tag": "p", "children": [f"\U0001f4cd {loc_text}"]})
+    if fest.ticket_url:
+        nodes.append({"tag": "p", "children": [f"\U0001f39f {fest.ticket_url}"]})
     if fest.description:
         nodes.append({"tag": "p", "children": [fest.description]})
 
     if fest.website_url or fest.vk_url or fest.tg_url:
+        nodes.extend(telegraph_br())
         nodes.extend(telegraph_br())
         nodes.append({"tag": "h3", "children": ["Контакты фестиваля"]})
         if fest.website_url:
@@ -6751,6 +6756,7 @@ async def build_festival_page_content(db: Database, fest: Festival) -> tuple[str
             )
 
     if events:
+        nodes.extend(telegraph_br())
         nodes.extend(telegraph_br())
         nodes.append({"tag": "h3", "children": ["Мероприятия фестиваля"]})
         for e in events:
@@ -6883,6 +6889,8 @@ async def build_festival_vk_message(db: Database, fest: Festival) -> str:
     loc_text = festival_location(fest, events)
     if loc_text:
         lines.append(f"\U0001f4cd {loc_text}")
+    if fest.ticket_url:
+        lines.append(f"\U0001f39f {fest.ticket_url}")
     if fest.description:
         lines.append(fest.description)
     if fest.website_url or fest.vk_url or fest.tg_url:
@@ -8463,6 +8471,7 @@ async def show_festival_edit_menu(user_id: int, fest: Festival, bot: Bot):
         f"site: {fest.website_url or ''}",
         f"vk: {fest.vk_url or ''}",
         f"tg: {fest.tg_url or ''}",
+        f"ticket: {fest.ticket_url or ''}",
     ]
     keyboard = [
         [
@@ -8511,6 +8520,12 @@ async def show_festival_edit_menu(user_id: int, fest: Festival, bot: Bot):
             types.InlineKeyboardButton(
                 text=("Delete TG" if fest.tg_url else "Add TG"),
                 callback_data=f"festeditfield:{fest.id}:tg",
+            )
+        ],
+        [
+            types.InlineKeyboardButton(
+                text=("Delete ticket" if fest.ticket_url else "Add ticket"),
+                callback_data=f"festeditfield:{fest.id}:ticket",
             )
         ],
         [types.InlineKeyboardButton(text="Done", callback_data="festeditdone")],
@@ -9259,6 +9274,8 @@ async def handle_festival_edit_message(message: types.Message, db: Database, bot
             fest.vk_url = None if text in {"", "-"} else text
         elif field == "tg":
             fest.tg_url = None if text in {"", "-"} else text
+        elif field == "ticket":
+            fest.ticket_url = None if text in {"", "-"} else text
         await session.commit()
         logging.info("festival %s updated", fest.name)
     festival_edit_sessions[message.from_user.id] = (fid, None)

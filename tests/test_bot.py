@@ -6550,6 +6550,24 @@ async def test_edit_festival_contacts(tmp_path: Path):
         fest = await session.get(main.Festival, fid)
         assert fest.vk_url is None
 
+    festival_edit_sessions[1] = (fid, "ticket")
+
+    msg3 = types.Message.model_validate(
+        {
+            "message_id": 4,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "https://tix",
+
+        }
+    )
+    await main.handle_festival_edit_message(msg3, db, bot)
+
+    async with db.get_session() as session:
+        fest = await session.get(main.Festival, fid)
+        assert fest.ticket_url == "https://tix"
+
 
 @pytest.mark.asyncio
 async def test_festival_page_contacts_and_dates(tmp_path: Path):
@@ -6702,6 +6720,7 @@ async def test_festival_page_no_events_shows_info(tmp_path: Path, monkeypatch):
             end_date=FUTURE_DATE,
             location_name="Hall",
             city="Town",
+            ticket_url="https://tix",
         )
         session.add(fest)
         await session.commit()
@@ -6715,6 +6734,13 @@ async def test_festival_page_no_events_shows_info(tmp_path: Path, monkeypatch):
     dump = json_dumps(content)
     assert "\ud83d\udcc5" in dump or "📅" in dump
     assert "\ud83d\xdccd" in dump or "📍" in dump
+    assert "\ud83c\udf9f" in dump or "🎟" in dump
+    idx_loc = next(
+        i
+        for i, n in enumerate(content)
+        if n.get("tag") == "p" and "\U0001f4cd" in "".join(n.get("children", []))
+    )
+    assert content[idx_loc + 1]["children"] == ["\U0001f39f https://tix"]
 
 
 @pytest.mark.asyncio
@@ -6731,13 +6757,16 @@ async def test_festival_vk_message_no_events(tmp_path: Path):
             location_name="Hall",
             city="Town",
             description="Desc",
+            ticket_url="https://tix",
         )
         session.add(fest)
         await session.commit()
 
     text = await main.build_festival_vk_message(db, fest)
+    lines = text.splitlines()
     assert "\U0001f4c5" in text or "📅" in text
     assert "\U0001f4cd" in text or "📍" in text
+    assert lines[3] == "\U0001f39f https://tix"
 
 
 @pytest.mark.asyncio
