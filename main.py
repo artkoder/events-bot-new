@@ -6688,6 +6688,11 @@ async def build_festival_page_content(db: Database, fest: Festival) -> tuple[str
         desc = await generate_festival_description(fest, events)
         if desc:
             fest.description = desc
+            await session.execute(
+                update(Festival)
+                .where(Festival.id == fest.id)
+                .values(description=desc)
+            )
             await session.commit()
 
     nodes: list[dict] = []
@@ -6878,6 +6883,16 @@ async def build_festival_vk_message(db: Database, fest: Festival) -> str:
             select(Event).where(Event.festival == fest.name).order_by(Event.date, Event.time)
         )
         events = res.scalars().all()
+        if not fest.description:
+            desc = await generate_festival_description(fest, events)
+            if desc:
+                fest.description = desc
+                await session.execute(
+                    update(Festival)
+                    .where(Festival.id == fest.id)
+                    .values(description=desc)
+                )
+                await session.commit()
     lines = [fest.full_name or fest.name]
     start, end = festival_dates(fest, events)
 
