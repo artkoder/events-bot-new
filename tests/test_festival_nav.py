@@ -15,6 +15,8 @@ def test_apply_festival_nav_insert_when_missing():
     assert updated.count(FEST_NAV_START) == 1
     assert '<!-- FEST_NAV_START -->' not in updated
     assert '<!-- FEST_NAV_END -->' not in updated
+    assert '<!--FEST_NAV_START-->' not in updated
+    assert '<!--FEST_NAV_END-->' not in updated
     assert '<!--NAV_HASH:' in updated
     assert updated.endswith(FOOTER_LINK_HTML)
 
@@ -51,6 +53,15 @@ def test_apply_festival_nav_rewrites_spaced_markers():
     assert updated.count(FEST_NAV_START) == 1
     assert '<!-- FEST_NAV_START -->' not in updated
     assert '<!-- FEST_NAV_END -->' not in updated
+
+
+def test_apply_festival_nav_rewrites_uppercase_markers():
+    html = '<p>start</p><!--FEST_NAV_START--><p>old</p><!--FEST_NAV_END-->'
+    updated, changed = main.apply_festival_nav(html, NAV_HTML)
+    assert changed is True
+    assert updated.count(FEST_NAV_START) == 1
+    assert '<!--FEST_NAV_START-->' not in updated
+    assert '<!--FEST_NAV_END-->' not in updated
 
 
 def test_apply_footer_link_idempotent():
