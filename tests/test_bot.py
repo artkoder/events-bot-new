@@ -6770,6 +6770,47 @@ async def test_festival_vk_message_no_events(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_festival_vk_message_generates_description(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.get_session() as session:
+        fest = main.Festival(
+            name="Auto",
+            start_date=FUTURE_DATE,
+            end_date=FUTURE_DATE,
+            location_name="Hall",
+            city="Town",
+        )
+        session.add(fest)
+        session.add(
+            main.Event(
+                title="A",
+                description="d",
+                source_text="s",
+                date=FUTURE_DATE,
+                time="18:00",
+                location_name="Hall",
+                city="Town",
+                festival="Auto",
+            )
+        )
+        await session.commit()
+
+    async def fake_desc(fest_obj, events):
+        return "Desc"
+
+    monkeypatch.setattr(main, "generate_festival_description", fake_desc)
+
+    text = await main.build_festival_vk_message(db, fest)
+    assert "Desc" in text
+
+    async with db.get_session() as session:
+        saved = await session.get(main.Festival, fest.id)
+        assert saved.description == "Desc"
+
+
+@pytest.mark.asyncio
 async def test_festival_page_lists_upcoming(tmp_path: Path):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
