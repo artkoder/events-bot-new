@@ -4421,6 +4421,7 @@ async def test_add_events_from_text_schedules_pages(tmp_path: Path, monkeypatch)
         res = await session.execute(stmt)
         tasks = [row[0] for row in res.all()]
     assert tasks.count(JobTask.month_pages) == 2
+    assert tasks.count(JobTask.week_pages) == 2
     assert tasks.count(JobTask.weekend_pages) == 2
     async with db.get_session() as session:
         res = await session.execute(select(Event))
@@ -6998,10 +6999,14 @@ async def test_publication_plan_and_updates(tmp_path: Path, monkeypatch):
     async def fake_week(event_id, db_obj, bot_obj):
         return True
 
+    async def fake_week_pages(event_id, db_obj, bot_obj):
+        return True
+
     monkeypatch.setattr(main, "update_telegraph_event_page", fake_tg)
     monkeypatch.setattr(main, "job_sync_vk_source_post", fake_vk_job)
     monkeypatch.setattr(main, "update_month_pages_for", fake_month)
     monkeypatch.setattr(main, "update_weekend_pages_for", fake_week)
+    monkeypatch.setattr(main, "update_week_pages_for", fake_week_pages)
     monkeypatch.setattr(
         main,
         "JOB_HANDLERS",
@@ -7009,6 +7014,7 @@ async def test_publication_plan_and_updates(tmp_path: Path, monkeypatch):
             "telegraph_build": fake_tg,
             "vk_sync": fake_vk_job,
             "month_pages": fake_month,
+            "week_pages": fake_week_pages,
             "weekend_pages": fake_week,
             "festival_pages": fake_week,
         },
@@ -7031,6 +7037,7 @@ async def test_publication_plan_and_updates(tmp_path: Path, monkeypatch):
     assert "Telegraph (событие): OK — t" in texts
     assert "VK: OK — v" in texts
     assert any(t.startswith("Страница месяца: OK") for t in texts)
+    assert any(t.startswith("Неделя: OK") for t in texts)
     assert any(t.startswith("Выходные: OK") for t in texts)
     assert texts[-1] == "Готово"
 

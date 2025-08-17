@@ -3764,9 +3764,11 @@ async def schedule_event_update_tasks(db: Database, ev: Event) -> None:
         await enqueue_job(db, eid, JobTask.vk_sync)
     await enqueue_job(db, eid, JobTask.month_pages)
     d = parse_iso_date(ev.date)
-    w_start = weekend_start_for_date(d) if d else None
-    if w_start:
-        await enqueue_job(db, eid, JobTask.weekend_pages)
+    if d:
+        await enqueue_job(db, eid, JobTask.week_pages)
+        w_start = weekend_start_for_date(d)
+        if w_start:
+            await enqueue_job(db, eid, JobTask.weekend_pages)
     if ev.festival:
         await enqueue_job(db, eid, JobTask.festival_pages)
     logging.info("scheduled event tasks for %s", eid)
@@ -4401,6 +4403,7 @@ TASK_LABELS = {
     "telegraph_build": "Telegraph (событие)",
     "vk_sync": "VK",
     "month_pages": "Страница месяца",
+    "week_pages": "Неделя",
     "weekend_pages": "Выходные",
     "festival_pages": "Фестиваль",
 }
@@ -4421,6 +4424,13 @@ async def _job_result_link(task: JobTask, event_id: int, db: Database) -> str | 
             if month_key:
                 page = await session.get(MonthPage, month_key)
                 return page.url if page else None
+            return None
+        if task == JobTask.week_pages:
+            d = parse_iso_date(ev.date.split("..", 1)[0])
+            if d:
+                w_start = week_start_for_date(d)
+                page = await session.get(WeekPage, w_start.isoformat())
+                return page.vk_post_url if page else None
             return None
         if task == JobTask.weekend_pages:
             d = parse_iso_date(ev.date.split("..", 1)[0])
@@ -4889,6 +4899,17 @@ async def update_weekend_pages_for(event_id: int, db: Database, bot: Bot | None)
         await sync_weekend_page(db, w_start.isoformat())
 
 
+async def update_week_pages_for(event_id: int, db: Database, bot: Bot | None) -> None:
+    async with db.get_session() as session:
+        ev = await session.get(Event, event_id)
+    if not ev:
+        return
+    d = parse_iso_date(ev.date)
+    if d:
+        w_start = week_start_for_date(d)
+        await sync_vk_week_post(db, w_start.isoformat(), bot)
+
+
 async def update_festival_pages_for_event(event_id: int, db: Database, bot: Bot | None) -> None:
     async with db.get_session() as session:
         ev = await session.get(Event, event_id)
@@ -4927,6 +4948,7 @@ JOB_HANDLERS = {
     "telegraph_build": update_telegraph_event_page,
     "vk_sync": job_sync_vk_source_post,
     "month_pages": update_month_pages_for,
+    "week_pages": update_week_pages_for,
     "weekend_pages": update_weekend_pages_for,
     "festival_pages": update_festival_pages_for_event,
 }
