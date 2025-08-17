@@ -20,7 +20,7 @@ def simple_md_to_html(text: str) -> str:
 
 def telegraph_br() -> list[dict]:
     """Return a safe blank line for Telegraph rendering."""
-    return [{"tag": "p", "children": ["\u00A0"]}]
+    return [{"tag": "br"}]
 
 
 class Marker(str):

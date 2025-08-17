@@ -57,6 +57,7 @@ async def test_progress_notifications(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "job_sync_vk_source_post", ok_handler)
     monkeypatch.setattr(main, "update_month_pages_for", nochange_handler)
     monkeypatch.setattr(main, "update_weekend_pages_for", ok_handler)
+    monkeypatch.setattr(main, "update_week_pages_for", ok_handler)
     monkeypatch.setattr(main, "update_festival_pages_for_event", ok_handler)
     monkeypatch.setattr(
         main,
@@ -65,6 +66,7 @@ async def test_progress_notifications(tmp_path, monkeypatch):
             "telegraph_build": ok_handler,
             "vk_sync": ok_handler,
             "month_pages": nochange_handler,
+            "week_pages": ok_handler,
             "weekend_pages": ok_handler,
             "festival_pages": ok_handler,
         },
@@ -75,6 +77,7 @@ async def test_progress_notifications(tmp_path, monkeypatch):
             JobTask.telegraph_build: "http://t",
             JobTask.vk_sync: "http://v",
             JobTask.month_pages: "http://m",
+            JobTask.week_pages: "http://wk",
             JobTask.weekend_pages: "http://w",
         }
         return mapping.get(task)
@@ -85,6 +88,7 @@ async def test_progress_notifications(tmp_path, monkeypatch):
 
     assert "Telegraph (событие): OK — http://t" in bot.messages
     assert "Страница месяца: без изменений" in bot.messages
+    assert "Неделя: OK — http://wk" in bot.messages
     assert "Выходные: OK — http://w" in bot.messages
     assert "VK: OK — http://v" in bot.messages
 
@@ -132,6 +136,7 @@ async def test_progress_notifications_forced_rebuild(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "update_telegraph_event_page", ok_handler)
     monkeypatch.setattr(main, "job_sync_vk_source_post", ok_handler)
     monkeypatch.setattr(main, "update_weekend_pages_for", ok_handler)
+    monkeypatch.setattr(main, "update_week_pages_for", ok_handler)
     monkeypatch.setattr(main, "update_festival_pages_for_event", ok_handler)
     monkeypatch.setattr(
         main,
@@ -140,6 +145,7 @@ async def test_progress_notifications_forced_rebuild(tmp_path, monkeypatch):
             "telegraph_build": ok_handler,
             "vk_sync": ok_handler,
             "month_pages": month_handler,
+            "week_pages": ok_handler,
             "weekend_pages": ok_handler,
             "festival_pages": ok_handler,
         },
@@ -189,6 +195,7 @@ async def test_progress_notifications_error(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "job_sync_vk_source_post", ok_handler)
     monkeypatch.setattr(main, "update_month_pages_for", err_handler)
     monkeypatch.setattr(main, "update_weekend_pages_for", ok_handler)
+    monkeypatch.setattr(main, "update_week_pages_for", ok_handler)
     monkeypatch.setattr(main, "update_festival_pages_for_event", ok_handler)
     monkeypatch.setattr(
         main,
@@ -197,6 +204,7 @@ async def test_progress_notifications_error(tmp_path, monkeypatch):
             "telegraph_build": ok_handler,
             "vk_sync": ok_handler,
             "month_pages": err_handler,
+            "week_pages": ok_handler,
             "weekend_pages": ok_handler,
             "festival_pages": ok_handler,
         },
