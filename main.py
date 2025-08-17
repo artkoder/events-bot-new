@@ -8323,6 +8323,7 @@ async def init_db_and_scheduler(
     app["daily_scheduler"] = asyncio.create_task(daily_scheduler(db, bot))
     app["add_event_worker"] = asyncio.create_task(add_event_queue_worker(db, bot))
     app["add_event_watch"] = asyncio.create_task(_watch_add_event_worker(app, db, bot))
+    app["job_outbox_worker"] = asyncio.create_task(job_outbox_worker(db, bot))
     gc.collect()
     logging.info("BOOT_OK pid=%s", os.getpid())
 
