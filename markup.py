@@ -20,7 +20,8 @@ def simple_md_to_html(text: str) -> str:
 
 def telegraph_br() -> list[dict]:
     """Return a safe blank line for Telegraph rendering."""
-    return [{"tag": "br"}]
+    # U+200B survives Telegraph HTML import, unlike &nbsp; in <p>
+    return [{"tag": "p", "children": ["\u200B"]}]
 
 
 class Marker(str):

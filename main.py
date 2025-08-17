@@ -1705,9 +1705,9 @@ FEST_NAV_START = "<!-- FEST_NAV_START -->"
 FEST_NAV_END = "<!-- FEST_NAV_END -->"
 
 FOOTER_LINK_HTML = (
-    '<p>&nbsp;</p>'
+    '<p>&#8203;</p>'
     '<p><a href="https://t.me/kenigevents">Полюбить Калининград Анонсы</a></p>'
-    '<p>&nbsp;</p>'
+    '<p>&#8203;</p>'
 )
 
 
@@ -1779,7 +1779,7 @@ def apply_festival_nav(html_content: str, html_block: str) -> str:
 def apply_footer_link(html_content: str) -> str:
     """Ensure the Telegram channel link footer is present once."""
     pattern = re.compile(
-        r'<p><a href="https://t\.me/kenigevents">[^<]+</a></p><p>&nbsp;</p>'
+        r'<p><a href="https://t\.me/kenigevents">[^<]+</a></p><p>(?:&nbsp;|&#8203;)</p>'
     )
     html_content = pattern.sub("", html_content).rstrip()
     return html_content + FOOTER_LINK_HTML
