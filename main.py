@@ -517,6 +517,7 @@ HEAVY_SEMAPHORE = asyncio.Semaphore(1)
 TG_SEND_SEMAPHORE = asyncio.Semaphore(int(os.getenv("TG_SEND_CONCURRENCY", "2")))
 VK_SEMAPHORE = asyncio.Semaphore(int(os.getenv("VK_CONCURRENCY", "1")))
 TELEGRAPH_SEMAPHORE = asyncio.Semaphore(int(os.getenv("TELEGRAPH_CONCURRENCY", "1")))
+FEST_JOB_MULT = 100_000
 
 # Maximum size (in bytes) for downloaded files
 MAX_DOWNLOAD_SIZE = int(os.getenv("MAX_DOWNLOAD_SIZE", str(5 * 1024 * 1024)))
@@ -1714,6 +1715,29 @@ async def build_festivals_nav_block(
             html = cached_html
         changed = False
     return html, lines, changed
+
+
+async def rebuild_fest_nav_if_changed(db: Database) -> bool:
+    """Rebuild festival navigation and enqueue update jobs if changed.
+
+    Returns ``True`` if navigation hash changed and jobs were scheduled.
+    """
+
+    _, _, changed = await build_festivals_nav_block(db)
+    if not changed:
+        return False
+    async with db.get_session() as session:
+        fids = (await session.execute(select(Festival.id))).scalars().all()
+    nav_hash = await get_setting_value(db, "fest_nav_hash") or "0"
+    suffix = int(nav_hash[:4], 16)
+    for fid in fids:
+        eid = -(fid * FEST_JOB_MULT + suffix)
+        await enqueue_job(db, eid, JobTask.fest_nav_tg)
+        await enqueue_job(db, eid, JobTask.fest_nav_vk)
+    logging.info(
+        "scheduled festival navigation update", extra={"count": len(fids)}
+    )
+    return True
 
 
 ICS_LABEL = "Добавить в календарь на телефоне (ICS)"
@@ -4459,6 +4483,8 @@ TASK_LABELS = {
     "week_pages": "Неделя",
     "weekend_pages": "Выходные",
     "festival_pages": "Фестиваль",
+    "fest_nav_tg": "Навигация TG",
+    "fest_nav_vk": "Навигация VK",
 }
 
 
@@ -5008,13 +5034,7 @@ async def update_festival_pages_for_event(event_id: int, db: Database, bot: Bot 
         return
     await sync_festival_page(db, ev.festival)
     await sync_festival_vk_post(db, ev.festival, bot)
-    nav_html, nav_lines, changed = await build_festivals_nav_block(db)
-    if changed:
-        asyncio.create_task(
-            refresh_nav_on_all_festivals(
-                db, bot, nav_html=nav_html, nav_lines=nav_lines
-            )
-        )
+    await rebuild_fest_nav_if_changed(db)
 
 
 async def publish_event_progress(event: Event, db: Database, bot: Bot, chat_id: int) -> None:
@@ -5106,6 +5126,67 @@ async def job_sync_vk_source_post(event_id: int, db: Database, bot: Bot | None) 
             await session.commit()
 
 
+async def update_festival_tg_nav(event_id: int, db: Database, bot: Bot | None) -> bool:
+    fid = (-event_id) // FEST_JOB_MULT if event_id < 0 else event_id
+    async with db.get_session() as session:
+        fest = await session.get(Festival, fid)
+    if not fest or not fest.telegraph_path:
+        return False
+    token = get_telegraph_token()
+    if not token:
+        logging.error("Telegraph token unavailable")
+        return False
+    tg = Telegraph(access_token=token, domain="telegra.ph")
+    nav_html = await get_setting_value(db, "fest_nav_html")
+    if nav_html is None:
+        nav_html, _, _ = await build_festivals_nav_block(db)
+    path = fest.telegraph_path
+    try:
+        page = await telegraph_call(tg.get_page, path, return_html=True)
+        html_content = page.get("content") or page.get("content_html") or ""
+        title = page.get("title") or fest.full_name or fest.name
+        m = re.search(r"<!--NAV_HASH:([0-9a-f]+)-->", html_content)
+        old_hash = m.group(1) if m else ""
+        new_html, changed = apply_festival_nav(html_content, nav_html)
+        m2 = re.search(r"<!--NAV_HASH:([0-9a-f]+)-->", new_html)
+        new_hash = m2.group(1) if m2 else ""
+        if changed:
+            await telegraph_call(tg.edit_page, path, title=title, html_content=new_html)
+            logging.info(
+                "updated festival page %s in Telegraph", fest.name,
+                extra={"action": "edited", "target": "tg", "path": path, "nav_old": old_hash, "nav_new": new_hash},
+            )
+        else:
+            logging.info(
+                "festival page %s navigation unchanged", fest.name,
+                extra={"action": "skipped_nochange", "target": "tg", "path": path, "nav_old": old_hash, "nav_new": new_hash},
+            )
+        return changed
+    except Exception as e:
+        logging.error(
+            "Failed to update festival page %s: %s", fest.name, e,
+            extra={"action": "error", "target": "tg", "path": path},
+        )
+        raise
+
+
+async def update_festival_vk_nav(event_id: int, db: Database, bot: Bot | None) -> bool:
+    fid = (-event_id) // FEST_JOB_MULT if event_id < 0 else event_id
+    async with db.get_session() as session:
+        fest = await session.get(Festival, fid)
+    if not fest:
+        return False
+    try:
+        res = await sync_festival_vk_post(db, fest.name, bot, nav_only=True)
+        return bool(res)
+    except Exception as e:
+        logging.error(
+            "Failed to update festival VK post %s: %s", fest.name, e,
+            extra={"action": "error", "target": "vk", "fest": fest.name},
+        )
+        raise
+
+
 JOB_HANDLERS = {
     "telegraph_build": update_telegraph_event_page,
     "vk_sync": job_sync_vk_source_post,
@@ -5113,6 +5194,8 @@ JOB_HANDLERS = {
     "week_pages": update_week_pages_for,
     "weekend_pages": update_weekend_pages_for,
     "festival_pages": update_festival_pages_for_event,
+    "fest_nav_tg": update_festival_tg_nav,
+    "fest_nav_vk": update_festival_vk_nav,
 }
 
 
@@ -7235,20 +7318,20 @@ async def sync_festival_vk_post(
                     "festival post %s navigation unchanged", name,
                     extra={"action": "skipped_nochange", "target": "vk", "url": fest.vk_post_url},
                 )
-                return
+                return False
             res_edit = await _try_edit(message, None)
             if res_edit is True:
                 logging.info(
                     "updated festival post %s on VK", name,
                     extra={"action": "edited", "target": "vk", "url": fest.vk_post_url},
                 )
-                return
+                return True
             if res_edit is None:
                 logging.error(
                     "VK post error for festival %s", name,
                     extra={"action": "error", "target": "vk", "url": fest.vk_post_url},
                 )
-                return
+                raise RuntimeError("vk edit failed")
             can_edit = False  # editing not possible, create new post
 
     message = await build_festival_vk_message(db, fest)
@@ -7268,13 +7351,13 @@ async def sync_festival_vk_post(
                 "updated festival post %s on VK", name,
                 extra={"action": "edited", "target": "vk", "url": fest.vk_post_url},
             )
-            return
+            return True
         if res_edit is None:
             logging.error(
                 "VK post error for festival %s", name,
                 extra={"action": "error", "target": "vk", "url": fest.vk_post_url},
             )
-            return
+            raise RuntimeError("vk edit failed")
 
     url = await _try_post(message, attachments)
     if url:
@@ -7288,11 +7371,12 @@ async def sync_festival_vk_post(
             "created festival post %s: %s", name, url,
             extra={"action": "edited", "target": "vk", "url": url},
         )
-    else:
-        logging.error(
-            "VK post error for festival %s", name,
-            extra={"action": "error", "target": "vk", "url": fest.vk_post_url},
-        )
+        return True
+    logging.error(
+        "VK post error for festival %s", name,
+        extra={"action": "error", "target": "vk", "url": fest.vk_post_url},
+    )
+    raise RuntimeError("vk post failed")
 
 
 async def send_festival_poll(
