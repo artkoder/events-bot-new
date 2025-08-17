@@ -6902,6 +6902,66 @@ async def test_festival_vk_message_lists_upcoming(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_refresh_nav_triggered_on_new_festival(monkeypatch, tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    next_month_date = (date.fromisoformat(FUTURE_DATE) + timedelta(days=31)).isoformat()
+
+    async with db.get_session() as session:
+        fest1 = main.Festival(name="Jazz", vk_post_url="http://vk1")
+        fest2 = main.Festival(name="Rock", vk_post_url="http://vk2")
+        session.add(fest1)
+        session.add(fest2)
+        session.add(
+            Event(
+                title="A",
+                description="d",
+                source_text="s",
+                date=FUTURE_DATE,
+                time="18:00",
+                location_name="Hall",
+                festival="Jazz",
+            )
+        )
+        ev2 = Event(
+            title="B",
+            description="d",
+            source_text="s",
+            date=next_month_date,
+            time="18:00",
+            location_name="Park",
+            festival="Rock",
+        )
+        session.add(ev2)
+        await session.commit()
+        eid2 = ev2.id
+
+    async def fake_sync_page(db_obj, name):
+        return None
+
+    async def fake_sync_vk(db_obj, name, bot=None, nav_only=False, nav_lines=None):
+        return None
+
+    called: dict[str, list[str]] = {}
+    done = asyncio.Event()
+
+    async def fake_refresh(db_obj, bot=None, nav_html=None, nav_lines=None):
+        called["nav_lines"] = nav_lines or []
+        done.set()
+
+    monkeypatch.setattr(main, "sync_festival_page", fake_sync_page)
+    monkeypatch.setattr(main, "sync_festival_vk_post", fake_sync_vk)
+    monkeypatch.setattr(main, "refresh_nav_on_all_festivals", fake_refresh)
+
+    await main.update_festival_pages_for_event(eid2, db, bot=None)
+    await asyncio.wait_for(done.wait(), 1.0)
+    lines = called["nav_lines"]
+    assert any("http://vk1" in line for line in lines)
+    assert any("http://vk2" in line for line in lines)
+
+
+@pytest.mark.asyncio
 async def test_edit_vk_post_preserves_photos(monkeypatch):
     captured = {}
 
