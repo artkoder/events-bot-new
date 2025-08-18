@@ -273,6 +273,16 @@ VK_FALLBACK_ON_CAPTCHA = os.getenv("VK_FALLBACK_ON_CAPTCHA", "false").lower() ==
 if VK_FALLBACK_ON_CAPTCHA:
     VK_FALLBACK_CODES.add(14)
 
+# scheduling options for weekly VK post edits
+WEEK_EDIT_MODE = os.getenv("WEEK_EDIT_MODE", "deferred")
+WEEK_EDIT_CRON = os.getenv("WEEK_EDIT_CRON", "02:30")
+
+# captcha handling configuration
+CAPTCHA_WAIT_S = int(os.getenv("CAPTCHA_WAIT_S", "600"))
+CAPTCHA_MAX_ATTEMPTS = int(os.getenv("CAPTCHA_MAX_ATTEMPTS", "2"))
+CAPTCHA_NIGHT_RANGE = os.getenv("CAPTCHA_NIGHT_RANGE", "00:00-07:00")
+CAPTCHA_RETRY_AT = os.getenv("CAPTCHA_RETRY_AT", "08:10")
+
 # metrics counters
 vk_fallback_group_to_user_total = 0
 ICS_CONTENT_TYPE = "text/calendar; charset=utf-8"
