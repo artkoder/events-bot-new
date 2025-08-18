@@ -905,9 +905,18 @@ def _vk_user_token() -> str | None:
 class VKAPIError(Exception):
     """Exception raised for VK API errors."""
 
-    def __init__(self, code: int | None, message: str):
+    def __init__(
+        self,
+        code: int | None,
+        message: str,
+        captcha_sid: str | None = None,
+        captcha_img: str | None = None,
+    ) -> None:
         self.code = code
         self.message = message
+        # additional info for captcha challenge
+        self.captcha_sid = captcha_sid
+        self.captcha_img = captcha_img
         super().__init__(message)
 
 
@@ -992,9 +1001,12 @@ async def _vk_api(
             code = err.get("error_code")
             if code == 14:
                 _vk_captcha_needed = True
+                captcha_sid = err.get("captcha_sid")
+                captcha_img = err.get("captcha_img")
                 if db and bot:
                     await notify_superadmin(db, bot, "VK captcha needed")
-                raise VKAPIError(code, msg)
+                # surface captcha details to caller
+                raise VKAPIError(code, msg, captcha_sid, captcha_img)
             if kind == "user" and code in {5, 27}:
                 global _vk_user_token_bad
                 if _vk_user_token_bad != token:
@@ -1033,11 +1045,21 @@ async def _vk_api(
                     )
                     last_err = err
                     continue
-                raise VKAPIError(code, err.get("error_msg", ""))
+                raise VKAPIError(
+                    code,
+                    err.get("error_msg", ""),
+                    err.get("captcha_sid"),
+                    err.get("captcha_img"),
+                )
         last_err = err
         break
     if last_err:
-        raise VKAPIError(last_err.get("error_code"), last_err.get("error_msg", ""))
+        raise VKAPIError(
+            last_err.get("error_code"),
+            last_err.get("error_msg", ""),
+            last_err.get("captcha_sid"),
+            last_err.get("captcha_img"),
+        )
     raise VKAPIError(None, "VK token missing")
 
 
