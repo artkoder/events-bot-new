@@ -261,11 +261,20 @@ SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "events-ics")
 VK_TOKEN = os.getenv("VK_TOKEN")
 VK_USER_TOKEN = os.getenv("VK_USER_TOKEN")
 VK_AFISHA_GROUP_ID = os.getenv("VK_AFISHA_GROUP_ID")
-VK_ACTOR = os.getenv("VK_ACTOR", "user")
-VK_ACTOR_FALLBACK_CODES = {
-    int(x) for x in os.getenv("VK_ACTOR_AUTO_ERRORS", "5,15,200,213,219").split(",") if x
+
+# which actor token to use for VK API calls
+VK_ACTOR_MODE = os.getenv("VK_ACTOR_MODE", "auto")
+
+# error codes triggering fallback from group to user token
+VK_FALLBACK_CODES = {
+    int(x) for x in os.getenv("VK_FALLBACK_CODES", "15,200,203").split(",") if x
 }
-actor_fallbacks_total = 0
+VK_FALLBACK_ON_CAPTCHA = os.getenv("VK_FALLBACK_ON_CAPTCHA", "false").lower() == "true"
+if VK_FALLBACK_ON_CAPTCHA:
+    VK_FALLBACK_CODES.add(14)
+
+# metrics counters
+vk_fallback_group_to_user_total = 0
 ICS_CONTENT_TYPE = "text/calendar; charset=utf-8"
 ICS_CONTENT_DISP_TEMPLATE = 'inline; filename="{name}"'
 ICS_CALNAME = "kenigevents"
@@ -901,7 +910,7 @@ async def _vk_api(
     else:
         user_token = _vk_user_token()
         group_token = VK_TOKEN
-        mode = VK_ACTOR
+        mode = VK_ACTOR_MODE
         if mode == "group":
             if group_token:
                 tokens.append(("group", group_token))
@@ -993,11 +1002,11 @@ async def _vk_api(
                 idx == 0
                 and len(tokens) > 1
                 and kind == "group"
-                and VK_ACTOR == "auto"
+                and VK_ACTOR_MODE == "auto"
             ):
-                if code in VK_ACTOR_FALLBACK_CODES:
-                    global actor_fallbacks_total
-                    actor_fallbacks_total += 1
+                if code in VK_FALLBACK_CODES:
+                    global vk_fallback_group_to_user_total
+                    vk_fallback_group_to_user_total += 1
                     logging.info(
                         "vk actor fallback group->user code=%s method=%s",
                         code,
