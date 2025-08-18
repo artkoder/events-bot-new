@@ -4280,6 +4280,28 @@ async def test_update_event_description_error_does_not_stop_sync(tmp_path: Path,
 
 
 @pytest.mark.asyncio
+async def test_add_events_from_text_requires_time(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async def fake_parse(text: str, source_channel: str | None = None, festival_names=None):
+        return [
+            {
+                "title": "T",
+                "short_description": "d",
+                "date": "2025-08-09",
+                "time": "",
+                "location_name": "Hall",
+            }
+        ]
+
+    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
+
+    results = await main.add_events_from_text(db, "t", None, None, None)
+    assert results == []
+
+
+@pytest.mark.asyncio
 async def test_add_events_from_text_skips_description_update_for_new_event(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
@@ -4588,6 +4610,8 @@ async def test_exhibition_auto_year_end(tmp_path: Path, monkeypatch):
                 "short_description": "d",
                 "location_name": "Hall",
                 "event_type": "выставка",
+                "date": "2025-08-09",
+                "time": "14:00",
             }
         ]
 
@@ -4597,27 +4621,13 @@ async def test_exhibition_auto_year_end(tmp_path: Path, monkeypatch):
     monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
     monkeypatch.setattr("main.create_source_page", fake_create)
 
-    class FakeDate(date):
-        @classmethod
-        def today(cls):
-            return date(2025, 7, 15)
-
-    class FakeDatetime(datetime):
-        @classmethod
-        def now(cls, tz=None):
-            return datetime(2025, 7, 15, 12, 0, tzinfo=tz)
-
-    monkeypatch.setattr(main, "date", FakeDate)
-    monkeypatch.setattr(main, "datetime", FakeDatetime)
-
     results = await main.add_events_from_text(db, "text", None, None, None)
     assert results
     ev = results[0][0]
-    today = FakeDate.today()
-    assert ev.date == today.isoformat()
-    assert ev.end_date == date(today.year, 12, 31).isoformat()
+    assert ev.date == "2025-08-09"
+    assert ev.end_date == date(2025, 12, 31).isoformat()
 
-    _, content, _ = await main.build_month_page_content(db, today.strftime("%Y-%m"))
+    _, content, _ = await main.build_month_page_content(db, "2025-08")
     found = False
     exh_section = False
     for n in content:
