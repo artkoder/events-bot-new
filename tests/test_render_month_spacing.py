@@ -25,6 +25,17 @@ def test_render_month_day_section_has_blank_lines():
     assert "<p>\u200B</p><h4>" in html
 
 
+def test_render_month_day_section_weekend_headers_adjacent():
+    events = [
+        make_event("A", "2025-01-18", "12:00"),
+    ]
+    html = main.render_month_day_section(date(2025, 1, 18), events)
+    assert (
+        "<h3>🟥🟥🟥 суббота 🟥🟥🟥</h3><h3>🟥🟥🟥 18 января 🟥🟥🟥</h3><p>\u200B</p>"
+        in html
+    )
+
+
 def test_telegraph_br_no_span():
     html = nodes_to_html(main.telegraph_br())
     assert html == "<p>\u200B</p>"
@@ -40,3 +51,19 @@ def test_event_to_nodes_ends_with_blank_paragraph():
     nodes = main.event_to_nodes(event)
     assert nodes[-1] == main.telegraph_br()[0]
     assert nodes_to_html(nodes).endswith("<p>\u200B</p>")
+
+
+def test_add_day_sections_weekend_headers_adjacent():
+    d = date(2025, 1, 18)
+    events = [make_event("A", d.isoformat(), "12:00")]
+    nodes = []
+
+    def add_many(items):
+        nodes.extend(items)
+
+    main.add_day_sections([d], {d: events}, {}, add_many)
+    html = nodes_to_html(nodes)
+    assert (
+        "<h3>🟥🟥🟥 суббота 🟥🟥🟥</h3><h3>🟥🟥🟥 18 января 🟥🟥🟥</h3><p>\u200B</p>"
+        in html
+    )

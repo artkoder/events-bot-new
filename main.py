@@ -5952,10 +5952,8 @@ def add_day_sections(
         add_many(telegraph_br())
         if d.weekday() == 5:
             add_many([{ "tag": "h3", "children": ["🟥🟥🟥 суббота 🟥🟥🟥"] }])
-            add_many(telegraph_br())
         elif d.weekday() == 6:
             add_many([{ "tag": "h3", "children": ["🟥🟥 воскресенье 🟥🟥"] }])
-            add_many(telegraph_br())
         add_many([{ "tag": "h3", "children": [f"🟥🟥🟥 {format_day_pretty(d)} 🟥🟥🟥"] }])
         add_many(telegraph_br())
         for ev in events:
@@ -5973,10 +5971,8 @@ def render_month_day_section(d: date, events: list[Event]) -> str:
     nodes.extend(telegraph_br())
     if d.weekday() == 5:
         nodes.append({"tag": "h3", "children": ["🟥🟥🟥 суббота 🟥🟥🟥"]})
-        nodes.extend(telegraph_br())
     elif d.weekday() == 6:
         nodes.append({"tag": "h3", "children": ["🟥🟥 воскресенье 🟥🟥"]})
-        nodes.extend(telegraph_br())
     nodes.append({"tag": "h3", "children": [f"🟥🟥🟥 {format_day_pretty(d)} 🟥🟥🟥"]})
     nodes.extend(telegraph_br())
     for ev in events:
