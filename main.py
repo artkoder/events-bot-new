@@ -3993,14 +3993,32 @@ async def add_events_from_text(
         addr = data.get("location_address")
         city = data.get("city")
         addr = strip_city_from_address(addr, city)
+        title = (data.get("title") or "").strip()
+        time_str = (data.get("time") or "").strip()
+        location_name = (data.get("location_name") or "").strip()
+        if not all([title, date_str, time_str, location_name]):
+            missing = [
+                name
+                for name, value in (
+                    ("title", title),
+                    ("date", date_str),
+                    ("time", time_str),
+                    ("location_name", location_name),
+                )
+                if not value
+            ]
+            logging.warning(
+                "Skipping event due to missing fields: %s", ", ".join(missing)
+            )
+            continue
 
         base_event = Event(
-            title=data.get("title", ""),
+            title=title,
             description=data.get("short_description", ""),
             festival=data.get("festival") or None,
             date=date_str,
-            time=data.get("time", ""),
-            location_name=data.get("location_name", ""),
+            time=time_str,
+            location_name=location_name,
             location_address=addr,
             city=city,
             ticket_price_min=data.get("ticket_price_min"),
