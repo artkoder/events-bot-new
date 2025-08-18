@@ -52,14 +52,20 @@ browse upcoming announcements. The command accepts dates like `2025-07-10`,
   # Weekly post edit scheduling
   export WEEK_EDIT_MODE=deferred  # immediate|deferred
   export WEEK_EDIT_CRON=02:30     # HH:MM local time
+  # Optional: fine-grained weekly edit control
+  export VK_WEEK_EDIT_ENABLED=false
+  export VK_WEEK_EDIT_SCHEDULE=02:30
+  export VK_WEEK_EDIT_TZ=UTC
 
   # Captcha handling parameters
   export CAPTCHA_WAIT_S=600
   export CAPTCHA_MAX_ATTEMPTS=2
   export CAPTCHA_NIGHT_RANGE=00:00-07:00
   export CAPTCHA_RETRY_AT=08:10
+  export VK_CAPTCHA_TTL_MIN=5
+  export VK_CAPTCHA_QUIET=00:00-07:00
  python main.py
-   ```
+  ```
 
 ## Deployment on Fly.io
 
