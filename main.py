@@ -277,11 +277,20 @@ if VK_FALLBACK_ON_CAPTCHA:
 WEEK_EDIT_MODE = os.getenv("WEEK_EDIT_MODE", "deferred")
 WEEK_EDIT_CRON = os.getenv("WEEK_EDIT_CRON", "02:30")
 
+# new scheduling and captcha parameters
+VK_WEEK_EDIT_ENABLED = (
+    os.getenv("VK_WEEK_EDIT_ENABLED", "false").lower() == "true"
+)
+VK_WEEK_EDIT_SCHEDULE = os.getenv("VK_WEEK_EDIT_SCHEDULE", "02:30")
+VK_WEEK_EDIT_TZ = os.getenv("VK_WEEK_EDIT_TZ", "UTC")
+
 # captcha handling configuration
 CAPTCHA_WAIT_S = int(os.getenv("CAPTCHA_WAIT_S", "600"))
 CAPTCHA_MAX_ATTEMPTS = int(os.getenv("CAPTCHA_MAX_ATTEMPTS", "2"))
 CAPTCHA_NIGHT_RANGE = os.getenv("CAPTCHA_NIGHT_RANGE", "00:00-07:00")
 CAPTCHA_RETRY_AT = os.getenv("CAPTCHA_RETRY_AT", "08:10")
+VK_CAPTCHA_TTL_MIN = int(os.getenv("VK_CAPTCHA_TTL_MIN", "5"))
+VK_CAPTCHA_QUIET = os.getenv("VK_CAPTCHA_QUIET", "00:00-07:00")
 
 # metrics counters
 vk_fallback_group_to_user_total = 0
