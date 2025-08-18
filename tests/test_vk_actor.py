@@ -10,12 +10,12 @@ class DummyResp:
 @pytest.mark.asyncio
 async def test_vk_actor_auto_fallback(monkeypatch):
     monkeypatch.setattr(main, "_vk_captcha_needed", False)
-    monkeypatch.setattr(main, "VK_ACTOR", "auto")
+    monkeypatch.setattr(main, "VK_ACTOR_MODE", "auto")
     monkeypatch.setattr(main, "VK_TOKEN", "g")
     monkeypatch.setenv("VK_USER_TOKEN", "u")
     monkeypatch.setattr(main, "_vk_user_token_bad", None)
     monkeypatch.setattr(main, "BACKOFF_DELAYS", [0])
-    main.actor_fallbacks_total = 0
+    main.vk_fallback_group_to_user_total = 0
 
     calls = []
     async def fake_http_call(name, method, url, timeout, data, **kwargs):
@@ -28,17 +28,17 @@ async def test_vk_actor_auto_fallback(monkeypatch):
     data = await main._vk_api("wall.post", {}, token=None, db=None, bot=None)
     assert data["response"] == "ok"
     assert calls == ["g", "u"]
-    assert main.actor_fallbacks_total == 1
+    assert main.vk_fallback_group_to_user_total == 1
 
 @pytest.mark.asyncio
 async def test_vk_actor_auto_no_fallback(monkeypatch):
     monkeypatch.setattr(main, "_vk_captcha_needed", False)
-    monkeypatch.setattr(main, "VK_ACTOR", "auto")
+    monkeypatch.setattr(main, "VK_ACTOR_MODE", "auto")
     monkeypatch.setattr(main, "VK_TOKEN", "g")
     monkeypatch.setenv("VK_USER_TOKEN", "u")
     monkeypatch.setattr(main, "_vk_user_token_bad", None)
     monkeypatch.setattr(main, "BACKOFF_DELAYS", [0])
-    main.actor_fallbacks_total = 0
+    main.vk_fallback_group_to_user_total = 0
 
     calls = []
     async def fake_http_call(name, method, url, timeout, data, **kwargs):
@@ -50,4 +50,4 @@ async def test_vk_actor_auto_no_fallback(monkeypatch):
         await main._vk_api("wall.post", {}, db=None, bot=None)
     assert e.value.code == 3
     assert calls == ["g"]
-    assert main.actor_fallbacks_total == 0
+    assert main.vk_fallback_group_to_user_total == 0
