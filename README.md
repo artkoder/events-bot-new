@@ -44,6 +44,20 @@ browse upcoming announcements. The command accepts dates like `2025-07-10`,
   # Optional: group token used as a fallback
   export VK_TOKEN=vk_group_token
   # Sending images to VK is disabled by default. Use /vkphotos to enable it.
+  # Optional behaviour tuning
+  export VK_ACTOR_MODE=auto  # group|user|auto
+  export VK_FALLBACK_CODES="15,200,203"  # VK error codes for fallback
+  export VK_FALLBACK_ON_CAPTCHA=false
+
+  # Weekly post edit scheduling
+  export WEEK_EDIT_MODE=deferred  # immediate|deferred
+  export WEEK_EDIT_CRON=02:30     # HH:MM local time
+
+  # Captcha handling parameters
+  export CAPTCHA_WAIT_S=600
+  export CAPTCHA_MAX_ATTEMPTS=2
+  export CAPTCHA_NIGHT_RANGE=00:00-07:00
+  export CAPTCHA_RETRY_AT=08:10
  python main.py
    ```
 
