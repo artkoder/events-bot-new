@@ -261,6 +261,11 @@ SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "events-ics")
 VK_TOKEN = os.getenv("VK_TOKEN")
 VK_USER_TOKEN = os.getenv("VK_USER_TOKEN")
 VK_AFISHA_GROUP_ID = os.getenv("VK_AFISHA_GROUP_ID")
+VK_ACTOR = os.getenv("VK_ACTOR", "user")
+VK_ACTOR_FALLBACK_CODES = {
+    int(x) for x in os.getenv("VK_ACTOR_AUTO_ERRORS", "5,15,200,213,219").split(",") if x
+}
+actor_fallbacks_total = 0
 ICS_CONTENT_TYPE = "text/calendar; charset=utf-8"
 ICS_CONTENT_DISP_TEMPLATE = 'inline; filename="{name}"'
 ICS_CALNAME = "kenigevents"
@@ -895,15 +900,37 @@ async def _vk_api(
         tokens.append((token_kind, token))
     else:
         user_token = _vk_user_token()
-        if user_token:
-            tokens.append(("user", user_token))
-        if VK_TOKEN:
-            tokens.append(("group", VK_TOKEN))
+        group_token = VK_TOKEN
+        mode = VK_ACTOR
+        if mode == "group":
+            if group_token:
+                tokens.append(("group", group_token))
+        elif mode == "user":
+            if user_token:
+                tokens.append(("user", user_token))
+        elif mode == "auto":
+            auto_methods = ("wall.post", "wall.edit", "wall.getById")
+            if any(method.startswith(m) for m in auto_methods) or method.startswith("photos."):
+                if group_token:
+                    tokens.append(("group", group_token))
+                if user_token:
+                    tokens.append(("user", user_token))
+            else:
+                if user_token:
+                    tokens.append(("user", user_token))
+                if group_token:
+                    tokens.append(("group", group_token))
+        else:
+            if user_token:
+                tokens.append(("user", user_token))
+            if group_token:
+                tokens.append(("group", group_token))
     last_err: dict | None = None
     session = get_vk_session()
-    for kind, token in tokens:
+    for idx, (kind, token) in enumerate(tokens):
         params["access_token"] = token
         params["v"] = "5.131"
+        logging.info("vk.actor=%s method=%s", kind, method)
         logging.info(
             "calling VK API %s using %s token %s", method, kind, redact_token(token)
         )
@@ -960,8 +987,27 @@ async def _vk_api(
                 )
                 break
             await asyncio.sleep(delay)
+        if err:
+            code = err.get("error_code")
+            if (
+                idx == 0
+                and len(tokens) > 1
+                and kind == "group"
+                and VK_ACTOR == "auto"
+            ):
+                if code in VK_ACTOR_FALLBACK_CODES:
+                    global actor_fallbacks_total
+                    actor_fallbacks_total += 1
+                    logging.info(
+                        "vk actor fallback group->user code=%s method=%s",
+                        code,
+                        method,
+                    )
+                    last_err = err
+                    continue
+                raise VKAPIError(code, err.get("error_msg", ""))
         last_err = err
-        continue
+        break
     if last_err:
         raise VKAPIError(last_err.get("error_code"), last_err.get("error_msg", ""))
     raise VKAPIError(None, "VK token missing")
