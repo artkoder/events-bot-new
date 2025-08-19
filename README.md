@@ -188,6 +188,15 @@ order:
 This makes job execution idempotent and prevents duplicate rebuilds when many
 events are added at once.
 
+Example log extract for a batch of events:
+
+```
+INFO TASK_START task=festival_pages coalesce_key=festival_pages:42
+INFO TASK_START task=month_pages coalesce_key=month_pages:2025-08 depends_on=festival_pages:42
+INFO TASK_START task=vk_week_post coalesce_key=vk_week_post:2025-34 depends_on=month_pages:2025-08
+INFO TASK_DONE task=vk_week_post status=done changed=True
+```
+
 ## Batch progress
 
 A batch of events shares a single progress message. Event processing and each
@@ -210,8 +219,20 @@ VK jobs, sends the captcha image to the super admin and waits for input. Jobs
 resume automatically after the correct code is supplied or fail after a timeout
 if the captcha is ignored.
 
+When a post fails with `method is unavailable with group auth` (or any error
+code listed in `VK_FALLBACK_CODES`) the bot automatically retries using the
+user token before giving up. The progress card shows a temporary pause icon
+`⏸` while waiting for captcha input and resolves to `✅` or `❌` afterwards.
+
 ## Festival links on month pages
 
 When a festival already has a Telegraph page (`telegraph_url` is set) the month
 page renders the festival name as a clickable link.
+
+## Link formatting
+
+Telegraph pages and "source" pages use `linkify_for_telegraph` to convert
+plain URLs and patterns like `Name (https://example.com)` into clickable
+anchors. VK posts expose the original URLs in parentheses using
+`expose_links_for_vk` so the full address remains visible.
 
