@@ -110,6 +110,8 @@ from markup import (
     PERM_END,
     FEST_NAV_START,
     FEST_NAV_END,
+    linkify_for_telegraph,
+    expose_links_for_vk,
 )
 from sections import replace_between_markers, content_hash
 from db import Database
@@ -4014,7 +4016,7 @@ async def add_events_from_text(
     catbox_urls, tg_urls, catbox_msg_global = await upload_images(images)
     links_iter = iter(extract_links_from_html(html_text) if html_text else [])
     source_text_clean = re.sub(
-        r"<[^>]+>", "", _vk_expose_links(html_text or text)
+        r"<[^>]+>", "", expose_links_for_vk(html_text or text)
     )
 
     if festival_info:
@@ -4407,7 +4409,7 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
     html_text = message.html_text or message.caption_html
     if html_text and html_text.startswith("/addevent_raw"):
         html_text = html_text[len("/addevent_raw") :].lstrip()
-    source_clean = re.sub(r"<[^>]+>", "", _vk_expose_links(html_text or parts[1]))
+    source_clean = re.sub(r"<[^>]+>", "", expose_links_for_vk(html_text or parts[1]))
 
     event = Event(
         title=title,
@@ -5445,6 +5447,7 @@ def next_month(month: str) -> str:
 @lru_cache(maxsize=8)
 def md_to_html(text: str) -> str:
     html_text = simple_md_to_html(text)
+    html_text = linkify_for_telegraph(html_text)
     html_text = re.sub(r"&lt;/?tg-emoji.*?&gt;", "", html_text)
     if not re.match(r"^<(?:h\d|p|ul|ol|blockquote|pre|table)", html_text):
         html_text = f"<p>{html_text}</p>"
@@ -7962,23 +7965,6 @@ def _vk_owner_and_post_id(url: str) -> tuple[str, str] | None:
     return m.group(1), m.group(2)
 
 
-def _vk_expose_links(text: str) -> str:
-    def repl_html(m: re.Match) -> str:
-        href, label = m.group(1), m.group(2)
-        return f"{label} ({href})"
-
-    def repl_md(m: re.Match) -> str:
-        label, href = m.group(1), m.group(2)
-        return f"{label} ({href})"
-
-    text = re.sub(
-        r"<a[^>]+href=['\"]([^'\"]+)['\"][^>]*>(.*?)</a>",
-        repl_html,
-        text,
-        flags=re.IGNORECASE | re.DOTALL,
-    )
-    text = re.sub(r"\[([^\]]+)\]\((https?://[^)]+)\)", repl_md, text)
-    return text
 
 
 def build_vk_source_header(event: Event, festival: Festival | None = None) -> list[str]:
@@ -8066,7 +8052,7 @@ def build_vk_source_message(
 ) -> str:
     """Build detailed VK post for an event including original source text."""
 
-    text = _vk_expose_links(text)
+    text = expose_links_for_vk(text)
     lines = build_vk_source_header(event, festival)
     lines.extend(text.strip().splitlines())
     lines.append(VK_BLANK_LINE)
@@ -8139,7 +8125,7 @@ async def sync_vk_source_post(
                 lines.pop()
             texts.append("\n".join(lines).strip())
 
-        text_clean = _vk_expose_links(text).strip()
+        text_clean = expose_links_for_vk(text).strip()
         if texts:
             if append_text:
                 texts.append(text_clean)
