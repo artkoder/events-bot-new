@@ -494,6 +494,8 @@ VK_PHOTOS_ENABLED: bool = False
 _supabase_client: "Client | None" = None  # type: ignore[name-defined]
 _vk_user_token_bad: str | None = None
 _vk_captcha_needed: bool = False
+_vk_captcha_sid: str | None = None
+_vk_captcha_img: str | None = None
 _shared_session: ClientSession | None = None
 # backward-compatible aliases used in tests
 _http_session: ClientSession | None = None
@@ -929,9 +931,9 @@ async def _vk_api(
     token_kind: str = "group",
 ) -> dict:
     """Call VK API with token fallback."""
-    global _vk_captcha_needed
+    global _vk_captcha_needed, _vk_captcha_sid, _vk_captcha_img
     if _vk_captcha_needed:
-        raise VKAPIError(14, "Captcha needed")
+        raise VKAPIError(14, "Captcha needed", _vk_captcha_sid, _vk_captcha_img)
     tokens: list[tuple[str, str]] = []
     if token:
         tokens.append((token_kind, token))
@@ -1001,12 +1003,12 @@ async def _vk_api(
             code = err.get("error_code")
             if code == 14:
                 _vk_captcha_needed = True
-                captcha_sid = err.get("captcha_sid")
-                captcha_img = err.get("captcha_img")
+                _vk_captcha_sid = err.get("captcha_sid")
+                _vk_captcha_img = err.get("captcha_img")
                 if db and bot:
                     await notify_superadmin(db, bot, "VK captcha needed")
                 # surface captcha details to caller
-                raise VKAPIError(code, msg, captcha_sid, captcha_img)
+                raise VKAPIError(code, msg, _vk_captcha_sid, _vk_captcha_img)
             if kind == "user" and code in {5, 27}:
                 global _vk_user_token_bad
                 if _vk_user_token_bad != token:
