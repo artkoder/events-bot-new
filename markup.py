@@ -7,6 +7,9 @@ MD_ITALIC = re.compile(r'(?<!\w)(\*|_)(.+?)\1(?!\w)', re.S)
 MD_LINK   = re.compile(r'\[([^\]]+?)\]\((https?://[^)]+?)\)')
 MD_HEADER = re.compile(r'^(#{1,6})\s+(.+)$', re.M)
 
+_BARE_LINK_RE = re.compile(r'(?<!href=["\'])(https?://[^\s<>)]+)')
+_TEXT_LINK_RE = re.compile(r'([^<\[]+?)\s*\((https?://[^)]+)\)')
+
 def simple_md_to_html(text: str) -> str:
     """Конвертирует небольшой подмножество markdown → HTML для Telegraph."""
     text = html.escape(text)
@@ -17,6 +20,42 @@ def simple_md_to_html(text: str) -> str:
 
     return text.replace('\n', '<br>')
 
+
+
+def linkify_for_telegraph(text_or_html: str) -> str:
+    """Преобразует голые URL и пары «текст (url)» в кликабельные ссылки."""
+    def repl_text(m: re.Match[str]) -> str:
+        label, href = m.group(1).strip(), m.group(2)
+        return f'<a href="{href}">{label}</a>'
+
+    def repl_bare(m: re.Match[str]) -> str:
+        url = m.group(1)
+        return f'<a href="{url}">{url}</a>'
+
+    text = MD_LINK.sub(lambda m: f'<a href="{m[2]}">{m[1]}</a>', text_or_html)
+    text = _TEXT_LINK_RE.sub(repl_text, text)
+    text = _BARE_LINK_RE.sub(repl_bare, text)
+    return text
+
+
+def expose_links_for_vk(text_or_html: str) -> str:
+    """Преобразует HTML/markdown ссылки в формат «текст (url)» для VK."""
+    def repl_html(m: re.Match[str]) -> str:
+        href, label = m.group(1), m.group(2)
+        return f"{label} ({href})"
+
+    def repl_md(m: re.Match[str]) -> str:
+        label, href = m.group(1), m.group(2)
+        return f"{label} ({href})"
+
+    text = re.sub(
+        r"<a[^>]+href=['\"]([^'\"]+)['\"][^>]*>(.*?)</a>",
+        repl_html,
+        text_or_html,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    text = re.sub(r"\[([^\]]+)\]\((https?://[^)]+)\)", repl_md, text)
+    return text
 
 def telegraph_br() -> list[dict]:
     """Return a safe blank line for Telegraph rendering."""
