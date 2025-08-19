@@ -3596,6 +3596,20 @@ async def test_create_source_page_footer(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_build_source_page_content_linkify():
+    html, _, _ = await main.build_source_page_content(
+        "T", "See https://example.com", None, None, None, None, None
+    )
+    assert (
+        '<a href="https://example.com">https://example.com</a>' in html
+    )
+    html2, _, _ = await main.build_source_page_content(
+        "T", "", None, "Site (https://example.com)", None, None, None
+    )
+    assert '<a href="https://example.com">Site</a>' in html2
+
+
+@pytest.mark.asyncio
 async def test_update_event_description_from_telegraph(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()

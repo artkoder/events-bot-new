@@ -101,7 +101,8 @@ async def test_add_events_from_text_preserves_links(tmp_path: Path, monkeypatch)
     html = "<a href='http://reg'>Регистрация</a>"
     res = await main.add_events_from_text(db, "Регистрация", None, html, None)
     ev = res[0][0]
-    assert "Регистрация (http://reg)" in ev.source_text
+    assert "http://reg" in ev.source_text
+    assert "(http://reg)" not in ev.source_text
 
 
 @pytest.mark.asyncio

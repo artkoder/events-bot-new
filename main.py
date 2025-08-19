@@ -4015,9 +4015,7 @@ async def add_events_from_text(
         images = [media] if isinstance(media, tuple) else list(media)
     catbox_urls, tg_urls, catbox_msg_global = await upload_images(images)
     links_iter = iter(extract_links_from_html(html_text) if html_text else [])
-    source_text_clean = re.sub(
-        r"<[^>]+>", "", expose_links_for_vk(html_text or text)
-    )
+    source_text_clean = html_text or text
 
     if festival_info:
         fest_name = festival_info.get("name") or festival_info.get("festival")
@@ -4409,7 +4407,7 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
     html_text = message.html_text or message.caption_html
     if html_text and html_text.startswith("/addevent_raw"):
         html_text = html_text[len("/addevent_raw") :].lstrip()
-    source_clean = re.sub(r"<[^>]+>", "", expose_links_for_vk(html_text or parts[1]))
+    source_clean = html_text or parts[1]
 
     event = Event(
         title=title,
@@ -10099,6 +10097,7 @@ async def build_source_page_content(
         cleaned = cleaned.replace(
             "\U0001f193\U0001f193\U0001f193\U0001f193", "Бесплатно"
         )
+        cleaned = linkify_for_telegraph(cleaned)
         html_content += f"<p>{cleaned.replace('\n', '<br/>')}</p>"
     else:
         clean_text = strip_title(text)
@@ -10106,7 +10105,11 @@ async def build_source_page_content(
         clean_text = clean_text.replace(
             "\U0001f193\U0001f193\U0001f193\U0001f193", "Бесплатно"
         )
-        paragraphs = [f"<p>{html.escape(line)}</p>" for line in clean_text.splitlines()]
+        paragraphs = []
+        for line in clean_text.splitlines():
+            escaped = html.escape(line)
+            linked = linkify_for_telegraph(escaped)
+            paragraphs.append(f"<p>{linked}</p>")
         html_content += "".join(paragraphs)
     if db:
         nav_html = await build_month_nav_html(db)
