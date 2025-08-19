@@ -211,6 +211,8 @@ class Database:
                     attempts INTEGER DEFAULT 0,
                     last_error TEXT,
                     last_result TEXT,
+                    coalesce_key TEXT,
+                    depends_on TEXT,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     next_run_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
@@ -218,6 +220,8 @@ class Database:
             )
 
             await _add_column(conn, "joboutbox", "last_result TEXT")
+            await _add_column(conn, "joboutbox", "coalesce_key TEXT")
+            await _add_column(conn, "joboutbox", "depends_on TEXT")
 
             await conn.execute(
                 """

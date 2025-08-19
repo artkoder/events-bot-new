@@ -164,3 +164,54 @@ page.
   ping queries for faster read operations. A read-only context manager is
   available for pure `SELECT` statements.
 
+
+## Batch publishing and coalescing
+
+When multiple events from the same festival are added in quick succession the
+bot groups related aggregation jobs. Each group is identified by a
+`coalesce_key`:
+
+- `festival_pages:{festival_id}`
+- `month_pages:{yyyy-mm}`
+- `week_pages:{yyyy-ww}`
+- `weekend_pages:{yyyy-mm-dd}`
+- `vk_week_post:{yyyy-ww}` and `vk_weekend_post:{yyyy-mm-dd}`
+
+If another task with the same key is scheduled before the first one runs the
+payloads are merged and only a single job executes. Aggregated jobs wait for a
+short debounce window (5–10 seconds) before running and respect the dependency
+order:
+
+`festival_pages` → `month_pages`/`week_pages`/`weekend_pages` →
+`vk_week_post`/`vk_weekend_post`.
+
+This makes job execution idempotent and prevents duplicate rebuilds when many
+events are added at once.
+
+## Batch progress
+
+A batch of events shares a single progress message. Event processing and each
+aggregated page update contribute to the same card:
+
+```
+Events (Telegraph): X/N
+Festival: ✅/❌
+Month: ✅/❌, Week: ✅/❌, Weekend: ✅/❌
+VK week/weekend posts: ✅/❌/⏸
+```
+
+Every item eventually resolves to a final state (success, error or paused) so
+the progress card never ends with a spinner.
+
+## VK captcha handling
+
+VK API errors with code `14` trigger a captcha flow. The bot pauses all pending
+VK jobs, sends the captcha image to the super admin and waits for input. Jobs
+resume automatically after the correct code is supplied or fail after a timeout
+if the captcha is ignored.
+
+## Festival links on month pages
+
+When a festival already has a Telegraph page (`telegraph_url` is set) the month
+page renders the festival name as a clickable link.
+
