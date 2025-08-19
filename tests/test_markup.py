@@ -36,6 +36,9 @@ def test_linkify_plain_url():
 def test_linkify_text_url():
     assert linkify_for_telegraph("Site (https://example.com)") == '<a href="https://example.com">Site</a>'
 
+def test_linkify_markdown_link():
+    assert linkify_for_telegraph("[site](https://example.com)") == '<a href="https://example.com">site</a>'
+
 def test_expose_links_from_html():
     assert expose_links_for_vk('see <a href="https://example.com">site</a>') == 'see site (https://example.com)'
 
