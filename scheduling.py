@@ -13,6 +13,7 @@ class Job:
     payload: List[Any] = field(default_factory=list)
     depends_on: Set[str] = field(default_factory=set)
     dirty: bool = False
+    track: bool = True
 
 
 class BatchProgress:
@@ -78,6 +79,7 @@ class CoalescingScheduler:
                 else payload
             ),
             depends_on=set(depends_on or []),
+            track=track,
         )
         self.jobs[key] = job
         if track and self.progress:
@@ -101,7 +103,8 @@ class CoalescingScheduler:
                     if self.progress:
                         self.progress.finish_job(key, "error")
                     raise
-                self.order.append(key)
+                if job.track:
+                    self.order.append(key)
                 completed.add(key)
                 remaining.remove(key)
             if not progress_made:
