@@ -1008,7 +1008,7 @@ async def _vk_api(
                 _vk_captcha_sid = err.get("captcha_sid")
                 _vk_captcha_img = err.get("captcha_img")
                 if db and bot:
-                    await notify_superadmin(db, bot, "VK captcha needed")
+                    await notify_vk_captcha(db, bot, _vk_captcha_img)
                 # surface captcha details to caller
                 raise VKAPIError(code, msg, _vk_captcha_sid, _vk_captcha_img)
             if kind == "user" and code in {5, 27}:
@@ -1274,6 +1274,25 @@ async def notify_superadmin(db: Database, bot: Bot, text: str):
                 logging.error("failed to notify superadmin: %s", e2)
     except Exception as e:
         logging.error("failed to notify superadmin: %s", e)
+
+
+async def notify_vk_captcha(db: Database, bot: Bot, img_url: str | None):
+    admin_id = await get_superadmin_id(db)
+    if not admin_id:
+        return
+    try:
+        if img_url:
+            async with span("tg-send"):
+                await bot.send_photo(
+                    admin_id, img_url, caption="VK captcha needed. Use /captcha <code>"
+                )
+        else:
+            async with span("tg-send"):
+                await bot.send_message(
+                    admin_id, "VK captcha needed. Use /captcha <code>"
+                )
+    except Exception as e:  # pragma: no cover - network issues
+        logging.error("failed to send vk captcha: %s", e)
 
 
 async def notify_event_added(
@@ -3432,6 +3451,45 @@ async def handle_vkphotos(message: types.Message, db: Database, bot: Bot):
     await bot.send_message(message.chat.id, f"VK photo posting {status}")
 
 
+async def handle_vk_captcha(message: types.Message, db: Database, bot: Bot):
+    global _vk_captcha_needed, _vk_captcha_sid, _vk_captcha_img
+    parts = message.text.split(maxsplit=1)
+    if len(parts) != 2:
+        await bot.send_message(message.chat.id, "Usage: /captcha <code>")
+        return
+    async with db.get_session() as session:
+        user = await session.get(User, message.from_user.id)
+        if not user or not user.is_superadmin:
+            return
+    code = parts[1].strip()
+    if not _vk_captcha_sid:
+        await bot.send_message(message.chat.id, "No captcha pending")
+        return
+    try:
+        await _vk_api(
+            "captcha.force",
+            {"captcha_sid": _vk_captcha_sid, "captcha_key": code},
+            db,
+            bot,
+        )
+        _vk_captcha_needed = False
+        _vk_captcha_sid = None
+        _vk_captcha_img = None
+        await bot.send_message(message.chat.id, "Captcha solved, VK tasks resumed")
+    except VKAPIError:
+        await bot.send_message(message.chat.id, "Invalid captcha code, try again")
+
+
+async def handle_askloc(callback: types.CallbackQuery, db: Database, bot: Bot):
+    await callback.answer()
+    await bot.send_message(callback.message.chat.id, "Пришлите сообщение с локацией и пересланным постом")
+
+
+async def handle_askcity(callback: types.CallbackQuery, db: Database, bot: Bot):
+    await callback.answer()
+    await bot.send_message(callback.message.chat.id, "Пришлите сообщение с городом и пересланным постом")
+
+
 async def handle_my_chat_member(update: types.ChatMemberUpdated, db: Database):
     if update.chat.type != "channel":
         return
@@ -3969,7 +4027,7 @@ async def add_events_from_text(
 
     bot: Bot | None = None,
 
-) -> list[tuple[Event, bool, list[str], str]]:
+) -> list[tuple[Event | None, bool, list[str], str]]:
     logging.info(
         "add_events_from_text start: len=%d source=%s", len(text), source_link
     )
@@ -4008,7 +4066,7 @@ async def add_events_from_text(
             raise
         return []
 
-    results: list[tuple[Event, bool, list[str], str]] = []
+    results: list[tuple[Event | None, bool, list[str], str]] = []
     first = True
     images: list[tuple[bytes, str]] = []
     if media:
@@ -4108,6 +4166,7 @@ async def add_events_from_text(
             logging.warning(
                 "Skipping event due to missing fields: %s", ", ".join(missing)
             )
+            results.append((None, False, missing, "missing"))
             continue
 
         base_event = Event(
@@ -9841,6 +9900,29 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
         logging.info("no events parsed from forwarded text")
         return
     for saved, added, lines, status in results:
+        if status == "missing":
+            keyboard = types.InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        types.InlineKeyboardButton(
+                            text="Добавить локацию",
+                            callback_data="askloc",
+                        )
+                    ],
+                    [
+                        types.InlineKeyboardButton(
+                            text="Добавить город",
+                            callback_data="askcity",
+                        )
+                    ],
+                ]
+            )
+            await bot.send_message(
+                message.chat.id,
+                "Отсутствуют обязательные поля: " + ", ".join(lines),
+                reply_markup=keyboard,
+            )
+            continue
         if isinstance(saved, Festival):
             markup = types.InlineKeyboardMarkup(
                 inline_keyboard=[
@@ -10302,6 +10384,15 @@ def create_app() -> web.Application:
     async def vkphotos_wrapper(message: types.Message):
         await handle_vkphotos(message, db, bot)
 
+    async def captcha_wrapper(message: types.Message):
+        await handle_vk_captcha(message, db, bot)
+
+    async def askloc_wrapper(callback: types.CallbackQuery):
+        await handle_askloc(callback, db, bot)
+
+    async def askcity_wrapper(callback: types.CallbackQuery):
+        await handle_askcity(callback, db, bot)
+
     async def menu_wrapper(message: types.Message):
         await handle_menu(message, db, bot)
 
@@ -10381,6 +10472,8 @@ def create_app() -> web.Application:
         or c.data.startswith("requeue:")
     ,
     )
+    dp.callback_query.register(askloc_wrapper, lambda c: c.data == "askloc")
+    dp.callback_query.register(askcity_wrapper, lambda c: c.data == "askcity")
     dp.message.register(tz_wrapper, Command("tz"))
     dp.message.register(
         add_event_session_wrapper, lambda m: m.from_user.id in add_event_sessions
@@ -10394,6 +10487,7 @@ def create_app() -> web.Application:
     dp.message.register(vkgroup_wrapper, Command("vkgroup"))
     dp.message.register(vktime_wrapper, Command("vktime"))
     dp.message.register(vkphotos_wrapper, Command("vkphotos"))
+    dp.message.register(captcha_wrapper, Command("captcha"))
     dp.message.register(menu_wrapper, Command("menu"))
     dp.message.register(events_menu_wrapper, lambda m: m.text == MENU_EVENTS)
     dp.message.register(events_date_wrapper, lambda m: m.from_user.id in events_date_sessions)
