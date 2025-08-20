@@ -2,7 +2,7 @@ import os
 import sys
 
 import pytest
-from datetime import datetime
+from datetime import datetime, timedelta
 from sqlmodel import select
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
@@ -299,4 +299,67 @@ async def test_publish_event_progress_single_message(tmp_path, monkeypatch):
     assert final.startswith("Готово")
     assert "✅ Telegraph (событие) — http://t" in final
     assert "✅ VK — http://v" in final
+    assert "✅ Неделя — http://wk" in final
+
+
+@pytest.mark.asyncio
+async def test_publish_event_progress_waits_for_pending(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    ev = Event(
+        title="t",
+        description="d",
+        date="2025-01-04",
+        time="12:00",
+        location_name="loc",
+        source_text="src",
+    )
+    async with db.get_session() as session:
+        session.add(ev)
+        await session.commit()
+        await session.refresh(ev)
+
+    async with db.get_session() as session:
+        session.add_all(
+            [
+                JobOutbox(event_id=ev.id, task=JobTask.telegraph_build),
+                JobOutbox(
+                    event_id=ev.id,
+                    task=JobTask.week_pages,
+                    next_run_at=datetime.utcnow() + timedelta(milliseconds=100),
+                ),
+            ]
+        )
+        await session.commit()
+
+    async def ok_handler(eid, db_obj, bot_obj):
+        return True
+
+    monkeypatch.setattr(main, "update_telegraph_event_page", ok_handler)
+    monkeypatch.setattr(main, "update_week_pages_for", ok_handler)
+    monkeypatch.setattr(
+        main,
+        "JOB_HANDLERS",
+        {
+            "telegraph_build": ok_handler,
+            "week_pages": ok_handler,
+        },
+    )
+
+    async def fake_link(task, eid, db_obj):
+        mapping = {
+            JobTask.telegraph_build: "http://t",
+            JobTask.week_pages: "http://wk",
+        }
+        return mapping.get(task)
+
+    monkeypatch.setattr(main, "_job_result_link", fake_link)
+
+    bot = ProgBot()
+    await publish_event_progress(ev, db, bot, chat_id=1)
+
+    final = bot.edits[-1]
+    assert final.startswith("Готово")
+    assert "✅ Telegraph (событие) — http://t" in final
     assert "✅ Неделя — http://wk" in final

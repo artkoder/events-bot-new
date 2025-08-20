@@ -5259,8 +5259,29 @@ async def publish_event_progress(event: Event, db: Database, bot: Bot, chat_id: 
             text=text,
         )
 
-    while await _run_due_jobs_once(db, bot, updater, event.id):
-        await asyncio.sleep(0)
+    deadline = _time.monotonic() + 30
+    while True:
+        processed = await _run_due_jobs_once(db, bot, updater, event.id)
+        if processed:
+            await asyncio.sleep(0)
+            continue
+        async with db.get_session() as session:
+            next_run = (
+                await session.execute(
+                    select(func.min(JobOutbox.next_run_at)).where(
+                        JobOutbox.event_id == event.id,
+                        JobOutbox.status.in_([JobStatus.pending, JobStatus.error]),
+                    )
+                )
+            ).scalar()
+        if not next_run:
+            break
+        wait = (next_run - datetime.utcnow()).total_seconds()
+        if wait <= 0:
+            continue
+        if _time.monotonic() + wait > deadline:
+            break
+        await asyncio.sleep(min(wait, 1.0))
 
     if progress:
         all_done = all(info["icon"] != "\U0001f504" for info in progress.values())
