@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
 
 
@@ -14,6 +14,39 @@ class Job:
     depends_on: Set[str] = field(default_factory=set)
     dirty: bool = False
     track: bool = True
+
+
+MONTHS_NOM = [
+    "",
+    "январь",
+    "февраль",
+    "март",
+    "апрель",
+    "май",
+    "июнь",
+    "июль",
+    "август",
+    "сентябрь",
+    "октябрь",
+    "ноябрь",
+    "декабрь",
+]
+
+MONTHS_GEN = [
+    "",
+    "января",
+    "февраля",
+    "марта",
+    "апреля",
+    "мая",
+    "июня",
+    "июля",
+    "августа",
+    "сентября",
+    "октября",
+    "ноября",
+    "декабря",
+]
 
 
 class BatchProgress:
@@ -33,6 +66,57 @@ class BatchProgress:
 
     def event_completed(self) -> None:
         self.events_done += 1
+
+    # Formatting -----------------------------------------------------------------
+
+    def _format_range(self, start: datetime, end: datetime) -> str:
+        if start.month == end.month and start.year == end.year:
+            name = MONTHS_GEN[start.month]
+            return f"{start.day}\u2013{end.day} {name} {start.year}"
+        if start.year == end.year:
+            s = f"{start.day} {MONTHS_GEN[start.month]}"
+            e = f"{end.day} {MONTHS_GEN[end.month]} {start.year}"
+        else:
+            s = f"{start.day} {MONTHS_GEN[start.month]} {start.year}"
+            e = f"{end.day} {MONTHS_GEN[end.month]} {end.year}"
+        return f"{s}\u2013{e}"
+
+    def _label(self, key: str) -> str:
+        kind, _, ident = key.partition(":")
+        if kind == "festival_pages":
+            return f"Фестиваль: {ident}"
+        if kind == "month_pages":
+            year, month = ident.split("-")
+            name = MONTHS_NOM[int(month)].capitalize()
+            return f"Страница месяца: {name} {year}"
+        if kind == "week_pages":
+            year, week = ident.split("-")
+            start = datetime.fromisocalendar(int(year), int(week), 1)
+            end = start + timedelta(days=6)
+            return f"Неделя: {self._format_range(start, end)}"
+        if kind == "weekend_pages":
+            start = datetime.strptime(ident, "%Y-%m-%d")
+            end = start + timedelta(days=1)
+            return f"Выходные: {self._format_range(start, end)}"
+        if kind == "vk_week_post":
+            year, week = ident.split("-")
+            start = datetime.fromisocalendar(int(year), int(week), 1)
+            end = start + timedelta(days=6)
+            return f"Пост недели VK: {self._format_range(start, end)}"
+        if kind == "vk_weekend_post":
+            start = datetime.strptime(ident, "%Y-%m-%d")
+            end = start + timedelta(days=1)
+            return f"Пост выходных VK: {self._format_range(start, end)}"
+        return key
+
+    def snapshot_text(self) -> str:
+        icon = {"success": "✅", "error": "❌", "pending": "⏳"}
+        lines = [
+            f"События (Telegraph): {self.events_done}/{self.total_events}"
+        ]
+        for key in sorted(self.status.keys()):
+            lines.append(f"{icon[self.status[key]]} {self._label(key)}")
+        return "\n".join(lines)
 
     def report(self) -> Dict[str, Any]:
         return {"events": (self.events_done, self.total_events), **self.status}
@@ -134,9 +218,13 @@ def schedule_event_batch(
         week = dt.isocalendar().week
         month_key = f"month_pages:{dt:%Y-%m}"
         week_key = f"week_pages:{dt.year}-{week:02d}"
-        weekend_key = f"weekend_pages:{dt:%Y-%m-%d}"
         vk_week_key = f"vk_week_post:{dt.year}-{week:02d}"
-        vk_weekend_key = f"vk_weekend_post:{dt:%Y-%m-%d}"
+        weekend_key = None
+        vk_weekend_key = None
+        if dt.weekday() >= 5:
+            wstart = dt - timedelta(days=dt.weekday() - 5)
+            weekend_key = f"weekend_pages:{wstart:%Y-%m-%d}"
+            vk_weekend_key = f"vk_weekend_post:{wstart:%Y-%m-%d}"
 
         scheduler.add_job(
             f"telegraph:{idx}",
@@ -157,21 +245,26 @@ def schedule_event_batch(
             payload=idx,
             depends_on=[festival_key],
         )
-        scheduler.add_job(
-            weekend_key,
-            _dummy_job,
-            payload=idx,
-            depends_on=[festival_key],
-        )
+        if weekend_key:
+            scheduler.add_job(
+                weekend_key,
+                _dummy_job,
+                payload=idx,
+                depends_on=[festival_key],
+            )
+            wk_dep = [month_key, week_key, weekend_key]
+        else:
+            wk_dep = [month_key, week_key]
         scheduler.add_job(
             vk_week_key,
             _dummy_job,
             payload=idx,
-            depends_on=[month_key, week_key, weekend_key],
+            depends_on=wk_dep,
         )
-        scheduler.add_job(
-            vk_weekend_key,
-            _dummy_job,
-            payload=idx,
-            depends_on=[month_key, week_key, weekend_key],
-        )
+        if vk_weekend_key and weekend_key:
+            scheduler.add_job(
+                vk_weekend_key,
+                _dummy_job,
+                payload=idx,
+                depends_on=wk_dep,
+            )
