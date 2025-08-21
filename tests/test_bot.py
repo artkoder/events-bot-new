@@ -1534,7 +1534,13 @@ async def test_forward_missing_fields(tmp_path: Path, monkeypatch):
 
     await main.handle_forwarded(fwd_msg, db, bot)
 
-    assert any("Отсутствуют обязательные поля" in m[1] for m in bot.messages)
+    msg = next((m for m in bot.messages if "Отсутствуют обязательные поля" in m[1]), None)
+    assert msg is not None
+    markup = msg[2]["reply_markup"]
+    texts = [b.text for row in markup.inline_keyboard for b in row]
+    assert "Добавить локацию" in texts
+    assert "Добавить город" in texts
+    assert "Добавить время" not in texts
     async with db.get_session() as session:
         ev = (await session.execute(select(Event))).scalars().first()
     assert ev is None
@@ -4369,7 +4375,12 @@ async def test_add_events_from_text_requires_time(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
 
     results = await main.add_events_from_text(db, "t", None, None, None)
-    assert results == []
+    assert len(results) == 1
+    saved, added, missing, status = results[0]
+    assert saved is None
+    assert not added
+    assert status == "missing"
+    assert set(missing) == {"time", "city"}
 
 
 @pytest.mark.asyncio
