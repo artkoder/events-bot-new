@@ -87,7 +87,7 @@ import hashlib
 import unicodedata
 
 from telegraph import Telegraph, TelegraphException
-from net import http_call, telegraph_upload
+from net import http_call, telegraph_upload, VK_FALLBACK_CODES
 
 from functools import partial, lru_cache
 from collections import defaultdict, deque
@@ -267,13 +267,7 @@ VK_AFISHA_GROUP_ID = os.getenv("VK_AFISHA_GROUP_ID")
 # which actor token to use for VK API calls
 VK_ACTOR_MODE = os.getenv("VK_ACTOR_MODE", "auto")
 
-# error codes triggering fallback from group to user token
-VK_FALLBACK_CODES = {
-    int(x) for x in os.getenv("VK_FALLBACK_CODES", "15,200,203").split(",") if x
-}
-VK_FALLBACK_ON_CAPTCHA = os.getenv("VK_FALLBACK_ON_CAPTCHA", "false").lower() == "true"
-if VK_FALLBACK_ON_CAPTCHA:
-    VK_FALLBACK_CODES.add(14)
+# error codes triggering fallback from group to user token are baked in
 
 # scheduling options for weekly VK post edits
 WEEK_EDIT_MODE = os.getenv("WEEK_EDIT_MODE", "deferred")
