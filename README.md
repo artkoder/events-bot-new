@@ -227,6 +227,12 @@ captcha input and resolves to `✅` or `❌` afterwards.
 When a festival already has a Telegraph page (`telegraph_url` is set) the month
 page renders the festival name as a clickable link.
 
+## Month navigation footer
+
+Each month page ends with a navigation block that lists every available month.
+When a new month is created the navigation is rebuilt on all pages so that each
+footer links to all month pages and the current month is shown without a link.
+
 ## Link formatting
 
 Telegraph pages and "source" pages use `linkify_for_telegraph` to convert
