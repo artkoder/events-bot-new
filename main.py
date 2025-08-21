@@ -4003,6 +4003,36 @@ async def schedule_event_update_tasks(db: Database, ev: Event) -> None:
     logging.info("scheduled event tasks for %s", eid)
 
 
+def missing_fields(event: dict | Event) -> list[str]:
+    """Return a list of required fields missing from ``event``.
+
+    ``event`` can be either an ``Event`` instance or a mapping with string keys.
+    The required fields are: ``title``, ``date``, ``time``, ``location_name``
+    and ``city``.
+    """
+
+    if isinstance(event, Event):
+        data = {
+            "title": event.title,
+            "date": event.date,
+            "time": event.time,
+            "location_name": event.location_name,
+            "city": event.city,
+        }
+    else:
+        data = {
+            key: (event.get(key) or "").strip() for key in (
+                "title",
+                "date",
+                "time",
+                "location_name",
+                "city",
+            )
+        }
+
+    return [field for field, value in data.items() if not value]
+
+
 async def add_events_from_text(
     db: Database,
     text: str,
@@ -4146,17 +4176,17 @@ async def add_events_from_text(
         title = (data.get("title") or "").strip()
         time_str = (data.get("time") or "").strip()
         location_name = (data.get("location_name") or "").strip()
-        if not all([title, date_str, time_str, location_name]):
-            missing = [
-                name
-                for name, value in (
-                    ("title", title),
-                    ("date", date_str),
-                    ("time", time_str),
-                    ("location_name", location_name),
-                )
-                if not value
-            ]
+        missing = missing_fields(
+            {
+                "title": title,
+                "date": date_str,
+                "time": time_str,
+                "location_name": location_name,
+                "city": city or "",
+            }
+        )
+        required_missing = [m for m in missing if m != "city"]
+        if required_missing:
             logging.warning(
                 "Skipping event due to missing fields: %s", ", ".join(missing)
             )
@@ -9916,22 +9946,23 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
         return
     for saved, added, lines, status in results:
         if status == "missing":
-            keyboard = types.InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [
-                        types.InlineKeyboardButton(
-                            text="Добавить локацию",
-                            callback_data="askloc",
-                        )
-                    ],
-                    [
-                        types.InlineKeyboardButton(
-                            text="Добавить город",
-                            callback_data="askcity",
-                        )
-                    ],
-                ]
-            )
+            buttons: list[list[types.InlineKeyboardButton]] = []
+            if "time" in lines:
+                buttons.append(
+                    [types.InlineKeyboardButton(text="Добавить время", callback_data="asktime")]
+                )
+                buttons.append(
+                    [types.InlineKeyboardButton(text="Изменить дату", callback_data="askdate")]
+                )
+            if "location_name" in lines:
+                buttons.append(
+                    [types.InlineKeyboardButton(text="Добавить локацию", callback_data="askloc")]
+                )
+            if "city" in lines:
+                buttons.append(
+                    [types.InlineKeyboardButton(text="Добавить город", callback_data="askcity")]
+                )
+            keyboard = types.InlineKeyboardMarkup(inline_keyboard=buttons)
             await bot.send_message(
                 message.chat.id,
                 "Отсутствуют обязательные поля: " + ", ".join(lines),
@@ -9956,6 +9987,12 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
             )
             continue
         buttons = []
+        if not saved.city:
+            buttons.append(
+                types.InlineKeyboardButton(
+                    text="Добавить город", callback_data="askcity"
+                )
+            )
         if (
             not saved.is_free
             and saved.ticket_price_min is None
