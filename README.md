@@ -46,8 +46,6 @@ browse upcoming announcements. The command accepts dates like `2025-07-10`,
   # Sending images to VK is disabled by default. Use /vkphotos to enable it.
   # Optional behaviour tuning
   export VK_ACTOR_MODE=auto  # group|user|auto
-  export VK_FALLBACK_CODES="15,200,203"  # VK error codes for fallback
-  export VK_FALLBACK_ON_CAPTCHA=false
 
   # Weekly post edit scheduling
   export WEEK_EDIT_MODE=deferred  # immediate|deferred
@@ -219,10 +217,10 @@ VK jobs, sends the captcha image to the super admin and waits for input. Jobs
 resume automatically after the correct code is supplied or fail after a timeout
 if the captcha is ignored.
 
-When a post fails with `method is unavailable with group auth` (or any error
-code listed in `VK_FALLBACK_CODES`) the bot automatically retries using the
-user token before giving up. The progress card shows a temporary pause icon
-`⏸` while waiting for captcha input and resolves to `✅` or `❌` afterwards.
+When a post fails with `method is unavailable with group auth` (or error codes
+15, 200 or 203) the bot automatically retries using the user token before
+giving up. The progress card shows a temporary pause icon `⏸` while waiting for
+captcha input and resolves to `✅` or `❌` afterwards.
 
 ## Festival links on month pages
 
