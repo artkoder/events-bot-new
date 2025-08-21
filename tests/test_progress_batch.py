@@ -4,7 +4,7 @@ from scheduling import BatchProgress, CoalescingScheduler, schedule_event_batch
 
 
 @pytest.mark.asyncio
-async def test_progress_updates_to_final_state():
+async def test_single_progress_card_final_snapshot():
     dates = [
         "2025-07-31",
         "2025-08-01",
@@ -21,9 +21,10 @@ async def test_progress_updates_to_final_state():
     assert progress.events_done == len(dates)
     assert len(progress.status) == 7
     final = progress.snapshot_text()
-    assert "⏳" not in final
-    assert final.count("Страница месяца") == 2
-    assert final.count("Неделя:") == 1
-    assert final.count("Выходные:") == 1
-    assert final.count("Пост недели VK") == 1
-    assert final.count("Пост выходных VK") == 1
+    assert "🔄" not in final
+    assert final.count("Festival") == 1
+    assert final.count("Month:") == 2
+    assert final.count("Week:") == 1
+    assert final.count("Weekend:") == 1
+    assert final.count("VK week:") == 1
+    assert final.count("VK weekend:") == 1
