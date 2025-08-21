@@ -2005,6 +2005,8 @@ async def build_month_nav_html(db: Database) -> str:
     async with db.get_session() as session:
         result = await session.execute(select(MonthPage).order_by(MonthPage.month))
         months = result.scalars().all()
+    cur_month = datetime.now(LOCAL_TZ).strftime("%Y-%m")
+    months = [m for m in months if m.month >= cur_month]
     if not months:
         return ""
     links: list[str] = []
@@ -6187,7 +6189,10 @@ def add_day_sections(
             add_many([{ "tag": "h3", "children": ["🟥🟥🟥 суббота 🟥🟥🟥"] }])
         elif d.weekday() == 6:
             add_many([{ "tag": "h3", "children": ["🟥🟥 воскресенье 🟥🟥"] }])
-        add_many([{ "tag": "h3", "children": [f"🟥🟥🟥 {format_day_pretty(d)} 🟥🟥🟥"] }])
+        add_many([
+            {"tag": "h3", "children": [f"🟥🟥🟥 {format_day_pretty(d)} 🟥🟥🟥"]},
+            {"tag": "br"},
+        ])
         add_many(telegraph_br())
         for ev in events:
             fest = fest_map.get((ev.festival or "").casefold())
@@ -6380,6 +6385,7 @@ def _build_month_page_content_sync(
     if exhibitions and not exceeded:
         add_many([PERM_START])
         add({"tag": "h3", "children": ["Постоянные выставки"]})
+        add({"tag": "br"})
         add_many(telegraph_br())
         for ev in exhibitions:
             if exceeded:
@@ -6406,6 +6412,8 @@ def _build_month_page_content_sync(
                 ],
             }
         )
+        add({"tag": "br"})
+        add_many(telegraph_br())
 
     title = (
         f"События Калининграда в {month_name_prepositional(month)}: полный анонс от Полюбить Калининград Анонсы"
@@ -6471,7 +6479,9 @@ async def _sync_month_page_inner(db: Database, month: str, update_links: bool = 
                     rough2 = rough_size(content2)
                     if not page.path2:
                         logging.info("creating second page for %s", month)
-                        data2 = await telegraph_create_page(tg, title2, html_content=html2)
+                        data2 = await telegraph_call(
+                            tg.create_page, title=title2, html_content=html2
+                        )
                         page.url2 = normalize_telegraph_url(data2.get("url"))
                         page.path2 = data2.get("path")
                     else:
@@ -6507,7 +6517,9 @@ async def _sync_month_page_inner(db: Database, month: str, update_links: bool = 
                     rough1 = rough_size(content1)
                     if not page.path:
                         logging.info("creating first page for %s", month)
-                        data1 = await telegraph_create_page(tg, title1, html_content=html1)
+                        data1 = await telegraph_call(
+                            tg.create_page, title=title1, html_content=html1
+                        )
                         page.url = normalize_telegraph_url(data1.get("url"))
                         page.path = data1.get("path")
                         created = True
@@ -6549,8 +6561,8 @@ async def _sync_month_page_inner(db: Database, month: str, update_links: bool = 
                 else:
                     if not page.path:
                         logging.info("creating month page %s", month)
-                        data = await telegraph_create_page(
-                            tg, title, html_content=html_full
+                        data = await telegraph_call(
+                            tg.create_page, title=title, html_content=html_full
                         )
                         page.url = normalize_telegraph_url(data.get("url"))
                         page.path = data.get("path")
