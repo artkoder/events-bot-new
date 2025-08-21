@@ -152,6 +152,10 @@ DEBUG = os.getenv("EVBOT_DEBUG") == "1"
 
 _page_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 _month_next_run: dict[str, float] = defaultdict(float)
+_week_next_run: dict[str, float] = defaultdict(float)
+_weekend_next_run: dict[str, float] = defaultdict(float)
+_vk_week_next_run: dict[str, float] = defaultdict(float)
+_vk_weekend_next_run: dict[str, float] = defaultdict(float)
 _partner_last_run: date | None = None
 
 _startup_handler_registered = False
@@ -6800,6 +6804,17 @@ async def _sync_weekend_page_inner(
     db: Database, start: str, update_links: bool = True, post_vk: bool = True
 ):
     async with HEAVY_SEMAPHORE:
+        now = _time.time()
+        if "PYTEST_CURRENT_TEST" not in os.environ and now < _weekend_next_run[start]:
+            logging.debug("sync_weekend_page skipped, debounced")
+            return
+        _weekend_next_run[start] = now + 60
+        logging.info(
+            "sync_weekend_page start: start=%s update_links=%s post_vk=%s",
+            start,
+            update_links,
+            post_vk,
+        )
         if DEBUG:
             mem_info("weekend page before")
         token = get_telegraph_token()
@@ -7045,6 +7060,11 @@ async def build_weekend_vk_message(db: Database, start: str) -> str:
 async def sync_vk_weekend_post(db: Database, start: str, bot: Bot | None = None) -> None:
     lock = _weekend_vk_lock(start)
     async with lock:
+        now = _time.time()
+        if "PYTEST_CURRENT_TEST" not in os.environ and now < _vk_weekend_next_run[start]:
+            logging.debug("sync_vk_weekend_post skipped, debounced")
+            return
+        _vk_weekend_next_run[start] = now + 60
         logging.info("sync_vk_weekend_post start for %s", start)
         group_id = VK_AFISHA_GROUP_ID
         if not group_id:
@@ -7091,6 +7111,11 @@ async def sync_vk_weekend_post(db: Database, start: str, bot: Bot | None = None)
 async def sync_vk_week_post(db: Database, start: str, bot: Bot | None = None) -> None:
     lock = _week_vk_lock(start)
     async with lock:
+        now = _time.time()
+        if "PYTEST_CURRENT_TEST" not in os.environ and now < _vk_week_next_run[start]:
+            logging.debug("sync_vk_week_post skipped, debounced")
+            return
+        _vk_week_next_run[start] = now + 60
         logging.info("sync_vk_week_post start for %s", start)
         group_id = VK_AFISHA_GROUP_ID
         if not group_id:
