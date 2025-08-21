@@ -1974,13 +1974,8 @@ def apply_footer_link(html_content: str) -> str:
 
 
 async def build_month_nav_html(db: Database) -> str:
-    cur_month = datetime.now(LOCAL_TZ).strftime("%Y-%m")
     async with db.get_session() as session:
-        result = await session.execute(
-            select(MonthPage)
-            .where(MonthPage.month >= cur_month)
-            .order_by(MonthPage.month)
-        )
+        result = await session.execute(select(MonthPage).order_by(MonthPage.month))
         months = result.scalars().all()
     if not months:
         return ""
@@ -6328,11 +6323,10 @@ def _build_month_page_content_sync(
 
     add_day_sections(sorted(by_day), by_day, fest_map, add_many, use_markers=True)
 
-    future_pages = [p for p in nav_pages if p.month >= month]
     month_nav: list[dict] = []
-    nav_children = []
-    if future_pages:
-        for idx, p in enumerate(future_pages):
+    nav_children: list = []
+    if nav_pages:
+        for idx, p in enumerate(nav_pages):
             name = month_name_nominative(p.month)
             if p.month == month:
                 nav_children.append(name)
@@ -6340,7 +6334,7 @@ def _build_month_page_content_sync(
                 nav_children.append(
                     {"tag": "a", "attrs": {"href": p.url}, "children": [name]}
                 )
-            if idx < len(future_pages) - 1:
+            if idx < len(nav_pages) - 1:
                 nav_children.append(" ")
     else:
         nav_children = [month_name_nominative(month)]
