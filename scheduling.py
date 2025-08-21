@@ -110,7 +110,12 @@ class BatchProgress:
         return key
 
     def snapshot_text(self) -> str:
-        icon = {"success": "✅", "error": "❌", "pending": "⏳"}
+        icon = {
+            "success": "✅",
+            "error": "❌",
+            "pending": "⏳",
+            "paused": "⏸",
+        }
         lines = [
             f"События (Telegraph): {self.events_done}/{self.total_events}"
         ]
@@ -123,10 +128,15 @@ class BatchProgress:
 
 
 class CoalescingScheduler:
-    def __init__(self, progress: Optional[BatchProgress] = None) -> None:
+    def __init__(
+        self,
+        progress: Optional[BatchProgress] = None,
+        debounce_seconds: float = 0.0,
+    ) -> None:
         self.jobs: Dict[str, Job] = {}
         self.progress = progress
         self.order: List[str] = []
+        self.debounce_seconds = debounce_seconds
 
     def add_job(
         self,
@@ -170,6 +180,8 @@ class CoalescingScheduler:
             self.progress.register_job(key)
 
     async def run(self) -> None:
+        if self.debounce_seconds > 0:
+            await asyncio.sleep(self.debounce_seconds)
         remaining = set(self.jobs.keys())
         completed: Set[str] = set()
         while remaining:
