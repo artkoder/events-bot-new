@@ -142,11 +142,14 @@ class CoalescingScheduler:
         self,
         progress: Optional[BatchProgress] = None,
         debounce_seconds: float = 0.0,
+        on_captcha: Optional[Callable[["CoalescingScheduler", str], None]] = None,
     ) -> None:
         self.jobs: Dict[str, Job] = {}
         self.progress = progress
         self.order: List[str] = []
         self.debounce_seconds = debounce_seconds
+        self._remaining: Set[str] | None = None
+        self.on_captcha = on_captcha
 
     def add_job(
         self,
@@ -190,10 +193,11 @@ class CoalescingScheduler:
             self.progress.register_job(key)
 
     async def run(self) -> None:
-        if self.debounce_seconds > 0:
+        if self.debounce_seconds > 0 and self._remaining is None:
             await asyncio.sleep(self.debounce_seconds)
-        remaining = set(self.jobs.keys())
-        completed: Set[str] = set()
+        remaining = self._remaining if self._remaining is not None else set(self.jobs.keys())
+        self._remaining = remaining
+        completed: Set[str] = set(self.jobs.keys()) - remaining
         while remaining:
             progress_made = False
             for key in list(remaining):
@@ -203,19 +207,31 @@ class CoalescingScheduler:
                 progress_made = True
                 try:
                     await job.func(job.payload)
-                    if self.progress:
-                        self.progress.finish_job(key, "success")
-                except Exception:
+                except Exception as e:
+                    if getattr(e, "code", None) == 14:
+                        if self.progress:
+                            self.progress.finish_job(key, "paused")
+                        self._remaining = remaining
+                        if self.on_captcha:
+                            self.on_captcha(self, key)
+                        return
                     if self.progress:
                         self.progress.finish_job(key, "error")
+                    self._remaining = remaining
                     raise
+                if self.progress:
+                    self.progress.finish_job(key, "success")
                 if job.track:
                     self.order.append(key)
                 completed.add(key)
                 remaining.remove(key)
             if not progress_made:
                 raise RuntimeError("Circular dependency detected")
+        self._remaining = None
 
+    @property
+    def remaining_jobs(self) -> Set[str]:
+        return self._remaining or set()
 
 # Utilities for tests -------------------------------------------------------------------
 

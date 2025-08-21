@@ -492,6 +492,8 @@ _vk_user_token_bad: str | None = None
 _vk_captcha_needed: bool = False
 _vk_captcha_sid: str | None = None
 _vk_captcha_img: str | None = None
+_vk_captcha_resume: Callable[[], Awaitable[None]] | None = None
+_vk_captcha_timeout: asyncio.Task | None = None
 _shared_session: ClientSession | None = None
 # backward-compatible aliases used in tests
 _http_session: ClientSession | None = None
@@ -1287,6 +1289,28 @@ async def notify_vk_captcha(db: Database, bot: Bot, img_url: str | None):
                 )
     except Exception as e:  # pragma: no cover - network issues
         logging.error("failed to send vk captcha: %s", e)
+
+
+def vk_captcha_paused(scheduler, key: str) -> None:
+    """Register callback to resume VK jobs after captcha."""
+    global _vk_captcha_resume, _vk_captcha_timeout
+    async def _resume():
+        try:
+            await scheduler.run()
+        except Exception:
+            logging.exception("VK resume failed")
+    _vk_captcha_resume = _resume
+    if _vk_captcha_timeout:
+        _vk_captcha_timeout.cancel()
+
+    async def _timeout():
+        await asyncio.sleep(VK_CAPTCHA_TTL_MIN * 60)
+        if scheduler.progress:
+            for k in list(scheduler.remaining_jobs):
+                scheduler.progress.finish_job(k, "error")
+        _vk_captcha_resume = None
+
+    _vk_captcha_timeout = asyncio.create_task(_timeout())
 
 
 async def notify_event_added(
@@ -3441,7 +3465,7 @@ async def handle_vkphotos(message: types.Message, db: Database, bot: Bot):
 
 
 async def handle_vk_captcha(message: types.Message, db: Database, bot: Bot):
-    global _vk_captcha_needed, _vk_captcha_sid, _vk_captcha_img
+    global _vk_captcha_needed, _vk_captcha_sid, _vk_captcha_img, _vk_captcha_resume, _vk_captcha_timeout
     parts = message.text.split(maxsplit=1)
     if len(parts) != 2:
         await bot.send_message(message.chat.id, "Usage: /captcha <code>")
@@ -3464,6 +3488,13 @@ async def handle_vk_captcha(message: types.Message, db: Database, bot: Bot):
         _vk_captcha_needed = False
         _vk_captcha_sid = None
         _vk_captcha_img = None
+        if _vk_captcha_timeout:
+            _vk_captcha_timeout.cancel()
+            _vk_captcha_timeout = None
+        resume = _vk_captcha_resume
+        _vk_captcha_resume = None
+        if resume:
+            await resume()
         await bot.send_message(message.chat.id, "Captcha solved, VK tasks resumed")
     except VKAPIError:
         await bot.send_message(message.chat.id, "Invalid captcha code, try again")
