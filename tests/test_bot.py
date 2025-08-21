@@ -76,7 +76,17 @@ def _sync_event_updates(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _mock_page_sync(monkeypatch):
+def _mock_page_sync(monkeypatch, request):
+    if any(
+        key in request.node.nodeid
+        for key in (
+            "sync_month_page_split",
+            "sync_month_page_split_on_error",
+            "month_page_split_filters_past_events",
+        )
+    ):
+        return
+
     async def fake_month(db_obj, month):
         return None
 
