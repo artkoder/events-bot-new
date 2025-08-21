@@ -84,42 +84,52 @@ class BatchProgress:
     def _label(self, key: str) -> str:
         kind, _, ident = key.partition(":")
         if kind == "festival_pages":
-            return f"Фестиваль: {ident}"
+            return "Festival"
         if kind == "month_pages":
-            year, month = ident.split("-")
+            _, month = ident.split("-")
             name = MONTHS_NOM[int(month)].capitalize()
-            return f"Страница месяца: {name} {year}"
+            return f"Month: {name}"
         if kind == "week_pages":
             year, week = ident.split("-")
             start = datetime.fromisocalendar(int(year), int(week), 1)
             end = start + timedelta(days=6)
-            return f"Неделя: {self._format_range(start, end)}"
+            return f"Week: {self._format_range(start, end)}"
         if kind == "weekend_pages":
             start = datetime.strptime(ident, "%Y-%m-%d")
             end = start + timedelta(days=1)
-            return f"Выходные: {self._format_range(start, end)}"
+            return f"Weekend: {self._format_range(start, end)}"
         if kind == "vk_week_post":
             year, week = ident.split("-")
             start = datetime.fromisocalendar(int(year), int(week), 1)
             end = start + timedelta(days=6)
-            return f"Пост недели VK: {self._format_range(start, end)}"
+            return f"VK week: {self._format_range(start, end)}"
         if kind == "vk_weekend_post":
             start = datetime.strptime(ident, "%Y-%m-%d")
             end = start + timedelta(days=1)
-            return f"Пост выходных VK: {self._format_range(start, end)}"
+            return f"VK weekend: {self._format_range(start, end)}"
         return key
 
     def snapshot_text(self) -> str:
         icon = {
             "success": "✅",
             "error": "❌",
-            "pending": "⏳",
+            "pending": "🔄",
             "paused": "⏸",
         }
         lines = [
-            f"События (Telegraph): {self.events_done}/{self.total_events}"
+            f"Events (Telegraph): {self.events_done}/{self.total_events}"
         ]
-        for key in sorted(self.status.keys()):
+        order = {
+            "festival_pages": 0,
+            "month_pages": 1,
+            "week_pages": 2,
+            "weekend_pages": 3,
+            "vk_week_post": 4,
+            "vk_weekend_post": 5,
+        }
+        for key in sorted(
+            self.status.keys(), key=lambda k: (order.get(k.split(":")[0], 99), k)
+        ):
             lines.append(f"{icon[self.status[key]]} {self._label(key)}")
         return "\n".join(lines)
 

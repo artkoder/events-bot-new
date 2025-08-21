@@ -6,7 +6,7 @@ from scheduling import CoalescingScheduler, schedule_event_batch
 @pytest.mark.asyncio
 async def test_coalesce_creates_single_jobs():
     scheduler = CoalescingScheduler()
-    dates = ["2025-07-16"] * 5
+    dates = ["2025-07-19"] * 5
     schedule_event_batch(scheduler, festival_id=1, dates=dates)
 
     keys = scheduler.jobs.keys()
