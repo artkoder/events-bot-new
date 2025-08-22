@@ -11,3 +11,9 @@ def test_normalize_event_type_no_change():
     title = "\ud83c\udfb5 Concert"
     desc = "Музыкальный концерт"
     assert normalize_event_type(title, desc, "концерт") == "концерт"
+
+
+def test_normalize_event_type_masterclass():
+    title = "\ud83d\udcda Workshop"
+    desc = "Практический мастер-класс"
+    assert normalize_event_type(title, desc, "мастер-класс") == "мастер-класс"

@@ -4394,6 +4394,58 @@ async def test_add_events_from_text_requires_time(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_add_events_from_text_uses_address_when_name_missing(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async def fake_parse(text: str, source_channel: str | None = None, festival_names=None):
+        return [
+            {
+                "title": "T",
+                "date": "2025-08-09",
+                "time": "14:00",
+                "location_address": "Leninsky 83",
+                "city": "Калининград",
+            }
+        ]
+
+    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
+
+    results = await main.add_events_from_text(db, "t", None, None, None)
+    saved, added, _, status = results[0]
+    assert added
+    assert status == "added"
+    assert saved.location_name == "Leninsky 83"
+    assert saved.location_address is None
+
+
+@pytest.mark.asyncio
+async def test_add_events_from_text_accepts_masterclass(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async def fake_parse(text: str, source_channel: str | None = None, festival_names=None):
+        return [
+            {
+                "title": "\u2728 Masterclass",
+                "date": "2025-08-21",
+                "time": "18:00",
+                "location_name": "Музей Изобразительных искусств",
+                "city": "Калининград",
+                "event_type": "мастер-класс",
+            }
+        ]
+
+    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
+
+    results = await main.add_events_from_text(db, "t", None, None, None)
+    saved, added, _, status = results[0]
+    assert added
+    assert status == "added"
+    assert saved.event_type == "мастер-класс"
+
+
+@pytest.mark.asyncio
 async def test_add_events_from_text_skips_description_update_for_new_event(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()

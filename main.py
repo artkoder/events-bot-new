@@ -4208,6 +4208,8 @@ async def add_events_from_text(
         title = (data.get("title") or "").strip()
         time_str = (data.get("time") or "").strip()
         location_name = (data.get("location_name") or "").strip()
+        if not location_name and addr:
+            location_name, addr = addr, None
         missing = missing_fields(
             {
                 "title": title,
