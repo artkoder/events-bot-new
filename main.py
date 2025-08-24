@@ -1463,9 +1463,8 @@ async def upload_images(
                 catbox_msg += f"{name}: too large; "
                 continue
             if not detect_image_type(data):
-                logging.warning("catbox skip %s: not image", name)
+                logging.warning("catbox upload %s: not image", name)
                 catbox_msg += f"{name}: not image; "
-                continue
             uploaded = False
             delays = [0.7, 1.5, 3.0]
             for attempt, delay in enumerate(delays, 1):
@@ -1475,7 +1474,7 @@ async def upload_images(
                     form.add_field("fileToUpload", data, filename=name)
                     async with span("http"):
                         async with HTTP_SEMAPHORE:
-                            async with session.post(
+                            async with await session.post(
                                 "https://catbox.moe/user/api.php", data=form
                             ) as resp:
                                 text_r = await resp.text()
@@ -1497,7 +1496,9 @@ async def upload_images(
                     logging.error("catbox error %s: %s", name, e)
                 break
             if not uploaded:
-                url = await telegraph_upload(data, name)
+                url = telegraph_upload(data, name)
+                if asyncio.iscoroutine(url):
+                    url = await url
                 if url:
                     tg_urls.append(url)
                     catbox_msg += "tg ok; "
@@ -1542,8 +1543,10 @@ def normalize_event_type(
     return event_type
 
 
-def canonicalize_date(value: str) -> str | None:
+def canonicalize_date(value: str | None) -> str | None:
     """Return ISO date string if value parses as date or ``None``."""
+    if not value:
+        return None
     value = value.split("..", 1)[0].strip()
     if not value:
         return None
@@ -2172,6 +2175,9 @@ async def build_ics_content(db: Database, event: Event) -> str:
 
 
 async def upload_ics(event: Event, db: Database) -> str | None:
+    if os.getenv("SUPABASE_DISABLED") == "1":
+        logging.debug("Supabase disabled")
+        return None
     async with span("http"):
         client = get_supabase_client()
         if not client:
@@ -5222,7 +5228,7 @@ async def update_month_pages_for(event_id: int, db: Database, bot: Bot | None) -
             await sync_month_page(db, month)
         return True
 
-    tg = Telegraph(access_token=token, domain="telegra.ph")
+    tg = Telegraph(access_token=token)
 
     changed_any = False
     rebuild_any = False
@@ -5390,7 +5396,7 @@ async def update_festival_tg_nav(event_id: int, db: Database, bot: Bot | None) -
     if not token:
         logging.error("Telegraph token unavailable")
         return False
-    tg = Telegraph(access_token=token, domain="telegra.ph")
+    tg = Telegraph(access_token=token)
     nav_html = await get_setting_value(db, "fest_nav_html")
     if nav_html is None:
         nav_html, _, _ = await build_festivals_nav_block(db)
@@ -6439,7 +6445,7 @@ async def _sync_month_page_inner(db: Database, month: str, update_links: bool = 
         if not token:
             logging.error("Telegraph token unavailable")
             return
-        tg = Telegraph(access_token=token, domain="telegra.ph")
+        tg = Telegraph(access_token=token)
         async with db.get_session() as session:
             page = await session.get(MonthPage, month)
             created = False
@@ -6835,7 +6841,7 @@ async def _sync_weekend_page_inner(
         if not token:
             logging.error("Telegraph token unavailable")
             return
-        tg = Telegraph(access_token=token, domain="telegra.ph")
+        tg = Telegraph(access_token=token)
         from telegraph.utils import nodes_to_html
 
         async with db.get_session() as session:
@@ -7331,7 +7337,7 @@ async def sync_festival_page(
         if not token:
             logging.error("Telegraph token unavailable")
             return
-        tg = Telegraph(access_token=token, domain="telegra.ph")
+        tg = Telegraph(access_token=token)
         async with db.get_session() as session:
             result = await session.execute(
                 select(Festival).where(Festival.name == name)
@@ -7416,7 +7422,7 @@ async def refresh_nav_on_all_festivals(
         if not changed:
             return
     token = get_telegraph_token()
-    tg = Telegraph(access_token=token, domain="telegra.ph") if token else None
+    tg = Telegraph(access_token=token) if token else None
     for fid, name, path, vk_url in fests:
         if tg and path:
             try:
@@ -10096,7 +10102,7 @@ async def telegraph_test():
     if not token:
         print("Unable to obtain Telegraph token")
         return
-    tg = Telegraph(access_token=token, domain="telegra.ph")
+    tg = Telegraph(access_token=token)
     page = await telegraph_call(
         tg.create_page, "Test Page", html_content="<p>test</p>"
     )
@@ -10123,7 +10129,7 @@ async def update_source_page(
     if not token:
         logging.error("Telegraph token unavailable")
         return "token missing"
-    tg = Telegraph(access_token=token, domain="telegra.ph")
+    tg = Telegraph(access_token=token)
     try:
         logging.info("Fetching telegraph page %s", path)
         page = await telegraph_call(tg.get_page, path, return_html=True)
@@ -10171,7 +10177,7 @@ async def update_source_page_ics(path: str, title: str, url: str | None):
     if not token:
         logging.error("Telegraph token unavailable")
         return
-    tg = Telegraph(access_token=token, domain="telegra.ph")
+    tg = Telegraph(access_token=token)
     try:
         logging.info("Editing telegraph ICS for %s", path)
         page = await telegraph_call(tg.get_page, path, return_html=True)
@@ -10191,7 +10197,7 @@ async def get_source_page_text(path: str) -> str:
     if not token:
         logging.error("Telegraph token unavailable")
         return ""
-    tg = Telegraph(access_token=token, domain="telegra.ph")
+    tg = Telegraph(access_token=token)
     try:
         page = await telegraph_call(tg.get_page, path, return_html=True)
     except Exception as e:
