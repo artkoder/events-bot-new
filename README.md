@@ -241,3 +241,10 @@ plain URLs and patterns like `Name (https://example.com)` into clickable
 anchors. VK posts expose the original URLs in parentheses using
 `expose_links_for_vk` so the full address remains visible.
 
+
+## Календарь (ICS)
+When an event is added or updated the bot builds an `.ics` calendar file. The file is
+uploaded to Supabase and posted to the asset channel as a document. Both steps use a
+separate semaphore so they do not block VK or Telegraph jobs. If `SUPABASE_DISABLED` is
+set the upload is skipped. When the content hasn't changed the previous Supabase URL and
+Telegram `file_id` are reused without extra network requests.

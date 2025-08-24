@@ -557,6 +557,15 @@ HEAVY_SEMAPHORE = asyncio.Semaphore(1)
 TG_SEND_SEMAPHORE = asyncio.Semaphore(int(os.getenv("TG_SEND_CONCURRENCY", "2")))
 VK_SEMAPHORE = asyncio.Semaphore(int(os.getenv("VK_CONCURRENCY", "1")))
 TELEGRAPH_SEMAPHORE = asyncio.Semaphore(int(os.getenv("TELEGRAPH_CONCURRENCY", "1")))
+ICS_SEMAPHORE: asyncio.Semaphore | None = None
+
+
+def get_ics_semaphore() -> asyncio.Semaphore:
+    global ICS_SEMAPHORE
+    loop = asyncio.get_event_loop()
+    if ICS_SEMAPHORE is None or ICS_SEMAPHORE._loop is not loop:  # type: ignore[attr-defined]
+        ICS_SEMAPHORE = asyncio.Semaphore(1)
+    return ICS_SEMAPHORE
 FEST_JOB_MULT = 100_000
 
 # Maximum size (in bytes) for downloaded files
@@ -2316,6 +2325,184 @@ async def delete_ics(event: Event):
         logging.error("Failed to delete ics: %s", e)
 
 
+def _ics_filename(event: Event) -> str:
+    d = parse_iso_date(event.date.split("..", 1)[0])
+    if d:
+        return f"event-{event.id}-{d.isoformat()}.ics"
+    return f"event-{event.id}.ics"
+
+
+def _ics_escape(value: str) -> str:
+    return (
+        value.replace("\\", "\\\\")
+        .replace(",", "\\,")
+        .replace(";", "\\;")
+        .replace("\n", "\\n")
+    )
+
+
+def build_event_ics(event: Event) -> bytes:
+    time_range = parse_time_range(event.time)
+    if not time_range:
+        raise ValueError("bad time")
+    start_t, end_t = time_range
+    d = parse_iso_date(event.date.split("..", 1)[0])
+    if not d:
+        raise ValueError("bad date")
+    start_dt = datetime.combine(d, start_t, tzinfo=LOCAL_TZ).astimezone(timezone.utc)
+    if end_t:
+        end_dt = datetime.combine(d, end_t, tzinfo=LOCAL_TZ).astimezone(timezone.utc)
+    else:
+        end_dt = start_dt + timedelta(hours=1)
+
+    desc = event.description or ""
+    link = event.telegraph_url
+    if link:
+        desc = f"{desc}\n\n{link}" if desc else link
+    location = ", ".join(
+        filter(None, [event.location_name, event.location_address, event.city])
+    )
+
+    lines = [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "PRODID:-//events-bot//RU",
+        "CALSCALE:GREGORIAN",
+        "METHOD:PUBLISH",
+        f"X-WR-CALNAME:{ICS_CALNAME}",
+        "BEGIN:VEVENT",
+        f"UID:polyubit-{event.id}@ics",
+        f"DTSTAMP:{start_dt.strftime('%Y%m%dT%H%M%SZ')}",
+        f"DTSTART:{start_dt.strftime('%Y%m%dT%H%M%SZ')}",
+        f"DTEND:{end_dt.strftime('%Y%m%dT%H%M%SZ')}",
+        f"SUMMARY:{_ics_escape(event.title)}",
+    ]
+    if desc:
+        lines.append(f"DESCRIPTION:{_ics_escape(desc)}")
+    if location:
+        lines.append(f"LOCATION:{_ics_escape(location)}")
+    if link:
+        lines.append(f"URL:{link}")
+    lines.extend(["END:VEVENT", "END:VCALENDAR"])
+    return "\r\n".join(lines).encode("utf-8")
+
+
+async def ics_publish(event_id: int, db: Database, bot: Bot, progress=None) -> bool:
+    async with get_ics_semaphore():
+        async with db.get_session() as session:
+            ev = await session.get(Event, event_id)
+        if not ev:
+            return False
+
+        try:
+            ics_bytes = build_event_ics(ev)
+        except Exception as e:  # pragma: no cover - build failure
+            if progress:
+                progress.mark("ics_supabase", "error", str(e))
+                progress.mark("ics_telegram", "error", str(e))
+            raise
+
+        ics_hash = hashlib.sha256(ics_bytes).hexdigest()
+        filename = _ics_filename(ev)
+        errors: list[str] = []
+        supabase_url: str | None = None
+        tg_file_id: str | None = None
+
+        if ev.ics_hash == ics_hash:
+            if progress:
+                progress.mark("ics_supabase", "skipped_nochange", "no change")
+            if ev.ics_file_id:
+                if progress:
+                    progress.mark("ics_telegram", "skipped_nochange", "no change")
+            else:
+                try:
+                    channel = await get_asset_channel(db)
+                    if channel:
+                        file = types.BufferedInputFile(ics_bytes, filename=filename)
+                        async with span("tg-send"):
+                            msg = await bot.send_document(
+                                channel.channel_id,
+                                file,
+                                caption="Календарь к событию",
+                            )
+                        tg_file_id = msg.document.file_id
+                        if progress:
+                            progress.mark("ics_telegram", "done", "sent")
+                except Exception as te:
+                    errors.append(str(te))
+                    if progress:
+                        progress.mark("ics_telegram", "error", str(te))
+            changed = tg_file_id is not None
+        else:
+            supabase_disabled = os.getenv("SUPABASE_DISABLED") == "1"
+            if not supabase_disabled:
+                try:
+                    client = get_supabase_client()
+                    if client:
+                        storage = client.storage.from_(SUPABASE_BUCKET)
+                        async with span("http"):
+                            await asyncio.to_thread(
+                                storage.upload,
+                                filename,
+                                ics_bytes,
+                                {
+                                    "content-type": ICS_CONTENT_TYPE,
+                                    "content-disposition": ICS_CONTENT_DISP_TEMPLATE.format(
+                                        name=filename
+                                    ),
+                                    "upsert": "true",
+                                },
+                            )
+                            supabase_url = await asyncio.to_thread(
+                                storage.get_public_url, filename
+                            )
+                        if progress:
+                            progress.mark("ics_supabase", "done", supabase_url)
+                except Exception as se:  # pragma: no cover - network failure
+                    errors.append(str(se))
+                    if progress:
+                        progress.mark("ics_supabase", "error", str(se))
+            else:
+                if progress:
+                    progress.mark("ics_supabase", "skipped_disabled", "disabled")
+
+            try:
+                channel = await get_asset_channel(db)
+                if channel:
+                    file = types.BufferedInputFile(ics_bytes, filename=filename)
+                    caption = "Календарь к событию"
+                    if ev.telegraph_url:
+                        caption += f"\n{ev.telegraph_url}"
+                    async with span("tg-send"):
+                        msg = await bot.send_document(
+                            channel.channel_id,
+                            file,
+                            caption=caption,
+                        )
+                    tg_file_id = msg.document.file_id
+                    if progress:
+                        progress.mark("ics_telegram", "done", "sent")
+            except Exception as te:  # pragma: no cover - network failure
+                errors.append(str(te))
+                if progress:
+                    progress.mark("ics_telegram", "error", str(te))
+            changed = True
+
+        async with db.get_session() as session:
+            ev = await session.get(Event, event_id)
+            if ev:
+                ev.ics_hash = ics_hash
+                ev.ics_updated_at = datetime.utcnow()
+                if supabase_url is not None:
+                    ev.ics_url_supabase = supabase_url
+                if tg_file_id is not None:
+                    ev.ics_file_id = tg_file_id
+                await session.commit()
+
+        if errors:
+            raise RuntimeError("; ".join(errors))
+        return changed
+
 async def delete_asset_post(event: Event, db: Database, bot: Bot):
     if not event.ics_post_id:
         return
@@ -4032,6 +4219,7 @@ async def schedule_event_update_tasks(db: Database, ev: Event) -> None:
     await enqueue_job(db, eid, JobTask.telegraph_build)
     if not is_vk_wall_url(ev.source_post_url):
         await enqueue_job(db, eid, JobTask.vk_sync)
+    await enqueue_job(db, eid, JobTask.ics_publish)
     await enqueue_job(db, eid, JobTask.month_pages)
     d = parse_iso_date(ev.date)
     if d:
@@ -4721,6 +4909,7 @@ BACKOFF_SCHEDULE = [30, 120, 600, 3600]
 TASK_LABELS = {
     "telegraph_build": "Telegraph (событие)",
     "vk_sync": "VK",
+    "ics_publish": "ICS",
     "month_pages": "Страница месяца",
     "week_pages": "Неделя",
     "weekend_pages": "Выходные",
@@ -4739,6 +4928,8 @@ async def _job_result_link(task: JobTask, event_id: int, db: Database) -> str | 
             return ev.telegraph_url
         if task == JobTask.vk_sync:
             return ev.source_vk_post_url
+        if task == JobTask.ics_publish:
+            return ev.ics_url_supabase
         if task == JobTask.month_pages:
             d = parse_iso_date(ev.date.split("..", 1)[0])
             month_key = d.strftime("%Y-%m") if d else None
@@ -5453,6 +5644,7 @@ async def update_festival_vk_nav(event_id: int, db: Database, bot: Bot | None) -
 JOB_HANDLERS = {
     "telegraph_build": update_telegraph_event_page,
     "vk_sync": job_sync_vk_source_post,
+    "ics_publish": ics_publish,
     "month_pages": update_month_pages_for,
     "week_pages": update_week_pages_for,
     "weekend_pages": update_weekend_pages_for,
