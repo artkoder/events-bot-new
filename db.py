@@ -120,8 +120,6 @@ class Database:
                     ics_url TEXT,
                     source_post_url TEXT,
                     source_vk_post_url TEXT,
-                    ics_post_url TEXT,
-                    ics_post_id INTEGER,
                     ics_hash TEXT,
                     ics_file_id TEXT,
                     ics_updated_at TIMESTAMP,
