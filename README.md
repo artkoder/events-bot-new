@@ -52,16 +52,17 @@ browse upcoming announcements. The command accepts dates like `2025-07-10`,
   export WEEK_EDIT_CRON=02:30     # HH:MM local time
   # Optional: fine-grained weekly edit control
   export VK_WEEK_EDIT_ENABLED=false
-  export VK_WEEK_EDIT_SCHEDULE=02:30
-  export VK_WEEK_EDIT_TZ=UTC
+  export VK_WEEK_EDIT_SCHEDULE=02:10
+  export VK_WEEK_EDIT_TZ=Europe/Kaliningrad
 
   # Captcha handling parameters
   export CAPTCHA_WAIT_S=600
   export CAPTCHA_MAX_ATTEMPTS=2
   export CAPTCHA_NIGHT_RANGE=00:00-07:00
   export CAPTCHA_RETRY_AT=08:10
-  export VK_CAPTCHA_TTL_MIN=5
-  export VK_CAPTCHA_QUIET=00:00-07:00
+  export VK_CAPTCHA_TTL_MIN=60
+  # optional quiet hours for captcha notifications (HH:MM-HH:MM)
+  export VK_CAPTCHA_QUIET=
  python main.py
   ```
 

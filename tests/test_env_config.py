@@ -26,7 +26,7 @@ def test_new_config_defaults(monkeypatch):
     assert main.CAPTCHA_NIGHT_RANGE == "00:00-07:00"
     assert main.CAPTCHA_RETRY_AT == "08:10"
     assert main.VK_WEEK_EDIT_ENABLED is False
-    assert main.VK_WEEK_EDIT_SCHEDULE == "02:30"
-    assert main.VK_WEEK_EDIT_TZ == "UTC"
-    assert main.VK_CAPTCHA_TTL_MIN == 5
-    assert main.VK_CAPTCHA_QUIET == "00:00-07:00"
+    assert main.VK_WEEK_EDIT_SCHEDULE == "02:10"
+    assert main.VK_WEEK_EDIT_TZ == "Europe/Kaliningrad"
+    assert main.VK_CAPTCHA_TTL_MIN == 60
+    assert main.VK_CAPTCHA_QUIET == ""
