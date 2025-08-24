@@ -13,7 +13,8 @@ _connector: TCPConnector | None = None
 _session: ClientSession | None = None
 
 # VK API error codes that trigger actor fallback from group to user token
-VK_FALLBACK_CODES = {15, 200, 203}
+# include generic "Access denied" errors for posting methods
+VK_FALLBACK_CODES = {15, 200, 203, 214}
 
 
 class _Response:
