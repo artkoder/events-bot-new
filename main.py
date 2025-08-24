@@ -78,6 +78,7 @@ from aiohttp import (
     ServerDisconnectedError,
 )
 from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.exceptions import TelegramBadRequest
 import socket
 from difflib import SequenceMatcher
 import json
@@ -2212,25 +2213,44 @@ def _ics_filename(event: Event) -> str:
     return f"event-{event.id}.ics"
 
 
-def message_link(file_id: str) -> str:
-    return f"https://t.me/{file_id}"
+def message_link(chat_id: int, message_id: int) -> str:
+    """Return a t.me link for a message."""
+    if chat_id < 0:
+        cid = str(chat_id)
+        if cid.startswith("-100"):
+            cid = cid[4:]
+        else:
+            cid = cid[1:]
+        return f"https://t.me/c/{cid}/{message_id}"
+    return f"https://t.me/{chat_id}/{message_id}"
 
 
-def format_event_caption(ev: Event) -> str:
+_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _strip_tags(text: str) -> str:
+    return html.unescape(_TAG_RE.sub("", text))
+
+
+def format_event_caption(ev: Event, *, style: str = "ics") -> tuple[str, str | None]:
     lines = format_event_daily(ev).splitlines()
     if not lines:
-        return "Календарь к событию"
-    title = lines[0]
+        return "Календарь к событию", None
+    title = _strip_tags(lines[0])
     details = lines[-1]
     if details.startswith("<i>") and details.endswith("</i>"):
         details = details[3:-4]
+    details = _strip_tags(details)
     parts = details.split(" ", 2)
     if len(parts) >= 3:
         details = f"{parts[0]} {parts[1]}, {parts[2]}"
-    caption = [title, details]
+    caption_lines = [title]
+    parse_mode: str | None = None
     if ev.telegraph_url:
-        caption.append(f"Подробнее: {ev.telegraph_url}")
-    return "\n".join(caption)
+        caption_lines.append(f'<a href="{html.escape(ev.telegraph_url)}">Подробнее</a>')
+        parse_mode = "HTML"
+    caption_lines.append(details)
+    return "\n".join(caption_lines), parse_mode
 
 
 async def ics_publish(event_id: int, db: Database, bot: Bot, progress=None) -> bool:
@@ -2263,29 +2283,40 @@ async def ics_publish(event_id: int, db: Database, bot: Bot, progress=None) -> b
                 progress.mark("ics_supabase", "skipped_nochange", "no change")
             if ev.ics_file_id:
                 if progress:
-                    progress.mark(
-                        "ics_telegram",
-                        "done",
-                        message_link(ev.ics_file_id),
-                    )
+                    progress.mark("ics_telegram", "skipped_nochange", "no change")
             else:
                 try:
                     channel = await get_asset_channel(db)
                     if channel:
                         file = types.BufferedInputFile(ics_bytes, filename=filename)
-                        async with span("tg-send"):
-                            msg = await bot.send_document(
-                                channel.channel_id,
-                                file,
-                                caption=format_event_caption(ev),
-                            )
-                        tg_file_id = msg.document.file_id
-                        if progress:
-                            progress.mark(
-                                "ics_telegram",
-                                "done",
-                                message_link(tg_file_id),
-                            )
+                        caption, parse_mode = format_event_caption(ev)
+                        try:
+                            async with span("tg-send"):
+                                msg = await bot.send_document(
+                                    channel.channel_id,
+                                    file,
+                                    caption=caption,
+                                    parse_mode=parse_mode,
+                                )
+                        except TelegramBadRequest:
+                            lines = caption.split("\n")
+                            if ev.telegraph_url and len(lines) >= 3:
+                                caption = "\n".join(
+                                    [lines[0], f"Подробнее: {ev.telegraph_url}", lines[2]]
+                                )
+                            async with span("tg-send"):
+                                msg = await bot.send_document(
+                                    channel.channel_id,
+                                    file,
+                                    caption=caption,
+                                )
+                    tg_file_id = msg.document.file_id
+                    if progress:
+                        progress.mark(
+                            "ics_telegram",
+                            "done",
+                            message_link(msg.chat.id, msg.message_id),
+                        )
                 except Exception as te:
                     errors.append(str(te))
                     if progress:
@@ -2328,18 +2359,36 @@ async def ics_publish(event_id: int, db: Database, bot: Bot, progress=None) -> b
                 channel = await get_asset_channel(db)
                 if channel:
                     file = types.BufferedInputFile(ics_bytes, filename=filename)
-                    async with span("tg-send"):
-                        msg = await bot.send_document(
-                            channel.channel_id,
-                            file,
-                            caption=format_event_caption(ev),
-                        )
+                    caption, parse_mode = format_event_caption(ev)
+                    try:
+                        async with span("tg-send"):
+                            msg = await bot.send_document(
+                                channel.channel_id,
+                                file,
+                                caption=caption,
+                                parse_mode=parse_mode,
+                            )
+                    except TelegramBadRequest:
+                        if ev.telegraph_url:
+                            caption = "\n".join(
+                                [
+                                    caption.split("\n")[0],
+                                    f"Подробнее: {ev.telegraph_url}",
+                                    caption.split("\n")[-1],
+                                ]
+                            )
+                        async with span("tg-send"):
+                            msg = await bot.send_document(
+                                channel.channel_id,
+                                file,
+                                caption=caption,
+                            )
                     tg_file_id = msg.document.file_id
                     if progress:
                         progress.mark(
                             "ics_telegram",
                             "done",
-                            message_link(tg_file_id),
+                            message_link(msg.chat.id, msg.message_id),
                         )
             except Exception as te:  # pragma: no cover - network failure
                 errors.append(str(te))
@@ -5248,9 +5297,7 @@ async def publish_event_progress(event: Event, db: Database, bot: Bot, chat_id: 
         link = event.ics_url
         suffix = f" — <a href='{html.escape(link)}'>открыть</a>" if link else ""
         ics_sub["ics_supabase"] = {"icon": "\U0001f504", "suffix": suffix}
-        tg_link = message_link(event.ics_file_id) if event.ics_file_id else ""
-        tg_suffix = f" — <a href='{html.escape(tg_link)}'>открыть</a>" if tg_link else ""
-        ics_sub["ics_telegram"] = {"icon": "\U0001f504", "suffix": tg_suffix}
+        ics_sub["ics_telegram"] = {"icon": "\U0001f504", "suffix": ""}
     lines = []
     for t in tasks:
         if t == JobTask.ics_publish:

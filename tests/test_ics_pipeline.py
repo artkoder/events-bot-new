@@ -13,9 +13,14 @@ class DummyBot(Bot):
         self.docs = []
 
     async def send_document(self, chat_id, document, caption=None, **kwargs):
-        self.docs.append((chat_id, caption))
+        self.docs.append((chat_id, caption, kwargs.get("parse_mode")))
         from types import SimpleNamespace
-        return SimpleNamespace(document=SimpleNamespace(file_id="file" + str(len(self.docs))), message_id=len(self.docs))
+        chat = SimpleNamespace(id=chat_id)
+        return SimpleNamespace(
+            document=SimpleNamespace(file_id="file" + str(len(self.docs))),
+            message_id=len(self.docs),
+            chat=chat,
+        )
 
 
 class FakeClient:
