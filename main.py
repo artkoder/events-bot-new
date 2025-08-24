@@ -4167,8 +4167,6 @@ async def add_events_from_text(
                             exclude={
                                 "id",
                                 "added_at",
-                                "ics_post_url",
-                                "ics_post_id",
                             }
                         )
                     )
@@ -5686,8 +5684,8 @@ def format_event_md(e: Event, festival: Festival | None = None) -> str:
         cam = "\U0001f4f8" * max(0, e.photo_count)
         prefix = f"{cam} " if cam else ""
         more_line = f"{prefix}[подробнее]({e.telegraph_url})"
-        if e.ics_post_url:
-            more_line += f" \U0001f4c5 [добавить в календарь]({e.ics_post_url})"
+        if e.ics_url:
+            more_line += f" \U0001f4c5 [добавить в календарь]({e.ics_url})"
         lines.append(more_line)
     loc = e.location_name
     addr = e.location_address

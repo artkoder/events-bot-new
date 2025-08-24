@@ -34,6 +34,14 @@ class FakeClient:
         return f"https://supabase/{path}"
 
 
+class Progress:
+    def __init__(self):
+        self.marks = []
+
+    def mark(self, key, status, detail):
+        self.marks.append((key, status, detail))
+
+
 @pytest.mark.asyncio
 async def test_publish_ics_both_channels_success(tmp_path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
@@ -91,12 +99,57 @@ async def test_ics_skips_when_no_change(tmp_path, monkeypatch):
         await session.commit()
     fake = FakeClient()
     monkeypatch.setattr(main, "get_supabase_client", lambda: fake)
+    async def fake_update(*a, **k):
+        pass
+    monkeypatch.setattr(main, "update_source_page_ics", fake_update)
     await main.ics_publish(1, db, bot)
     fake.uploaded.clear()
     bot.docs.clear()
-    await main.ics_publish(1, db, bot)
+    pr = Progress()
+    await main.ics_publish(1, db, bot, pr)
     assert not fake.uploaded
     assert not bot.docs
+    assert ("ics_supabase", "skipped_nochange", "no change") in pr.marks
+    assert ("ics_telegram", "skipped_nochange", "no change") in pr.marks
+
+
+@pytest.mark.asyncio
+async def test_ics_updates_on_change(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+    async with db.get_session() as session:
+        session.add(Channel(channel_id=-100, title="Asset", is_admin=True, is_asset=True))
+        session.add(
+            Event(
+                id=1,
+                title="A",
+                description="d",
+                source_text="s",
+                date="2025-07-18",
+                time="19:00",
+                location_name="Hall",
+                city="Town",
+            )
+        )
+        await session.commit()
+    fake = FakeClient()
+    monkeypatch.setattr(main, "get_supabase_client", lambda: fake)
+    async def fake_update(*a, **k):
+        pass
+    monkeypatch.setattr(main, "update_source_page_ics", fake_update)
+    await main.ics_publish(1, db, bot)
+    async with db.get_session() as session:
+        ev = await session.get(Event, 1)
+        h1, u1, f1 = ev.ics_hash, ev.ics_url, ev.ics_file_id
+        ev.date = "2025-07-19"
+        await session.commit()
+    await main.ics_publish(1, db, bot)
+    async with db.get_session() as session:
+        ev = await session.get(Event, 1)
+        assert ev.ics_hash != h1
+        assert ev.ics_url != u1
+        assert ev.ics_file_id != f1
 
 
 @pytest.mark.asyncio
