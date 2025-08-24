@@ -5907,8 +5907,11 @@ async def test_forward_adds_calendar_button(tmp_path: Path, monkeypatch):
 
     async def fake_send_document(self, chat_id, document, caption=None, parse_mode=None):
         class Msg:
-            message_id = 77
-        return Msg()
+            def __init__(self, cid):
+                self.message_id = 77
+                self.chat = type("C", (), {"id": cid})()
+                self.document = type("D", (), {"file_id": "f1"})()
+        return Msg(chat_id)
 
     monkeypatch.setattr(DummyBot, "send_document", fake_send_document, raising=False)
 
