@@ -60,7 +60,7 @@ class BatchProgress:
     def register_job(self, key: str) -> None:
         self.status.setdefault(key, "pending")
 
-    def finish_job(self, key: str, status: str = "success") -> None:
+    def finish_job(self, key: str, status: str = "done") -> None:
         if key in self.status:
             self.status[key] = status
 
@@ -111,10 +111,13 @@ class BatchProgress:
 
     def snapshot_text(self) -> str:
         icon = {
-            "success": "✅",
+            "pending": "⏳",
+            "running": "🔄",
+            "deferred": "⏸",
+            "captcha": "🧩⏸",
+            "done": "✅",
             "error": "❌",
-            "pending": "🔄",
-            "paused": "⏸",
+            "skipped_nochange": "⏭",
         }
         lines = [
             f"Events (Telegraph): {self.events_done}/{self.total_events}"
@@ -206,11 +209,13 @@ class CoalescingScheduler:
                     continue
                 progress_made = True
                 try:
+                    if self.progress:
+                        self.progress.finish_job(key, "running")
                     await job.func(job.payload)
                 except Exception as e:
                     if getattr(e, "code", None) == 14:
                         if self.progress:
-                            self.progress.finish_job(key, "paused")
+                            self.progress.finish_job(key, "captcha")
                         self._remaining = remaining
                         if self.on_captcha:
                             self.on_captcha(self, key)
@@ -220,7 +225,7 @@ class CoalescingScheduler:
                     self._remaining = remaining
                     raise
                 if self.progress:
-                    self.progress.finish_job(key, "success")
+                    self.progress.finish_job(key, "done")
                 if job.track:
                     self.order.append(key)
                 completed.add(key)
