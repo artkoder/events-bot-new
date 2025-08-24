@@ -296,7 +296,9 @@ VK_CAPTCHA_TTL_MIN = int(os.getenv("VK_CAPTCHA_TTL_MIN", "60"))
 VK_CAPTCHA_QUIET = os.getenv("VK_CAPTCHA_QUIET", "")
 
 # metrics counters
-vk_fallback_group_to_user_total = 0
+vk_fallback_group_to_user_total: dict[str, int] = defaultdict(int)
+# circuit breaker for group-token permission errors
+vk_group_blocked: TTLCache[str, bool] = TTLCache(maxsize=16, ttl=12 * 3600)
 ICS_CONTENT_TYPE = "text/calendar; charset=utf-8"
 ICS_CONTENT_DISP_TEMPLATE = 'inline; filename="{name}"'
 ICS_CALNAME = "kenigevents"
@@ -963,15 +965,16 @@ async def _vk_api(
                 tokens.append(("user", user_token))
         elif mode == "auto":
             auto_methods = ("wall.post", "wall.edit", "wall.getById")
+            group_blocked = vk_group_blocked.get(method)
             if any(method.startswith(m) for m in auto_methods) or method.startswith("photos."):
-                if group_token:
+                if group_token and not group_blocked:
                     tokens.append(("group", group_token))
                 if user_token:
                     tokens.append(("user", user_token))
             else:
                 if user_token:
                     tokens.append(("user", user_token))
-                if group_token:
+                if group_token and not group_blocked:
                     tokens.append(("group", group_token))
         else:
             if user_token:
@@ -1051,13 +1054,20 @@ async def _vk_api(
                 and kind == "group"
                 and VK_ACTOR_MODE == "auto"
             ):
-                if code in VK_FALLBACK_CODES:
-                    global vk_fallback_group_to_user_total
-                    vk_fallback_group_to_user_total += 1
+                msg_l = (err.get("error_msg", "") or "").lower()
+                perm_error = (
+                    code in VK_FALLBACK_CODES
+                    or "method is unavailable with group auth" in msg_l
+                    or "access to adding post denied" in msg_l
+                )
+                if perm_error:
+                    vk_fallback_group_to_user_total[method] += 1
+                    vk_group_blocked[method] = True
+                    reason = f"code={code}" if code in VK_FALLBACK_CODES else err.get("error_msg", "")
                     logging.info(
-                        "vk actor fallback group->user code=%s method=%s",
-                        code,
+                        "vk.fallback group\u2192user method=%s reason=%s",
                         method,
+                        reason,
                     )
                     last_err = err
                     continue
