@@ -123,7 +123,6 @@ class Database:
                     ics_post_url TEXT,
                     ics_post_id INTEGER,
                     ics_hash TEXT,
-                    ics_url_supabase TEXT,
                     ics_file_id TEXT,
                     ics_updated_at TIMESTAMP,
                     source_chat_id INTEGER,
@@ -138,7 +137,6 @@ class Database:
             )
             await _add_column(conn, "event", "photo_urls JSON")
             await _add_column(conn, "event", "ics_hash TEXT")
-            await _add_column(conn, "event", "ics_url_supabase TEXT")
             await _add_column(conn, "event", "ics_file_id TEXT")
             await _add_column(conn, "event", "ics_updated_at TIMESTAMP")
 

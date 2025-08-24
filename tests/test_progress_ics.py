@@ -61,6 +61,9 @@ async def test_progress_lines_for_ics_states(tmp_path, monkeypatch):
         await session.commit()
     fake = FakeClient()
     monkeypatch.setattr(main, "get_supabase_client", lambda: fake)
+    async def fake_update(*a, **k):
+        pass
+    monkeypatch.setattr(main, "update_source_page_ics", fake_update)
 
     pr = Progress()
     await main.ics_publish(1, db, bot, pr)
