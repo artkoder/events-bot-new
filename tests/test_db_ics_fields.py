@@ -52,10 +52,13 @@ async def test_ics_fields_persist_and_update(tmp_path, monkeypatch):
         await session.commit()
     fake = FakeClient()
     monkeypatch.setattr(main, "get_supabase_client", lambda: fake)
+    async def fake_update(*a, **k):
+        pass
+    monkeypatch.setattr(main, "update_source_page_ics", fake_update)
     await main.ics_publish(1, db, bot)
     async with db.get_session() as session:
         ev = await session.get(Event, 1)
-        h1, u1, f1, t1 = ev.ics_hash, ev.ics_url_supabase, ev.ics_file_id, ev.ics_updated_at
+        h1, u1, f1, t1 = ev.ics_hash, ev.ics_url, ev.ics_file_id, ev.ics_updated_at
     async with db.get_session() as session:
         ev = await session.get(Event, 1)
         ev.time = "20:00"
@@ -64,6 +67,6 @@ async def test_ics_fields_persist_and_update(tmp_path, monkeypatch):
     async with db.get_session() as session:
         ev = await session.get(Event, 1)
         assert ev.ics_hash != h1
-        assert ev.ics_url_supabase
+        assert ev.ics_url
         assert ev.ics_file_id != f1
         assert ev.ics_updated_at > t1

@@ -90,7 +90,6 @@ class Event(SQLModel, table=True):
     ics_post_url: Optional[str] = None
     ics_post_id: Optional[int] = None
     ics_hash: Optional[str] = None
-    ics_url_supabase: Optional[str] = None
     ics_file_id: Optional[str] = None
     ics_updated_at: Optional[datetime] = None
     source_chat_id: Optional[int] = None

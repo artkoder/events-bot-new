@@ -1404,23 +1404,6 @@ async def restore_database(data: bytes, db: Database):
     db._conn = None  # type: ignore[attr-defined]
     await db.init()
 
-
-def build_asset_caption(event: Event, day: date) -> str:
-    """Return HTML caption for a calendar asset post."""
-    loc = html.escape(event.location_name or "")
-    addr = event.location_address
-    if addr and event.city:
-        addr = strip_city_from_address(addr, event.city)
-    if addr:
-        loc += f", {html.escape(addr)}"
-    if event.city:
-        loc += f", #{html.escape(event.city)}"
-    return (
-        f"<b>{html.escape(event.title)}</b>\n"
-        f"<i>{format_day_pretty(day)} {event.time} {loc}</i>"
-    )
-
-
 def validate_offset(value: str) -> bool:
     if len(value) != 6 or value[0] not in "+-" or value[3] != ":":
         return False
@@ -2186,205 +2169,11 @@ async def build_ics_content(db: Database, event: Event) -> str:
     return "\r\n".join(folded) + "\r\n"
 
 
-async def upload_ics(event: Event, db: Database) -> str | None:
-    if os.getenv("SUPABASE_DISABLED") == "1":
-        logging.debug("Supabase disabled")
-        return None
-    async with span("http"):
-        client = get_supabase_client()
-        if not client:
-            logging.debug("Supabase disabled")
-            return None
-        if event.end_date:
-            logging.info("skip ics for multi-day event %s", event.id)
-            return None
-        if not parse_time_range(event.time):
-            logging.info("skip ics for unclear time %s", event.id)
-            return None
-        content = await build_ics_content(db, event)
-        d = parse_iso_date(event.date)
-        if d:
-            path = f"Event-{event.id}-{d.day:02d}-{d.month:02d}-{d.year}.ics"
-        else:
-            path = f"Event-{event.id}.ics"
-        if DEBUG:
-            logging.debug("ICS upload %s size=%d", path, len(content.encode("utf-8")))
-        try:
-            logging.info("Uploading ICS to %s/%s", SUPABASE_BUCKET, path)
-            storage = client.storage.from_(SUPABASE_BUCKET)
-            await asyncio.to_thread(
-                storage.upload,
-                path,
-                content.encode("utf-8"),
-                {
-                    "content-type": ICS_CONTENT_TYPE,
-                    "content-disposition": ICS_CONTENT_DISP_TEMPLATE.format(name=path),
-                    "upsert": "true",
-                },
-            )
-            url = await asyncio.to_thread(storage.get_public_url, path)
-            logging.info("ICS uploaded: %s", url)
-        except Exception as e:
-            logging.error("Failed to upload ics: %s", e)
-            return None
-        return url
-
-
-async def post_ics_asset(event: Event, db: Database, bot: Bot) -> tuple[str, int] | None:
-    channel = await get_asset_channel(db)
-    if not channel:
-        logging.info("no asset channel configured")
-        return None
-    try:
-        content = await build_ics_content(db, event)
-    except Exception as e:
-        logging.error("failed to build ics content: %s", e)
-        return None
-
-    d = parse_iso_date(event.date)
-    if d:
-        name = f"Event-{event.id}-{d.day:02d}-{d.month:02d}-{d.year}.ics"
-    else:
-
-        d = date.today()
-        name = f"Event-{event.id}.ics"
-    file = types.BufferedInputFile(content.encode("utf-8"), filename=name)
-    caption = build_asset_caption(event, d)
-
-    logging.info(
-        "posting ics asset to channel %s with caption %s",
-        channel.channel_id,
-        caption.replace("\n", " | "),
-    )
-
-    try:
-        if event.ics_post_id:
-            media = types.InputMediaDocument(
-                media=file, caption=caption, parse_mode="HTML"
-            )
-            await bot.edit_message_media(
-                chat_id=channel.channel_id,
-                message_id=event.ics_post_id,
-                media=media,
-            )
-            url = build_channel_post_url(channel, event.ics_post_id)
-            logging.info("updated ics in asset channel: %s", url)
-            return url, event.ics_post_id
-        msg = await bot.send_document(
-            channel.channel_id,
-            file,
-            caption=caption,
-            parse_mode="HTML",
-        )
-        url = build_channel_post_url(channel, msg.message_id)
-        logging.info("posted ics to asset channel: %s", url)
-        return url, msg.message_id
-    except Exception as e:
-        logging.error("failed to post ics to asset channel: %s", e)
-        return None
-
-async def add_calendar_button(event: Event, db: Database, bot: Bot):
-    """Attach calendar link button to the original channel post."""
-    if not (
-        event.source_chat_id
-        and event.source_message_id
-        and event.ics_post_url
-    ):
-        return
-    month_buttons = await build_month_buttons(db)
-    rows = [[types.InlineKeyboardButton(text="Добавить в календарь", url=event.ics_post_url)]]
-    if month_buttons:
-        rows.append(month_buttons)
-    markup = types.InlineKeyboardMarkup(inline_keyboard=rows)
-    try:
-        await bot.edit_message_reply_markup(
-            chat_id=event.source_chat_id,
-            message_id=event.source_message_id,
-            reply_markup=markup,
-        )
-
-        logging.info(
-            "calendar button set for event %s post %s", event.id, event.source_post_url
-        )
-
-    except Exception as e:
-        logging.error("failed to set calendar button: %s", e)
-
-
-async def delete_ics(event: Event):
-    client = get_supabase_client()
-    if not client or not event.ics_url:
-        return
-    path = event.ics_url.split("/")[-1]
-    try:
-        logging.info("Deleting ICS %s from %s", path, SUPABASE_BUCKET)
-        storage = client.storage.from_(SUPABASE_BUCKET)
-        async with span("http"):
-            await asyncio.to_thread(storage.remove, [path])
-    except Exception as e:
-        logging.error("Failed to delete ics: %s", e)
-
-
 def _ics_filename(event: Event) -> str:
     d = parse_iso_date(event.date.split("..", 1)[0])
     if d:
         return f"event-{event.id}-{d.isoformat()}.ics"
     return f"event-{event.id}.ics"
-
-
-def _ics_escape(value: str) -> str:
-    return (
-        value.replace("\\", "\\\\")
-        .replace(",", "\\,")
-        .replace(";", "\\;")
-        .replace("\n", "\\n")
-    )
-
-
-def build_event_ics(event: Event) -> bytes:
-    time_range = parse_time_range(event.time)
-    if not time_range:
-        raise ValueError("bad time")
-    start_t, end_t = time_range
-    d = parse_iso_date(event.date.split("..", 1)[0])
-    if not d:
-        raise ValueError("bad date")
-    start_dt = datetime.combine(d, start_t, tzinfo=LOCAL_TZ).astimezone(timezone.utc)
-    if end_t:
-        end_dt = datetime.combine(d, end_t, tzinfo=LOCAL_TZ).astimezone(timezone.utc)
-    else:
-        end_dt = start_dt + timedelta(hours=1)
-
-    desc = event.description or ""
-    link = event.telegraph_url
-    if link:
-        desc = f"{desc}\n\n{link}" if desc else link
-    location = ", ".join(
-        filter(None, [event.location_name, event.location_address, event.city])
-    )
-
-    lines = [
-        "BEGIN:VCALENDAR",
-        "VERSION:2.0",
-        "PRODID:-//events-bot//RU",
-        "CALSCALE:GREGORIAN",
-        "METHOD:PUBLISH",
-        f"X-WR-CALNAME:{ICS_CALNAME}",
-        "BEGIN:VEVENT",
-        f"UID:polyubit-{event.id}@ics",
-        f"DTSTAMP:{start_dt.strftime('%Y%m%dT%H%M%SZ')}",
-        f"DTSTART:{start_dt.strftime('%Y%m%dT%H%M%SZ')}",
-        f"DTEND:{end_dt.strftime('%Y%m%dT%H%M%SZ')}",
-        f"SUMMARY:{_ics_escape(event.title)}",
-    ]
-    if desc:
-        lines.append(f"DESCRIPTION:{_ics_escape(desc)}")
-    if location:
-        lines.append(f"LOCATION:{_ics_escape(location)}")
-    if link:
-        lines.append(f"URL:{link}")
-    lines.extend(["END:VEVENT", "END:VCALENDAR"])
-    return "\r\n".join(lines).encode("utf-8")
 
 
 async def ics_publish(event_id: int, db: Database, bot: Bot, progress=None) -> bool:
@@ -2395,14 +2184,18 @@ async def ics_publish(event_id: int, db: Database, bot: Bot, progress=None) -> b
             return False
 
         try:
-            ics_bytes = build_event_ics(ev)
+            content = await build_ics_content(db, ev)
+            ics_bytes = content.encode("utf-8")
+            hash_source = "\r\n".join(
+                l for l in content.split("\r\n") if not l.startswith(("UID:", "DTSTAMP:"))
+            ).encode("utf-8")
         except Exception as e:  # pragma: no cover - build failure
             if progress:
                 progress.mark("ics_supabase", "error", str(e))
                 progress.mark("ics_telegram", "error", str(e))
             raise
 
-        ics_hash = hashlib.sha256(ics_bytes).hexdigest()
+        ics_hash = hashlib.sha256(hash_source).hexdigest()
         filename = _ics_filename(ev)
         errors: list[str] = []
         supabase_url: str | None = None
@@ -2494,49 +2287,17 @@ async def ics_publish(event_id: int, db: Database, bot: Bot, progress=None) -> b
                 ev.ics_hash = ics_hash
                 ev.ics_updated_at = datetime.utcnow()
                 if supabase_url is not None:
-                    ev.ics_url_supabase = supabase_url
+                    ev.ics_url = supabase_url
                 if tg_file_id is not None:
                     ev.ics_file_id = tg_file_id
                 await session.commit()
 
+        if supabase_url is not None:
+            await update_source_page_ics(event_id, db, supabase_url)
+
         if errors:
             raise RuntimeError("; ".join(errors))
         return changed
-
-async def delete_asset_post(event: Event, db: Database, bot: Bot):
-    if not event.ics_post_id:
-        return
-    try:
-        channel = await get_asset_channel(db)
-        if not channel:
-            return
-        async with span("tg-send"):
-            await bot.delete_message(channel.channel_id, event.ics_post_id)
-    except Exception as e:
-        logging.error("failed to delete asset message: %s", e)
-
-
-async def remove_calendar_button(event: Event, bot: Bot):
-    """Remove calendar button from the original channel post."""
-    if not (event.source_chat_id and event.source_message_id):
-        return
-    try:
-        async with span("tg-send"):
-            await bot.edit_message_reply_markup(
-                chat_id=event.source_chat_id,
-                message_id=event.source_message_id,
-                reply_markup=None,
-            )
-
-        logging.info(
-            "calendar button removed for event %s post %s",
-            event.id,
-            event.source_post_url,
-        )
-
-    except Exception as e:
-        logging.error("failed to remove calendar button: %s", e)
-
 
 @lru_cache(maxsize=1)
 def _read_base_prompt() -> str:
@@ -3276,97 +3037,18 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
         await callback.answer("Toggled")
     elif data.startswith("createics:"):
         eid = int(data.split(":")[1])
-        async with db.get_session() as session:
-            user = await session.get(User, callback.from_user.id)
-            event = await session.get(Event, eid)
-            if not event or (user and user.blocked) or (
-                user and user.is_partner and event.creator_id != user.user_id
-            ):
-                await callback.answer("Not authorized", show_alert=True)
-                return
-            if event:
-                url = await upload_ics(event, db)
-                if url:
-                    event.ics_url = url
-                    await session.commit()
-                    logging.info("ICS saved for event %s: %s", eid, url)
-                    posted = await post_ics_asset(event, db, bot)
-                    if posted:
-                        url_p, msg_id = posted
-                        event.ics_post_url = url_p
-                        event.ics_post_id = msg_id
-                        await add_calendar_button(event, db, bot)
-                    if event.telegraph_path:
-                        await update_source_page_ics(
-                            event.telegraph_path, event.title or "Event", url
-                        )
-                        if not is_vk_wall_url(event.source_post_url):
-                            await sync_vk_source_post(
-                                event,
-                                event.source_text,
-                                db,
-                                bot,
-                                ics_url=url,
-                                append_text=False,
-                            )
-                    month = event.date.split("..", 1)[0][:7]
-                    await sync_month_page(db, month)
-
-                    d = parse_iso_date(event.date)
-                    w_start = weekend_start_for_date(d) if d else None
-
-                    if w_start:
-                        await sync_weekend_page(db, w_start.isoformat())
-                else:
-                    logging.warning("ICS creation failed for event %s", eid)
-        if event:
-            await show_edit_menu(callback.from_user.id, event, bot)
-        await callback.answer("Created")
+        await enqueue_job(db, eid, JobTask.ics_publish)
+        await callback.answer("Enqueued")
     elif data.startswith("delics:"):
         eid = int(data.split(":")[1])
         async with db.get_session() as session:
-            user = await session.get(User, callback.from_user.id)
-            event = await session.get(Event, eid)
-            if not event or (user and user.blocked) or (
-                user and user.is_partner and event.creator_id != user.user_id
-            ):
-                await callback.answer("Not authorized", show_alert=True)
-                return
-            if event and event.ics_url:
-                await delete_ics(event)
-                event.ics_url = None
+            ev = await session.get(Event, eid)
+            if ev:
+                ev.ics_url = None
+                ev.ics_file_id = None
+                ev.ics_hash = None
+                ev.ics_updated_at = None
                 await session.commit()
-                logging.info("ICS removed for event %s", eid)
-                await delete_asset_post(event, db, bot)
-                event.ics_post_url = None
-                event.ics_post_id = None
-                await session.commit()
-                await remove_calendar_button(event, bot)
-                if event.telegraph_path:
-                    await update_source_page_ics(
-                        event.telegraph_path, event.title or "Event", None
-                    )
-                    if not is_vk_wall_url(event.source_post_url):
-                        await sync_vk_source_post(
-                            event,
-                            event.source_text,
-                            db,
-                            bot,
-                            ics_url=None,
-                            append_text=False,
-                        )
-                month = event.date.split("..", 1)[0][:7]
-                await sync_month_page(db, month)
-
-                d = parse_iso_date(event.date)
-                w_start = weekend_start_for_date(d) if d else None
-
-                if w_start:
-                    await sync_weekend_page(db, w_start.isoformat())
-            elif event:
-                logging.debug("deleteics: no file for event %s", eid)
-        if event:
-            await show_edit_menu(callback.from_user.id, event, bot)
         await callback.answer("Deleted")
     elif data.startswith("markfree:"):
         eid = int(data.split(":")[1])
@@ -4929,7 +4611,7 @@ async def _job_result_link(task: JobTask, event_id: int, db: Database) -> str | 
         if task == JobTask.vk_sync:
             return ev.source_vk_post_url
         if task == JobTask.ics_publish:
-            return ev.ics_url_supabase
+            return ev.ics_url
         if task == JobTask.month_pages:
             d = parse_iso_date(ev.date.split("..", 1)[0])
             month_key = d.strftime("%Y-%m") if d else None
@@ -5175,10 +4857,6 @@ async def update_telegraph_event_page(
         ev = await session.get(Event, event_id)
         if not ev:
             return None
-        if not ev.ics_url:
-            ics = await upload_ics(ev, db)
-            if ics:
-                ev.ics_url = ics
         display_link = False if ev.source_post_url else True
         html_content, _, _ = await build_source_page_content(
             ev.title or "Event",
@@ -10366,13 +10044,19 @@ async def update_source_page(
         return f"error: {e}", 0
 
 
-async def update_source_page_ics(path: str, title: str, url: str | None):
+async def update_source_page_ics(event_id: int, db: Database, url: str | None):
     """Insert or remove the ICS link in a Telegraph page."""
+    async with db.get_session() as session:
+        ev = await session.get(Event, event_id)
+    if not ev or not ev.telegraph_path:
+        return
     token = get_telegraph_token()
     if not token:
         logging.error("Telegraph token unavailable")
         return
     tg = Telegraph(access_token=token)
+    path = ev.telegraph_path
+    title = ev.title or "Event"
     try:
         logging.info("Editing telegraph ICS for %s", path)
         page = await telegraph_call(tg.get_page, path, return_html=True)

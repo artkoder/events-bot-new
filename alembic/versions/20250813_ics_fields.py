@@ -11,7 +11,6 @@ depends_on = None
 
 def upgrade() -> None:
     op.add_column('event', sa.Column('ics_hash', sa.String(), nullable=True))
-    op.add_column('event', sa.Column('ics_url_supabase', sa.String(), nullable=True))
     op.add_column('event', sa.Column('ics_file_id', sa.String(), nullable=True))
     op.add_column('event', sa.Column('ics_updated_at', sa.DateTime(), nullable=True))
 
@@ -19,5 +18,4 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.drop_column('event', 'ics_updated_at')
     op.drop_column('event', 'ics_file_id')
-    op.drop_column('event', 'ics_url_supabase')
     op.drop_column('event', 'ics_hash')

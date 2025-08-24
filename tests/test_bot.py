@@ -3566,27 +3566,6 @@ def test_apply_ics_link_insert_and_remove():
 
 
 @pytest.mark.asyncio
-async def test_update_source_page_ics(monkeypatch):
-    edited = {}
-
-    class DummyTG:
-        def get_page(self, path, return_html=True):
-            return {"content": "<p>T</p><p></p><p>body</p>"}
-
-        def edit_page(self, path, title, html_content):
-            edited["html"] = html_content
-
-    monkeypatch.setattr("main.get_telegraph_token", lambda: "t")
-    monkeypatch.setattr(
-        "main.Telegraph", lambda access_token=None, domain=None: DummyTG()
-    )
-
-    await main.update_source_page_ics("p", "T", "http://x")
-    assert "Добавить в календарь" in edited.get("html", "")
-    await main.update_source_page_ics("p", "T", None)
-
-
-@pytest.mark.asyncio
 async def test_update_telegraph_event_page_deterministic(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
@@ -3607,9 +3586,6 @@ async def test_update_telegraph_event_page_deterministic(tmp_path: Path, monkeyp
     created: list[bool] = []
     updated_paths: list[str] = []
 
-    async def fake_upload(ev, db_obj):
-        return None
-
     async def fake_create_page(tg, title, html_content=None, **kwargs):
         assert "path" not in kwargs
         created.append(True)
@@ -3620,7 +3596,6 @@ async def test_update_telegraph_event_page_deterministic(tmp_path: Path, monkeyp
             updated_paths.append(args[0])
         return None
 
-    monkeypatch.setattr(main, "upload_ics", fake_upload)
     monkeypatch.setattr(main, "telegraph_create_page", fake_create_page)
     monkeypatch.setattr(main, "telegraph_call", fake_call)
     monkeypatch.setattr(main, "get_telegraph_token", lambda: "t")
@@ -4479,8 +4454,6 @@ async def test_add_events_from_text_skips_description_update_for_new_event(tmp_p
     async def fake_sync_vk(*args, **kwargs):
         return None
 
-    async def fake_upload_ics(event, db_obj):
-        return None
 
     monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
     monkeypatch.setattr("main.create_source_page", fake_create)
@@ -4488,7 +4461,6 @@ async def test_add_events_from_text_skips_description_update_for_new_event(tmp_p
     monkeypatch.setattr("main.sync_weekend_page", fake_weekend)
     monkeypatch.setattr("main.update_event_description", boom)
     monkeypatch.setattr("main.sync_vk_source_post", fake_sync_vk)
-    monkeypatch.setattr("main.upload_ics", fake_upload_ics)
 
     results = await main.add_events_from_text(db, "text", None, None, None)
     assert calls["parse"] == 1
@@ -4569,22 +4541,10 @@ async def test_add_events_from_text_schedules_pages(tmp_path: Path, monkeypatch)
     async def fake_sync_vk(*args, **kwargs):
         return None
 
-    async def fake_upload_ics(*args, **kwargs):
-        return None
-
-    async def fake_post_ics_asset(*args, **kwargs):
-        return None
-
-    async def fake_add_calendar_button(*args, **kwargs):
-        return None
-
     monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
     monkeypatch.setattr("main.create_source_page", fake_create)
     monkeypatch.setattr("main.upload_images", fake_upload_images)
     monkeypatch.setattr("main.sync_vk_source_post", fake_sync_vk)
-    monkeypatch.setattr("main.upload_ics", fake_upload_ics)
-    monkeypatch.setattr("main.post_ics_asset", fake_post_ics_asset)
-    monkeypatch.setattr("main.add_calendar_button", fake_add_calendar_button)
 
     results = await main.add_events_from_text(db, "t", None, None, None)
     assert len(results) == 2
@@ -5834,93 +5794,6 @@ async def test_month_page_festival_link(tmp_path: Path):
     assert "http://tg" in json_dumps(content)
 
 
-@pytest.mark.asyncio
-async def test_upload_ics_content_type(tmp_path: Path, monkeypatch):
-    db = Database(str(tmp_path / "db.sqlite"))
-    await db.init()
-
-    event = Event(
-        id=1,
-        title="T",
-        description="d",
-        source_text="s",
-        date=date.today().isoformat(),
-        time="10:00",
-        location_name="Hall",
-    )
-
-    class DummyBucket:
-        def __init__(self):
-            self.upload_args = None
-
-        def upload(self, path, data, options):
-            self.upload_args = (path, data, options)
-
-        def get_public_url(self, path):
-            return f"https://test/{path}"
-
-        def remove(self, paths):
-            pass
-
-    class DummyStorage:
-        def __init__(self):
-            self.bucket = DummyBucket()
-
-        def from_(self, bucket):
-            return self.bucket
-
-    class DummyClient:
-        def __init__(self):
-            self.storage = DummyStorage()
-
-    dummy = DummyClient()
-    monkeypatch.setattr(main, "get_supabase_client", lambda: dummy)
-    monkeypatch.setattr(main, "SUPABASE_URL", "x")
-    monkeypatch.setattr(main, "SUPABASE_KEY", "y")
-
-    url = await main.upload_ics(event, db)
-    assert url.endswith(".ics")
-    opts = dummy.storage.bucket.upload_args[2]
-    assert opts["content-type"] == main.ICS_CONTENT_TYPE
-    assert opts["content-disposition"].startswith("inline;")
-    assert "filename=\"" in opts["content-disposition"]
-
-
-@pytest.mark.asyncio
-async def test_upload_ics_disabled(tmp_path: Path, monkeypatch):
-    db = Database(str(tmp_path / "db.sqlite"))
-    await db.init()
-
-    event = Event(
-        id=1,
-        title="T",
-        description="d",
-        source_text="s",
-        date=date.today().isoformat(),
-        time="10:00",
-        location_name="Hall",
-    )
-
-    called = {"v": False}
-
-    class DummyClient:
-        pass
-
-    def fake_client():
-        called["v"] = True
-        return DummyClient()
-
-    monkeypatch.setattr(main, "SUPABASE_URL", "x")
-    monkeypatch.setattr(main, "SUPABASE_KEY", "y")
-    monkeypatch.setattr(main, "get_supabase_client", fake_client)
-    monkeypatch.setenv("SUPABASE_DISABLED", "1")
-
-    url = await main.upload_ics(event, db)
-    assert url is None
-    assert called["v"] is False
-
-
-@pytest.mark.asyncio
 async def test_build_ics_content_headers(tmp_path: Path):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
@@ -5969,97 +5842,6 @@ async def test_build_ics_location_escape(tmp_path: Path):
 def test_parse_time_range_dots():
     result = main.parse_time_range("10:30..18:00")
     assert result == (time(10, 30), time(18, 0))
-
-
-
-@pytest.mark.asyncio
-async def test_post_ics_asset_caption(tmp_path: Path, monkeypatch):
-    db = Database(str(tmp_path / "db.sqlite"))
-    await db.init()
-    bot = DummyBot("123:abc")
-
-    ch = main.Channel(channel_id=-1002, title="Asset", is_admin=True, is_asset=True)
-    async with db.get_session() as session:
-        session.add(ch)
-        await session.commit()
-
-    event = Event(
-        id=1,
-        title="Concert",
-        description="desc",
-        source_text="s",
-        date="2025-07-18",
-        time="19:00",
-        location_name="Сигнал",
-        location_address="Леонова 22",
-        city="Калининград",
-    )
-
-    async def fake_build(db2, ev):
-        return "ICS"
-
-    monkeypatch.setattr(main, "build_ics_content", fake_build)
-
-    async def fake_send_document(self, chat_id, document, caption=None, parse_mode=None):
-        self.messages.append((chat_id, caption))
-        class Msg:
-            message_id = 42
-        return Msg()
-
-    monkeypatch.setattr(DummyBot, "send_document", fake_send_document, raising=False)
-
-    url, msg_id = await main.post_ics_asset(event, db, bot)
-    assert msg_id == 42
-    caption = bot.messages[0][1]
-    day = main.format_day_pretty(date(2025, 7, 18))
-    assert f"<b>Concert</b>" in caption
-    assert f"<i>{day} 19:00 Сигнал, Леонова 22, #Калининград</i>" in caption
-
-
-@pytest.mark.asyncio
-async def test_post_ics_asset_updates_existing(tmp_path: Path, monkeypatch):
-    db = Database(str(tmp_path / "db.sqlite"))
-    await db.init()
-    bot = DummyBot("123:abc")
-
-    ch = main.Channel(channel_id=-1002, title="Asset", is_admin=True, is_asset=True)
-    async with db.get_session() as session:
-        session.add(ch)
-        await session.commit()
-
-    event = Event(
-        id=1,
-        title="Concert",
-        description="desc",
-        source_text="s",
-        date="2025-07-18",
-        time="19:00",
-        location_name="Hall",
-        ics_post_id=42,
-        ics_post_url="http://t.me/x/42",
-    )
-
-    async def fake_build(db2, ev):
-        return "ICS"
-
-    monkeypatch.setattr(main, "build_ics_content", fake_build)
-
-    edited: dict[str, tuple[int, int]] = {}
-
-    async def fake_edit_media(self, chat_id, message_id, media):
-        edited["call"] = (chat_id, message_id)
-
-    async def fake_send_document(self, *a, **k):
-        raise AssertionError("send_document should not be called")
-
-    monkeypatch.setattr(DummyBot, "edit_message_media", fake_edit_media, raising=False)
-    monkeypatch.setattr(DummyBot, "send_document", fake_send_document, raising=False)
-
-    url, msg_id = await main.post_ics_asset(event, db, bot)
-
-    assert edited["call"] == (ch.channel_id, 42)
-    assert url == main.build_channel_post_url(ch, 42)
-    assert msg_id == 42
 
 
 @pytest.mark.asyncio
@@ -6112,13 +5894,8 @@ async def test_forward_adds_calendar_button(tmp_path: Path, monkeypatch):
         return "ICS"
 
     monkeypatch.setattr(main, "build_ics_content", fake_build)
-    async def fake_upload(ev, db2):
-        return "https://x/ics"
-
     async def fake_create(*a, **k):
         return ("u", "p", "", 0)
-
-    monkeypatch.setattr(main, "upload_ics", fake_upload)
     monkeypatch.setattr(main, "create_source_page", fake_create)
     monkeypatch.setattr(main, "update_source_page_ics", lambda *a, **k: None)
 
@@ -6127,11 +5904,6 @@ async def test_forward_adds_calendar_button(tmp_path: Path, monkeypatch):
 
     monkeypatch.setattr(main, "sync_month_page", fake_sync)
     monkeypatch.setattr(main, "sync_weekend_page", fake_sync)
-
-    async def fake_post(event, db2, b):
-        return ("https://t.me/a/1", 55)
-
-    monkeypatch.setattr(main, "post_ics_asset", fake_post)
 
     async def fake_send_document(self, chat_id, document, caption=None, parse_mode=None):
         class Msg:

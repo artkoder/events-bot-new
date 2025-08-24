@@ -56,12 +56,17 @@ async def test_publish_ics_both_channels_success(tmp_path, monkeypatch):
         await session.commit()
     fake = FakeClient()
     monkeypatch.setattr(main, "get_supabase_client", lambda: fake)
+    called = {}
+    async def fake_update(*a, **k):
+        called["v"] = True
+    monkeypatch.setattr(main, "update_source_page_ics", fake_update)
     await main.ics_publish(1, db, bot)
     assert fake.uploaded
     assert bot.docs
+    assert called.get("v")
     async with db.get_session() as session:
         ev = await session.get(Event, 1)
-        assert ev.ics_hash and ev.ics_url_supabase and ev.ics_file_id
+        assert ev.ics_hash and ev.ics_url and ev.ics_file_id
 
 
 @pytest.mark.asyncio
@@ -125,7 +130,7 @@ async def test_supabase_error_does_not_block_telegram(tmp_path, monkeypatch):
     async with db.get_session() as session:
         ev = await session.get(Event, 1)
         assert ev.ics_file_id
-        assert ev.ics_url_supabase is None
+        assert ev.ics_url is None
 
 
 @pytest.mark.asyncio
@@ -158,7 +163,7 @@ async def test_telegram_error_does_not_block_supabase(tmp_path, monkeypatch):
     assert fake.uploaded
     async with db.get_session() as session:
         ev = await session.get(Event, 1)
-        assert ev.ics_url_supabase
+        assert ev.ics_url
         assert ev.ics_file_id is None
 
 
@@ -197,14 +202,15 @@ async def test_ics_coalesced_jobs_and_semaphore(tmp_path, monkeypatch):
     fake = FakeClient()
     monkeypatch.setattr(main, "get_supabase_client", lambda: fake)
     order = []
-    orig = main.build_event_ics
-    def fake_build(ev):
-        order.append((ev.id, time.perf_counter()))
-        time.sleep(0.05)
-        return orig(ev)
-    monkeypatch.setattr(main, "build_event_ics", fake_build)
+    orig = main.build_ics_content
+    async def fake_build(db_arg, ev_arg):
+        order.append((ev_arg.id, time.perf_counter()))
+        await asyncio.sleep(0.1)
+        return await orig(db_arg, ev_arg)
+    monkeypatch.setattr(main, "build_ics_content", fake_build)
     await asyncio.gather(
         main.ics_publish(1, db, bot),
         main.ics_publish(2, db, bot),
     )
-    assert order[1][1] >= order[0][1] + 0.05
+    assert order[0][0] == 1 and order[1][0] == 2
+    assert order[1][1] >= order[0][1]
