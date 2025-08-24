@@ -56,6 +56,8 @@ async def test_progress_lines_for_ics_states(tmp_path, monkeypatch):
                 time="19:00",
                 location_name="Hall",
                 city="Town",
+                telegraph_url="https://tg/1",
+                silent=True,
             )
         )
         await session.commit()
@@ -72,6 +74,11 @@ async def test_progress_lines_for_ics_states(tmp_path, monkeypatch):
         m[0] == "ics_telegram" and m[1] == "done" and m[2].startswith("https://t.me/")
         for m in pr.marks
     )
+    caption = bot.docs[0][1]
+    lines = caption.splitlines()
+    assert lines[0] == "<b>A</b>"
+    assert "Hall" in lines[1] and "#Town" in lines[1]
+    assert lines[2] == "Подробнее: https://tg/1"
 
     os.environ["SUPABASE_DISABLED"] = "1"
     pr = Progress()
@@ -87,7 +94,10 @@ async def test_progress_lines_for_ics_states(tmp_path, monkeypatch):
     pr = Progress()
     await main.ics_publish(1, db, bot, pr)
     assert ("ics_supabase", "skipped_nochange", "no change") in pr.marks
-    assert ("ics_telegram", "skipped_nochange", "no change") in pr.marks
+    assert any(
+        m[0] == "ics_telegram" and m[1] == "done" and m[2].startswith("https://t.me/")
+        for m in pr.marks
+    )
 
     class BadClient(FakeClient):
         def upload(self, *a, **k):

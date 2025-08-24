@@ -979,7 +979,7 @@ async def _vk_api(
                         tokens.append(("group", group_token))
                     else:
                         logging.info(
-                            "vk actor skip=group reason=circuit-breaker method=%s", method
+                            "vk.actor=skip group reason=circuit method=%s", method
                         )
                 if user_token:
                     tokens.append(("user", user_token))
@@ -991,7 +991,7 @@ async def _vk_api(
                         tokens.append(("group", group_token))
                     else:
                         logging.info(
-                            "vk actor skip=group reason=circuit-breaker method=%s", method
+                            "vk.actor=skip group reason=circuit method=%s", method
                         )
         else:
             if user_token:
@@ -1002,10 +1002,14 @@ async def _vk_api(
             raise VKPermissionError(None, "permission error")
     last_err: dict | None = None
     session = get_vk_session()
+    fallback_next = False
     for idx, (kind, token) in enumerate(tokens):
         params["access_token"] = token
         params["v"] = "5.131"
-        logging.info("vk.actor=%s method=%s", kind, method)
+        actor_msg = f"vk.actor={kind}"
+        if kind == "user" and fallback_next:
+            actor_msg += " (fallback)"
+        logging.info("%s method=%s", actor_msg, method)
         logging.info(
             "calling VK API %s using %s token %s", method, kind, redact_token(token)
         )
@@ -1056,6 +1060,31 @@ async def _vk_api(
                 logging.info("vk no-retry error: %s", msg)
                 return data
             last_msg = msg
+            msg_l = msg.lower()
+            perm_error = (
+                idx == 0
+                and len(tokens) > 1
+                and kind == "group"
+                and VK_ACTOR_MODE == "auto"
+                and (
+                    code in VK_FALLBACK_CODES
+                    or "method is unavailable with group auth" in msg_l
+                    or "access to adding post denied" in msg_l
+                    or "access denied" in msg_l
+                )
+            )
+            if perm_error:
+                vk_fallback_group_to_user_total[method] += 1
+                expires = _time.time() + VK_CB_TTL
+                vk_group_blocked[method] = expires
+                logging.info(
+                    "vk.circuit[%s]=blocked, until=%s",
+                    method,
+                    datetime.fromtimestamp(expires, timezone.utc).isoformat(),
+                )
+                last_err = err
+                fallback_next = True
+                break
             if attempt == len(BACKOFF_DELAYS):
                 logging.warning(
                     "vk api %s failed after %d attempts: %s",
@@ -1066,42 +1095,15 @@ async def _vk_api(
                 break
             await asyncio.sleep(delay)
         if err:
+            if fallback_next and kind == "group":
+                continue
             code = err.get("error_code")
-            if (
-                idx == 0
-                and len(tokens) > 1
-                and kind == "group"
-                and VK_ACTOR_MODE == "auto"
-            ):
-                msg_l = (err.get("error_msg", "") or "").lower()
-                perm_error = (
-                    code in VK_FALLBACK_CODES
-                    or "method is unavailable with group auth" in msg_l
-                    or "access to adding post denied" in msg_l
-                    or "access denied" in msg_l
-                )
-                if perm_error:
-                    vk_fallback_group_to_user_total[method] += 1
-                    expires = _time.time() + VK_CB_TTL
-                    vk_group_blocked[method] = expires
-                    logging.info(
-                        "vk actor fallback group->user code=%s method=%s",
-                        code,
-                        method,
-                    )
-                    logging.info(
-                        "vk circuit-breaker set method=%s ttl=12h",
-                        method,
-                    )
-                    last_err = err
-                    continue
-                raise VKAPIError(
-                    code,
-                    err.get("error_msg", ""),
-                    err.get("captcha_sid"),
-                    err.get("captcha_img"),
-                )
-        last_err = err
+            raise VKAPIError(
+                code,
+                err.get("error_msg", ""),
+                err.get("captcha_sid"),
+                err.get("captcha_img"),
+            )
         break
     if last_err:
         raise VKAPIError(
@@ -2210,8 +2212,25 @@ def _ics_filename(event: Event) -> str:
     return f"event-{event.id}.ics"
 
 
-def _tg_message_link(chat_id: int, message_id: int) -> str:
-    return f"https://t.me/c/{abs(chat_id)}/{message_id}"
+def message_link(file_id: str) -> str:
+    return f"https://t.me/{file_id}"
+
+
+def format_event_caption(ev: Event) -> str:
+    lines = format_event_daily(ev).splitlines()
+    if not lines:
+        return "Календарь к событию"
+    title = lines[0]
+    details = lines[-1]
+    if details.startswith("<i>") and details.endswith("</i>"):
+        details = details[3:-4]
+    parts = details.split(" ", 2)
+    if len(parts) >= 3:
+        details = f"{parts[0]} {parts[1]}, {parts[2]}"
+    caption = [title, details]
+    if ev.telegraph_url:
+        caption.append(f"Подробнее: {ev.telegraph_url}")
+    return "\n".join(caption)
 
 
 async def ics_publish(event_id: int, db: Database, bot: Bot, progress=None) -> bool:
@@ -2239,23 +2258,16 @@ async def ics_publish(event_id: int, db: Database, bot: Bot, progress=None) -> b
         supabase_url: str | None = None
         tg_file_id: str | None = None
 
-        def _caption(ev: Event) -> str:
-            lines = format_event_daily(ev).splitlines()
-            caption_parts = [lines[0]] if lines else ["Календарь к событию"]
-            if ev.telegraph_url:
-                caption_parts.append(f"Подробнее → {ev.telegraph_url}")
-            if lines:
-                caption_parts.append(lines[-1])
-            if ev.source_post_url and ev.source_post_url != ev.telegraph_url:
-                caption_parts.append(ev.source_post_url)
-            return "\n".join(caption_parts)
-
         if ev.ics_hash == ics_hash:
             if progress:
                 progress.mark("ics_supabase", "skipped_nochange", "no change")
             if ev.ics_file_id:
                 if progress:
-                    progress.mark("ics_telegram", "skipped_nochange", "no change")
+                    progress.mark(
+                        "ics_telegram",
+                        "done",
+                        message_link(ev.ics_file_id),
+                    )
             else:
                 try:
                     channel = await get_asset_channel(db)
@@ -2265,14 +2277,14 @@ async def ics_publish(event_id: int, db: Database, bot: Bot, progress=None) -> b
                             msg = await bot.send_document(
                                 channel.channel_id,
                                 file,
-                                caption=_caption(ev),
+                                caption=format_event_caption(ev),
                             )
                         tg_file_id = msg.document.file_id
                         if progress:
                             progress.mark(
                                 "ics_telegram",
                                 "done",
-                                _tg_message_link(channel.channel_id, msg.message_id),
+                                message_link(tg_file_id),
                             )
                 except Exception as te:
                     errors.append(str(te))
@@ -2320,14 +2332,14 @@ async def ics_publish(event_id: int, db: Database, bot: Bot, progress=None) -> b
                         msg = await bot.send_document(
                             channel.channel_id,
                             file,
-                            caption=_caption(ev),
+                            caption=format_event_caption(ev),
                         )
                     tg_file_id = msg.document.file_id
                     if progress:
                         progress.mark(
                             "ics_telegram",
                             "done",
-                            _tg_message_link(channel.channel_id, msg.message_id),
+                            message_link(tg_file_id),
                         )
             except Exception as te:  # pragma: no cover - network failure
                 errors.append(str(te))
@@ -3915,6 +3927,7 @@ async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
 async def enqueue_job(
     db: Database, event_id: int, task: JobTask, payload: dict | None = None
 ) -> None:
+    job_key = f"{task.value}:{event_id}"
     async with db.get_session() as session:
         stmt = select(JobOutbox).where(
             JobOutbox.event_id == event_id, JobOutbox.task == task
@@ -3922,15 +3935,18 @@ async def enqueue_job(
         res = await session.execute(stmt)
         job = res.scalar_one_or_none()
         now = datetime.utcnow()
-        if job and (
-            job.status
-            in {
-                JobStatus.pending,
-                JobStatus.running,
-                JobStatus.done,
-            }
-            or (job.status == JobStatus.error and task == JobTask.vk_sync)
-        ):
+        if job and job.status in {
+            JobStatus.pending,
+            JobStatus.running,
+            JobStatus.done,
+        }:
+            if payload is not None:
+                job.payload = payload
+                session.add(job)
+                await session.commit()
+                logging.info("enqueue_job merged job_key=%s", job_key)
+            else:
+                logging.info("enqueue_job skip duplicate job_key=%s", job_key)
             return
         if job:
             job.status = JobStatus.pending
@@ -3940,6 +3956,7 @@ async def enqueue_job(
             job.updated_at = now
             job.next_run_at = now
             session.add(job)
+            logging.info("enqueue_job merged job_key=%s", job_key)
         else:
             session.add(
                 JobOutbox(
@@ -3951,6 +3968,7 @@ async def enqueue_job(
                     next_run_at=now,
                 )
             )
+            logging.info("enqueue_job new job_key=%s", job_key)
         await session.commit()
 
 
@@ -5230,7 +5248,9 @@ async def publish_event_progress(event: Event, db: Database, bot: Bot, chat_id: 
         link = event.ics_url
         suffix = f" — <a href='{html.escape(link)}'>открыть</a>" if link else ""
         ics_sub["ics_supabase"] = {"icon": "\U0001f504", "suffix": suffix}
-        ics_sub["ics_telegram"] = {"icon": "\U0001f504", "suffix": ""}
+        tg_link = message_link(event.ics_file_id) if event.ics_file_id else ""
+        tg_suffix = f" — <a href='{html.escape(tg_link)}'>открыть</a>" if tg_link else ""
+        ics_sub["ics_telegram"] = {"icon": "\U0001f504", "suffix": tg_suffix}
     lines = []
     for t in tasks:
         if t == JobTask.ics_publish:
