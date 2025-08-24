@@ -21,7 +21,7 @@ async def test_single_progress_card_final_snapshot():
     assert progress.events_done == len(dates)
     assert len(progress.status) == 7
     final = progress.snapshot_text()
-    assert "🔄" not in final
+    assert "⏳" not in final
     assert final.count("Festival") == 1
     assert final.count("Month:") == 2
     assert final.count("Week:") == 1

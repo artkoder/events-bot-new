@@ -67,7 +67,7 @@ async def test_progress_captcha_flow(tmp_path, monkeypatch):
     )
 
     await scheduler.run()
-    assert progress.status["vk_week_post:2025-30"] == "paused"
+    assert progress.status["vk_week_post:2025-30"] == "captcha"
     assert progress.status["vk_week_post:2025-31"] == "pending"
     assert bot.photos and bot.photos[0][1] == "img"
 
@@ -82,8 +82,8 @@ async def test_progress_captcha_flow(tmp_path, monkeypatch):
     )
     await main.handle_vk_captcha(msg, db, bot)
 
-    assert progress.status["vk_week_post:2025-30"] == "success"
+    assert progress.status["vk_week_post:2025-30"] == "done"
     assert progress.status["vk_week_post:2025-31"] == "error"
-    assert "paused" not in progress.status.values()
+    assert "captcha" not in progress.status.values()
     assert "pending" not in progress.status.values()
     assert calls == ["wall.post", "wall.post", "wall.post"]
