@@ -91,6 +91,7 @@ from net import http_call, telegraph_upload, VK_FALLBACK_CODES
 
 from functools import partial, lru_cache
 from collections import defaultdict, deque
+from cachetools import TTLCache
 import asyncio
 import contextlib
 import random
@@ -100,7 +101,6 @@ from io import BytesIO
 import aiosqlite
 import gc
 import atexit
-from cachetools import TTLCache
 from markup import (
     simple_md_to_html,
     telegraph_br,
@@ -298,7 +298,8 @@ VK_CAPTCHA_QUIET = os.getenv("VK_CAPTCHA_QUIET", "")
 # metrics counters
 vk_fallback_group_to_user_total: dict[str, int] = defaultdict(int)
 # circuit breaker for group-token permission errors
-vk_group_blocked: TTLCache[str, bool] = TTLCache(maxsize=16, ttl=12 * 3600)
+VK_CB_TTL = 12 * 3600
+vk_group_blocked: dict[str, float] = {}
 ICS_CONTENT_TYPE = "text/calendar; charset=utf-8"
 ICS_CONTENT_DISP_TEMPLATE = 'inline; filename="{name}"'
 ICS_CALNAME = "kenigevents"
@@ -938,6 +939,10 @@ class VKAPIError(Exception):
         super().__init__(message)
 
 
+class VKPermissionError(VKAPIError):
+    """Raised when VK posting is blocked and no fallback token is available."""
+
+
 async def _vk_api(
     method: str,
     params: dict,
@@ -957,6 +962,7 @@ async def _vk_api(
         user_token = _vk_user_token()
         group_token = VK_TOKEN
         mode = VK_ACTOR_MODE
+        now = _time.time()
         if mode == "group":
             if group_token:
                 tokens.append(("group", group_token))
@@ -965,22 +971,35 @@ async def _vk_api(
                 tokens.append(("user", user_token))
         elif mode == "auto":
             auto_methods = ("wall.post", "wall.edit", "wall.getById")
-            group_blocked = vk_group_blocked.get(method)
+            blocked_until = vk_group_blocked.get(method, 0.0)
+            group_allowed = not group_token or now >= blocked_until
             if any(method.startswith(m) for m in auto_methods) or method.startswith("photos."):
-                if group_token and not group_blocked:
-                    tokens.append(("group", group_token))
+                if group_token:
+                    if group_allowed:
+                        tokens.append(("group", group_token))
+                    else:
+                        logging.info(
+                            "vk actor skip=group reason=circuit-breaker method=%s", method
+                        )
                 if user_token:
                     tokens.append(("user", user_token))
             else:
                 if user_token:
                     tokens.append(("user", user_token))
-                if group_token and not group_blocked:
-                    tokens.append(("group", group_token))
+                if group_token:
+                    if group_allowed:
+                        tokens.append(("group", group_token))
+                    else:
+                        logging.info(
+                            "vk actor skip=group reason=circuit-breaker method=%s", method
+                        )
         else:
             if user_token:
                 tokens.append(("user", user_token))
             if group_token:
                 tokens.append(("group", group_token))
+        if not tokens and mode == "auto" and method == "wall.post" and blocked_until > now and not user_token:
+            raise VKPermissionError(None, "permission error")
     last_err: dict | None = None
     session = get_vk_session()
     for idx, (kind, token) in enumerate(tokens):
@@ -1059,15 +1078,20 @@ async def _vk_api(
                     code in VK_FALLBACK_CODES
                     or "method is unavailable with group auth" in msg_l
                     or "access to adding post denied" in msg_l
+                    or "access denied" in msg_l
                 )
                 if perm_error:
                     vk_fallback_group_to_user_total[method] += 1
-                    vk_group_blocked[method] = True
-                    reason = f"code={code}" if code in VK_FALLBACK_CODES else err.get("error_msg", "")
+                    expires = _time.time() + VK_CB_TTL
+                    vk_group_blocked[method] = expires
                     logging.info(
-                        "vk.fallback group\u2192user method=%s reason=%s",
+                        "vk actor fallback group->user code=%s method=%s",
+                        code,
                         method,
-                        reason,
+                    )
+                    logging.info(
+                        "vk circuit-breaker set method=%s ttl=12h",
+                        method,
                     )
                     last_err = err
                     continue
@@ -2186,6 +2210,10 @@ def _ics_filename(event: Event) -> str:
     return f"event-{event.id}.ics"
 
 
+def _tg_message_link(chat_id: int, message_id: int) -> str:
+    return f"https://t.me/c/{abs(chat_id)}/{message_id}"
+
+
 async def ics_publish(event_id: int, db: Database, bot: Bot, progress=None) -> bool:
     async with get_ics_semaphore():
         async with db.get_session() as session:
@@ -2211,6 +2239,17 @@ async def ics_publish(event_id: int, db: Database, bot: Bot, progress=None) -> b
         supabase_url: str | None = None
         tg_file_id: str | None = None
 
+        def _caption(ev: Event) -> str:
+            lines = format_event_daily(ev).splitlines()
+            caption_parts = [lines[0]] if lines else ["Календарь к событию"]
+            if ev.telegraph_url:
+                caption_parts.append(f"Подробнее → {ev.telegraph_url}")
+            if lines:
+                caption_parts.append(lines[-1])
+            if ev.source_post_url and ev.source_post_url != ev.telegraph_url:
+                caption_parts.append(ev.source_post_url)
+            return "\n".join(caption_parts)
+
         if ev.ics_hash == ics_hash:
             if progress:
                 progress.mark("ics_supabase", "skipped_nochange", "no change")
@@ -2226,11 +2265,15 @@ async def ics_publish(event_id: int, db: Database, bot: Bot, progress=None) -> b
                             msg = await bot.send_document(
                                 channel.channel_id,
                                 file,
-                                caption="Календарь к событию",
+                                caption=_caption(ev),
                             )
                         tg_file_id = msg.document.file_id
                         if progress:
-                            progress.mark("ics_telegram", "done", "sent")
+                            progress.mark(
+                                "ics_telegram",
+                                "done",
+                                _tg_message_link(channel.channel_id, msg.message_id),
+                            )
                 except Exception as te:
                     errors.append(str(te))
                     if progress:
@@ -2273,18 +2316,19 @@ async def ics_publish(event_id: int, db: Database, bot: Bot, progress=None) -> b
                 channel = await get_asset_channel(db)
                 if channel:
                     file = types.BufferedInputFile(ics_bytes, filename=filename)
-                    caption = "Календарь к событию"
-                    if ev.telegraph_url:
-                        caption += f"\n{ev.telegraph_url}"
                     async with span("tg-send"):
                         msg = await bot.send_document(
                             channel.channel_id,
                             file,
-                            caption=caption,
+                            caption=_caption(ev),
                         )
                     tg_file_id = msg.document.file_id
                     if progress:
-                        progress.mark("ics_telegram", "done", "sent")
+                        progress.mark(
+                            "ics_telegram",
+                            "done",
+                            _tg_message_link(channel.channel_id, msg.message_id),
+                        )
             except Exception as te:  # pragma: no cover - network failure
                 errors.append(str(te))
                 if progress:
@@ -3878,11 +3922,15 @@ async def enqueue_job(
         res = await session.execute(stmt)
         job = res.scalar_one_or_none()
         now = datetime.utcnow()
-        if job and job.status in {
-            JobStatus.pending,
-            JobStatus.running,
-            JobStatus.done,
-        }:
+        if job and (
+            job.status
+            in {
+                JobStatus.pending,
+                JobStatus.running,
+                JobStatus.done,
+            }
+            or (job.status == JobStatus.error and task == JobTask.vk_sync)
+        ):
             return
         if job:
             job.status = JobStatus.pending
@@ -4660,6 +4708,7 @@ async def _run_due_jobs_once(
     bot: Bot,
     notify: Callable[[JobTask, JobStatus, bool, str | None, str | None], Awaitable[None]] | None = None,
     only_event: int | None = None,
+    ics_progress: Any | None = None,
 ) -> int:
     now = datetime.utcnow()
     async with db.get_session() as session:
@@ -4711,7 +4760,10 @@ async def _run_due_jobs_once(
             async with span(
                 "event_pipeline", step=job.task.value, event_id=job.event_id
             ):
-                res = await handler(job.event_id, db, bot)
+                if job.task == JobTask.ics_publish:
+                    res = await handler(job.event_id, db, bot, ics_progress)
+                else:
+                    res = await handler(job.event_id, db, bot)
             rebuild = isinstance(res, str) and res == "rebuild"
             changed = res if isinstance(res, bool) else True
             link = (
@@ -4749,6 +4801,7 @@ async def _run_due_jobs_once(
             logging.exception("job %s failed", job.id)
             status = JobStatus.error
             link = None
+            retry = not isinstance(exc, VKPermissionError)
         text = None
         async with db.get_session() as session:
             obj = await session.get(JobOutbox, job.id)
@@ -4765,9 +4818,14 @@ async def _run_due_jobs_once(
                     obj.last_result = cur_res
                     obj.next_run_at = datetime.utcnow()
                 else:
-                    obj.attempts += 1
-                    delay = BACKOFF_SCHEDULE[min(obj.attempts - 1, len(BACKOFF_SCHEDULE) - 1)]
-                    obj.next_run_at = datetime.utcnow() + timedelta(seconds=delay)
+                    if retry:
+                        obj.attempts += 1
+                        delay = BACKOFF_SCHEDULE[
+                            min(obj.attempts - 1, len(BACKOFF_SCHEDULE) - 1)
+                        ]
+                        obj.next_run_at = datetime.utcnow() + timedelta(seconds=delay)
+                    else:
+                        obj.next_run_at = datetime.utcnow() + timedelta(days=3650)
                 session.add(obj)
                 await session.commit()
             if notify and send:
@@ -5167,10 +5225,65 @@ async def publish_event_progress(event: Event, db: Database, bot: Bot, chat_id: 
     progress: dict[JobTask, dict[str, str]] = {
         t: {"icon": "\U0001f504", "suffix": ""} for t in tasks
     }
-    lines = [f"\U0001f504 {TASK_LABELS[t.value]}" for t in tasks]
+    ics_sub: dict[str, dict[str, str]] = {}
+    if JobTask.ics_publish in tasks:
+        link = event.ics_url
+        suffix = f" — <a href='{html.escape(link)}'>открыть</a>" if link else ""
+        ics_sub["ics_supabase"] = {"icon": "\U0001f504", "suffix": suffix}
+        ics_sub["ics_telegram"] = {"icon": "\U0001f504", "suffix": ""}
+    lines = []
+    for t in tasks:
+        if t == JobTask.ics_publish:
+            lines.append(f"\U0001f504 {TASK_LABELS[t.value]}")
+            if "ics_supabase" in ics_sub:
+                lines.append(
+                    f"{ics_sub['ics_supabase']['icon']} ICS (Supabase){ics_sub['ics_supabase']['suffix']}"
+                )
+            if "ics_telegram" in ics_sub:
+                lines.append(
+                    f"{ics_sub['ics_telegram']['icon']} ICS (Telegram){ics_sub['ics_telegram']['suffix']}"
+                )
+        else:
+            lines.append(f"\U0001f504 {TASK_LABELS[t.value]}")
     head = "Идёт процесс публикации, ждите"
     text = head if not lines else head + "\n" + "\n".join(lines)
-    msg = await bot.send_message(chat_id, text)
+    msg = await bot.send_message(chat_id, text, disable_web_page_preview=True)
+
+    async def render() -> None:
+        all_done = all(info["icon"] != "\U0001f504" for info in progress.values())
+        head = "Готово" if all_done else "Идёт процесс публикации, ждите"
+        lines: list[str] = []
+        for t, info in progress.items():
+            if t == JobTask.ics_publish:
+                lines.append(f"{info['icon']} {TASK_LABELS[t.value]}{info['suffix']}")
+                sup = ics_sub.get("ics_supabase")
+                if sup:
+                    lines.append(f"{sup['icon']} ICS (Supabase){sup['suffix']}")
+                tg = ics_sub.get("ics_telegram")
+                if tg:
+                    lines.append(f"{tg['icon']} ICS (Telegram){tg['suffix']}")
+            else:
+                lines.append(f"{info['icon']} {TASK_LABELS[t.value]}{info['suffix']}")
+        text = head if not lines else head + "\n" + "\n".join(lines)
+        await bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=msg.message_id,
+            text=text,
+            disable_web_page_preview=True,
+        )
+
+    def ics_mark(key: str, status: str, detail: str) -> None:
+        icon = "✅" if status.startswith("done") or status.startswith("skipped") else "❌"
+        if status == "done" and detail:
+            suffix = f" — <a href='{html.escape(detail)}'>открыть</a>"
+        elif detail:
+            suffix = f" — {detail}"
+        else:
+            suffix = ""
+        ics_sub[key] = {"icon": icon, "suffix": suffix}
+        asyncio.create_task(render())
+
+    ics_progress = type("_P", (), {"mark": ics_mark})() if ics_sub else None
 
     async def updater(
         task: JobTask,
@@ -5191,21 +5304,11 @@ async def publish_event_progress(event: Event, db: Database, bot: Bot, chat_id: 
             icon = "❌"
             suffix = f" — {err.splitlines()[0] if err else ''}"
         progress[task] = {"icon": icon, "suffix": suffix}
-        all_done = all(info["icon"] != "\U0001f504" for info in progress.values())
-        head = "Готово" if all_done else "Идёт процесс публикации, ждите"
-        lines = [
-            f"{info['icon']} {TASK_LABELS[t.value]}{info['suffix']}" for t, info in progress.items()
-        ]
-        text = head if not lines else head + "\n" + "\n".join(lines)
-        await bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=msg.message_id,
-            text=text,
-        )
+        await render()
 
     deadline = _time.monotonic() + 30
     while True:
-        processed = await _run_due_jobs_once(db, bot, updater, event.id)
+        processed = await _run_due_jobs_once(db, bot, updater, event.id, ics_progress)
         if processed:
             await asyncio.sleep(0)
             continue
@@ -5228,17 +5331,7 @@ async def publish_event_progress(event: Event, db: Database, bot: Bot, chat_id: 
         await asyncio.sleep(min(wait, 1.0))
 
     if progress:
-        all_done = all(info["icon"] != "\U0001f504" for info in progress.values())
-        head = "Готово" if all_done else "Идёт процесс публикации, ждите"
-        lines = [
-            f"{info['icon']} {TASK_LABELS[t.value]}{info['suffix']}" for t, info in progress.items()
-        ]
-        text = head if not lines else head + "\n" + "\n".join(lines)
-        await bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=msg.message_id,
-            text=text,
-        )
+        await render()
     else:
         await bot.edit_message_text(
             chat_id=chat_id,
@@ -5248,6 +5341,8 @@ async def publish_event_progress(event: Event, db: Database, bot: Bot, chat_id: 
 
 
 async def job_sync_vk_source_post(event_id: int, db: Database, bot: Bot | None) -> None:
+    if vk_group_blocked.get("wall.post", 0.0) > _time.time() and not _vk_user_token():
+        raise VKPermissionError(None, "permission error")
     async with db.get_session() as session:
         ev = await session.get(Event, event_id)
     if not ev or is_vk_wall_url(ev.source_post_url):
@@ -9313,7 +9408,7 @@ async def handle_status(message: types.Message, db: Database, bot: Bot):
         if not user or not user.is_superadmin:
             await bot.send_message(message.chat.id, "Not authorized")
             return
-    uptime = time.time() - START_TIME
+    uptime = _time.time() - START_TIME
     qlen = add_event_queue.qsize()
     jobs = list(JOB_HISTORY)[-5:]
     lines = [

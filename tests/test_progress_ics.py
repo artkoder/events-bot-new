@@ -68,7 +68,10 @@ async def test_progress_lines_for_ics_states(tmp_path, monkeypatch):
     pr = Progress()
     await main.ics_publish(1, db, bot, pr)
     assert ("ics_supabase", "done", "https://supabase/event-1-2025-07-18.ics") in pr.marks
-    assert ("ics_telegram", "done", "sent") in pr.marks
+    assert any(
+        m[0] == "ics_telegram" and m[1] == "done" and m[2].startswith("https://t.me/")
+        for m in pr.marks
+    )
 
     os.environ["SUPABASE_DISABLED"] = "1"
     pr = Progress()
