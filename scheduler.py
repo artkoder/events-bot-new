@@ -19,6 +19,8 @@ _scheduler: AsyncIOScheduler | None = None
 _run_meta: dict[str, tuple[str, float]] = {}
 
 
+
+
 def _job_wrapper(job_id: str, func):
     async def _run(*args):
         run_id, start = _run_meta.get(job_id, (uuid4().hex, _time.perf_counter()))
@@ -91,7 +93,6 @@ def _on_event(event):
 def startup(db, bot) -> AsyncIOScheduler:
     global _scheduler
     if _scheduler is None:
-        # AsyncIOExecutor has no configuration options; use default settings
         executor = AsyncIOExecutor()
         _scheduler = AsyncIOScheduler(executors={"default": executor}, timezone="UTC")
         _scheduler.configure(
@@ -235,6 +236,10 @@ def startup(db, bot) -> AsyncIOScheduler:
 
     if not _scheduler.running:
         _scheduler.start()
+        try:
+            _scheduler._executors["default"]._max_workers = 2
+        except Exception:
+            pass
 
     return _scheduler
 
