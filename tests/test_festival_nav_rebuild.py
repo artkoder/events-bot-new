@@ -3,16 +3,17 @@ import main
 from models import Festival, JobOutbox, JobStatus
 from markup import FEST_NAV_START
 from sqlalchemy import select
-from datetime import date
+from datetime import date, timedelta
 
 
 @pytest.mark.asyncio
-async def test_rebuild_festival_nav_updates_all(tmp_path, monkeypatch):
+async def test_rebuild_festival_nav_updates_only_upcoming(tmp_path, monkeypatch):
     db = main.Database(str(tmp_path / "db.sqlite"))
     await db.init()
 
     # prepare festivals
     today = date.today().isoformat()
+    yesterday = (date.today() - timedelta(days=1)).isoformat()
     async with db.get_session() as session:
         for i in range(3):
             session.add(
@@ -24,9 +25,19 @@ async def test_rebuild_festival_nav_updates_all(tmp_path, monkeypatch):
                     end_date=today,
                 )
             )
+        session.add(
+            Festival(
+                name="Past",
+                telegraph_path="p_old",
+                vk_post_url="u_old",
+                start_date=yesterday,
+                end_date=yesterday,
+            )
+        )
         await session.commit()
 
     tg_pages = {f"p{i+1}": {"html": "<p>start</p>", "title": f"Fest{i+1}"} for i in range(3)}
+    tg_pages["p_old"] = {"html": "<p>start</p>", "title": "Past"}
 
     class DummyTelegraph:
         def __init__(self, *_, **__):
@@ -47,6 +58,7 @@ async def test_rebuild_festival_nav_updates_all(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "get_telegraph_token", lambda: "token")
 
     vk_base = {f"Fest{i+1}": f"base{i+1}\n" for i in range(3)}
+    vk_base["Past"] = "base_old\n"
     vk_posts = vk_base.copy()
 
     async def fake_sync_festival_vk_post(db, name, bot, nav_only=False, nav_lines=None):
@@ -66,14 +78,21 @@ async def test_rebuild_festival_nav_updates_all(tmp_path, monkeypatch):
 
     changed = await main.rebuild_fest_nav_if_changed(db)
     assert changed
+    async with db.get_session() as session:
+        jobs = (await session.execute(select(JobOutbox))).all()
+    assert len(jobs) == 3 * 2
     while await main._run_due_jobs_once(db, None):
         pass
 
-    for page in tg_pages.values():
+    for key in ["p1", "p2", "p3"]:
+        page = tg_pages[key]
         assert FEST_NAV_START in page["html"]
         assert page["html"].endswith(main.FOOTER_LINK_HTML)
-    for name in vk_posts:
+    assert tg_pages["p_old"]["html"] == "<p>start</p>"
+
+    for name in ["Fest1", "Fest2", "Fest3"]:
         assert vk_posts[name] != vk_base[name]
+    assert vk_posts["Past"] == vk_base["Past"]
 
     changed2 = await main.rebuild_fest_nav_if_changed(db)
     assert not changed2
@@ -97,8 +116,9 @@ async def test_rebuild_festival_nav_updates_all(tmp_path, monkeypatch):
     assert changed3
     while await main._run_due_jobs_once(db, None):
         pass
-    for name in vk_posts:
+    for name in ["Fest1", "Fest2", "Fest3", "Fest4"]:
         assert vk_posts[name] != vk_base[name]
+    assert vk_posts["Past"] == vk_base["Past"]
 
 
 @pytest.mark.asyncio

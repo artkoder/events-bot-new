@@ -6677,6 +6677,10 @@ async def test_festival_page_no_events_shows_info(tmp_path: Path, monkeypatch):
         if n.get("tag") == "p" and "\U0001f4cd" in "".join(n.get("children", []))
     )
     assert content[idx_loc + 1]["children"] == ["\U0001f39f https://tix"]
+    assert any(
+        n.get("tag") == "p" and "Расписание скоро обновим" in "".join(n.get("children", []))
+        for n in content
+    )
 
 
 @pytest.mark.asyncio
@@ -6703,6 +6707,119 @@ async def test_festival_vk_message_no_events(tmp_path: Path):
     assert "\U0001f4c5" in text or "📅" in text
     assert "\U0001f4cd" in text or "📍" in text
     assert lines[3] == "\U0001f39f https://tix"
+    assert "Расписание скоро обновим" in lines
+
+
+@pytest.mark.asyncio
+async def test_festival_page_filters_past_events(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    past = (date.today() - timedelta(days=1)).isoformat()
+    async with db.get_session() as session:
+        fest = Festival(name="Solo")
+        session.add(fest)
+        session.add(
+            Event(
+                title="Past",
+                description="d",
+                source_text="s",
+                date=past,
+                time="18:00",
+                location_name="Hall",
+                festival="Solo",
+            )
+        )
+        session.add(
+            Event(
+                title="Future",
+                description="d",
+                source_text="s",
+                date=FUTURE_DATE,
+                time="18:00",
+                location_name="Hall",
+                festival="Solo",
+            )
+        )
+        await session.commit()
+    _, nodes = await main.build_festival_page_content(db, fest)
+    dump = json_dumps(nodes)
+    assert "Future" in dump
+    assert "Past" not in dump
+
+
+@pytest.mark.asyncio
+async def test_festival_vk_message_filters_past_events(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    past = (date.today() - timedelta(days=1)).isoformat()
+    async with db.get_session() as session:
+        fest = Festival(name="Solo")
+        session.add(fest)
+        session.add(
+            Event(
+                title="Past",
+                description="d",
+                source_text="s",
+                date=past,
+                time="18:00",
+                location_name="Hall",
+                festival="Solo",
+            )
+        )
+        session.add(
+            Event(
+                title="Future",
+                description="d",
+                source_text="s",
+                date=FUTURE_DATE,
+                time="18:00",
+                location_name="Hall",
+                festival="Solo",
+            )
+        )
+        await session.commit()
+    text = await main.build_festival_vk_message(db, fest)
+    assert "Future" in text
+    assert "Past" not in text
+
+
+@pytest.mark.asyncio
+async def test_update_festival_pages_ignores_past_events(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    past = (date.today() - timedelta(days=1)).isoformat()
+    async with db.get_session() as session:
+        fest = Festival(name="Solo")
+        session.add(fest)
+        ev = Event(
+            title="Past",
+            description="d",
+            source_text="s",
+            date=past,
+            time="18:00",
+            location_name="Hall",
+            festival="Solo",
+        )
+        session.add(ev)
+        await session.commit()
+        eid = ev.id
+    called: list[str] = []
+
+    async def fake_page(db_obj, name):
+        called.append("page")
+
+    async def fake_vk(db_obj, name, bot=None, nav_only=False, nav_lines=None):
+        called.append("vk")
+
+    async def fake_nav(db_obj):
+        called.append("nav")
+
+    monkeypatch.setattr(main, "sync_festival_page", fake_page)
+    monkeypatch.setattr(main, "sync_festival_vk_post", fake_vk)
+    monkeypatch.setattr(main, "rebuild_fest_nav_if_changed", fake_nav)
+
+    await main.update_festival_pages_for_event(eid, db, bot=None)
+    assert called == []
 
 
 @pytest.mark.asyncio
@@ -7048,8 +7165,8 @@ async def test_publication_plan_and_updates(tmp_path: Path, monkeypatch):
             ev = await session.get(Event, eid)
             ev.telegraph_url = "t"
             session.add(ev)
-            await session.commit()
-            return "t"
+        await session.commit()
+        return "t"
 
     async def fake_vk_job(event_id, db_obj, bot_obj):
         async with db_obj.get_session() as session:
