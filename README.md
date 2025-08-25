@@ -238,8 +238,9 @@ footer links to all month pages and the current month is shown without a link.
 
 Telegraph pages and "source" pages use `linkify_for_telegraph` to convert
 plain URLs and patterns like `Name (https://example.com)` into clickable
-anchors. VK posts expose the original URLs in parentheses using
-`expose_links_for_vk` so the full address remains visible.
+anchors. VK posts pass the text through `sanitize_for_vk`, which exposes the
+original URLs in parentheses and strips unsupported HTML and Telegram emoji so
+the full address remains visible.
 
 
 ## Календарь (ICS)
