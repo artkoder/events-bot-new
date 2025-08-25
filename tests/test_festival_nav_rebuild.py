@@ -75,6 +75,13 @@ async def test_rebuild_festival_nav_updates_only_upcoming(tmp_path, monkeypatch)
 
     monkeypatch.setattr(main, "get_vk_group_id", lambda db: 1)
     monkeypatch.setattr(main, "sync_festival_vk_post", fake_sync_festival_vk_post)
+    called_index = False
+
+    async def fake_sync_index(db):
+        nonlocal called_index
+        called_index = True
+
+    monkeypatch.setattr(main, "sync_festivals_index_page", fake_sync_index)
 
     changed = await main.rebuild_fest_nav_if_changed(db)
     assert changed
@@ -93,6 +100,7 @@ async def test_rebuild_festival_nav_updates_only_upcoming(tmp_path, monkeypatch)
     for name in ["Fest1", "Fest2", "Fest3"]:
         assert vk_posts[name] != vk_base[name]
     assert vk_posts["Past"] == vk_base["Past"]
+    assert called_index
 
     changed2 = await main.rebuild_fest_nav_if_changed(db)
     assert not changed2
@@ -175,6 +183,11 @@ async def test_vk_failure_does_not_block_tg(tmp_path, monkeypatch):
 
     monkeypatch.setattr(main, "get_vk_group_id", lambda db: 1)
     monkeypatch.setattr(main, "sync_festival_vk_post", fake_sync_festival_vk_post)
+
+    async def fake_sync_index2(db):
+        return None
+
+    monkeypatch.setattr(main, "sync_festivals_index_page", fake_sync_index2)
 
     await main.rebuild_fest_nav_if_changed(db)
     for _ in range(3):

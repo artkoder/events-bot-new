@@ -1989,6 +1989,47 @@ async def build_festivals_nav_block(
     return html, lines, changed
 
 
+async def sync_festivals_index_page(db: Database) -> None:
+    """Create or update landing page listing all festivals."""
+    token = get_telegraph_token()
+    if not token:
+        logging.error("Telegraph token unavailable")
+        return
+    tg = Telegraph(access_token=token)
+
+    nodes, _ = await _build_festival_nav_block(db)
+    if nodes and nodes[0].get("tag") == "p":
+        nodes = nodes[1:]
+    from telegraph.utils import nodes_to_html
+
+    html = (nodes_to_html(nodes) if nodes else "") + FOOTER_LINK_HTML
+    path = await get_setting_value(db, "fest_index_path")
+    url = await get_setting_value(db, "fest_index_url")
+    title = "Все фестивали региона"
+
+    try:
+        if path:
+            await telegraph_call(
+                tg.edit_page, path, title=title, html_content=html
+            )
+            logging.info("updated festivals index page", extra={"target": "tg", "path": path})
+        else:
+            data = await telegraph_create_page(tg, title=title, html_content=html)
+            url = normalize_telegraph_url(data.get("url"))
+            path = data.get("path")
+            logging.info("created festivals index page %s", url)
+    except Exception as e:
+        logging.error("Failed to sync festivals index page: %s", e)
+        return
+
+    if path:
+        await set_setting_value(db, "fest_index_path", path)
+    if url is None and path:
+        url = f"https://telegra.ph/{path}"
+    if url:
+        await set_setting_value(db, "fest_index_url", url)
+
+
 async def rebuild_fest_nav_if_changed(db: Database) -> bool:
     """Rebuild festival navigation and enqueue update jobs if changed.
 
@@ -1998,6 +2039,7 @@ async def rebuild_fest_nav_if_changed(db: Database) -> bool:
     _, _, changed = await build_festivals_nav_block(db)
     if not changed:
         return False
+    await sync_festivals_index_page(db)
     # schedule updates only for upcoming festivals
     items = await upcoming_festivals(db)
     fids = [fest.id for _, _, fest in items]
@@ -6551,6 +6593,7 @@ async def build_month_page_content(
         async with db.get_session() as session:
             res_f = await session.execute(select(Festival))
             fest_map = {f.name.casefold(): f for f in res_f.scalars().all()}
+    fest_index_url = await get_setting_value(db, "fest_index_url")
 
     async with span("render"):
         title, content, size = await asyncio.to_thread(
@@ -6562,6 +6605,7 @@ async def build_month_page_content(
             fest_map,
             continuation_url,
             size_limit,
+            fest_index_url,
         )
     logging.info("build_month_page_content size=%d", size)
     return title, content, size
@@ -6575,6 +6619,7 @@ def _build_month_page_content_sync(
     fest_map: dict[str, Festival],
     continuation_url: str | None,
     size_limit: int | None,
+    fest_index_url: str | None,
 ) -> tuple[str, list, int]:
     today = datetime.now(LOCAL_TZ).date()
     today_str = today.isoformat()
@@ -6682,6 +6727,21 @@ def _build_month_page_content_sync(
         )
         add({"tag": "br"})
         add_many(telegraph_br())
+
+    if fest_index_url and not exceeded:
+        add_many(telegraph_br())
+        add(
+            {
+                "tag": "p",
+                "children": [
+                    {
+                        "tag": "a",
+                        "attrs": {"href": fest_index_url},
+                        "children": ["🎪 Все фестивали региона"],
+                    }
+                ],
+            }
+        )
 
     title = (
         f"События Калининграда в {month_name_prepositional(month)}: полный анонс от Полюбить Калининград Анонсы"
