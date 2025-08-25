@@ -45,6 +45,36 @@ class Progress:
 
 
 @pytest.mark.asyncio
+async def test_format_event_caption_unit():
+    ev = Event(
+        id=1,
+        title="Title",
+        description="d",
+        source_text="s",
+        date="2025-07-18",
+        time="19:00",
+        location_name="Hall",
+        location_address="Street 1",
+        city="Town",
+        emoji="🔥",
+        telegraph_url="https://tg/1",
+    )
+    caption, parse_mode = main.format_event_caption(ev)
+    assert parse_mode == "HTML"
+    lines = caption.splitlines()
+    assert len(lines) == 3
+    assert lines[0] == "🔥 Title"
+    assert lines[1] == '<a href="https://tg/1">Подробнее</a>'
+    assert lines[2].startswith("<i>") and lines[2].endswith("</i>")
+    assert ", 19:00" not in lines[2]
+    assert "19:00" in lines[2]
+    assert "Hall" in lines[2]
+    assert "Street 1" in lines[2]
+    assert "#Town" in lines[2]
+    assert "\U0001f6a9" not in caption
+
+
+@pytest.mark.asyncio
 async def test_progress_lines_for_ics_states(tmp_path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
@@ -82,9 +112,15 @@ async def test_progress_lines_for_ics_states(tmp_path, monkeypatch):
     caption, parse_mode = bot.docs[0][1], bot.docs[0][2]
     assert parse_mode == "HTML"
     lines = caption.splitlines()
+    assert len(lines) == 3
     assert lines[0] == "A"
+    assert "\U0001f6a9" not in lines[0]
     assert lines[1] == '<a href="https://tg/1">Подробнее</a>'
-    assert "Hall" in lines[2] and "#Town" in lines[2] and ", 19:00" in lines[2]
+    assert lines[2].startswith("<i>") and lines[2].endswith("</i>")
+    assert ", 19:00" not in lines[2]
+    assert "19:00" in lines[2]
+    assert "Hall" in lines[2]
+    assert "#Town" in lines[2]
 
     os.environ["SUPABASE_DISABLED"] = "1"
     pr = Progress()

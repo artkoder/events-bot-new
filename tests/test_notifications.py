@@ -363,3 +363,43 @@ async def test_publish_event_progress_waits_for_pending(tmp_path, monkeypatch):
     assert final.startswith("Готово")
     assert "✅ Telegraph (событие) — http://t" in final
     assert "✅ Неделя — http://wk" in final
+
+
+@pytest.mark.asyncio
+async def test_publish_event_progress_ics(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    ev = Event(
+        title="t",
+        description="d",
+        date="2025-01-04",
+        time="12:00",
+        location_name="loc",
+        source_text="src",
+    )
+    async with db.get_session() as session:
+        session.add(ev)
+        await session.commit()
+        await session.refresh(ev)
+        session.add(JobOutbox(event_id=ev.id, task=JobTask.ics_publish))
+        await session.commit()
+
+    async def ics_handler(eid, db_obj, bot_obj, progress):
+        progress.mark("ics_supabase", "done", "https://sup")
+        progress.mark("ics_telegram", "done", "https://tg")
+        return True
+
+    monkeypatch.setattr(main, "JOB_HANDLERS", {"ics_publish": ics_handler})
+
+    async def fake_link(task, eid, db_obj):
+        return None
+
+    monkeypatch.setattr(main, "_job_result_link", fake_link)
+
+    bot = ProgBot()
+    await publish_event_progress(ev, db, bot, chat_id=1)
+
+    final = bot.edits[-1]
+    assert "✅ ICS (Supabase) — <a href='https://sup'>открыть</a>" in final
+    assert "✅ ICS (Telegram) — <a href='https://tg'>открыть</a>" in final

@@ -97,6 +97,7 @@ import asyncio
 import contextlib
 import random
 import html
+from types import SimpleNamespace
 import sqlite3
 from io import BytesIO
 import aiosqlite
@@ -2233,24 +2234,43 @@ def _strip_tags(text: str) -> str:
 
 
 def format_event_caption(ev: Event, *, style: str = "ics") -> tuple[str, str | None]:
-    lines = format_event_daily(ev).splitlines()
-    if not lines:
-        return "Календарь к событию", None
-    title = _strip_tags(lines[0])
-    details = lines[-1]
-    if details.startswith("<i>") and details.endswith("</i>"):
-        details = details[3:-4]
-    details = _strip_tags(details)
-    parts = details.split(" ", 2)
-    if len(parts) >= 3:
-        details = f"{parts[0]} {parts[1]}, {parts[2]}"
-    caption_lines = [title]
-    parse_mode: str | None = None
+    emoji_part = ""
+    if ev.emoji and not ev.title.strip().startswith(ev.emoji):
+        emoji_part = f"{ev.emoji} "
+    title = f"{emoji_part}{ev.title}".strip()
+
+    date_part = ev.date.split("..", 1)[0]
+    d = parse_iso_date(date_part)
+    if d:
+        day = format_day_pretty(d)
+    else:
+        day = ev.date
+
+    parts: list[str] = [html.escape(day)]
+    if ev.time:
+        parts.append(html.escape(ev.time))
+
+    loc_parts: list[str] = []
+    loc = ev.location_name.strip()
+    if loc:
+        loc_parts.append(html.escape(loc))
+    addr = ev.location_address
+    if addr and ev.city:
+        addr = strip_city_from_address(addr, ev.city)
+    if addr:
+        loc_parts.append(html.escape(addr))
+    if ev.city:
+        loc_parts.append(f"#{html.escape(ev.city)}")
+    if loc_parts:
+        parts.append(", ".join(loc_parts))
+
+    details = " ".join(parts)
+
+    lines = [html.escape(title)]
     if ev.telegraph_url:
-        caption_lines.append(f'<a href="{html.escape(ev.telegraph_url)}">Подробнее</a>')
-        parse_mode = "HTML"
-    caption_lines.append(details)
-    return "\n".join(caption_lines), parse_mode
+        lines.append(f'<a href="{html.escape(ev.telegraph_url)}">Подробнее</a>')
+    lines.append(f"<i>{details}</i>")
+    return "\n".join(lines), "HTML"
 
 
 async def ics_publish(event_id: int, db: Database, bot: Bot, progress=None) -> bool:
@@ -5350,7 +5370,7 @@ async def publish_event_progress(event: Event, db: Database, bot: Bot, chat_id: 
         ics_sub[key] = {"icon": icon, "suffix": suffix}
         asyncio.create_task(render())
 
-    ics_progress = type("_P", (), {"mark": ics_mark})() if ics_sub else None
+    ics_progress = SimpleNamespace(mark=ics_mark) if ics_sub else None
 
     async def updater(
         task: JobTask,
