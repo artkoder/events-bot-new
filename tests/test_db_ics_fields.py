@@ -60,6 +60,7 @@ async def test_ics_fields_persist_and_update(tmp_path, monkeypatch):
     async def fake_update(*a, **k):
         pass
     monkeypatch.setattr(main, "update_source_page_ics", fake_update)
+    monkeypatch.setattr(main, "update_source_post_keyboard", lambda *a, **k: None)
     await main.ics_publish(1, db, bot)
     async with db.get_session() as session:
         ev = await session.get(Event, 1)
