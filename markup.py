@@ -57,6 +57,27 @@ def expose_links_for_vk(text_or_html: str) -> str:
     text = re.sub(r"\[([^\]]+)\]\((https?://[^)]+)\)", repl_md, text)
     return text
 
+
+def sanitize_for_vk(text_or_html: str) -> str:
+    """Expose links and strip unsupported HTML for VK posts."""
+    s = expose_links_for_vk(text_or_html)
+    s = html.unescape(s)
+    s = s.replace("\xa0", " ")
+    s = re.sub(r"</?tg-emoji[^>]*>", "", s, flags=re.I)
+    s = re.sub(r"&lt;/?tg-emoji.*?&gt;", "", s, flags=re.I)
+    s = re.sub(r"<\s*(?:b|strong)\s*>(.*?)<\s*/\s*(?:b|strong)\s*>", r"*\1*", s, flags=re.I | re.S)
+    s = re.sub(r"<\s*(?:i|em)\s*>(.*?)<\s*/\s*(?:i|em)\s*>", r"_\1_", s, flags=re.I | re.S)
+    s = re.sub(r"<\s*(?:s|del)\s*>(.*?)<\s*/\s*(?:s|del)\s*>", r"~\1~", s, flags=re.I | re.S)
+    s = re.sub(r"<\s*br\s*/?\s*>", "\n", s, flags=re.I)
+    s = re.sub(r"</\s*p\s*>", "\n", s, flags=re.I)
+    s = re.sub(r"</\s*li\s*>", "\n", s, flags=re.I)
+    s = re.sub(r"<\s*li\s*>", "• ", s, flags=re.I)
+    s = re.sub(r"<\s*/?(?:p|ul|ol)\s*>", "", s, flags=re.I)
+    s = re.sub(r"</?[^>]+>", "", s)
+    s = re.sub(r"[ \t]{2,}", " ", s)
+    s = re.sub(r"\n{3,}", "\n\n", s).strip()
+    return s
+
 def telegraph_br() -> list[dict]:
     """Return a safe blank line for Telegraph rendering."""
     # U+200B survives Telegraph HTML import, unlike &nbsp; in <p>
