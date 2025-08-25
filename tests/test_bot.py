@@ -5898,6 +5898,7 @@ async def test_forward_adds_calendar_button(tmp_path: Path, monkeypatch):
         return ("u", "p", "", 0)
     monkeypatch.setattr(main, "create_source_page", fake_create)
     monkeypatch.setattr(main, "update_source_page_ics", lambda *a, **k: None)
+    monkeypatch.setattr(main, "update_source_post_keyboard", lambda *a, **k: None)
 
     async def fake_sync(*a, **k):
         return None

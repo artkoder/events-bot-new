@@ -38,3 +38,4 @@ def _mock_telegraph(monkeypatch, request):
             return url
         return None
     monkeypatch.setattr(main, "update_telegraph_event_page", fake_update)
+    monkeypatch.setattr(main, "update_source_post_keyboard", lambda *a, **k: None)

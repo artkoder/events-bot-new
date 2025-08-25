@@ -73,6 +73,7 @@ async def test_publish_ics_both_channels_success(tmp_path, monkeypatch):
     async def fake_update(*a, **k):
         called["v"] = True
     monkeypatch.setattr(main, "update_source_page_ics", fake_update)
+    monkeypatch.setattr(main, "update_source_post_keyboard", lambda *a, **k: None)
     await main.ics_publish(1, db, bot)
     assert fake.uploaded
     assert bot.docs
@@ -80,6 +81,7 @@ async def test_publish_ics_both_channels_success(tmp_path, monkeypatch):
     async with db.get_session() as session:
         ev = await session.get(Event, 1)
         assert ev.ics_hash and ev.ics_url and ev.ics_file_id
+        assert ev.ics_post_url and ev.ics_post_id
 
 
 @pytest.mark.asyncio
@@ -107,6 +109,7 @@ async def test_ics_skips_when_no_change(tmp_path, monkeypatch):
     async def fake_update(*a, **k):
         pass
     monkeypatch.setattr(main, "update_source_page_ics", fake_update)
+    monkeypatch.setattr(main, "update_source_post_keyboard", lambda *a, **k: None)
     await main.ics_publish(1, db, bot)
     fake.uploaded.clear()
     bot.docs.clear()
@@ -143,6 +146,7 @@ async def test_ics_updates_on_change(tmp_path, monkeypatch):
     async def fake_update(*a, **k):
         pass
     monkeypatch.setattr(main, "update_source_page_ics", fake_update)
+    monkeypatch.setattr(main, "update_source_post_keyboard", lambda *a, **k: None)
     await main.ics_publish(1, db, bot)
     async with db.get_session() as session:
         ev = await session.get(Event, 1)

@@ -2165,6 +2165,80 @@ async def build_month_buttons(db: Database, limit: int = 3) -> list[types.Inline
     return buttons
 
 
+async def build_event_month_buttons(event: Event, db: Database) -> list[types.InlineKeyboardButton]:
+    """Return navigation buttons for the event's month and the next month with events."""
+    month = (event.date.split("..", 1)[0])[:7]
+    async with db.get_session() as session:
+        result = await session.execute(
+            select(MonthPage)
+            .where(MonthPage.month >= month)
+            .order_by(MonthPage.month)
+        )
+        months = result.scalars().all()
+    buttons: list[types.InlineKeyboardButton] = []
+    cur_page = next((m for m in months if m.month == month and m.url), None)
+    if cur_page:
+        label = f"\U0001f4c5 {month_name_nominative(cur_page.month)}"
+        buttons.append(types.InlineKeyboardButton(text=label, url=cur_page.url))
+    next_page = None
+    for m in months:
+        if m.month > month and m.url:
+            next_page = m
+            break
+    if next_page:
+        label = f"\U0001f4c5 {month_name_nominative(next_page.month)}"
+        buttons.append(types.InlineKeyboardButton(text=label, url=next_page.url))
+    return buttons
+
+
+async def update_source_post_keyboard(event_id: int, db: Database, bot: Bot) -> None:
+    """Update reply markup on the source post with ICS and month navigation buttons."""
+    logging.info("update_source_post_keyboard start for event %s", event_id)
+    async with db.get_session() as session:
+        ev = await session.get(Event, event_id)
+    if not ev or not ev.source_chat_id or not ev.source_message_id:
+        logging.info("update_source_post_keyboard skip for event %s: no source post", event_id)
+        return
+    rows: list[list[types.InlineKeyboardButton]] = []
+    if ev.ics_post_url:
+        rows.append(
+            [
+                types.InlineKeyboardButton(
+                    text="Добавить в календарь", url=ev.ics_post_url
+                )
+            ]
+        )
+    month_buttons = await build_event_month_buttons(ev, db)
+    if month_buttons:
+        rows.append(month_buttons)
+    if not rows:
+        logging.info("update_source_post_keyboard skip for event %s: no buttons", event_id)
+        return
+    markup = types.InlineKeyboardMarkup(inline_keyboard=rows)
+    try:
+        async with TG_SEND_SEMAPHORE:
+            async with span("tg-send"):
+                await bot.edit_message_reply_markup(
+                    ev.source_chat_id,
+                    ev.source_message_id,
+                    reply_markup=markup,
+                )
+        logging.info("update_source_post_keyboard done for event %s", event_id)
+    except TelegramBadRequest as e:
+        if "message is not modified" in str(e):
+            logging.info(
+                "update_source_post_keyboard no change for event %s", event_id
+            )
+        else:
+            logging.error(
+                "update_source_post_keyboard failed for event %s: %s", event_id, e
+            )
+    except Exception as e:  # pragma: no cover - network failures
+        logging.error(
+            "update_source_post_keyboard failed for event %s: %s", event_id, e
+        )
+
+
 def parse_bool_text(value: str) -> bool | None:
     """Convert text to boolean if possible."""
     normalized = value.strip().lower()
@@ -2391,6 +2465,8 @@ async def ics_publish(event_id: int, db: Database, bot: Bot, progress=None) -> b
         errors: list[str] = []
         supabase_url: str | None = None
         tg_file_id: str | None = None
+        tg_post_id: int | None = None
+        tg_post_url: str | None = None
 
         if ev.ics_hash == ics_hash:
             if progress:
@@ -2425,6 +2501,8 @@ async def ics_publish(event_id: int, db: Database, bot: Bot, progress=None) -> b
                                     caption=caption,
                                 )
                     tg_file_id = msg.document.file_id
+                    tg_post_id = msg.message_id
+                    tg_post_url = message_link(msg.chat.id, msg.message_id)
                     if progress:
                         progress.mark(
                             "ics_telegram",
@@ -2498,12 +2576,14 @@ async def ics_publish(event_id: int, db: Database, bot: Bot, progress=None) -> b
                                 caption=caption,
                             )
                     tg_file_id = msg.document.file_id
+                    tg_post_id = msg.message_id
+                    tg_post_url = message_link(msg.chat.id, msg.message_id)
                     if progress:
                         progress.mark(
                             "ics_telegram",
-                            "done",
-                            message_link(msg.chat.id, msg.message_id),
-                        )
+                        "done",
+                        message_link(msg.chat.id, msg.message_id),
+                    )
             except Exception as te:  # pragma: no cover - network failure
                 errors.append(str(te))
                 if progress:
@@ -2519,10 +2599,20 @@ async def ics_publish(event_id: int, db: Database, bot: Bot, progress=None) -> b
                     ev.ics_url = supabase_url
                 if tg_file_id is not None:
                     ev.ics_file_id = tg_file_id
+                if tg_post_url is not None:
+                    ev.ics_post_url = tg_post_url
+                if tg_post_id is not None:
+                    ev.ics_post_id = tg_post_id
                 await session.commit()
 
         if supabase_url is not None:
             await update_source_page_ics(event_id, db, supabase_url)
+        try:
+            await update_source_post_keyboard(event_id, db, bot)
+        except Exception as e:  # pragma: no cover - logging inside
+            logging.warning(
+                "update_source_post_keyboard failed for %s: %s", event_id, e
+            )
 
         if errors:
             raise RuntimeError("; ".join(errors))

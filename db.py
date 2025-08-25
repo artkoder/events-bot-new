@@ -123,6 +123,8 @@ class Database:
                     ics_hash TEXT,
                     ics_file_id TEXT,
                     ics_updated_at TIMESTAMP,
+                    ics_post_url TEXT,
+                    ics_post_id INTEGER,
                     source_chat_id INTEGER,
                     source_message_id INTEGER,
                     creator_id INTEGER,
@@ -137,6 +139,8 @@ class Database:
             await _add_column(conn, "event", "ics_hash TEXT")
             await _add_column(conn, "event", "ics_file_id TEXT")
             await _add_column(conn, "event", "ics_updated_at TIMESTAMP")
+            await _add_column(conn, "event", "ics_post_url TEXT")
+            await _add_column(conn, "event", "ics_post_id INTEGER")
 
             await conn.execute(
                 """

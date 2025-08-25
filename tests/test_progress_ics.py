@@ -101,6 +101,7 @@ async def test_progress_lines_for_ics_states(tmp_path, monkeypatch):
     async def fake_update(*a, **k):
         pass
     monkeypatch.setattr(main, "update_source_page_ics", fake_update)
+    monkeypatch.setattr(main, "update_source_post_keyboard", lambda *a, **k: None)
 
     pr = Progress()
     await main.ics_publish(1, db, bot, pr)
@@ -188,6 +189,7 @@ async def test_html_fallback(tmp_path, monkeypatch):
     async def fake_update(*a, **k):
         pass
     monkeypatch.setattr(main, "update_source_page_ics", fake_update)
+    monkeypatch.setattr(main, "update_source_post_keyboard", lambda *a, **k: None)
     pr = Progress()
     await main.ics_publish(1, db, bot, pr)
     caption, parse_mode = bot.docs[0][1], bot.docs[0][2]
