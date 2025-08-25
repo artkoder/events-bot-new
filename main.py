@@ -1998,8 +1998,9 @@ async def rebuild_fest_nav_if_changed(db: Database) -> bool:
     _, _, changed = await build_festivals_nav_block(db)
     if not changed:
         return False
-    async with db.get_session() as session:
-        fids = (await session.execute(select(Festival.id))).scalars().all()
+    # schedule updates only for upcoming festivals
+    items = await upcoming_festivals(db)
+    fids = [fest.id for _, _, fest in items]
     nav_hash = await get_setting_value(db, "fest_nav_hash") or "0"
     suffix = int(nav_hash[:4], 16)
     for fid in fids:
@@ -5488,6 +5489,10 @@ async def update_festival_pages_for_event(event_id: int, db: Database, bot: Bot 
         ev = await session.get(Event, event_id)
     if not ev or not ev.festival:
         return
+    today = date.today().isoformat()
+    end = ev.end_date or ev.date
+    if end < today:
+        return
     await sync_festival_page(db, ev.festival)
     await sync_festival_vk_post(db, ev.festival, bot)
     await rebuild_fest_nav_if_changed(db)
@@ -7482,8 +7487,11 @@ async def build_festival_page_content(db: Database, fest: Festival) -> tuple[str
     logging.info("building festival page content for %s", fest.name)
 
     async with db.get_session() as session:
+        today = date.today().isoformat()
         res = await session.execute(
-            select(Event).where(Event.festival == fest.name).order_by(Event.date, Event.time)
+            select(Event)
+            .where(Event.festival == fest.name, Event.date >= today)
+            .order_by(Event.date, Event.time)
         )
         events = res.scalars().all()
 
@@ -7570,6 +7578,10 @@ async def build_festival_page_content(db: Database, fest: Festival) -> tuple[str
         nodes.append({"tag": "h3", "children": ["Мероприятия фестиваля"]})
         for e in events:
             nodes.extend(event_to_nodes(e))
+    else:
+        nodes.extend(telegraph_br())
+        nodes.extend(telegraph_br())
+        nodes.append({"tag": "p", "children": ["Расписание скоро обновим"]})
     nav_nodes, _ = await _build_festival_nav_block(db, exclude=fest.name)
     if nav_nodes:
         from telegraph.utils import nodes_to_html, html_to_nodes
@@ -7708,8 +7720,11 @@ async def refresh_nav_on_all_festivals(
 
 async def build_festival_vk_message(db: Database, fest: Festival) -> str:
     async with db.get_session() as session:
+        today = date.today().isoformat()
         res = await session.execute(
-            select(Event).where(Event.festival == fest.name).order_by(Event.date, Event.time)
+            select(Event)
+            .where(Event.festival == fest.name, Event.date >= today)
+            .order_by(Event.date, Event.time)
         )
         events = res.scalars().all()
         if not fest.description:
@@ -7746,9 +7761,13 @@ async def build_festival_vk_message(db: Database, fest: Festival) -> str:
             lines.append(f"вк: {fest.vk_url}")
         if fest.tg_url:
             lines.append(f"телеграм: {fest.tg_url}")
-    for ev in events:
+    if events:
+        for ev in events:
+            lines.append(VK_BLANK_LINE)
+            lines.append(format_event_vk(ev))
+    else:
         lines.append(VK_BLANK_LINE)
-        lines.append(format_event_vk(ev))
+        lines.append("Расписание скоро обновим")
     _, nav_lines = await _build_festival_nav_block(db, exclude=fest.name)
     if nav_lines:
         lines.extend(nav_lines)
