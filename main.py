@@ -2040,18 +2040,11 @@ async def rebuild_fest_nav_if_changed(db: Database) -> bool:
     if not changed:
         return False
     await sync_festivals_index_page(db)
-    # schedule updates only for upcoming festivals
-    items = await upcoming_festivals(db)
-    fids = [fest.id for _, _, fest in items]
     nav_hash = await get_setting_value(db, "fest_nav_hash") or "0"
     suffix = int(nav_hash[:4], 16)
-    for fid in fids:
-        eid = -(fid * FEST_JOB_MULT + suffix)
-        await enqueue_job(db, eid, JobTask.fest_nav_tg)
-        await enqueue_job(db, eid, JobTask.fest_nav_vk)
-    logging.info(
-        "scheduled festival navigation update", extra={"count": len(fids)}
-    )
+    eid = -suffix
+    await enqueue_job(db, eid, JobTask.fest_nav_update_all)
+    logging.info("scheduled festival navigation update", extra={"count": 1})
     return True
 
 
@@ -4974,8 +4967,7 @@ TASK_LABELS = {
     "week_pages": "Неделя",
     "weekend_pages": "Выходные",
     "festival_pages": "Фестиваль",
-    "fest_nav_tg": "Навигация TG",
-    "fest_nav_vk": "Навигация VK",
+    "fest_nav:update_all": "Навигация",
 }
 
 
@@ -5748,6 +5740,27 @@ async def update_festival_vk_nav(event_id: int, db: Database, bot: Bot | None) -
         raise
 
 
+async def update_all_festival_nav(event_id: int, db: Database, bot: Bot | None) -> bool:
+    items = await upcoming_festivals(db)
+    changed_any = False
+    errors: list[Exception] = []
+    for _, _, fest in items:
+        eid = -(fest.id * FEST_JOB_MULT)
+        try:
+            if await update_festival_tg_nav(eid, db, bot):
+                changed_any = True
+        except Exception as e:  # pragma: no cover - logged in callee
+            errors.append(e)
+        try:
+            if await update_festival_vk_nav(eid, db, bot):
+                changed_any = True
+        except Exception as e:  # pragma: no cover - logged in callee
+            errors.append(e)
+    if errors:
+        raise errors[0]
+    return changed_any
+
+
 JOB_HANDLERS = {
     "telegraph_build": update_telegraph_event_page,
     "vk_sync": job_sync_vk_source_post,
@@ -5756,8 +5769,7 @@ JOB_HANDLERS = {
     "week_pages": update_week_pages_for,
     "weekend_pages": update_weekend_pages_for,
     "festival_pages": update_festival_pages_for_event,
-    "fest_nav_tg": update_festival_tg_nav,
-    "fest_nav_vk": update_festival_vk_nav,
+    "fest_nav:update_all": update_all_festival_nav,
 }
 
 

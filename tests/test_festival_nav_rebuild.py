@@ -87,7 +87,7 @@ async def test_rebuild_festival_nav_updates_only_upcoming(tmp_path, monkeypatch)
     assert changed
     async with db.get_session() as session:
         jobs = (await session.execute(select(JobOutbox))).all()
-    assert len(jobs) == 3 * 2
+    assert len(jobs) == 1
     while await main._run_due_jobs_once(db, None):
         pass
 
@@ -205,6 +205,6 @@ async def test_vk_failure_does_not_block_tg(tmp_path, monkeypatch):
                 select(JobOutbox.event_id, JobOutbox.task, JobOutbox.status)
             )
         ).all()
-    vk_statuses = [r.status for r in rows if r.task.value == "fest_nav_vk"]
-    assert JobStatus.error in vk_statuses
+    statuses = [r.status for r in rows if r.task.value == "fest_nav:update_all"]
+    assert JobStatus.error in statuses
 
