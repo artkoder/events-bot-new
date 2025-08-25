@@ -29,6 +29,8 @@ async def test_vk_api_captcha_cached(monkeypatch):
     monkeypatch.setattr(main, "_vk_captcha_needed", False)
     monkeypatch.setattr(main, "_vk_captcha_sid", None)
     monkeypatch.setattr(main, "_vk_captcha_img", None)
+    monkeypatch.setattr(main, "_vk_captcha_method", None)
+    monkeypatch.setattr(main, "_vk_captcha_params", None)
     with pytest.raises(main.VKAPIError) as e1:
         await main._vk_api("wall.get", {}, token="t")
     assert e1.value.code == 14
@@ -66,15 +68,32 @@ async def test_handle_vk_captcha_flow(tmp_path: Path, monkeypatch):
     main._vk_captcha_sid = "sid"
     main._vk_captcha_img = "img"
     main._vk_captcha_needed = True
+    main._vk_captcha_method = "wall.post"
+    main._vk_captcha_params = {}
 
     async def fake_superadmin_id(db):
         return 1
 
     monkeypatch.setattr(main, "get_superadmin_id", fake_superadmin_id)
+    class ImgResp:
+        def __init__(self, data: bytes):
+            self._data = data
+        async def read(self):
+            return self._data
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+    class ImgSession:
+        def get(self, url):
+            return ImgResp(b"img")
+    monkeypatch.setattr(main, "get_http_session", lambda: ImgSession())
     await main.notify_vk_captcha(db, bot, "img")
-    assert bot.photos and bot.photos[0][1] == "img"
+    from aiogram.types import BufferedInputFile
+    assert bot.photos and isinstance(bot.photos[0][1], BufferedInputFile)
 
     async def fake_vk_api(method, params, db=None, bot=None, **kwargs):
+        assert method == "wall.post"
         assert params["captcha_sid"] == "sid"
         assert params["captcha_key"] == "1234"
         return {"response": 1}

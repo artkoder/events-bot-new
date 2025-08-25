@@ -27,21 +27,44 @@ async def test_progress_captcha_flow(tmp_path, monkeypatch):
         session.add(User(user_id=1, is_superadmin=True))
         await session.commit()
 
+    main._vk_captcha_needed = False
+    main._vk_captcha_sid = None
+    main._vk_captcha_img = None
+    main._vk_captcha_method = None
+    main._vk_captcha_params = None
+
     calls = []
 
+    class ImgResp:
+        def __init__(self, data: bytes):
+            self._data = data
+        async def read(self):
+            return self._data
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class ImgSession:
+        def get(self, url):
+            return ImgResp(b"img")
+
+    monkeypatch.setattr(main, "get_http_session", lambda: ImgSession())
+
     async def fake_vk_api(method, params, db=None, bot=None, **kwargs):
-        if method == "captcha.force":
-            assert params["captcha_sid"] == "sid"
-            assert params["captcha_key"] == "1234"
-            return {"response": 1}
         calls.append(method)
         if len(calls) == 1:
             main._vk_captcha_needed = True
             main._vk_captcha_sid = "sid"
             main._vk_captcha_img = "img"
+            main._vk_captcha_method = method
+            main._vk_captcha_params = params.copy()
             await main.notify_vk_captcha(db, bot, "img")
             raise main.VKAPIError(14, "Captcha needed", "sid", "img")
-        if len(calls) == 2:
+        if params.get("captcha_sid"):
+            assert params["captcha_sid"] == "sid"
+            assert params["captcha_key"] == "1234"
+            main._vk_captcha_needed = False
             return {"response": 1}
         raise main.VKAPIError(5, "fail")
 
@@ -69,7 +92,8 @@ async def test_progress_captcha_flow(tmp_path, monkeypatch):
     await scheduler.run()
     assert progress.status["vk_week_post:2025-30"] == "captcha"
     assert progress.status["vk_week_post:2025-31"] == "pending"
-    assert bot.photos and bot.photos[0][1] == "img"
+    from aiogram.types import BufferedInputFile
+    assert bot.photos and isinstance(bot.photos[0][1], BufferedInputFile)
 
     msg = types.Message.model_validate(
         {
