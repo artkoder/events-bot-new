@@ -208,3 +208,41 @@ async def test_vk_failure_does_not_block_tg(tmp_path, monkeypatch):
     statuses = [r.status for r in rows if r.task.value == "fest_nav:update_all"]
     assert JobStatus.error in statuses
 
+
+@pytest.mark.asyncio
+async def test_nav_hash_skip(tmp_path, monkeypatch):
+    db = main.Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    today = date.today().isoformat()
+    async with db.get_session() as session:
+        session.add(
+            Festival(
+                name="Fest1",
+                telegraph_path="p1",
+                vk_post_url="u1",
+                start_date=today,
+                end_date=today,
+                nav_hash="abc",
+            )
+        )
+        await session.commit()
+    await main.set_setting_value(db, "fest_nav_hash", "abc")
+
+    calls = {"tg": 0, "vk": 0}
+
+    async def fake_tg(eid, db, bot):
+        calls["tg"] += 1
+        return True
+
+    async def fake_vk(eid, db, bot):
+        calls["vk"] += 1
+        return True
+
+    monkeypatch.setattr(main, "update_festival_tg_nav", fake_tg)
+    monkeypatch.setattr(main, "update_festival_vk_nav", fake_vk)
+
+    await main.update_all_festival_nav(0, db, None)
+
+    assert calls["tg"] == 0
+    assert calls["vk"] == 0
+

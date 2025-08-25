@@ -149,6 +149,7 @@ class Festival(SQLModel, table=True):
     location_address: Optional[str] = None
     city: Optional[str] = None
     source_text: Optional[str] = None
+    nav_hash: Optional[str] = None
 
 
 class JobTask(str, Enum):
