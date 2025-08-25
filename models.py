@@ -159,8 +159,7 @@ class JobTask(str, Enum):
     weekend_pages = "weekend_pages"
     week_pages = "week_pages"
     festival_pages = "festival_pages"
-    fest_nav_tg = "fest_nav_tg"
-    fest_nav_vk = "fest_nav_vk"
+    fest_nav_update_all = "fest_nav:update_all"
 
 
 class JobStatus(str, Enum):
