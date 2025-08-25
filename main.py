@@ -115,6 +115,7 @@ from markup import (
     FEST_NAV_END,
     linkify_for_telegraph,
     expose_links_for_vk,
+    sanitize_for_vk,
 )
 from sections import replace_between_markers, content_hash
 from db import Database
@@ -8478,7 +8479,7 @@ def build_vk_source_message(
 ) -> str:
     """Build detailed VK post for an event including original source text."""
 
-    text = expose_links_for_vk(text)
+    text = sanitize_for_vk(expose_links_for_vk(text))
     lines = build_vk_source_header(event, festival)
     lines.extend(text.strip().splitlines())
     lines.append(VK_BLANK_LINE)
@@ -8551,7 +8552,7 @@ async def sync_vk_source_post(
                 lines.pop()
             texts.append("\n".join(lines).strip())
 
-        text_clean = expose_links_for_vk(text).strip()
+        text_clean = sanitize_for_vk(expose_links_for_vk(text)).strip()
         if texts:
             if append_text:
                 texts.append(text_clean)
