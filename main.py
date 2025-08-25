@@ -10676,8 +10676,7 @@ def create_app() -> web.Application:
     async def vkphotos_wrapper(message: types.Message):
         await handle_vkphotos(message, db, bot)
 
-    async def captcha_wrapper(message: types.Message):
-        await handle_vk_captcha(message, db, bot)
+    captcha_handler = partial(handle_vk_captcha, db=db, bot=bot)
 
     async def askloc_wrapper(callback: types.CallbackQuery):
         await handle_askloc(callback, db, bot)
@@ -10787,8 +10786,8 @@ def create_app() -> web.Application:
     dp.message.register(vkgroup_wrapper, Command("vkgroup"))
     dp.message.register(vktime_wrapper, Command("vktime"))
     dp.message.register(vkphotos_wrapper, Command("vkphotos"))
-    dp.message.register(captcha_wrapper, Command("captcha"))
-    dp.message.register(captcha_wrapper, F.reply_to_message)
+    dp.message.register(captcha_handler, Command("captcha"))
+    dp.message.register(captcha_handler, F.reply_to_message)
     dp.message.register(menu_wrapper, Command("menu"))
     dp.message.register(events_menu_wrapper, lambda m: m.text == MENU_EVENTS)
     dp.message.register(events_date_wrapper, lambda m: m.from_user.id in events_date_sessions)
