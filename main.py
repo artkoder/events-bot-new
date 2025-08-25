@@ -7982,6 +7982,12 @@ async def sync_festival_vk_post(
                     extra={"action": "error", "target": "vk", "url": fest.vk_post_url},
                 )
                 raise RuntimeError("vk edit failed")
+            if os.getenv("VK_NAV_FALLBACK") == "skip":
+                logging.info(
+                    "festival post %s skipping VK edit", name,
+                    extra={"action": "vk_nav_skip_edit", "target": "vk", "url": fest.vk_post_url},
+                )
+                return False
             can_edit = False  # editing not possible, create new post
 
     message = await build_festival_vk_message(db, fest)

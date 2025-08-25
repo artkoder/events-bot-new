@@ -1,3 +1,4 @@
+import logging
 import pytest
 import main
 from models import Festival, JobOutbox, JobStatus
@@ -245,4 +246,99 @@ async def test_nav_hash_skip(tmp_path, monkeypatch):
 
     assert calls["tg"] == 0
     assert calls["vk"] == 0
+
+
+@pytest.mark.asyncio
+async def test_update_tg_nav_sets_nav_hash(tmp_path, monkeypatch):
+    db = main.Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    today = date.today().isoformat()
+    async with db.get_session() as session:
+        fest = Festival(
+            name="Fest1",
+            telegraph_path="p1",
+            start_date=today,
+            end_date=today,
+        )
+        session.add(fest)
+        await session.commit()
+        fid = fest.id
+    await main.set_setting_value(db, "fest_nav_hash", "abc")
+    await main.set_setting_value(db, "fest_nav_html", "<p>nav</p>")
+
+    tg_pages = {"p1": {"html": "<p>start</p>", "title": "Fest1"}}
+
+    class DummyTelegraph:
+        def __init__(self, *_, **__):
+            pass
+
+        def get_page(self, path, return_html=True):
+            return {
+                "content_html": tg_pages[path]["html"],
+                "title": tg_pages[path]["title"],
+            }
+
+        def edit_page(self, path, title, html_content):
+            tg_pages[path] = {"html": html_content, "title": title}
+            return {}
+
+    async def fake_call(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(main, "Telegraph", DummyTelegraph)
+    monkeypatch.setattr(main, "telegraph_call", fake_call)
+    monkeypatch.setattr(main, "get_telegraph_token", lambda: "token")
+
+    res = await main.update_festival_tg_nav(-fid * main.FEST_JOB_MULT, db, None)
+    assert res
+    async with db.get_session() as session:
+        fest_db = await session.get(Festival, fid)
+        assert fest_db.nav_hash == "abc"
+
+
+@pytest.mark.asyncio
+async def test_vk_nav_only_skip_edit(tmp_path, monkeypatch, caplog):
+    db = main.Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    today = date.today().isoformat()
+    async with db.get_session() as session:
+        fest = Festival(
+            name="Fest1",
+            vk_post_url="https://vk.com/wall-1_1",
+            start_date=today,
+            end_date=today,
+        )
+        session.add(fest)
+        await session.commit()
+
+    monkeypatch.setenv("VK_USER_TOKEN", "tok")
+    monkeypatch.setenv("VK_NAV_FALLBACK", "skip")
+    monkeypatch.setattr(main, "_vk_user_token_bad", None)
+
+    async def fake_group_id(db):
+        return "1"
+
+    monkeypatch.setattr(main, "get_vk_group_id", fake_group_id)
+
+    async def fake_nav_block(db, exclude=None, today=None, items=None):
+        return [], ["nav"]
+
+    async def fake_vk_api(method, params, db, bot, token=None, token_kind=None):
+        return {"response": [{"text": "base"}]}
+
+    async def fake_edit(url, message, db, bot, attachments):
+        raise main.VKAPIError(214, "edit time expired")
+
+    async def fake_post(*args, **kwargs):
+        assert False, "should not post"
+
+    monkeypatch.setattr(main, "_build_festival_nav_block", fake_nav_block)
+    monkeypatch.setattr(main, "_vk_api", fake_vk_api)
+    monkeypatch.setattr(main, "edit_vk_post", fake_edit)
+    monkeypatch.setattr(main, "post_to_vk", fake_post)
+
+    with caplog.at_level(logging.INFO):
+        res = await main.sync_festival_vk_post(db, "Fest1", nav_only=True)
+    assert res is False
+    assert any(getattr(r, "action", None) == "vk_nav_skip_edit" for r in caplog.records)
 
