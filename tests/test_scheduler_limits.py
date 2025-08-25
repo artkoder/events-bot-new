@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 sys.path.append(str(Path(__file__).resolve().parent.parent))
-from scheduler import startup, cleanup
+from scheduling import startup, cleanup
 
 
 @pytest.mark.asyncio
