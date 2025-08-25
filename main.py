@@ -1804,6 +1804,7 @@ async def upcoming_festivals(
                 Festival.name,
                 Festival.telegraph_path,
                 Festival.vk_post_url,
+                Festival.nav_hash,
                 func.coalesce(Festival.start_date, ev_dates.c.start).label("start"),
                 func.coalesce(Festival.end_date, ev_dates.c.end).label("end"),
             )
@@ -1821,12 +1822,18 @@ async def upcoming_festivals(
         logging.debug("db upcoming_festivals took %.1f ms", dur)
 
     data: list[tuple[date | None, date | None, Festival]] = []
-    for fid, name, path, vk_url, start_s, end_s in rows:
+    for fid, name, path, vk_url, nav_hash, start_s, end_s in rows:
         start = parse_iso_date(start_s) if start_s else None
         end = parse_iso_date(end_s) if end_s else None
         if not start and not end:
             continue
-        fest = Festival(id=fid, name=name, telegraph_path=path, vk_post_url=vk_url)
+        fest = Festival(
+            id=fid,
+            name=name,
+            telegraph_path=path,
+            vk_post_url=vk_url,
+            nav_hash=nav_hash,
+        )
         data.append((start, end, fest))
     return data
 
@@ -5683,44 +5690,47 @@ async def update_festival_tg_nav(event_id: int, db: Database, bot: Bot | None) -
     fid = (-event_id) // FEST_JOB_MULT if event_id < 0 else event_id
     async with db.get_session() as session:
         fest = await session.get(Festival, fid)
-    if not fest or not fest.telegraph_path:
-        return False
-    token = get_telegraph_token()
-    if not token:
-        logging.error("Telegraph token unavailable")
-        return False
-    tg = Telegraph(access_token=token)
-    nav_html = await get_setting_value(db, "fest_nav_html")
-    if nav_html is None:
-        nav_html, _, _ = await build_festivals_nav_block(db)
-    path = fest.telegraph_path
-    try:
-        page = await telegraph_call(tg.get_page, path, return_html=True)
-        html_content = page.get("content") or page.get("content_html") or ""
-        title = page.get("title") or fest.full_name or fest.name
-        m = re.search(r"<!--NAV_HASH:([0-9a-f]+)-->", html_content)
-        old_hash = m.group(1) if m else ""
-        new_html, changed = apply_festival_nav(html_content, nav_html)
-        m2 = re.search(r"<!--NAV_HASH:([0-9a-f]+)-->", new_html)
-        new_hash = m2.group(1) if m2 else ""
-        if changed:
-            await telegraph_call(tg.edit_page, path, title=title, html_content=new_html)
-            logging.info(
-                "updated festival page %s in Telegraph", fest.name,
-                extra={"action": "edited", "target": "tg", "path": path, "nav_old": old_hash, "nav_new": new_hash},
+        if not fest or not fest.telegraph_path:
+            return False
+        token = get_telegraph_token()
+        if not token:
+            logging.error("Telegraph token unavailable")
+            return False
+        tg = Telegraph(access_token=token)
+        nav_html = await get_setting_value(db, "fest_nav_html")
+        if nav_html is None:
+            nav_html, _, _ = await build_festivals_nav_block(db)
+        path = fest.telegraph_path
+        try:
+            page = await telegraph_call(tg.get_page, path, return_html=True)
+            html_content = page.get("content") or page.get("content_html") or ""
+            title = page.get("title") or fest.full_name or fest.name
+            m = re.search(r"<!--NAV_HASH:([0-9a-f]+)-->", html_content)
+            old_hash = m.group(1) if m else ""
+            new_html, changed = apply_festival_nav(html_content, nav_html)
+            m2 = re.search(r"<!--NAV_HASH:([0-9a-f]+)-->", new_html)
+            new_hash = m2.group(1) if m2 else ""
+            if changed:
+                await telegraph_call(tg.edit_page, path, title=title, html_content=new_html)
+                fest.nav_hash = await get_setting_value(db, "fest_nav_hash")
+                session.add(fest)
+                await session.commit()
+                logging.info(
+                    "updated festival page %s in Telegraph", fest.name,
+                    extra={"action": "edited", "target": "tg", "path": path, "nav_old": old_hash, "nav_new": new_hash},
+                )
+            else:
+                logging.info(
+                    "festival page %s navigation unchanged", fest.name,
+                    extra={"action": "skipped_nochange", "target": "tg", "path": path, "nav_old": old_hash, "nav_new": new_hash},
+                )
+            return changed
+        except Exception as e:
+            logging.error(
+                "Failed to update festival page %s: %s", fest.name, e,
+                extra={"action": "error", "target": "tg", "path": path},
             )
-        else:
-            logging.info(
-                "festival page %s navigation unchanged", fest.name,
-                extra={"action": "skipped_nochange", "target": "tg", "path": path, "nav_old": old_hash, "nav_new": new_hash},
-            )
-        return changed
-    except Exception as e:
-        logging.error(
-            "Failed to update festival page %s: %s", fest.name, e,
-            extra={"action": "error", "target": "tg", "path": path},
-        )
-        raise
+            raise
 
 
 async def update_festival_vk_nav(event_id: int, db: Database, bot: Bot | None) -> bool:
@@ -5742,9 +5752,16 @@ async def update_festival_vk_nav(event_id: int, db: Database, bot: Bot | None) -
 
 async def update_all_festival_nav(event_id: int, db: Database, bot: Bot | None) -> bool:
     items = await upcoming_festivals(db)
+    nav_hash = await get_setting_value(db, "fest_nav_hash")
     changed_any = False
     errors: list[Exception] = []
     for _, _, fest in items:
+        if nav_hash and fest.nav_hash == nav_hash:
+            logging.info(
+                "festival navigation up to date, skipping",
+                extra={"action": "skipped_same_hash", "fest": fest.name},
+            )
+            continue
         eid = -(fest.id * FEST_JOB_MULT)
         try:
             if await update_festival_tg_nav(eid, db, bot):

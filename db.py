@@ -207,6 +207,7 @@ class Database:
             await _add_column(conn, "festival", "location_address TEXT")
             await _add_column(conn, "festival", "city TEXT")
             await _add_column(conn, "festival", "ticket_url TEXT")
+            await _add_column(conn, "festival", "nav_hash TEXT")
 
             await conn.execute(
                 """
