@@ -65,7 +65,7 @@ def _load_icalendar() -> None:
         Calendar = _Calendar
         IcsEvent = _IcsEvent
 
-from aiogram import Bot, Dispatcher, types
+from aiogram import Bot, Dispatcher, types, F
 from safe_bot import SafeBot, BACKOFF_DELAYS
 from aiogram.filters import Command
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
@@ -118,7 +118,7 @@ from markup import (
 )
 from sections import replace_between_markers, content_hash
 from db import Database
-from scheduler import startup as scheduler_startup, cleanup as scheduler_cleanup
+from scheduling import startup as scheduler_startup, cleanup as scheduler_cleanup
 from sqlalchemy import select, update, delete, text, func
 
 from models import (
@@ -1055,6 +1055,12 @@ async def _vk_api(
                 _vk_captcha_img = err.get("captcha_img")
                 _vk_captcha_method = method
                 _vk_captcha_params = orig_params.copy()
+                logging.warning(
+                    "vk captcha sid=%s method=%s params=%s",
+                    _vk_captcha_sid,
+                    method,
+                    str(orig_params)[:200],
+                )
                 if db and bot:
                     await notify_vk_captcha(db, bot, _vk_captcha_img)
                 # surface captcha details to caller
@@ -1436,11 +1442,21 @@ def vk_captcha_paused(scheduler, key: str) -> None:
         _vk_captcha_timeout.cancel()
 
     async def _timeout():
+        global _vk_captcha_needed, _vk_captcha_sid, _vk_captcha_img
+        global _vk_captcha_method, _vk_captcha_params, _vk_captcha_timeout
         await asyncio.sleep(VK_CAPTCHA_TTL_MIN * 60)
         if scheduler.progress:
             for k in list(scheduler.remaining_jobs):
                 scheduler.progress.finish_job(k, "error")
+        if getattr(scheduler, "_remaining", None) is not None:
+            scheduler._remaining = None  # type: ignore[attr-defined]
+        _vk_captcha_needed = False
+        _vk_captcha_sid = None
+        _vk_captcha_img = None
+        _vk_captcha_method = None
+        _vk_captcha_params = None
         _vk_captcha_resume = None
+        _vk_captcha_timeout = None
 
     _vk_captcha_timeout = asyncio.create_task(_timeout())
 
@@ -10772,6 +10788,7 @@ def create_app() -> web.Application:
     dp.message.register(vktime_wrapper, Command("vktime"))
     dp.message.register(vkphotos_wrapper, Command("vkphotos"))
     dp.message.register(captcha_wrapper, Command("captcha"))
+    dp.message.register(captcha_wrapper, F.reply_to_message)
     dp.message.register(menu_wrapper, Command("menu"))
     dp.message.register(events_menu_wrapper, lambda m: m.text == MENU_EVENTS)
     dp.message.register(events_date_wrapper, lambda m: m.from_user.id in events_date_sessions)
