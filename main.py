@@ -47,6 +47,7 @@ def configure_logging() -> None:
 configure_logging()
 
 from datetime import date, datetime, timedelta, timezone, time
+from zoneinfo import ZoneInfo
 from typing import Optional, Tuple, Iterable, Any, Callable, Awaitable
 from urllib.parse import urlparse, parse_qs
 import uuid
@@ -504,6 +505,8 @@ _vk_user_token_bad: str | None = None
 _vk_captcha_needed: bool = False
 _vk_captcha_sid: str | None = None
 _vk_captcha_img: str | None = None
+_vk_captcha_method: str | None = None
+_vk_captcha_params: dict | None = None
 _vk_captcha_resume: Callable[[], Awaitable[None]] | None = None
 _vk_captcha_timeout: asyncio.Task | None = None
 _shared_session: ClientSession | None = None
@@ -952,11 +955,13 @@ async def _vk_api(
     bot: Bot | None = None,
     token: str | None = None,
     token_kind: str = "group",
+    skip_captcha: bool = False,
 ) -> dict:
     """Call VK API with token fallback."""
-    global _vk_captcha_needed, _vk_captcha_sid, _vk_captcha_img
-    if _vk_captcha_needed:
+    global _vk_captcha_needed, _vk_captcha_sid, _vk_captcha_img, _vk_captcha_method, _vk_captcha_params
+    if _vk_captcha_needed and not skip_captcha:
         raise VKAPIError(14, "Captcha needed", _vk_captcha_sid, _vk_captcha_img)
+    orig_params = dict(params)
     tokens: list[tuple[str, str]] = []
     if token:
         tokens.append((token_kind, token))
@@ -1006,8 +1011,9 @@ async def _vk_api(
     session = get_vk_session()
     fallback_next = False
     for idx, (kind, token) in enumerate(tokens):
-        params["access_token"] = token
-        params["v"] = "5.131"
+        call_params = orig_params.copy()
+        call_params["access_token"] = token
+        call_params["v"] = "5.131"
         actor_msg = f"vk.actor={kind}"
         if kind == "user" and fallback_next:
             actor_msg += " (fallback)"
@@ -1021,7 +1027,7 @@ async def _vk_api(
                 "POST",
                 f"https://api.vk.com/method/{method}",
                 timeout=HTTP_TIMEOUT,
-                data=params,
+                data=call_params,
             )
             return resp.json()
 
@@ -1047,6 +1053,8 @@ async def _vk_api(
                 _vk_captcha_needed = True
                 _vk_captcha_sid = err.get("captcha_sid")
                 _vk_captcha_img = err.get("captcha_img")
+                _vk_captcha_method = method
+                _vk_captcha_params = orig_params.copy()
                 if db and bot:
                     await notify_vk_captcha(db, bot, _vk_captcha_img)
                 # surface captcha details to caller
@@ -1325,24 +1333,90 @@ async def notify_superadmin(db: Database, bot: Bot, text: str):
     except Exception as e:
         logging.error("failed to notify superadmin: %s", e)
 
+def _vk_captcha_quiet_until() -> datetime | None:
+    if not VK_CAPTCHA_QUIET:
+        return None
+    try:
+        start_s, end_s = VK_CAPTCHA_QUIET.split('-', 1)
+        tz = ZoneInfo(VK_WEEK_EDIT_TZ)
+        now = datetime.now(tz)
+        start_t = datetime.strptime(start_s, '%H:%M').time()
+        end_t = datetime.strptime(end_s, '%H:%M').time()
+        start_dt = datetime.combine(now.date(), start_t, tz)
+        end_dt = datetime.combine(now.date(), end_t, tz)
+        if start_dt <= end_dt:
+            if start_dt <= now < end_dt:
+                return end_dt
+        else:
+            if now >= start_dt:
+                return end_dt + timedelta(days=1)
+            if now < end_dt:
+                return end_dt
+    except Exception:
+        logging.exception('captcha quiet parse failed')
+    return None
+
+
+
 
 async def notify_vk_captcha(db: Database, bot: Bot, img_url: str | None):
     admin_id = await get_superadmin_id(db)
     if not admin_id:
         return
+    ttl = VK_CAPTCHA_TTL_MIN
+    caption = f"VK captcha needed. Use /captcha <code> (expires in {ttl} min)"
+    buttons = [[types.InlineKeyboardButton(text="Ввести код", callback_data="captcha_input")]]
+    quiet_until = _vk_captcha_quiet_until()
+    if quiet_until:
+        buttons.append([types.InlineKeyboardButton(text=f"Отложить до {quiet_until.strftime('%H:%M')}", callback_data="captcha_delay")])
+    markup = types.InlineKeyboardMarkup(inline_keyboard=buttons)
     try:
         if img_url:
-            async with span("tg-send"):
-                await bot.send_photo(
-                    admin_id, img_url, caption="VK captcha needed. Use /captcha <code>"
-                )
-        else:
-            async with span("tg-send"):
-                await bot.send_message(
-                    admin_id, "VK captcha needed. Use /captcha <code>"
-                )
+            try:
+                session = get_http_session()
+                async with HTTP_SEMAPHORE:
+                    async with session.get(img_url) as resp:
+                        data = await resp.read()
+                photo = types.BufferedInputFile(data, filename="vk_captcha.jpg")
+                async with span("tg-send"):
+                    await bot.send_photo(admin_id, photo, caption=caption, reply_markup=markup)
+                return
+            except Exception:
+                logging.exception("failed to download captcha image")
+        text = caption
+        if img_url:
+            text = f"VK captcha needed: {img_url}\nUse /captcha <code>"
+        async with span("tg-send"):
+            await bot.send_message(admin_id, text, reply_markup=markup)
     except Exception as e:  # pragma: no cover - network issues
         logging.error("failed to send vk captcha: %s", e)
+
+async def handle_vk_captcha_prompt(callback: types.CallbackQuery, db: Database, bot: Bot):
+    await callback.answer()
+    await bot.send_message(
+        callback.message.chat.id,
+        f"Введите капчу (осталось {VK_CAPTCHA_TTL_MIN} мин):",
+        reply_markup=types.ForceReply(),
+    )
+
+
+async def handle_vk_captcha_delay(callback: types.CallbackQuery, db: Database, bot: Bot):
+    await callback.answer()
+    quiet_until = _vk_captcha_quiet_until()
+    if not quiet_until:
+        return
+    await bot.send_message(
+        callback.message.chat.id,
+        f"Отложено до {quiet_until.strftime('%H:%M')}",
+    )
+    delay = (quiet_until - datetime.now(ZoneInfo(VK_WEEK_EDIT_TZ))).total_seconds()
+    async def _remind():
+        await asyncio.sleep(max(0, delay))
+        if _vk_captcha_needed and _vk_captcha_img:
+            await notify_vk_captcha(db, bot, _vk_captcha_img)
+    asyncio.create_task(_remind())
+
+
 
 
 def vk_captcha_paused(scheduler, key: str) -> None:
@@ -1350,6 +1424,10 @@ def vk_captcha_paused(scheduler, key: str) -> None:
     global _vk_captcha_resume, _vk_captcha_timeout
     async def _resume():
         try:
+            if scheduler.progress:
+                scheduler.progress.finish_job(key, "done")
+            if getattr(scheduler, "_remaining", None):
+                scheduler._remaining.discard(key)  # type: ignore[attr-defined]
             await scheduler.run()
         except Exception:
             logging.exception("VK resume failed")
@@ -3484,29 +3562,36 @@ async def handle_vkphotos(message: types.Message, db: Database, bot: Bot):
 
 
 async def handle_vk_captcha(message: types.Message, db: Database, bot: Bot):
-    global _vk_captcha_needed, _vk_captcha_sid, _vk_captcha_img, _vk_captcha_resume, _vk_captcha_timeout
-    parts = message.text.split(maxsplit=1)
-    if len(parts) != 2:
+    global _vk_captcha_needed, _vk_captcha_sid, _vk_captcha_img, _vk_captcha_resume, _vk_captcha_timeout, _vk_captcha_method, _vk_captcha_params
+    text = message.text or ""
+    code: str | None = None
+    if text.startswith("/captcha"):
+        parts = text.split(maxsplit=1)
+        if len(parts) != 2:
+            await bot.send_message(message.chat.id, "Usage: /captcha <code>")
+            return
+        code = parts[1].strip()
+    elif message.reply_to_message:
+        code = text.strip()
+    else:
         await bot.send_message(message.chat.id, "Usage: /captcha <code>")
         return
     async with db.get_session() as session:
         user = await session.get(User, message.from_user.id)
         if not user or not user.is_superadmin:
             return
-    code = parts[1].strip()
-    if not _vk_captcha_sid:
+    if not _vk_captcha_sid or not _vk_captcha_method or _vk_captcha_params is None:
         await bot.send_message(message.chat.id, "No captcha pending")
         return
+    params = dict(_vk_captcha_params)
+    params.update({"captcha_sid": _vk_captcha_sid, "captcha_key": code})
     try:
-        await _vk_api(
-            "captcha.force",
-            {"captcha_sid": _vk_captcha_sid, "captcha_key": code},
-            db,
-            bot,
-        )
+        await _vk_api(_vk_captcha_method, params, db, bot, skip_captcha=True)
         _vk_captcha_needed = False
         _vk_captcha_sid = None
         _vk_captcha_img = None
+        _vk_captcha_method = None
+        _vk_captcha_params = None
         if _vk_captcha_timeout:
             _vk_captcha_timeout.cancel()
             _vk_captcha_timeout = None
@@ -10584,6 +10669,12 @@ def create_app() -> web.Application:
     async def askcity_wrapper(callback: types.CallbackQuery):
         await handle_askcity(callback, db, bot)
 
+    async def captcha_prompt_wrapper(callback: types.CallbackQuery):
+        await handle_vk_captcha_prompt(callback, db, bot)
+
+    async def captcha_delay_wrapper(callback: types.CallbackQuery):
+        await handle_vk_captcha_delay(callback, db, bot)
+
     async def menu_wrapper(message: types.Message):
         await handle_menu(message, db, bot)
 
@@ -10665,6 +10756,8 @@ def create_app() -> web.Application:
     )
     dp.callback_query.register(askloc_wrapper, lambda c: c.data == "askloc")
     dp.callback_query.register(askcity_wrapper, lambda c: c.data == "askcity")
+    dp.callback_query.register(captcha_prompt_wrapper, lambda c: c.data == "captcha_input")
+    dp.callback_query.register(captcha_delay_wrapper, lambda c: c.data == "captcha_delay")
     dp.message.register(tz_wrapper, Command("tz"))
     dp.message.register(
         add_event_session_wrapper, lambda m: m.from_user.id in add_event_sessions
