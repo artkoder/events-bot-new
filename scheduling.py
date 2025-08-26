@@ -131,6 +131,7 @@ class BatchProgress:
             "running": "🔄",
             "deferred": "⏸",
             "captcha": "🧩⏸",
+            "captcha_expired": "⚠️",
             "done": "✅",
             "error": "❌",
             "skipped_nochange": "⏭",
