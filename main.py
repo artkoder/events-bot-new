@@ -680,6 +680,176 @@ def seconds_to_next_minute(now: datetime) -> float:
 MENU_ADD_EVENT = "\u2795 Добавить событие"
 MENU_EVENTS = "\U0001f4c5 События"
 
+# command help descriptions by role
+# roles: guest (not registered), user (registered), superadmin
+HELP_COMMANDS = [
+    {
+        "usage": "/help",
+        "desc": "Show available commands for your role",
+        "roles": {"guest", "user", "superadmin"},
+    },
+    {
+        "usage": "/start",
+        "desc": "Register the first user as superadmin or display status",
+        "roles": {"guest", "user", "superadmin"},
+    },
+    {
+        "usage": "/register",
+        "desc": "Request moderator access",
+        "roles": {"guest"},
+    },
+    {
+        "usage": "/menu",
+        "desc": "Show main menu",
+        "roles": {"user", "superadmin"},
+    },
+    {
+        "usage": "/addevent <text>",
+        "desc": "Parse text with model 4o and store events",
+        "roles": {"user", "superadmin"},
+    },
+    {
+        "usage": "/addevent_raw <title>|<date>|<time>|<location>",
+        "desc": "Add event without LLM",
+        "roles": {"user", "superadmin"},
+    },
+    {
+        "usage": "/events [DATE]",
+        "desc": "List events for the day",
+        "roles": {"user", "superadmin"},
+    },
+    {
+        "usage": "/exhibitions",
+        "desc": "List active exhibitions",
+        "roles": {"user", "superadmin"},
+    },
+    {
+        "usage": "/pages",
+        "desc": "Show Telegraph month and weekend pages",
+        "roles": {"user", "superadmin"},
+    },
+    {
+        "usage": "/fest",
+        "desc": "List festivals with edit options",
+        "roles": {"user", "superadmin"},
+    },
+    {
+        "usage": "/vklink <event_id> <VK post link>",
+        "desc": "Attach VK post link to an event",
+        "roles": {"user", "superadmin"},
+    },
+    {
+        "usage": "/requests",
+        "desc": "Review pending registrations",
+        "roles": {"superadmin"},
+    },
+    {
+        "usage": "/tz <±HH:MM>",
+        "desc": "Set timezone offset",
+        "roles": {"superadmin"},
+    },
+    {
+        "usage": "/setchannel",
+        "desc": "Register announcement or asset channel",
+        "roles": {"superadmin"},
+    },
+    {
+        "usage": "/channels",
+        "desc": "List admin channels",
+        "roles": {"superadmin"},
+    },
+    {
+        "usage": "/regdailychannels",
+        "desc": "Choose channels for daily announcements",
+        "roles": {"superadmin"},
+    },
+    {
+        "usage": "/daily",
+        "desc": "Manage daily announcement channels",
+        "roles": {"superadmin"},
+    },
+    {
+        "usage": "/images",
+        "desc": "Toggle uploading photos to Catbox",
+        "roles": {"superadmin"},
+    },
+    {
+        "usage": "/vkgroup <id|off>",
+        "desc": "Set or disable VK group",
+        "roles": {"superadmin"},
+    },
+    {
+        "usage": "/vktime today|added <HH:MM>",
+        "desc": "Change VK posting times",
+        "roles": {"superadmin"},
+    },
+    {
+        "usage": "/vkphotos",
+        "desc": "Toggle VK photo posting",
+        "roles": {"superadmin"},
+    },
+    {
+        "usage": "/captcha <code>",
+        "desc": "Submit VK captcha code",
+        "roles": {"superadmin"},
+    },
+    {
+        "usage": "/ask4o <text>",
+        "desc": "Send query to model 4o",
+        "roles": {"superadmin"},
+    },
+    {
+        "usage": "/stats [events]",
+        "desc": "Show Telegraph view counts",
+        "roles": {"superadmin"},
+    },
+    {
+        "usage": "/status [job_id]",
+        "desc": "Show uptime and job status",
+        "roles": {"superadmin"},
+    },
+    {
+        "usage": "/trace <run_id>",
+        "desc": "Show recent log trace",
+        "roles": {"superadmin"},
+    },
+    {
+        "usage": "/last_errors [N]",
+        "desc": "Show last N errors",
+        "roles": {"superadmin"},
+    },
+    {
+        "usage": "/debug queue",
+        "desc": "Show background job counts",
+        "roles": {"superadmin"},
+    },
+    {
+        "usage": "/mem",
+        "desc": "Show memory usage",
+        "roles": {"superadmin"},
+    },
+    {
+        "usage": "/festivals_fix_nav",
+        "desc": "Fix festival navigation links",
+        "roles": {"superadmin"},
+    },
+    {
+        "usage": "/users",
+        "desc": "List users and roles",
+        "roles": {"superadmin"},
+    },
+    {
+        "usage": "/dumpdb",
+        "desc": "Download database dump",
+        "roles": {"superadmin"},
+    },
+    {
+        "usage": "/restore",
+        "desc": "Restore database from dump",
+        "roles": {"superadmin"},
+    },
+]
+
 
 class IPv4AiohttpSession(AiohttpSession):
     """Aiohttp session that forces IPv4 and reuses the shared ClientSession."""
@@ -3061,6 +3231,21 @@ async def handle_menu(message: types.Message, db: Database, bot: Bot):
         user = await session.get(User, message.from_user.id)
     if user and not user.blocked:
         await send_main_menu(bot, user, message.chat.id)
+
+
+async def handle_help(message: types.Message, db: Database, bot: Bot) -> None:
+    """Send command list according to user role."""
+    async with db.get_session() as session:
+        user = await session.get(User, message.from_user.id)
+    role = "guest"
+    if user and not user.blocked:
+        role = "superadmin" if user.is_superadmin else "user"
+    lines = [
+        f"{item['usage']} - {item['desc']}"
+        for item in HELP_COMMANDS
+        if role in item["roles"]
+    ]
+    await bot.send_message(message.chat.id, "\n".join(lines) or "No commands available")
 
 
 async def handle_events_menu(message: types.Message, db: Database, bot: Bot):
@@ -11252,6 +11437,9 @@ def create_app() -> web.Application:
     async def register_wrapper(message: types.Message):
         await handle_register(message, db, bot)
 
+    async def help_wrapper(message: types.Message):
+        await handle_help(message, db, bot)
+
     async def requests_wrapper(message: types.Message):
         await handle_requests(message, db, bot)
 
@@ -11407,6 +11595,7 @@ def create_app() -> web.Application:
     async def festivals_fix_nav_wrapper(message: types.Message):
         await handle_festivals_fix_nav(message, db, bot)
 
+    dp.message.register(help_wrapper, Command("help"))
     dp.message.register(start_wrapper, Command("start"))
     dp.message.register(register_wrapper, Command("register"))
     dp.message.register(requests_wrapper, Command("requests"))

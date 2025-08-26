@@ -4,6 +4,7 @@
 |---------|-----------|-------------|
 | `/start` | - | Register the first user as superadmin or display status. |
 | `/register` | - | Request moderator access if slots (<10) are free. |
+| `/help` | - | Show commands available for your role. |
 | `/requests` | - | Superadmin sees pending registrations with approve/reject buttons. |
 | `/tz <±HH:MM>` | required offset | Set timezone offset (superadmin only). |
 | `/addevent <text>` | event description | Parse text with model 4o and store one or several events. The original text is published to Telegraph. Images up to 5&nbsp;MB are uploaded to Catbox and shown on that page. Forwarded messages from moderators are processed the same way. |
