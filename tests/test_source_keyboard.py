@@ -1,5 +1,6 @@
 import pytest
 from aiogram import Bot
+from datetime import datetime
 
 import main
 from main import Database, Event, MonthPage, update_source_post_keyboard
@@ -17,10 +18,17 @@ class DummyBot(Bot):
 
 
 @pytest.mark.asyncio
-async def test_update_keyboard_with_ics(tmp_path):
+async def test_update_keyboard_with_ics(tmp_path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
     bot = DummyBot("123:abc")
+
+    class FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2025, 7, 2, tzinfo=tz)
+
+    monkeypatch.setattr(main, "datetime", FakeDatetime)
     async with db.get_session() as session:
         session.add_all([
             MonthPage(month="2025-07", url="https://t.me/c/m1", path="p1"),
@@ -52,10 +60,17 @@ async def test_update_keyboard_with_ics(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_update_keyboard_without_ics(tmp_path):
+async def test_update_keyboard_without_ics(tmp_path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
     bot = DummyBot("123:abc")
+
+    class FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2025, 7, 2, tzinfo=tz)
+
+    monkeypatch.setattr(main, "datetime", FakeDatetime)
     async with db.get_session() as session:
         session.add_all([
             MonthPage(month="2025-07", url="https://t.me/c/m1", path="p1"),
@@ -79,3 +94,44 @@ async def test_update_keyboard_without_ics(tmp_path):
     assert len(markup.inline_keyboard) == 1
     assert len(markup.inline_keyboard[0]) == 1
     assert markup.inline_keyboard[0][0].url == "https://t.me/c/m1"
+
+
+@pytest.mark.asyncio
+async def test_update_keyboard_future_event_uses_current_month(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    class FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2025, 8, 5, tzinfo=tz)
+
+    monkeypatch.setattr(main, "datetime", FakeDatetime)
+    async with db.get_session() as session:
+        session.add_all(
+            [
+                MonthPage(month="2025-08", url="https://t.me/c/m1", path="p1"),
+                MonthPage(month="2025-09", url="https://t.me/c/m2", path="p2"),
+                Event(
+                    id=1,
+                    title="A",
+                    description="d",
+                    source_text="s",
+                    date="2025-11-18",
+                    time="19:00",
+                    location_name="Hall",
+                    city="Town",
+                    source_chat_id=-100,
+                    source_message_id=10,
+                ),
+            ]
+        )
+        await session.commit()
+    await update_source_post_keyboard(1, db, bot)
+    assert bot.edits
+    markup = bot.edits[0][2]
+    assert len(markup.inline_keyboard) == 1
+    assert len(markup.inline_keyboard[0]) == 2
+    assert markup.inline_keyboard[0][0].url == "https://t.me/c/m1"
+    assert markup.inline_keyboard[0][1].url == "https://t.me/c/m2"
