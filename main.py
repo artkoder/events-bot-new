@@ -1286,8 +1286,8 @@ async def ensure_festival(
     location_address: str | None = None,
     city: str | None = None,
     source_text: str | None = None,
-) -> tuple[Festival, bool]:
-    """Return festival and creation flag."""
+) -> tuple[Festival, bool, bool]:
+    """Return festival and flags (created, updated)."""
     async with db.get_session() as session:
         res = await session.execute(select(Festival).where(Festival.name == name))
         fest = res.scalar_one_or_none()
@@ -1320,7 +1320,7 @@ async def ensure_festival(
             if updated:
                 session.add(fest)
                 await session.commit()
-            return fest, False
+            return fest, False, updated
         fest = Festival(
             name=name,
             full_name=full_name,
@@ -1335,7 +1335,7 @@ async def ensure_festival(
         session.add(fest)
         await session.commit()
         logging.info("created festival %s", name)
-        return fest, True
+        return fest, True, True
 
 
 async def get_superadmin_id(db: Database) -> int | None:
@@ -4516,7 +4516,7 @@ async def add_events_from_text(
             raise
         return []
 
-    results: list[tuple[Event | None, bool, list[str], str]] = []
+    results: list[tuple[Event | Festival | None, bool, list[str], str]] = []
     first = True
     images: list[tuple[bytes, str]] = []
     if media:
@@ -4525,6 +4525,9 @@ async def add_events_from_text(
     links_iter = iter(extract_links_from_html(html_text) if html_text else [])
     source_text_clean = html_text or text
 
+    festival_obj: Festival | None = None
+    fest_created = False
+    fest_updated = False
     if festival_info:
         fest_name = festival_info.get("name") or festival_info.get("festival")
         start = canonicalize_date(festival_info.get("start_date") or festival_info.get("date"))
@@ -4534,7 +4537,7 @@ async def add_events_from_text(
         city = festival_info.get("city")
         loc_addr = strip_city_from_address(loc_addr, city)
         photo_u = catbox_urls[0] if catbox_urls else None
-        fest_obj, created = await ensure_festival(
+        fest_obj, created, updated = await ensure_festival(
             db,
             fest_name,
             full_name=festival_info.get("full_name"),
@@ -4546,29 +4549,17 @@ async def add_events_from_text(
             city=city,
             source_text=source_text_clean,
         )
-        if not parsed and created:
+        festival_obj = fest_obj
+        fest_created = created
+        fest_updated = updated
+        if created:
             await sync_festival_page(db, fest_obj.name)
             await sync_festival_vk_post(db, fest_obj.name, bot)
             async with db.get_session() as session:
                 res = await session.execute(
                     select(Festival).where(Festival.name == fest_obj.name)
                 )
-                fest_obj = res.scalar_one_or_none()
-            lines = [f"festival: {fest_obj.name}"]
-            if fest_obj.telegraph_url:
-                lines.append(f"telegraph: {fest_obj.telegraph_url}")
-            if fest_obj.vk_post_url:
-                lines.append(f"vk_post: {fest_obj.vk_post_url}")
-            if fest_obj.start_date:
-                lines.append(f"start: {fest_obj.start_date}")
-            if fest_obj.end_date:
-                lines.append(f"end: {fest_obj.end_date}")
-            if fest_obj.location_name:
-                lines.append(f"location_name: {fest_obj.location_name}")
-            if fest_obj.city:
-                lines.append(f"city: {fest_obj.city}")
-            results.append((fest_obj, True, lines, "festival"))
-            logging.info("festival %s created without events", fest_obj.name)
+                festival_obj = res.scalar_one_or_none()
     for data in parsed:
         logging.info(
             "processing event candidate: %s on %s %s",
@@ -4729,6 +4720,24 @@ async def add_events_from_text(
             status = "added" if added else "updated"
             results.append((saved, added, lines, status))
             first = False
+    if festival_obj and (fest_created or fest_updated):
+        lines = [f"festival: {festival_obj.name}"]
+        if festival_obj.telegraph_url:
+            lines.append(f"telegraph: {festival_obj.telegraph_url}")
+        if festival_obj.vk_post_url:
+            lines.append(f"vk_post: {festival_obj.vk_post_url}")
+        if festival_obj.start_date:
+            lines.append(f"start: {festival_obj.start_date}")
+        if festival_obj.end_date:
+            lines.append(f"end: {festival_obj.end_date}")
+        if festival_obj.location_name:
+            lines.append(f"location_name: {festival_obj.location_name}")
+        if festival_obj.city:
+            lines.append(f"city: {festival_obj.city}")
+        results.insert(0, (festival_obj, fest_created, lines, "festival"))
+        logging.info(
+            "festival %s %s", festival_obj.name, "created" if fest_created else "updated"
+        )
     logging.info("add_events_from_text finished with %d results", len(results))
     del parsed
     gc.collect()
@@ -4823,10 +4832,10 @@ async def handle_add_event(
         return
     logging.info("handle_add_event parsed %d results", len(results))
     grouped: dict[int, tuple[Event, bool]] = {}
-    fest_msgs: list[tuple[Festival, list[str]]] = []
+    fest_msgs: list[tuple[Festival, bool, list[str]]] = []
     for saved, added, lines, status in results:
         if isinstance(saved, Festival):
-            fest_msgs.append((saved, lines))
+            fest_msgs.append((saved, added, lines))
             continue
         info = grouped.get(saved.id)
         if info:
@@ -4834,15 +4843,23 @@ async def handle_add_event(
         else:
             grouped[saved.id] = (saved, added)
 
-    for fest, lines in fest_msgs:
-        markup = types.InlineKeyboardMarkup(
-            inline_keyboard=[[types.InlineKeyboardButton(
-                text="Создать события по дням",
-                callback_data=f"festdays:{fest.id}")]]
-        )
+    for fest, added, lines in fest_msgs:
+        async with db.get_session() as session:
+            res = await session.execute(
+                select(func.count()).select_from(Event).where(Event.festival == fest.name)
+            )
+            count = res.scalar_one()
+        markup = None
+        if count == 0:
+            markup = types.InlineKeyboardMarkup(
+                inline_keyboard=[[types.InlineKeyboardButton(
+                    text="Создать события по дням",
+                    callback_data=f"festdays:{fest.id}")]]
+            )
+        status = "added" if added else "updated"
         await bot.send_message(
             message.chat.id,
-            "Festival added\n" + "\n".join(lines),
+            f"Festival {status}\n" + "\n".join(lines),
             reply_markup=markup,
         )
 
@@ -6673,14 +6690,17 @@ def event_to_nodes(
             fest = getattr(e, "_festival", None)
         if fest:
             prefix = "✨ " if fest_icon else ""
-            if fest.telegraph_url:
-                children = []
+            url = fest.telegraph_url
+            if not url and fest.telegraph_path:
+                url = f"https://telegra.ph/{fest.telegraph_path.lstrip('/')}"
+            if url:
+                children: list = []
                 if prefix:
                     children.append(prefix)
                 children.append(
                     {
                         "tag": "a",
-                        "attrs": {"href": fest.telegraph_url},
+                        "attrs": {"href": url},
                         "children": [fest.name],
                     }
                 )
@@ -6883,6 +6903,11 @@ def _build_month_page_content_sync(
     size_limit: int | None,
     fest_index_url: str | None,
 ) -> tuple[str, list, int]:
+    # Ensure festivals have full Telegraph URLs for easy linking
+    for fest in fest_map.values():
+        if not fest.telegraph_url and fest.telegraph_path:
+            fest.telegraph_url = f"https://telegra.ph/{fest.telegraph_path.lstrip('/')}"
+
     today = datetime.now(LOCAL_TZ).date()
     today_str = today.isoformat()
     cutoff = (today - timedelta(days=30)).isoformat()
@@ -7912,6 +7937,21 @@ async def build_festival_page_content(db: Database, fest: Festival) -> tuple[str
         nav_html = nodes_to_html(nav_nodes)
         nav_block = f"{FEST_NAV_START}{nav_html}{FEST_NAV_END}"
         nodes.extend(html_to_nodes(nav_block))
+    fest_index_url = await get_setting_value(db, "fest_index_url")
+    if fest_index_url:
+        nodes.append(
+            {
+                "tag": "p",
+                "children": [
+                    "\U0001f3aa Все фестивали Калининградской области → ",
+                    {
+                        "tag": "a",
+                        "attrs": {"href": fest_index_url},
+                        "children": [fest_index_url],
+                    },
+                ],
+            }
+        )
     title = fest.full_name or fest.name
     return title, nodes
 

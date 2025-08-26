@@ -5270,16 +5270,16 @@ def test_event_to_nodes_festival_link():
         location_name="Hall",
         festival="Jazz",
     )
-    fest = main.Festival(name="Jazz", telegraph_url="http://tg")
+    fest = main.Festival(name="Jazz", telegraph_path="tg")
     nodes = main.event_to_nodes(e, fest)
-    assert nodes[1]["children"][0]["attrs"]["href"] == "http://tg"
+    assert nodes[1]["children"][0]["attrs"]["href"] == "https://telegra.ph/tg"
     assert sum(
         1
         for n in nodes
         if isinstance(n, dict)
         and any(
             isinstance(c, dict)
-            and c.get("attrs", {}).get("href") == "http://tg"
+            and c.get("attrs", {}).get("href") == "https://telegra.ph/tg"
             for c in n.get("children", [])
         )
     ) == 1
@@ -5410,6 +5410,60 @@ async def test_add_festival_without_events(tmp_path: Path, monkeypatch):
 
     markup = bot.messages[0][2]["reply_markup"]
     assert any(btn.callback_data == f"festdays:{fid}" for row in markup.inline_keyboard for btn in row)
+
+
+@pytest.mark.asyncio
+async def test_add_event_with_festival_message(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async def fake_parse(text: str, source_channel: str | None = None, festival_names=None):
+        return [
+            {
+                "title": "T",
+                "short_description": "d",
+                "date": FUTURE_DATE,
+                "time": "18:00",
+                "location_name": "Hall",
+                "festival": "Fest",
+            }
+        ]
+
+    fake_parse._festival = {
+        "name": "Fest",
+        "start_date": FUTURE_DATE,
+        "end_date": FUTURE_DATE,
+        "location_name": "Hall",
+        "city": "Town",
+    }
+
+    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
+        return "u", "p", "", 0
+
+    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.create_source_page", fake_create)
+
+    msg = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "/addevent info",
+        }
+    )
+
+    await handle_add_event(msg, db, bot)
+
+    fest_msgs = [m for m in bot.messages if m[1].startswith("Festival")]
+    assert fest_msgs
+    fest_text = fest_msgs[0][1]
+    assert fest_text.startswith("Festival added")
+    assert "festival: Fest" in fest_text
+    assert fest_msgs[0][2].get("reply_markup") is None
+
+    assert any(m[1].startswith("Event") for m in bot.messages)
 
 
 @pytest.mark.asyncio
