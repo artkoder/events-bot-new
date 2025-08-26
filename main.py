@@ -2080,14 +2080,14 @@ async def sync_festivals_index_page(db: Database) -> None:
         f"{FEST_INDEX_INTRO_END}"
     )
     html = (
-        "<h1>Все фестивали региона</h1>"
+        "<h1>Все фестивали Калининградской области</h1>"
         + intro_html
         + (nodes_to_html(nodes) if nodes else "")
         + FOOTER_LINK_HTML
     )
     path = await get_setting_value(db, "fest_index_path")
     url = await get_setting_value(db, "fest_index_url")
-    title = "Все фестивали региона"
+    title = "Все фестивали Калининградской области"
 
     try:
         if path:
@@ -5190,6 +5190,7 @@ async def _run_due_jobs_once(
     notify: Callable[[JobTask, JobStatus, bool, str | None, str | None], Awaitable[None]] | None = None,
     only_event: int | None = None,
     ics_progress: Any | None = None,
+    fest_progress: Any | None = None,
 ) -> int:
     now = datetime.utcnow()
     async with db.get_session() as session:
@@ -5259,6 +5260,8 @@ async def _run_due_jobs_once(
                 ):
                     if job.task == JobTask.ics_publish:
                         res = await handler(job.event_id, db, bot, ics_progress)
+                    elif job.task == JobTask.festival_pages:
+                        res = await handler(job.event_id, db, bot, fest_progress)
                     else:
                         res = await handler(job.event_id, db, bot)
                 rebuild = isinstance(res, str) and res == "rebuild"
@@ -5712,18 +5715,34 @@ async def update_week_pages_for(event_id: int, db: Database, bot: Bot | None) ->
         await sync_vk_week_post(db, w_start.isoformat(), bot)
 
 
-async def update_festival_pages_for_event(event_id: int, db: Database, bot: Bot | None) -> None:
+async def update_festival_pages_for_event(
+    event_id: int, db: Database, bot: Bot | None, progress: Any | None = None
+) -> bool:
     async with db.get_session() as session:
         ev = await session.get(Event, event_id)
     if not ev or not ev.festival:
-        return
+        return False
     today = date.today().isoformat()
     end = ev.end_date or ev.date
     if end < today:
-        return
-    await sync_festival_page(db, ev.festival)
-    await sync_festival_vk_post(db, ev.festival, bot)
-    await rebuild_fest_nav_if_changed(db)
+        return False
+    try:
+        url = await sync_festival_page(db, ev.festival)
+        if progress:
+            if url:
+                progress.mark("tg", "done", url)
+            else:
+                progress.mark("tg", "skipped", "")
+    except Exception as e:
+        if progress:
+            progress.mark("tg", "error", str(e))
+        raise
+    vk_changed = False
+    try:
+        vk_changed = bool(await sync_festival_vk_post(db, ev.festival, bot))
+    finally:
+        await rebuild_fest_nav_if_changed(db)
+    return vk_changed
 
 
 async def publish_event_progress(event: Event, db: Database, bot: Bot, chat_id: int) -> None:
@@ -5761,6 +5780,9 @@ async def publish_event_progress(event: Event, db: Database, bot: Bot, chat_id: 
         suffix = f" — <a href='{html.escape(link)}'>открыть</a>" if link else ""
         ics_sub["ics_supabase"] = {"icon": "\U0001f504", "suffix": suffix}
         ics_sub["ics_telegram"] = {"icon": "\U0001f504", "suffix": ""}
+    fest_sub: dict[str, dict[str, str]] = {}
+    if JobTask.festival_pages in tasks:
+        fest_sub["tg"] = {"icon": "\U0001f504", "suffix": ""}
     lines = []
     for t in tasks:
         if t == JobTask.ics_publish:
@@ -5773,6 +5795,13 @@ async def publish_event_progress(event: Event, db: Database, bot: Bot, chat_id: 
                 lines.append(
                     f"{ics_sub['ics_telegram']['icon']} ICS (Telegram){ics_sub['ics_telegram']['suffix']}"
                 )
+        elif t == JobTask.festival_pages:
+            lines.append(f"\U0001f504 {job_label(t)}")
+            sub = fest_sub.get("tg")
+            if sub:
+                lines.append(
+                    f"{sub['icon']} Telegraph (фестиваль){sub['suffix']}"
+                )
         else:
             lines.append(f"\U0001f504 {job_label(t)}")
     head = "Идёт процесс публикации, ждите"
@@ -5781,6 +5810,10 @@ async def publish_event_progress(event: Event, db: Database, bot: Bot, chat_id: 
 
     async def render() -> None:
         all_done = all(info["icon"] != "\U0001f504" for info in progress.values())
+        if fest_sub:
+            all_done = all_done and all(
+                info["icon"] != "\U0001f504" for info in fest_sub.values()
+            )
         head = "Готово" if all_done else "Идёт процесс публикации, ждите"
         lines: list[str] = []
         for t, info in progress.items():
@@ -5792,6 +5825,13 @@ async def publish_event_progress(event: Event, db: Database, bot: Bot, chat_id: 
                 tg = ics_sub.get("ics_telegram")
                 if tg:
                     lines.append(f"{tg['icon']} ICS (Telegram){tg['suffix']}")
+            elif t == JobTask.festival_pages:
+                lines.append(f"{info['icon']} {job_label(t)}{info['suffix']}")
+                sub = fest_sub.get("tg")
+                if sub:
+                    lines.append(
+                        f"{sub['icon']} Telegraph (фестиваль){sub['suffix']}"
+                    )
             else:
                 lines.append(f"{info['icon']} {job_label(t)}{info['suffix']}")
         text = head if not lines else head + "\n" + "\n".join(lines)
@@ -5814,6 +5854,21 @@ async def publish_event_progress(event: Event, db: Database, bot: Bot, chat_id: 
         asyncio.create_task(render())
 
     ics_progress = SimpleNamespace(mark=ics_mark) if ics_sub else None
+
+    def fest_mark(key: str, status: str, detail: str) -> None:
+        icon = "✅" if status in {"done", "skipped"} else "❌"
+        if status == "done" and detail:
+            suffix = f" — {detail}"
+        elif status == "skipped":
+            suffix = " — без изменений"
+        elif detail:
+            suffix = f" — {detail}"
+        else:
+            suffix = ""
+        fest_sub[key] = {"icon": icon, "suffix": suffix}
+        asyncio.create_task(render())
+
+    fest_progress = SimpleNamespace(mark=fest_mark) if fest_sub else None
 
     async def updater(
         task: JobTask,
@@ -5843,7 +5898,9 @@ async def publish_event_progress(event: Event, db: Database, bot: Bot, chat_id: 
 
     deadline = _time.monotonic() + 30
     while True:
-        processed = await _run_due_jobs_once(db, bot, updater, event.id, ics_progress)
+        processed = await _run_due_jobs_once(
+            db, bot, updater, event.id, ics_progress, fest_progress
+        )
         if processed:
             await asyncio.sleep(0)
             continue
@@ -6008,6 +6065,43 @@ async def update_all_festival_nav(event_id: int, db: Database, bot: Bot | None) 
     if errors:
         raise errors[0]
     return changed_any
+
+
+async def festivals_fix_nav(
+    db: Database, bot: Bot | None = None
+) -> tuple[int, int, int]:
+    items = await upcoming_festivals(db)
+    nav_hash = await get_setting_value(db, "fest_nav_hash")
+    pages = 0
+    changed = 0
+    duplicates = 0
+    logging.info("fest_nav_force_rebuild", extra={"action": "start"})
+    for _, _, fest in items:
+        pages += 1
+        before = fest.nav_hash
+        eid = -(fest.id * FEST_JOB_MULT)
+        try:
+            if await update_festival_tg_nav(eid, db, bot):
+                changed += 1
+                if nav_hash and before == nav_hash:
+                    duplicates += 1
+        except Exception:
+            pass
+        try:
+            if await update_festival_vk_nav(eid, db, bot):
+                changed += 1
+        except Exception:
+            pass
+    logging.info(
+        "fest_nav_force_rebuild",
+        extra={
+            "action": "finish",
+            "pages": pages,
+            "changed": changed,
+            "duplicates_fixed": duplicates,
+        },
+    )
+    return pages, changed, duplicates
 
 
 JOB_HANDLERS = {
@@ -6672,7 +6766,10 @@ def event_title_nodes(e: Event) -> list:
 
 
 def event_to_nodes(
-    e: Event, festival: Festival | None = None, fest_icon: bool = False
+    e: Event,
+    festival: Festival | None = None,
+    fest_icon: bool = False,
+    log_fest_link: bool = False,
 ) -> list[dict]:
     md = format_event_md(e, festival)
 
@@ -6684,30 +6781,47 @@ def event_to_nodes(
     from telegraph.utils import html_to_nodes
 
     nodes = [{"tag": "h4", "children": event_title_nodes(e)}]
-    if festival or e.festival:
-        fest = festival
-        if fest is None and e.festival:
-            fest = getattr(e, "_festival", None)
-        if fest:
-            prefix = "✨ " if fest_icon else ""
-            url = fest.telegraph_url
-            if not url and fest.telegraph_path:
-                url = f"https://telegra.ph/{fest.telegraph_path.lstrip('/')}"
-            if url:
-                children: list = []
-                if prefix:
-                    children.append(prefix)
-                children.append(
-                    {
-                        "tag": "a",
-                        "attrs": {"href": url},
-                        "children": [fest.name],
-                    }
-                )
-                nodes.append({"tag": "p", "children": children})
-            else:
-                text = f"{prefix}{fest.name}" if prefix else fest.name
-                nodes.append({"tag": "p", "children": [text]})
+    fest = festival
+    if fest is None and e.festival:
+        fest = getattr(e, "_festival", None)
+    if log_fest_link and e.festival:
+        has_url = bool(getattr(fest, "telegraph_url", None))
+        has_path = bool(getattr(fest, "telegraph_path", None))
+        href = ""
+        if has_url:
+            href = fest.telegraph_url
+        elif has_path:
+            href = f"https://telegra.ph/{fest.telegraph_path.lstrip('/')}"
+        logging.info(
+            "month_render_fest_link",
+            extra={
+                "event_id": e.id,
+                "festival": e.festival,
+                "has_url": has_url,
+                "has_path": has_path,
+                "href_used": href,
+            },
+        )
+    if fest:
+        prefix = "✨ " if fest_icon else ""
+        url = fest.telegraph_url
+        if not url and fest.telegraph_path:
+            url = f"https://telegra.ph/{fest.telegraph_path.lstrip('/')}"
+        if url:
+            children: list = []
+            if prefix:
+                children.append(prefix)
+            children.append(
+                {
+                    "tag": "a",
+                    "attrs": {"href": url},
+                    "children": [fest.name],
+                }
+            )
+            nodes.append({"tag": "p", "children": children})
+        else:
+            text = f"{prefix}{fest.name}" if prefix else fest.name
+            nodes.append({"tag": "p", "children": [text]})
     if body_md:
         html_text = md_to_html(body_md)
         nodes.extend(html_to_nodes(html_text))
@@ -6772,7 +6886,11 @@ def add_day_sections(
         add_many(telegraph_br())
         for ev in events:
             fest = fest_map.get((ev.festival or "").casefold())
-            add_many(event_to_nodes(ev, fest, fest_icon=True))
+            add_many(
+                event_to_nodes(
+                    ev, fest, fest_icon=True, log_fest_link=use_markers
+                )
+            )
         if use_markers:
             add_many([DAY_END(d)])
 
@@ -6791,7 +6909,9 @@ def render_month_day_section(d: date, events: list[Event]) -> str:
     nodes.extend(telegraph_br())
     for ev in events:
         fest = getattr(ev, "_festival", None)
-        nodes.extend(event_to_nodes(ev, fest, fest_icon=True))
+        nodes.extend(
+            event_to_nodes(ev, fest, fest_icon=True, log_fest_link=True)
+        )
     return nodes_to_html(nodes)
 
 async def get_month_data(db: Database, month: str, *, fallback: bool = True):
@@ -7026,7 +7146,7 @@ def _build_month_page_content_sync(
                     {
                         "tag": "a",
                         "attrs": {"href": fest_index_url},
-                        "children": ["🎪 Все фестивали региона"],
+                        "children": ["🎪 Все фестивали Калининградской области"],
                     }
                 ],
             }
@@ -7939,6 +8059,10 @@ async def build_festival_page_content(db: Database, fest: Festival) -> tuple[str
         nodes.extend(html_to_nodes(nav_block))
     fest_index_url = await get_setting_value(db, "fest_index_url")
     if fest_index_url:
+        logging.info(
+            "festival_page_index_link",
+            extra={"festival": fest.name, "fest_index_url": fest_index_url},
+        )
         nodes.append(
             {
                 "tag": "p",
@@ -7967,7 +8091,7 @@ async def sync_festival_page(
         token = get_telegraph_token()
         if not token:
             logging.error("Telegraph token unavailable")
-            return
+            return None
         tg = Telegraph(access_token=token)
         async with db.get_session() as session:
             result = await session.execute(
@@ -7975,11 +8099,12 @@ async def sync_festival_page(
             )
             fest = result.scalar_one_or_none()
             if not fest:
-                return
+                return None
             title = fest.full_name or fest.name
             path = fest.telegraph_path
             url = fest.telegraph_url
 
+        changed = False
         try:
             created = False
             if refresh_nav_only and path:
@@ -8006,16 +8131,18 @@ async def sync_festival_page(
                 url = fest.telegraph_url
                 if path:
                     await telegraph_call(tg.edit_page, path, title=title, content=content)
+                    changed = True
                     logging.info("updated festival page %s in Telegraph", name)
                 else:
                     data = await telegraph_create_page(tg, title, content=content)
                     url = normalize_telegraph_url(data.get("url"))
                     path = data.get("path")
                     created = True
+                    changed = True
                     logging.info("created festival page %s: %s", name, url)
         except Exception as e:
             logging.error("Failed to sync festival %s: %s", name, e)
-            return
+            return None
 
         async with db.get_session() as session:
             result = await session.execute(
@@ -8027,6 +8154,7 @@ async def sync_festival_page(
                 fest_db.telegraph_path = path
                 await session.commit()
                 logging.info("synced festival page %s", name)
+        return url if changed else None
 
 
 async def refresh_nav_on_all_festivals(
@@ -10133,6 +10261,21 @@ async def handle_status(message: types.Message, db: Database, bot: Bot):
     await bot.send_message(message.chat.id, "\n".join(lines))
 
 
+async def handle_festivals_fix_nav(
+    message: types.Message, db: Database, bot: Bot
+) -> None:
+    async with db.get_session() as session:
+        user = await session.get(User, message.from_user.id)
+        if not user or not user.is_superadmin:
+            await bot.send_message(message.chat.id, "Not authorized")
+            return
+    pages, changed, duplicates = await festivals_fix_nav(db, bot)
+    await bot.send_message(
+        message.chat.id,
+        f"Processed {pages}, changed {changed}, duplicates_fixed {duplicates}",
+    )
+
+
 async def handle_trace(message: types.Message, db: Database, bot: Bot):
     async with db.get_session() as session:
         user = await session.get(User, message.from_user.id)
@@ -10724,6 +10867,20 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
             )
             continue
         if isinstance(saved, Festival):
+            async with db.get_session() as session:
+                count = (
+                    await session.scalar(
+                        select(func.count()).where(Event.festival == saved.name)
+                    )
+                ) or 0
+            logging.info(
+                "festival_notify",
+                extra={
+                    "festival": saved.name,
+                    "action": "created" if added else "updated",
+                    "events_count_at_moment": count,
+                },
+            )
             markup = types.InlineKeyboardMarkup(
                 inline_keyboard=[
                     [
@@ -11247,6 +11404,9 @@ def create_app() -> web.Application:
     async def mem_wrapper(message: types.Message):
         await handle_mem(message, db, bot)
 
+    async def festivals_fix_nav_wrapper(message: types.Message):
+        await handle_festivals_fix_nav(message, db, bot)
+
     dp.message.register(start_wrapper, Command("start"))
     dp.message.register(register_wrapper, Command("register"))
     dp.message.register(requests_wrapper, Command("requests"))
@@ -11329,6 +11489,7 @@ def create_app() -> web.Application:
     dp.message.register(last_errors_wrapper, Command("last_errors"))
     dp.message.register(debug_wrapper, Command("debug"))
     dp.message.register(mem_wrapper, Command("mem"))
+    dp.message.register(festivals_fix_nav_wrapper, Command("festivals_fix_nav"))
     dp.message.register(users_wrapper, Command("users"))
     dp.message.register(dumpdb_wrapper, Command("dumpdb"))
     dp.message.register(restore_wrapper, Command("restore"))
