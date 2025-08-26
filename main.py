@@ -5921,15 +5921,17 @@ def next_month(month: str) -> str:
 def md_to_html(text: str) -> str:
     html_text = simple_md_to_html(text)
     html_text = linkify_for_telegraph(html_text)
-    html_text = re.sub(r"&lt;/?tg-emoji.*?&gt;", "", html_text)
+    html_text = re.sub(r"&lt;/?tg-(?:emoji|spoiler).*?&gt;", "", html_text)
     if not re.match(r"^<(?:h\d|p|ul|ol|blockquote|pre|table)", html_text):
         html_text = f"<p>{html_text}</p>"
-    # Telegraph API does not allow h1/h2 or Telegram-specific emoji tags
+    # Telegraph API does not allow h1/h2 or Telegram-specific tags
     html_text = re.sub(r"<(\/?)h[12]>", r"<\1h3>", html_text)
-    html_text = re.sub(r"</?tg-emoji[^>]*>", "", html_text)
+    html_text = re.sub(r"</?tg-(?:emoji|spoiler)[^>]*>", "", html_text)
     return html_text
 
-_DISALLOWED_TAGS_RE = re.compile(r"</?(?:span|div|style|script)[^>]*>", re.IGNORECASE)
+_DISALLOWED_TAGS_RE = re.compile(
+    r"</?(?:span|div|style|script|tg-spoiler)[^>]*>", re.IGNORECASE
+)
 
 
 def lint_telegraph_html(html: str) -> str:
@@ -10517,7 +10519,7 @@ async def update_source_page(
         for url in urls:
             html_content += f'<img src="{html.escape(url)}"/><p></p>'
         new_html = normalize_hashtag_dates(new_html)
-        cleaned = re.sub(r"</?tg-emoji[^>]*>", "", new_html)
+        cleaned = re.sub(r"</?tg-(?:emoji|spoiler)[^>]*>", "", new_html)
         cleaned = cleaned.replace(
             "\U0001f193\U0001f193\U0001f193\U0001f193", "Бесплатно"
         )
@@ -10672,7 +10674,7 @@ async def build_source_page_content(
     if html_text:
         html_text = strip_title(html_text)
         html_text = normalize_hashtag_dates(html_text)
-        cleaned = re.sub(r"</?tg-emoji[^>]*>", "", html_text)
+        cleaned = re.sub(r"</?tg-(?:emoji|spoiler)[^>]*>", "", html_text)
         cleaned = cleaned.replace(
             "\U0001f193\U0001f193\U0001f193\U0001f193", "Бесплатно"
         )
