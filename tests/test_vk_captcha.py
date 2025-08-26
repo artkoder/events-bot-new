@@ -3,6 +3,8 @@ import main
 from aiogram import Bot, types
 from pathlib import Path
 from main import Database, User
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 class DummyResp:
     def __init__(self, data):
@@ -91,6 +93,7 @@ async def test_handle_vk_captcha_flow(tmp_path: Path, monkeypatch):
     await main.notify_vk_captcha(db, bot, "img")
     from aiogram.types import BufferedInputFile
     assert bot.photos and isinstance(bot.photos[0][1], BufferedInputFile)
+    assert "Нужна капча" in bot.photos[0][2]["caption"]
 
     async def fake_vk_api(method, params, db=None, bot=None, **kwargs):
         assert method == "wall.post"
@@ -110,4 +113,84 @@ async def test_handle_vk_captcha_flow(tmp_path: Path, monkeypatch):
     )
     await main.handle_vk_captcha(msg, db, bot)
     assert main._vk_captcha_sid is None
-    assert bot.messages and "Captcha solved" in bot.messages[0][1]
+    assert bot.messages and bot.messages[0][1] == "VK ✅"
+
+
+@pytest.mark.asyncio
+async def test_vk_captcha_prompt_force_reply(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = PhotoBot("123:abc")
+    main._vk_captcha_requested_at = datetime.now(ZoneInfo("UTC"))
+    cb = types.CallbackQuery.model_validate(
+        {
+            "id": "1",
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "message": {
+                "message_id": 10,
+                "date": 0,
+                "chat": {"id": 1, "type": "private"},
+            },
+            "chat_instance": "1",
+            "data": "captcha_input",
+        }
+    )
+    cb._bot = bot
+    async def fake_answer(self):
+        return None
+    monkeypatch.setattr(types.CallbackQuery, "answer", fake_answer)
+    await main.handle_vk_captcha_prompt(cb, db, bot)
+    assert main._vk_captcha_awaiting_user == 1
+    assert bot.messages
+    assert "Введите код с картинки" in bot.messages[0][1]
+    assert isinstance(bot.messages[0][2]["reply_markup"], types.ForceReply)
+
+
+@pytest.mark.asyncio
+async def test_handle_vk_captcha_invalid(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = PhotoBot("123:abc")
+    async with db.get_session() as session:
+        session.add(User(user_id=1, is_superadmin=True))
+        await session.commit()
+    main._vk_captcha_sid = "sid"
+    main._vk_captcha_img = "img"
+    main._vk_captcha_needed = True
+    main._vk_captcha_method = "wall.post"
+    main._vk_captcha_params = {}
+    async def fake_superadmin_id(db):
+        return 1
+    monkeypatch.setattr(main, "get_superadmin_id", fake_superadmin_id)
+    class ImgResp:
+        def __init__(self, data: bytes):
+            self._data = data
+        async def read(self):
+            return self._data
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+    class ImgSession:
+        def get(self, url):
+            return ImgResp(b"img")
+    monkeypatch.setattr(main, "get_http_session", lambda: ImgSession())
+    await main.notify_vk_captcha(db, bot, "img")
+    async def fake_vk_api(method, params, db=None, bot=None, **kwargs):
+        assert params["captcha_sid"] == "sid"
+        assert params["captcha_key"] == "0000"
+        raise main.VKAPIError(14, "Captcha needed", "sid", "img")
+    monkeypatch.setattr(main, "_vk_api", fake_vk_api)
+    msg = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "/captcha 0000",
+        }
+    )
+    await main.handle_vk_captcha(msg, db, bot)
+    assert bot.messages and bot.messages[-1][1] == "код не подошёл"
+    markup = bot.messages[-1][2]["reply_markup"]
+    assert markup.inline_keyboard[0][0].text == "Отправить новый код"

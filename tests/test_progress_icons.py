@@ -9,6 +9,7 @@ def test_icons_single_and_batch_states():
         "job_running": "running",
         "job_deferred": "deferred",
         "job_captcha": "captcha",
+        "job_expired": "captcha_expired",
         "job_done": "done",
         "job_error": "error",
         "job_skipped": "skipped_nochange",
@@ -18,6 +19,7 @@ def test_icons_single_and_batch_states():
     assert "🔄" in text
     assert "⏸" in text
     assert "🧩⏸" in text
+    assert "⚠️" in text
     assert "✅" in text
     assert "❌" in text
     assert "⏭" in text
