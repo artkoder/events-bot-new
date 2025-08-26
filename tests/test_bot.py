@@ -4537,7 +4537,7 @@ async def test_add_events_from_text_schedules_pages(tmp_path: Path, monkeypatch)
         return "u", "p"
 
     async def fake_upload_images(media):
-        return [], [], ""
+        return [], ""
 
     async def fake_sync_vk(*args, **kwargs):
         return None
@@ -6412,7 +6412,7 @@ async def test_add_festival_updates_other_pages(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(main, "sync_festival_vk_post", fake_sync_vk)
 
     async def fake_upload(images):
-        return [], [], ""
+        return [], ""
 
     monkeypatch.setattr(main, "upload_images", fake_upload)
 
