@@ -1490,6 +1490,7 @@ async def ensure_festival(
             if updated:
                 session.add(fest)
                 await session.commit()
+                await rebuild_fest_nav_if_changed(db)
             return fest, False, updated
         fest = Festival(
             name=name,
@@ -1505,6 +1506,7 @@ async def ensure_festival(
         session.add(fest)
         await session.commit()
         logging.info("created festival %s", name)
+        await rebuild_fest_nav_if_changed(db)
         return fest, True, True
 
 
@@ -2066,78 +2068,6 @@ async def upcoming_festivals(
         )
         data.append((start, end, fest))
     return data
-
-
-async def build_festivals_list_nodes(
-    db: Database, *, exclude: str | None = None, today: date | None = None
-) -> list[dict]:
-    """Return Telegraph nodes listing upcoming festivals."""
-    items = await upcoming_festivals(db, today=today, exclude=exclude, limit=10)
-    if not items:
-        return []
-    if today is None:
-        today = date.today()
-    groups: dict[str, list[Festival]] = {}
-    for start, end, fest in items:
-        if start and start <= today <= (end or start):
-            month = today.strftime("%Y-%m")
-        else:
-            month = (start or today).strftime("%Y-%m")
-        groups.setdefault(month, []).append(fest)
-
-    nodes: list[dict] = []
-    nodes.append({"tag": "h3", "children": ["Ближайшие фестивали"]})
-    for month in sorted(groups.keys()):
-        nodes.append({"tag": "h4", "children": [month_name_nominative(month)]})
-        for fest in groups[month]:
-            url = fest.telegraph_url
-            if not url and fest.telegraph_path:
-                url = f"https://telegra.ph/{fest.telegraph_path}"
-            if url:
-                nodes.append(
-                    {
-                        "tag": "p",
-                        "children": [
-                            {
-                                "tag": "a",
-                                "attrs": {"href": url},
-                                "children": [fest.name],
-                            }
-                        ],
-                    }
-                )
-            else:
-                nodes.append({"tag": "p", "children": [fest.name]})
-    return nodes
-
-
-async def build_festivals_list_lines_vk(
-    db: Database, *, exclude: str | None = None, today: date | None = None
-) -> list[str]:
-    """Return lines listing upcoming festivals for VK posts."""
-    items = await upcoming_festivals(db, today=today, exclude=exclude, limit=10)
-    if not items:
-        return []
-    if today is None:
-        today = date.today()
-    groups: dict[str, list[Festival]] = {}
-    for start, end, fest in items:
-        if start and start <= today <= (end or start):
-            month = today.strftime("%Y-%m")
-        else:
-            month = (start or today).strftime("%Y-%m")
-        groups.setdefault(month, []).append(fest)
-
-    lines: list[str] = ["Ближайшие фестивали"]
-    for month in sorted(groups.keys()):
-        lines.append(month_name_nominative(month))
-        for fest in groups[month]:
-            if fest.vk_post_url:
-                lines.append(f"[{fest.vk_post_url}|{fest.name}]")
-
-            else:
-                lines.append(fest.name)
-    return lines
 
 
 async def _build_festival_nav_block(
@@ -3561,6 +3491,8 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                 return
             start = parse_iso_date(fest.start_date or "")
             end = parse_iso_date(fest.end_date or "")
+            old_start = fest.start_date
+            old_end = fest.end_date
             if not start or not end:
                 await callback.answer(
                     "Не задан период фестиваля. Сначала отредактируйте даты.",
@@ -3589,6 +3521,7 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
             await session.commit()
         async with db.get_session() as session:
             notify_user = await session.get(User, callback.from_user.id)
+            fresh = await session.get(Festival, fest.id)
         for saved, added in events:
             lines = [
                 f"title: {saved.title}",
@@ -3615,6 +3548,8 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
         logging.info(
             "festdays created %d events for %s", len(events), fest.name
         )
+        if fresh and (fresh.start_date != old_start or fresh.end_date != old_end):
+            await rebuild_fest_nav_if_changed(db)
         await callback.answer()
     elif data.startswith("festedit:"):
         fid = int(data.split(":")[1])
@@ -5939,11 +5874,7 @@ async def update_festival_pages_for_event(
         if progress:
             progress.mark("tg", "error", str(e))
         raise
-    vk_changed = False
-    try:
-        vk_changed = bool(await sync_festival_vk_post(db, ev.festival, bot))
-    finally:
-        await rebuild_fest_nav_if_changed(db)
+    vk_changed = bool(await sync_festival_vk_post(db, ev.festival, bot))
     return vk_changed
 
 
@@ -8172,15 +8103,16 @@ async def build_festival_page_content(db: Database, fest: Festival) -> tuple[str
 
         logging.info("festival %s has %d events", fest.name, len(events))
 
-        desc = await generate_festival_description(fest, events)
-        if desc:
-            fest.description = desc
-            await session.execute(
-                update(Festival)
-                .where(Festival.id == fest.id)
-                .values(description=desc)
-            )
-            await session.commit()
+        if not fest.description:
+            desc = await generate_festival_description(fest, events)
+            if desc:
+                fest.description = desc
+                await session.execute(
+                    update(Festival)
+                    .where(Festival.id == fest.id)
+                    .values(description=desc)
+                )
+                await session.commit()
 
     nodes: list[dict] = []
     if fest.photo_url:
@@ -8273,12 +8205,13 @@ async def build_festival_page_content(db: Database, fest: Festival) -> tuple[str
             {
                 "tag": "p",
                 "children": [
-                    "\U0001f3aa Все фестивали Калининградской области → ",
                     {
                         "tag": "a",
                         "attrs": {"href": fest_index_url},
-                        "children": [fest_index_url],
-                    },
+                        "children": [
+                            "\U0001f3aa Все фестивали Калининградской области →"
+                        ],
+                    }
                 ],
             }
         )
@@ -10915,6 +10848,7 @@ async def handle_festival_edit_message(message: types.Message, db: Database, bot
 
     await sync_festival_page(db, fest.name)
     await sync_festival_vk_post(db, fest.name, bot)
+    await rebuild_fest_nav_if_changed(db)
 
 
 

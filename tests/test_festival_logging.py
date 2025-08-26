@@ -193,10 +193,11 @@ async def test_sync_festival_vk_post_nav_only_no_change(tmp_path, monkeypatch, c
     monkeypatch.setattr(main, "get_vk_group_id", fake_group_id)
 
     async def fake_nav_block(db, exclude=None, today=None, items=None):
-        return [], ["nav"]
+        return [], [main.VK_BLANK_LINE, "Ближайшие фестивали", "nav"]
 
     async def fake_vk_api(method, params, db, bot, token=None, token_kind=None):
-        return {"response": [{"text": "base\nnav"}]}
+        text = f"base\n{main.VK_BLANK_LINE}\nБлижайшие фестивали\nnav"
+        return {"response": [{"text": text}]}
 
     edit_called = {"called": False}
 
