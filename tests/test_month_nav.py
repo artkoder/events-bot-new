@@ -66,3 +66,74 @@ async def test_footer_links_propagate_across_all_month_pages(tmp_path: Path, mon
                 assert name in html
             else:
                 assert f'<a href="https://t.me/{other}">{name}</a>' in html
+
+
+@pytest.mark.asyncio
+async def test_month_nav_skips_past_and_empty(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    # Events in August, September, November only
+    async with db.get_session() as session:
+        session.add_all(
+            [
+                Event(
+                    title="A", description="d", source_text="s",
+                    date="2025-08-26", time="18:00", location_name="Hall"
+                ),
+                Event(
+                    title="S", description="d", source_text="s",
+                    date="2025-09-02", time="18:00", location_name="Hall"
+                ),
+                Event(
+                    title="N", description="d", source_text="s",
+                    date="2025-11-01", time="18:00", location_name="Hall"
+                ),
+            ]
+        )
+        for m in ("2025-08", "2025-09", "2025-11"):
+            session.add(MonthPage(month=m, url=f"https://t.me/{m}", path=m))
+        await session.commit()
+
+    class FakeDate(date):
+        @classmethod
+        def today(cls):
+            return date(2025, 8, 26)
+
+    class FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2025, 8, 26, 12, 0, tzinfo=tz)
+
+    monkeypatch.setattr(main, "date", FakeDate)
+    monkeypatch.setattr(main, "datetime", FakeDatetime)
+
+    _, content_aug, _ = await main.build_month_page_content(db, "2025-08")
+    html_aug = main.unescape_html_comments(nodes_to_html(content_aug))
+    assert html_aug.count(main.NAV_MONTHS_START) == 1
+    assert html_aug.count(main.NAV_MONTHS_END) == 1
+    assert '<h4>август <a href="https://t.me/2025-09">сентябрь</a> <a href="https://t.me/2025-11">ноябрь</a></h4>' in html_aug
+    assert "июль" not in html_aug
+    assert "октябрь" not in html_aug
+
+    _, content_sep, _ = await main.build_month_page_content(db, "2025-09")
+    html_sep = main.unescape_html_comments(nodes_to_html(content_sep))
+    assert '<h4><a href="https://t.me/2025-08">август</a> сентябрь <a href="https://t.me/2025-11">ноябрь</a></h4>' in html_sep
+    assert "октябрь" not in html_sep
+
+    class FakeDate2(date):
+        @classmethod
+        def today(cls):
+            return date(2025, 9, 1)
+
+    class FakeDatetime2(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2025, 9, 1, 12, 0, tzinfo=tz)
+
+    monkeypatch.setattr(main, "date", FakeDate2)
+    monkeypatch.setattr(main, "datetime", FakeDatetime2)
+
+    _, content_aug2, _ = await main.build_month_page_content(db, "2025-08")
+    html_aug2 = main.unescape_html_comments(nodes_to_html(content_aug2))
+    assert '<a href="https://t.me/2025-08">' not in html_aug2
+    assert '<h4><a href="https://t.me/2025-09">сентябрь</a> <a href="https://t.me/2025-11">ноябрь</a></h4>' in html_aug2

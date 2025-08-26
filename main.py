@@ -113,6 +113,10 @@ from markup import (
     PERM_END,
     FEST_NAV_START,
     FEST_NAV_END,
+    NAV_MONTHS_START,
+    NAV_MONTHS_END,
+    FEST_INDEX_INTRO_START,
+    FEST_INDEX_INTRO_END,
     linkify_for_telegraph,
     expose_links_for_vk,
     sanitize_for_vk,
@@ -2066,9 +2070,21 @@ async def sync_festivals_index_page(db: Database) -> None:
     nodes, _ = await _build_festival_nav_block(db)
     if nodes and nodes[0].get("tag") == "p":
         nodes = nodes[1:]
+    if nodes and nodes[0].get("tag") == "h3":
+        nodes[0]["tag"] = "h2"
     from telegraph.utils import nodes_to_html
 
-    html = (nodes_to_html(nodes) if nodes else "") + FOOTER_LINK_HTML
+    intro_html = (
+        f"{FEST_INDEX_INTRO_START}<p><small><i>Вот какие фестивали нашёл для вас канал "
+        f'<a href="https://t.me/kenigevents">Полюбить Калининград Анонсы</a>.</i></small></p>'
+        f"{FEST_INDEX_INTRO_END}"
+    )
+    html = (
+        "<h1>Все фестивали региона</h1>"
+        + intro_html
+        + (nodes_to_html(nodes) if nodes else "")
+        + FOOTER_LINK_HTML
+    )
     path = await get_setting_value(db, "fest_index_path")
     url = await get_setting_value(db, "fest_index_url")
     title = "Все фестивали региона"
@@ -2129,8 +2145,8 @@ async def rebuild_fest_nav_if_changed(db: Database) -> bool:
 
 
 ICS_LABEL = "Добавить в календарь на телефоне (ICS)"
-MONTH_NAV_START = "<!--month-nav-start-->"
-MONTH_NAV_END = "<!--month-nav-end-->"
+MONTH_NAV_START = NAV_MONTHS_START
+MONTH_NAV_END = NAV_MONTHS_END
 
 FOOTER_LINK_HTML = (
     '<p>&#8203;</p>'
@@ -2185,10 +2201,16 @@ def apply_ics_link(html_content: str, url: str | None) -> str:
 def apply_month_nav(html_content: str, html_block: str | None) -> str:
     """Insert or replace the month navigation block."""
     start = html_content.find(MONTH_NAV_START)
-    if start != -1:
-        end = html_content.find(MONTH_NAV_END, start)
-        if end != -1:
-            html_content = html_content[:start] + html_content[end + len(MONTH_NAV_END) :]
+    end = html_content.find(MONTH_NAV_END, start + len(MONTH_NAV_START)) if start != -1 else -1
+    if start != -1 and end != -1:
+        html_content = html_content[:start] + html_content[end + len(MONTH_NAV_END) :]
+    else:
+        legacy_start = "<!--month-nav-start-->"
+        legacy_end = "<!--month-nav-end-->"
+        ls = html_content.find(legacy_start)
+        le = html_content.find(legacy_end, ls + len(legacy_start)) if ls != -1 else -1
+        if ls != -1 and le != -1:
+            html_content = html_content[:ls] + html_content[le + len(legacy_end) :]
     if html_block:
         html_content += f"{MONTH_NAV_START}{html_block}{MONTH_NAV_END}"
     return html_content
@@ -2209,8 +2231,18 @@ def apply_festival_nav(html_content: str, nav_html: str | Iterable[str]) -> tupl
         nav_html = "".join(nav_html)
     nav_hash = content_hash(nav_html)
     nav_block = f"<!--NAV_HASH:{nav_hash}-->{nav_html}"
-    legacy_start_variants = ["<!-- FEST_NAV_START -->", "<!--FEST_NAV_START-->"]
-    legacy_end_variants = ["<!-- FEST_NAV_END -->", "<!--FEST_NAV_END-->"]
+    legacy_start_variants = [
+        "<!--fest-nav-start-->",
+        "<!-- fest-nav-start -->",
+        "<!-- FEST_NAV_START -->",
+        "<!--FEST_NAV_START-->",
+    ]
+    legacy_end_variants = [
+        "<!--fest-nav-end-->",
+        "<!-- fest-nav-end -->",
+        "<!-- FEST_NAV_END -->",
+        "<!--FEST_NAV_END-->",
+    ]
     legacy_replaced = False
     if any(v in html_content for v in legacy_start_variants + legacy_end_variants):
         for v in legacy_start_variants:
@@ -2230,9 +2262,8 @@ def apply_festival_nav(html_content: str, nav_html: str | Iterable[str]) -> tupl
             return html_content, False
     else:
         heading = "<h3>Ближайшие фестивали</h3>"
-        idx = html_content.rfind(heading)
-        if idx != -1:
-            html_content = html_content[:idx]
+        if heading in html_content:
+            html_content = html_content.split(heading, 1)[0]
 
     html_content = replace_between_markers(html_content, FEST_NAV_START, FEST_NAV_END, nav_block)
     html_content = apply_footer_link(html_content)
@@ -2249,19 +2280,37 @@ def apply_footer_link(html_content: str) -> str:
 
 
 async def build_month_nav_html(db: Database) -> str:
+    today = datetime.now(LOCAL_TZ).date()
+    start_nav = today.replace(day=1)
+    end_nav = date(today.year + 1, 4, 1)
     async with db.get_session() as session:
-        result = await session.execute(select(MonthPage).order_by(MonthPage.month))
-        months = result.scalars().all()
-    cur_month = datetime.now(LOCAL_TZ).strftime("%Y-%m")
-    months = [m for m in months if m.month >= cur_month]
-    if not months:
-        return ""
+        res_nav = await session.execute(
+            select(func.substr(Event.date, 1, 7))
+            .where(
+                Event.date >= start_nav.isoformat(),
+                Event.date < end_nav.isoformat(),
+            )
+            .group_by(func.substr(Event.date, 1, 7))
+            .order_by(func.substr(Event.date, 1, 7))
+        )
+        months = [r[0] for r in res_nav]
+        if not months:
+            return ""
+        res_pages = await session.execute(
+            select(MonthPage).where(MonthPage.month.in_(months))
+        )
+        page_map = {p.month: p for p in res_pages.scalars().all()}
     links: list[str] = []
-    for idx, p in enumerate(months):
-        name = month_name_nominative(p.month)
+    for idx, m in enumerate(months):
+        p = page_map.get(m)
+        if not p or not p.url:
+            continue
+        name = month_name_nominative(m)
         links.append(f'<a href="{html.escape(p.url)}">{name}</a>')
         if idx < len(months) - 1:
             links.append(" ")
+    if not links:
+        return ""
     return "<br/><h4>" + "".join(links) + "</h4>"
 
 async def build_month_buttons(db: Database, limit: int = 3) -> list[types.InlineKeyboardButton]:
@@ -6715,6 +6764,7 @@ async def get_month_data(db: Database, month: str, *, fallback: bool = True):
     """Return events, exhibitions and nav pages for the given month."""
     start = date.fromisoformat(month + "-01")
     next_start = (start.replace(day=28) + timedelta(days=4)).replace(day=1)
+    today = datetime.now(LOCAL_TZ).date()
     async with db.get_session() as session:
         result = await session.execute(
             select(Event)
@@ -6735,11 +6785,26 @@ async def get_month_data(db: Database, month: str, *, fallback: bool = True):
         )
         exhibitions = ex_result.scalars().all()
 
-        result_nav = await session.execute(select(MonthPage).order_by(MonthPage.month))
-        nav_pages = result_nav.scalars().all()
-
-
-    today = datetime.now(LOCAL_TZ).date()
+        start_nav = today.replace(day=1)
+        end_nav = date(today.year + 1, 4, 1)
+        res_nav = await session.execute(
+            select(func.substr(Event.date, 1, 7))
+            .where(
+                Event.date >= start_nav.isoformat(),
+                Event.date < end_nav.isoformat(),
+            )
+            .group_by(func.substr(Event.date, 1, 7))
+            .order_by(func.substr(Event.date, 1, 7))
+        )
+        nav_months = [r[0] for r in res_nav]
+        if nav_months:
+            res_pages = await session.execute(
+                select(MonthPage).where(MonthPage.month.in_(nav_months))
+            )
+            page_map = {p.month: p for p in res_pages.scalars().all()}
+            nav_pages = [page_map[m] for m in nav_months if m in page_map]
+        else:
+            nav_pages = []
 
     if month == today.strftime("%Y-%m"):
         today_str = today.isoformat()
@@ -6890,9 +6955,11 @@ def _build_month_page_content_sync(
         add_many([PERM_END])
 
     if month_nav and not exceeded:
+        add_many([NAV_MONTHS_START])
         add_many(telegraph_br())
         add_many(month_nav)
         add_many(telegraph_br())
+        add_many([NAV_MONTHS_END])
 
     if continuation_url and not exceeded:
         add_many(telegraph_br())
