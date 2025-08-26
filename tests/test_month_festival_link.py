@@ -14,7 +14,7 @@ async def test_month_page_links_festival(tmp_path: Path, monkeypatch):
     await db.init()
 
     async with db.get_session() as session:
-        fest = Festival(name="Fest", telegraph_url="https://telegra.ph/fest", telegraph_path="fest")
+        fest = Festival(name="Fest", telegraph_path="fest")
         session.add(fest)
         session.add(
             Event(
