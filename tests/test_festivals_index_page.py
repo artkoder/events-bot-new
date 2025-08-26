@@ -7,6 +7,7 @@ import main
 from db import Database
 from models import Festival, Event
 from telegraph.utils import nodes_to_html
+from markup import FEST_INDEX_INTRO_START, FEST_INDEX_INTRO_END
 
 
 @pytest.mark.asyncio
@@ -47,7 +48,12 @@ async def test_sync_festivals_index_page_created(tmp_path: Path, monkeypatch, ca
     with caplog.at_level(logging.INFO):
         await main.sync_festivals_index_page(db)
 
-    assert "Ближайшие фестивали" in stored["html"]
+    html = stored["html"]
+    assert "<h1>Все фестивали региона</h1>" in html
+    assert "<h2>Ближайшие фестивали</h2>" in html
+    assert html.count(FEST_INDEX_INTRO_START) == 1
+    assert html.count(FEST_INDEX_INTRO_END) == 1
+    assert html.count("https://t.me/kenigevents") >= 2
     url = await main.get_setting_value(db, "fest_index_url")
     path = await main.get_setting_value(db, "fest_index_path")
     assert url == "https://telegra.ph/fests"
@@ -91,6 +97,10 @@ async def test_sync_festivals_index_page_updated(tmp_path: Path, monkeypatch, ca
     rec = next(r for r in caplog.records if getattr(r, "action", None) == "edited")
     assert rec.target == "tg"
     assert rec.path == "fests"
+    html = stored["edited"]
+    assert "<h1>Все фестивали региона</h1>" in html
+    assert html.count(FEST_INDEX_INTRO_START) == 1
+    assert html.count(FEST_INDEX_INTRO_END) == 1
 
 
 @pytest.mark.asyncio
