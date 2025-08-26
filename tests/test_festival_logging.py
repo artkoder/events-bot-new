@@ -1,6 +1,7 @@
 import logging
 import os
 from datetime import date
+from pathlib import Path
 
 import pytest
 
@@ -218,6 +219,52 @@ async def test_sync_festival_vk_post_nav_only_no_change(tmp_path, monkeypatch, c
     assert rec.target == "vk"
     assert rec.url == "https://vk.com/wall-1_1"
     assert rec.fest == "Fest1"
+
+
+@pytest.mark.asyncio
+async def test_festivals_fix_nav_force(tmp_path: Path, monkeypatch, caplog):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    today = date.today().isoformat()
+    async with db.get_session() as session:
+        f1 = Festival(name="Fest1", start_date=today, end_date=today, nav_hash="abc")
+        f2 = Festival(name="Fest2", start_date=today, end_date=today, nav_hash="def")
+        session.add_all([f1, f2])
+        await session.commit()
+    await main.set_setting_value(db, "fest_nav_hash", "abc")
+    calls = {"tg": 0, "vk": 0}
+
+    async def fake_tg(eid, db_obj, bot_obj):
+        calls["tg"] += 1
+        return True
+
+    async def fake_vk(eid, db_obj, bot_obj):
+        calls["vk"] += 1
+        return True
+
+    monkeypatch.setattr(main, "update_festival_tg_nav", fake_tg)
+    monkeypatch.setattr(main, "update_festival_vk_nav", fake_vk)
+
+    with caplog.at_level(logging.INFO):
+        pages, changed, dup = await main.festivals_fix_nav(db, None)
+
+    assert pages == 2
+    assert changed == 4
+    assert dup == 1
+    assert calls["tg"] == 2
+    assert calls["vk"] == 2
+    rec_start = next(
+        r
+        for r in caplog.records
+        if r.message == "fest_nav_force_rebuild" and getattr(r, "action", None) == "start"
+    )
+    rec_finish = next(
+        r
+        for r in caplog.records
+        if r.message == "fest_nav_force_rebuild" and getattr(r, "action", None) == "finish"
+    )
+    assert rec_finish.pages == 2
+    assert rec_finish.duplicates_fixed == 1
 
 
 @pytest.mark.asyncio

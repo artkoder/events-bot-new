@@ -5413,7 +5413,7 @@ async def test_add_festival_without_events(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_add_event_with_festival_message(tmp_path: Path, monkeypatch):
+async def test_add_event_with_festival_message(tmp_path: Path, monkeypatch, caplog):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
     bot = DummyBot("123:abc")
@@ -5454,7 +5454,8 @@ async def test_add_event_with_festival_message(tmp_path: Path, monkeypatch):
         }
     )
 
-    await handle_add_event(msg, db, bot)
+    with caplog.at_level(logging.INFO):
+        await handle_add_event(msg, db, bot)
 
     fest_msgs = [m for m in bot.messages if m[1].startswith("Festival")]
     assert fest_msgs
@@ -5462,6 +5463,11 @@ async def test_add_event_with_festival_message(tmp_path: Path, monkeypatch):
     assert fest_text.startswith("Festival added")
     assert "festival: Fest" in fest_text
     assert fest_msgs[0][2].get("reply_markup") is None
+
+    rec = next(r for r in caplog.records if r.message == "festival_notify")
+    assert rec.festival == "Fest"
+    assert rec.action == "created"
+    assert rec.events_count_at_moment == 1
 
     assert any(m[1].startswith("Event") for m in bot.messages)
 
@@ -7341,5 +7347,79 @@ async def test_publication_plan_and_updates(tmp_path: Path, monkeypatch):
     assert "✅ Страница месяца" in final_text
     assert "✅ VK (неделя" in final_text
     assert "✅ VK (выходные" in final_text
+
+
+@pytest.mark.asyncio
+async def test_progress_includes_festival_tg(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+    future = (date.today() + timedelta(days=7)).isoformat()
+    async with db.get_session() as session:
+        fest = Festival(name="Fest")
+        ev = Event(
+            title="T",
+            description="d",
+            source_text="s",
+            date=future,
+            time="18:00",
+            location_name="Hall",
+            festival="Fest",
+        )
+        session.add_all([fest, ev])
+        await session.commit()
+        await session.refresh(ev)
+
+    await main.schedule_event_update_tasks(db, ev)
+
+    async def ok_handler(eid, db_obj, bot_obj):
+        return True
+
+    async def nochange_handler(eid, db_obj, bot_obj):
+        return False
+
+    async def fake_sync_fest_page(db_obj, name, refresh_nav_only=False, items=None):
+        return "http://fest"
+
+    async def fake_sync_fest_vk(db_obj, name, bot_obj, nav_only=False, nav_lines=None):
+        return True
+
+    monkeypatch.setattr(main, "update_telegraph_event_page", ok_handler)
+    monkeypatch.setattr(main, "job_sync_vk_source_post", ok_handler)
+    monkeypatch.setattr(main, "update_month_pages_for", nochange_handler)
+    monkeypatch.setattr(main, "update_weekend_pages_for", ok_handler)
+    monkeypatch.setattr(main, "update_week_pages_for", ok_handler)
+    monkeypatch.setattr(main, "sync_festival_page", fake_sync_fest_page)
+    monkeypatch.setattr(main, "sync_festival_vk_post", fake_sync_fest_vk)
+    monkeypatch.setattr(main, "rebuild_fest_nav_if_changed", lambda db_obj: None)
+    monkeypatch.setattr(
+        main,
+        "JOB_HANDLERS",
+        {
+            "telegraph_build": ok_handler,
+            "vk_sync": ok_handler,
+            "month_pages": nochange_handler,
+            "week_pages": ok_handler,
+            "weekend_pages": ok_handler,
+            "festival_pages": main.update_festival_pages_for_event,
+        },
+    )
+
+    async def fake_link(task, eid, db_obj):
+        mapping = {
+            JobTask.telegraph_build: "http://t",
+            JobTask.vk_sync: "http://v",
+            JobTask.month_pages: "http://m",
+            JobTask.week_pages: "http://wk",
+            JobTask.weekend_pages: "http://w",
+            JobTask.festival_pages: "http://vk",
+        }
+        return mapping.get(task)
+
+    monkeypatch.setattr(main, "_job_result_link", fake_link)
+
+    await main.publish_event_progress(ev, db, bot, chat_id=1)
+    final_text = bot.text_edits[-1][2]
+    assert "✅ Telegraph (фестиваль) — http://fest" in final_text
 
 
