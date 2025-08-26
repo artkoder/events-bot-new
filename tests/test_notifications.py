@@ -401,5 +401,6 @@ async def test_publish_event_progress_ics(tmp_path, monkeypatch):
     await publish_event_progress(ev, db, bot, chat_id=1)
 
     final = bot.edits[-1]
-    assert "✅ ICS (Supabase) — <a href='https://sup'>открыть</a>" in final
-    assert "✅ ICS (Telegram) — <a href='https://tg'>открыть</a>" in final
+    assert "✅ ICS (Supabase) — https://sup" in final
+    assert "✅ ICS (Telegram) — https://tg" in final
+    assert "<a href" not in final

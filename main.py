@@ -5120,7 +5120,7 @@ BACKOFF_SCHEDULE = [30, 120, 600, 3600]
 TASK_LABELS = {
     "telegraph_build": "Telegraph (событие)",
     "vk_sync": "VK (событие)",
-    "ics_publish": "ICS",
+    "ics_publish": "Календарь (ICS)",
     "month_pages": "Страница месяца",
     "week_pages": "VK (неделя)",
     "weekend_pages": "VK (выходные)",
@@ -5768,6 +5768,11 @@ async def publish_event_progress(event: Event, db: Database, bot: Bot, chat_id: 
     }
 
     def job_label(task: JobTask) -> str:
+        if task == JobTask.month_pages:
+            d = parse_iso_date(event.date.split("..", 1)[0])
+            month_key = d.strftime("%Y-%m") if d else None
+            if month_key:
+                return f"Telegraph ({month_name_nominative(month_key)})"
         base = TASK_LABELS[task.value]
         if task in vk_tasks and vk_scope and base.endswith(")"):
             return base[:-1] + f" {vk_scope})"
@@ -5777,7 +5782,7 @@ async def publish_event_progress(event: Event, db: Database, bot: Bot, chat_id: 
     ics_sub: dict[str, dict[str, str]] = {}
     if JobTask.ics_publish in tasks:
         link = event.ics_url
-        suffix = f" — <a href='{html.escape(link)}'>открыть</a>" if link else ""
+        suffix = f" — {link}" if link else ""
         ics_sub["ics_supabase"] = {"icon": "\U0001f504", "suffix": suffix}
         ics_sub["ics_telegram"] = {"icon": "\U0001f504", "suffix": ""}
     fest_sub: dict[str, dict[str, str]] = {}
@@ -5843,13 +5848,12 @@ async def publish_event_progress(event: Event, db: Database, bot: Bot, chat_id: 
         )
 
     def ics_mark(key: str, status: str, detail: str) -> None:
-        icon = "✅" if status.startswith("done") or status.startswith("skipped") else "❌"
-        if status == "done" and detail:
-            suffix = f" — <a href='{html.escape(detail)}'>открыть</a>"
-        elif detail:
-            suffix = f" — {detail}"
+        if status == "skipped_disabled":
+            icon = "⏸"
+            suffix = " — отключено"
         else:
-            suffix = ""
+            icon = "✅" if status.startswith("done") or status.startswith("skipped") else "❌"
+            suffix = f" — {detail}" if detail else ""
         ics_sub[key] = {"icon": icon, "suffix": suffix}
         asyncio.create_task(render())
 

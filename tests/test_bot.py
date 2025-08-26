@@ -7344,7 +7344,8 @@ async def test_publication_plan_and_updates(tmp_path: Path, monkeypatch):
     assert final_text.startswith("Готово")
     assert "✅ Telegraph (событие) — t" in final_text
     assert "✅ VK (событие) — v" in final_text
-    assert "✅ Страница месяца" in final_text
+    expected_month = main.month_name_nominative(weekend_day.strftime("%Y-%m"))
+    assert f"✅ Telegraph ({expected_month})" in final_text
     assert "✅ VK (неделя" in final_text
     assert "✅ VK (выходные" in final_text
 
