@@ -936,9 +936,11 @@ class VKAPIError(Exception):
         message: str,
         captcha_sid: str | None = None,
         captcha_img: str | None = None,
+        method: str | None = None,
     ) -> None:
         self.code = code
         self.message = message
+        self.method = method
         # additional info for captcha challenge
         self.captcha_sid = captcha_sid
         self.captcha_img = captcha_img
@@ -961,7 +963,7 @@ async def _vk_api(
     """Call VK API with token fallback."""
     global _vk_captcha_needed, _vk_captcha_sid, _vk_captcha_img, _vk_captcha_method, _vk_captcha_params
     if _vk_captcha_needed and not skip_captcha:
-        raise VKAPIError(14, "Captcha needed", _vk_captcha_sid, _vk_captcha_img)
+        raise VKAPIError(14, "Captcha needed", _vk_captcha_sid, _vk_captcha_img, method)
     orig_params = dict(params)
     tokens: list[tuple[str, str]] = []
     if token:
@@ -1065,7 +1067,7 @@ async def _vk_api(
                 if db and bot:
                     await notify_vk_captcha(db, bot, _vk_captcha_img)
                 # surface captcha details to caller
-                raise VKAPIError(code, msg, _vk_captcha_sid, _vk_captcha_img)
+                raise VKAPIError(code, msg, _vk_captcha_sid, _vk_captcha_img, method)
             if kind == "user" and code in {5, 27}:
                 global _vk_user_token_bad
                 if _vk_user_token_bad != token:
@@ -1120,6 +1122,7 @@ async def _vk_api(
                 err.get("error_msg", ""),
                 err.get("captcha_sid"),
                 err.get("captcha_img"),
+                method,
             )
         break
     if last_err:
@@ -1128,8 +1131,9 @@ async def _vk_api(
             last_err.get("error_msg", ""),
             last_err.get("captcha_sid"),
             last_err.get("captcha_img"),
+            method,
         )
-    raise VKAPIError(None, "VK token missing")
+    raise VKAPIError(None, "VK token missing", method=method)
 
 
 async def upload_vk_photo(
@@ -4985,12 +4989,12 @@ BACKOFF_SCHEDULE = [30, 120, 600, 3600]
 
 TASK_LABELS = {
     "telegraph_build": "Telegraph (событие)",
-    "vk_sync": "VK",
+    "vk_sync": "VK (событие)",
     "ics_publish": "ICS",
     "month_pages": "Страница месяца",
-    "week_pages": "Неделя",
-    "weekend_pages": "Выходные",
-    "festival_pages": "Фестиваль",
+    "week_pages": "VK (неделя)",
+    "weekend_pages": "VK (выходные)",
+    "festival_pages": "VK (фестиваль)",
     "fest_nav:update_all": "Навигация",
 }
 
@@ -5025,7 +5029,16 @@ async def _job_result_link(task: JobTask, event_id: int, db: Database) -> str | 
             w_start = weekend_start_for_date(d) if d else None
             if w_start:
                 page = await session.get(WeekendPage, w_start.isoformat())
-                return page.url if page else None
+                return page.vk_post_url if page else None
+            return None
+        if task == JobTask.festival_pages:
+            if ev.festival:
+                fest = (
+                    await session.execute(
+                        select(Festival).where(Festival.name == ev.festival)
+                    )
+                ).scalar_one_or_none()
+                return fest.vk_post_url if fest else None
             return None
     return None
 
@@ -5126,7 +5139,18 @@ async def _run_due_jobs_once(
             )
         except Exception as exc:  # pragma: no cover - log and backoff
             took_ms = (_time.perf_counter() - start) * 1000
-            err = str(exc)
+            if isinstance(exc, VKAPIError):
+                if exc.code == 14:
+                    err = "captcha"
+                else:
+                    prefix = (
+                        "ошибка публикации VK"
+                        if exc.method and exc.method.startswith("wall.")
+                        else "ошибка VK"
+                    )
+                    err = f"{prefix}: {exc.code}/{exc.message} ({exc.method})"
+            else:
+                err = str(exc)
             logging.error(
                 "TASK_FAIL event=%s task=%s run_id=%s attempt=%d took_ms=%.0f err=\"%s\"",
                 job.event_id,
@@ -5567,6 +5591,24 @@ async def publish_event_progress(event: Event, db: Database, bot: Bot, chat_id: 
     progress: dict[JobTask, dict[str, str]] = {
         t: {"icon": "\U0001f504", "suffix": ""} for t in tasks
     }
+    vk_group = await get_vk_group_id(db)
+    vk_scope = ""
+    if vk_group:
+        vk_scope = f"@{vk_group}" if not vk_group.startswith("-") else f"#{vk_group}"
+    vk_tasks = {
+        JobTask.vk_sync,
+        JobTask.week_pages,
+        JobTask.weekend_pages,
+        JobTask.festival_pages,
+    }
+
+    def job_label(task: JobTask) -> str:
+        base = TASK_LABELS[task.value]
+        if task in vk_tasks and vk_scope and base.endswith(")"):
+            return base[:-1] + f" {vk_scope})"
+        if task in vk_tasks and vk_scope:
+            return f"{base} {vk_scope}"
+        return base
     ics_sub: dict[str, dict[str, str]] = {}
     if JobTask.ics_publish in tasks:
         link = event.ics_url
@@ -5576,7 +5618,7 @@ async def publish_event_progress(event: Event, db: Database, bot: Bot, chat_id: 
     lines = []
     for t in tasks:
         if t == JobTask.ics_publish:
-            lines.append(f"\U0001f504 {TASK_LABELS[t.value]}")
+            lines.append(f"\U0001f504 {job_label(t)}")
             if "ics_supabase" in ics_sub:
                 lines.append(
                     f"{ics_sub['ics_supabase']['icon']} ICS (Supabase){ics_sub['ics_supabase']['suffix']}"
@@ -5586,7 +5628,7 @@ async def publish_event_progress(event: Event, db: Database, bot: Bot, chat_id: 
                     f"{ics_sub['ics_telegram']['icon']} ICS (Telegram){ics_sub['ics_telegram']['suffix']}"
                 )
         else:
-            lines.append(f"\U0001f504 {TASK_LABELS[t.value]}")
+            lines.append(f"\U0001f504 {job_label(t)}")
     head = "Идёт процесс публикации, ждите"
     text = head if not lines else head + "\n" + "\n".join(lines)
     msg = await bot.send_message(chat_id, text, disable_web_page_preview=True)
@@ -5597,7 +5639,7 @@ async def publish_event_progress(event: Event, db: Database, bot: Bot, chat_id: 
         lines: list[str] = []
         for t, info in progress.items():
             if t == JobTask.ics_publish:
-                lines.append(f"{info['icon']} {TASK_LABELS[t.value]}{info['suffix']}")
+                lines.append(f"{info['icon']} {job_label(t)}{info['suffix']}")
                 sup = ics_sub.get("ics_supabase")
                 if sup:
                     lines.append(f"{sup['icon']} ICS (Supabase){sup['suffix']}")
@@ -5605,7 +5647,7 @@ async def publish_event_progress(event: Event, db: Database, bot: Bot, chat_id: 
                 if tg:
                     lines.append(f"{tg['icon']} ICS (Telegram){tg['suffix']}")
             else:
-                lines.append(f"{info['icon']} {TASK_LABELS[t.value]}{info['suffix']}")
+                lines.append(f"{info['icon']} {job_label(t)}{info['suffix']}")
         text = head if not lines else head + "\n" + "\n".join(lines)
         await bot.edit_message_text(
             chat_id=chat_id,
@@ -5644,7 +5686,12 @@ async def publish_event_progress(event: Event, db: Database, bot: Bot, chat_id: 
                 suffix = " — без изменений"
         else:
             icon = "❌"
-            suffix = f" — {err.splitlines()[0] if err else ''}"
+            if err == "captcha":
+                suffix = " — требуется капча; нажмите «Ввести код»"
+            elif err:
+                suffix = f" — {err}"
+            else:
+                suffix = ""
         progress[task] = {"icon": icon, "suffix": suffix}
         await render()
 
@@ -8820,7 +8867,7 @@ async def edit_vk_post(
     old_attachments: list[str] = []
     user_token = _vk_user_token()
     if not user_token:
-        raise VKAPIError(None, "VK_USER_TOKEN missing")
+        raise VKAPIError(None, "VK_USER_TOKEN missing", method="wall.getById")
     try:
         data = await _vk_api(
             "wall.getById",

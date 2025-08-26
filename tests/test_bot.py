@@ -7222,9 +7222,9 @@ async def test_publication_plan_and_updates(tmp_path: Path, monkeypatch):
     final_text = bot.text_edits[-1][2]
     assert final_text.startswith("Готово")
     assert "✅ Telegraph (событие) — t" in final_text
-    assert "✅ VK — v" in final_text
+    assert "✅ VK (событие) — v" in final_text
     assert "✅ Страница месяца" in final_text
-    assert "✅ Неделя" in final_text
-    assert "✅ Выходные" in final_text
+    assert "✅ VK (неделя" in final_text
+    assert "✅ VK (выходные" in final_text
 
 

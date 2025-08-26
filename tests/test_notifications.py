@@ -89,9 +89,9 @@ async def test_progress_notifications(tmp_path, monkeypatch):
 
     assert "Telegraph (событие): OK — http://t" in bot.messages
     assert "Страница месяца: без изменений" in bot.messages
-    assert "Неделя: OK — http://wk" in bot.messages
-    assert "Выходные: OK — http://w" in bot.messages
-    assert "VK: OK — http://v" in bot.messages
+    assert "VK (неделя): OK — http://wk" in bot.messages
+    assert "VK (выходные): OK — http://w" in bot.messages
+    assert "VK (событие): OK — http://v" in bot.messages
 
     bot.messages.clear()
     async with db.get_session() as session:
@@ -298,8 +298,8 @@ async def test_publish_event_progress_single_message(tmp_path, monkeypatch):
     final = bot.edits[-1]
     assert final.startswith("Готово")
     assert "✅ Telegraph (событие) — http://t" in final
-    assert "✅ VK — http://v" in final
-    assert "✅ Неделя — http://wk" in final
+    assert "✅ VK (событие) — http://v" in final
+    assert "✅ VK (неделя) — http://wk" in final
 
 
 @pytest.mark.asyncio
@@ -362,7 +362,7 @@ async def test_publish_event_progress_waits_for_pending(tmp_path, monkeypatch):
     final = bot.edits[-1]
     assert final.startswith("Готово")
     assert "✅ Telegraph (событие) — http://t" in final
-    assert "✅ Неделя — http://wk" in final
+    assert "✅ VK (неделя) — http://wk" in final
 
 
 @pytest.mark.asyncio
