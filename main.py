@@ -4417,7 +4417,8 @@ async def schedule_event_update_tasks(db: Database, ev: Event) -> None:
     await enqueue_job(db, eid, JobTask.telegraph_build)
     if not is_vk_wall_url(ev.source_post_url):
         await enqueue_job(db, eid, JobTask.vk_sync)
-    await enqueue_job(db, eid, JobTask.ics_publish)
+    if ev.time and "ics_publish" in JOB_HANDLERS:
+        await enqueue_job(db, eid, JobTask.ics_publish)
     await enqueue_job(db, eid, JobTask.month_pages)
     d = parse_iso_date(ev.date)
     if d:
@@ -4434,15 +4435,14 @@ def missing_fields(event: dict | Event) -> list[str]:
     """Return a list of required fields missing from ``event``.
 
     ``event`` can be either an ``Event`` instance or a mapping with string keys.
-    The required fields are: ``title``, ``date``, ``time``, ``location_name``
-    and ``city``.
+    The required fields are: ``title``, ``date``, ``location_name`` and ``city``.
+    The ``time`` field is optional.
     """
 
     if isinstance(event, Event):
         data = {
             "title": event.title,
             "date": event.date,
-            "time": event.time,
             "location_name": event.location_name,
             "city": event.city,
         }
@@ -4451,7 +4451,6 @@ def missing_fields(event: dict | Event) -> list[str]:
             key: (event.get(key) or "").strip() for key in (
                 "title",
                 "date",
-                "time",
                 "location_name",
                 "city",
             )
@@ -4609,7 +4608,6 @@ async def add_events_from_text(
             {
                 "title": title,
                 "date": date_str,
-                "time": time_str,
                 "location_name": location_name,
                 "city": city or "",
             }
@@ -5221,28 +5219,13 @@ async def _run_due_jobs_once(
         )
         start = _time.perf_counter()
         changed = True
-        try:
-            handler = JOB_HANDLERS[job.task.value]
-            async with span(
-                "event_pipeline", step=job.task.value, event_id=job.event_id
-            ):
-                if job.task == JobTask.ics_publish:
-                    res = await handler(job.event_id, db, bot, ics_progress)
-                else:
-                    res = await handler(job.event_id, db, bot)
-            rebuild = isinstance(res, str) and res == "rebuild"
-            changed = res if isinstance(res, bool) else True
-            link = (
-                await _job_result_link(job.task, job.event_id, db)
-                if changed
-                else None
-            )
-            if rebuild and link:
-                link += " (forced rebuild)"
+        handler = JOB_HANDLERS.get(job.task.value)
+        if not handler:
             status = JobStatus.done
             err = None
+            changed = False
+            link = None
             took_ms = (_time.perf_counter() - start) * 1000
-            short = link or ("ok" if changed else "nochange")
             logging.info(
                 "TASK_DONE event=%s task=%s run_id=%s attempt=%d took_ms=%.0f result=%s",
                 job.event_id,
@@ -5250,35 +5233,66 @@ async def _run_due_jobs_once(
                 run_id,
                 attempt,
                 took_ms,
-                short,
+                "skipped",
             )
-        except Exception as exc:  # pragma: no cover - log and backoff
-            took_ms = (_time.perf_counter() - start) * 1000
-            if isinstance(exc, VKAPIError):
-                if exc.code == 14:
-                    err = "captcha"
+        else:
+            try:
+                async with span(
+                    "event_pipeline", step=job.task.value, event_id=job.event_id
+                ):
+                    if job.task == JobTask.ics_publish:
+                        res = await handler(job.event_id, db, bot, ics_progress)
+                    else:
+                        res = await handler(job.event_id, db, bot)
+                rebuild = isinstance(res, str) and res == "rebuild"
+                changed = res if isinstance(res, bool) else True
+                link = (
+                    await _job_result_link(job.task, job.event_id, db)
+                    if changed
+                    else None
+                )
+                if rebuild and link:
+                    link += " (forced rebuild)"
+                status = JobStatus.done
+                err = None
+                took_ms = (_time.perf_counter() - start) * 1000
+                short = link or ("ok" if changed else "nochange")
+                logging.info(
+                    "TASK_DONE event=%s task=%s run_id=%s attempt=%d took_ms=%.0f result=%s",
+                    job.event_id,
+                    job.task.value,
+                    run_id,
+                    attempt,
+                    took_ms,
+                    short,
+                )
+            except Exception as exc:  # pragma: no cover - log and backoff
+                took_ms = (_time.perf_counter() - start) * 1000
+                if isinstance(exc, VKAPIError):
+                    if exc.code == 14:
+                        err = "captcha"
+                    else:
+                        prefix = (
+                            "ошибка публикации VK"
+                            if exc.method and exc.method.startswith("wall.")
+                            else "ошибка VK"
+                        )
+                        err = f"{prefix}: {exc.code}/{exc.message} ({exc.method})"
                 else:
-                    prefix = (
-                        "ошибка публикации VK"
-                        if exc.method and exc.method.startswith("wall.")
-                        else "ошибка VK"
-                    )
-                    err = f"{prefix}: {exc.code}/{exc.message} ({exc.method})"
-            else:
-                err = str(exc)
-            logging.error(
-                "TASK_FAIL event=%s task=%s run_id=%s attempt=%d took_ms=%.0f err=\"%s\"",
-                job.event_id,
-                job.task.value,
-                run_id,
-                attempt,
-                took_ms,
-                err.splitlines()[0],
-            )
-            logging.exception("job %s failed", job.id)
-            status = JobStatus.error
-            link = None
-            retry = not isinstance(exc, VKPermissionError)
+                    err = str(exc)
+                logging.error(
+                    "TASK_FAIL event=%s task=%s run_id=%s attempt=%d took_ms=%.0f err=\"%s\"",
+                    job.event_id,
+                    job.task.value,
+                    run_id,
+                    attempt,
+                    took_ms,
+                    err.splitlines()[0],
+                )
+                logging.exception("job %s failed", job.id)
+                status = JobStatus.error
+                link = None
+                retry = not isinstance(exc, VKPermissionError)
         text = None
         async with db.get_session() as session:
             obj = await session.get(JobOutbox, job.id)

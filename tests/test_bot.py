@@ -1557,6 +1557,66 @@ async def test_forward_missing_fields(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_forward_missing_time_allowed(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async def fake_parse(text: str, source_channel: str | None = None) -> list[dict]:
+        return [
+            {
+                "title": "Forwarded",
+                "date": FUTURE_DATE,
+                "time": "",
+                "location_name": "Club",
+                "city": "Kaliningrad",
+            }
+        ]
+
+    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+
+    start_msg = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "/start",
+        }
+    )
+    await handle_start(start_msg, db, bot)
+
+    upd = DummyUpdate(-100123, "Chan")
+    await main.handle_my_chat_member(upd, db)
+
+    async with db.get_session() as session:
+        ch = await session.get(main.Channel, -100123)
+        ch.is_registered = True
+        await session.commit()
+
+    fwd_msg = types.Message.model_validate(
+        {
+            "message_id": 3,
+            "date": 0,
+            "forward_date": 0,
+            "forward_from_chat": {"id": -100123, "type": "channel", "username": "chan"},
+            "forward_from_message_id": 10,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "Some text",
+        }
+    )
+
+    await main.handle_forwarded(fwd_msg, db, bot)
+
+    assert not any("Отсутствуют обязательные поля" in m[1] for m in bot.messages)
+    async with db.get_session() as session:
+        ev = (await session.execute(select(Event))).scalars().first()
+    assert ev is not None
+    assert ev.time == ""
+
+
+@pytest.mark.asyncio
 async def test_forward_passes_channel_name(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
@@ -4343,7 +4403,7 @@ async def test_update_event_description_error_does_not_stop_sync(tmp_path: Path,
 
 
 @pytest.mark.asyncio
-async def test_add_events_from_text_requires_time(tmp_path: Path, monkeypatch):
+async def test_add_events_from_text_allows_missing_time(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
 
@@ -4355,6 +4415,7 @@ async def test_add_events_from_text_requires_time(tmp_path: Path, monkeypatch):
                 "date": "2025-08-09",
                 "time": "",
                 "location_name": "Hall",
+                "city": "Kaliningrad",
             }
         ]
 
@@ -4362,11 +4423,11 @@ async def test_add_events_from_text_requires_time(tmp_path: Path, monkeypatch):
 
     results = await main.add_events_from_text(db, "t", None, None, None)
     assert len(results) == 1
-    saved, added, missing, status = results[0]
-    assert saved is None
-    assert not added
-    assert status == "missing"
-    assert set(missing) == {"time", "city"}
+    saved, added, lines, status = results[0]
+    assert saved is not None
+    assert added
+    assert status == "added"
+    assert saved.time == ""
 
 
 @pytest.mark.asyncio
