@@ -2483,8 +2483,14 @@ async def build_month_nav_html(db: Database) -> str:
         return ""
     return "<br/><h4>" + "".join(links) + "</h4>"
 
-async def build_month_buttons(db: Database, limit: int = 3) -> list[types.InlineKeyboardButton]:
+async def build_month_buttons(
+    db: Database, limit: int = 3, debug: bool = False
+) -> list[types.InlineKeyboardButton] | tuple[
+    list[types.InlineKeyboardButton], str, list[str]
+]:
     """Return buttons linking to upcoming month pages."""
+    # Ensure LOCAL_TZ is initialised based on current DB setting.
+    await get_tz_offset(db)
     cur_month = datetime.now(LOCAL_TZ).strftime("%Y-%m")
     async with db.get_session() as session:
         result = await session.execute(
@@ -2494,10 +2500,17 @@ async def build_month_buttons(db: Database, limit: int = 3) -> list[types.Inline
         )
         months = result.scalars().all()
     buttons: list[types.InlineKeyboardButton] = []
-    for p in months[:limit]:
-        if p.url:
-            label = f"\U0001f4c5 {month_name_nominative(p.month)}"
-            buttons.append(types.InlineKeyboardButton(text=label, url=p.url))
+    shown: list[str] = []
+    for p in months:
+        if not p.url:
+            continue
+        label = f"\U0001f4c5 {month_name_nominative(p.month)}"
+        buttons.append(types.InlineKeyboardButton(text=label, url=p.url))
+        shown.append(p.month)
+        if len(buttons) >= limit:
+            break
+    if debug:
+        return buttons, cur_month, shown
     return buttons
 
 
@@ -2544,7 +2557,11 @@ async def update_source_post_keyboard(event_id: int, db: Database, bot: Bot) -> 
                 )
             ]
         )
-    month_buttons = await build_event_month_buttons(ev, db)
+    month_result = await build_month_buttons(db, limit=2, debug=True)
+    month_buttons, cur_month, months_shown = month_result
+    logging.info(
+        "month_buttons_source_post cur=%s -> %s", cur_month, months_shown
+    )
     if month_buttons:
         rows.append(month_buttons)
     if not rows:
