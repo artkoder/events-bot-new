@@ -2000,7 +2000,10 @@ async def sync_festivals_index_page(db: Database) -> None:
     """Create or update landing page listing all festivals."""
     token = get_telegraph_token()
     if not token:
-        logging.error("Telegraph token unavailable")
+        logging.error(
+            "Telegraph token unavailable",
+            extra={"action": "error", "target": "tg"},
+        )
         return
     tg = Telegraph(access_token=token)
 
@@ -2019,14 +2022,25 @@ async def sync_festivals_index_page(db: Database) -> None:
             await telegraph_call(
                 tg.edit_page, path, title=title, html_content=html
             )
-            logging.info("updated festivals index page", extra={"target": "tg", "path": path})
+            logging.info(
+                "updated festivals index page",
+                extra={"action": "edited", "target": "tg", "path": path},
+            )
         else:
             data = await telegraph_create_page(tg, title=title, html_content=html)
             url = normalize_telegraph_url(data.get("url"))
             path = data.get("path")
-            logging.info("created festivals index page %s", url)
+            logging.info(
+                "created festivals index page %s",
+                url,
+                extra={"action": "created", "target": "tg", "path": path, "url": url},
+            )
     except Exception as e:
-        logging.error("Failed to sync festivals index page: %s", e)
+        logging.error(
+            "Failed to sync festivals index page: %s",
+            e,
+            extra={"action": "error", "target": "tg", "path": path},
+        )
         return
 
     if path:
@@ -2051,7 +2065,10 @@ async def rebuild_fest_nav_if_changed(db: Database) -> bool:
     suffix = int(nav_hash[:4], 16)
     eid = -suffix
     await enqueue_job(db, eid, JobTask.fest_nav_update_all)
-    logging.info("scheduled festival navigation update", extra={"count": 1})
+    logging.info(
+        "scheduled festival navigation update",
+        extra={"action": "scheduled", "count": 1, "nav_hash": nav_hash[:6]},
+    )
     return True
 
 
@@ -5694,7 +5711,10 @@ async def update_festival_tg_nav(event_id: int, db: Database, bot: Bot | None) -
             return False
         token = get_telegraph_token()
         if not token:
-            logging.error("Telegraph token unavailable")
+            logging.error(
+                "Telegraph token unavailable",
+                extra={"action": "error", "target": "tg", "fest": fest.name},
+            )
             return False
         tg = Telegraph(access_token=token)
         nav_html = await get_setting_value(db, "fest_nav_html")
@@ -5717,18 +5737,32 @@ async def update_festival_tg_nav(event_id: int, db: Database, bot: Bot | None) -
                 await session.commit()
                 logging.info(
                     "updated festival page %s in Telegraph", fest.name,
-                    extra={"action": "edited", "target": "tg", "path": path, "nav_old": old_hash, "nav_new": new_hash},
+                    extra={
+                        "action": "edited",
+                        "target": "tg",
+                        "path": path,
+                        "nav_old": old_hash,
+                        "nav_new": new_hash,
+                        "fest": fest.name,
+                    },
                 )
             else:
                 logging.info(
                     "festival page %s navigation unchanged", fest.name,
-                    extra={"action": "skipped_nochange", "target": "tg", "path": path, "nav_old": old_hash, "nav_new": new_hash},
+                    extra={
+                        "action": "skipped_nochange",
+                        "target": "tg",
+                        "path": path,
+                        "nav_old": old_hash,
+                        "nav_new": new_hash,
+                        "fest": fest.name,
+                    },
                 )
             return changed
         except Exception as e:
             logging.error(
                 "Failed to update festival page %s: %s", fest.name, e,
-                extra={"action": "error", "target": "tg", "path": path},
+                extra={"action": "error", "target": "tg", "path": path, "fest": fest.name},
             )
             raise
 
@@ -5758,7 +5792,8 @@ async def update_all_festival_nav(event_id: int, db: Database, bot: Bot | None) 
     for _, _, fest in items:
         if nav_hash and fest.nav_hash == nav_hash:
             logging.info(
-                "festival navigation up to date, skipping",
+                "festival page %s navigation hash matches, skipping",
+                fest.name,
                 extra={"action": "skipped_same_hash", "fest": fest.name},
             )
             continue
@@ -5773,6 +5808,10 @@ async def update_all_festival_nav(event_id: int, db: Database, bot: Bot | None) 
                 changed_any = True
         except Exception as e:  # pragma: no cover - logged in callee
             errors.append(e)
+    logging.info(
+        "fest_nav_update_all finished",
+        extra={"action": "done", "changed": changed_any},
+    )
     if errors:
         raise errors[0]
     return changed_any
@@ -7792,15 +7831,28 @@ async def refresh_nav_on_all_festivals(
                     )
                     logging.info(
                         "updated festival page %s in Telegraph", name,
-                        extra={"action": "edited", "target": "tg", "path": path},
+                        extra={
+                            "action": "edited",
+                            "target": "tg",
+                            "path": path,
+                            "fest": name,
+                        },
                     )
                 else:
                     logging.info(
                         "festival page %s navigation unchanged", name,
-                        extra={"action": "skipped_nochange", "target": "tg", "path": path},
+                        extra={
+                            "action": "skipped_nochange",
+                            "target": "tg",
+                            "path": path,
+                            "fest": name,
+                        },
                     )
             except Exception as e:
-                logging.error("Failed to update festival page %s: %s", name, e)
+                logging.error(
+                    "Failed to update festival page %s: %s", name, e,
+                    extra={"action": "error", "target": "tg", "path": path, "fest": name},
+                )
         if vk_url:
             await sync_festival_vk_post(
                 db, name, bot, nav_only=True, nav_lines=nav_lines
@@ -7927,12 +7979,19 @@ async def sync_festival_vk_post(
         if nav_lines_local:
             ids = _vk_owner_and_post_id(fest.vk_post_url)
             if not ids:
-                logging.error("invalid VK post url %s", fest.vk_post_url)
+                logging.error(
+                    "invalid VK post url %s",
+                    fest.vk_post_url,
+                    extra={"action": "error", "target": "vk", "url": fest.vk_post_url, "fest": name},
+                )
                 return
             owner_id, post_id = ids
             user_token = _vk_user_token()
             if not user_token:
-                logging.error("VK_USER_TOKEN missing")
+                logging.error(
+                    "VK_USER_TOKEN missing",
+                    extra={"action": "error", "target": "vk", "fest": name, "url": fest.vk_post_url},
+                )
                 return
             try:
                 data = await _vk_api(
@@ -7950,7 +8009,7 @@ async def sync_festival_vk_post(
                     name,
                     e.code,
                     e.message,
-                    extra={"action": "error", "target": "vk", "url": fest.vk_post_url},
+                    extra={"action": "error", "target": "vk", "url": fest.vk_post_url, "fest": name},
                 )
                 return
             lines = text.split("\n")
@@ -7966,26 +8025,41 @@ async def sync_festival_vk_post(
             if message == text:
                 logging.info(
                     "festival post %s navigation unchanged", name,
-                    extra={"action": "skipped_nochange", "target": "vk", "url": fest.vk_post_url},
+                    extra={
+                        "action": "skipped_nochange",
+                        "target": "vk",
+                        "url": fest.vk_post_url,
+                        "fest": name,
+                    },
                 )
                 return False
             res_edit = await _try_edit(message, None)
             if res_edit is True:
                 logging.info(
                     "updated festival post %s on VK", name,
-                    extra={"action": "edited", "target": "vk", "url": fest.vk_post_url},
+                    extra={
+                        "action": "edited",
+                        "target": "vk",
+                        "url": fest.vk_post_url,
+                        "fest": name,
+                    },
                 )
                 return True
             if res_edit is None:
                 logging.error(
                     "VK post error for festival %s", name,
-                    extra={"action": "error", "target": "vk", "url": fest.vk_post_url},
+                    extra={"action": "error", "target": "vk", "url": fest.vk_post_url, "fest": name},
                 )
                 raise RuntimeError("vk edit failed")
             if os.getenv("VK_NAV_FALLBACK") == "skip":
                 logging.info(
                     "festival post %s skipping VK edit", name,
-                    extra={"action": "vk_nav_skip_edit", "target": "vk", "url": fest.vk_post_url},
+                    extra={
+                        "action": "vk_nav_skip_edit",
+                        "target": "vk",
+                        "url": fest.vk_post_url,
+                        "fest": name,
+                    },
                 )
                 return False
             can_edit = False  # editing not possible, create new post
@@ -8005,13 +8079,18 @@ async def sync_festival_vk_post(
         if res_edit is True:
             logging.info(
                 "updated festival post %s on VK", name,
-                extra={"action": "edited", "target": "vk", "url": fest.vk_post_url},
+                extra={
+                    "action": "edited",
+                    "target": "vk",
+                    "url": fest.vk_post_url,
+                    "fest": name,
+                },
             )
             return True
         if res_edit is None:
             logging.error(
                 "VK post error for festival %s", name,
-                extra={"action": "error", "target": "vk", "url": fest.vk_post_url},
+                extra={"action": "error", "target": "vk", "url": fest.vk_post_url, "fest": name},
             )
             raise RuntimeError("vk edit failed")
 
@@ -8025,12 +8104,12 @@ async def sync_festival_vk_post(
             await session.commit()
         logging.info(
             "created festival post %s: %s", name, url,
-            extra={"action": "edited", "target": "vk", "url": url},
+            extra={"action": "created", "target": "vk", "url": url, "fest": name},
         )
         return True
     logging.error(
         "VK post error for festival %s", name,
-        extra={"action": "error", "target": "vk", "url": fest.vk_post_url},
+        extra={"action": "error", "target": "vk", "url": fest.vk_post_url, "fest": name},
     )
     raise RuntimeError("vk post failed")
 

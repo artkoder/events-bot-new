@@ -1,3 +1,4 @@
+import logging
 import pytest
 from datetime import date, datetime
 from pathlib import Path
@@ -9,7 +10,7 @@ from telegraph.utils import nodes_to_html
 
 
 @pytest.mark.asyncio
-async def test_sync_festivals_index_page(tmp_path: Path, monkeypatch):
+async def test_sync_festivals_index_page_created(tmp_path: Path, monkeypatch, caplog):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
     today = date.today().isoformat()
@@ -43,13 +44,53 @@ async def test_sync_festivals_index_page(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(main, "telegraph_create_page", fake_create_page)
     monkeypatch.setattr(main, "get_telegraph_token", lambda: "token")
 
-    await main.sync_festivals_index_page(db)
+    with caplog.at_level(logging.INFO):
+        await main.sync_festivals_index_page(db)
 
     assert "Ближайшие фестивали" in stored["html"]
     url = await main.get_setting_value(db, "fest_index_url")
     path = await main.get_setting_value(db, "fest_index_path")
     assert url == "https://telegra.ph/fests"
     assert path == "fests"
+    rec = next(r for r in caplog.records if getattr(r, "action", None) == "created")
+    assert rec.target == "tg"
+    assert rec.path == "fests"
+    assert rec.url == "https://telegra.ph/fests"
+
+
+@pytest.mark.asyncio
+async def test_sync_festivals_index_page_updated(tmp_path: Path, monkeypatch, caplog):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    today = date.today().isoformat()
+    async with db.get_session() as session:
+        session.add(Festival(name="Fest", start_date=today, end_date=today))
+        await session.commit()
+
+    stored = {}
+
+    class DummyTelegraph:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def edit_page(self, path, title, html_content):
+            stored["edited"] = html_content
+            return {}
+
+    async def fake_telegraph_call(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(main, "Telegraph", DummyTelegraph)
+    monkeypatch.setattr(main, "telegraph_call", fake_telegraph_call)
+    monkeypatch.setattr(main, "get_telegraph_token", lambda: "token")
+    await main.set_setting_value(db, "fest_index_path", "fests")
+
+    with caplog.at_level(logging.INFO):
+        await main.sync_festivals_index_page(db)
+
+    rec = next(r for r in caplog.records if getattr(r, "action", None) == "edited")
+    assert rec.target == "tg"
+    assert rec.path == "fests"
 
 
 @pytest.mark.asyncio
