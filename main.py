@@ -89,7 +89,7 @@ import hashlib
 import unicodedata
 
 from telegraph import Telegraph, TelegraphException
-from net import http_call, telegraph_upload, VK_FALLBACK_CODES
+from net import http_call, VK_FALLBACK_CODES
 
 from functools import partial, lru_cache
 from collections import defaultdict, deque
@@ -501,6 +501,8 @@ async def _watch_add_event_worker(app: web.Application, db: Database, bot: Bot):
 CATBOX_ENABLED: bool = False
 # toggle for sending photos to VK
 VK_PHOTOS_ENABLED: bool = False
+# toggle for Telegraph image uploads (disabled by default)
+TELEGRAPH_IMAGE_UPLOAD: bool = os.getenv("TELEGRAPH_IMAGE_UPLOAD", "0") != "0"
 _supabase_client: "Client | None" = None  # type: ignore[name-defined]
 _vk_user_token_bad: str | None = None
 _vk_captcha_needed: bool = False
@@ -593,7 +595,25 @@ def detect_image_type(data: bytes) -> str | None:
         return "bmp"
     if data.startswith(b"RIFF") and data[8:12] == b"WEBP":
         return "webp"
+    if data[4:12] == b"ftypavif":
+        return "avif"
     return None
+
+
+def ensure_jpeg(data: bytes, name: str) -> tuple[bytes, str]:
+    """Convert WEBP or AVIF images to JPEG."""
+    kind = detect_image_type(data)
+    if kind in {"webp", "avif"}:
+        from PIL import Image
+
+        bio_in = BytesIO(data)
+        with Image.open(bio_in) as im:
+            rgb = im.convert("RGB")
+            bio_out = BytesIO()
+            rgb.save(bio_out, format="JPEG")
+            data = bio_out.getvalue()
+        name = re.sub(r"\.[^.]+$", "", name) + ".jpg"
+    return data, name
 
 # Timeout for OpenAI 4o requests (in seconds)
 FOUR_O_TIMEOUT = float(os.getenv("FOUR_O_TIMEOUT", "60"))
@@ -1166,16 +1186,13 @@ async def upload_vk_photo(
                         return data
 
         img_bytes = await asyncio.wait_for(_download(), HTTP_TIMEOUT)
+        img_bytes, _ = ensure_jpeg(img_bytes, "image.jpg")
         form = FormData()
-        ctype = "image/jpeg"
-        kind = detect_image_type(img_bytes)
-        if kind:
-            ctype = f"image/{kind}"
         form.add_field(
             "photo",
             img_bytes,
             filename="image.jpg",
-            content_type=ctype,
+            content_type="image/jpeg",
         )
         async def _upload():
             async with span("http"):
@@ -1562,7 +1579,8 @@ async def extract_images(message: types.Message, bot: Bot) -> list[tuple[bytes, 
         bio = BytesIO()
         async with span("tg-send"):
             await bot.download(message.photo[-1].file_id, destination=bio)
-        images.append((bio.getvalue(), "photo.jpg"))
+        data, name = ensure_jpeg(bio.getvalue(), "photo.jpg")
+        images.append((data, name))
     if (
         message.document
         and message.document.mime_type
@@ -1572,20 +1590,19 @@ async def extract_images(message: types.Message, bot: Bot) -> list[tuple[bytes, 
         async with span("tg-send"):
             await bot.download(message.document.file_id, destination=bio)
         name = message.document.file_name or "image.jpg"
-        images.append((bio.getvalue(), name))
+        data, name = ensure_jpeg(bio.getvalue(), name)
+        images.append((data, name))
     return images[:3]
 
 
-async def upload_images(
-    images: list[tuple[bytes, str]]
-) -> tuple[list[str], list[str], str]:
-    """Upload images to Catbox with Telegraph fallback."""
+async def upload_images(images: list[tuple[bytes, str]]) -> tuple[list[str], str]:
+    """Upload images to Catbox with retries."""
     catbox_urls: list[str] = []
-    tg_urls: list[str] = []
     catbox_msg = ""
     if CATBOX_ENABLED and images:
         session = get_http_session()
         for data, name in images[:3]:
+            data, name = ensure_jpeg(data, name)
             if len(data) > 5 * 1024 * 1024:
                 logging.warning("catbox skip %s: too large", name)
                 catbox_msg += f"{name}: too large; "
@@ -1593,9 +1610,10 @@ async def upload_images(
             if not detect_image_type(data):
                 logging.warning("catbox upload %s: not image", name)
                 catbox_msg += f"{name}: not image; "
-            uploaded = False
-            delays = [0.7, 1.5, 3.0]
-            for attempt, delay in enumerate(delays, 1):
+            success = False
+            delays = [0.5, 1.0, 2.0]
+            for attempt in range(1, 4):
+                logging.info("catbox try %d/3", attempt)
                 try:
                     form = FormData()
                     form.add_field("reqtype", "fileupload")
@@ -1610,34 +1628,23 @@ async def upload_images(
                                     url = text_r.strip()
                                     catbox_urls.append(url)
                                     catbox_msg += "ok; "
-                                    logging.info("catbox uploaded %s", url)
-                                    uploaded = True
+                                    logging.info("catbox ok %s", url)
+                                    success = True
                                     break
-                                logging.warning(
-                                    "catbox upload failed %s: %s %s", name, resp.status, text_r
-                                )
-                                if resp.status in {412, 429} or resp.status >= 500:
-                                    if attempt < len(delays):
-                                        await asyncio.sleep(delay)
-                                        continue
-                except Exception as e:
-                    logging.error("catbox error %s: %s", name, e)
-                break
-            if not uploaded:
-                url = telegraph_upload(data, name)
-                if asyncio.iscoroutine(url):
-                    url = await url
-                if url:
-                    tg_urls.append(url)
-                    catbox_msg += "tg ok; "
-                    logging.info("telegraph uploaded %s", url)
-                else:
-                    catbox_msg += f"{name}: both failed; "
-                    logging.error("both uploads failed for %s", name)
+                                reason = f"{resp.status} {text_r}".strip()
+                except Exception as e:  # pragma: no cover - network errors
+                    reason = str(e)
+                if success:
+                    break
+                if attempt < 3:
+                    await asyncio.sleep(delays[attempt - 1])
+            if not success:
+                logging.warning("catbox failed %s", reason)
+                catbox_msg += f"{name}: failed; "
         catbox_msg = catbox_msg.strip("; ")
     elif images:
         catbox_msg = "disabled"
-    return catbox_urls, tg_urls, catbox_msg
+    return catbox_urls, catbox_msg
 
 
 def normalize_hashtag_dates(text: str) -> str:
@@ -4386,7 +4393,7 @@ async def add_events_from_text(
     images: list[tuple[bytes, str]] = []
     if media:
         images = [media] if isinstance(media, tuple) else list(media)
-    catbox_urls, tg_urls, catbox_msg_global = await upload_images(images)
+    catbox_urls, catbox_msg_global = await upload_images(images)
     links_iter = iter(extract_links_from_html(html_text) if html_text else [])
     source_text_clean = html_text or text
 
@@ -4398,7 +4405,7 @@ async def add_events_from_text(
         loc_addr = festival_info.get("location_address")
         city = festival_info.get("city")
         loc_addr = strip_city_from_address(loc_addr, city)
-        photo_u = (catbox_urls or tg_urls)[0] if (catbox_urls or tg_urls) else None
+        photo_u = catbox_urls[0] if catbox_urls else None
         fest_obj, created = await ensure_festival(
             db,
             fest_name,
@@ -4508,8 +4515,8 @@ async def add_events_from_text(
             source_chat_id=source_chat_id,
             source_message_id=source_message_id,
             creator_id=creator_id,
-            photo_count=len(catbox_urls or tg_urls),
-            photo_urls=catbox_urls or tg_urls,
+            photo_count=len(catbox_urls),
+            photo_urls=catbox_urls,
         )
 
         base_event.event_type = normalize_event_type(
@@ -4517,7 +4524,7 @@ async def add_events_from_text(
         )
 
         if base_event.festival:
-            photo_u = (catbox_urls or tg_urls)[0] if (catbox_urls or tg_urls) else None
+            photo_u = catbox_urls[0] if catbox_urls else None
             await ensure_festival(
                 db,
                 base_event.festival,
@@ -10512,10 +10519,9 @@ async def update_source_page(
         if catbox_urls is not None:
             urls = list(catbox_urls)
             catbox_msg = ""
-            tg_urls: list[str] = []
         else:
-            catbox_urls, tg_urls, catbox_msg = await upload_images(images)
-            urls = catbox_urls or tg_urls
+            catbox_urls, catbox_msg = await upload_images(images)
+            urls = catbox_urls
         for url in urls:
             html_content += f'<img src="{html.escape(url)}"/><p></p>'
         new_html = normalize_hashtag_dates(new_html)
@@ -10660,8 +10666,8 @@ async def build_source_page_content(
         urls = list(catbox_urls)
         catbox_msg = ""
     else:
-        catbox_urls, tg_urls, catbox_msg = await upload_images(images)
-        urls = catbox_urls or tg_urls
+        catbox_urls, catbox_msg = await upload_images(images)
+        urls = catbox_urls
     if source_url and display_link:
         html_content += (
             f'<p><a href="{html.escape(source_url)}"><strong>{html.escape(title)}</strong></a></p>'
