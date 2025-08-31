@@ -5979,7 +5979,11 @@ async def update_festival_pages_for_event(
             progress.mark("tg", "error", str(e))
         raise
     vk_changed = bool(await sync_festival_vk_post(db, ev.festival, bot))
-    return vk_changed
+    nav_changed = await rebuild_fest_nav_if_changed(db)
+    if progress and nav_changed:
+        url = await get_setting_value(db, "fest_index_url")
+        progress.mark("index", "done", url or "")
+    return vk_changed or nav_changed
 
 
 async def publish_event_progress(event: Event, db: Database, bot: Bot, chat_id: int) -> None:
@@ -6057,11 +6061,13 @@ async def publish_event_progress(event: Event, db: Database, bot: Bot, chat_id: 
                 )
         elif t == JobTask.festival_pages:
             lines.append(f"{info['icon']} {job_label(t)}{info['suffix']}")
-            sub = fest_sub.get("tg")
-            if sub:
-                lines.append(
-                    f"{sub['icon']} Telegraph (фестиваль){sub['suffix']}"
-                )
+            labels = {
+                "tg": "Telegraph (фестиваль)",
+                "index": "Все фестивали (Telegraph)",
+            }
+            for key, sub in fest_sub.items():
+                label = labels.get(key, key)
+                lines.append(f"{sub['icon']} {label}{sub['suffix']}")
         else:
             lines.append(f"{info['icon']} {job_label(t)}{info['suffix']}")
     head = "Идёт процесс публикации, ждите"
@@ -6105,11 +6111,13 @@ async def publish_event_progress(event: Event, db: Database, bot: Bot, chat_id: 
                     lines.append(f"{tg['icon']} ICS (Telegram){tg['suffix']}")
             elif t == JobTask.festival_pages:
                 lines.append(f"{info['icon']} {job_label(t)}{info['suffix']}")
-                sub = fest_sub.get("tg")
-                if sub:
-                    lines.append(
-                        f"{sub['icon']} Telegraph (фестиваль){sub['suffix']}"
-                    )
+                labels = {
+                    "tg": "Telegraph (фестиваль)",
+                    "index": "Все фестивали (Telegraph)",
+                }
+                for key, sub in fest_sub.items():
+                    label = labels.get(key, key)
+                    lines.append(f"{sub['icon']} {label}{sub['suffix']}")
             else:
                 lines.append(f"{info['icon']} {job_label(t)}{info['suffix']}")
         text = head if not lines else head + "\n" + "\n".join(lines)
