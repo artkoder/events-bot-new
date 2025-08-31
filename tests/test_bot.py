@@ -4308,13 +4308,46 @@ async def test_multiple_ticket_links(tmp_path: Path, monkeypatch):
     monkeypatch.setattr("main.create_source_page", fake_create)
 
     html = (
-        "Билеты <a href='https://l1'>купить</a>" 
+        "Билеты <a href='https://l1'>купить</a>"
         " и ещё один концерт. Билеты <a href='https://l2'>здесь</a>"
     )
 
     results = await main.add_events_from_text(db, "text", None, html, None)
     assert results[0][0].ticket_link == "https://l1"
     assert results[1][0].ticket_link == "https://l2"
+
+
+@pytest.mark.asyncio
+async def test_ignore_polubit_39_link(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async def fake_parse(text: str, source_channel: str | None = None) -> list[dict]:
+        return [
+            {
+                "title": "T",
+                "short_description": "d",
+                "date": FUTURE_DATE,
+                "time": "18:00",
+                "location_name": "Hall",
+                "ticket_link": None,
+                "event_type": "встреча",
+                "emoji": None,
+                "is_free": True,
+            }
+        ]
+
+    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
+        return "url", "p"
+
+    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.create_source_page", fake_create)
+
+    html = "📂 Полюбить 39 (<a href='https://t.me/addlist/foo'>https://t.me/addlist/foo</a>)"
+    results = await main.add_events_from_text(db, "text", None, html, None)
+    ev = results[0][0]
+    assert ev.ticket_link is None
 
 
 @pytest.mark.asyncio
