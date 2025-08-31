@@ -8,6 +8,7 @@ The bot uses APScheduler to run periodic maintenance tasks every 15 minutes. Eac
 - **cleanup old events** – removes past events after 03:00 local time and notifies the superadmin.
 - **VK daily posts and polls** – publishes daily announcements and festival polls when posting times are reached and a VK group is configured.
 - **Telegraph pages sync** – refreshes month and weekend Telegraph pages after 01:00 local time.
+- **festival navigation rebuild** – rebuilds festival navigation and landing page nightly.
 
 ## Environment variables
 

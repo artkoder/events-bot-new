@@ -425,6 +425,7 @@ def startup(db, bot) -> AsyncIOScheduler:
         cleanup_scheduler,
         partner_notification_scheduler,
         nightly_page_sync,
+        rebuild_fest_nav_if_changed,
     )
 
     _scheduler.add_job(
@@ -467,6 +468,19 @@ def startup(db, bot) -> AsyncIOScheduler:
         id="partner_notification_scheduler",
         minute="5",
         args=[db, bot],
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=30,
+    )
+
+    _scheduler.add_job(
+        _job_wrapper("fest_nav_rebuild", rebuild_fest_nav_if_changed),
+        "cron",
+        id="fest_nav_rebuild",
+        hour="3",
+        minute="0",
+        args=[db],
         replace_existing=True,
         max_instances=1,
         coalesce=True,

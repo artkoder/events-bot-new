@@ -2,7 +2,7 @@ import os
 import sys
 
 import pytest
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from sqlmodel import select
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
@@ -464,3 +464,53 @@ async def test_publish_event_progress_captcha_flag(tmp_path, monkeypatch):
     markup = bot.markups[0]
     assert markup.inline_keyboard[0][0].callback_data == "captcha_input"
     main._vk_captcha_needed = False
+
+
+@pytest.mark.asyncio
+async def test_publish_event_progress_fest_index(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    future_date = (date.today() + timedelta(days=1)).isoformat()
+    ev = Event(
+        title="t",
+        description="d",
+        date=future_date,
+        time="12:00",
+        location_name="loc",
+        source_text="src",
+        festival="Fest",
+    )
+    async with db.get_session() as session:
+        session.add(ev)
+        await session.commit()
+        await session.refresh(ev)
+        session.add(JobOutbox(event_id=ev.id, task=JobTask.festival_pages))
+        await session.commit()
+
+    async def fake_sync_festival_page(db_obj, name, **kwargs):
+        return "http://fest"
+
+    async def fake_sync_festival_vk_post(db_obj, name, bot_obj, nav_only=False, nav_lines=None):
+        return False
+
+    async def fake_rebuild(db_obj):
+        return True
+
+    async def fake_get_setting(db_obj, key):
+        if key == "fest_index_url":
+            return "http://index"
+        return None
+
+    monkeypatch.setattr(main, "sync_festival_page", fake_sync_festival_page)
+    monkeypatch.setattr(main, "sync_festival_vk_post", fake_sync_festival_vk_post)
+    monkeypatch.setattr(main, "rebuild_fest_nav_if_changed", fake_rebuild)
+    monkeypatch.setattr(main, "get_setting_value", fake_get_setting)
+    monkeypatch.setattr(main, "_job_result_link", lambda task, eid, db_obj: "http://vk")
+
+    bot = ProgBot()
+    await publish_event_progress(ev, db, bot, chat_id=1)
+
+    final = bot.edits[-1]
+    assert "✅ Telegraph (фестиваль) — http://fest" in final
+    assert "✅ Все фестивали (Telegraph) — http://index" in final
