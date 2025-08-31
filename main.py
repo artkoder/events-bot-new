@@ -6679,6 +6679,7 @@ def extract_links_from_html(html_text: str) -> list[str]:
     )
     matches = list(pattern.finditer(html_text))
     lower_html = html_text.lower()
+    skip_phrases = ["полюбить 39"]
 
     def qualifies(label: str, start: int, end: int) -> bool:
         text = label.lower()
@@ -6692,6 +6693,9 @@ def extract_links_from_html(html_text: str) -> list[str]:
     others: list[tuple[int, str]] = []
     for m in matches:
         href, label = m.group(1), m.group(2)
+        context_before = lower_html[max(0, m.start() - 60) : m.start()]
+        if any(phrase in context_before for phrase in skip_phrases):
+            continue
         if qualifies(label, *m.span()):
             prioritized.append((m.start(), href))
         else:
