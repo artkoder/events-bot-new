@@ -49,7 +49,7 @@ async def test_sync_festivals_index_page_created(tmp_path: Path, monkeypatch, ca
         await main.sync_festivals_index_page(db)
 
     html = stored["html"]
-    assert "<h1>Все фестивали Калининградской области</h1>" in html
+    assert "<h3>Все фестивали Калининградской области</h3>" in html
     assert "<h2>Ближайшие фестивали</h2>" in html
     assert html.count(FEST_INDEX_INTRO_START) == 1
     assert html.count(FEST_INDEX_INTRO_END) == 1
@@ -98,7 +98,7 @@ async def test_sync_festivals_index_page_updated(tmp_path: Path, monkeypatch, ca
     assert rec.target == "tg"
     assert rec.path == "fests"
     html = stored["edited"]
-    assert "<h1>Все фестивали Калининградской области</h1>" in html
+    assert "<h3>Все фестивали Калининградской области</h3>" in html
     assert html.count(FEST_INDEX_INTRO_START) == 1
     assert html.count(FEST_INDEX_INTRO_END) == 1
 

@@ -2180,7 +2180,7 @@ async def sync_festivals_index_page(db: Database) -> None:
         f"{FEST_INDEX_INTRO_END}"
     )
     html = (
-        "<h1>Все фестивали Калининградской области</h1>"
+        "<h3>Все фестивали Калининградской области</h3>"
         + intro_html
         + (nodes_to_html(nodes) if nodes else "")
         + FOOTER_LINK_HTML
@@ -2475,8 +2475,8 @@ async def update_source_post_keyboard(event_id: int, db: Database, bot: Bot) -> 
     logging.info("update_source_post_keyboard start for event %s", event_id)
     async with db.get_session() as session:
         ev = await session.get(Event, event_id)
-    if not ev or not ev.source_chat_id or not ev.source_message_id:
-        logging.info("update_source_post_keyboard skip for event %s: no source post", event_id)
+    if not ev:
+        logging.info("update_source_post_keyboard skip for event %s: no event", event_id)
         return
     rows: list[list[types.InlineKeyboardButton]] = []
     if ev.ics_post_url:
@@ -2498,27 +2498,77 @@ async def update_source_post_keyboard(event_id: int, db: Database, bot: Bot) -> 
         logging.info("update_source_post_keyboard skip for event %s: no buttons", event_id)
         return
     markup = types.InlineKeyboardMarkup(inline_keyboard=rows)
+    target = f"{ev.source_chat_id}/{ev.source_message_id}"
+    if ev.source_chat_id and ev.source_message_id:
+        try:
+            async with TG_SEND_SEMAPHORE:
+                async with span("tg-send"):
+                    await bot.edit_message_reply_markup(
+                        ev.source_chat_id,
+                        ev.source_message_id,
+                        reply_markup=markup,
+                    )
+            logging.info(
+                "update_source_post_keyboard done for event %s target=%s",
+                event_id,
+                target,
+            )
+            return
+        except TelegramBadRequest as e:
+            if "message is not modified" in str(e):
+                logging.info(
+                    "update_source_post_keyboard no change for event %s", event_id
+                )
+                return
+            if "message can't be edited" not in str(e):
+                logging.error(
+                    "update_source_post_keyboard failed for event %s target=%s: %s",
+                    event_id,
+                    target,
+                    e,
+                )
+                return
+        except Exception as e:  # pragma: no cover - network failures
+            logging.error(
+                "update_source_post_keyboard failed for event %s target=%s: %s",
+                event_id,
+                target,
+                e,
+            )
+            return
+
+    if not ev.source_chat_id:
+        logging.info(
+            "update_source_post_keyboard skip for event %s: no target chat", event_id
+        )
+        return
+
     try:
         async with TG_SEND_SEMAPHORE:
             async with span("tg-send"):
-                await bot.edit_message_reply_markup(
+                msg = await bot.send_message(
                     ev.source_chat_id,
-                    ev.source_message_id,
+                    "Добавить в календарь/Навигация по месяцам",
                     reply_markup=markup,
                 )
-        logging.info("update_source_post_keyboard done for event %s", event_id)
-    except TelegramBadRequest as e:
-        if "message is not modified" in str(e):
-            logging.info(
-                "update_source_post_keyboard no change for event %s", event_id
-            )
-        else:
-            logging.error(
-                "update_source_post_keyboard failed for event %s: %s", event_id, e
-            )
+        async with db.get_session() as session:
+            obj = await session.get(Event, event_id)
+            if obj:
+                obj.source_chat_id = ev.source_chat_id
+                obj.source_message_id = msg.message_id
+                await session.commit()
+        logging.info(
+            "update_source_post_keyboard service message for event %s target=%s/%s",
+            event_id,
+            ev.source_chat_id,
+            msg.message_id,
+        )
     except Exception as e:  # pragma: no cover - network failures
         logging.error(
-            "update_source_post_keyboard failed for event %s: %s", event_id, e
+            "update_source_post_keyboard service failed for event %s target=%s: %s",
+            event_id,
+            ev.source_chat_id,
+            e,
         )
 
 
@@ -4371,6 +4421,11 @@ def _copy_fields(dst: Event, src: Event) -> None:
     ):
         setattr(dst, f, getattr(src, f))
 
+    for f in ("source_chat_id", "source_message_id", "source_post_url"):
+        val = getattr(src, f)
+        if val is not None:
+            setattr(dst, f, val)
+
 
 async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
     """Insert or update an event if a similar one exists.
@@ -5900,6 +5955,18 @@ async def publish_event_progress(event: Event, db: Database, bot: Bot, chat_id: 
         JobTask.festival_pages,
     }
 
+    captcha_markup = None
+    if _vk_captcha_needed:
+        captcha_markup = types.InlineKeyboardMarkup(
+            inline_keyboard=[[types.InlineKeyboardButton(text="Ввести код", callback_data="captcha_input")]]
+        )
+        for t in tasks:
+            if t in vk_tasks:
+                progress[t] = {
+                    "icon": "❌",
+                    "suffix": " — требуется капча; нажмите «Ввести код»",
+                }
+
     def job_label(task: JobTask) -> str:
         if task == JobTask.month_pages:
             d = parse_iso_date(event.date.split("..", 1)[0])
@@ -5923,8 +5990,9 @@ async def publish_event_progress(event: Event, db: Database, bot: Bot, chat_id: 
         fest_sub["tg"] = {"icon": "\U0001f504", "suffix": ""}
     lines = []
     for t in tasks:
+        info = progress[t]
         if t == JobTask.ics_publish:
-            lines.append(f"\U0001f504 {job_label(t)}")
+            lines.append(f"{info['icon']} {job_label(t)}{info['suffix']}")
             if "ics_supabase" in ics_sub:
                 lines.append(
                     f"{ics_sub['ics_supabase']['icon']} ICS (Supabase){ics_sub['ics_supabase']['suffix']}"
@@ -5934,19 +6002,28 @@ async def publish_event_progress(event: Event, db: Database, bot: Bot, chat_id: 
                     f"{ics_sub['ics_telegram']['icon']} ICS (Telegram){ics_sub['ics_telegram']['suffix']}"
                 )
         elif t == JobTask.festival_pages:
-            lines.append(f"\U0001f504 {job_label(t)}")
+            lines.append(f"{info['icon']} {job_label(t)}{info['suffix']}")
             sub = fest_sub.get("tg")
             if sub:
                 lines.append(
                     f"{sub['icon']} Telegraph (фестиваль){sub['suffix']}"
                 )
         else:
-            lines.append(f"\U0001f504 {job_label(t)}")
+            lines.append(f"{info['icon']} {job_label(t)}{info['suffix']}")
     head = "Идёт процесс публикации, ждите"
     text = head if not lines else head + "\n" + "\n".join(lines)
-    msg = await bot.send_message(chat_id, text, disable_web_page_preview=True)
+    text += "\n<!-- v0 -->"
+    msg = await bot.send_message(
+        chat_id,
+        text,
+        disable_web_page_preview=True,
+        reply_markup=captcha_markup,
+    )
+
+    version = 1
 
     async def render() -> None:
+        nonlocal version
         all_done = all(info["icon"] != "\U0001f504" for info in progress.values())
         if fest_sub:
             all_done = all_done and all(
@@ -5973,11 +6050,14 @@ async def publish_event_progress(event: Event, db: Database, bot: Bot, chat_id: 
             else:
                 lines.append(f"{info['icon']} {job_label(t)}{info['suffix']}")
         text = head if not lines else head + "\n" + "\n".join(lines)
+        text += f"\n<!-- v{version} -->"
+        version += 1
         await bot.edit_message_text(
             chat_id=chat_id,
             message_id=msg.message_id,
             text=text,
             disable_web_page_preview=True,
+            reply_markup=captcha_markup if _vk_captcha_needed else None,
         )
 
     def ics_mark(key: str, status: str, detail: str) -> None:
@@ -6018,10 +6098,15 @@ async def publish_event_progress(event: Event, db: Database, bot: Bot, chat_id: 
             return
         if status == JobStatus.done:
             icon = "✅"
-            if changed:
-                suffix = f" — {link}" if link else ""
-            else:
+            if link:
+                suffix = f" — {link}"
+            elif not changed:
                 suffix = " — без изменений"
+            else:
+                suffix = ""
+        elif err and "disabled" in err.lower():
+            icon = "⏸"
+            suffix = f" — {err}" if err else " — отключено"
         else:
             icon = "❌"
             if err == "captcha":
@@ -6065,7 +6150,7 @@ async def publish_event_progress(event: Event, db: Database, bot: Bot, chat_id: 
         await bot.edit_message_text(
             chat_id=chat_id,
             message_id=msg.message_id,
-            text="Готово",
+            text=f"Готово\n<!-- v{version} -->",
         )
 
 
@@ -10969,8 +11054,8 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
         link,
         message.html_text or message.caption_html,
         media,
-        source_chat_id=chat_id if link else None,
-        source_message_id=msg_id if link else None,
+        source_chat_id=message.chat.id,
+        source_message_id=message.message_id,
         creator_id=user.user_id,
         source_channel=channel_name,
 
