@@ -236,6 +236,27 @@ class ProgBot:
         self.edits.append(text)
 
 
+class CapBot:
+    def __init__(self):
+        self.messages = []
+        self.markups = []
+        self._mid = 0
+
+    async def send_message(self, chat_id, text, reply_markup=None, **kwargs):
+        self.messages.append(text)
+        self.markups.append(reply_markup)
+        self._mid += 1
+        class M:
+            pass
+
+        m = M()
+        m.message_id = self._mid
+        return m
+
+    async def edit_message_text(self, text, chat_id=None, message_id=None, reply_markup=None, **kwargs):
+        pass
+
+
 @pytest.mark.asyncio
 async def test_publish_event_progress_single_message(tmp_path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
@@ -404,3 +425,41 @@ async def test_publish_event_progress_ics(tmp_path, monkeypatch):
     assert "✅ ICS (Supabase) — https://sup" in final
     assert "✅ ICS (Telegram) — https://tg" in final
     assert "<a href" not in final
+
+
+@pytest.mark.asyncio
+async def test_publish_event_progress_captcha_flag(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    ev = Event(
+        title="t",
+        description="d",
+        date="2025-01-04",
+        time="12:00",
+        location_name="loc",
+        source_text="src",
+    )
+    async with db.get_session() as session:
+        session.add(ev)
+        await session.commit()
+        await session.refresh(ev)
+        session.add(
+            JobOutbox(
+                event_id=ev.id,
+                task=JobTask.vk_sync,
+                next_run_at=datetime.utcnow() + timedelta(hours=1),
+            )
+        )
+        await session.commit()
+
+    main._vk_captcha_needed = True
+    bot = CapBot()
+    await publish_event_progress(ev, db, bot, chat_id=1)
+
+    assert bot.messages
+    text = bot.messages[0]
+    assert "❌ VK (событие) — требуется капча" in text
+    markup = bot.markups[0]
+    assert markup.inline_keyboard[0][0].callback_data == "captcha_input"
+    main._vk_captcha_needed = False
