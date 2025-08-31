@@ -1,0 +1,47 @@
+import pytest
+from pathlib import Path
+from sqlalchemy import select
+
+import main
+from db import Database
+from models import Festival
+
+
+@pytest.mark.asyncio
+async def test_add_events_from_text_autofills_program_url(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async def fake_parse(text, *args, **kwargs):
+        main.parse_event_via_4o._festival = {"name": "Fest"}
+        return []
+
+    async def fake_upload(images):
+        return [], ""
+
+    async def fake_sync_page(db, name):
+        return None
+
+    async def fake_sync_vk(db, name, bot):
+        return None
+
+    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
+    monkeypatch.setattr(main, "upload_images", fake_upload)
+    monkeypatch.setattr(main, "sync_festival_page", fake_sync_page)
+    monkeypatch.setattr(main, "sync_festival_vk_post", fake_sync_vk)
+
+    html = '<a href="https://telegra.ph/prog">prog</a>'
+    await main.add_events_from_text(db, "t", None, html, None)
+
+    async with db.get_session() as session:
+        fest = await session.scalar(select(Festival).where(Festival.name == "Fest"))
+        assert fest is not None
+        assert fest.program_url == "https://telegra.ph/prog"
+
+    html2 = '<a href="https://example.com/program">prog</a>'
+    await main.add_events_from_text(db, "t", None, html2, None)
+
+    async with db.get_session() as session:
+        fest = await session.scalar(select(Festival).where(Festival.name == "Fest"))
+        assert fest.program_url == "https://example.com/program"
+
