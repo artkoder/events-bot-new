@@ -523,6 +523,14 @@ _vk_captcha_key: str | None = None
 _shared_session: ClientSession | None = None
 # backward-compatible aliases used in tests
 _http_session: ClientSession | None = None
+
+# tasks affected by VK captcha pause
+VK_JOB_TASKS = {
+    JobTask.vk_sync,
+    JobTask.week_pages,
+    JobTask.weekend_pages,
+    JobTask.festival_pages,
+}
 _vk_session: ClientSession | None = None
 
 # Telegraph API rejects pages over ~64&nbsp;kB. Use a slightly lower limit
@@ -1702,6 +1710,38 @@ def vk_captcha_paused(scheduler, key: str) -> None:
         logging.info("vk_captcha invalid/expired")
 
     _vk_captcha_timeout = asyncio.create_task(_timeout())
+
+
+async def vk_captcha_pause_outbox(db: Database) -> None:
+    """Pause all VK jobs and register resume callback."""
+    global _vk_captcha_resume
+    far = datetime.utcnow() + timedelta(days=3650)
+    async with db.get_session() as session:
+        await session.execute(
+            update(JobOutbox)
+            .where(
+                JobOutbox.task.in_(VK_JOB_TASKS),
+                JobOutbox.status.in_(
+                    [JobStatus.pending, JobStatus.error, JobStatus.running]
+                ),
+            )
+            .values(status=JobStatus.paused, next_run_at=far)
+        )
+        await session.commit()
+
+    async def _resume() -> None:
+        async with db.get_session() as session:
+            await session.execute(
+                update(JobOutbox)
+                .where(
+                    JobOutbox.task.in_(VK_JOB_TASKS),
+                    JobOutbox.status == JobStatus.paused,
+                )
+                .values(status=JobStatus.pending, next_run_at=datetime.utcnow())
+            )
+            await session.commit()
+
+    _vk_captcha_resume = _resume
 
 
 async def notify_event_added(
@@ -5430,6 +5470,7 @@ async def _run_due_jobs_once(
         start = _time.perf_counter()
         changed = True
         handler = JOB_HANDLERS.get(job.task.value)
+        pause = False
         if not handler:
             status = JobStatus.done
             err = None
@@ -5480,9 +5521,13 @@ async def _run_due_jobs_once(
                 )
             except Exception as exc:  # pragma: no cover - log and backoff
                 took_ms = (_time.perf_counter() - start) * 1000
+                pause = False
                 if isinstance(exc, VKAPIError):
                     if exc.code == 14:
                         err = "captcha"
+                        status = JobStatus.paused
+                        pause = True
+                        retry = False
                     else:
                         prefix = (
                             "ошибка публикации VK"
@@ -5490,8 +5535,12 @@ async def _run_due_jobs_once(
                             else "ошибка VK"
                         )
                         err = f"{prefix}: {exc.code}/{exc.message} ({exc.method})"
+                        status = JobStatus.error
+                        retry = not isinstance(exc, VKPermissionError)
                 else:
                     err = str(exc)
+                    status = JobStatus.error
+                    retry = True
                 logging.error(
                     "TASK_FAIL event=%s task=%s run_id=%s attempt=%d took_ms=%.0f err=\"%s\"",
                     job.event_id,
@@ -5502,9 +5551,7 @@ async def _run_due_jobs_once(
                     err.splitlines()[0],
                 )
                 logging.exception("job %s failed", job.id)
-                status = JobStatus.error
                 link = None
-                retry = not isinstance(exc, VKPermissionError)
         text = None
         async with db.get_session() as session:
             obj = await session.get(JobOutbox, job.id)
@@ -5533,6 +5580,8 @@ async def _run_due_jobs_once(
                 await session.commit()
             if notify and send:
                 await notify(job.task, status, changed, link, err)
+        if pause:
+            await vk_captcha_pause_outbox(db)
         processed += 1
     return processed
 
@@ -5948,22 +5997,18 @@ async def publish_event_progress(event: Event, db: Database, bot: Bot, chat_id: 
     vk_scope = ""
     if vk_group:
         vk_scope = f"@{vk_group}" if not vk_group.startswith("-") else f"#{vk_group}"
-    vk_tasks = {
-        JobTask.vk_sync,
-        JobTask.week_pages,
-        JobTask.weekend_pages,
-        JobTask.festival_pages,
-    }
+    vk_tasks = VK_JOB_TASKS
 
     captcha_markup = None
-    if _vk_captcha_needed:
+    vk_present = any(t in vk_tasks for t in tasks)
+    if _vk_captcha_needed and vk_present:
         captcha_markup = types.InlineKeyboardMarkup(
             inline_keyboard=[[types.InlineKeyboardButton(text="Ввести код", callback_data="captcha_input")]]
         )
         for t in tasks:
             if t in vk_tasks:
                 progress[t] = {
-                    "icon": "❌",
+                    "icon": "⏸",
                     "suffix": " — требуется капча; нажмите «Ввести код»",
                 }
 
@@ -5989,9 +6034,18 @@ async def publish_event_progress(event: Event, db: Database, bot: Bot, chat_id: 
     if JobTask.festival_pages in tasks:
         fest_sub["tg"] = {"icon": "\U0001f504", "suffix": ""}
     lines = []
+    vk_line_added = False
     for t in tasks:
         info = progress[t]
-        if t == JobTask.ics_publish:
+        if _vk_captcha_needed and vk_present and t in vk_tasks:
+            if vk_line_added:
+                continue
+            label = "VK"
+            if vk_scope:
+                label += f" {vk_scope}"
+            lines.append(f"{info['icon']} {label}{info['suffix']}")
+            vk_line_added = True
+        elif t == JobTask.ics_publish:
             lines.append(f"{info['icon']} {job_label(t)}{info['suffix']}")
             if "ics_supabase" in ics_sub:
                 lines.append(
@@ -6031,8 +6085,17 @@ async def publish_event_progress(event: Event, db: Database, bot: Bot, chat_id: 
             )
         head = "Готово" if all_done else "Идёт процесс публикации, ждите"
         lines: list[str] = []
+        vk_line_added = False
         for t, info in progress.items():
-            if t == JobTask.ics_publish:
+            if _vk_captcha_needed and vk_present and t in vk_tasks:
+                if vk_line_added:
+                    continue
+                label = "VK"
+                if vk_scope:
+                    label += f" {vk_scope}"
+                lines.append(f"{info['icon']} {label}{info['suffix']}")
+                vk_line_added = True
+            elif t == JobTask.ics_publish:
                 lines.append(f"{info['icon']} {job_label(t)}{info['suffix']}")
                 sup = ics_sub.get("ics_supabase")
                 if sup:
@@ -6104,14 +6167,15 @@ async def publish_event_progress(event: Event, db: Database, bot: Bot, chat_id: 
                 suffix = " — без изменений"
             else:
                 suffix = ""
+        elif status == JobStatus.paused:
+            icon = "⏸"
+            suffix = " — требуется капча; нажмите «Ввести код»"
         elif err and "disabled" in err.lower():
             icon = "⏸"
             suffix = f" — {err}" if err else " — отключено"
         else:
             icon = "❌"
-            if err == "captcha":
-                suffix = " — требуется капча; нажмите «Ввести код»"
-            elif err:
+            if err:
                 suffix = f" — {err}"
             else:
                 suffix = ""

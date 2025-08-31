@@ -459,7 +459,8 @@ async def test_publish_event_progress_captcha_flag(tmp_path, monkeypatch):
 
     assert bot.messages
     text = bot.messages[0]
-    assert "❌ VK (событие) — требуется капча" in text
+    assert "⏸ VK — требуется капча; нажмите «Ввести код»" in text
+    assert text.count("VK") == 1
     markup = bot.markups[0]
     assert markup.inline_keyboard[0][0].callback_data == "captcha_input"
     main._vk_captcha_needed = False
