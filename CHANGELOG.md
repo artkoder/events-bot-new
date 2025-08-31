@@ -197,9 +197,6 @@
 
 - Event publication statuses now appear in one updating message with inline status icons.
 
+## v0.3.32 - Festival program links
 
-
-
-
-
-
+- Festival records support a `program_url`. Telegraph festival pages now include a "ПРОГРАММА" section with program and site links when provided, and the admin menu allows editing the program link.

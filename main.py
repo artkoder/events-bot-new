@@ -4301,6 +4301,8 @@ async def send_festivals_list(message: types.Message, db: Database, bot: Bot, ed
             parts.append(f.telegraph_url)
         if f.website_url:
             parts.append(f"site: {f.website_url}")
+        if f.program_url:
+            parts.append(f"program: {f.program_url}")
         if f.vk_url:
             parts.append(f"vk: {f.vk_url}")
         if f.tg_url:
@@ -8338,6 +8340,35 @@ async def build_festival_page_content(db: Database, fest: Festival) -> tuple[str
                 await session.commit()
 
     nodes: list[dict] = []
+    if fest.program_url:
+        nodes.append({"tag": "h2", "children": ["ПРОГРАММА"]})
+        links = [
+            {
+                "tag": "p",
+                "children": [
+                    {
+                        "tag": "a",
+                        "attrs": {"href": fest.program_url},
+                        "children": ["Смотреть программу"],
+                    }
+                ],
+            }
+        ]
+        if fest.website_url:
+            links.append(
+                {
+                    "tag": "p",
+                    "children": [
+                        {
+                            "tag": "a",
+                            "attrs": {"href": fest.website_url},
+                            "children": ["Сайт"],
+                        }
+                    ],
+                }
+            )
+        nodes.extend(links)
+        nodes.extend(telegraph_br())
     if fest.photo_url:
         nodes.append({"tag": "img", "attrs": {"src": fest.photo_url}})
         nodes.append({"tag": "p", "children": ["\u00a0"]})
@@ -8617,6 +8648,8 @@ async def build_festival_vk_message(db: Database, fest: Festival) -> str:
         lines.append(f"\U0001f4cd {loc_text}")
     if fest.ticket_url:
         lines.append(f"\U0001f39f {fest.ticket_url}")
+    if fest.program_url:
+        lines.append(f"программа: {fest.program_url}")
     if fest.description:
         lines.append(fest.description)
     if fest.website_url or fest.vk_url or fest.tg_url:
@@ -10242,6 +10275,7 @@ async def show_festival_edit_menu(user_id: int, fest: Festival, bot: Bot):
         f"start: {fest.start_date or ''}",
         f"end: {fest.end_date or ''}",
         f"site: {fest.website_url or ''}",
+        f"program: {fest.program_url or ''}",
         f"vk: {fest.vk_url or ''}",
         f"tg: {fest.tg_url or ''}",
         f"ticket: {fest.ticket_url or ''}",
@@ -10281,6 +10315,12 @@ async def show_festival_edit_menu(user_id: int, fest: Festival, bot: Bot):
             types.InlineKeyboardButton(
                 text=("Delete site" if fest.website_url else "Add site"),
                 callback_data=f"festeditfield:{fest.id}:site",
+            )
+        ],
+        [
+            types.InlineKeyboardButton(
+                text=("Delete program" if fest.program_url else "Add program"),
+                callback_data=f"festeditfield:{fest.id}:program",
             )
         ],
         [
@@ -11058,6 +11098,8 @@ async def handle_festival_edit_message(message: types.Message, db: Database, bot
                 fest.end_date = d.isoformat()
         elif field == "site":
             fest.website_url = None if text in {"", "-"} else text
+        elif field == "program":
+            fest.program_url = None if text in {"", "-"} else text
         elif field == "vk":
             fest.vk_url = None if text in {"", "-"} else text
         elif field == "tg":
