@@ -2110,6 +2110,48 @@ async def upcoming_festivals(
     return data
 
 
+async def all_festivals(db: Database) -> list[tuple[date | None, date | None, Festival]]:
+    """Return all festivals with their inferred date ranges."""
+    async with db.get_session() as session:
+        ev_dates = (
+            select(
+                Event.festival,
+                func.min(Event.date).label("start"),
+                func.max(func.coalesce(Event.end_date, Event.date)).label("end"),
+            )
+            .group_by(Event.festival)
+            .subquery()
+        )
+        stmt = (
+            select(
+                Festival.id,
+                Festival.name,
+                Festival.telegraph_path,
+                Festival.vk_post_url,
+                Festival.nav_hash,
+                func.coalesce(Festival.start_date, ev_dates.c.start).label("start"),
+                func.coalesce(Festival.end_date, ev_dates.c.end).label("end"),
+            )
+            .outerjoin(ev_dates, ev_dates.c.festival == Festival.name)
+            .order_by(func.coalesce(Festival.start_date, ev_dates.c.start))
+        )
+        rows = (await session.execute(stmt)).all()
+
+    data: list[tuple[date | None, date | None, Festival]] = []
+    for fid, name, path, vk_url, nav_hash, start_s, end_s in rows:
+        start = parse_iso_date(start_s) if start_s else None
+        end = parse_iso_date(end_s) if end_s else None
+        fest = Festival(
+            id=fid,
+            name=name,
+            telegraph_path=path,
+            vk_post_url=vk_url,
+            nav_hash=nav_hash,
+        )
+        data.append((start, end, fest))
+    return data
+
+
 async def _build_festival_nav_block(
     db: Database,
     *,
@@ -2207,7 +2249,8 @@ async def sync_festivals_index_page(db: Database) -> None:
         return
     tg = Telegraph(access_token=token)
 
-    nodes, _ = await _build_festival_nav_block(db)
+    items = await all_festivals(db)
+    nodes, _ = await _build_festival_nav_block(db, items=items)
     if nodes and nodes[0].get("tag") == "p":
         nodes = nodes[1:]
     if nodes and nodes[0].get("tag") == "h3":
@@ -6378,13 +6421,15 @@ async def update_all_festival_nav(event_id: int, db: Database, bot: Bot | None) 
 async def festivals_fix_nav(
     db: Database, bot: Bot | None = None
 ) -> tuple[int, int, int]:
-    items = await upcoming_festivals(db)
+    async with db.get_session() as session:
+        res = await session.execute(select(Festival))
+        fests = res.scalars().all()
     nav_hash = await get_setting_value(db, "fest_nav_hash")
     pages = 0
     changed = 0
     duplicates_removed = 0
     logging.info("fest_nav_force_rebuild", extra={"action": "start"})
-    for _, _, fest in items:
+    for fest in fests:
         pages += 1
         before = fest.nav_hash
         eid = -(fest.id * FEST_JOB_MULT)
