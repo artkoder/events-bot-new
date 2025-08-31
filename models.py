@@ -142,6 +142,7 @@ class Festival(SQLModel, table=True):
     vk_poll_url: Optional[str] = None
     photo_url: Optional[str] = None
     website_url: Optional[str] = None
+    program_url: Optional[str] = None
     vk_url: Optional[str] = None
     tg_url: Optional[str] = None
     ticket_url: Optional[str] = None

@@ -193,6 +193,7 @@ class Database:
                     vk_poll_url TEXT,
                     photo_url TEXT,
                     website_url TEXT,
+                    program_url TEXT,
                     vk_url TEXT,
                     tg_url TEXT,
                     ticket_url TEXT,
@@ -206,6 +207,7 @@ class Database:
             await _add_column(conn, "festival", "location_name TEXT")
             await _add_column(conn, "festival", "location_address TEXT")
             await _add_column(conn, "festival", "city TEXT")
+            await _add_column(conn, "festival", "program_url TEXT")
             await _add_column(conn, "festival", "ticket_url TEXT")
             await _add_column(conn, "festival", "nav_hash TEXT")
 
