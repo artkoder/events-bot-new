@@ -3141,10 +3141,26 @@ async def parse_event_via_4o(
     festival = None
     if isinstance(data, dict):
         festival = data.get("festival")
+        fest = None
+        if isinstance(festival, str):
+            fest = {"name": festival}
+        elif isinstance(festival, dict):
+            fest = festival.copy()
+        for k in (
+            "start_date",
+            "end_date",
+            "city",
+            "location_name",
+            "location_address",
+            "full_name",
+            "program_url",
+            "website_url",
+        ):
+            if k in data and fest is not None and fest.get(k) in (None, ""):
+                fest[k] = data[k]
+        parse_event_via_4o._festival = fest
         if "events" in data and isinstance(data["events"], list):
-            parse_event_via_4o._festival = festival
             return data["events"]
-        parse_event_via_4o._festival = festival
         return [data]
     if isinstance(data, list):
         parse_event_via_4o._festival = None
@@ -4800,6 +4816,8 @@ async def add_events_from_text(
         if DEBUG:
             mem_info("LLM after")
         festival_info = getattr(parse_event_via_4o, "_festival", None)
+        if isinstance(festival_info, str):
+            festival_info = {"name": festival_info}
         logging.info("LLM returned %d events", len(parsed))
     except Exception as e:
         logging.error("LLM error: %s", e)
@@ -4815,6 +4833,22 @@ async def add_events_from_text(
     catbox_urls, catbox_msg_global = await upload_images(images)
     links_iter = iter(extract_links_from_html(html_text) if html_text else [])
     source_text_clean = html_text or text
+    program_url: str | None = None
+    prog_links: list[str] = []
+    if html_text:
+        prog_links.extend(re.findall(r"href=['\"]([^'\"]+)['\"]", html_text))
+    if text:
+        prog_links.extend(re.findall(r"https?://\S+", text))
+    for url in prog_links:
+        if "telegra.ph" in url:
+            program_url = url
+            break
+    if not program_url:
+        for url in prog_links:
+            u = url.lower()
+            if any(x in u for x in ["program", "schedule", "расписан", "програм"]):
+                program_url = url
+                break
 
     festival_obj: Festival | None = None
     fest_created = False
@@ -4843,6 +4877,14 @@ async def add_events_from_text(
         festival_obj = fest_obj
         fest_created = created
         fest_updated = updated
+        if program_url and (not fest_obj.program_url or fest_obj.program_url != program_url):
+            async with db.get_session() as session:
+                fest_db = await session.get(Festival, fest_obj.id)
+                if fest_db and fest_db.program_url != program_url:
+                    fest_db.program_url = program_url
+                    await session.commit()
+                    fest_updated = True
+                    festival_obj = fest_db
         if created:
             await sync_festival_page(db, fest_obj.name)
             await sync_festival_vk_post(db, fest_obj.name, bot)
@@ -11228,20 +11270,29 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
     if link:
         logging.info("source post url %s", link)
     logging.info("parsing forwarded text via LLM")
-    results = await add_events_from_text(
-        db,
-        text,
-        link,
-        message.html_text or message.caption_html,
-        media,
-        source_chat_id=message.chat.id,
-        source_message_id=message.message_id,
-        creator_id=user.user_id,
-        source_channel=channel_name,
-
-        bot=None,
-
-    )
+    try:
+        results = await add_events_from_text(
+            db,
+            text,
+            link,
+            message.html_text or message.caption_html,
+            media,
+            source_chat_id=message.chat.id,
+            source_message_id=message.message_id,
+            creator_id=user.user_id,
+            source_channel=channel_name,
+            bot=None,
+        )
+    except Exception as e:
+        logging.exception("forward parse failed")
+        snippet = (text or "")[:200]
+        msg = f"Не удалось обработать сообщение: {type(e).__name__}: {e}"
+        if snippet:
+            msg += f"\n\n{snippet}"
+        if link:
+            msg += f"\n{link}"
+        await notify_superadmin(db, bot, msg)
+        return
     logging.info("forward parsed %d events", len(results))
     if not results:
         logging.info("no events parsed from forwarded text")

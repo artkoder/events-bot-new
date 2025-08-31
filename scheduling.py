@@ -364,6 +364,11 @@ def _job_wrapper(job_id: str, func):
 
 
 def _on_event(event):
+    if not hasattr(event, "job_id"):
+        logging.debug(
+            "scheduler event %s (no job_id), ignored", getattr(event, "code", None)
+        )
+        return
     job_id = event.job_id
     name_map = {
         EVENT_JOB_SUBMITTED: "JOB_SUBMITTED",
@@ -549,7 +554,10 @@ def startup(db, bot) -> AsyncIOScheduler:
             misfire_grace_time=30,
         )
 
-    _scheduler.add_listener(_on_event)
+    _scheduler.add_listener(
+        _on_event,
+        EVENT_JOB_SUBMITTED | EVENT_JOB_EXECUTED | EVENT_JOB_ERROR | EVENT_JOB_MISSED,
+    )
     _scheduler.start()
     return _scheduler
 
