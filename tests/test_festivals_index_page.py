@@ -16,7 +16,10 @@ async def test_sync_festivals_index_page_created(tmp_path: Path, monkeypatch, ca
     await db.init()
     today = date.today().isoformat()
     async with db.get_session() as session:
-        session.add(Festival(name="Fest", start_date=today, end_date=today))
+        session.add_all([
+            Festival(name="Fest", start_date=today, end_date=today),
+            Festival(name="NoDate", telegraph_path="nodate"),
+        ])
         await session.commit()
 
     stored = {}
@@ -54,6 +57,7 @@ async def test_sync_festivals_index_page_created(tmp_path: Path, monkeypatch, ca
     assert html.count(FEST_INDEX_INTRO_START) == 1
     assert html.count(FEST_INDEX_INTRO_END) == 1
     assert html.count("https://t.me/kenigevents") >= 2
+    assert "NoDate" in html
     url = await main.get_setting_value(db, "fest_index_url")
     path = await main.get_setting_value(db, "fest_index_path")
     assert url == "https://telegra.ph/fests"

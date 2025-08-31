@@ -230,7 +230,8 @@ async def test_festivals_fix_nav_force(tmp_path: Path, monkeypatch, caplog):
     async with db.get_session() as session:
         f1 = Festival(name="Fest1", start_date=today, end_date=today, nav_hash="abc")
         f2 = Festival(name="Fest2", start_date=today, end_date=today, nav_hash="def")
-        session.add_all([f1, f2])
+        f3 = Festival(name="Fest3", telegraph_path="f3", nav_hash="ghi")
+        session.add_all([f1, f2, f3])
         await session.commit()
     await main.set_setting_value(db, "fest_nav_hash", "abc")
     calls = {"tg": 0, "vk": 0}
@@ -249,11 +250,11 @@ async def test_festivals_fix_nav_force(tmp_path: Path, monkeypatch, caplog):
     with caplog.at_level(logging.INFO):
         pages, changed, dup = await main.festivals_fix_nav(db, None)
 
-    assert pages == 2
-    assert changed == 4
+    assert pages == 3
+    assert changed == 6
     assert dup == 1
-    assert calls["tg"] == 2
-    assert calls["vk"] == 2
+    assert calls["tg"] == 3
+    assert calls["vk"] == 3
     rec_start = next(
         r
         for r in caplog.records
@@ -264,7 +265,7 @@ async def test_festivals_fix_nav_force(tmp_path: Path, monkeypatch, caplog):
         for r in caplog.records
         if r.message == "fest_nav_force_rebuild" and getattr(r, "action", None) == "finish"
     )
-    assert rec_finish.pages == 2
+    assert rec_finish.pages == 3
     assert rec_finish.duplicates_removed == 1
 
 
