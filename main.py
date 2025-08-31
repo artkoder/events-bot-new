@@ -2386,26 +2386,40 @@ def apply_festival_nav(html_content: str, nav_html: str | Iterable[str]) -> tupl
     legacy_replaced = False
     if any(v in html_content for v in legacy_start_variants + legacy_end_variants):
         for v in legacy_start_variants:
-            html_content = html_content.replace(v, FEST_NAV_START)
+            if v in html_content:
+                legacy_replaced = True
+                html_content = html_content.replace(v, FEST_NAV_START)
         for v in legacy_end_variants:
-            html_content = html_content.replace(v, FEST_NAV_END)
-        legacy_replaced = True
+            if v in html_content:
+                legacy_replaced = True
+                html_content = html_content.replace(v, FEST_NAV_END)
 
-    start = html_content.find(FEST_NAV_START)
-    end = html_content.find(FEST_NAV_END, start + len(FEST_NAV_START)) if start != -1 else -1
-    if start != -1 and end != -1:
-        current = html_content[start + len(FEST_NAV_START) : end]
+    block_pattern = re.compile(
+        re.escape(FEST_NAV_START) + r"(.*?)" + re.escape(FEST_NAV_END), re.DOTALL
+    )
+    blocks = block_pattern.findall(html_content)
+
+    heading_pattern = re.compile(
+        r"<h3>Ближайшие фестивали</h3>(?:<h4>.*?</h4>)?", re.DOTALL
+    )
+    headings = heading_pattern.findall(html_content)
+
+    if len(blocks) == 1 and not headings:
+        current = blocks[0]
         if content_hash(current) == content_hash(nav_block):
             if legacy_replaced:
+                html_content = block_pattern.sub(nav_block, html_content, count=1)
                 html_content = apply_footer_link(html_content)
                 return html_content, True
+            html_content = apply_footer_link(html_content)
             return html_content, False
-    else:
-        heading = "<h3>Ближайшие фестивали</h3>"
-        if heading in html_content:
-            html_content = html_content.split(heading, 1)[0]
 
-    html_content = replace_between_markers(html_content, FEST_NAV_START, FEST_NAV_END, nav_block)
+    html_content = block_pattern.sub("", html_content)
+    html_content = heading_pattern.sub("", html_content)
+
+    html_content = replace_between_markers(
+        html_content, FEST_NAV_START, FEST_NAV_END, nav_block
+    )
     html_content = apply_footer_link(html_content)
     return html_content, True
 
@@ -6368,7 +6382,7 @@ async def festivals_fix_nav(
     nav_hash = await get_setting_value(db, "fest_nav_hash")
     pages = 0
     changed = 0
-    duplicates = 0
+    duplicates_removed = 0
     logging.info("fest_nav_force_rebuild", extra={"action": "start"})
     for _, _, fest in items:
         pages += 1
@@ -6378,7 +6392,7 @@ async def festivals_fix_nav(
             if await update_festival_tg_nav(eid, db, bot):
                 changed += 1
                 if nav_hash and before == nav_hash:
-                    duplicates += 1
+                    duplicates_removed += 1
         except Exception:
             pass
         try:
@@ -6392,10 +6406,13 @@ async def festivals_fix_nav(
             "action": "finish",
             "pages": pages,
             "changed": changed,
-            "duplicates_fixed": duplicates,
+            "duplicates_removed": duplicates_removed,
         },
     )
-    return pages, changed, duplicates
+    return pages, changed, duplicates_removed
+
+
+festivals_nav_dedup = festivals_fix_nav
 
 
 JOB_HANDLERS = {
@@ -10565,10 +10582,10 @@ async def handle_festivals_fix_nav(
         if not user or not user.is_superadmin:
             await bot.send_message(message.chat.id, "Not authorized")
             return
-    pages, changed, duplicates = await festivals_fix_nav(db, bot)
+    pages, changed, duplicates_removed = await festivals_fix_nav(db, bot)
     await bot.send_message(
         message.chat.id,
-        f"Processed {pages}, changed {changed}, duplicates_fixed {duplicates}",
+        f"Processed {pages}, changed {changed}, duplicates_removed {duplicates_removed}",
     )
 
 
@@ -11791,6 +11808,7 @@ def create_app() -> web.Application:
     dp.message.register(debug_wrapper, Command("debug"))
     dp.message.register(mem_wrapper, Command("mem"))
     dp.message.register(festivals_fix_nav_wrapper, Command("festivals_fix_nav"))
+    dp.message.register(festivals_fix_nav_wrapper, Command("festivals_nav_dedup"))
     dp.message.register(users_wrapper, Command("users"))
     dp.message.register(dumpdb_wrapper, Command("dumpdb"))
     dp.message.register(restore_wrapper, Command("restore"))

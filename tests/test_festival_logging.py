@@ -265,7 +265,7 @@ async def test_festivals_fix_nav_force(tmp_path: Path, monkeypatch, caplog):
         if r.message == "fest_nav_force_rebuild" and getattr(r, "action", None) == "finish"
     )
     assert rec_finish.pages == 2
-    assert rec_finish.duplicates_fixed == 1
+    assert rec_finish.duplicates_removed == 1
 
 
 @pytest.mark.asyncio

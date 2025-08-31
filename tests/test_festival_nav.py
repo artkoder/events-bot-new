@@ -64,6 +64,27 @@ def test_apply_festival_nav_rewrites_uppercase_markers():
     assert '<!--FEST_NAV_END-->' not in updated
 
 
+def test_apply_festival_nav_deduplicates_multiple_blocks():
+    html = (
+        f"<p>start</p>{FEST_NAV_START}<p>old</p>{FEST_NAV_END}"
+        f"<p>mid</p>{FEST_NAV_START}<p>old2</p>{FEST_NAV_END}"
+    )
+    updated, changed = main.apply_festival_nav(html, NAV_HTML)
+    assert changed is True
+    assert updated.count(FEST_NAV_START) == 1
+    assert '<p>old</p>' not in updated
+    assert '<p>old2</p>' not in updated
+
+
+def test_apply_festival_nav_removes_heading_with_subheading():
+    html = '<p>start</p><h3>Ближайшие фестивали</h3><h4>old</h4><p>end</p>'
+    updated, changed = main.apply_festival_nav(html, NAV_HTML)
+    assert changed is True
+    assert '<h3>Ближайшие фестивали</h3>' not in updated
+    assert '<h4>old</h4>' not in updated
+    assert updated.count(FEST_NAV_START) == 1
+
+
 def test_apply_footer_link_idempotent():
     html = '<p>start</p>'
     first = main.apply_footer_link(html)
