@@ -168,6 +168,7 @@ class JobStatus(str, Enum):
     running = "running"
     done = "done"
     error = "error"
+    paused = "paused"
 
 
 class JobOutbox(SQLModel, table=True):
