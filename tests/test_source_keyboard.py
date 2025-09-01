@@ -23,6 +23,14 @@ class DummyBot(Bot):
         self.sent.append((chat_id, text, reply_markup))
         return SimpleNamespace(message_id=99, chat=SimpleNamespace(id=chat_id))
 
+    async def get_me(self):
+        from types import SimpleNamespace
+        return SimpleNamespace(id=42)
+
+    async def get_chat_member(self, chat_id, user_id):
+        from types import SimpleNamespace
+        return SimpleNamespace(can_edit_messages=True, status="administrator")
+
 
 @pytest.mark.asyncio
 async def test_update_keyboard_with_ics(tmp_path, monkeypatch):
@@ -179,6 +187,7 @@ async def test_update_keyboard_fallback_service_message(tmp_path, monkeypatch):
                 ics_post_url="https://t.me/c/asset/1",
                 source_chat_id=-100,
                 source_message_id=10,
+                creator_id=1,
             ),
         ])
         await session.commit()
@@ -187,9 +196,104 @@ async def test_update_keyboard_fallback_service_message(tmp_path, monkeypatch):
 
     assert bot.sent
     chat_id, text, markup = bot.sent[0]
-    assert chat_id == -100
+    assert chat_id == 1
+    assert text == "Добавить в календарь/Навигация по месяцам"
+    assert markup.inline_keyboard[0][0].url == "https://t.me/c/asset/1"
+    async with db.get_session() as session:
+        ev = await session.get(Event, 1)
+        assert ev.source_message_id == 10
+
+
+@pytest.mark.asyncio
+async def test_update_keyboard_fallback_private_chat(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    class FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2025, 7, 2, tzinfo=tz)
+
+    monkeypatch.setattr(main, "datetime", FakeDatetime)
+
+    async def failing_edit(*a, **k):
+        raise TelegramBadRequest(
+            method="editMessageReplyMarkup", message="message can't be edited"
+        )
+
+    bot.edit_message_reply_markup = failing_edit  # type: ignore
+
+    async with db.get_session() as session:
+        session.add_all([
+            MonthPage(month="2025-07", url="https://t.me/c/m1", path="p1"),
+            Event(
+                id=1,
+                title="A",
+                description="d",
+                source_text="s",
+                date="2025-07-18",
+                time="19:00",
+                location_name="Hall",
+                city="Town",
+                ics_post_url="https://t.me/c/asset/1",
+                source_chat_id=1,
+                source_message_id=10,
+            ),
+        ])
+        await session.commit()
+
+    await update_source_post_keyboard(1, db, bot)
+
+    assert bot.sent
+    chat_id, text, markup = bot.sent[0]
+    assert chat_id == 1
     assert text == "Добавить в календарь/Навигация по месяцам"
     assert markup.inline_keyboard[0][0].url == "https://t.me/c/asset/1"
     async with db.get_session() as session:
         ev = await session.get(Event, 1)
         assert ev.source_message_id == 99
+
+
+@pytest.mark.asyncio
+async def test_update_keyboard_restores_chat_id_from_url(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    class FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2025, 7, 2, tzinfo=tz)
+
+    monkeypatch.setattr(main, "datetime", FakeDatetime)
+
+    async with db.get_session() as session:
+        session.add_all([
+            MonthPage(month="2025-07", url="https://t.me/c/m1", path="p1"),
+            Event(
+                id=1,
+                title="A",
+                description="d",
+                source_text="s",
+                date="2025-07-18",
+                time="19:00",
+                location_name="Hall",
+                city="Town",
+                ics_post_url="https://t.me/c/asset/1",
+                source_chat_id=1,
+                source_message_id=10,
+                source_post_url="https://t.me/c/123/10",
+            ),
+        ])
+        await session.commit()
+
+    await update_source_post_keyboard(1, db, bot)
+
+    assert bot.edits
+    chat_id, msg_id, _ = bot.edits[0]
+    assert chat_id == -100123
+    assert msg_id == 10
+    async with db.get_session() as session:
+        ev = await session.get(Event, 1)
+        assert ev.source_chat_id == -100123
