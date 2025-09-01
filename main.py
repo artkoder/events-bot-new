@@ -2510,6 +2510,36 @@ async def build_month_nav_html(db: Database) -> str:
         return ""
     return "<br/><h4>" + "".join(links) + "</h4>"
 
+
+async def build_month_nav_block(db: Database) -> str:
+    """Return the Telegraph-ready month navigation block."""
+    nav_html = await build_month_nav_html(db)
+    if not nav_html:
+        return ""
+    if nav_html.startswith("<br/>"):
+        nav_html = nav_html[5:]
+    return f"<p>\u200B</p>{nav_html}<p>\u200B</p>"
+
+
+async def refresh_month_nav(db: Database) -> None:
+    today = datetime.now(LOCAL_TZ).date()
+    start_nav = today.replace(day=1)
+    end_nav = date(today.year + 1, 4, 1)
+    async with db.get_session() as session:
+        res_nav = await session.execute(
+            select(func.substr(Event.date, 1, 7))
+            .where(
+                Event.date >= start_nav.isoformat(),
+                Event.date < end_nav.isoformat(),
+            )
+            .group_by(func.substr(Event.date, 1, 7))
+            .order_by(func.substr(Event.date, 1, 7))
+        )
+        months = [r[0] for r in res_nav]
+    for m in months:
+        await sync_month_page(db, m, update_links=True, force=True)
+        await asyncio.sleep(0)
+
 async def build_month_buttons(
     db: Database, limit: int = 3, debug: bool = False
 ) -> list[types.InlineKeyboardButton] | tuple[
@@ -3014,6 +3044,12 @@ async def ics_publish(event_id: int, db: Database, bot: Bot, progress=None) -> b
                             "done",
                             message_link(msg.chat.id, msg.message_id),
                         )
+                except OSError:
+                    errors.append("temporary network error")
+                    if progress:
+                        progress.mark(
+                            "ics_telegram", "warn_net", "временная ошибка сети, будет повтор"
+                        )
                 except Exception as te:
                     errors.append(str(te))
                     if progress:
@@ -3044,6 +3080,12 @@ async def ics_publish(event_id: int, db: Database, bot: Bot, progress=None) -> b
                             )
                         if progress:
                             progress.mark("ics_supabase", "done", supabase_url)
+                except OSError:
+                    errors.append("temporary network error")
+                    if progress:
+                        progress.mark(
+                            "ics_supabase", "warn_net", "временная ошибка сети, будет повтор"
+                        )
                 except Exception as se:  # pragma: no cover - network failure
                     errors.append(str(se))
                     if progress:
@@ -3086,8 +3128,14 @@ async def ics_publish(event_id: int, db: Database, bot: Bot, progress=None) -> b
                     if progress:
                         progress.mark(
                             "ics_telegram",
-                        "done",
-                        message_link(msg.chat.id, msg.message_id),
+                            "done",
+                            message_link(msg.chat.id, msg.message_id),
+                        )
+            except OSError:
+                errors.append("temporary network error")
+                if progress:
+                    progress.mark(
+                        "ics_telegram", "warn_net", "временная ошибка сети, будет повтор"
                     )
             except Exception as te:  # pragma: no cover - network failure
                 errors.append(str(te))
@@ -3120,6 +3168,8 @@ async def ics_publish(event_id: int, db: Database, bot: Bot, progress=None) -> b
             )
 
         if errors:
+            if all(err == "temporary network error" for err in errors):
+                raise RuntimeError("temporary network error")
             raise RuntimeError("; ".join(errors))
         return changed
 
@@ -5827,14 +5877,20 @@ async def run_event_update_jobs(
         text = None
         if status == JobStatus.done:
             if changed:
-                text = f"{label}: OK"
+                if task == JobTask.month_pages and not link:
+                    text = f"{label}: создано/обновлено"
+                else:
+                    text = f"{label}: OK"
                 if link:
                     text += f" — {link}"
             else:
                 text = f"{label}: без изменений"
         elif status == JobStatus.error:
             err_short = err.splitlines()[0] if err else ""
-            text = f"{label}: ERROR: {err_short}"
+            if task == JobTask.ics_publish and "temporary network error" in err_short.lower():
+                text = f"{label}: временная ошибка сети, будет повтор"
+            else:
+                text = f"{label}: ERROR: {err_short}"
         if notify_chat_id is not None and text:
             await bot.send_message(notify_chat_id, text)
 
@@ -6030,7 +6086,7 @@ async def patch_month_page_for_date(db: Database, telegraph: Telegraph, month_ke
         logging.warning(
             "month_patch page_key=%s day=%s markers_missing", page_key, d.isoformat()
         )
-        await sync_month_page(db, month_key)
+        await sync_month_page(db, month_key, force=True)
         await set_section_hash(db, page_key, section_key, new_hash)
         dur = (_time.perf_counter() - start) * 1000
         logging.info(
@@ -6053,7 +6109,7 @@ async def patch_month_page_for_date(db: Database, telegraph: Telegraph, month_ke
                 page_key,
                 d.isoformat(),
             )
-            await sync_month_page(db, month_key)
+            await sync_month_page(db, month_key, force=True)
         else:
             raise
     await set_section_hash(db, page_key, section_key, new_hash)
@@ -6318,6 +6374,9 @@ async def publish_event_progress(event: Event, db: Database, bot: Bot, chat_id: 
         if status == "skipped_disabled":
             icon = "⏸"
             suffix = " — отключено"
+        elif status.startswith("warn"):
+            icon = "⚠️"
+            suffix = f" — {detail}" if detail else ""
         else:
             icon = "✅" if status.startswith("done") or status.startswith("skipped") else "❌"
             suffix = f" — {detail}" if detail else ""
@@ -6357,13 +6416,18 @@ async def publish_event_progress(event: Event, db: Database, bot: Bot, chat_id: 
             elif not changed:
                 suffix = " — без изменений"
             else:
-                suffix = ""
+                suffix = (
+                    " — создано/обновлено" if task == JobTask.month_pages else ""
+                )
         elif status == JobStatus.paused:
             icon = "⏸"
             suffix = " — требуется капча; нажмите «Ввести код»"
         elif err and "disabled" in err.lower():
             icon = "⏸"
             suffix = f" — {err}" if err else " — отключено"
+        elif err and "temporary network error" in err.lower():
+            icon = "⚠️"
+            suffix = " — временная ошибка сети, будет повтор"
         else:
             icon = "❌"
             if err:
@@ -7644,15 +7708,24 @@ def _build_month_page_content_sync(
     return title, content, size
 
 
-async def _sync_month_page_inner(db: Database, month: str, update_links: bool = False):
+async def _sync_month_page_inner(
+    db: Database, month: str, update_links: bool = False, force: bool = False
+):
     async with HEAVY_SEMAPHORE:
         now = _time.time()
-        if "PYTEST_CURRENT_TEST" not in os.environ and now < _month_next_run[month]:
+        if (
+            "PYTEST_CURRENT_TEST" not in os.environ
+            and not force
+            and now < _month_next_run[month]
+        ):
             logging.debug("sync_month_page skipped, debounced")
             return
         _month_next_run[month] = now + 60
         logging.info(
-            "sync_month_page start: month=%s update_links=%s", month, update_links
+            "sync_month_page start: month=%s update_links=%s force=%s",
+            month,
+            update_links,
+            force,
         )
         if DEBUG:
             mem_info("month page before")
@@ -7670,98 +7743,121 @@ async def _sync_month_page_inner(db: Database, month: str, update_links: bool = 
                 await session.commit()
                 created = True
 
-            events, exhibitions, nav_pages = await get_month_data(db, month)
+        async def commit_page() -> None:
+            async with db.get_session() as s:
+                db_page = await s.get(MonthPage, month)
+                db_page.url = page.url
+                db_page.path = page.path
+                db_page.url2 = page.url2
+                db_page.path2 = page.path2
+                db_page.content_hash = page.content_hash
+                db_page.content_hash2 = page.content_hash2
+                await s.commit()
 
-            async def commit_page() -> None:
-                async with db.get_session() as s:
-                    db_page = await s.get(MonthPage, month)
-                    db_page.url = page.url
-                    db_page.path = page.path
-                    db_page.url2 = page.url2
-                    db_page.path2 = page.path2
-                    db_page.content_hash = page.content_hash
-                    db_page.content_hash2 = page.content_hash2
-                    await s.commit()
-            from telegraph.utils import nodes_to_html
-
-            def split_events(total_size: int) -> tuple[list[Event], list[Event]]:
-                avg = total_size / len(events) if events else total_size
-                split_idx = max(1, int(TELEGRAPH_LIMIT // avg)) if events else 0
-                return events[:split_idx], events[split_idx:]
-
-            async def update_split(first: list[Event], second: list[Event]) -> None:
-                nonlocal created
-                title2, content2, _ = await build_month_page_content(
-                    db, month, second, exhibitions, nav_pages
+        if update_links:
+            nav_block = await build_month_nav_block(db)
+            for path_attr, hash_attr in (("path", "content_hash"), ("path2", "content_hash2")):
+                path = getattr(page, path_attr)
+                if not path:
+                    continue
+                page_data = await telegraph_call(tg.get_page, path, return_html=True)
+                html_content = page_data.get("content") or page_data.get("content_html") or ""
+                html_content = unescape_html_comments(html_content)
+                updated_html = replace_between_markers(
+                    html_content, NAV_MONTHS_START, NAV_MONTHS_END, nav_block
                 )
-                html2 = unescape_html_comments(nodes_to_html(content2))
-                hash2 = content_hash(html2)
-                if page.path2 and page.content_hash2 == hash2:
-                    logging.debug("telegraph_update skipped (no changes)")
-                else:
-                    rough2 = rough_size(content2)
-                    if not page.path2:
-                        logging.info("creating second page for %s", month)
-                        data2 = await telegraph_call(
-                            tg.create_page, title=title2, html_content=html2
-                        )
-                        page.url2 = normalize_telegraph_url(data2.get("url"))
-                        page.path2 = data2.get("path")
-                    else:
-                        logging.info("updating second page for %s", month)
-                        start = _time.perf_counter()
-                        await telegraph_call(
-                            tg.edit_page, page.path2, title=title2, html_content=html2
-                        )
-                        dur = (_time.perf_counter() - start) * 1000
-                        logging.info("editPage %s done in %.0f ms", page.path2, dur)
-                    logging.debug(
-                        "telegraph_update page=%s nodes=%d bytes≈%d",
-                        page.path2,
-                        len(content2),
-                        rough2,
-                    )
-                    page.content_hash2 = hash2
-                    await asyncio.sleep(0)
-
-                title1, content1, _ = await build_month_page_content(
-                    db,
-                    month,
-                    first,
-                    [],
-                    nav_pages,
-                    continuation_url=page.url2,
+                if content_hash(updated_html) == content_hash(html_content):
+                    continue
+                title = page_data.get("title") or month_name_prepositional(month)
+                await telegraph_call(
+                    tg.edit_page, path, title=title, html_content=updated_html
                 )
-                html1 = unescape_html_comments(nodes_to_html(content1))
-                hash1 = content_hash(html1)
-                if page.path and page.content_hash == hash1:
-                    logging.debug("telegraph_update skipped (no changes)")
-                else:
-                    rough1 = rough_size(content1)
-                    if not page.path:
-                        logging.info("creating first page for %s", month)
-                        data1 = await telegraph_call(
-                            tg.create_page, title=title1, html_content=html1
-                        )
-                        page.url = normalize_telegraph_url(data1.get("url"))
-                        page.path = data1.get("path")
-                        created = True
-                    else:
-                        logging.info("updating first page for %s", month)
-                        start = _time.perf_counter()
-                        await telegraph_call(
-                            tg.edit_page, page.path, title=title1, html_content=html1
-                        )
-                        dur = (_time.perf_counter() - start) * 1000
-                        logging.info("editPage %s done in %.0f ms", page.path, dur)
-                    logging.debug(
-                        "telegraph_update page=%s nodes=%d bytes≈%d",
-                        page.path,
-                        len(content1),
-                        rough1,
+                setattr(page, hash_attr, content_hash(updated_html))
+            await commit_page()
+            return
+
+        events, exhibitions, nav_pages = await get_month_data(db, month)
+
+        from telegraph.utils import nodes_to_html
+
+        def split_events(total_size: int) -> tuple[list[Event], list[Event]]:
+            avg = total_size / len(events) if events else total_size
+            split_idx = max(1, int(TELEGRAPH_LIMIT // avg)) if events else 0
+            return events[:split_idx], events[split_idx:]
+
+        async def update_split(first: list[Event], second: list[Event]) -> None:
+            nonlocal created
+            title2, content2, _ = await build_month_page_content(
+                db, month, second, exhibitions, nav_pages
+            )
+            html2 = unescape_html_comments(nodes_to_html(content2))
+            hash2 = content_hash(html2)
+            if page.path2 and page.content_hash2 == hash2:
+                logging.debug("telegraph_update skipped (no changes)")
+            else:
+                rough2 = rough_size(content2)
+                if not page.path2:
+                    logging.info("creating second page for %s", month)
+                    data2 = await telegraph_call(
+                        tg.create_page, title=title2, html_content=html2
                     )
-                    page.content_hash = hash1
-                    await asyncio.sleep(0)
+                    page.url2 = normalize_telegraph_url(data2.get("url"))
+                    page.path2 = data2.get("path")
+                else:
+                    logging.info("updating second page for %s", month)
+                    start = _time.perf_counter()
+                    await telegraph_call(
+                        tg.edit_page, page.path2, title=title2, html_content=html2
+                    )
+                    dur = (_time.perf_counter() - start) * 1000
+                    logging.info("editPage %s done in %.0f ms", page.path2, dur)
+                logging.debug(
+                    "telegraph_update page=%s nodes=%d bytes≈%d",
+                    page.path2,
+                    len(content2),
+                    rough2,
+                )
+                page.content_hash2 = hash2
+                await asyncio.sleep(0)
+
+            title1, content1, _ = await build_month_page_content(
+                db,
+                month,
+                first,
+                [],
+                nav_pages,
+                continuation_url=page.url2,
+            )
+            html1 = unescape_html_comments(nodes_to_html(content1))
+            hash1 = content_hash(html1)
+            if page.path and page.content_hash == hash1:
+                logging.debug("telegraph_update skipped (no changes)")
+            else:
+                rough1 = rough_size(content1)
+                if not page.path:
+                    logging.info("creating first page for %s", month)
+                    data1 = await telegraph_call(
+                        tg.create_page, title=title1, html_content=html1
+                    )
+                    page.url = normalize_telegraph_url(data1.get("url"))
+                    page.path = data1.get("path")
+                    created = True
+                else:
+                    logging.info("updating first page for %s", month)
+                    start = _time.perf_counter()
+                    await telegraph_call(
+                        tg.edit_page, page.path, title=title1, html_content=html1
+                    )
+                    dur = (_time.perf_counter() - start) * 1000
+                    logging.info("editPage %s done in %.0f ms", page.path, dur)
+                logging.debug(
+                    "telegraph_update page=%s nodes=%d bytes≈%d",
+                    page.path,
+                    len(content1),
+                    rough1,
+                )
+                page.content_hash = hash1
+                await asyncio.sleep(0)
 
                 logging.info(
                     "%s month page %s split into two",
@@ -7849,11 +7945,15 @@ async def _sync_month_page_inner(db: Database, month: str, update_links: bool = 
             await check_month_page_markers(tg, page.path2)
         if DEBUG:
             mem_info("month page after")
+        if not update_links:
+            await refresh_month_nav(db)
 
 
-async def sync_month_page(db: Database, month: str, update_links: bool = False):
+async def sync_month_page(
+    db: Database, month: str, update_links: bool = False, force: bool = False
+):
     async with _page_locks[f"month:{month}"]:
-        await _sync_month_page_inner(db, month, update_links)
+        await _sync_month_page_inner(db, month, update_links, force)
 
 
 def week_start_for_date(d: date) -> date:
