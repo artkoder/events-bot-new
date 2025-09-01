@@ -159,6 +159,8 @@ DEBUG = os.getenv("EVBOT_DEBUG") == "1"
 
 
 _page_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+# public alias for external modules/handlers
+page_lock = _page_locks
 _month_next_run: dict[str, float] = defaultdict(float)
 _week_next_run: dict[str, float] = defaultdict(float)
 _weekend_next_run: dict[str, float] = defaultdict(float)
@@ -2306,6 +2308,127 @@ async def sync_festivals_index_page(db: Database) -> None:
         await set_setting_value(db, "fest_index_url", url)
 
 
+async def rebuild_festivals_index_if_needed(
+    db: Database, telegraph: Telegraph | None = None, force: bool = False
+) -> tuple[str, str]:
+    """Rebuild the aggregated festivals landing page if content changed.
+
+    Returns a tuple ``(status, url)`` where ``status`` is one of
+    ``"built"``, ``"updated"`` or ``"nochange"``. The landing page lists all
+    upcoming festivals grouped by month. The resulting HTML is hashed and the
+    hash is compared with the previously stored one to avoid unnecessary
+    Telegraph updates.
+    """
+
+    start_t = _time.perf_counter()
+    items = await upcoming_festivals(db)
+    nodes, _ = await _build_festival_nav_block(db, items=items)
+    if nodes and nodes[0].get("tag") == "p":
+        nodes = nodes[1:]
+    if nodes and nodes[0].get("tag") == "h3":
+        nodes[0]["tag"] = "h2"
+    from telegraph.utils import nodes_to_html
+
+    intro_html = (
+        f"{FEST_INDEX_INTRO_START}<p><small><i>Вот какие фестивали нашёл для вас канал "
+        f'<a href="https://t.me/kenigevents">Полюбить Калининград Анонсы</a>.'
+        f"</i></small></p>{FEST_INDEX_INTRO_END}"
+    )
+    nav_html = nodes_to_html(nodes) if nodes else "<p>Пока нет ближайших фестивалей</p>"
+    html = "<h1>Все фестивали региона</h1>" + intro_html + nav_html + FOOTER_LINK_HTML
+    new_hash = hashlib.sha256(html.encode("utf-8")).hexdigest()
+    old_hash = await get_setting_value(db, "festivals_index_hash")
+    url = await get_setting_value(db, "festivals_index_url") or await get_setting_value(
+        db, "fest_index_url"
+    )
+    path = await get_setting_value(db, "festivals_index_path") or await get_setting_value(
+        db, "fest_index_path"
+    )
+
+    if not force and old_hash == new_hash and url:
+        dur = (_time.perf_counter() - start_t) * 1000
+        logging.info(
+            "festivals_index",
+            extra={
+                "action": "nochange",
+                "old_hash": (old_hash or "")[:6],
+                "new_hash": new_hash[:6],
+                "count": len(items),
+                "size": len(html),
+                "took_ms": dur,
+            },
+        )
+        return "nochange", url
+
+    token = get_telegraph_token()
+    if telegraph is None:
+        if not token:
+            logging.error(
+                "Telegraph token unavailable",
+                extra={"action": "error", "target": "tg"},
+            )
+            dur = (_time.perf_counter() - start_t) * 1000
+            logging.info(
+                "festivals_index",
+                extra={
+                    "action": "nochange",
+                    "old_hash": (old_hash or "")[:6],
+                    "new_hash": new_hash[:6],
+                    "count": len(items),
+                    "size": len(html),
+                    "took_ms": dur,
+                },
+            )
+            return "nochange", url or ""
+        telegraph = Telegraph(access_token=token)
+
+    title = "Все фестивали региона"
+    try:
+        if path:
+            await telegraph_call(
+                telegraph.edit_page, path, title=title, html_content=html
+            )
+            status = "updated"
+            if not url:
+                url = f"https://telegra.ph/{path}"
+        else:
+            data = await telegraph_create_page(
+                telegraph, title=title, html_content=html
+            )
+            url = normalize_telegraph_url(data.get("url"))
+            path = data.get("path")
+            status = "built"
+    except Exception as e:
+        logging.error(
+            "Failed to rebuild festivals index page: %s",
+            e,
+            extra={"action": "error", "target": "tg", "path": path},
+        )
+        raise
+
+    await set_setting_value(db, "festivals_index_url", url)
+    await set_setting_value(db, "fest_index_url", url)
+    if path:
+        await set_setting_value(db, "festivals_index_path", path)
+        await set_setting_value(db, "fest_index_path", path)
+    await set_setting_value(db, "festivals_index_hash", new_hash)
+    await set_setting_value(db, "festivals_index_built_at", datetime.utcnow().isoformat())
+
+    dur = (_time.perf_counter() - start_t) * 1000
+    logging.info(
+        "festivals_index",
+        extra={
+            "action": status,
+            "old_hash": (old_hash or "")[:6],
+            "new_hash": new_hash[:6],
+            "count": len(items),
+            "size": len(html),
+            "took_ms": dur,
+        },
+    )
+    return status, url
+
+
 async def rebuild_fest_nav_if_changed(db: Database) -> bool:
     """Rebuild festival navigation and enqueue update jobs if changed.
 
@@ -2315,7 +2438,7 @@ async def rebuild_fest_nav_if_changed(db: Database) -> bool:
     _, _, changed = await build_festivals_nav_block(db)
     if not changed:
         return False
-    await sync_festivals_index_page(db)
+    await rebuild_festivals_index_if_needed(db)
     nav_hash = await get_setting_value(db, "fest_nav_hash") or "0"
     suffix = int(nav_hash[:4], 16)
     eid = -suffix
@@ -6648,6 +6771,7 @@ async def festivals_fix_nav(
 
 
 festivals_nav_dedup = festivals_fix_nav
+rebuild_festival_pages_nav = festivals_fix_nav
 
 
 JOB_HANDLERS = {
@@ -10895,11 +11019,13 @@ async def handle_festivals_fix_nav(
         if not user or not user.is_superadmin:
             await bot.send_message(message.chat.id, "Not authorized")
             return
-    pages, changed, duplicates_removed = await festivals_fix_nav(db, bot)
-    await bot.send_message(
-        message.chat.id,
-        f"Processed {pages}, changed {changed}, duplicates_removed {duplicates_removed}",
-    )
+    async with page_lock["festivals-index"]:
+        await message.answer("Пересобираю навигацию и лендинг…")
+        status, url = await rebuild_festivals_index_if_needed(db)
+        pages, changed, duplicates_removed = await rebuild_festival_pages_nav(db, bot)
+        await message.answer(
+            f"Готово. pages:{pages}, changed:{changed}, duplicates_removed:{duplicates_removed}\nЛендинг: {url}"
+        )
 
 
 async def handle_trace(message: types.Message, db: Database, bot: Bot):
