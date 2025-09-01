@@ -53,7 +53,7 @@ async def test_sync_festivals_index_page_created(tmp_path: Path, monkeypatch, ca
 
     html = stored["html"]
     assert "<h3>Все фестивали Калининградской области</h3>" in html
-    assert "<h2>Ближайшие фестивали</h2>" in html
+    assert "<h3>Ближайшие фестивали</h3>" in html
     assert html.count(FEST_INDEX_INTRO_START) == 1
     assert html.count(FEST_INDEX_INTRO_END) == 1
     assert html.count("https://t.me/kenigevents") >= 2
@@ -143,3 +143,53 @@ async def test_month_page_has_festivals_link(tmp_path: Path, monkeypatch):
     _, content, _ = await main.build_month_page_content(db, "2025-07")
     html = nodes_to_html(content)
     assert '<a href="https://telegra.ph/fests">🎪 Все фестивали Калининградской области</a>' in html
+
+
+def test_sanitize_telegraph_html_rewrites_and_checks():
+    html = "<h1>X</h1><h5>Y</h5><p>Z</p>"
+    assert main.sanitize_telegraph_html(html) == "<h3>X</h3><h3>Y</h3><p>Z</p>"
+    with pytest.raises(ValueError):
+        main.sanitize_telegraph_html("<p>ok</p><script>bad</script>")
+
+
+@pytest.mark.asyncio
+async def test_rebuild_festivals_index_force_updates(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    today = date.today().isoformat()
+    async with db.get_session() as session:
+        session.add(Festival(name="Fest", start_date=today, end_date=today))
+        await session.commit()
+
+    calls = {"edited": 0}
+
+    class DummyTelegraph:
+        def __init__(self, *a, **k):
+            pass
+
+        def edit_page(self, path, title, html_content):
+            calls["edited"] += 1
+            return {}
+
+        def create_page(self, title, html_content):
+            return {"url": "https://telegra.ph/fests", "path": "fests"}
+
+    async def fake_call(func, *a, **k):
+        return func(*a, **k)
+
+    async def fake_create_page(tg, *a, **k):
+        return tg.create_page(*a, **k)
+
+    monkeypatch.setattr(main, "Telegraph", DummyTelegraph)
+    monkeypatch.setattr(main, "telegraph_call", fake_call)
+    monkeypatch.setattr(main, "telegraph_create_page", fake_create_page)
+    monkeypatch.setattr(main, "get_telegraph_token", lambda: "token")
+
+    await main.rebuild_festivals_index_if_needed(db)
+    status, _ = await main.rebuild_festivals_index_if_needed(db)
+    assert status == "nochange"
+    assert calls["edited"] == 0
+
+    status, _ = await main.rebuild_festivals_index_if_needed(db, force=True)
+    assert status == "updated"
+    assert calls["edited"] == 1

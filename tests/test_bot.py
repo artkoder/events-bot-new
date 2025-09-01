@@ -1948,10 +1948,14 @@ async def test_forward_add_festival(tmp_path: Path, monkeypatch):
             fest.vk_post_url = "https://vk.com/wall-1_1"
             await session.commit()
 
+    async def fake_rebuild(db_obj, telegraph=None, force: bool = False):
+        return "built", ""
+
     monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
     monkeypatch.setattr("main.create_source_page", fake_create)
     monkeypatch.setattr(main, "sync_festival_page", fake_sync_festival_page)
     monkeypatch.setattr(main, "sync_festival_vk_post", fake_sync_vk)
+    monkeypatch.setattr(main, "rebuild_festivals_index_if_needed", fake_rebuild)
 
     start_msg = types.Message.model_validate(
         {
@@ -2340,14 +2344,18 @@ async def test_exhibition_listing(tmp_path: Path, monkeypatch):
     )
     await handle_start(start_msg, db, bot)
 
+    today = date.today()
+    start = today.isoformat()
+    end = (today + timedelta(days=10)).isoformat()
+
     async def fake_parse(text: str, source_channel: str | None = None) -> list[dict]:
         return [
             {
                 "title": "Expo",
                 "short_description": "desc",
                 "festival": "",
-                "date": "2025-07-10",
-                "end_date": "2025-07-20",
+                "date": start,
+                "end_date": end,
                 "time": "",
                 "location_name": "Hall",
                 "location_address": "Addr",
@@ -2385,7 +2393,7 @@ async def test_exhibition_listing(tmp_path: Path, monkeypatch):
             "date": 0,
             "chat": {"id": 1, "type": "private"},
             "from": {"id": 1, "is_bot": False, "first_name": "A"},
-            "text": "/events 2025-07-10",
+            "text": f"/events {start}",
         }
     )
     await handle_events(evt_msg, db, bot)
@@ -2397,7 +2405,7 @@ async def test_exhibition_listing(tmp_path: Path, monkeypatch):
             "date": 0,
             "chat": {"id": 1, "type": "private"},
             "from": {"id": 1, "is_bot": False, "first_name": "A"},
-            "text": "/events 2025-07-20",
+            "text": f"/events {end}",
         }
     )
     await handle_events(evt_msg2, db, bot)
@@ -2413,7 +2421,9 @@ async def test_exhibition_listing(tmp_path: Path, monkeypatch):
         }
     )
     await handle_exhibitions(exh_msg, db, bot)
-    assert "c 10 июля по 20 июля" in bot.messages[-1][1]
+    start_txt = main.format_day_pretty(date.fromisoformat(start))
+    end_txt = main.format_day_pretty(date.fromisoformat(end))
+    assert f"c {start_txt} по {end_txt}" in bot.messages[-1][1]
 
 
 @pytest.mark.asyncio
@@ -3114,7 +3124,7 @@ async def test_event_title_link(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(main, "datetime", FakeDatetime)
 
 
-    _, content, _ = await main.build_month_page_content(db, FUTURE_DATE[:7])
+    _, content, _ = await main.build_month_page_content(db, "2025-07")
     h4 = next(n for n in content if n.get("tag") == "h4")
     children = h4["children"]
     assert any(isinstance(c, dict) and c.get("tag") == "a" for c in children)

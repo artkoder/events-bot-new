@@ -2060,7 +2060,7 @@ async def upcoming_festivals(
 ) -> list[tuple[date | None, date | None, Festival]]:
     """Return festivals that are current or upcoming."""
     if today is None:
-        today = date.today()
+        today = datetime.now(LOCAL_TZ).date()
     today_str = today.isoformat()
     async with db.get_session() as session:
         ev_dates = (
@@ -2164,7 +2164,7 @@ async def _build_festival_nav_block(
 ) -> tuple[list[dict], list[str]]:
     """Return navigation blocks for festival pages and VK posts."""
     if today is None:
-        today = date.today()
+        today = datetime.now(LOCAL_TZ).date()
     if items is None:
         items = await upcoming_festivals(db, today=today, exclude=exclude)
     else:
@@ -2256,8 +2256,6 @@ async def sync_festivals_index_page(db: Database) -> None:
     nodes, _ = await _build_festival_nav_block(db, items=items)
     if nodes and nodes[0].get("tag") == "p":
         nodes = nodes[1:]
-    if nodes and nodes[0].get("tag") == "h3":
-        nodes[0]["tag"] = "h2"
     from telegraph.utils import nodes_to_html
 
     intro_html = (
@@ -2271,6 +2269,7 @@ async def sync_festivals_index_page(db: Database) -> None:
         + (nodes_to_html(nodes) if nodes else "")
         + FOOTER_LINK_HTML
     )
+    html = sanitize_telegraph_html(html)
     path = await get_setting_value(db, "fest_index_path")
     url = await get_setting_value(db, "fest_index_url")
     title = "Все фестивали Калининградской области"
@@ -2326,8 +2325,6 @@ async def rebuild_festivals_index_if_needed(
     nodes, _ = await _build_festival_nav_block(db, items=items)
     if nodes and nodes[0].get("tag") == "p":
         nodes = nodes[1:]
-    if nodes and nodes[0].get("tag") == "h3":
-        nodes[0]["tag"] = "h2"
     from telegraph.utils import nodes_to_html
 
     intro_html = (
@@ -2337,6 +2334,7 @@ async def rebuild_festivals_index_if_needed(
     )
     nav_html = nodes_to_html(nodes) if nodes else "<p>Пока нет ближайших фестивалей</p>"
     html = "<h3>Все фестивали региона</h3>" + intro_html + nav_html + FOOTER_LINK_HTML
+    html = sanitize_telegraph_html(html)
     new_hash = hashlib.sha256(html.encode("utf-8")).hexdigest()
     old_hash = await get_setting_value(db, "festivals_index_hash")
     url = await get_setting_value(db, "festivals_index_url") or await get_setting_value(
@@ -2400,10 +2398,20 @@ async def rebuild_festivals_index_if_needed(
             path = data.get("path")
             status = "built"
     except Exception as e:
+        dur = (_time.perf_counter() - start_t) * 1000
         logging.error(
             "Failed to rebuild festivals index page: %s",
             e,
-            extra={"action": "error", "target": "tg", "path": path},
+            extra={
+                "action": "error",
+                "target": "tg",
+                "path": path,
+                "old_hash": (old_hash or "")[:6],
+                "new_hash": new_hash[:6],
+                "count": len(items),
+                "size": len(html),
+                "took_ms": dur,
+            },
         )
         raise
 
@@ -2460,6 +2468,49 @@ FOOTER_LINK_HTML = (
     '<p><a href="https://t.me/kenigevents">Полюбить Калининград Анонсы</a></p>'
     '<p>&#8203;</p>'
 )
+
+
+TELEGRAPH_ALLOWED_TAGS = {
+    "p",
+    "a",
+    "img",
+    "figure",
+    "figcaption",
+    "h3",
+    "h4",
+    "b",
+    "strong",
+    "i",
+    "em",
+    "u",
+    "s",
+    "del",
+    "blockquote",
+    "code",
+    "pre",
+    "ul",
+    "ol",
+    "li",
+}
+
+_TG_HEADER_RE = re.compile(r"<(/?)h([1-6])(\b[^>]*)>", re.IGNORECASE)
+_TG_TAG_RE = re.compile(r"<\/?([a-z0-9]+)", re.IGNORECASE)
+
+
+def sanitize_telegraph_html(html: str) -> str:
+    def repl(match: re.Match[str]) -> str:
+        slash, level, attrs = match.groups()
+        level = level.lower()
+        if level in {"1", "2", "5", "6"}:
+            level = "3"
+        return f"<{slash}h{level}{attrs}>"
+
+    html = _TG_HEADER_RE.sub(repl, html)
+    tags = {t.lower() for t in _TG_TAG_RE.findall(html)}
+    disallowed = [t for t in tags if t not in TELEGRAPH_ALLOWED_TAGS]
+    if disallowed:
+        raise ValueError(f"Unsupported tag(s): {', '.join(disallowed)}")
+    return html
 
 
 def parse_time_range(value: str) -> tuple[time, time | None] | None:
@@ -7698,7 +7749,7 @@ async def get_month_data(db: Database, month: str, *, fallback: bool = True):
             e for e in exhibitions if e.end_date and e.end_date >= today_str
         ]
 
-    if fallback and (not events or not exhibitions):
+    if fallback and not events and not exhibitions:
         prev_month = (start - timedelta(days=1)).strftime("%Y-%m")
         if prev_month != month:
             prev_events, prev_exh, _ = await get_month_data(
@@ -11094,12 +11145,19 @@ async def handle_festivals_fix_nav(
         if not user or not user.is_superadmin:
             await bot.send_message(message.chat.id, "Not authorized")
             return
+    parts = (message.text or "").split()
+    force = len(parts) > 1 and parts[1].lower() == "force"
     async with page_lock["festivals-index"]:
         await message.answer("Пересобираю навигацию и лендинг…")
-        status, url = await rebuild_festivals_index_if_needed(db)
+        try:
+            status, url = await rebuild_festivals_index_if_needed(db, force=force)
+        except Exception as e:
+            status = f"ошибка: {e}"
+            url = ""
         pages, changed, duplicates_removed = await rebuild_festival_pages_nav(db, bot)
+        landing_line = f"Лендинг: {status}" + (f" {url}" if url else "")
         await message.answer(
-            f"Готово. pages:{pages}, changed:{changed}, duplicates_removed:{duplicates_removed}\nЛендинг: {url}"
+            f"Готово. pages:{pages}, changed:{changed}, duplicates_removed:{duplicates_removed}\n{landing_line}"
         )
 
 
