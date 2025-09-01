@@ -20,10 +20,10 @@ async def test_rebuild_fest_nav_if_changed_logs_nav_hash(tmp_path, monkeypatch, 
         session.add(Festival(name="Fest", start_date=today, end_date=today))
         await session.commit()
 
-    async def fake_sync_index(db):
-        return None
+    async def fake_sync_index(db, telegraph=None, force: bool = False):
+        return "built", ""
 
-    monkeypatch.setattr(main, "sync_festivals_index_page", fake_sync_index)
+    monkeypatch.setattr(main, "rebuild_festivals_index_if_needed", fake_sync_index)
 
     with caplog.at_level(logging.INFO):
         changed = await main.rebuild_fest_nav_if_changed(db)
