@@ -2575,6 +2575,42 @@ async def update_source_post_keyboard(event_id: int, db: Database, bot: Bot) -> 
     if not ev:
         logging.info("update_source_post_keyboard skip for event %s: no event", event_id)
         return
+
+    def detect_chat_type(cid: int | None) -> str:
+        if cid is None:
+            return "unknown"
+        if cid > 0:
+            return "private"
+        return "channel" if str(cid).startswith("-100") else "group"
+
+    # attempt to restore correct source_chat_id from source_post_url if it looks like
+    # it points to a channel message but event stores a private chat id
+    if ev.source_post_url and ev.source_chat_id and ev.source_chat_id > 0:
+        chat_match = None
+        msg_id = None
+        m = re.match(r"https://t.me/c/([0-9]+)/([0-9]+)", ev.source_post_url)
+        if m:
+            cid, msg_id = m.groups()
+            chat_match = int("-100" + cid)
+        else:
+            m = re.match(r"https://t.me/([A-Za-z0-9_]+)/([0-9]+)", ev.source_post_url)
+            if m:
+                username, msg_id = m.group(1), int(m.group(2))
+                try:
+                    chat = await bot.get_chat("@" + username)
+                    chat_match = chat.id
+                except Exception:
+                    pass
+        if chat_match and msg_id:
+            ev.source_chat_id = chat_match
+            ev.source_message_id = int(msg_id)
+            async with db.get_session() as session:
+                obj = await session.get(Event, event_id)
+                if obj:
+                    obj.source_chat_id = ev.source_chat_id
+                    obj.source_message_id = ev.source_message_id
+                    await session.commit()
+
     rows: list[list[types.InlineKeyboardButton]] = []
     if ev.ics_post_url:
         rows.append(
@@ -2596,7 +2632,21 @@ async def update_source_post_keyboard(event_id: int, db: Database, bot: Bot) -> 
         return
     markup = types.InlineKeyboardMarkup(inline_keyboard=rows)
     target = f"{ev.source_chat_id}/{ev.source_message_id}"
-    if ev.source_chat_id and ev.source_message_id:
+    chat_type = detect_chat_type(ev.source_chat_id)
+    edit_failed_reason: str | None = None
+
+    can_edit = True
+    if ev.source_chat_id and ev.source_chat_id < 0:
+        try:
+            me = await bot.get_me()
+            member = await bot.get_chat_member(ev.source_chat_id, me.id)
+            can_edit = bool(getattr(member, "can_edit_messages", False)) or getattr(
+                member, "status", ""
+            ) == "creator"
+        except Exception:
+            pass
+
+    if can_edit and ev.source_chat_id and ev.source_message_id:
         try:
             async with TG_SEND_SEMAPHORE:
                 async with span("tg-send"):
@@ -2606,65 +2656,90 @@ async def update_source_post_keyboard(event_id: int, db: Database, bot: Bot) -> 
                         reply_markup=markup,
                     )
             logging.info(
-                "update_source_post_keyboard done for event %s target=%s",
+                "update_source_post_keyboard done for event %s target=%s chat_type=%s",
                 event_id,
                 target,
+                chat_type,
             )
             return
         except TelegramBadRequest as e:
             if "message is not modified" in str(e):
                 logging.info(
-                    "update_source_post_keyboard no change for event %s", event_id
-                )
-                return
-            if "message can't be edited" not in str(e):
-                logging.error(
-                    "update_source_post_keyboard failed for event %s target=%s: %s",
+                    "update_source_post_keyboard no change for event %s target=%s chat_type=%s",
                     event_id,
                     target,
+                    chat_type,
+                )
+                return
+            edit_failed_reason = str(e)
+            if "message can't be edited" not in str(e):
+                logging.error(
+                    "update_source_post_keyboard failed for event %s target=%s chat_type=%s: %s",
+                    event_id,
+                    target,
+                    chat_type,
                     e,
                 )
                 return
         except Exception as e:  # pragma: no cover - network failures
             logging.error(
-                "update_source_post_keyboard failed for event %s target=%s: %s",
+                "update_source_post_keyboard failed for event %s target=%s chat_type=%s: %s",
                 event_id,
                 target,
+                chat_type,
                 e,
             )
             return
-
+    elif ev.source_chat_id and ev.source_message_id and not can_edit:
+        edit_failed_reason = "no edit rights"
     if not ev.source_chat_id:
         logging.info(
             "update_source_post_keyboard skip for event %s: no target chat", event_id
         )
         return
 
+    fallback_chat = ev.creator_id if ev.source_chat_id < 0 else ev.source_chat_id
+    if edit_failed_reason:
+        logging.warning(
+            "update_source_post_keyboard edit failed for event %s target=%s chat_type=%s reason=%s fallback=%s",
+            event_id,
+            target,
+            chat_type,
+            edit_failed_reason,
+            fallback_chat,
+        )
+
+    if not fallback_chat:
+        return
+
     try:
         async with TG_SEND_SEMAPHORE:
             async with span("tg-send"):
                 msg = await bot.send_message(
-                    ev.source_chat_id,
+                    fallback_chat,
                     "Добавить в календарь/Навигация по месяцам",
                     reply_markup=markup,
                 )
-        async with db.get_session() as session:
-            obj = await session.get(Event, event_id)
-            if obj:
-                obj.source_chat_id = ev.source_chat_id
-                obj.source_message_id = msg.message_id
-                await session.commit()
+        if ev.source_chat_id > 0:
+            async with db.get_session() as session:
+                obj = await session.get(Event, event_id)
+                if obj:
+                    obj.source_chat_id = fallback_chat
+                    obj.source_message_id = msg.message_id
+                    await session.commit()
         logging.info(
-            "update_source_post_keyboard service message for event %s target=%s/%s",
+            "update_source_post_keyboard service message for event %s target=%s/%s chat_type=%s",
             event_id,
-            ev.source_chat_id,
+            fallback_chat,
             msg.message_id,
+            detect_chat_type(fallback_chat),
         )
     except Exception as e:  # pragma: no cover - network failures
         logging.error(
-            "update_source_post_keyboard service failed for event %s target=%s: %s",
+            "update_source_post_keyboard service failed for event %s target=%s chat_type=%s: %s",
             event_id,
-            ev.source_chat_id,
+            fallback_chat,
+            detect_chat_type(fallback_chat),
             e,
         )
 
@@ -11274,6 +11349,13 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
                     else:
                         cid = cid.lstrip("-")
                     link = f"https://t.me/c/{cid}/{msg_id}"
+    # determine where to update buttons: default to forwarded message itself
+    target_chat_id = message.chat.id
+    target_message_id = message.message_id
+    if chat_id and msg_id:
+        target_chat_id = chat_id
+        target_message_id = msg_id
+
     if link:
         logging.info("source post url %s", link)
     logging.info("parsing forwarded text via LLM")
@@ -11284,8 +11366,8 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
             link,
             message.html_text or message.caption_html,
             media,
-            source_chat_id=message.chat.id,
-            source_message_id=message.message_id,
+            source_chat_id=target_chat_id,
+            source_message_id=target_message_id,
             creator_id=user.user_id,
             source_channel=channel_name,
             bot=None,

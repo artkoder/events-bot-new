@@ -1494,6 +1494,74 @@ async def test_forward_add_event(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_handle_forwarded_uses_original_ids(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    captured: dict[str, int | None] = {}
+
+    async def fake_add_events_from_text(
+        db,
+        text,
+        source_link,
+        html_text,
+        media,
+        *,
+        raise_exc=False,
+        source_chat_id=None,
+        source_message_id=None,
+        creator_id=None,
+        display_source=True,
+        source_channel=None,
+        channel_title=None,
+        bot=None,
+    ):
+        captured["chat_id"] = source_chat_id
+        captured["msg_id"] = source_message_id
+        return []
+
+    monkeypatch.setattr(main, "add_events_from_text", fake_add_events_from_text)
+
+    start_msg = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "/start",
+        }
+    )
+    await handle_start(start_msg, db, bot)
+
+    upd = DummyUpdate(-100123, "Chan")
+    await main.handle_my_chat_member(upd, db)
+
+    async with db.get_session() as session:
+        ch = await session.get(main.Channel, -100123)
+        ch.is_registered = True
+        await session.commit()
+
+    fwd_msg = types.Message.model_validate(
+        {
+            "message_id": 3,
+            "date": 0,
+            "forward_date": 0,
+            "forward_from_chat": {"id": -100123, "type": "channel", "username": "chan"},
+            "forward_from_message_id": 10,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "Some text",
+        }
+    )
+
+    await main.handle_forwarded(fwd_msg, db, bot)
+
+    assert captured["chat_id"] == -100123
+    assert captured["msg_id"] == 10
+
+
+@pytest.mark.asyncio
 async def test_forward_missing_fields(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
