@@ -4,7 +4,8 @@ import os
 import pytest
 from aiogram import Bot, types
 import main
-from main import Database, Event, Channel
+from main import Database, Event, Channel, JobOutbox, JobTask
+from sqlalchemy import select
 
 
 class DummyBot(Bot):
@@ -276,3 +277,38 @@ async def test_ics_coalesced_jobs_and_semaphore(tmp_path, monkeypatch):
     )
     assert order[0][0] == 1 and order[1][0] == 2
     assert order[1][1] >= order[0][1]
+
+
+@pytest.mark.asyncio
+async def test_ics_publish_enqueues_page_jobs(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+    async with db.get_session() as session:
+        session.add(Channel(channel_id=-100, title="Asset", is_admin=True, is_asset=True))
+        session.add(
+            Event(
+                id=1,
+                title="A",
+                description="d",
+                source_text="s",
+                date="2025-07-18",
+                time="19:00",
+                location_name="Hall",
+                city="Town",
+            )
+        )
+        await session.commit()
+    fake = FakeClient()
+    monkeypatch.setattr(main, "get_supabase_client", lambda: fake)
+    async def fake_update(*a, **k):
+        pass
+    monkeypatch.setattr(main, "update_source_page_ics", fake_update)
+    monkeypatch.setattr(main, "update_source_post_keyboard", lambda *a, **k: None)
+    await main.ics_publish(1, db, bot)
+    async with db.get_session() as session:
+        res = await session.execute(select(JobOutbox.task))
+        tasks = {row[0] for row in res.all()}
+    assert JobTask.month_pages in tasks
+    assert JobTask.weekend_pages in tasks
+    assert JobTask.week_pages in tasks

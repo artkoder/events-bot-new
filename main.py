@@ -3280,6 +3280,17 @@ async def ics_publish(event_id: int, db: Database, bot: Bot, progress=None) -> b
                 if tg_post_id is not None:
                     ev.ics_post_id = tg_post_id
                 await session.commit()
+                committed = True
+            else:
+                committed = False
+
+        if committed:
+            await enqueue_job(db, event_id, JobTask.month_pages)
+            await enqueue_job(db, event_id, JobTask.weekend_pages)
+            await enqueue_job(db, event_id, JobTask.week_pages)
+            logging.info(
+                "ics_publish enqueued nav rebuild for %s", event_id
+            )
 
         if supabase_url is not None:
             await update_source_page_ics(event_id, db, supabase_url)
@@ -6316,6 +6327,32 @@ async def update_week_pages_for(event_id: int, db: Database, bot: Bot | None) ->
     if d:
         w_start = week_start_for_date(d)
         await sync_vk_week_post(db, w_start.isoformat(), bot)
+
+
+async def ics_fix_nav(db: Database, month: str | None = None) -> int:
+    """Enqueue rebuild jobs for events with ICS links."""
+    if month:
+        months = [month]
+    else:
+        today = date.today().replace(day=1)
+        this_month = today.strftime("%Y-%m")
+        next_month = (today + timedelta(days=32)).strftime("%Y-%m")
+        months = [this_month, next_month]
+    count = 0
+    async with db.get_session() as session:
+        for m in months:
+            stmt = select(Event).where(
+                Event.ics_url.is_not(None), Event.date.like(f"{m}%")
+            )
+            res = await session.execute(stmt)
+            events = res.scalars().all()
+            for ev in events:
+                await enqueue_job(db, ev.id, JobTask.month_pages)
+                await enqueue_job(db, ev.id, JobTask.weekend_pages)
+                await enqueue_job(db, ev.id, JobTask.week_pages)
+                count += 1
+    logging.info("ics_fix_nav enqueued tasks for %s events", count)
+    return count
 
 
 async def update_festival_pages_for_event(
@@ -11028,6 +11065,18 @@ async def handle_festivals_fix_nav(
         )
 
 
+async def handle_ics_fix_nav(message: types.Message, db: Database, bot: Bot) -> None:
+    async with db.get_session() as session:
+        user = await session.get(User, message.from_user.id)
+        if not user or not user.is_superadmin:
+            await bot.send_message(message.chat.id, "Not authorized")
+            return
+    parts = (message.text or "").split()
+    month = parts[1] if len(parts) > 1 else None
+    count = await ics_fix_nav(db, month)
+    await message.answer(f"Готово. события: {count}")
+
+
 async def handle_trace(message: types.Message, db: Database, bot: Bot):
     async with db.get_session() as session:
         user = await session.get(User, message.from_user.id)
@@ -12181,6 +12230,9 @@ def create_app() -> web.Application:
     async def festivals_fix_nav_wrapper(message: types.Message):
         await handle_festivals_fix_nav(message, db, bot)
 
+    async def ics_fix_nav_wrapper(message: types.Message):
+        await handle_ics_fix_nav(message, db, bot)
+
     dp.message.register(help_wrapper, Command("help"))
     dp.message.register(start_wrapper, Command("start"))
     dp.message.register(register_wrapper, Command("register"))
@@ -12266,6 +12318,7 @@ def create_app() -> web.Application:
     dp.message.register(mem_wrapper, Command("mem"))
     dp.message.register(festivals_fix_nav_wrapper, Command("festivals_fix_nav"))
     dp.message.register(festivals_fix_nav_wrapper, Command("festivals_nav_dedup"))
+    dp.message.register(ics_fix_nav_wrapper, Command("ics_fix_nav"))
     dp.message.register(users_wrapper, Command("users"))
     dp.message.register(dumpdb_wrapper, Command("dumpdb"))
     dp.message.register(restore_wrapper, Command("restore"))
