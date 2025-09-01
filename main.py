@@ -5823,7 +5823,14 @@ async def update_telegraph_event_page(
         ev.content_hash = new_hash
         session.add(ev)
         await session.commit()
-        return ev.telegraph_url
+        url = ev.telegraph_url
+
+    try:
+        # ensure month pages reflect the newly created telegraph link
+        await update_month_pages_for(event_id, db, bot)
+    except Exception:  # pragma: no cover - log but ignore
+        logging.exception("update_month_pages_for failed for %s", event_id)
+    return url
 
 
 def ensure_day_markers(page_html: str, d: date) -> tuple[str, bool]:
