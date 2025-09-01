@@ -2335,7 +2335,7 @@ async def rebuild_festivals_index_if_needed(
         f"</i></small></p>{FEST_INDEX_INTRO_END}"
     )
     nav_html = nodes_to_html(nodes) if nodes else "<p>Пока нет ближайших фестивалей</p>"
-    html = "<h1>Все фестивали региона</h1>" + intro_html + nav_html + FOOTER_LINK_HTML
+    html = "<h3>Все фестивали региона</h3>" + intro_html + nav_html + FOOTER_LINK_HTML
     new_hash = hashlib.sha256(html.encode("utf-8")).hexdigest()
     old_hash = await get_setting_value(db, "festivals_index_hash")
     url = await get_setting_value(db, "festivals_index_url") or await get_setting_value(
