@@ -456,7 +456,8 @@ settings_cache: TTLCache[str, str | None] = TTLCache(maxsize=64, ttl=300)
 add_event_queue: asyncio.Queue[tuple[str, types.Message, bool, int]] = asyncio.Queue(
     maxsize=200
 )
-ADD_EVENT_TIMEOUT = int(os.getenv("ADD_EVENT_TIMEOUT", "180"))
+# allow more time for handling slow background operations
+ADD_EVENT_TIMEOUT = int(os.getenv("ADD_EVENT_TIMEOUT", "600"))
 ADD_EVENT_RETRY_DELAYS = [30, 60, 120]  # сек
 ADD_EVENT_MAX_ATTEMPTS = len(ADD_EVENT_RETRY_DELAYS) + 1
 _ADD_EVENT_LAST_DEQUEUE_TS: float = 0.0
@@ -1887,7 +1888,7 @@ async def upload_images(images: list[tuple[bytes, str]]) -> tuple[list[str], str
                     form.add_field("fileToUpload", data, filename=name)
                     async with span("http"):
                         async with HTTP_SEMAPHORE:
-                            async with await session.post(
+                            async with session.post(
                                 "https://catbox.moe/user/api.php", data=form
                             ) as resp:
                                 text_r = await resp.text()
@@ -3203,6 +3204,7 @@ async def ics_publish(event_id: int, db: Database, bot: Bot, progress=None) -> b
                             )
                         if progress:
                             progress.mark("ics_supabase", "done", supabase_url)
+                        logging.info("ics_publish supabase_url=%s", supabase_url)
                 except OSError:
                     errors.append("temporary network error")
                     if progress:
@@ -3214,6 +3216,7 @@ async def ics_publish(event_id: int, db: Database, bot: Bot, progress=None) -> b
                     if progress:
                         progress.mark("ics_supabase", "error", str(se))
             else:
+                logging.info("ics_publish SUPABASE_DISABLED=1")
                 if progress:
                     progress.mark("ics_supabase", "skipped_disabled", "disabled")
 
@@ -4981,10 +4984,10 @@ async def enqueue_job(
 async def schedule_event_update_tasks(db: Database, ev: Event) -> None:
     eid = ev.id
     await enqueue_job(db, eid, JobTask.telegraph_build)
-    if not is_vk_wall_url(ev.source_post_url):
-        await enqueue_job(db, eid, JobTask.vk_sync)
     if ev.time and "ics_publish" in JOB_HANDLERS:
         await enqueue_job(db, eid, JobTask.ics_publish)
+    if not is_vk_wall_url(ev.source_post_url):
+        await enqueue_job(db, eid, JobTask.vk_sync)
     await enqueue_job(db, eid, JobTask.month_pages)
     d = parse_iso_date(ev.date)
     if d:
@@ -5659,8 +5662,7 @@ async def add_event_queue_worker(db: Database, bot: Bot, limit: int = 2):
             try:
                 await bot.send_message(
                     msg.chat.id,
-                    f"Задача зависла (таймаут {ADD_EVENT_TIMEOUT} c). "
-                    f"Снята и будет повторена. Попытка {attempts+1}/{ADD_EVENT_MAX_ATTEMPTS}.",
+                    "Фоновая публикация ещё идёт, статус обновится в этом сообщении",
                 )
             except Exception:
                 logging.warning("notify timeout failed")
@@ -5680,30 +5682,8 @@ async def add_event_queue_worker(db: Database, bot: Bot, limit: int = 2):
             logging.info("add_event_queue item done in %.0f ms", dur)
             add_event_queue.task_done()
 
-        if timed_out and attempts + 1 < ADD_EVENT_MAX_ATTEMPTS:
-            delay = ADD_EVENT_RETRY_DELAYS[min(attempts, len(ADD_EVENT_RETRY_DELAYS) - 1)]
-            async def _requeue() -> None:
-                await asyncio.sleep(delay)
-                try:
-                    add_event_queue.put_nowait((kind, msg, using_session, attempts + 1))
-                    logging.info(
-                        "add_event requeued user=%s attempt=%d delay=%s",
-                        getattr(msg.from_user, "id", None),
-                        attempts + 2,
-                        delay,
-                    )
-                except asyncio.QueueFull:
-                    logging.error("requeue failed: queue full")
-            asyncio.create_task(_requeue())
-        elif timed_out:
-            try:
-                await bot.send_message(
-                    msg.chat.id,
-                    "Задача по добавлению события не выполнена после повторов. "
-                    "Попробуйте ещё раз позже.",
-                )
-            except Exception:
-                pass
+        if timed_out:
+            pass
 
 
 BACKOFF_SCHEDULE = [30, 120, 600, 3600]
@@ -5719,6 +5699,9 @@ TASK_LABELS = {
     "festival_pages": "VK (фестиваль)",
     "fest_nav:update_all": "Навигация",
 }
+
+# runtime storage for progress callbacks keyed by event id
+_EVENT_PROGRESS: dict[int, SimpleNamespace] = {}
 
 
 async def _job_result_link(task: JobTask, event_id: int, db: Database) -> str | None:
@@ -5779,10 +5762,10 @@ async def reconcile_job_outbox(db: Database) -> None:
 async def _run_due_jobs_once(
     db: Database,
     bot: Bot,
-    notify: Callable[[JobTask, JobStatus, bool, str | None, str | None], Awaitable[None]] | None = None,
+    notify: Callable[[JobTask, int, JobStatus, bool, str | None, str | None], Awaitable[None]] | None = None,
     only_event: int | None = None,
-    ics_progress: Any | None = None,
-    fest_progress: Any | None = None,
+    ics_progress: dict[int, Any] | Any | None = None,
+    fest_progress: dict[int, Any] | Any | None = None,
 ) -> int:
     now = datetime.utcnow()
     async with db.get_session() as session:
@@ -5809,6 +5792,8 @@ async def _run_due_jobs_once(
                 )
                 .limit(1)
             )
+            if job.task == JobTask.ics_publish:
+                exists_stmt = exists_stmt.where(JobOutbox.task == JobTask.ics_publish)
             if (await session.execute(exists_stmt)).first():
                 continue
             obj = await session.get(JobOutbox, job.id)
@@ -5852,9 +5837,19 @@ async def _run_due_jobs_once(
                     "event_pipeline", step=job.task.value, event_id=job.event_id
                 ):
                     if job.task == JobTask.ics_publish:
-                        res = await handler(job.event_id, db, bot, ics_progress)
+                        prog = (
+                            ics_progress.get(job.event_id)
+                            if isinstance(ics_progress, dict)
+                            else ics_progress
+                        )
+                        res = await handler(job.event_id, db, bot, prog)
                     elif job.task == JobTask.festival_pages:
-                        res = await handler(job.event_id, db, bot, fest_progress)
+                        fest_prog = (
+                            fest_progress.get(job.event_id)
+                            if isinstance(fest_progress, dict)
+                            else fest_progress
+                        )
+                        res = await handler(job.event_id, db, bot, fest_prog)
                     else:
                         res = await handler(job.event_id, db, bot)
                 rebuild = isinstance(res, str) and res == "rebuild"
@@ -5939,7 +5934,7 @@ async def _run_due_jobs_once(
                 session.add(obj)
                 await session.commit()
             if notify and send:
-                await notify(job.task, status, changed, link, err)
+                await notify(job.task, job.event_id, status, changed, link, err)
         if pause:
             await vk_captcha_pause_outbox(db)
         processed += 1
@@ -5984,7 +5979,36 @@ async def job_outbox_worker(db: Database, bot: Bot, interval: float = 2.0):
     last_log = 0.0
     while True:
         try:
-            await _run_due_jobs_once(db, bot)
+            async def notifier(
+                task: JobTask,
+                eid: int,
+                status: JobStatus,
+                changed: bool,
+                link: str | None,
+                err: str | None,
+            ) -> None:
+                ctx = _EVENT_PROGRESS.get(eid)
+                if ctx:
+                    await ctx.updater(task, eid, status, changed, link, err)
+
+            ics_map = {
+                eid: ctx.ics_progress
+                for eid, ctx in _EVENT_PROGRESS.items()
+                if ctx.ics_progress
+            }
+            fest_map = {
+                eid: ctx.fest_progress
+                for eid, ctx in _EVENT_PROGRESS.items()
+                if ctx.fest_progress
+            }
+            await _run_due_jobs_once(
+                db,
+                bot,
+                notifier,
+                None,
+                ics_map if ics_map else None,
+                fest_map if fest_map else None,
+            )
         except Exception:  # pragma: no cover - log unexpected errors
             logging.exception("job_outbox_worker cycle failed")
         if _time.monotonic() - last_log >= 30.0:
@@ -6002,6 +6026,7 @@ async def run_event_update_jobs(
 ) -> None:
     async def notifier(
         task: JobTask,
+        eid: int,
         status: JobStatus,
         changed: bool,
         link: str | None,
@@ -6090,11 +6115,6 @@ async def update_telegraph_event_page(
         await session.commit()
         url = ev.telegraph_url
 
-    try:
-        # ensure month pages reflect the newly created telegraph link
-        await update_month_pages_for(event_id, db, bot)
-    except Exception:  # pragma: no cover - log but ignore
-        logging.exception("update_month_pages_for failed for %s", event_id)
     return url
 
 
@@ -6562,6 +6582,7 @@ async def publish_event_progress(event: Event, db: Database, bot: Bot, chat_id: 
 
     async def updater(
         task: JobTask,
+        eid: int,
         status: JobStatus,
         changed: bool,
         link: str | None,
@@ -6596,6 +6617,17 @@ async def publish_event_progress(event: Event, db: Database, bot: Bot, chat_id: 
                 suffix = ""
         progress[task] = {"icon": icon, "suffix": suffix}
         await render()
+        all_done = all(info["icon"] != "\U0001f504" for info in progress.values())
+        if fest_sub:
+            all_done = all_done and all(
+                info["icon"] != "\U0001f504" for info in fest_sub.values()
+            )
+        if all_done:
+            _EVENT_PROGRESS.pop(event.id, None)
+
+    _EVENT_PROGRESS[event.id] = SimpleNamespace(
+        updater=updater, ics_progress=ics_progress, fest_progress=fest_progress
+    )
 
     deadline = _time.monotonic() + 30
     while True:
@@ -6631,6 +6663,7 @@ async def publish_event_progress(event: Event, db: Database, bot: Bot, chat_id: 
             message_id=msg.message_id,
             text=f"Готово\n<!-- v{version} -->",
         )
+    _EVENT_PROGRESS.pop(event.id, None)
 
 
 async def job_sync_vk_source_post(event_id: int, db: Database, bot: Bot | None) -> None:
@@ -6886,10 +6919,10 @@ def format_weekend_range(saturday: date) -> str:
     """Return human-friendly weekend range like '12–13 июля'."""
     sunday = saturday + timedelta(days=1)
     if saturday.month == sunday.month:
-        return f"{saturday.day}\u2013{sunday.day}\u00A0{MONTHS[saturday.month - 1]}"
+        return f"{saturday.day}\u2013{sunday.day} {MONTHS[saturday.month - 1]}"
     return (
-        f"{saturday.day}\u00A0{MONTHS[saturday.month - 1]} \u2013 "
-        f"{sunday.day}\u00A0{MONTHS[sunday.month - 1]}"
+        f"{saturday.day} {MONTHS[saturday.month - 1]} \u2013 "
+        f"{sunday.day} {MONTHS[sunday.month - 1]}"
     )
 
 
@@ -7652,24 +7685,10 @@ async def get_month_data(db: Database, month: str, *, fallback: bool = True):
 
         start_nav = today.replace(day=1)
         end_nav = date(today.year + 1, 4, 1)
-        res_nav = await session.execute(
-            select(func.substr(Event.date, 1, 7))
-            .where(
-                Event.date >= start_nav.isoformat(),
-                Event.date < end_nav.isoformat(),
-            )
-            .group_by(func.substr(Event.date, 1, 7))
-            .order_by(func.substr(Event.date, 1, 7))
+        res_pages = await session.execute(
+            select(MonthPage).order_by(MonthPage.month)
         )
-        nav_months = [r[0] for r in res_nav]
-        if nav_months:
-            res_pages = await session.execute(
-                select(MonthPage).where(MonthPage.month.in_(nav_months))
-            )
-            page_map = {p.month: p for p in res_pages.scalars().all()}
-            nav_pages = [page_map[m] for m in nav_months if m in page_map]
-        else:
-            nav_pages = []
+        nav_pages = res_pages.scalars().all()
 
     if month == today.strftime("%Y-%m"):
         today_str = today.isoformat()
@@ -7679,13 +7698,16 @@ async def get_month_data(db: Database, month: str, *, fallback: bool = True):
             e for e in exhibitions if e.end_date and e.end_date >= today_str
         ]
 
-    if not exhibitions and fallback:
+    if fallback and (not events or not exhibitions):
         prev_month = (start - timedelta(days=1)).strftime("%Y-%m")
         if prev_month != month:
-            prev_events, prev_exh, _ = await get_month_data(db, prev_month, fallback=False)
+            prev_events, prev_exh, _ = await get_month_data(
+                db, prev_month, fallback=True
+            )
             if not events:
                 events.extend(prev_events)
-            exhibitions.extend(prev_exh)
+            if not exhibitions:
+                exhibitions.extend(prev_exh)
 
     return events, exhibitions, nav_pages
 
@@ -7872,6 +7894,7 @@ def _build_month_page_content_sync(
 async def _sync_month_page_inner(
     db: Database, month: str, update_links: bool = False, force: bool = False
 ):
+    tasks: list[Awaitable[None]] = []
     async with HEAVY_SEMAPHORE:
         now = _time.time()
         if (
@@ -8299,6 +8322,7 @@ async def build_weekend_page_content(
 async def _sync_weekend_page_inner(
     db: Database, start: str, update_links: bool = True, post_vk: bool = True
 ):
+    tasks: list[Awaitable[None]] = []
     async with HEAVY_SEMAPHORE:
         now = _time.time()
         if "PYTEST_CURRENT_TEST" not in os.environ and now < _weekend_next_run[start]:
@@ -8348,6 +8372,8 @@ async def _sync_weekend_page_inner(
                     rough,
                 )
                 page.content_hash = hash_new
+                if update_links:
+                    await telegraph_call(tg.edit_page, page.path, title=title, content=content)
             elif page.content_hash == hash_new and not update_links:
                 logging.debug("telegraph_update skipped (no changes)")
             else:
@@ -8380,6 +8406,18 @@ async def _sync_weekend_page_inner(
             await sync_vk_weekend_post(db, start)
         if DEBUG:
             mem_info("weekend page after")
+
+        if update_links or created:
+            d_start = date.fromisoformat(start)
+            for d_adj in (d_start - timedelta(days=7), d_start + timedelta(days=7)):
+                w_key = d_adj.isoformat()
+                async with db.get_session() as session:
+                    if await session.get(WeekendPage, w_key):
+                        tasks.append(
+                            sync_weekend_page(db, w_key, update_links=False, post_vk=False)
+                        )
+    for t in tasks:
+        await t
 
 
 async def sync_weekend_page(
