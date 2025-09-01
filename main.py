@@ -2260,8 +2260,8 @@ async def sync_festivals_index_page(db: Database) -> None:
     from telegraph.utils import nodes_to_html
 
     intro_html = (
-        f"{FEST_INDEX_INTRO_START}<p><small><i>Вот какие фестивали нашёл для вас канал "
-        f'<a href="https://t.me/kenigevents">Полюбить Калининград Анонсы</a>.</i></small></p>'
+        f"{FEST_INDEX_INTRO_START}<p><i>Вот какие фестивали нашёл для вас канал "
+        f'<a href="https://t.me/kenigevents">Полюбить Калининград Анонсы</a>.</i></p>'
         f"{FEST_INDEX_INTRO_END}"
     )
     html = (
@@ -2330,9 +2330,9 @@ async def rebuild_festivals_index_if_needed(
     from telegraph.utils import nodes_to_html
 
     intro_html = (
-        f"{FEST_INDEX_INTRO_START}<p><small><i>Вот какие фестивали нашёл для вас канал "
+        f"{FEST_INDEX_INTRO_START}<p><i>Вот какие фестивали нашёл для вас канал "
         f'<a href="https://t.me/kenigevents">Полюбить Калининград Анонсы</a>.'
-        f"</i></small></p>{FEST_INDEX_INTRO_END}"
+        f"</i></p>{FEST_INDEX_INTRO_END}"
     )
     nav_html = nodes_to_html(nodes) if nodes else "<p>Пока нет ближайших фестивалей</p>"
     html = "<h3>Все фестивали региона</h3>" + intro_html + nav_html + FOOTER_LINK_HTML
