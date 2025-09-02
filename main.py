@@ -4994,7 +4994,7 @@ async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
 
 async def enqueue_job(
     db: Database, event_id: int, task: JobTask, payload: dict | None = None
-) -> None:
+) -> str:
     job_key = f"{task.value}:{event_id}"
     async with db.get_session() as session:
         stmt = select(JobOutbox).where(
@@ -5003,20 +5003,40 @@ async def enqueue_job(
         res = await session.execute(stmt)
         job = res.scalar_one_or_none()
         now = datetime.utcnow()
-        if job and job.status in {
-            JobStatus.pending,
-            JobStatus.running,
-            JobStatus.done,
-        }:
-            if payload is not None:
-                job.payload = payload
-                session.add(job)
-                await session.commit()
-                logging.info("enqueue_job merged job_key=%s", job_key)
-            else:
-                logging.info("enqueue_job skip duplicate job_key=%s", job_key)
-            return
         if job:
+            if job.status in {JobStatus.pending, JobStatus.running}:
+                if payload is not None:
+                    job.payload = payload
+                    session.add(job)
+                    await session.commit()
+                    logging.info("enqueue_job merged job_key=%s", job_key)
+                    return "merged"
+                logging.info("enqueue_job skip duplicate job_key=%s", job_key)
+                return "skipped"
+            if job.status == JobStatus.done:
+                if task in {
+                    JobTask.telegraph_build,
+                    JobTask.month_pages,
+                    JobTask.week_pages,
+                    JobTask.weekend_pages,
+                    JobTask.ics_publish,
+                }:
+                    job.status = JobStatus.pending
+                    job.payload = payload
+                    job.attempts = 0
+                    job.last_error = None
+                    job.updated_at = now
+                    job.next_run_at = now
+                    session.add(job)
+                    await session.commit()
+                    logging.info(
+                        "enqueue_job merged(requeue) job_key=%s", job_key
+                    )
+                    return "requeued"
+                logging.info(
+                    "enqueue_job skip up-to-date job_key=%s", job_key
+                )
+                return "skipped"
             job.status = JobStatus.pending
             job.payload = payload
             job.attempts = 0
@@ -5024,39 +5044,53 @@ async def enqueue_job(
             job.updated_at = now
             job.next_run_at = now
             session.add(job)
+            await session.commit()
             logging.info("enqueue_job merged job_key=%s", job_key)
-        else:
-            session.add(
-                JobOutbox(
-                    event_id=event_id,
-                    task=task,
-                    payload=payload,
-                    status=JobStatus.pending,
-                    updated_at=now,
-                    next_run_at=now,
-                )
+            return "merged"
+        session.add(
+            JobOutbox(
+                event_id=event_id,
+                task=task,
+                payload=payload,
+                status=JobStatus.pending,
+                updated_at=now,
+                next_run_at=now,
             )
-            logging.info("enqueue_job new job_key=%s", job_key)
+        )
         await session.commit()
+        logging.info("enqueue_job new job_key=%s", job_key)
+        return "new"
 
 
-async def schedule_event_update_tasks(db: Database, ev: Event) -> None:
+async def schedule_event_update_tasks(db: Database, ev: Event) -> dict[JobTask, str]:
     eid = ev.id
-    await enqueue_job(db, eid, JobTask.telegraph_build)
+    results: dict[JobTask, str] = {}
+    results[JobTask.telegraph_build] = await enqueue_job(
+        db, eid, JobTask.telegraph_build
+    )
     if ev.time and "ics_publish" in JOB_HANDLERS:
-        await enqueue_job(db, eid, JobTask.ics_publish)
+        results[JobTask.ics_publish] = await enqueue_job(
+            db, eid, JobTask.ics_publish
+        )
     if not is_vk_wall_url(ev.source_post_url):
-        await enqueue_job(db, eid, JobTask.vk_sync)
-    await enqueue_job(db, eid, JobTask.month_pages)
+        results[JobTask.vk_sync] = await enqueue_job(db, eid, JobTask.vk_sync)
+    results[JobTask.month_pages] = await enqueue_job(db, eid, JobTask.month_pages)
     d = parse_iso_date(ev.date)
     if d:
-        await enqueue_job(db, eid, JobTask.week_pages)
+        results[JobTask.week_pages] = await enqueue_job(
+            db, eid, JobTask.week_pages
+        )
         w_start = weekend_start_for_date(d)
         if w_start:
-            await enqueue_job(db, eid, JobTask.weekend_pages)
+            results[JobTask.weekend_pages] = await enqueue_job(
+                db, eid, JobTask.weekend_pages
+            )
     if ev.festival:
-        await enqueue_job(db, eid, JobTask.festival_pages)
+        results[JobTask.festival_pages] = await enqueue_job(
+            db, eid, JobTask.festival_pages
+        )
     logging.info("scheduled event tasks for %s", eid)
+    return results
 
 
 def missing_fields(event: dict | Event) -> list[str]:
@@ -5600,7 +5634,7 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
     )
     async with db.get_session() as session:
         event, added = await upsert_event(session, event)
-    await schedule_event_update_tasks(db, event)
+    results = await schedule_event_update_tasks(db, event)
     lines = [
         f"title: {event.title}",
         f"date: {event.date}",
@@ -5642,7 +5676,7 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
         reply_markup=markup,
     )
     await notify_event_added(db, bot, user, event, added)
-    await publish_event_progress(event, db, bot, message.chat.id)
+    await publish_event_progress(event, db, bot, message.chat.id, results)
     logging.info("handle_add_event_raw finished for user %s", message.from_user.id)
 
 
@@ -6464,17 +6498,34 @@ async def update_festival_pages_for_event(
     return vk_changed or nav_changed
 
 
-async def publish_event_progress(event: Event, db: Database, bot: Bot, chat_id: int) -> None:
+async def publish_event_progress(
+    event: Event,
+    db: Database,
+    bot: Bot,
+    chat_id: int,
+    initial_statuses: dict[JobTask, str] | None = None,
+) -> None:
     async with db.get_session() as session:
-        jobs = (
-            await session.execute(
-                select(JobOutbox.task).where(JobOutbox.event_id == event.id)
+        jobs = await session.execute(
+            select(JobOutbox.task, JobOutbox.status).where(
+                JobOutbox.event_id == event.id
             )
-        ).scalars().all()
-    tasks = [job for job in jobs if job.value in TASK_LABELS]
-    progress: dict[JobTask, dict[str, str]] = {
-        t: {"icon": "\U0001f504", "suffix": ""} for t in tasks
-    }
+        )
+        rows = jobs.all()
+    tasks = [t for t, _ in rows if t.value in TASK_LABELS]
+    progress: dict[JobTask, dict[str, str]] = {}
+    for task, status in rows:
+        if task.value not in TASK_LABELS:
+            continue
+        icon = "\U0001f504"
+        suffix = ""
+        action = initial_statuses.get(task) if initial_statuses else None
+        if action == "skipped" or status == JobStatus.done:
+            icon = "⏭"
+            suffix = " — актуально"
+        elif action == "requeued":
+            suffix = " — перезапущено"
+        progress[task] = {"icon": icon, "suffix": suffix}
     vk_group = await get_vk_group_id(db)
     vk_scope = ""
     if vk_group:
