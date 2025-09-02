@@ -9,8 +9,10 @@ NAV_HTML = '<p>nav</p>'
 
 def test_apply_festival_nav_insert_when_missing():
     html = '<p>start</p>'
-    updated, changed = main.apply_festival_nav(html, NAV_HTML)
+    updated, changed, removed, replaced = main.apply_festival_nav(html, NAV_HTML)
     assert changed is True
+    assert removed == 0
+    assert replaced is False
     assert updated.startswith('<p>start</p>')
     assert updated.count(FEST_NAV_START) == 1
     assert '<!-- FEST_NAV_START -->' not in updated
@@ -23,33 +25,48 @@ def test_apply_festival_nav_insert_when_missing():
 
 def test_apply_festival_nav_replace_existing():
     html = f'<p>start</p>{FEST_NAV_START}<p>old</p>{FEST_NAV_END}'
-    updated, changed = main.apply_festival_nav(html, NAV_HTML)
+    updated, changed, removed, _ = main.apply_festival_nav(html, NAV_HTML)
     assert changed is True
+    assert removed == 1
     assert NAV_HTML in updated
     assert '<p>old</p>' not in updated
 
 
 def test_apply_festival_nav_idempotent():
     html = '<p>start</p>'
-    first, changed = main.apply_festival_nav(html, NAV_HTML)
+    first, changed, _, _ = main.apply_festival_nav(html, NAV_HTML)
     assert changed is True
-    second, changed2 = main.apply_festival_nav(first, NAV_HTML)
+    second, changed2, removed, replaced = main.apply_festival_nav(first, NAV_HTML)
     assert changed2 is False
+    assert removed == 0
+    assert replaced is False
     assert first == second
 
 
 def test_apply_festival_nav_removes_legacy_heading():
     html = '<p>start</p><h3>Ближайшие фестивали</h3><p>old</p>'
-    updated, changed = main.apply_festival_nav(html, NAV_HTML)
+    updated, changed, removed, _ = main.apply_festival_nav(html, NAV_HTML)
     assert changed is True
+    assert removed == 1
     assert '<h3>Ближайшие фестивали</h3>' not in updated
+    assert updated.count(FEST_NAV_START) == 1
+
+
+def test_apply_festival_nav_removes_paragraph_strong_heading():
+    html = '<p>start</p><p><strong>Ближайшие фестивали</strong></p><p>old</p>'
+    updated, changed, removed, _ = main.apply_festival_nav(html, NAV_HTML)
+    assert changed is True
+    assert removed == 1
+    assert 'Ближайшие фестивали' not in updated
     assert updated.count(FEST_NAV_START) == 1
 
 
 def test_apply_festival_nav_rewrites_spaced_markers():
     html = '<p>start</p><!-- FEST_NAV_START --><p>old</p><!-- FEST_NAV_END -->'
-    updated, changed = main.apply_festival_nav(html, NAV_HTML)
+    updated, changed, removed, replaced = main.apply_festival_nav(html, NAV_HTML)
     assert changed is True
+    assert removed == 1
+    assert replaced is True
     assert updated.count(FEST_NAV_START) == 1
     assert '<!-- FEST_NAV_START -->' not in updated
     assert '<!-- FEST_NAV_END -->' not in updated
@@ -57,8 +74,10 @@ def test_apply_festival_nav_rewrites_spaced_markers():
 
 def test_apply_festival_nav_rewrites_uppercase_markers():
     html = '<p>start</p><!--FEST_NAV_START--><p>old</p><!--FEST_NAV_END-->'
-    updated, changed = main.apply_festival_nav(html, NAV_HTML)
+    updated, changed, removed, replaced = main.apply_festival_nav(html, NAV_HTML)
     assert changed is True
+    assert removed == 1
+    assert replaced is True
     assert updated.count(FEST_NAV_START) == 1
     assert '<!--FEST_NAV_START-->' not in updated
     assert '<!--FEST_NAV_END-->' not in updated
@@ -69,8 +88,9 @@ def test_apply_festival_nav_deduplicates_multiple_blocks():
         f"<p>start</p>{FEST_NAV_START}<p>old</p>{FEST_NAV_END}"
         f"<p>mid</p>{FEST_NAV_START}<p>old2</p>{FEST_NAV_END}"
     )
-    updated, changed = main.apply_festival_nav(html, NAV_HTML)
+    updated, changed, removed, _ = main.apply_festival_nav(html, NAV_HTML)
     assert changed is True
+    assert removed == 2
     assert updated.count(FEST_NAV_START) == 1
     assert '<p>old</p>' not in updated
     assert '<p>old2</p>' not in updated
@@ -78,8 +98,9 @@ def test_apply_festival_nav_deduplicates_multiple_blocks():
 
 def test_apply_festival_nav_removes_heading_with_subheading():
     html = '<p>start</p><h3>Ближайшие фестивали</h3><h4>old</h4><p>end</p>'
-    updated, changed = main.apply_festival_nav(html, NAV_HTML)
+    updated, changed, removed, _ = main.apply_festival_nav(html, NAV_HTML)
     assert changed is True
+    assert removed == 1
     assert '<h3>Ближайшие фестивали</h3>' not in updated
     assert '<h4>old</h4>' not in updated
     assert updated.count(FEST_NAV_START) == 1

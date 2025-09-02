@@ -77,6 +77,8 @@ async def test_update_festival_tg_nav_logs_edited(tmp_path, monkeypatch, caplog)
     assert rec.fest == "Fest1"
     assert rec.nav_old == ""
     assert rec.nav_new == h
+    assert rec.removed_legacy_blocks == 0
+    assert rec.legacy_markers_replaced is False
 
 
 @pytest.mark.asyncio
@@ -93,7 +95,7 @@ async def test_update_festival_tg_nav_logs_skipped(tmp_path, monkeypatch, caplog
     nav_html = "<p>nav</p>"
     await main.set_setting_value(db, "fest_nav_html", nav_html)
 
-    existing_html, _ = main.apply_festival_nav("<p>start</p>", nav_html)
+    existing_html, *_ = main.apply_festival_nav("<p>start</p>", nav_html)
     tg_pages = {"p1": {"html": existing_html, "title": "Fest1"}}
 
     class DummyTelegraph:
@@ -124,6 +126,8 @@ async def test_update_festival_tg_nav_logs_skipped(tmp_path, monkeypatch, caplog
     assert rec.fest == "Fest1"
     assert rec.nav_old == h
     assert rec.nav_new == h
+    assert rec.removed_legacy_blocks == 0
+    assert rec.legacy_markers_replaced is False
 
 
 @pytest.mark.asyncio

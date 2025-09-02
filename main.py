@@ -2574,7 +2574,9 @@ def apply_month_nav(html_content: str, html_block: str | None) -> str:
     return html_content
 
 
-def apply_festival_nav(html_content: str, nav_html: str | Iterable[str]) -> tuple[str, bool]:
+def apply_festival_nav(
+    html_content: str, nav_html: str | Iterable[str]
+) -> tuple[str, bool, int, bool]:
     """Idempotently insert or replace the festival navigation block.
 
     ``nav_html`` may be a pre-rendered HTML fragment or an iterable of pieces
@@ -2582,7 +2584,7 @@ def apply_festival_nav(html_content: str, nav_html: str | Iterable[str]) -> tupl
     a ``NAV_HASH`` comment with a SHA256 hash of the normalized HTML so that
     the existing block can be compared cheaply.
 
-    Returns updated HTML and a boolean ``changed`` flag.
+    Returns a tuple ``(html, changed, removed_legacy_blocks, legacy_markers_replaced)``.
     """
 
     if not isinstance(nav_html, str):
@@ -2601,45 +2603,51 @@ def apply_festival_nav(html_content: str, nav_html: str | Iterable[str]) -> tupl
         "<!-- FEST_NAV_END -->",
         "<!--FEST_NAV_END-->",
     ]
-    legacy_replaced = False
+    legacy_markers_replaced = False
     if any(v in html_content for v in legacy_start_variants + legacy_end_variants):
         for v in legacy_start_variants:
             if v in html_content:
-                legacy_replaced = True
+                legacy_markers_replaced = True
                 html_content = html_content.replace(v, FEST_NAV_START)
         for v in legacy_end_variants:
             if v in html_content:
-                legacy_replaced = True
+                legacy_markers_replaced = True
                 html_content = html_content.replace(v, FEST_NAV_END)
 
     block_pattern = re.compile(
         re.escape(FEST_NAV_START) + r"(.*?)" + re.escape(FEST_NAV_END), re.DOTALL
     )
-    blocks = block_pattern.findall(html_content)
-
-    heading_pattern = re.compile(
-        r"<h3>Ближайшие фестивали</h3>(?:<h4>.*?</h4>)?", re.DOTALL
+    unmarked_block_pattern = re.compile(
+        r"(?:<p>\s*)?(?:<h3[^>]*>\s*Ближайшие(?:\s|&nbsp;)+фестивали\s*</h3>|"
+        r"<p>\s*<strong>\s*Ближайшие(?:\s|&nbsp;)+фестивали\s*</strong>\s*</p>)"
+        r".*?(?=(?:<h[23][^>]*>|<!--\s*FEST_NAV_START\s*-->|$))",
+        re.DOTALL | re.IGNORECASE,
     )
-    headings = heading_pattern.findall(html_content)
 
-    if len(blocks) == 1 and not headings:
+    blocks = block_pattern.findall(html_content)
+    legacy_headings = unmarked_block_pattern.findall(html_content)
+
+    if len(blocks) == 1 and not legacy_headings:
         current = blocks[0]
         if content_hash(current) == content_hash(nav_block):
-            if legacy_replaced:
+            if legacy_markers_replaced:
                 html_content = block_pattern.sub(nav_block, html_content, count=1)
                 html_content = apply_footer_link(html_content)
-                return html_content, True
+                return html_content, True, 0, True
             html_content = apply_footer_link(html_content)
-            return html_content, False
+            return html_content, False, 0, False
 
-    html_content = block_pattern.sub("", html_content)
-    html_content = heading_pattern.sub("", html_content)
+    removed_legacy_blocks = 0
+    html_content, n = block_pattern.subn("", html_content)
+    removed_legacy_blocks += n
+    html_content, n = unmarked_block_pattern.subn("", html_content)
+    removed_legacy_blocks += n
 
     html_content = replace_between_markers(
         html_content, FEST_NAV_START, FEST_NAV_END, nav_block
     )
     html_content = apply_footer_link(html_content)
-    return html_content, True
+    return html_content, True, removed_legacy_blocks, legacy_markers_replaced
 
 
 def apply_footer_link(html_content: str) -> str:
@@ -6762,9 +6770,20 @@ async def update_festival_tg_nav(event_id: int, db: Database, bot: Bot | None) -
             title = page.get("title") or fest.full_name or fest.name
             m = re.search(r"<!--NAV_HASH:([0-9a-f]+)-->", html_content)
             old_hash = m.group(1) if m else ""
-            new_html, changed = apply_festival_nav(html_content, nav_html)
+            new_html, changed, removed_blocks, markers_replaced = apply_festival_nav(
+                html_content, nav_html
+            )
             m2 = re.search(r"<!--NAV_HASH:([0-9a-f]+)-->", new_html)
             new_hash = m2.group(1) if m2 else ""
+            extra = {
+                "target": "tg",
+                "path": path,
+                "nav_old": old_hash,
+                "nav_new": new_hash,
+                "fest": fest.name,
+                "removed_legacy_blocks": removed_blocks,
+                "legacy_markers_replaced": markers_replaced,
+            }
             if changed:
                 await telegraph_call(tg.edit_page, path, title=title, html_content=new_html)
                 fest.nav_hash = await get_setting_value(db, "fest_nav_hash")
@@ -6772,26 +6791,12 @@ async def update_festival_tg_nav(event_id: int, db: Database, bot: Bot | None) -
                 await session.commit()
                 logging.info(
                     "updated festival page %s in Telegraph", fest.name,
-                    extra={
-                        "action": "edited",
-                        "target": "tg",
-                        "path": path,
-                        "nav_old": old_hash,
-                        "nav_new": new_hash,
-                        "fest": fest.name,
-                    },
+                    extra={"action": "edited", **extra},
                 )
             else:
                 logging.info(
                     "festival page %s navigation unchanged", fest.name,
-                    extra={
-                        "action": "skipped_nochange",
-                        "target": "tg",
-                        "path": path,
-                        "nav_old": old_hash,
-                        "nav_new": new_hash,
-                        "fest": fest.name,
-                    },
+                    extra={"action": "skipped_nochange", **extra},
                 )
             return changed
         except Exception as e:
@@ -8978,19 +8983,27 @@ async def sync_festival_page(
                 nav_html, _, _ = await build_festivals_nav_block(db)
                 page = await telegraph_call(tg.get_page, path, return_html=True)
                 html_content = page.get("content") or page.get("content_html") or ""
-                new_html, changed = apply_festival_nav(html_content, nav_html)
+                new_html, changed, removed_blocks, markers_replaced = apply_festival_nav(
+                    html_content, nav_html
+                )
+                extra = {
+                    "target": "tg",
+                    "path": path,
+                    "removed_legacy_blocks": removed_blocks,
+                    "legacy_markers_replaced": markers_replaced,
+                }
                 if changed:
                     await telegraph_call(
                         tg.edit_page, path, title=title, html_content=new_html
                     )
                     logging.info(
                         "updated festival page %s in Telegraph", name,
-                        extra={"action": "edited", "target": "tg", "path": path},
+                        extra={"action": "edited", **extra},
                     )
                 else:
                     logging.info(
                         "festival page %s navigation unchanged", name,
-                        extra={"action": "skipped_nochange", "target": "tg", "path": path},
+                        extra={"action": "skipped_nochange", **extra},
                     )
             else:
                 title, content = await build_festival_page_content(db, fest)
@@ -9055,29 +9068,28 @@ async def refresh_nav_on_all_festivals(
                 page = await telegraph_call(tg.get_page, path, return_html=True)
                 html_content = page.get("content") or page.get("content_html") or ""
                 title = page.get("title") or name
-                new_html, changed = apply_festival_nav(html_content, nav_html)
+                new_html, changed, removed_blocks, markers_replaced = apply_festival_nav(
+                    html_content, nav_html
+                )
+                extra = {
+                    "target": "tg",
+                    "path": path,
+                    "fest": name,
+                    "removed_legacy_blocks": removed_blocks,
+                    "legacy_markers_replaced": markers_replaced,
+                }
                 if changed:
                     await telegraph_call(
                         tg.edit_page, path, title=title, html_content=new_html
                     )
                     logging.info(
                         "updated festival page %s in Telegraph", name,
-                        extra={
-                            "action": "edited",
-                            "target": "tg",
-                            "path": path,
-                            "fest": name,
-                        },
+                        extra={"action": "edited", **extra},
                     )
                 else:
                     logging.info(
                         "festival page %s navigation unchanged", name,
-                        extra={
-                            "action": "skipped_nochange",
-                            "target": "tg",
-                            "path": path,
-                            "fest": name,
-                        },
+                        extra={"action": "skipped_nochange", **extra},
                     )
             except Exception as e:
                 logging.error(
