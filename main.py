@@ -2719,8 +2719,15 @@ async def refresh_month_nav(db: Database) -> None:
             .order_by(func.substr(Event.date, 1, 7))
         )
         months = [r[0] for r in res_nav]
+        res_pages = await session.execute(
+            select(MonthPage).where(MonthPage.month.in_(months))
+        )
+        page_map = {p.month: p for p in res_pages.scalars().all()}
+
     for m in months:
-        await sync_month_page(db, m, update_links=True, force=True)
+        page = page_map.get(m)
+        update_links = bool(page and page.url)
+        await sync_month_page(db, m, update_links=update_links, force=True)
         await asyncio.sleep(0)
 
 async def build_month_buttons(
