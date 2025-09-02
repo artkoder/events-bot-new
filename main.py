@@ -10497,12 +10497,12 @@ async def nightly_page_sync(db: Database, run_id: str | None = None) -> None:
             weekends.add(w.isoformat())
     for month in months:
         try:
-            await sync_month_page(db, month, update_links=False)
+            await sync_month_page(db, month, update_links=True)
         except Exception as e:  # pragma: no cover - log and continue
             logging.error("nightly_page_sync month %s failed: %s", month, e)
     for start in weekends:
         try:
-            await sync_weekend_page(db, start, update_links=False, post_vk=False)
+            await sync_weekend_page(db, start, update_links=True, post_vk=False)
         except Exception as e:  # pragma: no cover - log and continue
             logging.error("nightly_page_sync weekend %s failed: %s", start, e)
 

@@ -8,6 +8,7 @@ app = "events-bot-new"
 [env]
   PORT = "8080"
   PYTHONOPTIMIZE = "2"
+  ENABLE_NIGHTLY_PAGE_SYNC = "1"
 
 
 [[mounts]]
