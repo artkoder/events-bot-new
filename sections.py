@@ -1,5 +1,8 @@
 import re
 import hashlib
+from dataclasses import dataclass
+from datetime import date
+from typing import Any, List
 
 
 def normalize_html(s: str) -> str:
@@ -24,3 +27,77 @@ def replace_between_markers(html: str, start: str, end: str, new_block: str) -> 
     if html and not html.endswith("\n"):
         html += "\n"
     return html + start + new_block + end
+
+
+MONTHS_RU = {
+    "января": 1,
+    "февраля": 2,
+    "марта": 3,
+    "апреля": 4,
+    "мая": 5,
+    "июня": 6,
+    "июля": 7,
+    "августа": 8,
+    "сентября": 9,
+    "октября": 10,
+    "ноября": 11,
+    "декабря": 12,
+}
+
+
+@dataclass
+class DaySection:
+    """Descriptor for a day's section on a month page."""
+
+    date: date
+    h3_idx: int
+    start_idx: int
+    end_idx: int
+
+
+def _nodes_from_html(html_or_nodes: Any) -> List[dict]:
+    if isinstance(html_or_nodes, str):
+        from telegraph.utils import html_to_nodes
+
+        return html_to_nodes(html_or_nodes)
+    return html_or_nodes
+
+
+def parse_month_sections(html_or_nodes: Any) -> List[DaySection]:
+    """Return sections for each day found by ``h3`` headers.
+
+    The function does not modify or normalise nodes; zero‑width spaces and
+    other whitespace are preserved as is.  The returned ``start_idx`` points to
+    the first node following the ``h3`` header.  ``end_idx`` points to the index
+    of the next ``h3`` or the end of the node list.
+    """
+
+    nodes = _nodes_from_html(html_or_nodes)
+    sections: List[DaySection] = []
+    h3_positions = [i for i, n in enumerate(nodes) if n.get("tag") == "h3"]
+    for idx, pos in enumerate(h3_positions):
+        node = nodes[pos]
+        text_parts = []
+        for ch in node.get("children", []):
+            if isinstance(ch, str):
+                text_parts.append(ch)
+        text = "".join(text_parts)
+        # remove emojis and extra spaces
+        clean = re.sub(r"[^\w\s]", " ", text, flags=re.UNICODE)
+        clean = re.sub(r"\s+", " ", clean).strip().lower()
+        m = re.match(r"(\d{1,2})\s+([а-я]+)", clean)
+        if not m:
+            continue
+        day = int(m.group(1))
+        month_name = m.group(2)
+        month = MONTHS_RU.get(month_name)
+        if not month:
+            continue
+        # year is irrelevant for ordering; use a placeholder
+        d = date(2000, month, day)
+        next_pos = h3_positions[idx + 1] if idx + 1 < len(h3_positions) else len(nodes)
+        sections.append(
+            DaySection(date=d, h3_idx=pos, start_idx=pos + 1, end_idx=next_pos)
+        )
+    return sections
+
