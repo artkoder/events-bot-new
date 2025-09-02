@@ -191,6 +191,8 @@ class JobOutbox(SQLModel, table=True):
     last_result: Optional[str] = None
     updated_at: datetime = Field(default_factory=datetime.utcnow)
     next_run_at: datetime = Field(default_factory=datetime.utcnow)
+    coalesce_key: Optional[str] = None
+    depends_on: Optional[str] = None
 
 
 def create_all(engine) -> None:

@@ -5000,60 +5000,97 @@ async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
 
 
 async def enqueue_job(
-    db: Database, event_id: int, task: JobTask, payload: dict | None = None
+    db: Database,
+    event_id: int,
+    task: JobTask,
+    payload: dict | None = None,
+    *,
+    coalesce_key: str | None = None,
+    depends_on: list[str] | None = None,
 ) -> str:
-    job_key = f"{task.value}:{event_id}"
     async with db.get_session() as session:
-        stmt = select(JobOutbox).where(
-            JobOutbox.event_id == event_id, JobOutbox.task == task
-        )
+        now = datetime.utcnow()
+        ev = None
+        if coalesce_key is None or depends_on is None:
+            ev = await session.get(Event, event_id)
+        if coalesce_key is None and ev:
+            if task == JobTask.month_pages:
+                month = ev.date.split("..", 1)[0][:7]
+                coalesce_key = f"month_pages:{month}"
+            elif task == JobTask.week_pages:
+                d = parse_iso_date(ev.date)
+                if d:
+                    week = d.isocalendar().week
+                    coalesce_key = f"week_pages:{d.year}-{week:02d}"
+            elif task == JobTask.weekend_pages:
+                d = parse_iso_date(ev.date)
+                w = weekend_start_for_date(d) if d else None
+                if w:
+                    coalesce_key = f"weekend_pages:{w.isoformat()}"
+            elif task == JobTask.festival_pages and ev and ev.festival:
+                fest = (
+                    await session.execute(
+                        select(Festival.id).where(Festival.name == ev.festival)
+                    )
+                ).scalar_one_or_none()
+                if fest:
+                    coalesce_key = f"festival_pages:{fest}"
+        if depends_on is None and ev and ev.festival and task in {
+            JobTask.month_pages,
+            JobTask.week_pages,
+            JobTask.weekend_pages,
+        }:
+            fest = (
+                await session.execute(
+                    select(Festival.id).where(Festival.name == ev.festival)
+                )
+            ).scalar_one_or_none()
+            if fest:
+                depends_on = [f"festival_pages:{fest}"]
+        job_key = coalesce_key or f"{task.value}:{event_id}"
+        if coalesce_key:
+            stmt = select(JobOutbox).where(JobOutbox.coalesce_key == coalesce_key)
+        else:
+            stmt = select(JobOutbox).where(
+                JobOutbox.event_id == event_id, JobOutbox.task == task
+            )
         res = await session.execute(stmt)
         job = res.scalar_one_or_none()
-        now = datetime.utcnow()
+        dep_str = ",".join(depends_on) if depends_on else None
         if job:
+            updated = False
             if job.status in {JobStatus.pending, JobStatus.running}:
                 if payload is not None:
                     job.payload = payload
+                    updated = True
+                if depends_on:
+                    cur = set(filter(None, (job.depends_on or "").split(",")))
+                    before = cur.copy()
+                    cur.update(depends_on)
+                    if cur != before:
+                        job.depends_on = ",".join(sorted(cur))
+                        updated = True
+                if updated:
                     session.add(job)
                     await session.commit()
                     logging.info("enqueue_job merged job_key=%s", job_key)
                     return "merged"
-                logging.info("enqueue_job skip duplicate job_key=%s", job_key)
-                return "skipped"
-            if job.status == JobStatus.done:
-                if task in {
-                    JobTask.telegraph_build,
-                    JobTask.month_pages,
-                    JobTask.week_pages,
-                    JobTask.weekend_pages,
-                    JobTask.ics_publish,
-                }:
-                    job.status = JobStatus.pending
-                    job.payload = payload
-                    job.attempts = 0
-                    job.last_error = None
-                    job.updated_at = now
-                    job.next_run_at = now
-                    session.add(job)
-                    await session.commit()
-                    logging.info(
-                        "enqueue_job merged(requeue) job_key=%s", job_key
-                    )
-                    return "requeued"
-                logging.info(
-                    "enqueue_job skip up-to-date job_key=%s", job_key
-                )
-                return "skipped"
+                logging.info("enqueue_job coalesced job_key=%s", job_key)
+                return "coalesced"
             job.status = JobStatus.pending
             job.payload = payload
             job.attempts = 0
             job.last_error = None
             job.updated_at = now
             job.next_run_at = now
+            if depends_on:
+                cur = set(filter(None, (job.depends_on or "").split(",")))
+                cur.update(depends_on)
+                job.depends_on = ",".join(sorted(cur))
             session.add(job)
             await session.commit()
-            logging.info("enqueue_job merged job_key=%s", job_key)
-            return "merged"
+            logging.info("enqueue_job merged(requeue) job_key=%s", job_key)
+            return "requeued"
         session.add(
             JobOutbox(
                 event_id=event_id,
@@ -5062,6 +5099,8 @@ async def enqueue_job(
                 status=JobStatus.pending,
                 updated_at=now,
                 next_run_at=now,
+                coalesce_key=coalesce_key,
+                depends_on=dep_str,
             )
         )
         await session.commit()
@@ -6708,15 +6747,17 @@ async def publish_event_progress(
         if task not in progress:
             return
         if status == JobStatus.done:
-            icon = "✅"
-            if link:
-                suffix = f" — {link}"
-            elif not changed:
-                suffix = " — без изменений"
+            if not changed:
+                icon = "⏭"
+                suffix = ""
             else:
-                suffix = (
-                    " — создано/обновлено" if task == JobTask.month_pages else ""
-                )
+                icon = "✅"
+                if link:
+                    suffix = f" — {link}"
+                else:
+                    suffix = (
+                        " — создано/обновлено" if task == JobTask.month_pages else ""
+                    )
         elif status == JobStatus.paused:
             icon = "⏸"
             suffix = " — требуется капча; нажмите «Ввести код»"
@@ -8006,7 +8047,11 @@ def _build_month_page_content_sync(
 
 
 async def _sync_month_page_inner(
-    db: Database, month: str, update_links: bool = False, force: bool = False
+    db: Database,
+    month: str,
+    update_links: bool = False,
+    force: bool = False,
+    progress: Any | None = None,
 ):
     tasks: list[Awaitable[None]] = []
     async with HEAVY_SEMAPHORE:
@@ -8040,6 +8085,8 @@ async def _sync_month_page_inner(
                 session.add(page)
                 await session.commit()
                 created = True
+            prev_hash = page.content_hash
+            prev_hash2 = page.content_hash2
 
         async def commit_page() -> None:
             async with db.get_session() as s:
@@ -8226,6 +8273,8 @@ async def _sync_month_page_inner(
         except Exception as e:
             logging.error("Failed to sync month page %s: %s", month, e)
 
+            if progress:
+                progress.mark(f"month_pages:{month}", "error", str(e))
             if update_links or created:
                 async with db.get_session() as session:
                     result = await session.execute(
@@ -8245,13 +8294,25 @@ async def _sync_month_page_inner(
             mem_info("month page after")
         if not update_links:
             await refresh_month_nav(db)
+        changed = (
+            created
+            or page.content_hash != prev_hash
+            or page.content_hash2 != prev_hash2
+        )
+        if progress:
+            status = "done" if changed else "skipped_nochange"
+            progress.mark(f"month_pages:{month}", status, page.url or "")
 
 
 async def sync_month_page(
-    db: Database, month: str, update_links: bool = False, force: bool = False
+    db: Database,
+    month: str,
+    update_links: bool = False,
+    force: bool = False,
+    progress: Any | None = None,
 ):
     async with _page_locks[f"month:{month}"]:
-        await _sync_month_page_inner(db, month, update_links, force)
+        await _sync_month_page_inner(db, month, update_links, force, progress)
 
 
 def week_start_for_date(d: date) -> date:
@@ -8434,7 +8495,11 @@ async def build_weekend_page_content(
 
 
 async def _sync_weekend_page_inner(
-    db: Database, start: str, update_links: bool = True, post_vk: bool = True
+    db: Database,
+    start: str,
+    update_links: bool = True,
+    post_vk: bool = True,
+    progress: Any | None = None,
 ):
     tasks: list[Awaitable[None]] = []
     async with HEAVY_SEMAPHORE:
@@ -8468,6 +8533,7 @@ async def _sync_weekend_page_inner(
             else:
                 created = False
             path = page.path
+            prev_hash = page.content_hash
 
         try:
             title, content, _ = await build_weekend_page_content(db, start)
@@ -8506,6 +8572,8 @@ async def _sync_weekend_page_inner(
             logging.info("%s weekend page %s", "Created" if created else "Edited", start)
         except Exception as e:
             logging.error("Failed to sync weekend page %s: %s", start, e)
+            if progress:
+                progress.mark(f"weekend_pages:{start}", "error", str(e))
             return
 
         async with db.get_session() as session:
@@ -8521,6 +8589,11 @@ async def _sync_weekend_page_inner(
         if DEBUG:
             mem_info("weekend page after")
 
+        changed = created or page.content_hash != prev_hash
+        if progress:
+            status = "done" if changed else "skipped_nochange"
+            progress.mark(f"weekend_pages:{start}", status, page.url or "")
+
         if update_links or created:
             d_start = date.fromisoformat(start)
             for d_adj in (d_start - timedelta(days=7), d_start + timedelta(days=7)):
@@ -8535,10 +8608,14 @@ async def _sync_weekend_page_inner(
 
 
 async def sync_weekend_page(
-    db: Database, start: str, update_links: bool = True, post_vk: bool = True
+    db: Database,
+    start: str,
+    update_links: bool = True,
+    post_vk: bool = True,
+    progress: Any | None = None,
 ):
     async with _page_locks[f"week:{start}"]:
-        await _sync_weekend_page_inner(db, start, update_links, post_vk)
+        await _sync_weekend_page_inner(db, start, update_links, post_vk, progress)
 
 
 def _build_month_vk_nav_lines(week_pages: list[WeekPage], cur_month: str) -> list[str]:
@@ -10405,12 +10482,19 @@ async def nightly_page_sync(db: Database, run_id: str | None = None) -> None:
     """
     async with span("db"):
         async with db.get_session() as session:
-            months = (
-                await session.exec(select(MonthPage.month))
-            ).scalars().all()
-            weekends = (
-                await session.exec(select(WeekendPage.start))
-            ).scalars().all()
+            res = await session.execute(select(Event.date))
+            dates = [d for (d,) in res.all()]
+    months: set[str] = set()
+    weekends: set[str] = set()
+    for dt_str in dates:
+        start = dt_str.split("..", 1)[0]
+        d = parse_iso_date(start)
+        if not d:
+            continue
+        months.add(d.strftime("%Y-%m"))
+        w = weekend_start_for_date(d)
+        if w:
+            weekends.add(w.isoformat())
     for month in months:
         try:
             await sync_month_page(db, month, update_links=False)
@@ -11456,25 +11540,31 @@ async def handle_edit_message(message: types.Message, db: Database, bot: Bot):
         new_date = event.date.split("..", 1)[0]
         new_month = new_date[:7]
         new_fest = event.festival
-    await sync_month_page(db, old_month)
-    old_dt = parse_iso_date(old_date)
-    old_w = weekend_start_for_date(old_dt) if old_dt else None
-    if old_w:
-        await sync_weekend_page(db, old_w.isoformat())
-    if new_month != old_month:
-        await sync_month_page(db, new_month)
-    new_dt = parse_iso_date(new_date)
-    new_w = weekend_start_for_date(new_dt) if new_dt else None
-    if new_w and new_w != old_w:
-        await sync_weekend_page(db, new_w.isoformat())
+    await enqueue_job(db, eid, JobTask.month_pages)
+    await enqueue_job(db, eid, JobTask.week_pages)
+    await enqueue_job(db, eid, JobTask.weekend_pages)
+    if field == "city":
+        page_url = None
+        async with db.get_session() as session:
+            page = await session.get(MonthPage, new_month)
+            page_url = page.url if page else None
+        markup = None
+        if page_url:
+            label = f"Открыть {month_name_prepositional(new_month)}"
+            markup = types.InlineKeyboardMarkup(
+                inline_keyboard=[[types.InlineKeyboardButton(text=label, url=page_url)]]
+            )
+        await bot.send_message(
+            message.chat.id,
+            f"Город обновлён: {event.city}",
+            reply_markup=markup,
+        )
     if old_fest:
         await sync_festival_page(db, old_fest)
-
         await sync_festival_vk_post(db, old_fest, bot)
     if new_fest and new_fest != old_fest:
         await sync_festival_page(db, new_fest)
         await sync_festival_vk_post(db, new_fest, bot)
-
     if event.source_vk_post_url:
         try:
             await sync_vk_source_post(
@@ -11487,7 +11577,6 @@ async def handle_edit_message(message: types.Message, db: Database, bot: Bot):
             )
         except Exception as e:
             logging.error("failed to sync VK source post: %s", e)
-
     editing_sessions[message.from_user.id] = (eid, None)
     await show_edit_menu(message.from_user.id, event, bot)
 
