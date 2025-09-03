@@ -14,6 +14,7 @@ import asyncio
 import main
 from telegraph.api import json_dumps
 from telegraph import TelegraphException
+from telegraph.utils import nodes_to_html
 import importlib
 import logging
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -2913,6 +2914,16 @@ async def test_month_nav_and_exhibitions(tmp_path: Path, monkeypatch):
                 event_type="выставка",
             )
         )
+        session.add(
+            Event(
+                title="Meet",
+                description="d",
+                source_text="s",
+                date="2025-08-10",
+                time="12:00",
+                location_name="Hall",
+            )
+        )
         await session.commit()
 
     class FakeDate(date):
@@ -2929,18 +2940,12 @@ async def test_month_nav_and_exhibitions(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(main, "datetime", FakeDatetime)
 
     _, content, _ = await main.build_month_page_content(db, "2025-07")
-    nav_blocks = [
-        n
-        for n in content
-        if n.get("tag") == "h4"
-        and any(
-            isinstance(c, dict) and c.get("attrs", {}).get("href") == "m2"
-            for c in n.get("children", [])
-        )
-    ]
-    assert len(nav_blocks) == 1
-    first_block_children = nav_blocks[0]["children"]
-    assert not isinstance(first_block_children[0], dict)
+    html = main.unescape_html_comments(nodes_to_html(content))
+    nav_block = await main.build_month_nav_block(db)
+    html = main.replace_between_markers(
+        html, main.NAV_MONTHS_START, main.NAV_MONTHS_END, nav_block
+    )
+    assert 'href="m2"' in html
 
     idx_exh = next(
         i
