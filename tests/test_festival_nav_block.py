@@ -85,3 +85,30 @@ async def test_upcoming_festivals_filters_past_and_logs(tmp_path, caplog):
     assert "Future" in names
     assert any("db upcoming_festivals took" in r.message for r in caplog.records)
 
+
+@pytest.mark.asyncio
+async def test_festival_nav_block_sorted(tmp_path):
+    db = main.Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    today = date.today()
+    tomorrow = today + timedelta(days=1)
+    later = today + timedelta(days=2)
+    async with db.get_session() as session:
+        session.add_all(
+            [
+                Festival(
+                    name="Later",
+                    start_date=later.isoformat(),
+                    end_date=later.isoformat(),
+                ),
+                Festival(
+                    name="Soon",
+                    start_date=tomorrow.isoformat(),
+                    end_date=tomorrow.isoformat(),
+                ),
+            ]
+        )
+        await session.commit()
+    _, lines, _ = await main.build_festivals_nav_block(db)
+    assert lines.index("Soon") < lines.index("Later")
+

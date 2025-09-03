@@ -1,6 +1,6 @@
 import logging
 import pytest
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import main
@@ -105,6 +105,50 @@ async def test_sync_festivals_index_page_updated(tmp_path: Path, monkeypatch, ca
     assert "<h3>Все фестивали Калининградской области</h3>" in html
     assert html.count(FEST_INDEX_INTRO_START) == 1
     assert html.count(FEST_INDEX_INTRO_END) == 1
+
+
+@pytest.mark.asyncio
+async def test_sync_festivals_index_page_sorted(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    today = date.today()
+    soon = today + timedelta(days=1)
+    later = today + timedelta(days=2)
+    async with db.get_session() as session:
+        session.add_all(
+            [
+                Festival(
+                    name="Later",
+                    start_date=later.isoformat(),
+                    end_date=later.isoformat(),
+                ),
+                Festival(
+                    name="Soon",
+                    start_date=soon.isoformat(),
+                    end_date=soon.isoformat(),
+                ),
+            ]
+        )
+        await session.commit()
+
+    stored = {}
+
+    class DummyTelegraph:
+        def __init__(self, *a, **k):
+            pass
+
+        def create_page(self, title, html_content):
+            stored["html"] = html_content
+            return {"url": "https://telegra.ph/fests", "path": "fests"}
+
+    monkeypatch.setattr(main, "Telegraph", DummyTelegraph)
+    monkeypatch.setattr(main, "telegraph_call", lambda func, *a, **k: func(*a, **k))
+    monkeypatch.setattr(main, "telegraph_create_page", lambda tg, *a, **k: tg.create_page(*a, **k))
+    monkeypatch.setattr(main, "get_telegraph_token", lambda: "token")
+
+    await main.sync_festivals_index_page(db)
+    html = stored["html"]
+    assert html.index("Soon") < html.index("Later")
 
 
 @pytest.mark.asyncio
