@@ -368,6 +368,9 @@ partner_info_sessions: TTLCache[int, int] = TTLCache(maxsize=64, ttl=3600)
 # user_id -> (festival_id, field?) for festival editing
 festival_edit_sessions: TTLCache[int, tuple[int, str | None]] = TTLCache(maxsize=64, ttl=3600)
 
+# cache for first image in Telegraph pages
+telegraph_first_image: TTLCache[str, str] = TTLCache(maxsize=128, ttl=24 * 3600)
+
 # pending event text/photo input
 add_event_sessions: TTLCache[int, bool] = TTLCache(maxsize=64, ttl=3600)
 # waiting for a date for events listing
@@ -1554,6 +1557,91 @@ async def ensure_festival(
         logging.info("created festival %s", name)
         await rebuild_fest_nav_if_changed(db)
         return fest, True, True
+
+
+async def extract_telegra_ph_cover_url(page_url: str) -> str | None:
+    """Return first https://telegra.ph/file/... image from a Telegraph page."""
+    url = page_url.split("#", 1)[0].split("?", 1)[0]
+    cached = telegraph_first_image.get(url)
+    if cached is not None:
+        return cached
+    parsed = urlparse(url)
+    host = parsed.netloc.lower()
+    if host not in {"telegra.ph", "te.legra.ph"}:
+        return None
+    path = parsed.path.lstrip("/")
+    if not path:
+        return None
+    api_url = f"https://api.telegra.ph/getPage/{path}?return_content=true"
+    timeout = httpx.Timeout(HTTP_TIMEOUT)
+    for _ in range(3):
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.get(api_url)
+            resp.raise_for_status()
+            data = resp.json()
+            content = data.get("result", {}).get("content") or []
+
+            def norm(src: str | None) -> str | None:
+                if not src:
+                    return None
+                src = src.split("#", 1)[0].split("?", 1)[0]
+                if "/file/" not in src:
+                    return None
+                idx = src.find("/file/")
+                return f"https://telegra.ph{src[idx:]}"
+
+            def dfs(nodes) -> str | None:
+                for node in nodes:
+                    if isinstance(node, dict):
+                        tag = node.get("tag")
+                        attrs = node.get("attrs") or {}
+                        if tag == "img":
+                            u = norm(attrs.get("src"))
+                            if u:
+                                return u
+                        if tag == "a":
+                            u = norm(attrs.get("href"))
+                            if u:
+                                return u
+                        children = node.get("children") or []
+                        found = dfs(children)
+                        if found:
+                            return found
+                return None
+
+            cover = dfs(content)
+            if cover:
+                telegraph_first_image[url] = cover
+                logging.info("telegraph_cover: found")
+                return cover
+            logging.info("telegraph_cover: no_image")
+            return None
+        except Exception:
+            logging.info("telegraph_cover: api_failed")
+            await asyncio.sleep(1)
+    return None
+
+
+async def try_set_fest_cover_from_program(
+    db: Database, fest: Festival, force: bool = False
+) -> bool:
+    """Fetch Telegraph cover and set festival.photo_url if missing."""
+    if not fest.program_url:
+        return False
+    if not force and fest.photo_url:
+        return False
+    cover = await extract_telegra_ph_cover_url(fest.program_url)
+    if not cover:
+        return False
+    async with db.get_session() as session:
+        fresh = await session.get(Festival, fest.id)
+        if not fresh:
+            return False
+        fresh.photo_url = cover
+        await session.commit()
+    logging.info("telegraph_cover: set_ok")
+    return True
 
 
 async def get_superadmin_id(db: Database) -> int | None:
@@ -4174,6 +4262,18 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
         await send_festivals_list(callback.message, db, bot, edit=True)
         await callback.answer("Deleted")
 
+    elif data.startswith("festcover:"):
+        fid = int(data.split(":")[1])
+        async with db.get_session() as session:
+            fest = await session.get(Festival, fid)
+        if not fest:
+            await callback.answer("Festival not found", show_alert=True)
+            return
+        ok = await try_set_fest_cover_from_program(db, fest, force=True)
+        msg = "Обложка обновлена" if ok else "Картинка не найдена"
+        await callback.message.answer(msg)
+        await callback.answer()
+
     elif data.startswith("togglesilent:"):
         eid = int(data.split(":")[1])
         async with db.get_session() as session:
@@ -5391,6 +5491,8 @@ async def add_events_from_text(
                     select(Festival).where(Festival.name == fest_obj.name)
                 )
                 festival_obj = res.scalar_one_or_none()
+        if festival_obj:
+            await try_set_fest_cover_from_program(db, festival_obj)
     for data in parsed:
         logging.info(
             "processing event candidate: %s on %s %s",
@@ -11245,6 +11347,12 @@ async def show_festival_edit_menu(user_id: int, fest: Festival, bot: Bot):
             types.InlineKeyboardButton(
                 text=("Delete ticket" if fest.ticket_url else "Add ticket"),
                 callback_data=f"festeditfield:{fest.id}:ticket",
+            )
+        ],
+        [
+            types.InlineKeyboardButton(
+                text="Обновить обложку из Telegraph",
+                callback_data=f"festcover:{fest.id}",
             )
         ],
         [types.InlineKeyboardButton(text="Done", callback_data="festeditdone")],
