@@ -5368,8 +5368,24 @@ async def add_events_from_text(
                     fest_updated = True
                     festival_obj = fest_db
         if created:
-            await sync_festival_page(db, fest_obj.name)
-            await sync_festival_vk_post(db, fest_obj.name, bot)
+            async def _safe_sync_fest(name: str) -> None:
+                try:
+                    await sync_festival_page(db, name)
+                except Exception:
+                    logging.exception("festival page sync failed for %s", name)
+                try:
+                    await sync_festival_vk_post(db, name, bot, strict=True)
+                except Exception:
+                    logging.exception("festival VK sync failed for %s", name)
+                    if bot:
+                        try:
+                            await notify_superadmin(
+                                db, bot, f"festival VK sync failed for {name}"
+                            )
+                        except Exception:
+                            logging.exception("notify_superadmin failed for %s", name)
+
+            asyncio.create_task(_safe_sync_fest(fest_obj.name))
             async with db.get_session() as session:
                 res = await session.execute(
                     select(Festival).where(Festival.name == fest_obj.name)
@@ -9489,7 +9505,8 @@ async def sync_festival_vk_post(
     *,
     nav_only: bool = False,
     nav_lines: list[str] | None = None,
-):
+    strict: bool = False,
+) -> bool | None:
     group_id = await get_vk_group_id(db)
     if not group_id:
         return
@@ -9617,7 +9634,9 @@ async def sync_festival_vk_post(
                     "VK post error for festival %s", name,
                     extra={"action": "error", "target": "vk", "url": fest.vk_post_url, "fest": name},
                 )
-                raise RuntimeError("vk edit failed")
+                if strict:
+                    raise RuntimeError("vk edit failed")
+                return False
             if os.getenv("VK_NAV_FALLBACK") == "skip":
                 logging.info(
                     "festival post %s skipping VK edit", name,
@@ -9659,7 +9678,9 @@ async def sync_festival_vk_post(
                 "VK post error for festival %s", name,
                 extra={"action": "error", "target": "vk", "url": fest.vk_post_url, "fest": name},
             )
-            raise RuntimeError("vk edit failed")
+            if strict:
+                raise RuntimeError("vk edit failed")
+            return False
 
     url = await _try_post(message, attachments)
     if url:
@@ -9678,7 +9699,9 @@ async def sync_festival_vk_post(
         "VK post error for festival %s", name,
         extra={"action": "error", "target": "vk", "url": fest.vk_post_url, "fest": name},
     )
-    raise RuntimeError("vk post failed")
+    if strict:
+        raise RuntimeError("vk post failed")
+    return False
 
 
 async def send_festival_poll(

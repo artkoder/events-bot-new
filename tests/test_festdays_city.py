@@ -74,7 +74,7 @@ async def test_festdays_uses_correct_city(tmp_path: Path, monkeypatch):
     async def fake_sync_festival_page(db_obj, name, **kwargs):
         pass
 
-    async def fake_sync_vk(db_obj, name, bot_obj):
+    async def fake_sync_vk(db_obj, name, bot_obj, strict=False):
         pass
 
     async def fake_notify(db_obj, bot_obj, user, event, added):

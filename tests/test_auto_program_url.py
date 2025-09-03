@@ -22,7 +22,7 @@ async def test_add_events_from_text_autofills_program_url(tmp_path: Path, monkey
     async def fake_sync_page(db, name):
         return None
 
-    async def fake_sync_vk(db, name, bot):
+    async def fake_sync_vk(db, name, bot, strict=False):
         return None
 
     monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)

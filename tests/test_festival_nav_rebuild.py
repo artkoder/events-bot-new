@@ -47,7 +47,7 @@ async def test_rebuild_festival_nav_updates_only_upcoming(tmp_path, monkeypatch)
         def get_page(self, path, return_html=True):
             return {"content_html": tg_pages[path]["html"], "title": tg_pages[path]["title"]}
 
-        def edit_page(self, path, title, html_content):
+        def edit_page(self, path, title, html_content, **kwargs):
             tg_pages[path] = {"html": html_content, "title": title}
             return {}
 
@@ -62,7 +62,7 @@ async def test_rebuild_festival_nav_updates_only_upcoming(tmp_path, monkeypatch)
     vk_base["Past"] = "base_old\n"
     vk_posts = vk_base.copy()
 
-    async def fake_sync_festival_vk_post(db, name, bot, nav_only=False, nav_lines=None):
+    async def fake_sync_festival_vk_post(db, name, bot, nav_only=False, nav_lines=None, strict=False):
         assert nav_only
         _, lines = await main._build_festival_nav_block(db, exclude=name)
         nav = "\n".join(lines)
@@ -158,7 +158,7 @@ async def test_vk_failure_does_not_block_tg(tmp_path, monkeypatch):
         def get_page(self, path, return_html=True):
             return {"content_html": tg_pages[path]["html"], "title": tg_pages[path]["title"]}
 
-        def edit_page(self, path, title, html_content):
+        def edit_page(self, path, title, html_content, **kwargs):
             tg_pages[path] = {"html": html_content, "title": title}
             return {}
 
@@ -173,7 +173,7 @@ async def test_vk_failure_does_not_block_tg(tmp_path, monkeypatch):
     vk_posts = vk_base.copy()
     fail_name = "Fest1"
 
-    async def fake_sync_festival_vk_post(db, name, bot, nav_only=False, nav_lines=None):
+    async def fake_sync_festival_vk_post(db, name, bot, nav_only=False, nav_lines=None, strict=False):
         assert nav_only
         if name == fail_name:
             raise RuntimeError("vk failure")
@@ -279,7 +279,7 @@ async def test_update_tg_nav_sets_nav_hash(tmp_path, monkeypatch):
                 "title": tg_pages[path]["title"],
             }
 
-        def edit_page(self, path, title, html_content):
+        def edit_page(self, path, title, html_content, **kwargs):
             tg_pages[path] = {"html": html_content, "title": title}
             return {}
 

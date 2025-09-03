@@ -1947,7 +1947,7 @@ async def test_forward_add_festival(tmp_path: Path, monkeypatch):
             fest.telegraph_url = "https://telegra.ph/test"
             await session.commit()
 
-    async def fake_sync_vk(db_obj, name, bot_obj):
+    async def fake_sync_vk(db_obj, name, bot_obj, strict=False):
         async with db_obj.get_session() as session:
             fest = (await session.execute(select(main.Festival).where(main.Festival.name == name))).scalar_one()
             fest.vk_post_url = "https://vk.com/wall-1_1"
@@ -5659,7 +5659,7 @@ async def test_festdays_callback_creates_events(tmp_path: Path, monkeypatch):
     async def fake_sync_festival_page(db_obj, name, **kwargs):
         pass
 
-    async def fake_sync_vk(db_obj, name, bot_obj):
+    async def fake_sync_vk(db_obj, name, bot_obj, strict=False):
         pass
 
     async def fake_notify(db_obj, bot_obj, user, event, added):
@@ -6663,7 +6663,7 @@ async def test_add_festival_updates_other_pages(tmp_path: Path, monkeypatch):
     async def fake_sync_page(db, name, **kwargs):
         called_pages.append(name)
 
-    async def fake_sync_vk(db, name, bot=None):
+    async def fake_sync_vk(db, name, bot=None, strict=False):
         called_vk.append(name)
 
     monkeypatch.setattr(main, "sync_festival_page", fake_sync_page)
@@ -7067,7 +7067,7 @@ async def test_update_festival_pages_ignores_past_events(tmp_path: Path, monkeyp
     async def fake_page(db_obj, name):
         called.append("page")
 
-    async def fake_vk(db_obj, name, bot=None, nav_only=False, nav_lines=None):
+    async def fake_vk(db_obj, name, bot=None, nav_only=False, nav_lines=None, strict=False):
         called.append("vk")
 
     async def fake_nav(db_obj):
@@ -7246,7 +7246,7 @@ async def test_refresh_nav_triggered_on_new_festival(monkeypatch, tmp_path: Path
     async def fake_sync_page(db_obj, name):
         return None
 
-    async def fake_sync_vk(db_obj, name, bot=None, nav_only=False, nav_lines=None):
+    async def fake_sync_vk(db_obj, name, bot=None, nav_only=False, nav_lines=None, strict=False):
         return None
 
     called: dict[str, list[str]] = {}
@@ -7519,7 +7519,7 @@ async def test_progress_includes_festival_tg(tmp_path: Path, monkeypatch):
     async def fake_sync_fest_page(db_obj, name, refresh_nav_only=False, items=None):
         return "http://fest"
 
-    async def fake_sync_fest_vk(db_obj, name, bot_obj, nav_only=False, nav_lines=None):
+    async def fake_sync_fest_vk(db_obj, name, bot_obj, nav_only=False, nav_lines=None, strict=False):
         return True
 
     monkeypatch.setattr(main, "update_telegraph_event_page", ok_handler)
