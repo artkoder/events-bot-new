@@ -7669,21 +7669,23 @@ def event_to_nodes(
     festival: Festival | None = None,
     fest_icon: bool = False,
     log_fest_link: bool = False,
+    *,
+    show_festival: bool = True,
 ) -> list[dict]:
-    md = format_event_md(e, festival)
+    md = format_event_md(e, festival if show_festival else None)
 
     lines = md.split("\n")
     body_lines = lines[1:]
-    if festival and body_lines:
+    if show_festival and festival and body_lines:
         body_lines = body_lines[1:]
     body_md = "\n".join(body_lines) if body_lines else ""
     from telegraph.utils import html_to_nodes
 
     nodes = [{"tag": "h4", "children": event_title_nodes(e)}]
-    fest = festival
-    if fest is None and e.festival:
+    fest = festival if show_festival else None
+    if fest is None and show_festival and e.festival:
         fest = getattr(e, "_festival", None)
-    if log_fest_link and e.festival:
+    if log_fest_link and show_festival and e.festival:
         has_url = bool(getattr(fest, "telegraph_url", None))
         has_path = bool(getattr(fest, "telegraph_path", None))
         href = ""
@@ -7723,7 +7725,34 @@ def event_to_nodes(
             nodes.append({"tag": "p", "children": [text]})
     if body_md:
         html_text = md_to_html(body_md)
-        nodes.extend(html_to_nodes(html_text))
+        body_nodes = html_to_nodes(html_text)
+        if (
+            festival
+            and not show_festival
+            and not e.telegraph_url
+            and not (e.description and e.description.strip())
+            and body_nodes
+        ):
+            first = body_nodes[0]
+            if first.get("tag") == "p":
+                children = first.get("children") or []
+                if children and isinstance(children[0], dict) and children[0].get("tag") == "br":
+                    rest = children[1:]
+                    if festival.program_url:
+                        link_node = {
+                            "tag": "p",
+                            "children": [
+                                {
+                                    "tag": "a",
+                                    "attrs": {"href": festival.program_url},
+                                    "children": ["программа"],
+                                }
+                            ],
+                        }
+                        body_nodes = [link_node, {"tag": "p", "children": rest}]
+                    else:
+                        body_nodes = [{"tag": "p", "children": rest}]
+        nodes.extend(body_nodes)
     nodes.extend(telegraph_br())
     return nodes
 
@@ -9052,7 +9081,7 @@ async def build_festival_page_content(db: Database, fest: Festival) -> tuple[str
         nodes.extend(telegraph_br())
         nodes.append({"tag": "h3", "children": ["Мероприятия фестиваля"]})
         for e in events:
-            nodes.extend(event_to_nodes(e))
+            nodes.extend(event_to_nodes(e, festival=fest, show_festival=False))
     else:
         nodes.extend(telegraph_br())
         nodes.extend(telegraph_br())
