@@ -476,6 +476,7 @@ _ADD_EVENT_LAST_DEQUEUE_TS: float = 0.0
 
 async def _watch_add_event_worker(app: web.Application, db: Database, bot: Bot):
     worker: asyncio.Task = app["add_event_worker"]
+    STALL_GUARD_SECS = int(os.getenv("STALL_GUARD_SECS", str(ADD_EVENT_TIMEOUT + 30)))
     while True:
         alive = not worker.done()
         if DEBUG:
@@ -496,11 +497,16 @@ async def _watch_add_event_worker(app: web.Application, db: Database, bot: Bot):
             logging.info("add_event_queue_worker restarted")
         # воркер жив, но очередь не разгребается слишком долго -> «stalled»
         else:
-            try:
-                stalled_for = _time.monotonic() - _ADD_EVENT_LAST_DEQUEUE_TS
-            except Exception:
-                stalled_for = 0
-            if add_event_queue.qsize() > 0 and stalled_for > 120:
+            stalled_for = (
+                _time.monotonic() - _ADD_EVENT_LAST_DEQUEUE_TS
+                if _ADD_EVENT_LAST_DEQUEUE_TS
+                else 0
+            )
+            if (
+                add_event_queue.qsize() > 0
+                and _ADD_EVENT_LAST_DEQUEUE_TS
+                and stalled_for > STALL_GUARD_SECS
+            ):
                 logging.error(
                     "add_event_queue stalled for %.0fs; restarting worker",
                     stalled_for,
@@ -5967,6 +5973,7 @@ async def enqueue_add_event(message: types.Message, db: Database, bot: Bot):
         add_event_queue.qsize(),
     )
     await bot.send_message(message.chat.id, "Пост принят на обработку")
+    await bot.send_message(message.chat.id, "⏳ Разбираю текст…")
 
 
 async def enqueue_add_event_raw(message: types.Message, db: Database, bot: Bot):
@@ -5988,6 +5995,7 @@ async def enqueue_add_event_raw(message: types.Message, db: Database, bot: Bot):
         add_event_queue.qsize(),
     )
     await bot.send_message(message.chat.id, "Пост принят на обработку")
+    await bot.send_message(message.chat.id, "⏳ Разбираю текст…")
 
 
 async def add_event_queue_worker(db: Database, bot: Bot, limit: int = 2):
@@ -5997,6 +6005,12 @@ async def add_event_queue_worker(db: Database, bot: Bot, limit: int = 2):
     while True:
         kind, msg, using_session, attempts = await add_event_queue.get()
         _ADD_EVENT_LAST_DEQUEUE_TS = _time.monotonic()
+        logging.info(
+            "add_event_queue dequeued user=%s attempts=%d qsize=%d",
+            getattr(msg.from_user, "id", None),
+            attempts,
+            add_event_queue.qsize(),
+        )
         start = _time.perf_counter()
         timed_out = False
         try:
@@ -11060,7 +11074,10 @@ async def init_db_and_scheduler(
         )
     except Exception as e:
         logging.error("Failed to set webhook: %s", e)
-    scheduler_startup(db, bot)
+    try:
+        scheduler_startup(db, bot)
+    except Exception:
+        logging.exception("scheduler_startup failed; continuing without scheduler")
     app["daily_scheduler"] = asyncio.create_task(daily_scheduler(db, bot))
     app["add_event_worker"] = asyncio.create_task(add_event_queue_worker(db, bot))
     app["add_event_watch"] = asyncio.create_task(_watch_add_event_worker(app, db, bot))
@@ -11809,7 +11826,9 @@ async def collect_festival_vk_stats(db: Database) -> list[str]:
     return [f"{name}: {views}, {reach}" for name, views, reach in stats]
 
 
-async def handle_status(message: types.Message, db: Database, bot: Bot):
+async def handle_status(
+    message: types.Message, db: Database, bot: Bot, app: web.Application
+):
     parts = (message.text or "").split()
     if len(parts) > 1 and parts[1].isdigit():
         await send_job_status(message.chat.id, int(parts[1]), db, bot)
@@ -11821,10 +11840,21 @@ async def handle_status(message: types.Message, db: Database, bot: Bot):
             return
     uptime = _time.time() - START_TIME
     qlen = add_event_queue.qsize()
+    worker_task = app.get("add_event_worker")
+    alive = "no"
+    if isinstance(worker_task, asyncio.Task) and not worker_task.done():
+        alive = "yes"
+    last_dequeue = (
+        f"{int(_time.monotonic() - _ADD_EVENT_LAST_DEQUEUE_TS)}s"
+        if _ADD_EVENT_LAST_DEQUEUE_TS
+        else "never"
+    )
     jobs = list(JOB_HISTORY)[-5:]
     lines = [
         f"uptime: {int(uptime)}s",
         f"queue_len: {qlen}",
+        f"worker_alive: {alive}",
+        f"last_dequeue_ago: {last_dequeue}",
     ]
     if jobs:
         lines.append("last_jobs:")
@@ -13074,7 +13104,7 @@ def create_app() -> web.Application:
         await handle_vk_link_command(message, db, bot)
 
     async def status_wrapper(message: types.Message):
-        await handle_status(message, db, bot)
+        await handle_status(message, db, bot, app)
 
     async def trace_wrapper(message: types.Message):
         await handle_trace(message, db, bot)

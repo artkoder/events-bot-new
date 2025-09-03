@@ -337,6 +337,10 @@ _scheduler: AsyncIOScheduler | None = None
 _run_meta: dict[str, tuple[str, float]] = {}
 
 
+def _job_next_run(job):
+    return getattr(job, "next_run_time", None) or getattr(job, "next_run_at", None)
+
+
 def _job_wrapper(job_id: str, func):
     async def _run(*args):
         run_id, start = _run_meta.get(job_id, (uuid4().hex, _time.perf_counter()))
@@ -395,7 +399,7 @@ def _on_event(event):
     next_run = None
     if _scheduler:
         job = _scheduler.get_job(job_id)
-        next_run = getattr(job, "next_run_time", None) if job else None
+        next_run = _job_next_run(job) if job else None
     tb_excerpt = None
     tb = getattr(event, "traceback", None)
     if tb:
@@ -445,7 +449,7 @@ def startup(db, bot) -> AsyncIOScheduler:
         misfire_grace_time=30,
     )
     logging.info(
-        "SCHED registered job id=%s next_run=%s", job.id, getattr(job, "next_run_time", None)
+        "SCHED registered job id=%s next_run=%s", job.id, _job_next_run(job)
     )
     job = _scheduler.add_job(
         _job_wrapper("vk_poll_scheduler", vk_poll_scheduler),
@@ -459,7 +463,7 @@ def startup(db, bot) -> AsyncIOScheduler:
         misfire_grace_time=30,
     )
     logging.info(
-        "SCHED registered job id=%s next_run=%s", job.id, getattr(job, "next_run_time", None)
+        "SCHED registered job id=%s next_run=%s", job.id, _job_next_run(job)
     )
     job = _scheduler.add_job(
         _job_wrapper("cleanup_scheduler", cleanup_scheduler),
@@ -474,7 +478,7 @@ def startup(db, bot) -> AsyncIOScheduler:
         misfire_grace_time=30,
     )
     logging.info(
-        "SCHED registered job id=%s next_run=%s", job.id, getattr(job, "next_run_time", None)
+        "SCHED registered job id=%s next_run=%s", job.id, _job_next_run(job)
     )
     job = _scheduler.add_job(
         _job_wrapper("partner_notification_scheduler", partner_notification_scheduler),
@@ -488,7 +492,7 @@ def startup(db, bot) -> AsyncIOScheduler:
         misfire_grace_time=30,
     )
     logging.info(
-        "SCHED registered job id=%s next_run=%s", job.id, getattr(job, "next_run_time", None)
+        "SCHED registered job id=%s next_run=%s", job.id, _job_next_run(job)
     )
 
     job = _scheduler.add_job(
@@ -504,7 +508,7 @@ def startup(db, bot) -> AsyncIOScheduler:
         misfire_grace_time=30,
     )
     logging.info(
-        "SCHED registered job id=%s next_run=%s", job.id, getattr(job, "next_run_time", None)
+        "SCHED registered job id=%s next_run=%s", job.id, _job_next_run(job)
     )
 
     if os.getenv("ENABLE_NIGHTLY_PAGE_SYNC") == "1":
@@ -523,7 +527,7 @@ def startup(db, bot) -> AsyncIOScheduler:
         logging.info(
             "SCHED registered job id=%s next_run=%s",
             job.id,
-            getattr(job, "next_run_time", None),
+            _job_next_run(job),
         )
 
     async def _run_maintenance(job, name: str, timeout: float, run_id: str | None = None) -> None:
@@ -584,4 +588,7 @@ def startup(db, bot) -> AsyncIOScheduler:
 
 def cleanup() -> None:
     if _scheduler:
-        _scheduler.shutdown(wait=False)
+        try:
+            _scheduler.shutdown(wait=False)
+        except Exception:
+            logging.exception("scheduler shutdown failed")
