@@ -233,7 +233,7 @@ async def test_festdays_two_cities_no_mixup(tmp_path: Path, monkeypatch):
                     source_text=f"{fest.name} — {day.isoformat()}",
                 )
                 saved, _ = await upsert_event(session, ev)
-                await schedule_event_update_tasks(db, saved)
+                await schedule_event_update_tasks(db, saved, drain_nav=False)
         await session.commit()
 
     async with db.get_session() as session:

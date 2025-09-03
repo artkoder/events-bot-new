@@ -7579,7 +7579,7 @@ async def test_progress_includes_festival_tg(tmp_path: Path, monkeypatch):
         await session.commit()
         await session.refresh(ev)
 
-    await main.schedule_event_update_tasks(db, ev)
+    await main.schedule_event_update_tasks(db, ev, drain_nav=False)
 
     async def ok_handler(eid, db_obj, bot_obj):
         return True

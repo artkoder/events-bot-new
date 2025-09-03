@@ -73,7 +73,7 @@ async def test_weekend_page_two_festdays(tmp_path: Path, monkeypatch):
                     source_text=f"{fest.name} — {day.isoformat()}",
                 )
                 saved, _ = await upsert_event(session, ev)
-                await schedule_event_update_tasks(db, saved)
+                await schedule_event_update_tasks(db, saved, drain_nav=False)
         await session.commit()
 
     bot = DummyBot("1:1")

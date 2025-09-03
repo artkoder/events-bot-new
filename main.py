@@ -5306,7 +5306,9 @@ async def enqueue_job(
         return "new"
 
 
-async def schedule_event_update_tasks(db: Database, ev: Event) -> dict[JobTask, str]:
+async def schedule_event_update_tasks(
+    db: Database, ev: Event, *, drain_nav: bool = True
+) -> dict[JobTask, str]:
     eid = ev.id
     results: dict[JobTask, str] = {}
     results[JobTask.telegraph_build] = await enqueue_job(
@@ -5334,7 +5336,48 @@ async def schedule_event_update_tasks(db: Database, ev: Event) -> dict[JobTask, 
             db, eid, JobTask.festival_pages
         )
     logging.info("scheduled event tasks for %s", eid)
+    if drain_nav:
+        await _drain_nav_tasks(db, eid)
     return results
+
+
+NAV_TASKS = {
+    JobTask.month_pages,
+    JobTask.week_pages,
+    JobTask.weekend_pages,
+    JobTask.festival_pages,
+}
+
+
+async def _drain_nav_tasks(db: Database, event_id: int, timeout: float = 30.0) -> None:
+    deadline = _time.monotonic() + timeout
+    while True:
+        await _run_due_jobs_once(
+            db,
+            None,
+            None,
+            event_id,
+            None,
+            None,
+            NAV_TASKS,
+            True,
+        )
+        async with db.get_session() as session:
+            stmt = (
+                select(func.count())
+                .where(
+                    JobOutbox.event_id == event_id,
+                    JobOutbox.task.in_(NAV_TASKS),
+                    JobOutbox.status.in_([JobStatus.pending, JobStatus.running]),
+                )
+            )
+            remaining = (await session.execute(stmt)).scalar_one()
+        if not remaining:
+            break
+        if _time.monotonic() > deadline:
+            logging.warning("nav tasks drain timeout for event %s", event_id)
+            break
+        await asyncio.sleep(1.0)
 
 
 def missing_fields(event: dict | Event) -> list[str]:
@@ -6134,6 +6177,8 @@ async def _run_due_jobs_once(
     only_event: int | None = None,
     ics_progress: dict[int, Any] | Any | None = None,
     fest_progress: dict[int, Any] | Any | None = None,
+    allowed_tasks: set[JobTask] | None = None,
+    force_notify: bool = False,
 ) -> int:
     now = datetime.utcnow()
     async with db.get_session() as session:
@@ -6143,11 +6188,22 @@ async def _run_due_jobs_once(
                 JobOutbox.status.in_([JobStatus.pending, JobStatus.error]),
                 JobOutbox.next_run_at <= now,
             )
-            .order_by(JobOutbox.id)
         )
         if only_event is not None:
             stmt = stmt.where(JobOutbox.event_id == only_event)
+        if allowed_tasks:
+            stmt = stmt.where(JobOutbox.task.in_(allowed_tasks))
         jobs = (await session.execute(stmt)).scalars().all()
+    priority = {
+        JobTask.telegraph_build: 0,
+        JobTask.ics_publish: 0,
+        JobTask.month_pages: 1,
+        JobTask.week_pages: 1,
+        JobTask.weekend_pages: 1,
+        JobTask.festival_pages: 1,
+        JobTask.vk_sync: 2,
+    }
+    jobs.sort(key=lambda j: (priority.get(j.task, 99), j.id))
     processed = 0
     for job in jobs:
         async with db.get_session() as session:
@@ -6286,7 +6342,7 @@ async def _run_due_jobs_once(
                 obj.updated_at = datetime.utcnow()
                 if status == JobStatus.done:
                     cur_res = link if (changed and link) else ("ok" if changed else "nochange")
-                    if cur_res == prev:
+                    if cur_res == prev and not force_notify:
                         send = False
                     obj.last_result = cur_res
                     obj.next_run_at = datetime.utcnow()
@@ -6303,9 +6359,10 @@ async def _run_due_jobs_once(
                 await session.commit()
             if notify and send:
                 await notify(job.task, job.event_id, status, changed, link, err)
+        processed += 1
         if pause:
             await vk_captcha_pause_outbox(db)
-        processed += 1
+            continue
     return processed
 
 
@@ -6343,6 +6400,58 @@ async def _log_job_outbox_stats(db: Database) -> None:
     )
 
 
+_nav_watchdog_warned: set[str] = set()
+
+
+async def _watch_nav_jobs(db: Database, bot: Bot) -> None:
+    now = datetime.utcnow() - timedelta(seconds=60)
+    async with db.get_session() as session:
+        rows = await session.execute(
+            select(JobOutbox)
+            .where(
+                JobOutbox.task.in_(
+                    [JobTask.month_pages, JobTask.week_pages, JobTask.weekend_pages]
+                ),
+                JobOutbox.status == JobStatus.pending,
+                JobOutbox.updated_at < now,
+            )
+        )
+        jobs = rows.scalars().all()
+    for job in jobs:
+        if not job.coalesce_key or job.coalesce_key in _nav_watchdog_warned:
+            continue
+        blockers: list[str] = []
+        async with db.get_session() as session:
+            early = await session.execute(
+                select(JobOutbox.task)
+                .where(
+                    JobOutbox.event_id == job.event_id,
+                    JobOutbox.id < job.id,
+                    JobOutbox.status.in_([JobStatus.pending, JobStatus.running]),
+                )
+            )
+            tasks = [t.value for t in early.scalars().all()]
+            if tasks:
+                blockers.append("prior:" + ",".join(tasks))
+            deps = [d for d in (job.depends_on or "").split(",") if d]
+            if deps:
+                dep_rows = await session.execute(
+                    select(JobOutbox.coalesce_key)
+                    .where(
+                        JobOutbox.coalesce_key.in_(deps),
+                        JobOutbox.status.in_([JobStatus.pending, JobStatus.running]),
+                    )
+                )
+                dep_keys = [c for c in dep_rows.scalars().all()]
+                if dep_keys:
+                    blockers.append("depends_on:" + ",".join(dep_keys))
+        blockers.append(f"next_run_at:{job.next_run_at.isoformat()}")
+        msg = f"NAV_WATCHDOG key={job.coalesce_key} blocked_by={' ; '.join(blockers)}"
+        logging.warning(msg)
+        await notify_superadmin(db, bot, msg)
+        _nav_watchdog_warned.add(job.coalesce_key)
+
+
 async def job_outbox_worker(db: Database, bot: Bot, interval: float = 2.0):
     last_log = 0.0
     while True:
@@ -6377,6 +6486,7 @@ async def job_outbox_worker(db: Database, bot: Bot, interval: float = 2.0):
                 ics_map if ics_map else None,
                 fest_map if fest_map else None,
             )
+            await _watch_nav_jobs(db, bot)
         except Exception:  # pragma: no cover - log unexpected errors
             logging.exception("job_outbox_worker cycle failed")
         if _time.monotonic() - last_log >= 30.0:
@@ -7074,7 +7184,7 @@ async def publish_event_progress(
     deadline = _time.monotonic() + 30
     while True:
         processed = await _run_due_jobs_once(
-            db, bot, updater, event.id, ics_progress, fest_progress
+            db, bot, updater, event.id, ics_progress, fest_progress, None, True
         )
         if processed:
             await asyncio.sleep(0)

@@ -46,7 +46,7 @@ async def test_progress_notifications(tmp_path, monkeypatch):
         await session.commit()
         await session.refresh(ev)
 
-    await schedule_event_update_tasks(db, ev)
+    await schedule_event_update_tasks(db, ev, drain_nav=False)
 
     async def ok_handler(eid, db_obj, bot_obj):
         return True
@@ -125,7 +125,7 @@ async def test_progress_notifications_forced_rebuild(tmp_path, monkeypatch):
         await session.commit()
         await session.refresh(ev)
 
-    await schedule_event_update_tasks(db, ev)
+    await schedule_event_update_tasks(db, ev, drain_nav=False)
 
     async def month_handler(eid, db_obj, bot_obj):
         return "rebuild"
@@ -184,7 +184,7 @@ async def test_progress_notifications_error(tmp_path, monkeypatch):
         await session.commit()
         await session.refresh(ev)
 
-    await schedule_event_update_tasks(db, ev)
+    await schedule_event_update_tasks(db, ev, drain_nav=False)
 
     async def ok_handler(eid, db_obj, bot_obj):
         return True
