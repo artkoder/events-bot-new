@@ -2215,13 +2215,13 @@ async def _build_festival_nav_block(
             items = [t for t in items if t[2].name != exclude]
     if not items:
         return [], []
-    groups: dict[str, list[Festival]] = {}
+    groups: dict[str, list[tuple[date | None, Festival]]] = {}
     for start, end, fest in items:
         if start and start <= today <= (end or start):
             month = today.strftime("%Y-%m")
         else:
             month = (start or today).strftime("%Y-%m")
-        groups.setdefault(month, []).append(fest)
+        groups.setdefault(month, []).append((start, fest))
 
     nodes: list[dict] = []
     nodes.extend(telegraph_br())
@@ -2231,7 +2231,9 @@ async def _build_festival_nav_block(
         month_name = month_name_nominative(month)
         nodes.append({"tag": "h4", "children": [month_name]})
         lines.append(month_name)
-        for fest in groups[month]:
+        for start, fest in sorted(
+            groups[month], key=lambda t: t[0] or date.max
+        ):
             url = fest.telegraph_url
             if not url and fest.telegraph_path:
                 url = f"https://telegra.ph/{fest.telegraph_path}"
@@ -2296,6 +2298,9 @@ async def sync_festivals_index_page(db: Database) -> None:
     tg = Telegraph(access_token=token)
 
     items = await all_festivals(db)
+    today = datetime.now(LOCAL_TZ).date()
+    items = [t for t in items if t[1] is None or t[1] >= today]
+    items.sort(key=lambda t: t[0] or date.max)
     nodes, _ = await _build_festival_nav_block(db, items=items)
     if nodes and nodes[0].get("tag") == "p":
         nodes = nodes[1:]
