@@ -30,8 +30,7 @@ async def test_weekend_page_links_festival(tmp_path: Path, monkeypatch):
         await session.commit()
 
     async def fake_create_page(tg, *args, **kwargs):
-        slug = kwargs.get("slug", "p")
-        return {"path": slug, "url": f"http://t.me/{slug}"}
+        return {"path": "p", "url": "http://t.me/p"}
 
     async def fake_edit_page(tg, path, **kwargs):
         return None

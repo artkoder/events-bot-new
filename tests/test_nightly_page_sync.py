@@ -52,5 +52,7 @@ async def test_nightly_page_sync_updates_links(monkeypatch):
 
     await main.nightly_page_sync(db)
 
-    month_mock.assert_awaited_once_with(db, "2024-05", update_links=True)
-    weekend_mock.assert_awaited_once_with(db, "2024-05-11", update_links=True, post_vk=False)
+    month_mock.assert_awaited_once_with(db, "2024-05", update_links=True, force=True)
+    weekend_mock.assert_awaited_once_with(
+        db, "2024-05-11", update_links=True, post_vk=False, force=True
+    )
