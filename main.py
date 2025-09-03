@@ -5485,7 +5485,7 @@ async def add_events_from_text(
                         except Exception:
                             logging.exception("notify_superadmin failed for %s", name)
 
-            asyncio.create_task(_safe_sync_fest(fest_obj.name))
+            await _safe_sync_fest(fest_obj.name)
             async with db.get_session() as session:
                 res = await session.execute(
                     select(Festival).where(Festival.name == fest_obj.name)
@@ -6419,8 +6419,7 @@ def festival_event_slug(ev: Event, fest: Festival | None) -> str | None:
 async def ensure_event_telegraph_link(e: Event, fest: Festival | None, db: Database) -> None:
     """Ensure ``e.telegraph_url`` matches its festival slug.
 
-    If mismatch is detected, rebuild the Telegraph page and fall back to the
-    source URL for the current rendering pass.
+    If mismatch is detected, rebuild the Telegraph page to match the slug.
     """
     slug = festival_event_slug(e, fest)
     if not slug:
@@ -6433,8 +6432,6 @@ async def ensure_event_telegraph_link(e: Event, fest: Festival | None, db: Datab
         if refreshed:
             e.telegraph_url = refreshed.telegraph_url or e.source_post_url
             e.telegraph_path = refreshed.telegraph_path
-    if e.telegraph_path != slug:
-        e.telegraph_url = e.source_post_url or e.telegraph_url
 
 
 async def update_telegraph_event_page(
@@ -6485,7 +6482,6 @@ async def update_telegraph_event_page(
                 title=title,
                 content=nodes,
                 return_content=False,
-                slug=slug,
             )
             ev.telegraph_url = normalize_telegraph_url(data.get("url"))
             ev.telegraph_path = data.get("path")
@@ -8543,7 +8539,8 @@ async def _sync_month_page_inner(
                 )
                 await update_split(first, second)
         except TelegraphException as e:
-            if "CONTENT_TOO_BIG" in str(e):
+            msg = str(e).lower()
+            if all(word in msg for word in ("content", "too", "big")):
                 first, second = split_events(size)
                 logging.warning("Month page %s too big, splitting", month)
                 await update_split(first, second)
@@ -8837,6 +8834,7 @@ async def _sync_weekend_page_inner(
             html = nodes_to_html(content)
             hash_new = content_hash(html)
             if not path:
+                title = re.sub(r"(\d+)-(\d+)", r"\1 - \2", title)
                 data = await telegraph_create_page(tg, title, content=content)
                 page.url = normalize_telegraph_url(data.get("url"))
                 page.path = data.get("path")
@@ -10883,7 +10881,7 @@ async def nightly_page_sync(db: Database, run_id: str | None = None) -> None:
         months_list,
         weekends_list,
     )
-    await rebuild_pages(db, months_list, weekends_list)
+    await rebuild_pages(db, months_list, weekends_list, force=True)
     logging.info("nightly_page_sync finish")
 
 
