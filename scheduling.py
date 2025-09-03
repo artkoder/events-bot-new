@@ -395,7 +395,7 @@ def _on_event(event):
     next_run = None
     if _scheduler:
         job = _scheduler.get_job(job_id)
-        next_run = job.next_run_time if job else None
+        next_run = getattr(job, "next_run_time", None) if job else None
     tb_excerpt = None
     tb = getattr(event, "traceback", None)
     if tb:
@@ -444,7 +444,9 @@ def startup(db, bot) -> AsyncIOScheduler:
         coalesce=True,
         misfire_grace_time=30,
     )
-    logging.info("SCHED registered job id=%s next_run=%s", job.id, job.next_run_time)
+    logging.info(
+        "SCHED registered job id=%s next_run=%s", job.id, getattr(job, "next_run_time", None)
+    )
     job = _scheduler.add_job(
         _job_wrapper("vk_poll_scheduler", vk_poll_scheduler),
         "cron",
@@ -456,7 +458,9 @@ def startup(db, bot) -> AsyncIOScheduler:
         coalesce=True,
         misfire_grace_time=30,
     )
-    logging.info("SCHED registered job id=%s next_run=%s", job.id, job.next_run_time)
+    logging.info(
+        "SCHED registered job id=%s next_run=%s", job.id, getattr(job, "next_run_time", None)
+    )
     job = _scheduler.add_job(
         _job_wrapper("cleanup_scheduler", cleanup_scheduler),
         "cron",
@@ -469,7 +473,9 @@ def startup(db, bot) -> AsyncIOScheduler:
         coalesce=True,
         misfire_grace_time=30,
     )
-    logging.info("SCHED registered job id=%s next_run=%s", job.id, job.next_run_time)
+    logging.info(
+        "SCHED registered job id=%s next_run=%s", job.id, getattr(job, "next_run_time", None)
+    )
     job = _scheduler.add_job(
         _job_wrapper("partner_notification_scheduler", partner_notification_scheduler),
         "cron",
@@ -481,7 +487,9 @@ def startup(db, bot) -> AsyncIOScheduler:
         coalesce=True,
         misfire_grace_time=30,
     )
-    logging.info("SCHED registered job id=%s next_run=%s", job.id, job.next_run_time)
+    logging.info(
+        "SCHED registered job id=%s next_run=%s", job.id, getattr(job, "next_run_time", None)
+    )
 
     job = _scheduler.add_job(
         _job_wrapper("fest_nav_rebuild", rebuild_fest_nav_if_changed),
@@ -495,7 +503,9 @@ def startup(db, bot) -> AsyncIOScheduler:
         coalesce=True,
         misfire_grace_time=30,
     )
-    logging.info("SCHED registered job id=%s next_run=%s", job.id, job.next_run_time)
+    logging.info(
+        "SCHED registered job id=%s next_run=%s", job.id, getattr(job, "next_run_time", None)
+    )
 
     if os.getenv("ENABLE_NIGHTLY_PAGE_SYNC") == "1":
         job = _scheduler.add_job(
@@ -511,7 +521,9 @@ def startup(db, bot) -> AsyncIOScheduler:
             misfire_grace_time=30,
         )
         logging.info(
-            "SCHED registered job id=%s next_run=%s", job.id, job.next_run_time
+            "SCHED registered job id=%s next_run=%s",
+            job.id,
+            getattr(job, "next_run_time", None),
         )
 
     async def _run_maintenance(job, name: str, timeout: float, run_id: str | None = None) -> None:

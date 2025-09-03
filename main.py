@@ -681,6 +681,17 @@ async def telegraph_call(func, /, *args, retries: int = 3, **kwargs):
                 await asyncio.sleep(2**attempt)
                 continue
             raise TelegraphException("Telegraph request timed out") from e
+        except Exception as e:
+            msg = str(e)
+            m = re.search(r"Flood control exceeded.*Retry in (\d+) seconds", msg, re.I)
+            if m and attempt < retries - 1:
+                wait = int(m.group(1)) + 1
+                logging.warning(
+                    "telegraph_call flood wait=%ss attempt=%d", wait, attempt + 1
+                )
+                await asyncio.sleep(wait)
+                continue
+            raise
 
     # If we exit the loop without returning or raising, raise the last exception
     if last_exc:
@@ -8548,21 +8559,32 @@ async def _sync_month_page_inner(
                 logging.error("Failed to sync month page %s: %s", month, e)
                 raise
         except Exception as e:
-            logging.error("Failed to sync month page %s: %s", month, e)
+            msg = str(e).lower()
+            if all(word in msg for word in ("content", "too", "big")):
+                first, second = split_events(size)
+                logging.info(
+                    "sync_month_page: splitting %s (events=%d)",
+                    month,
+                    len(events),
+                )
+                logging.warning("Month page %s too big, splitting", month)
+                await update_split(first, second)
+            else:
+                logging.error("Failed to sync month page %s: %s", month, e)
 
-            if progress:
-                progress.mark(f"month_pages:{month}", "error", str(e))
-            if update_links or created:
-                async with db.get_session() as session:
-                    result = await session.execute(
-                        select(MonthPage).order_by(MonthPage.month)
-                    )
-                    months = result.scalars().all()
-                for p in months:
-                    if p.month != month:
-                        await sync_month_page(db, p.month, update_links=False)
-                        await asyncio.sleep(0)
-            raise
+                if progress:
+                    progress.mark(f"month_pages:{month}", "error", str(e))
+                if update_links or created:
+                    async with db.get_session() as session:
+                        result = await session.execute(
+                            select(MonthPage).order_by(MonthPage.month)
+                        )
+                        months = result.scalars().all()
+                    for p in months:
+                        if p.month != month:
+                            await sync_month_page(db, p.month, update_links=False)
+                            await asyncio.sleep(0)
+                raise
         if page.path:
             await check_month_page_markers(tg, page.path)
         if page.path2:
@@ -10788,7 +10810,7 @@ async def rebuild_pages(
     weekends: list[str],
     *,
     force: bool = False,
-) -> dict[str, dict[str, list[str]]]:
+) -> dict[str, dict[str, dict[str, list[str] | str]]]:
     logging.info(
         "rebuild_pages start months=%s weekends=%s force=%s",
         months,
@@ -10797,6 +10819,8 @@ async def rebuild_pages(
     )
     months_updated: dict[str, list[str]] = {}
     weekends_updated: dict[str, list[str]] = {}
+    months_failed: dict[str, str] = {}
+    weekends_failed: dict[str, str] = {}
     for month in months:
         async with db.get_session() as session:
             prev = await session.get(MonthPage, month)
@@ -10809,6 +10833,7 @@ async def rebuild_pages(
                 await sync_month_page(db, month, update_links=True)
         except Exception as e:  # pragma: no cover
             logging.error("nightly_page_sync month %s failed: %s", month, e)
+            months_failed[month] = str(e)
             continue
         async with db.get_session() as session:
             page = await session.get(MonthPage, month)
@@ -10838,6 +10863,7 @@ async def rebuild_pages(
                 await sync_weekend_page(db, start, update_links=True, post_vk=False)
         except Exception as e:  # pragma: no cover
             logging.error("nightly_page_sync weekend %s failed: %s", start, e)
+            weekends_failed[start] = str(e)
             continue
         async with db.get_session() as session:
             page = await session.get(WeekendPage, start)
@@ -10854,7 +10880,10 @@ async def rebuild_pages(
         len(months),
         len(weekends),
     )
-    return {"months": {"updated": months_updated}, "weekends": {"updated": weekends_updated}}
+    return {
+        "months": {"updated": months_updated, "failed": months_failed},
+        "weekends": {"updated": weekends_updated, "failed": weekends_failed},
+    }
 
 
 async def nightly_page_sync(db: Database, run_id: str | None = None) -> None:
@@ -11475,8 +11504,11 @@ async def _perform_pages_rebuild(db: Database, months: list[str], force: bool = 
     result = await rebuild_pages(db, months, weekends, force=force)
     lines = ["Telegraph month rebuild:"]
     for m in months:
+        failed = result["months"]["failed"].get(m)
         urls = result["months"]["updated"].get(m)
-        if urls:
+        if failed:
+            lines.append(f"❌ {m} — ошибка: {failed}")
+        elif urls:
             lines.append(f"✅ {m} — обновлено: {len(urls)} страниц")
             for u in urls:
                 lines.append(f"   • {u}")
@@ -11486,9 +11518,15 @@ async def _perform_pages_rebuild(db: Database, months: list[str], force: bool = 
     for m in months:
         w_list = mapping.get(m, [])
         updated: list[str] = []
+        failed_msgs: list[str] = []
         for w in w_list:
             updated.extend(result["weekends"]["updated"].get(w, []))
-        if updated:
+            err = result["weekends"]["failed"].get(w)
+            if err:
+                failed_msgs.append(f"{w}: {err}")
+        if failed_msgs:
+            lines.append(f"❌ {m} — ошибка: {'; '.join(failed_msgs)}")
+        elif updated:
             lines.append(f"✅ {m} — обновлено: {len(updated)} страниц")
             for u in updated:
                 lines.append(f"   • {u}")
