@@ -1069,6 +1069,31 @@ async def test_telegraph_call_timeout(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_telegraph_call_flood_retry(monkeypatch):
+    from telegraph import TelegraphException
+
+    calls = {"count": 0}
+
+    def func():
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise TelegraphException("Flood control exceeded. Retry in 1 seconds")
+        return "ok"
+
+    sleep_calls: list[float] = []
+
+    async def fake_sleep(seconds: float):
+        sleep_calls.append(seconds)
+
+    monkeypatch.setattr(main.asyncio, "sleep", fake_sleep)
+
+    result = await main.telegraph_call(func, retries=2)
+    assert result == "ok"
+    assert calls["count"] == 2
+    assert sleep_calls == [2]
+
+
+@pytest.mark.asyncio
 async def test_create_source_page_photo(monkeypatch):
     class DummyTG:
         def __init__(self, access_token=None):
@@ -3488,6 +3513,52 @@ async def test_sync_month_page_split_on_error(tmp_path: Path, monkeypatch):
             calls["edited"] += 1
             if path == "p1" and calls["edited"] == 1:
                 raise TelegraphException("CONTENT_TOO_BIG")
+
+    monkeypatch.setattr(m, "get_telegraph_token", lambda: "t")
+    monkeypatch.setattr(m, "Telegraph", lambda access_token=None, domain=None: DummyTG())
+
+    await m.sync_month_page(db, "2025-07")
+
+    async with db.get_session() as session:
+        page = await session.get(m.MonthPage, "2025-07")
+    assert page.url == "u1"
+    assert page.url2 is not None
+    assert len(calls["created"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_sync_month_page_split_on_generic_error(tmp_path: Path, monkeypatch):
+    m = importlib.reload(main)
+    db = m.Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.get_session() as session:
+        for day in range(1, 4):
+            session.add(
+                m.Event(
+                    title=f"E{day}",
+                    description="d",
+                    source_text="s",
+                    date=f"2025-07-{day:02d}",
+                    time="10:00",
+                    location_name="L",
+                )
+            )
+        session.add(m.MonthPage(month="2025-07", url="u1", path="p1"))
+        await session.commit()
+
+    calls = {"created": [], "edited": 0}
+
+    class DummyTG:
+        def create_page(self, title, content=None, html_content=None, **_):
+            calls["created"].append(html_content or json_dumps(content))
+            idx = len(calls["created"]) + 1
+            return {"url": f"u{idx}", "path": f"p{idx}"}
+
+        def edit_page(self, path, title=None, content=None, html_content=None, **kwargs):
+            calls["edited"] += 1
+            if path == "p1" and calls["edited"] == 1:
+                raise Exception("CONTENT_TOO_BIG")
 
     monkeypatch.setattr(m, "get_telegraph_token", lambda: "t")
     monkeypatch.setattr(m, "Telegraph", lambda access_token=None, domain=None: DummyTG())
