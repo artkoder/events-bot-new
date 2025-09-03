@@ -1,6 +1,7 @@
 import pytest
 from unittest.mock import AsyncMock
 
+import pytest
 import main
 
 
@@ -13,11 +14,27 @@ class DummySession:
     async def execute(self, stmt):
         return DummyResult()
 
+    async def get(self, model, key):
+        return DummyPage()
+
+    async def commit(self):
+        pass
+
     async def __aenter__(self):
         return self
 
     async def __aexit__(self, exc_type, exc, tb):
         pass
+
+
+class DummyPage:
+    def __init__(self):
+        self.content_hash = ""
+        self.content_hash2 = None
+        self.url = ""
+        self.path = ""
+        self.url2 = None
+        self.path2 = None
 
 
 class DummyDB:

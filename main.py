@@ -740,6 +740,11 @@ HELP_COMMANDS = [
         "roles": {"user", "superadmin"},
     },
     {
+        "usage": "/pages_rebuild [YYYY-MM[,YYYY-MM...]] [--past=0] [--future=2] [--force]",
+        "desc": "Rebuild Telegraph pages manually",
+        "roles": {"superadmin"},
+    },
+    {
         "usage": "/fest",
         "desc": "List festivals with edit options",
         "roles": {"user", "superadmin"},
@@ -5073,10 +5078,17 @@ async def enqueue_job(
                 if updated:
                     session.add(job)
                     await session.commit()
-                    logging.info("enqueue_job merged job_key=%s", job_key)
-                    return "merged"
+                logging.info("enqueue_job merged job_key=%s", job_key)
+                return "merged"
+            if coalesce_key:
+                logging.info(
+                    "enqueue_job coalesced into key=%s for event=%s",
+                    coalesce_key,
+                    event_id,
+                )
+            else:
                 logging.info("enqueue_job coalesced job_key=%s", job_key)
-                return "coalesced"
+            return "coalesced"
             job.status = JobStatus.pending
             job.payload = payload
             job.attempts = 0
@@ -5323,12 +5335,17 @@ async def add_events_from_text(
 
         addr = data.get("location_address")
         city = data.get("city")
-        addr = strip_city_from_address(addr, city)
         title = (data.get("title") or "").strip()
         time_str = (data.get("time") or "").strip()
         location_name = (data.get("location_name") or "").strip()
         if not location_name and addr:
             location_name, addr = addr, None
+        loc_text = f"{location_name} {addr or ''}".lower()
+        if city and city.lower() not in loc_text:
+            city = None
+        if not city:
+            city = "Калининград"
+        addr = strip_city_from_address(addr, city)
         missing = missing_fields(
             {
                 "title": title,
@@ -6551,14 +6568,29 @@ async def publish_event_progress(
     chat_id: int,
     initial_statuses: dict[JobTask, str] | None = None,
 ) -> None:
+    d = parse_iso_date(event.date.split("..", 1)[0])
+    coalesce_keys: list[str] = []
+    if d:
+        coalesce_keys.append(f"month_pages:{d.strftime('%Y-%m')}")
+        week = d.isocalendar().week
+        coalesce_keys.append(f"week_pages:{d.year}-{week:02d}")
+        w_start = weekend_start_for_date(d)
+        if w_start:
+            coalesce_keys.append(f"weekend_pages:{w_start.isoformat()}")
     async with db.get_session() as session:
         jobs = await session.execute(
             select(JobOutbox.task, JobOutbox.status).where(
-                JobOutbox.event_id == event.id
+                (JobOutbox.event_id == event.id)
+                | (JobOutbox.coalesce_key.in_(coalesce_keys))
             )
         )
         rows = jobs.all()
-    tasks = [t for t, _ in rows if t.value in TASK_LABELS]
+    tasks = []
+    seen_tasks: set[JobTask] = set()
+    for task, status in rows:
+        if task not in seen_tasks and task.value in TASK_LABELS:
+            tasks.append(task)
+            seen_tasks.add(task)
     progress: dict[JobTask, dict[str, str]] = {}
     for task, status in rows:
         if task.value not in TASK_LABELS:
@@ -8302,6 +8334,11 @@ async def _sync_month_page_inner(
         if progress:
             status = "done" if changed else "skipped_nochange"
             progress.mark(f"month_pages:{month}", status, page.url or "")
+        paths = ", ".join(p for p in [page.path, page.path2] if p)
+        if changed:
+            logging.info("month page %s: edited path=%s size=%d", month, paths, size)
+        else:
+            logging.info("month page %s: nochange", month)
 
 
 async def sync_month_page(
@@ -8499,12 +8536,17 @@ async def _sync_weekend_page_inner(
     start: str,
     update_links: bool = True,
     post_vk: bool = True,
+    force: bool = False,
     progress: Any | None = None,
 ):
     tasks: list[Awaitable[None]] = []
     async with HEAVY_SEMAPHORE:
         now = _time.time()
-        if "PYTEST_CURRENT_TEST" not in os.environ and now < _weekend_next_run[start]:
+        if (
+            "PYTEST_CURRENT_TEST" not in os.environ
+            and not force
+            and now < _weekend_next_run[start]
+        ):
             logging.debug("sync_weekend_page skipped, debounced")
             return
         _weekend_next_run[start] = now + 60
@@ -8593,6 +8635,13 @@ async def _sync_weekend_page_inner(
         if progress:
             status = "done" if changed else "skipped_nochange"
             progress.mark(f"weekend_pages:{start}", status, page.url or "")
+        size = len(html.encode())
+        if changed:
+            logging.info(
+                "weekend page %s: edited path=%s size=%d", start, page.path, size
+            )
+        else:
+            logging.info("weekend page %s: nochange", start)
 
         if update_links or created:
             d_start = date.fromisoformat(start)
@@ -8612,10 +8661,11 @@ async def sync_weekend_page(
     start: str,
     update_links: bool = True,
     post_vk: bool = True,
+    force: bool = False,
     progress: Any | None = None,
 ):
     async with _page_locks[f"week:{start}"]:
-        await _sync_weekend_page_inner(db, start, update_links, post_vk, progress)
+        await _sync_weekend_page_inner(db, start, update_links, post_vk, force, progress)
 
 
 def _build_month_vk_nav_lines(week_pages: list[WeekPage], cur_month: str) -> list[str]:
@@ -10472,14 +10522,82 @@ async def cleanup_scheduler(
             logging.error("Cleanup failed: %s", e)
             break
 
+async def rebuild_pages(
+    db: Database,
+    months: list[str],
+    weekends: list[str],
+    *,
+    force: bool = False,
+) -> dict[str, dict[str, list[str]]]:
+    logging.info(
+        "rebuild_pages start months=%s weekends=%s force=%s",
+        months,
+        weekends,
+        force,
+    )
+    months_updated: dict[str, list[str]] = {}
+    weekends_updated: dict[str, list[str]] = {}
+    for month in months:
+        async with db.get_session() as session:
+            prev = await session.get(MonthPage, month)
+            prev_hash = prev.content_hash if prev else None
+            prev_hash2 = prev.content_hash2 if prev else None
+        try:
+            if force:
+                await sync_month_page(db, month, update_links=True, force=True)
+            else:
+                await sync_month_page(db, month, update_links=True)
+        except Exception as e:  # pragma: no cover
+            logging.error("nightly_page_sync month %s failed: %s", month, e)
+            continue
+        async with db.get_session() as session:
+            page = await session.get(MonthPage, month)
+        if page and (
+            prev is None
+            or page.content_hash != prev_hash
+            or page.content_hash2 != prev_hash2
+        ):
+            urls = [u for u in [page.url, page.url2] if u]
+            months_updated[month] = urls
+            logging.info(
+                "month sync %s: updated %d pages %s", month, len(urls), urls
+            )
+        else:
+            logging.info("month sync %s: no changes", month)
+    for start in weekends:
+        async with db.get_session() as session:
+            prev = await session.get(WeekendPage, start)
+            prev_hash = prev.content_hash if prev else None
+        try:
+            if force:
+                await sync_weekend_page(
+                    db, start, update_links=True, post_vk=False, force=True
+                )
+            else:
+                await sync_weekend_page(db, start, update_links=True, post_vk=False)
+        except Exception as e:  # pragma: no cover
+            logging.error("nightly_page_sync weekend %s failed: %s", start, e)
+            continue
+        async with db.get_session() as session:
+            page = await session.get(WeekendPage, start)
+        if page and (prev is None or page.content_hash != prev_hash):
+            urls = [page.url] if page.url else []
+            weekends_updated[start] = urls
+            logging.info(
+                "weekend sync %s: updated %d pages %s", start, len(urls), urls
+            )
+        else:
+            logging.info("weekend sync %s: no changes", start)
+    logging.info(
+        "rebuild_pages done months=%d weekends=%d",
+        len(months),
+        len(weekends),
+    )
+    return {"months": {"updated": months_updated}, "weekends": {"updated": weekends_updated}}
+
 
 async def nightly_page_sync(db: Database, run_id: str | None = None) -> None:
-    """Rebuild all stored month and weekend pages once per night.
-
-    The job is optional and disabled by default. It is intended for manual
-    activation via an environment variable when a full resync of pages is
-    required.
-    """
+    """Rebuild all stored month and weekend pages once per night."""
     async with span("db"):
         async with db.get_session() as session:
             res = await session.execute(select(Event.date))
@@ -10495,16 +10613,15 @@ async def nightly_page_sync(db: Database, run_id: str | None = None) -> None:
         w = weekend_start_for_date(d)
         if w:
             weekends.add(w.isoformat())
-    for month in months:
-        try:
-            await sync_month_page(db, month, update_links=True)
-        except Exception as e:  # pragma: no cover - log and continue
-            logging.error("nightly_page_sync month %s failed: %s", month, e)
-    for start in weekends:
-        try:
-            await sync_weekend_page(db, start, update_links=True, post_vk=False)
-        except Exception as e:  # pragma: no cover - log and continue
-            logging.error("nightly_page_sync weekend %s failed: %s", start, e)
+    months_list = sorted(months)
+    weekends_list = sorted(weekends)
+    logging.info(
+        "nightly_page_sync start months=%s weekends=%s",
+        months_list,
+        weekends_list,
+    )
+    await rebuild_pages(db, months_list, weekends_list)
+    logging.info("nightly_page_sync finish")
 
 
 async def partner_notification_scheduler(db: Database, bot: Bot, run_id: str | None = None):
@@ -11050,6 +11167,129 @@ async def handle_pages(message: types.Message, db: Database, bot: Bot):
     await bot.send_message(message.chat.id, "\n".join(lines))
 
 
+def _shift_month(d: date, offset: int) -> date:
+    year = d.year + (d.month - 1 + offset) // 12
+    month = (d.month - 1 + offset) % 12 + 1
+    return date(year, month, 1)
+
+
+def _expand_months(months: list[str], past: int, future: int) -> list[str]:
+    if months:
+        return sorted(months)
+    today = date.today().replace(day=1)
+    start = _shift_month(today, -past)
+    total = past + future + 1
+    res = []
+    for i in range(total):
+        m = _shift_month(start, i)
+        res.append(m.strftime("%Y-%m"))
+    return res
+
+
+def _weekends_for_months(months: list[str]) -> tuple[list[str], dict[str, list[str]]]:
+    weekends: set[str] = set()
+    mapping: dict[str, list[str]] = defaultdict(list)
+    for m in months:
+        year, mon = map(int, m.split("-"))
+        d = date(year, mon, 1)
+        while d.month == mon:
+            w = weekend_start_for_date(d)
+            if w and w.month == mon:
+                key = w.isoformat()
+                if key not in mapping[m]:
+                    mapping[m].append(key)
+                    weekends.add(key)
+            d += timedelta(days=1)
+    return sorted(weekends), mapping
+
+
+async def _perform_pages_rebuild(db: Database, months: list[str], force: bool = False) -> str:
+    weekends, mapping = _weekends_for_months(months)
+    result = await rebuild_pages(db, months, weekends, force=force)
+    lines = ["Telegraph month rebuild:"]
+    for m in months:
+        urls = result["months"]["updated"].get(m)
+        if urls:
+            lines.append(f"✅ {m} — обновлено: {len(urls)} страниц")
+            for u in urls:
+                lines.append(f"   • {u}")
+        else:
+            lines.append(f"➖ {m} — без изменений")
+    lines.append("Telegraph weekends rebuild:")
+    for m in months:
+        w_list = mapping.get(m, [])
+        updated: list[str] = []
+        for w in w_list:
+            updated.extend(result["weekends"]["updated"].get(w, []))
+        if updated:
+            lines.append(f"✅ {m} — обновлено: {len(updated)} страниц")
+            for u in updated:
+                lines.append(f"   • {u}")
+        else:
+            lines.append(f"➖ {m} — без изменений")
+    return "\n".join(lines)
+
+
+def _parse_pages_rebuild_args(text: str) -> tuple[list[str], int, int, bool]:
+    parts = text.split()[1:]
+    months: list[str] = []
+    past = 0
+    future = 2
+    force = False
+    for p in parts:
+        if p.startswith("--past="):
+            try:
+                past = int(p.split("=", 1)[1])
+            except ValueError:
+                pass
+        elif p.startswith("--future="):
+            try:
+                future = int(p.split("=", 1)[1])
+            except ValueError:
+                pass
+        elif p == "--force":
+            force = True
+        else:
+            months.append(p)
+    return months, past, future, force
+
+
+async def handle_pages_rebuild(message: types.Message, db: Database, bot: Bot):
+    months, past, future, force = _parse_pages_rebuild_args(message.text or "")
+    if not months and (message.text or "").strip() == "/pages_rebuild":
+        options = _expand_months([], past, future)
+        buttons = [
+            [types.InlineKeyboardButton(text=m, callback_data=f"pages_rebuild:{m}")]
+            for m in options
+        ]
+        markup = types.InlineKeyboardMarkup(
+            inline_keyboard=buttons
+            + [[types.InlineKeyboardButton(text="Все", callback_data="pages_rebuild:ALL")]]
+        )
+        await bot.send_message(
+            message.chat.id,
+            "Выберите месяц для пересборки или «Все»",
+            reply_markup=markup,
+        )
+        return
+    months_list = _expand_months(months, past, future)
+    report = await _perform_pages_rebuild(db, months_list, force)
+    await bot.send_message(message.chat.id, report)
+
+
+async def handle_pages_rebuild_cb(
+    callback: types.CallbackQuery, db: Database, bot: Bot
+):
+    await callback.answer()
+    val = callback.data.split(":", 1)[1]
+    if val.upper() == "ALL":
+        months = _expand_months([], 0, 2)
+    else:
+        months = [val]
+    report = await _perform_pages_rebuild(db, months)
+    await bot.send_message(callback.message.chat.id, report)
+
+
 async def handle_fest(message: types.Message, db: Database, bot: Bot):
     await send_festivals_list(message, db, bot, edit=False)
 
@@ -11540,9 +11780,8 @@ async def handle_edit_message(message: types.Message, db: Database, bot: Bot):
         new_date = event.date.split("..", 1)[0]
         new_month = new_date[:7]
         new_fest = event.festival
-    await enqueue_job(db, eid, JobTask.month_pages)
-    await enqueue_job(db, eid, JobTask.week_pages)
-    await enqueue_job(db, eid, JobTask.weekend_pages)
+    results = await schedule_event_update_tasks(db, event)
+    await publish_event_progress(event, db, bot, message.chat.id, results)
     if field == "city":
         page_url = None
         async with db.get_session() as session:
@@ -12376,6 +12615,9 @@ def create_app() -> web.Application:
     async def pages_wrapper(message: types.Message):
         await handle_pages(message, db, bot)
 
+    async def pages_rebuild_wrapper(message: types.Message):
+        await handle_pages_rebuild(message, db, bot)
+
     async def stats_wrapper(message: types.Message):
         await handle_stats(message, db, bot)
 
@@ -12437,6 +12679,9 @@ def create_app() -> web.Application:
 
     async def askcity_wrapper(callback: types.CallbackQuery):
         await handle_askcity(callback, db, bot)
+
+    async def pages_rebuild_cb_wrapper(callback: types.CallbackQuery):
+        await handle_pages_rebuild_cb(callback, db, bot)
 
     async def captcha_prompt_wrapper(callback: types.CallbackQuery):
         await handle_vk_captcha_prompt(callback, db, bot)
@@ -12534,6 +12779,9 @@ def create_app() -> web.Application:
     )
     dp.callback_query.register(askloc_wrapper, lambda c: c.data == "askloc")
     dp.callback_query.register(askcity_wrapper, lambda c: c.data == "askcity")
+    dp.callback_query.register(
+        pages_rebuild_cb_wrapper, lambda c: c.data and c.data.startswith("pages_rebuild:")
+    )
     dp.callback_query.register(captcha_prompt_wrapper, lambda c: c.data == "captcha_input")
     dp.callback_query.register(captcha_delay_wrapper, lambda c: c.data == "captcha_delay")
     dp.callback_query.register(captcha_refresh_wrapper, lambda c: c.data == "captcha_refresh")
@@ -12565,6 +12813,7 @@ def create_app() -> web.Application:
     dp.message.register(fest_wrapper, Command("fest"))
 
     dp.message.register(pages_wrapper, Command("pages"))
+    dp.message.register(pages_rebuild_wrapper, Command("pages_rebuild"))
     dp.message.register(stats_wrapper, Command("stats"))
     dp.message.register(status_wrapper, Command("status"))
     dp.message.register(trace_wrapper, Command("trace"))

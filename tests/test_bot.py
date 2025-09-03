@@ -1617,7 +1617,7 @@ async def test_forward_missing_fields(tmp_path: Path, monkeypatch):
     markup = msg[2]["reply_markup"]
     texts = [b.text for row in markup.inline_keyboard for b in row]
     assert "Добавить локацию" in texts
-    assert "Добавить город" in texts
+    assert "Добавить город" not in texts
     assert "Добавить время" not in texts
     async with db.get_session() as session:
         ev = (await session.execute(select(Event))).scalars().first()
