@@ -5367,8 +5367,10 @@ async def test_handle_fest_list(tmp_path: Path):
 
     async with db.get_session() as session:
         session.add(User(user_id=1))
-        session.add(main.Festival(name="Jazz"))
+        fest = main.Festival(name="Jazz")
+        session.add(fest)
         await session.commit()
+        fid = fest.id
 
     msg = types.Message.model_validate(
         {
@@ -5380,7 +5382,19 @@ async def test_handle_fest_list(tmp_path: Path):
         }
     )
     await main.handle_fest(msg, db, bot)
-    assert "Jazz" in bot.messages[-1][1]
+    chat_id, text, kwargs = bot.messages[-1]
+    assert "Jazz" in text
+    markup = kwargs["reply_markup"]
+    assert any(
+        btn.text == f"Edit {fid}" and btn.callback_data == f"festedit:{fid}"
+        for row in markup.inline_keyboard
+        for btn in row
+    )
+    assert any(
+        btn.text == f"Delete {fid}" and btn.callback_data == f"festdel:{fid}"
+        for row in markup.inline_keyboard
+        for btn in row
+    )
 
 
 def test_event_to_nodes_festival_link():

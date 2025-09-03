@@ -4721,8 +4721,12 @@ async def send_festivals_list(message: types.Message, db: Database, bot: Bot, ed
         lines.append(" ".join(parts))
     keyboard = [
         [
-            types.InlineKeyboardButton(text="Edit", callback_data=f"festedit:{f.id}"),
-            types.InlineKeyboardButton(text="Delete", callback_data=f"festdel:{f.id}"),
+            types.InlineKeyboardButton(
+                text=f"Edit {f.id}", callback_data=f"festedit:{f.id}"
+            ),
+            types.InlineKeyboardButton(
+                text=f"Delete {f.id}", callback_data=f"festdel:{f.id}"
+            ),
         ]
         for f in fests
     ]
