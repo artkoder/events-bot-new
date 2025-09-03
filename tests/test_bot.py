@@ -14,6 +14,7 @@ import asyncio
 import main
 from telegraph.api import json_dumps
 from telegraph import TelegraphException
+import importlib
 import logging
 from sqlalchemy.ext.asyncio import async_sessionmaker
 import sqlite3
@@ -1029,6 +1030,8 @@ async def test_add_events_from_text_channel_title(tmp_path: Path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_telegraph_test(monkeypatch, capsys):
+    m = importlib.reload(main)
+
     class DummyTG:
         def __init__(self, access_token=None):
             self.access_token = access_token
@@ -1036,16 +1039,17 @@ async def test_telegraph_test(monkeypatch, capsys):
         def create_page(self, title, html_content=None, **_):
             return {"url": "https://telegra.ph/test", "path": "test"}
 
-        def edit_page(self, path, title, html_content):
+        def edit_page(self, path, title, html_content=None, **kwargs):
             pass
 
     monkeypatch.setenv("TELEGRAPH_TOKEN", "t")
     monkeypatch.setattr(
-        "main.Telegraph",
+        m,
+        "Telegraph",
         lambda access_token=None, domain=None: DummyTG(access_token),
     )
 
-    await telegraph_test()
+    await m.telegraph_test()
     captured = capsys.readouterr()
     assert "Created https://telegra.ph/test" in captured.out
     assert "Edited https://telegra.ph/test" in captured.out
@@ -2970,7 +2974,7 @@ async def test_sync_weekend_page_first_creation_includes_nav(
         def create_page(self, title, content=None, html_content=None, **_):
             return {"url": "u1", "path": "p1"}
 
-        def edit_page(self, path, title=None, content=None, html_content=None):
+        def edit_page(self, path, title=None, content=None, html_content=None, **kwargs):
             updates.append(content)
 
     monkeypatch.setattr("main.get_telegraph_token", lambda: "t")
@@ -3033,7 +3037,7 @@ async def test_sync_weekend_page_no_cross_updates(tmp_path: Path, monkeypatch):
             edits.append(("create", "p1"))
             return {"url": "u1", "path": "p1"}
 
-        def edit_page(self, path, title=None, content=None, html_content=None):
+        def edit_page(self, path, title=None, content=None, html_content=None, **kwargs):
             edits.append(("edit", path))
 
     monkeypatch.setattr("main.get_telegraph_token", lambda: "t")
@@ -3400,13 +3404,14 @@ async def test_sync_month_page_error(tmp_path: Path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_sync_month_page_split(tmp_path: Path, monkeypatch):
-    db = Database(str(tmp_path / "db.sqlite"))
+    m = importlib.reload(main)
+    db = m.Database(str(tmp_path / "db.sqlite"))
     await db.init()
 
     async with db.get_session() as session:
         for day in range(1, 4):
             session.add(
-                Event(
+                m.Event(
                     title=f"E{day}",
                     description="d",
                     source_text="s",
@@ -3420,38 +3425,36 @@ async def test_sync_month_page_split(tmp_path: Path, monkeypatch):
     calls = {"created": []}
 
     class DummyTG:
-        def __init__(self, access_token=None):
-            pass
-
         def create_page(self, title, content=None, html_content=None, **_):
             calls["created"].append(html_content or json_dumps(content))
             idx = len(calls["created"])
             return {"url": f"u{idx}", "path": f"p{idx}"}
 
-        def edit_page(self, path, title=None, content=None, html_content=None):
+        def edit_page(self, path, title=None, content=None, html_content=None, **kwargs):
             pass
 
-    monkeypatch.setattr("main.get_telegraph_token", lambda: "t")
-    monkeypatch.setattr("main.Telegraph", lambda access_token=None, domain=None: DummyTG())
-    monkeypatch.setattr("main.TELEGRAPH_LIMIT", 10)
+    monkeypatch.setattr(m, "get_telegraph_token", lambda: "t")
+    monkeypatch.setattr(m, "Telegraph", lambda access_token=None, domain=None: DummyTG())
+    monkeypatch.setattr(m, "TELEGRAPH_LIMIT", 10)
 
-    await main.sync_month_page(db, "2025-07")
+    await m.sync_month_page(db, "2025-07")
 
     async with db.get_session() as session:
-        page = await session.get(MonthPage, "2025-07")
+        page = await session.get(m.MonthPage, "2025-07")
     assert page.url2 is not None
     assert len(calls["created"]) == 2
 
 
 @pytest.mark.asyncio
 async def test_sync_month_page_split_on_error(tmp_path: Path, monkeypatch):
-    db = Database(str(tmp_path / "db.sqlite"))
+    m = importlib.reload(main)
+    db = m.Database(str(tmp_path / "db.sqlite"))
     await db.init()
 
     async with db.get_session() as session:
         for day in range(1, 4):
             session.add(
-                Event(
+                m.Event(
                     title=f"E{day}",
                     description="d",
                     source_text="s",
@@ -3460,32 +3463,31 @@ async def test_sync_month_page_split_on_error(tmp_path: Path, monkeypatch):
                     location_name="L",
                 )
             )
-        session.add(MonthPage(month="2025-07", url="u1", path="p1"))
+        session.add(m.MonthPage(month="2025-07", url="u1", path="p1"))
         await session.commit()
 
     calls = {"created": [], "edited": 0}
 
     class DummyTG:
-        def __init__(self, access_token=None):
-            pass
-
         def create_page(self, title, content=None, html_content=None, **_):
             calls["created"].append(html_content or json_dumps(content))
             idx = len(calls["created"]) + 1
             return {"url": f"u{idx}", "path": f"p{idx}"}
 
-        def edit_page(self, path, title=None, content=None, html_content=None):
+        def edit_page(
+            self, path, title=None, content=None, html_content=None, **kwargs
+        ):
             calls["edited"] += 1
             if path == "p1" and calls["edited"] == 1:
                 raise TelegraphException("CONTENT_TOO_BIG")
 
-    monkeypatch.setattr("main.get_telegraph_token", lambda: "t")
-    monkeypatch.setattr("main.Telegraph", lambda access_token=None, domain=None: DummyTG())
+    monkeypatch.setattr(m, "get_telegraph_token", lambda: "t")
+    monkeypatch.setattr(m, "Telegraph", lambda access_token=None, domain=None: DummyTG())
 
-    await main.sync_month_page(db, "2025-07")
+    await m.sync_month_page(db, "2025-07")
 
     async with db.get_session() as session:
-        page = await session.get(MonthPage, "2025-07")
+        page = await session.get(m.MonthPage, "2025-07")
     assert page.url == "u1"
     assert page.url2 is not None
     assert len(calls["created"]) == 1
@@ -3601,7 +3603,9 @@ async def test_month_page_split_filters_past_events(tmp_path: Path, monkeypatch)
             idx = len(created)
             return {"url": f"u{idx}", "path": f"p{idx}"}
 
-        def edit_page(self, path, title=None, content=None, html_content=None):
+        def edit_page(
+            self, path, title=None, content=None, html_content=None, **kwargs
+        ):
             created.append(html_content or content)
 
     monkeypatch.setattr(main, "date", FakeDate)
@@ -3641,7 +3645,7 @@ async def test_update_source_page_uses_content(monkeypatch):
         def get_page(self, path, return_html=True):
             return {"content": "<p>old</p>"}
 
-        def edit_page(self, path, title, html_content):
+        def edit_page(self, path, title, html_content=None, **kwargs):
             events["html"] = html_content
 
     monkeypatch.setattr("main.get_telegraph_token", lambda: "t")
@@ -3664,7 +3668,7 @@ async def test_update_source_page_footer(monkeypatch):
         def get_page(self, path, return_html=True):
             return {"content": "<p>old</p>"}
 
-        def edit_page(self, path, title, html_content):
+        def edit_page(self, path, title, html_content=None, **kwargs):
             edited["html"] = html_content
 
     monkeypatch.setattr("main.get_telegraph_token", lambda: "t")
@@ -3684,7 +3688,7 @@ async def test_update_source_page_normalizes_hashtags(monkeypatch):
         def get_page(self, path, return_html=True):
             return {"content": ""}
 
-        def edit_page(self, path, title, html_content):
+        def edit_page(self, path, title, html_content=None, **kwargs):
             assert "#1_августа" not in html_content
             assert "1 августа" in html_content
 
@@ -5465,7 +5469,7 @@ async def test_festival_auto_page_creation(tmp_path: Path, monkeypatch):
         def create_page(self, title, content=None, html_content=None, **_):
             return {"url": "http://tg", "path": "p"}
 
-        def edit_page(self, path, title=None, content=None, html_content=None):
+        def edit_page(self, path, title=None, content=None, html_content=None, **kwargs):
             pass
 
     monkeypatch.setenv("TELEGRAPH_TOKEN", "t")
@@ -5828,7 +5832,7 @@ async def test_festival_auto_page_creation(tmp_path: Path, monkeypatch):
         def create_page(self, title, content=None, html_content=None, **_):
             return {"url": "http://tg", "path": "p"}
 
-        def edit_page(self, path, title=None, content=None, html_content=None):
+        def edit_page(self, path, title=None, content=None, html_content=None, **kwargs):
             pass
 
     monkeypatch.setenv("TELEGRAPH_TOKEN", "t")
@@ -5954,7 +5958,7 @@ async def test_festival_auto_page_creation(tmp_path: Path, monkeypatch):
         def create_page(self, title, content=None, html_content=None, **_):
             return {"url": "http://tg", "path": "p"}
 
-        def edit_page(self, path, title=None, content=None, html_content=None):
+        def edit_page(self, path, title=None, content=None, html_content=None, **kwargs):
             pass
 
     monkeypatch.setenv("TELEGRAPH_TOKEN", "t")
@@ -6523,7 +6527,7 @@ async def test_festival_description_dash(tmp_path: Path, monkeypatch):
         def create_page(self, title, content=None, html_content=None, **_):
             return {"url": "http://tg", "path": "p"}
 
-        def edit_page(self, path, title=None, content=None, html_content=None):
+        def edit_page(self, path, title=None, content=None, html_content=None, **kwargs):
             pass
 
     monkeypatch.setenv("TELEGRAPH_TOKEN", "t")
