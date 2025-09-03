@@ -8604,9 +8604,12 @@ async def build_weekend_page_content(
         add_many(month_nav)
         add_many(telegraph_br())
 
+    label = format_weekend_range(saturday)
+    if saturday.month == sunday.month:
+        label = f"{saturday.day}-{sunday.day} {MONTHS[saturday.month - 1]}"
     title = (
         "Чем заняться на выходных в Калининградской области "
-        f"{format_weekend_range(saturday)}"
+        f"{label}"
     )
     if DEBUG:
         from telegraph.utils import nodes_to_html
@@ -10641,7 +10644,8 @@ async def rebuild_pages(
         async with db.get_session() as session:
             page = await session.get(MonthPage, month)
         if page and (
-            prev is None
+            force
+            or prev is None
             or page.content_hash != prev_hash
             or page.content_hash2 != prev_hash2
         ):
@@ -10668,7 +10672,7 @@ async def rebuild_pages(
             continue
         async with db.get_session() as session:
             page = await session.get(WeekendPage, start)
-        if page and (prev is None or page.content_hash != prev_hash):
+        if page and (force or prev is None or page.content_hash != prev_hash):
             urls = [page.url] if page.url else []
             weekends_updated[start] = urls
             logging.info(
@@ -11343,7 +11347,7 @@ def _parse_pages_rebuild_args(text: str) -> tuple[list[str], int, int, bool]:
 
 
 async def handle_pages_rebuild(message: types.Message, db: Database, bot: Bot):
-    months, past, future, force = _parse_pages_rebuild_args(message.text or "")
+    months, past, future, _ = _parse_pages_rebuild_args(message.text or "")
     if not months and (message.text or "").strip() == "/pages_rebuild":
         options = _expand_months([], past, future)
         buttons = [
@@ -11361,7 +11365,7 @@ async def handle_pages_rebuild(message: types.Message, db: Database, bot: Bot):
         )
         return
     months_list = _expand_months(months, past, future)
-    report = await _perform_pages_rebuild(db, months_list, force)
+    report = await _perform_pages_rebuild(db, months_list, force=True)
     await bot.send_message(message.chat.id, report)
 
 
@@ -11374,7 +11378,7 @@ async def handle_pages_rebuild_cb(
         months = _expand_months([], 0, 2)
     else:
         months = [val]
-    report = await _perform_pages_rebuild(db, months)
+    report = await _perform_pages_rebuild(db, months, force=True)
     await bot.send_message(callback.message.chat.id, report)
 
 

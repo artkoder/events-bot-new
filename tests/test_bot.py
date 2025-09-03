@@ -2784,7 +2784,7 @@ async def test_build_weekend_page_content(tmp_path: Path):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
 
-    saturday = main.next_weekend_start(date.today())
+    saturday = date(2025, 9, 6)
     async with db.get_session() as session:
         session.add(
             Event(
@@ -2798,6 +2798,7 @@ async def test_build_weekend_page_content(tmp_path: Path):
         )
         await session.commit()
 
+    sunday = saturday + timedelta(days=1)
     title, content, _ = await main.build_weekend_page_content(db, saturday.isoformat())
     assert "выходных" in title
     assert any(n.get("tag") == "h4" for n in content)
@@ -2809,7 +2810,9 @@ async def test_build_weekend_page_content(tmp_path: Path):
         if isinstance(c, dict) and c.get("tag") == "a"
     )
     assert link.get("attrs", {}).get("href") == "https://t.me/kenigevents"
-    assert str(saturday.day) in title
+    assert (
+        f"{saturday.day}-{sunday.day} {main.MONTHS[saturday.month - 1]}" in title
+    )
 
     cross = date(2025, 1, 31)
     async with db.get_session() as session:
