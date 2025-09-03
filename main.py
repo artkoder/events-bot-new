@@ -6279,6 +6279,41 @@ async def run_event_update_jobs(
         await asyncio.sleep(0)
 
 
+def festival_event_slug(ev: Event, fest: Festival | None) -> str | None:
+    """Return deterministic slug for festival day events."""
+    if not fest or not fest.id:
+        return None
+    d = parse_iso_date(ev.date)
+    start = parse_iso_date(fest.start_date) if fest.start_date else None
+    if d and start:
+        day_num = (d - start).days + 1
+    else:
+        day_num = 1
+    base = f"fest-{fest.id}-day-{day_num}-{ev.date}-{ev.city or ''}"
+    return slugify(base)
+
+
+async def ensure_event_telegraph_link(e: Event, fest: Festival | None, db: Database) -> None:
+    """Ensure ``e.telegraph_url`` matches its festival slug.
+
+    If mismatch is detected, rebuild the Telegraph page and fall back to the
+    source URL for the current rendering pass.
+    """
+    slug = festival_event_slug(e, fest)
+    if not slug:
+        return
+    if e.telegraph_path == slug:
+        return
+    await update_telegraph_event_page(e.id, db, None)
+    async with db.get_session() as session:
+        refreshed = await session.get(Event, e.id)
+        if refreshed:
+            e.telegraph_url = refreshed.telegraph_url or e.source_post_url
+            e.telegraph_path = refreshed.telegraph_path
+    if e.telegraph_path != slug:
+        e.telegraph_url = e.source_post_url or e.telegraph_url
+
+
 async def update_telegraph_event_page(
     event_id: int, db: Database, bot: Bot | None
 ) -> str | None:
@@ -6286,6 +6321,13 @@ async def update_telegraph_event_page(
         ev = await session.get(Event, event_id)
         if not ev:
             return None
+        fest = None
+        if ev.festival:
+            res_f = await session.execute(
+                select(Festival).where(Festival.name == ev.festival)
+            )
+            fest = res_f.scalar_one_or_none()
+        slug = festival_event_slug(ev, fest)
         display_link = False if ev.source_post_url else True
         html_content, _, _ = await build_source_page_content(
             ev.title or "Event",
@@ -6302,7 +6344,9 @@ async def update_telegraph_event_page(
 
         nodes = html_to_nodes(html_content)
         new_hash = content_hash(html_content)
-        if ev.content_hash == new_hash and ev.telegraph_url:
+        if ev.content_hash == new_hash and ev.telegraph_url and (
+            not slug or ev.telegraph_path == slug
+        ):
             await session.commit()
             return ev.telegraph_url
         token = get_telegraph_token()
@@ -6312,12 +6356,13 @@ async def update_telegraph_event_page(
             return ev.telegraph_url
         tg = Telegraph(access_token=token)
         title = ev.title or "Event"
-        if not ev.telegraph_path:
+        if not ev.telegraph_path or (slug and ev.telegraph_path != slug):
             data = await telegraph_create_page(
                 tg,
                 title=title,
                 content=nodes,
                 return_content=False,
+                slug=slug,
             )
             ev.telegraph_url = normalize_telegraph_url(data.get("url"))
             ev.telegraph_path = data.get("path")
@@ -7999,6 +8044,9 @@ async def build_month_page_content(
         async with db.get_session() as session:
             res_f = await session.execute(select(Festival))
             fest_map = {f.name.casefold(): f for f in res_f.scalars().all()}
+    for e in events:
+        fest = fest_map.get((e.festival or "").casefold())
+        await ensure_event_telegraph_link(e, fest, db)
     fest_index_url = await get_setting_value(db, "fest_index_url")
 
     async with span("render"):
@@ -8504,6 +8552,10 @@ async def build_weekend_page_content(
     async with db.get_session() as session:
         res_f = await session.execute(select(Festival))
         fest_map = {f.name.casefold(): f for f in res_f.scalars().all()}
+
+    for e in events:
+        fest = fest_map.get((e.festival or "").casefold())
+        await ensure_event_telegraph_link(e, fest, db)
 
     by_day: dict[date, list[Event]] = {}
     for e in events:
