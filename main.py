@@ -7934,7 +7934,7 @@ def render_month_day_section(d: date, events: list[Event]) -> str:
     return nodes_to_html(nodes)
 
 async def get_month_data(db: Database, month: str, *, fallback: bool = True):
-    """Return events, exhibitions and nav pages for the given month."""
+    """Return events and exhibitions for the given month."""
     start = date.fromisoformat(month + "-01")
     next_start = (start.replace(day=28) + timedelta(days=4)).replace(day=1)
     today = datetime.now(LOCAL_TZ).date()
@@ -7958,13 +7958,6 @@ async def get_month_data(db: Database, month: str, *, fallback: bool = True):
         )
         exhibitions = ex_result.scalars().all()
 
-        start_nav = today.replace(day=1)
-        end_nav = date(today.year + 1, 4, 1)
-        res_pages = await session.execute(
-            select(MonthPage).order_by(MonthPage.month)
-        )
-        nav_pages = res_pages.scalars().all()
-
     if month == today.strftime("%Y-%m"):
         today_str = today.isoformat()
         cutoff = (today - timedelta(days=30)).isoformat()
@@ -7976,7 +7969,7 @@ async def get_month_data(db: Database, month: str, *, fallback: bool = True):
     if fallback and not events and not exhibitions:
         prev_month = (start - timedelta(days=1)).strftime("%Y-%m")
         if prev_month != month:
-            prev_events, prev_exh, _ = await get_month_data(
+            prev_events, prev_exh = await get_month_data(
                 db, prev_month, fallback=True
             )
             if not events:
@@ -7984,7 +7977,7 @@ async def get_month_data(db: Database, month: str, *, fallback: bool = True):
             if not exhibitions:
                 exhibitions.extend(prev_exh)
 
-    return events, exhibitions, nav_pages
+    return events, exhibitions
 
 
 async def build_month_page_content(
@@ -7992,12 +7985,11 @@ async def build_month_page_content(
     month: str,
     events: list[Event] | None = None,
     exhibitions: list[Event] | None = None,
-    nav_pages: list[MonthPage] | None = None,
     continuation_url: str | None = None,
     size_limit: int | None = None,
 ) -> tuple[str, list, int]:
-    if events is None or exhibitions is None or nav_pages is None:
-        events, exhibitions, nav_pages = await get_month_data(db, month)
+    if events is None or exhibitions is None:
+        events, exhibitions = await get_month_data(db, month)
 
     async with span("db"):
         async with db.get_session() as session:
@@ -8011,7 +8003,6 @@ async def build_month_page_content(
             month,
             events,
             exhibitions,
-            nav_pages,
             fest_map,
             continuation_url,
             size_limit,
@@ -8025,7 +8016,6 @@ def _build_month_page_content_sync(
     month: str,
     events: list[Event],
     exhibitions: list[Event],
-    nav_pages: list[MonthPage],
     fest_map: dict[str, Festival],
     continuation_url: str | None,
     size_limit: int | None,
@@ -8091,24 +8081,8 @@ def _build_month_page_content_sync(
 
     add_day_sections(sorted(by_day), by_day, fest_map, add_many, use_markers=True)
 
-    month_nav: list[dict] = []
-    nav_children: list = []
-    if nav_pages:
-        for idx, p in enumerate(nav_pages):
-            name = month_name_nominative(p.month)
-            if p.month == month:
-                nav_children.append(name)
-            else:
-                nav_children.append(
-                    {"tag": "a", "attrs": {"href": p.url}, "children": [name]}
-                )
-            if idx < len(nav_pages) - 1:
-                nav_children.append(" ")
-    else:
-        nav_children = [month_name_nominative(month)]
-
-    if nav_children:
-        month_nav = [{"tag": "h4", "children": nav_children}]
+    nav_children: list = [month_name_nominative(month)]
+    month_nav: list[dict] = [{"tag": "h4", "children": nav_children}]
 
     if exhibitions and not exceeded:
         add_many([PERM_START])
@@ -8241,7 +8215,8 @@ async def _sync_month_page_inner(
             await commit_page()
             return
 
-        events, exhibitions, nav_pages = await get_month_data(db, month)
+        events, exhibitions = await get_month_data(db, month)
+        nav_block = await build_month_nav_block(db)
 
         from telegraph.utils import nodes_to_html
 
@@ -8253,9 +8228,12 @@ async def _sync_month_page_inner(
         async def update_split(first: list[Event], second: list[Event]) -> None:
             nonlocal created
             title2, content2, _ = await build_month_page_content(
-                db, month, second, exhibitions, nav_pages
+                db, month, second, exhibitions
             )
             html2 = unescape_html_comments(nodes_to_html(content2))
+            html2 = replace_between_markers(
+                html2, NAV_MONTHS_START, NAV_MONTHS_END, nav_block
+            )
             hash2 = content_hash(html2)
             if page.path2 and page.content_hash2 == hash2:
                 logging.debug("telegraph_update skipped (no changes)")
@@ -8290,10 +8268,12 @@ async def _sync_month_page_inner(
                 month,
                 first,
                 [],
-                nav_pages,
                 continuation_url=page.url2,
             )
             html1 = unescape_html_comments(nodes_to_html(content1))
+            html1 = replace_between_markers(
+                html1, NAV_MONTHS_START, NAV_MONTHS_END, nav_block
+            )
             hash1 = content_hash(html1)
             if page.path and page.content_hash == hash1:
                 logging.debug("telegraph_update skipped (no changes)")
@@ -8324,17 +8304,22 @@ async def _sync_month_page_inner(
                 page.content_hash = hash1
                 await asyncio.sleep(0)
 
-                logging.info(
-                    "%s month page %s split into two",
-                    "Created" if created else "Edited",
-                    month,
-                )
-                await commit_page()
+            logging.debug("month nav replaced with filtered block")
+
+            logging.info(
+                "%s month page %s split into two",
+                "Created" if created else "Edited",
+                month,
+            )
+            await commit_page()
 
         title, content, _ = await build_month_page_content(
-            db, month, events, exhibitions, nav_pages
+            db, month, events, exhibitions
         )
         html_full = unescape_html_comments(nodes_to_html(content))
+        html_full = replace_between_markers(
+            html_full, NAV_MONTHS_START, NAV_MONTHS_END, nav_block
+        )
         hash_full = content_hash(html_full)
         size = len(html_full.encode())
 
