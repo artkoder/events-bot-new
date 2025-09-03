@@ -1509,28 +1509,28 @@ async def ensure_festival(
         fest = res.scalar_one_or_none()
         if fest:
             updated = False
-            if photo_url and not fest.photo_url:
+            if photo_url and photo_url != fest.photo_url:
                 fest.photo_url = photo_url
                 updated = True
-            if full_name and not fest.full_name:
+            if full_name and full_name != fest.full_name:
                 fest.full_name = full_name
                 updated = True
-            if start_date and not fest.start_date:
+            if start_date and start_date != fest.start_date:
                 fest.start_date = start_date
                 updated = True
-            if end_date and not fest.end_date:
+            if end_date and end_date != fest.end_date:
                 fest.end_date = end_date
                 updated = True
-            if location_name and not fest.location_name:
+            if location_name and location_name != fest.location_name:
                 fest.location_name = location_name
                 updated = True
-            if location_address and not fest.location_address:
+            if location_address and location_address != fest.location_address:
                 fest.location_address = location_address
                 updated = True
-            if city and not fest.city:
-                fest.city = city
+            if city and city.strip() and city.strip() != (fest.city or "").strip():
+                fest.city = city.strip()
                 updated = True
-            if source_text and not fest.source_text:
+            if source_text and source_text != fest.source_text:
                 fest.source_text = source_text
                 updated = True
             if updated:
@@ -2001,6 +2001,14 @@ def parse_iso_date(value: str) -> date | None:
         return date.fromisoformat(value.split("..", 1)[0])
     except Exception:
         return None
+
+
+def parse_city_from_fest_name(name: str) -> str | None:
+    """Extract city name from festival name like 'День города <Город>'."""
+    m = re.search(r"День города\s+([A-ЯЁа-яёA-Za-z\- ]+?)(?:\s+\d|$)", name)
+    if not m:
+        return None
+    return m.group(1).strip()
 
 
 def festival_date_range(events: Iterable[Event]) -> tuple[date | None, date | None]:
@@ -4024,6 +4032,30 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                 )
                 return
             logging.info("festdays start fid=%s name=%s", fid, fest.name)
+            city_from_name = parse_city_from_fest_name(fest.name)
+            city_for_days = (fest.city or city_from_name or "").strip()
+            if not city_for_days:
+                logging.warning(
+                    "festdays: city unresolved for fest %s (id=%s)",
+                    fest.name,
+                    fest.id,
+                )
+            elif city_from_name and fest.city and city_from_name.strip() != fest.city.strip():
+                logging.warning(
+                    "festdays: city mismatch name=%s fest.city=%s using=%s",
+                    city_from_name,
+                    fest.city,
+                    city_from_name.strip(),
+                )
+                city_for_days = city_from_name.strip()
+            if not fest.city and city_for_days:
+                fest.city = city_for_days
+            logging.info(
+                "festdays: use city=%s for fest id=%s name=%s",
+                city_for_days,
+                fest.id,
+                fest.name,
+            )
             events: list[tuple[Event, bool]] = []
             for i in range((end - start).days + 1):
                 day = start + timedelta(days=i)
@@ -4035,8 +4067,8 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                     time="",
                     location_name=fest.location_name or "",
                     location_address=fest.location_address,
-                    city=fest.city,
-                    source_text="",
+                    city=city_for_days,
+                    source_text=f"{fest.name} — {day.isoformat()}",
                     creator_id=user.user_id if user else None,
                 )
                 saved, added = await upsert_event(session, event)
@@ -12605,7 +12637,7 @@ async def create_source_page(
     catbox_urls: list[str] | None = None,
 ) -> tuple[str, str, str, int] | None:
     """Create a Telegraph page with the original event text."""
-    if db:
+    if db and text and text.strip():
         from models import Event
         from sqlalchemy import select
 
