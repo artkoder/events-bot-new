@@ -491,7 +491,7 @@ async def test_publish_event_progress_fest_index(tmp_path, monkeypatch):
     async def fake_sync_festival_page(db_obj, name, **kwargs):
         return "http://fest"
 
-    async def fake_sync_festival_vk_post(db_obj, name, bot_obj, nav_only=False, nav_lines=None):
+    async def fake_sync_festival_vk_post(db_obj, name, bot_obj, nav_only=False, nav_lines=None, strict=False):
         return False
 
     async def fake_rebuild(db_obj):
