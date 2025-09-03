@@ -29,6 +29,22 @@ async def test_weekend_page_links_festival(tmp_path: Path, monkeypatch):
         )
         await session.commit()
 
+    async def fake_create_page(tg, *args, **kwargs):
+        slug = kwargs.get("slug", "p")
+        return {"path": slug, "url": f"http://t.me/{slug}"}
+
+    async def fake_edit_page(tg, path, **kwargs):
+        return None
+
+    async def fake_build(*a, **k):
+        return "<p>src</p>", [], 0
+
+    monkeypatch.setattr(main, "telegraph_create_page", fake_create_page)
+    monkeypatch.setattr(main, "telegraph_edit_page", fake_edit_page)
+    monkeypatch.setattr(main, "build_source_page_content", fake_build)
+    monkeypatch.setattr(main, "Telegraph", lambda access_token=None, domain=None: object())
+    monkeypatch.setattr(main, "get_telegraph_token", lambda: "t")
+
     class FakeDate(date):
         @classmethod
         def today(cls):
