@@ -78,6 +78,49 @@ async def test_rebuild_festivals_index_logs_img_counts(tmp_path, monkeypatch, ca
     rec = next(r for r in caplog.records if getattr(r, "action", None) in {"built", "updated"})
     assert rec.with_img == 1
     assert rec.without_img == 1
+    assert rec.spacers == 1
+    assert rec.compact_tail is False
+
+
+@pytest.mark.asyncio
+async def test_rebuild_festivals_index_compact_tail(tmp_path, monkeypatch, caplog):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    today = date.today().isoformat()
+    async with db.get_session() as session:
+        for i in range(3):
+            session.add(
+                Festival(
+                    name=f"Fest{i}",
+                    start_date=today,
+                    end_date=today,
+                    photo_url=f"https://example.com/{i}.jpg",
+                )
+            )
+        await session.commit()
+
+    class DummyTelegraph:
+        def __init__(self, *a, **k):
+            pass
+
+        def create_page(self, title, html_content):
+            return {"url": "https://telegra.ph/f", "path": "f"}
+
+    async def fake_call(func, *a, **k):
+        return func(*a, **k)
+
+    monkeypatch.setattr(main, "Telegraph", DummyTelegraph)
+    monkeypatch.setattr(main, "telegraph_call", fake_call)
+    monkeypatch.setattr(main, "get_telegraph_token", lambda: "token")
+    monkeypatch.setattr(main, "TELEGRAPH_LIMIT", 600)
+
+    with caplog.at_level(logging.INFO):
+        await main.rebuild_festivals_index_if_needed(db)
+
+    rec = next(r for r in caplog.records if getattr(r, "action", None) in {"built", "updated"})
+    assert rec.compact_tail is True
+    assert rec.spacers >= 2
+    assert rec.without_img > 0
 
 
 @pytest.mark.asyncio

@@ -16,10 +16,23 @@ async def test_sync_festivals_index_page_created(tmp_path: Path, monkeypatch, ca
     await db.init()
     today = date.today().isoformat()
     async with db.get_session() as session:
-        session.add_all([
-            Festival(name="Fest", start_date=today, end_date=today),
-            Festival(name="NoDate", telegraph_path="nodate"),
-        ])
+        session.add_all(
+            [
+                Festival(
+                    name="WithImg",
+                    start_date=today,
+                    end_date=today,
+                    photo_url="https://example.com/i.jpg",
+                    telegraph_path="withimg",
+                ),
+                Festival(
+                    name="NoImg",
+                    start_date=today,
+                    end_date=today,
+                    telegraph_path="noimg",
+                ),
+            ]
+        )
         await session.commit()
 
     stored = {}
@@ -52,12 +65,22 @@ async def test_sync_festivals_index_page_created(tmp_path: Path, monkeypatch, ca
         await main.sync_festivals_index_page(db)
 
     html = stored["html"]
-    assert "<h3>Все фестивали Калининградской области</h3>" in html
-    assert "<h4>" in html
+    assert "Все фестивали Калининградской области" not in html
+    assert html.count("<h3>") == 2
+    assert (
+        '<h3><a href="https://telegra.ph/withimg">WithImg</a></h3>' in html
+    )
+    assert (
+        '<h3><a href="https://telegra.ph/noimg">NoImg</a></h3>' in html
+    )
+    assert (
+        '<figure><a href="https://telegra.ph/withimg"><img src="https://example.com/i.jpg"/></a>'
+        in html
+    )
+    assert html.count('<p dir="auto">\u200b</p>') == 1
     assert html.count(FEST_INDEX_INTRO_START) == 1
     assert html.count(FEST_INDEX_INTRO_END) == 1
     assert html.count("https://t.me/kenigevents") >= 2
-    assert "NoDate" in html
     url = await main.get_setting_value(db, "fest_index_url")
     path = await main.get_setting_value(db, "fest_index_path")
     assert url == "https://telegra.ph/fests"
@@ -102,7 +125,7 @@ async def test_sync_festivals_index_page_updated(tmp_path: Path, monkeypatch, ca
     assert rec.target == "tg"
     assert rec.path == "fests"
     html = stored["edited"]
-    assert "<h3>Все фестивали Калининградской области</h3>" in html
+    assert "Все фестивали Калининградской области" not in html
     assert html.count(FEST_INDEX_INTRO_START) == 1
     assert html.count(FEST_INDEX_INTRO_END) == 1
 
