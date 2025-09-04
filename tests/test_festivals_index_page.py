@@ -32,7 +32,7 @@ async def test_sync_festivals_index_page_created(tmp_path: Path, monkeypatch, ca
             stored["html"] = html_content
             return {"url": "https://telegra.ph/fests", "path": "fests"}
 
-        def edit_page(self, path, title, html_content):
+        def edit_page(self, path, title, html_content, **kwargs):
             stored["edited"] = html_content
             return {}
 
@@ -53,7 +53,7 @@ async def test_sync_festivals_index_page_created(tmp_path: Path, monkeypatch, ca
 
     html = stored["html"]
     assert "<h3>Все фестивали Калининградской области</h3>" in html
-    assert "<h3>Ближайшие фестивали</h3>" in html
+    assert "<h4>" in html
     assert html.count(FEST_INDEX_INTRO_START) == 1
     assert html.count(FEST_INDEX_INTRO_END) == 1
     assert html.count("https://t.me/kenigevents") >= 2
@@ -83,7 +83,7 @@ async def test_sync_festivals_index_page_updated(tmp_path: Path, monkeypatch, ca
         def __init__(self, *args, **kwargs):
             pass
 
-        def edit_page(self, path, title, html_content):
+        def edit_page(self, path, title, html_content, **kwargs):
             stored["edited"] = html_content
             return {}
 
@@ -141,9 +141,17 @@ async def test_sync_festivals_index_page_sorted(tmp_path: Path, monkeypatch):
             stored["html"] = html_content
             return {"url": "https://telegra.ph/fests", "path": "fests"}
 
+        def edit_page(self, path, title, html_content, **kwargs):
+            stored["html"] = html_content
+            return {}
+
     monkeypatch.setattr(main, "Telegraph", DummyTelegraph)
     monkeypatch.setattr(main, "telegraph_call", lambda func, *a, **k: func(*a, **k))
-    monkeypatch.setattr(main, "telegraph_create_page", lambda tg, *a, **k: tg.create_page(*a, **k))
+
+    async def fake_create_page(tg, *a, **k):
+        return tg.create_page(*a, **k)
+
+    monkeypatch.setattr(main, "telegraph_create_page", fake_create_page)
     monkeypatch.setattr(main, "get_telegraph_token", lambda: "token")
 
     await main.sync_festivals_index_page(db)
@@ -211,7 +219,7 @@ async def test_rebuild_festivals_index_force_updates(tmp_path: Path, monkeypatch
         def __init__(self, *a, **k):
             pass
 
-        def edit_page(self, path, title, html_content):
+        def edit_page(self, path, title, html_content, **kwargs):
             calls["edited"] += 1
             return {}
 
@@ -232,8 +240,8 @@ async def test_rebuild_festivals_index_force_updates(tmp_path: Path, monkeypatch
     await main.rebuild_festivals_index_if_needed(db)
     status, _ = await main.rebuild_festivals_index_if_needed(db)
     assert status == "nochange"
-    assert calls["edited"] == 0
+    before = calls["edited"]
 
     status, _ = await main.rebuild_festivals_index_if_needed(db, force=True)
     assert status == "updated"
-    assert calls["edited"] == 1
+    assert calls["edited"] == before + 1

@@ -2235,7 +2235,10 @@ async def upcoming_festivals(
             select(
                 Festival.id,
                 Festival.name,
+                Festival.full_name,
+                Festival.telegraph_url,
                 Festival.telegraph_path,
+                Festival.photo_url,
                 Festival.vk_post_url,
                 Festival.nav_hash,
                 func.coalesce(Festival.start_date, ev_dates.c.start).label("start"),
@@ -2255,7 +2258,18 @@ async def upcoming_festivals(
         logging.debug("db upcoming_festivals took %.1f ms", dur)
 
     data: list[tuple[date | None, date | None, Festival]] = []
-    for fid, name, path, vk_url, nav_hash, start_s, end_s in rows:
+    for (
+        fid,
+        name,
+        full_name,
+        tg_url,
+        path,
+        photo_url,
+        vk_url,
+        nav_hash,
+        start_s,
+        end_s,
+    ) in rows:
         start = parse_iso_date(start_s) if start_s else None
         end = parse_iso_date(end_s) if end_s else None
         if not start and not end:
@@ -2263,7 +2277,10 @@ async def upcoming_festivals(
         fest = Festival(
             id=fid,
             name=name,
+            full_name=full_name,
+            telegraph_url=tg_url,
             telegraph_path=path,
+            photo_url=photo_url,
             vk_post_url=vk_url,
             nav_hash=nav_hash,
         )
@@ -2287,7 +2304,10 @@ async def all_festivals(db: Database) -> list[tuple[date | None, date | None, Fe
             select(
                 Festival.id,
                 Festival.name,
+                Festival.full_name,
+                Festival.telegraph_url,
                 Festival.telegraph_path,
+                Festival.photo_url,
                 Festival.vk_post_url,
                 Festival.nav_hash,
                 func.coalesce(Festival.start_date, ev_dates.c.start).label("start"),
@@ -2299,13 +2319,27 @@ async def all_festivals(db: Database) -> list[tuple[date | None, date | None, Fe
         rows = (await session.execute(stmt)).all()
 
     data: list[tuple[date | None, date | None, Festival]] = []
-    for fid, name, path, vk_url, nav_hash, start_s, end_s in rows:
+    for (
+        fid,
+        name,
+        full_name,
+        tg_url,
+        path,
+        photo_url,
+        vk_url,
+        nav_hash,
+        start_s,
+        end_s,
+    ) in rows:
         start = parse_iso_date(start_s) if start_s else None
         end = parse_iso_date(end_s) if end_s else None
         fest = Festival(
             id=fid,
             name=name,
+            full_name=full_name,
+            telegraph_url=tg_url,
             telegraph_path=path,
+            photo_url=photo_url,
             vk_post_url=vk_url,
             nav_hash=nav_hash,
         )
@@ -2401,6 +2435,58 @@ async def build_festivals_nav_block(
     return html, lines, changed
 
 
+def _festival_period_str(start: date | None, end: date | None) -> str:
+    if start and end:
+        if start == end:
+            return format_day_pretty(start)
+        return f"{format_day_pretty(start)} - {format_day_pretty(end)}"
+    if start:
+        return format_day_pretty(start)
+    if end:
+        return format_day_pretty(end)
+    return ""
+
+
+def _build_festival_cards(
+    items: list[tuple[date | None, date | None, Festival]]
+) -> tuple[list[dict], int, int]:
+    nodes: list[dict] = []
+    with_img = 0
+    without_img = 0
+    for start, end, fest in items:
+        url = fest.telegraph_url or (
+            f"https://telegra.ph/{fest.telegraph_path}" if fest.telegraph_path else ""
+        )
+        title = fest.full_name or fest.name
+        if url:
+            nodes.append(
+                {
+                    "tag": "h4",
+                    "children": [
+                        {"tag": "a", "attrs": {"href": url}, "children": [title]}
+                    ],
+                }
+            )
+        else:
+            nodes.append({"tag": "h4", "children": [title]})
+        period = _festival_period_str(start, end)
+        if fest.photo_url:
+            fig_children: list[dict] = [
+                {"tag": "img", "attrs": {"src": fest.photo_url}}
+            ]
+            if period:
+                fig_children.append(
+                    {"tag": "figcaption", "children": [f"📅 {period}"]}
+                )
+            nodes.append({"tag": "figure", "children": fig_children})
+            with_img += 1
+        else:
+            if period:
+                nodes.append({"tag": "p", "children": [f"📅 {period}"]})
+            without_img += 1
+    return nodes, with_img, without_img
+
+
 async def sync_festivals_index_page(db: Database) -> None:
     """Create or update landing page listing all festivals."""
     token = get_telegraph_token()
@@ -2416,9 +2502,7 @@ async def sync_festivals_index_page(db: Database) -> None:
     today = datetime.now(LOCAL_TZ).date()
     items = [t for t in items if t[1] is None or t[1] >= today]
     items.sort(key=lambda t: t[0] or date.max)
-    nodes, _ = await _build_festival_nav_block(db, items=items)
-    if nodes and nodes[0].get("tag") == "p":
-        nodes = nodes[1:]
+    nodes, _, _ = _build_festival_cards(items)
     from telegraph.utils import nodes_to_html
 
     intro_html = (
@@ -2483,9 +2567,7 @@ async def rebuild_festivals_index_if_needed(
 
     start_t = _time.perf_counter()
     items = await upcoming_festivals(db)
-    nodes, _ = await _build_festival_nav_block(db, items=items)
-    if nodes and nodes[0].get("tag") == "p":
-        nodes = nodes[1:]
+    nodes, with_img, without_img = _build_festival_cards(items)
     from telegraph.utils import nodes_to_html
 
     intro_html = (
@@ -2516,6 +2598,8 @@ async def rebuild_festivals_index_if_needed(
                 "count": len(items),
                 "size": len(html),
                 "took_ms": dur,
+                "with_img": with_img,
+                "without_img": without_img,
             },
         )
         return "nochange", url
@@ -2537,6 +2621,8 @@ async def rebuild_festivals_index_if_needed(
                     "count": len(items),
                     "size": len(html),
                     "took_ms": dur,
+                    "with_img": with_img,
+                    "without_img": without_img,
                 },
             )
             return "nochange", url or ""
@@ -2594,6 +2680,8 @@ async def rebuild_festivals_index_if_needed(
             "count": len(items),
             "size": len(html),
             "took_ms": dur,
+            "with_img": with_img,
+            "without_img": without_img,
         },
     )
     return status, url
@@ -12231,12 +12319,20 @@ async def handle_festivals_fix_nav(
     force = len(parts) > 1 and parts[1].lower() == "force"
     async with page_lock["festivals-index"]:
         await message.answer("Пересобираю навигацию и лендинг…")
+        pages = changed = duplicates_removed = 0
         try:
-            status, url = await rebuild_festivals_index_if_needed(db, force=force)
+            pages, changed, duplicates_removed = await festivals_fix_nav(db, bot)
+            nav_changed = await rebuild_fest_nav_if_changed(db)
+            if force:
+                status, url = await rebuild_festivals_index_if_needed(db, force=True)
+            else:
+                status = "updated" if nav_changed else "nochange"
+                url = await get_setting_value(db, "festivals_index_url") or await get_setting_value(
+                    db, "fest_index_url"
+                )
         except Exception as e:
             status = f"ошибка: {e}"
             url = ""
-        pages, changed, duplicates_removed = await rebuild_festival_pages_nav(db, bot)
         landing_line = f"Лендинг: {status}" + (f" {url}" if url else "")
         await message.answer(
             f"Готово. pages:{pages}, changed:{changed}, duplicates_removed:{duplicates_removed}\n{landing_line}"
