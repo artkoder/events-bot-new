@@ -2,6 +2,7 @@ import logging
 import os
 from datetime import date
 from pathlib import Path
+import logging
 
 import pytest
 
@@ -58,7 +59,11 @@ async def test_rebuild_festivals_index_logs_img_counts(tmp_path, monkeypatch, ca
             pass
 
         def create_page(self, title, html_content):
+            self.html = html_content
             return {"url": "https://telegra.ph/f", "path": "f"}
+
+        def get_page(self, path, return_html=True):
+            return {"content_html": getattr(self, "html", "")}
 
     async def fake_call(func, *a, **k):
         return func(*a, **k)
@@ -80,6 +85,65 @@ async def test_rebuild_festivals_index_logs_img_counts(tmp_path, monkeypatch, ca
     assert rec.without_img == 1
     assert rec.spacers == 1
     assert rec.compact_tail is False
+    assert rec.img_links_ok == 1
+    assert rec.img_links_fixed == 0
+
+
+@pytest.mark.asyncio
+async def test_rebuild_festivals_index_fallback(tmp_path, monkeypatch, caplog):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    today = date.today().isoformat()
+    async with db.get_session() as session:
+        session.add(
+            Festival(
+                name="WithImg",
+                start_date=today,
+                end_date=today,
+                photo_url="https://example.com/i.jpg",
+                telegraph_path="withimg",
+            )
+        )
+        await session.commit()
+
+    stored = {}
+
+    class DummyTelegraph:
+        def __init__(self, *a, **k):
+            pass
+
+        def create_page(self, title, html_content):
+            stored["html"] = html_content
+            return {"url": "https://telegra.ph/f", "path": "f"}
+
+        def get_page(self, path, return_html=True):
+            html = stored["html"].replace(
+                '<a href="https://telegra.ph/withimg"><img src="https://example.com/i.jpg"/></a>',
+                '<img src="https://example.com/i.jpg"/>'
+            )
+            return {"content_html": html}
+
+        def edit_page(self, path, title, html_content, **kwargs):
+            stored["edited"] = html_content
+            return {}
+
+    async def fake_call(func, *a, **k):
+        return func(*a, **k)
+
+    monkeypatch.setattr(main, "Telegraph", DummyTelegraph)
+    monkeypatch.setattr(main, "telegraph_call", fake_call)
+    monkeypatch.setattr(main, "telegraph_create_page", lambda tg, *a, **k: tg.create_page(*a, **k))
+    monkeypatch.setattr(main, "telegraph_edit_page", lambda tg, path, **k: tg.edit_page(path, **k))
+    monkeypatch.setattr(main, "get_telegraph_token", lambda: "token")
+
+    with caplog.at_level(logging.WARNING):
+        await main.rebuild_festivals_index_if_needed(db)
+
+    assert "Открыть страницу фестиваля" in stored["edited"]
+    rec = next(r for r in caplog.records if getattr(r, "action", None) in {"built", "updated"})
+    assert rec.img_links_fixed == 1
+    warn = next(r for r in caplog.records if r.message == "festivals_index img_link_missing")
+    assert warn.festival == "WithImg"
 
 
 @pytest.mark.asyncio
@@ -104,7 +168,11 @@ async def test_rebuild_festivals_index_compact_tail(tmp_path, monkeypatch, caplo
             pass
 
         def create_page(self, title, html_content):
+            self.html = html_content
             return {"url": "https://telegra.ph/f", "path": "f"}
+
+        def get_page(self, path, return_html=True):
+            return {"content_html": getattr(self, "html", "")}
 
     async def fake_call(func, *a, **k):
         return func(*a, **k)
