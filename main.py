@@ -2447,44 +2447,98 @@ def _festival_period_str(start: date | None, end: date | None) -> str:
     return ""
 
 
+def build_festival_card_nodes(
+    fest: Festival,
+    start: date | None,
+    end: date | None,
+    *,
+    with_image: bool,
+    add_spacer: bool,
+) -> tuple[list[dict], bool, int]:
+    """Return Telegraph nodes for a single festival card.
+
+    Returns a tuple ``(nodes, used_img, spacer_count)`` where ``nodes`` is a list
+    of Telegraph nodes representing the card, ``used_img`` indicates whether a
+    figure with an image was rendered and ``spacer_count`` is ``1`` if a trailing
+    spacer paragraph was added.
+    """
+
+    nodes: list[dict] = []
+    url = fest.telegraph_url or (
+        f"https://telegra.ph/{fest.telegraph_path}" if fest.telegraph_path else ""
+    )
+    title = fest.full_name or fest.name
+    if url:
+        nodes.append(
+            {
+                "tag": "h3",
+                "children": [
+                    {"tag": "a", "attrs": {"href": url}, "children": [title]}
+                ],
+            }
+        )
+    else:
+        logging.debug("festival_card_missing_url", extra={"fest": title})
+        nodes.append({"tag": "h3", "children": [title]})
+
+    period = _festival_period_str(start, end)
+    used_img = False
+    if with_image and fest.photo_url:
+        fig_children: list[dict] = []
+        img_node: dict = {"tag": "img", "attrs": {"src": fest.photo_url}}
+        if url:
+            fig_children.append({"tag": "a", "attrs": {"href": url}, "children": [img_node]})
+        else:
+            fig_children.append(img_node)
+        if period:
+            fig_children.append({"tag": "figcaption", "children": [f"📅 {period}"]})
+        nodes.append({"tag": "figure", "children": fig_children})
+        used_img = True
+    else:
+        if period:
+            nodes.append({"tag": "p", "children": [f"📅 {period}"]})
+
+    spacer_count = 0
+    if add_spacer:
+        nodes.append({"tag": "p", "attrs": {"dir": "auto"}, "children": ["\u200b"]})
+        spacer_count = 1
+
+    return nodes, used_img, spacer_count
+
+
 def _build_festival_cards(
     items: list[tuple[date | None, date | None, Festival]]
-) -> tuple[list[dict], int, int]:
+) -> tuple[list[dict], int, int, int, bool]:
     nodes: list[dict] = []
     with_img = 0
     without_img = 0
-    for start, end, fest in items:
-        url = fest.telegraph_url or (
-            f"https://telegra.ph/{fest.telegraph_path}" if fest.telegraph_path else ""
+    spacers = 0
+    compact_tail = False
+    for idx, (start, end, fest) in enumerate(items):
+        add_spacer = idx < len(items) - 1
+        use_img = not compact_tail
+        card_nodes, used_img, spacer_count = build_festival_card_nodes(
+            fest, start, end, with_image=use_img, add_spacer=add_spacer
         )
-        title = fest.full_name or fest.name
-        if url:
-            nodes.append(
-                {
-                    "tag": "h4",
-                    "children": [
-                        {"tag": "a", "attrs": {"href": url}, "children": [title]}
-                    ],
-                }
+        candidate = nodes + card_nodes
+        if not compact_tail and rough_size(candidate, TELEGRAPH_LIMIT + 1) > TELEGRAPH_LIMIT:
+            compact_tail = True
+            card_nodes, used_img, spacer_count = build_festival_card_nodes(
+                fest, start, end, with_image=False, add_spacer=add_spacer
             )
-        else:
-            nodes.append({"tag": "h4", "children": [title]})
-        period = _festival_period_str(start, end)
-        if fest.photo_url:
-            fig_children: list[dict] = [
-                {"tag": "img", "attrs": {"src": fest.photo_url}}
-            ]
-            if period:
-                fig_children.append(
-                    {"tag": "figcaption", "children": [f"📅 {period}"]}
-                )
-            nodes.append({"tag": "figure", "children": fig_children})
+            candidate = nodes + card_nodes
+            if rough_size(candidate, TELEGRAPH_LIMIT + 1) > TELEGRAPH_LIMIT:
+                break
+        elif compact_tail and rough_size(candidate, TELEGRAPH_LIMIT + 1) > TELEGRAPH_LIMIT:
+            break
+
+        nodes.extend(card_nodes)
+        spacers += spacer_count
+        if used_img:
             with_img += 1
         else:
-            if period:
-                nodes.append({"tag": "p", "children": [f"📅 {period}"]})
             without_img += 1
-    return nodes, with_img, without_img
+    return nodes, with_img, without_img, spacers, compact_tail
 
 
 async def sync_festivals_index_page(db: Database) -> None:
@@ -2502,7 +2556,7 @@ async def sync_festivals_index_page(db: Database) -> None:
     today = datetime.now(LOCAL_TZ).date()
     items = [t for t in items if t[1] is None or t[1] >= today]
     items.sort(key=lambda t: t[0] or date.max)
-    nodes, _, _ = _build_festival_cards(items)
+    nodes, with_img, without_img, spacers, compact_tail = _build_festival_cards(items)
     from telegraph.utils import nodes_to_html
 
     intro_html = (
@@ -2510,12 +2564,7 @@ async def sync_festivals_index_page(db: Database) -> None:
         f'<a href="https://t.me/kenigevents">Полюбить Калининград Анонсы</a>.</i></p>'
         f"{FEST_INDEX_INTRO_END}"
     )
-    html = (
-        "<h3>Все фестивали Калининградской области</h3>"
-        + intro_html
-        + (nodes_to_html(nodes) if nodes else "")
-        + FOOTER_LINK_HTML
-    )
+    html = intro_html + (nodes_to_html(nodes) if nodes else "") + FOOTER_LINK_HTML
     html = sanitize_telegraph_html(html)
     path = await get_setting_value(db, "fest_index_path")
     url = await get_setting_value(db, "fest_index_url")
@@ -2526,7 +2575,15 @@ async def sync_festivals_index_page(db: Database) -> None:
             await telegraph_edit_page(tg, path, title=title, html_content=html)
             logging.info(
                 "updated festivals index page",
-                extra={"action": "edited", "target": "tg", "path": path},
+                extra={
+                    "action": "edited",
+                    "target": "tg",
+                    "path": path,
+                    "with_img": with_img,
+                    "without_img": without_img,
+                    "spacers": spacers,
+                    "compact_tail": compact_tail,
+                },
             )
         else:
             data = await telegraph_create_page(tg, title=title, html_content=html)
@@ -2535,7 +2592,16 @@ async def sync_festivals_index_page(db: Database) -> None:
             logging.info(
                 "created festivals index page %s",
                 url,
-                extra={"action": "created", "target": "tg", "path": path, "url": url},
+                extra={
+                    "action": "created",
+                    "target": "tg",
+                    "path": path,
+                    "url": url,
+                    "with_img": with_img,
+                    "without_img": without_img,
+                    "spacers": spacers,
+                    "compact_tail": compact_tail,
+                },
             )
     except Exception as e:
         logging.error(
@@ -2567,7 +2633,7 @@ async def rebuild_festivals_index_if_needed(
 
     start_t = _time.perf_counter()
     items = await upcoming_festivals(db)
-    nodes, with_img, without_img = _build_festival_cards(items)
+    nodes, with_img, without_img, spacers, compact_tail = _build_festival_cards(items)
     from telegraph.utils import nodes_to_html
 
     intro_html = (
@@ -2576,7 +2642,7 @@ async def rebuild_festivals_index_if_needed(
         f"</i></p>{FEST_INDEX_INTRO_END}"
     )
     nav_html = nodes_to_html(nodes) if nodes else "<p>Пока нет ближайших фестивалей</p>"
-    html = "<h3>Все фестивали региона</h3>" + intro_html + nav_html + FOOTER_LINK_HTML
+    html = intro_html + nav_html + FOOTER_LINK_HTML
     html = sanitize_telegraph_html(html)
     new_hash = hashlib.sha256(html.encode("utf-8")).hexdigest()
     old_hash = await get_setting_value(db, "festivals_index_hash")
@@ -2593,6 +2659,8 @@ async def rebuild_festivals_index_if_needed(
             "festivals_index",
             extra={
                 "action": "nochange",
+                "page": "festivals_index",
+                "title": "Все фестивали Калининградской области",
                 "old_hash": (old_hash or "")[:6],
                 "new_hash": new_hash[:6],
                 "count": len(items),
@@ -2600,6 +2668,8 @@ async def rebuild_festivals_index_if_needed(
                 "took_ms": dur,
                 "with_img": with_img,
                 "without_img": without_img,
+                "spacers": spacers,
+                "compact_tail": compact_tail,
             },
         )
         return "nochange", url
@@ -2616,6 +2686,8 @@ async def rebuild_festivals_index_if_needed(
                 "festivals_index",
                 extra={
                     "action": "nochange",
+                    "page": "festivals_index",
+                    "title": "Все фестивали Калининградской области",
                     "old_hash": (old_hash or "")[:6],
                     "new_hash": new_hash[:6],
                     "count": len(items),
@@ -2623,12 +2695,14 @@ async def rebuild_festivals_index_if_needed(
                     "took_ms": dur,
                     "with_img": with_img,
                     "without_img": without_img,
+                    "spacers": spacers,
+                    "compact_tail": compact_tail,
                 },
             )
             return "nochange", url or ""
         telegraph = Telegraph(access_token=token)
 
-    title = "Все фестивали региона"
+    title = "Все фестивали Калининградской области"
     try:
         if path:
             await telegraph_edit_page(
@@ -2653,11 +2727,17 @@ async def rebuild_festivals_index_if_needed(
                 "action": "error",
                 "target": "tg",
                 "path": path,
+                "page": "festivals_index",
+                "title": "Все фестивали Калининградской области",
                 "old_hash": (old_hash or "")[:6],
                 "new_hash": new_hash[:6],
                 "count": len(items),
                 "size": len(html),
                 "took_ms": dur,
+                "with_img": with_img,
+                "without_img": without_img,
+                "spacers": spacers,
+                "compact_tail": compact_tail,
             },
         )
         raise
@@ -2675,6 +2755,8 @@ async def rebuild_festivals_index_if_needed(
         "festivals_index",
         extra={
             "action": status,
+            "page": "festivals_index",
+            "title": "Все фестивали Калининградской области",
             "old_hash": (old_hash or "")[:6],
             "new_hash": new_hash[:6],
             "count": len(items),
@@ -2682,6 +2764,8 @@ async def rebuild_festivals_index_if_needed(
             "took_ms": dur,
             "with_img": with_img,
             "without_img": without_img,
+            "spacers": spacers,
+            "compact_tail": compact_tail,
         },
     )
     return status, url
