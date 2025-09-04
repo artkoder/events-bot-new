@@ -35,6 +35,52 @@ async def test_rebuild_fest_nav_if_changed_logs_nav_hash(tmp_path, monkeypatch, 
 
 
 @pytest.mark.asyncio
+async def test_rebuild_festivals_index_logs_img_counts(tmp_path, monkeypatch, caplog):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    today = date.today().isoformat()
+    async with db.get_session() as session:
+        session.add_all(
+            [
+                Festival(
+                    name="WithImg",
+                    start_date=today,
+                    end_date=today,
+                    photo_url="https://example.com/i.jpg",
+                ),
+                Festival(name="NoImg", start_date=today, end_date=today),
+            ]
+        )
+        await session.commit()
+
+    class DummyTelegraph:
+        def __init__(self, *a, **k):
+            pass
+
+        def create_page(self, title, html_content):
+            return {"url": "https://telegra.ph/f", "path": "f"}
+
+    async def fake_call(func, *a, **k):
+        return func(*a, **k)
+
+    monkeypatch.setattr(main, "Telegraph", DummyTelegraph)
+    monkeypatch.setattr(main, "telegraph_call", fake_call)
+
+    async def fake_create_page(tg, *a, **k):
+        return tg.create_page(*a, **k)
+
+    monkeypatch.setattr(main, "telegraph_create_page", fake_create_page)
+    monkeypatch.setattr(main, "get_telegraph_token", lambda: "token")
+
+    with caplog.at_level(logging.INFO):
+        await main.rebuild_festivals_index_if_needed(db)
+
+    rec = next(r for r in caplog.records if getattr(r, "action", None) in {"built", "updated"})
+    assert rec.with_img == 1
+    assert rec.without_img == 1
+
+
+@pytest.mark.asyncio
 async def test_update_festival_tg_nav_logs_edited(tmp_path, monkeypatch, caplog):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
@@ -56,7 +102,7 @@ async def test_update_festival_tg_nav_logs_edited(tmp_path, monkeypatch, caplog)
         def get_page(self, path, return_html=True):
             return {"content_html": tg_pages[path]["html"], "title": tg_pages[path]["title"]}
 
-        def edit_page(self, path, title, html_content):
+        def edit_page(self, path, title, html_content, **kwargs):
             tg_pages[path] = {"html": html_content, "title": title}
             return {}
 
@@ -105,7 +151,7 @@ async def test_update_festival_tg_nav_logs_skipped(tmp_path, monkeypatch, caplog
         def get_page(self, path, return_html=True):
             return {"content_html": tg_pages[path]["html"], "title": tg_pages[path]["title"]}
 
-        def edit_page(self, path, title, html_content):
+        def edit_page(self, path, title, html_content, **kwargs):
             tg_pages[path] = {"html": html_content, "title": title}
             return {}
 
