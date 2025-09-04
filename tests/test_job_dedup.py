@@ -22,7 +22,8 @@ async def test_enqueue_job_dedup(tmp_path, caplog):
     assert kinds.count(JobTask.week_pages) == 1
     assert kinds.count(JobTask.month_pages) == 1
     assert any(
-        "skip duplicate job_key=week_pages:1" in r.message for r in caplog.records
+        r.message.startswith("ENQ") and "job_key=week_pages:1" in r.message and "merged" in r.message
+        for r in caplog.records
     )
 
 
@@ -65,8 +66,10 @@ async def test_enqueue_job_requeue_and_skip(tmp_path, caplog):
     assert jobs[JobTask.month_pages].last_error is None
     assert jobs[JobTask.vk_sync].status == JobStatus.done
     assert any(
-        "merged(requeue) job_key=month_pages:1" in r.message for r in caplog.records
+        r.message.startswith("ENQ") and "job_key=month_pages:1" in r.message and "requeued" in r.message
+        for r in caplog.records
     )
     assert any(
-        "skip up-to-date job_key=vk_sync:1" in r.message for r in caplog.records
+        r.message.startswith("ENQ") and "job_key=vk_sync:1" in r.message and "skipped" in r.message
+        for r in caplog.records
     )

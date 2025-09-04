@@ -46,6 +46,16 @@ def configure_logging() -> None:
 
 configure_logging()
 
+def logline(tag: str, eid: int | None, msg: str, **kw) -> None:
+    kv = " ".join(f"{k}={v}" for k, v in kw.items() if v is not None)
+    logging.info(
+        "%s %s %s%s",
+        tag,
+        f"[E{eid}]" if eid else "",
+        msg,
+        (f" | {kv}" if kv else ""),
+    )
+
 from datetime import date, datetime, timedelta, timezone, time
 from zoneinfo import ZoneInfo
 from typing import Optional, Tuple, Iterable, Any, Callable, Awaitable
@@ -3376,15 +3386,18 @@ async def ics_publish(event_id: int, db: Database, bot: Bot, progress=None) -> b
                                     file,
                                     caption=caption,
                                 )
-                    tg_file_id = msg.document.file_id
-                    tg_post_id = msg.message_id
-                    tg_post_url = message_link(msg.chat.id, msg.message_id)
-                    if progress:
-                        progress.mark(
-                            "ics_telegram",
-                            "done",
-                            message_link(msg.chat.id, msg.message_id),
-                        )
+                        tg_file_id = msg.document.file_id
+                        tg_post_id = msg.message_id
+                        tg_post_url = message_link(msg.chat.id, msg.message_id)
+                        if progress:
+                            progress.mark(
+                                "ics_telegram",
+                                "done",
+                                message_link(msg.chat.id, msg.message_id),
+                            )
+                        logline("ICS", event_id, "telegram done", url=tg_post_url)
+                    else:
+                        logline("ICS", event_id, "telegram skipped", reason="no_channel")
                 except OSError:
                     errors.append("temporary network error")
                     if progress:
@@ -3422,6 +3435,7 @@ async def ics_publish(event_id: int, db: Database, bot: Bot, progress=None) -> b
                         if progress:
                             progress.mark("ics_supabase", "done", supabase_url)
                         logging.info("ics_publish supabase_url=%s", supabase_url)
+                        logline("ICS", event_id, "supabase done", url=supabase_url)
                 except OSError:
                     errors.append("temporary network error")
                     if progress:
@@ -3438,42 +3452,45 @@ async def ics_publish(event_id: int, db: Database, bot: Bot, progress=None) -> b
                     progress.mark("ics_supabase", "skipped_disabled", "disabled")
 
             try:
-                channel = await get_asset_channel(db)
-                if channel:
-                    file = types.BufferedInputFile(ics_bytes, filename=filename)
-                    caption, parse_mode = format_event_caption(ev)
-                    try:
-                        async with span("tg-send"):
-                            msg = await bot.send_document(
-                                channel.channel_id,
-                                file,
-                                caption=caption,
-                                parse_mode=parse_mode,
+                    channel = await get_asset_channel(db)
+                    if channel:
+                        file = types.BufferedInputFile(ics_bytes, filename=filename)
+                        caption, parse_mode = format_event_caption(ev)
+                        try:
+                            async with span("tg-send"):
+                                msg = await bot.send_document(
+                                    channel.channel_id,
+                                    file,
+                                    caption=caption,
+                                    parse_mode=parse_mode,
+                                )
+                        except TelegramBadRequest:
+                            if ev.telegraph_url:
+                                caption = "\n".join(
+                                    [
+                                        caption.split("\n")[0],
+                                        f"Подробнее: {ev.telegraph_url}",
+                                        caption.split("\n")[-1],
+                                    ]
+                                )
+                            async with span("tg-send"):
+                                msg = await bot.send_document(
+                                    channel.channel_id,
+                                    file,
+                                    caption=caption,
+                                )
+                        tg_file_id = msg.document.file_id
+                        tg_post_id = msg.message_id
+                        tg_post_url = message_link(msg.chat.id, msg.message_id)
+                        if progress:
+                            progress.mark(
+                                "ics_telegram",
+                                "done",
+                                message_link(msg.chat.id, msg.message_id),
                             )
-                    except TelegramBadRequest:
-                        if ev.telegraph_url:
-                            caption = "\n".join(
-                                [
-                                    caption.split("\n")[0],
-                                    f"Подробнее: {ev.telegraph_url}",
-                                    caption.split("\n")[-1],
-                                ]
-                            )
-                        async with span("tg-send"):
-                            msg = await bot.send_document(
-                                channel.channel_id,
-                                file,
-                                caption=caption,
-                            )
-                    tg_file_id = msg.document.file_id
-                    tg_post_id = msg.message_id
-                    tg_post_url = message_link(msg.chat.id, msg.message_id)
-                    if progress:
-                        progress.mark(
-                            "ics_telegram",
-                            "done",
-                            message_link(msg.chat.id, msg.message_id),
-                        )
+                        logline("ICS", event_id, "telegram done", url=tg_post_url)
+                    else:
+                        logline("ICS", event_id, "telegram skipped", reason="no_channel")
             except OSError:
                 errors.append("temporary network error")
                 if progress:
@@ -4698,6 +4715,14 @@ async def handle_vk_captcha(message: types.Message, db: Database, bot: Bot):
         _vk_captcha_resume = None
         if resume:
             await resume()
+            eid = None
+            if _vk_captcha_key and ":" in _vk_captcha_key:
+                try:
+                    eid = int(_vk_captcha_key.split(":", 1)[1])
+                except ValueError:
+                    eid = None
+            if eid:
+                logline("VK", eid, "resumed after captcha")
         await bot.send_message(message.chat.id, "VK ✅")
         logging.info("vk_captcha ok")
     except VKAPIError:
@@ -5249,6 +5274,9 @@ async def enqueue_job(
         job = res.scalar_one_or_none()
         dep_str = ",".join(depends_on) if depends_on else None
         if job:
+            if job.status == JobStatus.done and task == JobTask.vk_sync:
+                logline("ENQ", event_id, "skipped", job_key=job_key)
+                return "skipped"
             if job.status == JobStatus.pending:
                 if payload is not None:
                     job.payload = payload
@@ -5263,7 +5291,15 @@ async def enqueue_job(
                 job.last_error = None
                 session.add(job)
                 await session.commit()
-                logging.info("enqueue_job merged(rearm) job_key=%s", job_key)
+                logline(
+                    "ENQ",
+                    event_id,
+                    "merged",
+                    job_key=job_key,
+                    status="pending",
+                    owner_eid=job.event_id if job.event_id != event_id else None,
+                    coalesce_key=job.coalesce_key,
+                )
                 return "merged-rearmed"
             if job.status == JobStatus.running:
                 updated = False
@@ -5280,7 +5316,15 @@ async def enqueue_job(
                 if updated:
                     session.add(job)
                     await session.commit()
-                logging.info("enqueue_job merged(running) job_key=%s", job_key)
+                logline(
+                    "ENQ",
+                    event_id,
+                    "merged",
+                    job_key=job_key,
+                    status="running",
+                    owner_eid=job.event_id if job.event_id != event_id else None,
+                    coalesce_key=job.coalesce_key,
+                )
                 return "merged"
 
             # requeue for existing (possibly coalesced) task
@@ -5296,7 +5340,13 @@ async def enqueue_job(
                 job.depends_on = ",".join(sorted(cur))
             session.add(job)
             await session.commit()
-            logging.info("enqueue_job requeued job_key=%s", job_key)
+            logline(
+                "ENQ",
+                event_id,
+                "requeued",
+                job_key=job_key,
+                coalesce_key=job.coalesce_key,
+            )
             return "requeued"
         session.add(
             JobOutbox(
@@ -5311,7 +5361,7 @@ async def enqueue_job(
             )
         )
         await session.commit()
-        logging.info("enqueue_job new job_key=%s", job_key)
+        logline("ENQ", event_id, "new", job_key=job_key)
         return "new"
 
 
@@ -5774,10 +5824,27 @@ async def add_events_from_text(
 
             async with db.get_session() as session:
                 saved, added = await upsert_event(session, event)
-            logging.info(
-                "event %s with id %s", "added" if added else "updated", saved.id
+            logline("FLOW", saved.id, "start add_event", user=creator_id)
+            logline(
+                "FLOW",
+                saved.id,
+                "parsed",
+                title=f'"{saved.title}"',
+                date=saved.date,
+                time=saved.time,
             )
             await schedule_event_update_tasks(db, saved)
+            d = parse_iso_date(saved.date)
+            week = d.isocalendar().week if d else None
+            w_start = weekend_start_for_date(d) if d else None
+            logline(
+                "FLOW",
+                saved.id,
+                "scheduled",
+                month=saved.date[:7],
+                week=f"{d.year}-{week:02d}" if week else None,
+                weekend=w_start.isoformat() if w_start else None,
+            )
             lines = [
                 f"title: {saved.title}",
                 f"date: {saved.date}",
@@ -6314,12 +6381,14 @@ async def _run_due_jobs_once(
             await session.commit()
         run_id = uuid.uuid4().hex
         attempt = job.attempts + 1
-        logging.info(
-            "TASK_START event=%s task=%s run_id=%s attempt=%d",
+        job_key = job.coalesce_key or f"{job.task.value}:{job.event_id}"
+        logline(
+            "RUN",
             job.event_id,
-            job.task.value,
-            run_id,
-            attempt,
+            "start",
+            job_id=job.id,
+            task=job.task.value,
+            key=job_key,
         )
         start = _time.perf_counter()
         changed = True
@@ -6331,14 +6400,13 @@ async def _run_due_jobs_once(
             changed = False
             link = None
             took_ms = (_time.perf_counter() - start) * 1000
-            logging.info(
-                "TASK_DONE event=%s task=%s run_id=%s attempt=%d took_ms=%.0f result=%s",
+            logline(
+                "RUN",
                 job.event_id,
-                job.task.value,
-                run_id,
-                attempt,
-                took_ms,
-                "skipped",
+                "done",
+                job_id=job.id,
+                task=job.task.value,
+                result="nochange",
             )
         else:
             try:
@@ -6370,14 +6438,14 @@ async def _run_due_jobs_once(
                 err = None
                 took_ms = (_time.perf_counter() - start) * 1000
                 short = link or ("ok" if changed else "nochange")
-                logging.info(
-                    "TASK_DONE event=%s task=%s run_id=%s attempt=%d took_ms=%.0f result=%s",
+                logline(
+                    "RUN",
                     job.event_id,
-                    job.task.value,
-                    run_id,
-                    attempt,
-                    took_ms,
-                    short,
+                    "done",
+                    job_id=job.id,
+                    task=job.task.value,
+                    result_url=link,
+                    result="changed" if changed else "nochange",
                 )
             except Exception as exc:  # pragma: no cover - log and backoff
                 took_ms = (_time.perf_counter() - start) * 1000
@@ -6388,6 +6456,14 @@ async def _run_due_jobs_once(
                         status = JobStatus.paused
                         pause = True
                         retry = False
+                        global _vk_captcha_key
+                        _vk_captcha_key = job_key
+                        logline(
+                            "VK",
+                            job.event_id,
+                            "paused captcha",
+                            group=f"@{VK_AFISHA_GROUP_ID}" if VK_AFISHA_GROUP_ID else None,
+                        )
                     else:
                         prefix = (
                             "ошибка публикации VK"
@@ -6401,14 +6477,13 @@ async def _run_due_jobs_once(
                     err = str(exc)
                     status = JobStatus.error
                     retry = True
-                logging.error(
-                    "TASK_FAIL event=%s task=%s run_id=%s attempt=%d took_ms=%.0f err=\"%s\"",
+                logline(
+                    "RUN",
                     job.event_id,
-                    job.task.value,
-                    run_id,
-                    attempt,
-                    took_ms,
-                    err.splitlines()[0],
+                    "error",
+                    job_id=job.id,
+                    task=job.task.value,
+                    exc=err.splitlines()[0],
                 )
                 logging.exception("job %s failed", job.id)
                 link = None
@@ -6714,6 +6789,7 @@ async def update_telegraph_event_page(
         await session.commit()
         url = ev.telegraph_url
 
+    logline("TG-EVENT", event_id, "done", url=url)
     return url
 
 
@@ -6918,11 +6994,29 @@ async def update_month_pages_for(event_id: int, db: Database, bot: Bot | None) -
         # ensure the month page is created before attempting a patch
         await sync_month_page(db, month)
         for d in month_dates:
+            logline("TG-MONTH", event_id, "patch start", month=month, day=d.isoformat())
             changed = await patch_month_page_for_date(db, tg, month, d)
-            if changed:
+            if changed == "rebuild":
                 changed_any = True
-                if changed == "rebuild":
-                    rebuild_any = True
+                rebuild_any = True
+                async with db.get_session() as session:
+                    page = await session.get(MonthPage, month)
+                logline(
+                    "TG-MONTH",
+                    event_id,
+                    "rebuild",
+                    month=month,
+                    url1=page.url,
+                    url2=page.url2,
+                )
+            elif changed:
+                changed_any = True
+                async with db.get_session() as session:
+                    page = await session.get(MonthPage, month)
+                url = page.url2 or page.url
+                logline("TG-MONTH", event_id, "patch changed", month=month, url=url)
+            else:
+                logline("TG-MONTH", event_id, "patch nochange", month=month)
     return "rebuild" if rebuild_any else changed_any
 
 
@@ -7199,6 +7293,9 @@ async def publish_event_progress(
             icon = "✅" if status.startswith("done") or status.startswith("skipped") else "❌"
             suffix = f" — {detail}" if detail else ""
         ics_sub[key] = {"icon": icon, "suffix": suffix}
+        label = "ICS (Supabase)" if key == "ics_supabase" else "ICS (Telegram)"
+        line = f"{icon} {label}{suffix}"
+        logline("PROG", event.id, "set", line=f'"{line}"')
         asyncio.create_task(render())
 
     ics_progress = SimpleNamespace(mark=ics_mark) if ics_sub else None
@@ -7214,6 +7311,10 @@ async def publish_event_progress(
         else:
             suffix = ""
         fest_sub[key] = {"icon": icon, "suffix": suffix}
+        labels = {"tg": "Telegraph (фестиваль)", "index": "Все фестивали (Telegraph)"}
+        label = labels.get(key, key)
+        line = f"{icon} {label}{suffix}"
+        logline("PROG", event.id, "set", line=f'"{line}"')
         asyncio.create_task(render())
 
     fest_progress = SimpleNamespace(mark=fest_mark) if fest_sub else None
@@ -7257,6 +7358,8 @@ async def publish_event_progress(
             else:
                 suffix = ""
         progress[task] = {"icon": icon, "suffix": suffix}
+        line = f"{icon} {job_label(task)}{suffix}"
+        logline("PROG", event.id, "set", line=f'"{line}"')
         await render()
         all_done = all(info["icon"] != "\U0001f504" for info in progress.values())
         if fest_sub:
@@ -7296,6 +7399,53 @@ async def publish_event_progress(
             break
         await asyncio.sleep(min(wait, 1.0))
 
+    async with db.get_session() as session:
+        ev = await session.get(Event, event.id)
+    fixed: list[str] = []
+    if ev:
+        if (
+            JobTask.telegraph_build in progress
+            and progress[JobTask.telegraph_build]["icon"] == "\U0001f504"
+            and ev.telegraph_url
+        ):
+            progress[JobTask.telegraph_build] = {
+                "icon": "✅",
+                "suffix": f" — {ev.telegraph_url}",
+            }
+            line = f"✅ {job_label(JobTask.telegraph_build)} — {ev.telegraph_url}"
+            logline("PROG", event.id, "set", line=f'"{line}"')
+            fixed.append("telegraph_event")
+        if (
+            JobTask.vk_sync in progress
+            and progress[JobTask.vk_sync]["icon"] == "\U0001f504"
+            and ev.source_vk_post_url
+        ):
+            progress[JobTask.vk_sync] = {
+                "icon": "✅",
+                "suffix": f" — {ev.source_vk_post_url}",
+            }
+            line = f"✅ {job_label(JobTask.vk_sync)} — {ev.source_vk_post_url}"
+            logline("PROG", event.id, "set", line=f'"{line}"')
+            fixed.append("vk_event")
+        if JobTask.ics_publish in progress:
+            sup = ics_sub.get("ics_supabase")
+            if ev.ics_url and sup and sup["icon"] == "\U0001f504":
+                ics_sub["ics_supabase"] = {
+                    "icon": "✅",
+                    "suffix": f" — {ev.ics_url}",
+                }
+                line = f"✅ ICS (Supabase) — {ev.ics_url}"
+                logline("PROG", event.id, "set", line=f'"{line}"')
+                fixed.append("ics_supabase")
+            tg = ics_sub.get("ics_telegram")
+            if ev.ics_post_url and tg and tg["icon"] == "\U0001f504":
+                ics_sub["ics_telegram"] = {
+                    "icon": "✅",
+                    "suffix": f" — {ev.ics_post_url}",
+                }
+                line = f"✅ ICS (Telegram) — {ev.ics_post_url}"
+                logline("PROG", event.id, "set", line=f'"{line}"')
+                fixed.append("ics_telegram")
     if progress:
         await render()
     else:
@@ -7304,6 +7454,8 @@ async def publish_event_progress(
             message_id=msg.message_id,
             text=f"Готово\n<!-- v{version} -->",
         )
+    if fixed:
+        logline("PROG", event.id, "reconcile", fixed=",".join(fixed))
     _EVENT_PROGRESS.pop(event.id, None)
 
 
@@ -7326,6 +7478,8 @@ async def job_sync_vk_source_post(event_id: int, db: Database, bot: Bot | None) 
             obj.content_hash = new_hash
             session.add(obj)
             await session.commit()
+    if vk_url:
+        logline("VK", event_id, "event done", url=vk_url)
 
 
 async def update_festival_tg_nav(event_id: int, db: Database, bot: Bot | None) -> bool:
