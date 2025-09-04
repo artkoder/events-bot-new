@@ -157,8 +157,8 @@ async def test_update_festival_tg_nav_logs_edited(tmp_path, monkeypatch, caplog)
     monkeypatch.setattr(main, "get_telegraph_token", lambda: "token")
 
     with caplog.at_level(logging.INFO):
-        changed = await main.update_festival_tg_nav(-fid * main.FEST_JOB_MULT, db, None)
-    assert changed
+        res = await main.update_festival_tg_nav(-fid * main.FEST_JOB_MULT, db, None)
+    assert res.changed
     h = content_hash("<p>nav</p>")
     rec = next(r for r in caplog.records if getattr(r, "action", None) == "edited")
     assert rec.target == "tg"
@@ -206,8 +206,8 @@ async def test_update_festival_tg_nav_logs_skipped(tmp_path, monkeypatch, caplog
     monkeypatch.setattr(main, "get_telegraph_token", lambda: "token")
 
     with caplog.at_level(logging.INFO):
-        changed = await main.update_festival_tg_nav(-fid * main.FEST_JOB_MULT, db, None)
-    assert not changed
+        res = await main.update_festival_tg_nav(-fid * main.FEST_JOB_MULT, db, None)
+    assert not res.changed
     h = content_hash(nav_html)
     rec = next(r for r in caplog.records if getattr(r, "action", None) == "skipped_nochange")
     assert rec.target == "tg"
@@ -242,7 +242,7 @@ async def test_update_all_festival_nav_skips_same_hash_logging(tmp_path, monkeyp
 
     async def fake_tg(eid, db, bot):
         calls["tg"] += 1
-        return True
+        return main.NavUpdateResult(True, 0, False)
 
     async def fake_vk(eid, db, bot):
         calls["vk"] += 1
@@ -331,7 +331,7 @@ async def test_festivals_fix_nav_force(tmp_path: Path, monkeypatch, caplog):
 
     async def fake_tg(eid, db_obj, bot_obj):
         calls["tg"] += 1
-        return True
+        return main.NavUpdateResult(True, 0, False)
 
     async def fake_vk(eid, db_obj, bot_obj):
         calls["vk"] += 1
@@ -341,25 +341,19 @@ async def test_festivals_fix_nav_force(tmp_path: Path, monkeypatch, caplog):
     monkeypatch.setattr(main, "update_festival_vk_nav", fake_vk)
 
     with caplog.at_level(logging.INFO):
-        pages, changed, dup = await main.festivals_fix_nav(db, None)
+        pages, changed, dup, legacy = await main.festivals_fix_nav(db, None)
 
-    assert pages == 3
-    assert changed == 6
-    assert dup == 1
-    assert calls["tg"] == 3
+    assert pages == 1
+    assert changed == 1
+    assert dup == 0
+    assert legacy == 0
+    assert calls["tg"] == 1
     assert calls["vk"] == 3
-    rec_start = next(
-        r
-        for r in caplog.records
-        if r.message == "fest_nav_force_rebuild" and getattr(r, "action", None) == "start"
-    )
     rec_finish = next(
-        r
-        for r in caplog.records
-        if r.message == "fest_nav_force_rebuild" and getattr(r, "action", None) == "finish"
+        r for r in caplog.records if r.message == "festivals_fix_nav nav_done"
     )
-    assert rec_finish.pages == 3
-    assert rec_finish.duplicates_removed == 1
+    assert rec_finish.pages == 1
+    assert rec_finish.duplicates_removed == 0
 
 
 @pytest.mark.asyncio

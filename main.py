@@ -109,6 +109,7 @@ import contextlib
 import random
 import html
 from types import SimpleNamespace
+from dataclasses import dataclass
 import sqlite3
 from io import BytesIO
 import aiosqlite
@@ -7801,19 +7802,29 @@ async def job_sync_vk_source_post(event_id: int, db: Database, bot: Bot | None) 
         logline("VK", event_id, "event done", url=vk_url)
 
 
-async def update_festival_tg_nav(event_id: int, db: Database, bot: Bot | None) -> bool:
+@dataclass
+class NavUpdateResult:
+    changed: bool
+    removed_legacy: int
+    replaced_markers: bool
+
+    def __bool__(self) -> bool:  # pragma: no cover - simple
+        return self.changed
+
+
+async def update_festival_tg_nav(event_id: int, db: Database, bot: Bot | None) -> NavUpdateResult:
     fid = (-event_id) // FEST_JOB_MULT if event_id < 0 else event_id
     async with db.get_session() as session:
         fest = await session.get(Festival, fid)
         if not fest or not fest.telegraph_path:
-            return False
+            return NavUpdateResult(False, 0, False)
         token = get_telegraph_token()
         if not token:
             logging.error(
                 "Telegraph token unavailable",
                 extra={"action": "error", "target": "tg", "fest": fest.name},
             )
-            return False
+            return NavUpdateResult(False, 0, False)
         tg = Telegraph(access_token=token)
         nav_html = await get_setting_value(db, "fest_nav_html")
         if nav_html is None:
@@ -7853,7 +7864,7 @@ async def update_festival_tg_nav(event_id: int, db: Database, bot: Bot | None) -
                     "festival page %s navigation unchanged", fest.name,
                     extra={"action": "skipped_nochange", **extra},
                 )
-            return changed
+            return NavUpdateResult(changed, removed_blocks, markers_replaced)
         except Exception as e:
             logging.error(
                 "Failed to update festival page %s: %s", fest.name, e,
@@ -7894,7 +7905,8 @@ async def update_all_festival_nav(event_id: int, db: Database, bot: Bot | None) 
             continue
         eid = -(fest.id * FEST_JOB_MULT)
         try:
-            if await update_festival_tg_nav(eid, db, bot):
+            res = await update_festival_tg_nav(eid, db, bot)
+            if res.changed:
                 changed_any = True
         except Exception as e:  # pragma: no cover - logged in callee
             errors.append(e)
@@ -7914,41 +7926,55 @@ async def update_all_festival_nav(event_id: int, db: Database, bot: Bot | None) 
 
 async def festivals_fix_nav(
     db: Database, bot: Bot | None = None
-) -> tuple[int, int, int]:
+) -> tuple[int, int, int, int]:
     async with db.get_session() as session:
         res = await session.execute(select(Festival))
         fests = res.scalars().all()
-    nav_hash = await get_setting_value(db, "fest_nav_hash")
+
     pages = 0
     changed = 0
     duplicates_removed = 0
-    logging.info("fest_nav_force_rebuild", extra={"action": "start"})
+    legacy_markers = 0
+
     for fest in fests:
-        pages += 1
-        before = fest.nav_hash
         eid = -(fest.id * FEST_JOB_MULT)
+        if fest.telegraph_path:
+            pages += 1
+            try:
+                res = await update_festival_tg_nav(eid, db, bot)
+                if res.changed:
+                    changed += 1
+                    duplicates_removed += res.removed_legacy
+                    if res.replaced_markers:
+                        legacy_markers += 1
+                    logging.info(
+                        "fest_nav page_updated",
+                        extra={
+                            "fest": fest.name,
+                            "removed_legacy": res.removed_legacy,
+                            "replaced_markers": res.replaced_markers,
+                        },
+                    )
+            except Exception as e:
+                logging.error(
+                    "festivals_fix_nav telegraph_failed",
+                    extra={"path": fest.telegraph_path, "err": str(e), "fest": fest.name},
+                )
         try:
-            if await update_festival_tg_nav(eid, db, bot):
-                changed += 1
-                if nav_hash and before == nav_hash:
-                    duplicates_removed += 1
+            await update_festival_vk_nav(eid, db, bot)
         except Exception:
             pass
-        try:
-            if await update_festival_vk_nav(eid, db, bot):
-                changed += 1
-        except Exception:
-            pass
+
     logging.info(
-        "fest_nav_force_rebuild",
+        "festivals_fix_nav nav_done",
         extra={
-            "action": "finish",
             "pages": pages,
             "changed": changed,
             "duplicates_removed": duplicates_removed,
+            "legacy_markers": legacy_markers,
         },
     )
-    return pages, changed, duplicates_removed
+    return pages, changed, duplicates_removed, legacy_markers
 
 
 festivals_nav_dedup = festivals_fix_nav
@@ -12546,21 +12572,16 @@ async def handle_festivals_fix_nav(
         if not user or not user.is_superadmin:
             await bot.send_message(message.chat.id, "Not authorized")
             return
-    parts = (message.text or "").split()
-    force = len(parts) > 1 and parts[1].lower() == "force"
+    run_id = uuid.uuid4().hex
+    logging.info(
+        "festivals_fix_nav start", extra={"run_id": run_id, "user": message.from_user.id}
+    )
     async with page_lock["festivals-index"]:
         await message.answer("Пересобираю навигацию и лендинг…")
         pages = changed = duplicates_removed = 0
         try:
-            pages, changed, duplicates_removed = await festivals_fix_nav(db, bot)
-            nav_changed = await rebuild_fest_nav_if_changed(db)
-            if force:
-                status, url = await rebuild_festivals_index_if_needed(db, force=True)
-            else:
-                status = "updated" if nav_changed else "nochange"
-                url = await get_setting_value(db, "festivals_index_url") or await get_setting_value(
-                    db, "fest_index_url"
-                )
+            pages, changed, duplicates_removed, _ = await festivals_fix_nav(db, bot)
+            status, url = await rebuild_festivals_index_if_needed(db, force=True)
         except Exception as e:
             status = f"ошибка: {e}"
             url = ""

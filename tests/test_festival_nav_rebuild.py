@@ -234,7 +234,7 @@ async def test_nav_hash_skip(tmp_path, monkeypatch):
 
     async def fake_tg(eid, db, bot):
         calls["tg"] += 1
-        return True
+        return main.NavUpdateResult(True, 0, False)
 
     async def fake_vk(eid, db, bot):
         calls["vk"] += 1
@@ -291,7 +291,7 @@ async def test_update_tg_nav_sets_nav_hash(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "get_telegraph_token", lambda: "token")
 
     res = await main.update_festival_tg_nav(-fid * main.FEST_JOB_MULT, db, None)
-    assert res
+    assert res.changed
     async with db.get_session() as session:
         fest_db = await session.get(Festival, fid)
         assert fest_db.nav_hash == "abc"
