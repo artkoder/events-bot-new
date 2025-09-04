@@ -5266,15 +5266,8 @@ async def enqueue_job(
                     await session.commit()
                 logging.info("enqueue_job merged job_key=%s", job_key)
                 return "merged"
-            if coalesce_key:
-                logging.info(
-                    "enqueue_job coalesced into key=%s for event=%s",
-                    coalesce_key,
-                    event_id,
-                )
-            else:
-                logging.info("enqueue_job coalesced job_key=%s", job_key)
-            return "coalesced"
+
+            # requeue for existing (possibly coalesced) task
             job.status = JobStatus.pending
             job.payload = payload
             job.attempts = 0
@@ -5287,7 +5280,7 @@ async def enqueue_job(
                 job.depends_on = ",".join(sorted(cur))
             session.add(job)
             await session.commit()
-            logging.info("enqueue_job merged(requeue) job_key=%s", job_key)
+            logging.info("enqueue_job requeued job_key=%s", job_key)
             return "requeued"
         session.add(
             JobOutbox(
@@ -5406,26 +5399,28 @@ async def _drain_nav_tasks(db: Database, event_id: int, timeout: float = 30.0) -
                 continue
             owners.setdefault(owner, set()).add(key)
 
-        ran = False
+        ran_any = False
         for idx, (owner, oks) in enumerate(owners.items()):
             if idx >= owners_limit:
                 break
-            logging.info(
-                "nav_drain owner_event=%s key=%s picked",
-                owner,
-                ",".join(sorted(oks)),
-            )
-            await _run_due_jobs_once(
+            count = await _run_due_jobs_once(
                 db,
                 None,
-                None,
-                owner,
-                None,
-                None,
-                NAV_TASKS,
-                True,
+                notify=None,
+                only_event=owner,
+                ics_progress=None,
+                fest_progress=None,
+                allowed_tasks=NAV_TASKS,
+                force_notify=True,
             )
-            ran = True
+            if count > 0:
+                logging.info(
+                    "nav_drain owner_event=%s key=%s ran=%d",
+                    owner,
+                    ",".join(sorted(oks)),
+                    count,
+                )
+            ran_any = ran_any or (count > 0)
 
         async with db.get_session() as session:
             remaining = (
@@ -5450,7 +5445,7 @@ async def _drain_nav_tasks(db: Database, event_id: int, timeout: float = 30.0) -
                 remaining,
             )
             break
-        if not ran:
+        if not ran_any:
             await asyncio.sleep(1.0)
 
 
