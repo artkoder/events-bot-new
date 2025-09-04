@@ -97,6 +97,8 @@ import re
 import httpx
 import hashlib
 import unicodedata
+import argparse
+import shlex
 
 from telegraph import Telegraph, TelegraphException
 from net import http_call, VK_FALLBACK_CODES
@@ -5569,6 +5571,13 @@ async def enqueue_job(
                 if updated:
                     session.add(job)
                     await session.commit()
+                if task in NAV_TASKS:
+                    logging.info(
+                        "ENQ nav merged key=%s into_owner_eid=%s owner_started_at=%s",
+                        job_key,
+                        job.event_id,
+                        job.updated_at.isoformat(),
+                    )
                 logline(
                     "ENQ",
                     event_id,
@@ -5614,6 +5623,8 @@ async def enqueue_job(
             )
         )
         await session.commit()
+        if task in NAV_TASKS:
+            logging.info("ENQ nav task key=%s eid=%s", job_key, event_id)
         logline("ENQ", event_id, "new", job_key=job_key)
         return "new"
 
@@ -5685,6 +5696,12 @@ async def _drain_nav_tasks(db: Database, event_id: int, timeout: float = 90.0) -
                 ).scalar_one_or_none()
                 if fest:
                     keys.add(f"festival_pages:{fest}")
+
+    logging.info(
+        "NAV drain start eid=%s keys=%s",
+        event_id,
+        sorted(keys),
+    )
 
     owners_limit = 3
     merged: dict[str, int] = {}
@@ -5765,13 +5782,12 @@ async def _drain_nav_tasks(db: Database, event_id: int, timeout: float = 90.0) -
                 except Exception:
                     continue
                 new_key = f"{key}:v2:{event_id}"
+                logging.info(
+                    "ENQ nav followup key=%s reason=owner_running",
+                    new_key,
+                )
                 await enqueue_job(db, event_id, task, coalesce_key=new_key)
                 keys.add(new_key)
-                logging.info(
-                    "nav_drain merged_into=%s running_key=%s requeue_followup=v2",
-                    owner,
-                    key,
-                )
                 del merged[key]
 
         async with db.get_session() as session:
@@ -5789,15 +5805,21 @@ async def _drain_nav_tasks(db: Database, event_id: int, timeout: float = 90.0) -
                 )
             ).scalar_one()
         if not remaining:
+            logging.info("NAV drain done")
             break
         if _time.monotonic() > deadline:
             logging.warning(
-                "nav tasks drain timeout for event %s (remaining=%s)",
-                event_id,
-                remaining,
+                "NAV drain timeout remaining=%s",
+                sorted(current_keys),
             )
             break
         if not ran_any:
+            ttl = int(max(0, deadline - _time.monotonic()))
+            logging.info(
+                "NAV drain wait remaining=%s ttl=%d",
+                sorted(current_keys),
+                ttl,
+            )
             await asyncio.sleep(1.0)
 
 
@@ -6668,6 +6690,13 @@ async def _run_due_jobs_once(
         run_id = uuid.uuid4().hex
         attempt = job.attempts + 1
         job_key = job.coalesce_key or f"{job.task.value}:{job.event_id}"
+        logging.info(
+            "RUN pick key=%s owner_eid=%s started_at=%s attempts=%d",
+            job_key,
+            job.event_id,
+            obj.updated_at.isoformat(),
+            attempt,
+        )
         logline(
             "RUN",
             job.event_id,
@@ -6773,6 +6802,12 @@ async def _run_due_jobs_once(
                 )
                 logging.exception("job %s failed", job.id)
                 link = None
+        logging.info(
+            "RUN done key=%s status=%s duration_ms=%.0f",
+            job_key,
+            "ok" if status == JobStatus.done else "fail",
+            took_ms,
+        )
         text = None
         async with db.get_session() as session:
             obj = await session.get(JobOutbox, job.id)
@@ -7239,7 +7274,18 @@ async def patch_month_page_for_date(db: Database, telegraph: Telegraph, month_ke
                     continue
                 raise
 
-    if page.path2:
+    def _dates_from_html(html: str) -> list[date]:
+        dates: list[date] = []
+        for m in re.finditer(r"<!--DAY:(\\d{4}-\\d{2}-\\d{2}) START-->", html):
+            dates.append(date.fromisoformat(m.group(1)))
+        for m in re.finditer(r"<h3>🟥🟥🟥 (\\d{1,2} [^<]+) 🟥🟥🟥</h3>", html):
+            parsed = _parse_pretty_date(m.group(1), d.year)
+            if parsed:
+                dates.append(parsed)
+        return dates
+
+    split = bool(page.path2)
+    if split:
         data1, data2 = await asyncio.gather(
             tg_call(telegraph.get_page, page.path, return_html=True),
             tg_call(telegraph.get_page, page.path2, return_html=True),
@@ -7251,6 +7297,8 @@ async def patch_month_page_for_date(db: Database, telegraph: Telegraph, month_ke
             data2.get("content") or data2.get("content_html") or ""
         )
         part = locate_month_day_page(html1, html2, d)
+        p1_dates = _dates_from_html(html1)
+        p1_last = max(p1_dates).isoformat() if p1_dates else ""
         if part == 1:
             html_content = html1
             page_path = page.path
@@ -7269,6 +7317,18 @@ async def patch_month_page_for_date(db: Database, telegraph: Telegraph, month_ke
         page_path = page.path
         title = data1.get("title") or month_key
         hash_attr = "content_hash"
+        part = 1
+        p1_dates = _dates_from_html(html_content)
+        p1_last = max(p1_dates).isoformat() if p1_dates else ""
+
+    logging.info(
+        "TG-MONTH select ym=%s date=%s split=%s p1_last=%s target=%s",
+        month_key,
+        d.isoformat(),
+        str(split).lower(),
+        p1_last,
+        "page2" if part == 2 else "page1",
+    )
 
     start_marker = DAY_START(d)
     end_marker = DAY_END(d)
@@ -7349,6 +7409,15 @@ async def patch_month_page_for_date(db: Database, telegraph: Telegraph, month_ke
         d.isoformat(),
         "True" if changed else "False",
         dur,
+    )
+    url = db_page.url2 if part == 2 else db_page.url
+    logging.info(
+        "TG-MONTH patch ym=%s date=%s target=%s changed=%s url=%s",
+        month_key,
+        d.isoformat(),
+        "page2" if part == 2 else "page1",
+        str(changed).lower(),
+        url,
     )
     return True
 
@@ -12749,6 +12818,99 @@ async def handle_debug(message: types.Message, db: Database, bot: Bot):
     await bot.send_message(message.chat.id, "\n".join(lines))
 
 
+async def handle_queue_reap(message: types.Message, db: Database, bot: Bot) -> None:
+    async with db.get_session() as session:
+        user = await session.get(User, message.from_user.id)
+        if not user or not user.is_superadmin:
+            await bot.send_message(message.chat.id, "Not authorized")
+            return
+    args = shlex.split(message.text or "")[1:]
+    parser = argparse.ArgumentParser(prog="/queue_reap", add_help=False)
+    parser.add_argument("--type")
+    parser.add_argument("--ym")
+    parser.add_argument("--key-prefix")
+    parser.add_argument("--status", default="running")
+    parser.add_argument("--older-than")
+    parser.add_argument("--limit", type=int, default=10)
+    parser.add_argument("--action", choices=["fail", "requeue"])
+    parser.add_argument("--apply", action="store_true")
+    try:
+        opts = parser.parse_args(args)
+    except Exception:
+        await bot.send_message(message.chat.id, "Invalid arguments")
+        return
+    key_prefix = opts.key_prefix
+    if not key_prefix and opts.type and opts.ym:
+        key_prefix = f"{opts.type}:{opts.ym}"
+    if not key_prefix and opts.type:
+        key_prefix = f"{opts.type}:"
+    older_sec = 0
+    if opts.older_than:
+        s = opts.older_than
+        mult = 60
+        if s.endswith("h"):
+            mult = 3600
+        elif s.endswith("d"):
+            mult = 86400
+        value = int(s[:-1]) if s[-1] in "mhd" else int(s)
+        older_sec = value * mult
+    now = datetime.utcnow()
+    async with db.get_session() as session:
+        stmt = select(JobOutbox).where(JobOutbox.status == JobStatus(opts.status))
+        if key_prefix:
+            stmt = stmt.where(JobOutbox.coalesce_key.like(f"{key_prefix}%"))
+        if older_sec:
+            thresh = now - timedelta(seconds=older_sec)
+            stmt = stmt.where(JobOutbox.updated_at < thresh)
+        stmt = stmt.order_by(JobOutbox.updated_at).limit(opts.limit)
+        jobs = (await session.execute(stmt)).scalars().all()
+    lines: list[str] = []
+    header = "[DRY-RUN] " if not opts.apply else ""
+    header += f"candidates={len(jobs)} status={opts.status}"
+    if opts.older_than:
+        header += f" older-than={opts.older_than}"
+    if key_prefix:
+        header += f" key-prefix={key_prefix}"
+    lines.append(header)
+    for idx, j in enumerate(jobs, 1):
+        key = j.coalesce_key or f"{j.task.value}:{j.event_id}"
+        started = j.updated_at.replace(microsecond=0).isoformat()
+        delta = now - j.updated_at
+        days, rem = divmod(int(delta.total_seconds()), 86400)
+        hours, rem = divmod(rem, 3600)
+        minutes = rem // 60
+        parts: list[str] = []
+        if days:
+            parts.append(f"{days}d")
+        if hours:
+            parts.append(f"{hours}h")
+        if not days and minutes:
+            parts.append(f"{minutes}m")
+        age = "".join(parts) or "0m"
+        lines.append(
+            f"{idx}) id={j.id} key={key} owner_eid={j.event_id} started={started} age={age}"
+        )
+    if opts.apply and opts.action and jobs:
+        async with db.get_session() as session:
+            for j in jobs:
+                obj = await session.get(JobOutbox, j.id)
+                if not obj:
+                    continue
+                if opts.action == "fail":
+                    obj.status = JobStatus.error
+                    obj.last_error = "reaped_by_admin"
+                else:
+                    obj.status = JobStatus.pending
+                    obj.attempts = 0
+                    obj.last_error = None
+                    obj.next_run_at = now
+                obj.updated_at = now
+                session.add(obj)
+            await session.commit()
+        lines.append(f"applied {opts.action} to {len(jobs)}")
+    await bot.send_message(message.chat.id, "\n".join(lines))
+
+
 async def handle_stats(message: types.Message, db: Database, bot: Bot):
     parts = message.text.split()
     mode = parts[1] if len(parts) > 1 else ""
@@ -13896,6 +14058,9 @@ def create_app() -> web.Application:
     async def debug_wrapper(message: types.Message):
         await handle_debug(message, db, bot)
 
+    async def queue_reap_wrapper(message: types.Message):
+        await handle_queue_reap(message, db, bot)
+
     async def mem_wrapper(message: types.Message):
         await handle_mem(message, db, bot)
 
@@ -13991,6 +14156,7 @@ def create_app() -> web.Application:
     dp.message.register(trace_wrapper, Command("trace"))
     dp.message.register(last_errors_wrapper, Command("last_errors"))
     dp.message.register(debug_wrapper, Command("debug"))
+    dp.message.register(queue_reap_wrapper, Command("queue_reap"))
     dp.message.register(mem_wrapper, Command("mem"))
     dp.message.register(festivals_fix_nav_wrapper, Command("festivals_fix_nav"))
     dp.message.register(festivals_fix_nav_wrapper, Command("festivals_nav_dedup"))
