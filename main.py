@@ -5571,6 +5571,38 @@ async def enqueue_job(
                 if updated:
                     session.add(job)
                     await session.commit()
+                follow_key = None
+                if (
+                    task == JobTask.month_pages
+                    and job.event_id != event_id
+                    and job.coalesce_key
+                ):
+                    follow_key = f"{job.coalesce_key}:v2:{event_id}"
+                    exists = (
+                        await session.execute(
+                            select(JobOutbox.id).where(
+                                JobOutbox.coalesce_key == follow_key
+                            )
+                        )
+                    ).scalar_one_or_none()
+                    if not exists:
+                        session.add(
+                            JobOutbox(
+                                event_id=event_id,
+                                task=task,
+                                payload=payload,
+                                status=JobStatus.pending,
+                                updated_at=now,
+                                next_run_at=now,
+                                coalesce_key=follow_key,
+                                depends_on=job.coalesce_key,
+                            )
+                        )
+                        await session.commit()
+                        logging.info(
+                            "ENQ nav followup key=%s reason=owner_running",
+                            follow_key,
+                        )
                 if task in NAV_TASKS:
                     logging.info(
                         "ENQ nav merged key=%s into_owner_eid=%s owner_started_at=%s",
@@ -9245,10 +9277,23 @@ async def _sync_month_page_inner(
                 page_data = await telegraph_call(tg.get_page, path, return_html=True)
                 html_content = page_data.get("content") or page_data.get("content_html") or ""
                 html_content = unescape_html_comments(html_content)
+                changed_any = False
+                if "<!--DAY" not in html_content:
+                    logging.warning("month_rebuild_markers_missing")
+                    year = int(month.split("-")[0])
+                    for m in re.finditer(
+                        r"<h3>🟥🟥🟥 (\d{1,2} [^<]+) 🟥🟥🟥</h3>", html_content
+                    ):
+                        parsed = _parse_pretty_date(m.group(1), year)
+                        if parsed:
+                            html_content, changed = ensure_day_markers(
+                                html_content, parsed
+                            )
+                            changed_any = changed_any or changed
                 updated_html = replace_between_markers(
                     html_content, NAV_MONTHS_START, NAV_MONTHS_END, nav_block
                 )
-                if content_hash(updated_html) == content_hash(html_content):
+                if not changed_any and content_hash(updated_html) == content_hash(html_content):
                     continue
                 title = page_data.get("title") or month_name_prepositional(month)
                 await telegraph_edit_page(
