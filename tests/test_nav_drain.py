@@ -39,12 +39,15 @@ async def test_drain_coalesced_month_task(tmp_path, monkeypatch):
 
     await main._drain_nav_tasks(db, ev2.id, timeout=1.0)
 
-    assert processed == [ev1.id]
+    assert processed == [ev1.id, ev2.id]
     async with db.get_session() as session:
-        job = (
-            await session.execute(select(JobOutbox).where(JobOutbox.event_id == ev1.id))
-        ).scalar_one()
-        assert job.status == JobStatus.done
+        jobs = (
+            await session.execute(select(JobOutbox).order_by(JobOutbox.id))
+        ).scalars().all()
+        assert {j.event_id: j.status for j in jobs} == {
+            ev1.id: JobStatus.done,
+            ev2.id: JobStatus.done,
+        }
 
 
 @pytest.mark.asyncio
@@ -80,9 +83,12 @@ async def test_drain_coalesced_weekend_task(tmp_path, monkeypatch):
 
     await main._drain_nav_tasks(db, ev2.id, timeout=1.0)
 
-    assert processed == [ev1.id]
+    assert processed == [ev1.id, ev2.id]
     async with db.get_session() as session:
-        job = (
-            await session.execute(select(JobOutbox).where(JobOutbox.event_id == ev1.id))
-        ).scalar_one()
-        assert job.status == JobStatus.done
+        jobs = (
+            await session.execute(select(JobOutbox).order_by(JobOutbox.id))
+        ).scalars().all()
+        assert {j.event_id: j.status for j in jobs} == {
+            ev1.id: JobStatus.done,
+            ev2.id: JobStatus.done,
+        }

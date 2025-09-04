@@ -1,5 +1,6 @@
 import pytest
 from datetime import date
+from sqlalchemy import select
 
 import main
 from markup import DAY_START, DAY_END, PERM_START, PERM_END
@@ -45,7 +46,7 @@ async def test_patch_month_page_inserts_chronologically(tmp_path):
             assert path == "p"
             return {"content_html": html, "title": "Title"}
 
-        def edit_page(self, path, title, html_content):
+        def edit_page(self, path, title, html_content, **kwargs):
             self.edited_html = html_content
             return {"path": path}
 
@@ -83,12 +84,12 @@ async def test_patch_month_page_handles_content_too_big(tmp_path, monkeypatch):
             assert path == "p"
             return {"content_html": html, "title": "Title"}
 
-        def edit_page(self, path, title, html_content):
+        def edit_page(self, path, title, html_content, **kwargs):
             raise main.TelegraphException("CONTENT_TOO_BIG")
 
     called = False
 
-    async def fake_sync(db_obj, month_key, update_links=False):
+    async def fake_sync(db_obj, month_key, update_links=False, **kwargs):
         nonlocal called
         called = True
 
@@ -137,7 +138,7 @@ async def test_patch_month_page_handles_escaped_legacy_markers(tmp_path):
             assert path == "p"
             return {"content_html": html, "title": "Title"}
 
-        def edit_page(self, path, title, html_content):
+        def edit_page(self, path, title, html_content, **kwargs):
             self.edited_html = html_content
             return {"path": path}
 
@@ -153,7 +154,7 @@ async def test_patch_month_page_handles_escaped_legacy_markers(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_patch_month_page_rebuilds_when_header_without_markers(tmp_path, monkeypatch):
+async def test_patch_month_page_converts_legacy_header(tmp_path):
     db = main.Database(str(tmp_path / "db.sqlite"))
     await db.init()
     async with db.get_session() as session:
@@ -171,38 +172,95 @@ async def test_patch_month_page_rebuilds_when_header_without_markers(tmp_path, m
         await session.commit()
 
     header = f"<h3>🟥🟥🟥 {main.format_day_pretty(date(2025, 8, 15))} 🟥🟥🟥</h3>"
-    html_state = {
-        "value": header + PERM_START + "perm" + PERM_END
-    }
-    html_state["value"] = html_state["value"].replace("<!--", "&lt;!--").replace(
-        "-->", "--&gt;"
-    )
+    html = header + PERM_START + "perm" + PERM_END
 
     class FakeTelegraph:
+        def __init__(self):
+            self.edited_html = None
+
         def get_page(self, path, return_html=True):
             assert path == "p"
-            return {"content_html": html_state["value"], "title": "Title"}
+            return {"content_html": html, "title": "Title"}
 
-        def edit_page(self, path, title, html_content):
-            raise AssertionError("edit_page should not be called")
-
-    called = False
-
-    async def fake_sync(db_obj, month_key, update_links=False):
-        nonlocal called
-        called = True
-        html_state["value"] = (
-            DAY_START("2025-08-15")
-            + "new"
-            + DAY_END("2025-08-15")
-            + PERM_START
-            + "perm"
-            + PERM_END
-        )
-
-    monkeypatch.setattr(main, "sync_month_page", fake_sync)
+        def edit_page(self, path, title, html_content, **kwargs):
+            self.edited_html = html_content
+            return {"path": path}
 
     tg = FakeTelegraph()
     changed = await main.patch_month_page_for_date(db, tg, "2025-08", date(2025, 8, 15))
-    assert changed == "rebuild"
-    assert called is True
+    assert changed is True
+    result = tg.edited_html
+    assert DAY_START("2025-08-15") in result
+    assert DAY_END("2025-08-15") in result
+    assert result.count(header) == 1
+    assert result.index(DAY_START("2025-08-15")) < result.index(header) < result.index(
+        DAY_END("2025-08-15")
+    )
+
+
+@pytest.mark.asyncio
+async def test_patch_month_page_split_updates_second_part(tmp_path):
+    db = main.Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    async with db.get_session() as session:
+        session.add(
+            main.MonthPage(month="2025-08", url="u1", path="p1", url2="u2", path2="p2")
+        )
+        session.add(
+            main.Event(
+                title="Concert",
+                description="desc",
+                date="2025-08-30",
+                time="12:00",
+                location_name="loc",
+                source_text="src",
+            )
+        )
+        await session.commit()
+
+    html1 = DAY_START("2025-08-01") + "1" + DAY_END("2025-08-01")
+    html2 = (
+        DAY_START("2025-08-29")
+        + "29"
+        + DAY_END("2025-08-29")
+        + PERM_START
+        + "perm"
+        + PERM_END
+    )
+
+    class FakeTelegraph:
+        def __init__(self):
+            self.edits: list[tuple[str, str]] = []
+
+        def get_page(self, path, return_html=True):
+            if path == "p1":
+                return {"content_html": html1, "title": "T1"}
+            assert path == "p2"
+            return {"content_html": html2, "title": "T2"}
+
+        def edit_page(self, path, title, html_content, **kwargs):
+            self.edits.append((path, html_content))
+            return {"path": path}
+
+    tg = FakeTelegraph()
+    changed = await main.patch_month_page_for_date(db, tg, "2025-08", date(2025, 8, 30))
+    assert changed is True
+    assert tg.edits[0][0] == "p2"
+    result = tg.edits[0][1]
+    assert DAY_START("2025-08-30") in result
+    assert DAY_END("2025-08-30") in result
+
+    async with db.get_session() as session:
+        page = await session.get(main.MonthPage, "2025-08")
+        evs = (
+            await session.execute(
+                select(main.Event).where(main.Event.date.like("2025-08-30%"))
+            )
+        ).scalars().all()
+        assert page.content_hash2 == main.content_hash(result)
+        expected_section = main.render_month_day_section(date(2025, 8, 30), evs)
+
+    h = await main.get_section_hash(
+        db, "telegraph:month:2025-08", "day:2025-08-30"
+    )
+    assert h == main.content_hash(expected_section)

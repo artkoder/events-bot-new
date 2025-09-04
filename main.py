@@ -5496,7 +5496,7 @@ NAV_TASKS = {
 }
 
 
-async def _drain_nav_tasks(db: Database, event_id: int, timeout: float = 30.0) -> None:
+async def _drain_nav_tasks(db: Database, event_id: int, timeout: float = 90.0) -> None:
     deadline = _time.monotonic() + timeout
 
     keys: set[str] = set()
@@ -5522,6 +5522,7 @@ async def _drain_nav_tasks(db: Database, event_id: int, timeout: float = 30.0) -
                     keys.add(f"festival_pages:{fest}")
 
     owners_limit = 3
+    merged: dict[str, int] = {}
 
     while True:
         await _run_due_jobs_once(
@@ -5548,10 +5549,13 @@ async def _drain_nav_tasks(db: Database, event_id: int, timeout: float = 30.0) -
             ).all()
 
         owners: dict[int, set[str]] = {}
+        self_keys = {key for owner, key in rows if owner == event_id}
         for owner, key in rows:
             if owner == event_id:
                 continue
             owners.setdefault(owner, set()).add(key)
+            if key not in self_keys and key not in merged:
+                merged[key] = owner
 
         ran_any = False
         for idx, (owner, oks) in enumerate(owners.items()):
@@ -5575,6 +5579,35 @@ async def _drain_nav_tasks(db: Database, event_id: int, timeout: float = 30.0) -
                     count,
                 )
             ran_any = ran_any or (count > 0)
+
+        async with db.get_session() as session:
+            rows = (
+                await session.execute(
+                    select(JobOutbox.coalesce_key)
+                    .where(
+                        JobOutbox.status.in_([JobStatus.pending, JobStatus.running]),
+                        JobOutbox.task.in_(NAV_TASKS),
+                        JobOutbox.coalesce_key.in_(keys),
+                    )
+                )
+            ).all()
+        current_keys = {key for (key,) in rows}
+        for key, owner in list(merged.items()):
+            if key not in current_keys:
+                task_name = key.split(":", 1)[0]
+                try:
+                    task = JobTask(task_name)
+                except Exception:
+                    continue
+                new_key = f"{key}:v2:{event_id}"
+                await enqueue_job(db, event_id, task, coalesce_key=new_key)
+                keys.add(new_key)
+                logging.info(
+                    "nav_drain merged_into=%s running_key=%s requeue_followup=v2",
+                    owner,
+                    key,
+                )
+                del merged[key]
 
         async with db.get_session() as session:
             remaining = (
@@ -6904,12 +6937,88 @@ def ensure_day_markers(page_html: str, d: date) -> tuple[str, bool]:
         return page_html, False
 
     insert = f"{start_marker}{end_marker}"
+    for m in re.finditer(r"<!--DAY:(\d{4}-\d{2}-\d{2}) START-->", page_html):
+        existing = date.fromisoformat(m.group(1))
+        if existing > d:
+            idx = m.start()
+            page_html = page_html[:idx] + insert + page_html[idx:]
+            return page_html, True
     idx = page_html.find(PERM_START)
     if idx != -1:
         page_html = page_html[:idx] + insert + page_html[idx:]
     else:
         page_html += insert
     return page_html, True
+
+
+def _parse_pretty_date(text: str, year: int) -> date | None:
+    m = re.match(r"(\d{1,2})\s+([а-яё]+)", text.strip(), re.IGNORECASE)
+    if not m:
+        return None
+    day = int(m.group(1))
+    month = {name: i + 1 for i, name in enumerate(MONTHS)}.get(m.group(2).lower())
+    if not month:
+        return None
+    return date(year, month, day)
+
+
+def locate_month_day_page(page_html_1: str, page_html_2: str | None, d: date) -> int:
+    """Return which part of a split month page should contain ``d``.
+
+    Returns ``1`` for the first part or ``2`` for the second. ``page_html_2``
+    can be ``None`` for non-split months.
+    """
+
+    if not page_html_2:
+        return 1
+
+    start_marker = DAY_START(d)
+    end_marker = DAY_END(d)
+    legacy_start = f"<!-- DAY:{d.isoformat()} START -->"
+    legacy_end = f"<!-- DAY:{d.isoformat()} END -->"
+    header = f"<h3>🟥🟥🟥 {format_day_pretty(d)} 🟥🟥🟥</h3>"
+
+    markers1 = start_marker in page_html_1 and end_marker in page_html_1
+    markers2 = start_marker in page_html_2 and end_marker in page_html_2
+    if markers2:
+        return 2
+    if markers1:
+        return 1
+
+    legacy1 = legacy_start in page_html_1 and legacy_end in page_html_1
+    legacy2 = legacy_start in page_html_2 and legacy_end in page_html_2
+    if legacy2:
+        return 2
+    if legacy1:
+        return 1
+
+    header1 = header in page_html_1
+    header2 = header in page_html_2
+    if header2:
+        return 2
+    if header1:
+        return 1
+
+    def dates_from_html(html: str) -> list[date]:
+        dates: list[date] = []
+        for m in re.finditer(r"<!--DAY:(\d{4}-\d{2}-\d{2}) START-->", html):
+            dates.append(date.fromisoformat(m.group(1)))
+        for m in re.finditer(r"<h3>🟥🟥🟥 (\d{1,2} [^<]+) 🟥🟥🟥</h3>", html):
+            parsed = _parse_pretty_date(m.group(1), d.year)
+            if parsed:
+                dates.append(parsed)
+        return dates
+
+    dates1 = dates_from_html(page_html_1)
+    dates2 = dates_from_html(page_html_2)
+
+    if dates1 and max(dates1) < d:
+        return 2
+    if not dates1 and page_html_2:
+        if len(page_html_1.encode()) > TELEGRAPH_LIMIT * 0.9:
+            return 2
+        return 2
+    return 1
 
 
 async def patch_month_page_for_date(db: Database, telegraph: Telegraph, month_key: str, d: date) -> bool:
@@ -6954,88 +7063,126 @@ async def patch_month_page_for_date(db: Database, telegraph: Telegraph, month_ke
         return False
 
     async def tg_call(func, /, *args, **kwargs):
-        last: Exception | None = None
         for attempt in range(2):
             try:
                 return await asyncio.wait_for(
                     asyncio.to_thread(func, *args, **kwargs), 7
                 )
-            except Exception as e:
-                last = e
+            except Exception:
                 if attempt == 0:
                     await asyncio.sleep(random.uniform(0, 1))
                     continue
                 raise
 
-    page_data = await tg_call(telegraph.get_page, page.path, return_html=True)
-    html_content = page_data.get("content") or page_data.get("content_html") or ""
-    html_content = unescape_html_comments(html_content)
-    html_content, _ = ensure_day_markers(html_content, d)
-    title = page_data.get("title") or month_key
+    if page.path2:
+        data1, data2 = await asyncio.gather(
+            tg_call(telegraph.get_page, page.path, return_html=True),
+            tg_call(telegraph.get_page, page.path2, return_html=True),
+        )
+        html1 = unescape_html_comments(
+            data1.get("content") or data1.get("content_html") or ""
+        )
+        html2 = unescape_html_comments(
+            data2.get("content") or data2.get("content_html") or ""
+        )
+        part = locate_month_day_page(html1, html2, d)
+        if part == 1:
+            html_content = html1
+            page_path = page.path
+            title = data1.get("title") or month_key
+            hash_attr = "content_hash"
+        else:
+            html_content = html2
+            page_path = page.path2
+            title = data2.get("title") or month_key
+            hash_attr = "content_hash2"
+    else:
+        data1 = await tg_call(telegraph.get_page, page.path, return_html=True)
+        html_content = unescape_html_comments(
+            data1.get("content") or data1.get("content_html") or ""
+        )
+        page_path = page.path
+        title = data1.get("title") or month_key
+        hash_attr = "content_hash"
+
     start_marker = DAY_START(d)
     end_marker = DAY_END(d)
     legacy_start = f"<!-- DAY:{d.isoformat()} START -->"
     legacy_end = f"<!-- DAY:{d.isoformat()} END -->"
-    marker_type = "new" if start_marker in html_content and end_marker in html_content else (
-        "legacy" if legacy_start in html_content and legacy_end in html_content else "none"
-    )
-    logging.info(
-        "month_patch page_key=%s day=%s markers=%s",
-        page_key,
-        d.isoformat(),
-        marker_type,
-    )
-    branch = "replace"
-    if marker_type == "new":
+    legacy_header = f"<h3>🟥🟥🟥 {format_day_pretty(d)} 🟥🟥🟥</h3>"
+
+    if start_marker in html_content and end_marker in html_content:
+        marker_type = "new"
         updated_html = replace_between_markers(
             html_content, start_marker, end_marker, html_section
         )
-    elif marker_type == "legacy":
-        branch = "migrate"
+    elif legacy_start in html_content and legacy_end in html_content:
+        marker_type = "legacy"
         updated_html = replace_between_markers(
             html_content, legacy_start, legacy_end, html_section
         )
         updated_html = updated_html.replace(legacy_start, start_marker).replace(
             legacy_end, end_marker
         )
+    elif legacy_header in html_content:
+        marker_type = "legacy"
+        updated_html = html_content.replace(
+            legacy_header, f"{start_marker}{html_section}{end_marker}"
+        )
     else:
-        branch = "rebuild"
-        logging.warning(
-            "month_patch page_key=%s day=%s markers_missing", page_key, d.isoformat()
+        marker_type = "none"
+        html_content, _ = ensure_day_markers(html_content, d)
+        updated_html = replace_between_markers(
+            html_content, start_marker, end_marker, html_section
         )
-        await sync_month_page(db, month_key, force=True)
-        await set_section_hash(db, page_key, section_key, new_hash)
-        dur = (_time.perf_counter() - start) * 1000
-        logging.info(
-            "month_patch page_key=%s day=%s branch=%s changed=True dur=%.0fms",
-            page_key,
-            d.isoformat(),
-            branch,
-            dur,
-        )
-        return "rebuild"
+
+    logging.info(
+        "month_patch choose page=%s day=%s marker=%s",
+        "path2" if hash_attr == "content_hash2" else "path",
+        d.isoformat(),
+        marker_type,
+    )
+
+    changed = content_hash(updated_html) != content_hash(html_content)
     updated_html = lint_telegraph_html(updated_html)
+
     try:
+        edit_start = _time.perf_counter()
         await telegraph_edit_page(
-            telegraph, page.path, title=title, html_content=updated_html
+            telegraph, page_path, title=title, html_content=updated_html
+        )
+        edit_dur = (_time.perf_counter() - edit_start) * 1000
+        logging.info(
+            "month_patch edit path=%s dur=%.0fms result=%s",
+            page_path,
+            edit_dur,
+            "changed" if changed else "nochange",
         )
     except TelegraphException as e:
         if "CONTENT_TOO_BIG" in str(e):
             logging.warning(
-                "month_patch page_key=%s day=%s content too big, rebuilding",
-                page_key,
+                "month_patch rebuild reason=too_big month=%s day=%s",
+                month_key,
                 d.isoformat(),
             )
             await sync_month_page(db, month_key, force=True)
-        else:
-            raise
+            await set_section_hash(db, page_key, section_key, new_hash)
+            return "rebuild"
+        raise
+
     await set_section_hash(db, page_key, section_key, new_hash)
+
+    async with db.get_session() as session:
+        db_page = await session.get(MonthPage, month_key)
+        setattr(db_page, hash_attr, content_hash(updated_html))
+        await session.commit()
+
     dur = (_time.perf_counter() - start) * 1000
     logging.info(
-        "month_patch page_key=%s day=%s branch=%s changed=True dur=%.0fms",
+        "month_patch page_key=%s day=%s branch=replace changed=%s dur=%.0fms",
         page_key,
         d.isoformat(),
-        branch,
+        "True" if changed else "False",
         dur,
     )
     return True
