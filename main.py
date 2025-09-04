@@ -5249,8 +5249,24 @@ async def enqueue_job(
         job = res.scalar_one_or_none()
         dep_str = ",".join(depends_on) if depends_on else None
         if job:
-            updated = False
-            if job.status in {JobStatus.pending, JobStatus.running}:
+            if job.status == JobStatus.pending:
+                if payload is not None:
+                    job.payload = payload
+                if depends_on:
+                    cur = set(filter(None, (job.depends_on or "").split(",")))
+                    cur.update(depends_on)
+                    job.depends_on = ",".join(sorted(cur))
+                now = datetime.utcnow()
+                job.next_run_at = now
+                job.updated_at = now
+                job.attempts = 0
+                job.last_error = None
+                session.add(job)
+                await session.commit()
+                logging.info("enqueue_job merged(rearm) job_key=%s", job_key)
+                return "merged-rearmed"
+            if job.status == JobStatus.running:
+                updated = False
                 if payload is not None:
                     job.payload = payload
                     updated = True
@@ -5264,7 +5280,7 @@ async def enqueue_job(
                 if updated:
                     session.add(job)
                     await session.commit()
-                logging.info("enqueue_job merged job_key=%s", job_key)
+                logging.info("enqueue_job merged(running) job_key=%s", job_key)
                 return "merged"
 
             # requeue for existing (possibly coalesced) task
@@ -5367,7 +5383,7 @@ async def _drain_nav_tasks(db: Database, event_id: int, timeout: float = 30.0) -
                 if fest:
                     keys.add(f"festival_pages:{fest}")
 
-    owners_limit = 5
+    owners_limit = 3
 
     while True:
         await _run_due_jobs_once(
@@ -6347,11 +6363,7 @@ async def _run_due_jobs_once(
                         res = await handler(job.event_id, db, bot)
                 rebuild = isinstance(res, str) and res == "rebuild"
                 changed = res if isinstance(res, bool) else True
-                link = (
-                    await _job_result_link(job.task, job.event_id, db)
-                    if changed
-                    else None
-                )
+                link = await _job_result_link(job.task, job.event_id, db)
                 if rebuild and link:
                     link += " (forced rebuild)"
                 status = JobStatus.done
@@ -6410,7 +6422,7 @@ async def _run_due_jobs_once(
                 obj.last_error = err
                 obj.updated_at = datetime.utcnow()
                 if status == JobStatus.done:
-                    cur_res = link if (changed and link) else ("ok" if changed else "nochange")
+                    cur_res = link if link else ("ok" if changed else "nochange")
                     if cur_res == prev and not force_notify:
                         send = False
                     obj.last_result = cur_res
@@ -7010,7 +7022,7 @@ async def publish_event_progress(
             coalesce_keys.append(f"weekend_pages:{w_start.isoformat()}")
     async with db.get_session() as session:
         jobs = await session.execute(
-            select(JobOutbox.task, JobOutbox.status).where(
+            select(JobOutbox.task, JobOutbox.status, JobOutbox.last_result).where(
                 (JobOutbox.event_id == event.id)
                 | (JobOutbox.coalesce_key.in_(coalesce_keys))
             )
@@ -7018,20 +7030,25 @@ async def publish_event_progress(
         rows = jobs.all()
     tasks = []
     seen_tasks: set[JobTask] = set()
-    for task, status in rows:
+    for task, status, _ in rows:
         if task not in seen_tasks and task.value in TASK_LABELS:
             tasks.append(task)
             seen_tasks.add(task)
     progress: dict[JobTask, dict[str, str]] = {}
-    for task, status in rows:
+    for task, status, last_res in rows:
         if task.value not in TASK_LABELS:
             continue
         icon = "\U0001f504"
         suffix = ""
         action = initial_statuses.get(task) if initial_statuses else None
+        link = last_res if last_res and last_res.startswith("http") else None
         if action == "skipped" or status == JobStatus.done:
-            icon = "⏭"
-            suffix = " — актуально"
+            if link:
+                icon = "✅"
+                suffix = f" — {link}"
+            else:
+                icon = "⏭"
+                suffix = " — актуально"
         elif action == "requeued":
             suffix = " — перезапущено"
         progress[task] = {"icon": icon, "suffix": suffix}
@@ -7111,12 +7128,14 @@ async def publish_event_progress(
     head = "Идёт процесс публикации, ждите"
     text = head if not lines else head + "\n" + "\n".join(lines)
     text += "\n<!-- v0 -->"
+    progress_ready = asyncio.Event()
     msg = await bot.send_message(
         chat_id,
         text,
         disable_web_page_preview=True,
         reply_markup=captcha_markup,
     )
+    progress_ready.set()
 
     version = 1
 
@@ -7207,20 +7226,21 @@ async def publish_event_progress(
         link: str | None,
         err: str | None,
     ) -> None:
+        await progress_ready.wait()
         if task not in progress:
             return
         if status == JobStatus.done:
-            if not changed:
+            if link:
+                icon = "✅"
+                suffix = f" — {link}"
+            elif not changed:
                 icon = "⏭"
                 suffix = ""
             else:
                 icon = "✅"
-                if link:
-                    suffix = f" — {link}"
-                else:
-                    suffix = (
-                        " — создано/обновлено" if task == JobTask.month_pages else ""
-                    )
+                suffix = (
+                    " — создано/обновлено" if task == JobTask.month_pages else ""
+                )
         elif status == JobStatus.paused:
             icon = "⏸"
             suffix = " — требуется капча; нажмите «Ввести код»"
