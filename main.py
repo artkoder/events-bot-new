@@ -626,6 +626,9 @@ def get_ics_semaphore() -> asyncio.Semaphore:
     return ICS_SEMAPHORE
 FEST_JOB_MULT = 100_000
 
+# Maximum number of images to accept in an album
+MAX_ALBUM_IMAGES = int(os.getenv("MAX_ALBUM_IMAGES", "10"))
+
 # Maximum size (in bytes) for downloaded files
 MAX_DOWNLOAD_SIZE = int(os.getenv("MAX_DOWNLOAD_SIZE", str(5 * 1024 * 1024)))
 
@@ -1529,6 +1532,7 @@ async def ensure_festival(
     name: str,
     full_name: str | None = None,
     photo_url: str | None = None,
+    photo_urls: list[str] | None = None,
     start_date: str | None = None,
     end_date: str | None = None,
     location_name: str | None = None,
@@ -1542,8 +1546,19 @@ async def ensure_festival(
         fest = res.scalar_one_or_none()
         if fest:
             updated = False
+            if photo_urls:
+                merged = fest.photo_urls[:]
+                for u in photo_urls:
+                    if u not in merged:
+                        merged.append(u)
+                if merged != fest.photo_urls:
+                    fest.photo_urls = merged
+                    updated = True
             if photo_url and photo_url != fest.photo_url:
                 fest.photo_url = photo_url
+                updated = True
+            elif not fest.photo_url and photo_urls:
+                fest.photo_url = photo_urls[0]
                 updated = True
             if full_name and full_name != fest.full_name:
                 fest.full_name = full_name
@@ -1574,7 +1589,8 @@ async def ensure_festival(
         fest = Festival(
             name=name,
             full_name=full_name,
-            photo_url=photo_url,
+            photo_url=photo_url or (photo_urls[0] if photo_urls else None),
+            photo_urls=photo_urls or ([photo_url] if photo_url else []),
             start_date=start_date,
             end_date=end_date,
             location_name=location_name,
@@ -1668,6 +1684,8 @@ async def try_set_fest_cover_from_program(
         fresh = await session.get(Festival, fest.id)
         if not fresh:
             return False
+        if cover not in fresh.photo_urls:
+            fresh.photo_urls = [cover] + fresh.photo_urls
         fresh.photo_url = cover
         await session.commit()
     logging.info("telegraph_cover: set_ok")
@@ -2013,7 +2031,7 @@ async def extract_images(message: types.Message, bot: Bot) -> list[tuple[bytes, 
         name = message.document.file_name or "image.jpg"
         data, name = ensure_jpeg(bio.getvalue(), name)
         images.append((data, name))
-    return images[:3]
+    return images[:MAX_ALBUM_IMAGES]
 
 
 async def upload_images(images: list[tuple[bytes, str]]) -> tuple[list[str], str]:
@@ -2022,7 +2040,7 @@ async def upload_images(images: list[tuple[bytes, str]]) -> tuple[list[str], str
     catbox_msg = ""
     if CATBOX_ENABLED and images:
         session = get_http_session()
-        for data, name in images[:3]:
+        for data, name in images[:MAX_ALBUM_IMAGES]:
             data, name = ensure_jpeg(data, name)
             if len(data) > 5 * 1024 * 1024:
                 logging.warning("catbox skip %s: too large", name)
@@ -4562,6 +4580,56 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
         msg = "Обложка обновлена" if ok else "Картинка не найдена"
         await callback.message.answer(msg)
         await callback.answer()
+    elif data.startswith("festimgs:"):
+        fid = int(data.split(":")[1])
+        async with db.get_session() as session:
+            fest = await session.get(Festival, fid)
+        if not fest:
+            await callback.answer("Festival not found", show_alert=True)
+            return
+        total = len(fest.photo_urls)
+        current = (
+            fest.photo_urls.index(fest.photo_url) + 1
+            if fest.photo_url in fest.photo_urls
+            else 0
+        )
+        text = (
+            "Иллюстрации фестиваля\n"
+            f"Всего: {total}\n"
+            f"Текущая обложка: #{current}\n"
+            "Выберите новое изображение обложки:"
+        )
+        buttons = [
+            types.InlineKeyboardButton(
+                text=f"#{i+1}", callback_data=f"festsetcover:{fid}:{i+1}"
+            )
+            for i in range(total)
+        ]
+        keyboard = [buttons[i : i + 5] for i in range(0, len(buttons), 5)]
+        keyboard.append(
+            [types.InlineKeyboardButton(text="Отмена", callback_data=f"festedit:{fid}")]
+        )
+        markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard)
+        await callback.message.answer(text, reply_markup=markup)
+        await callback.answer()
+    elif data.startswith("festsetcover:"):
+        _, fid, idx = data.split(":")
+        fid_i = int(fid)
+        idx_i = int(idx)
+        async with db.get_session() as session:
+            fest = await session.get(Festival, fid_i)
+            if not fest or idx_i < 1 or idx_i > len(fest.photo_urls):
+                await callback.answer("Invalid selection", show_alert=True)
+                return
+            fest.photo_url = fest.photo_urls[idx_i - 1]
+            await session.commit()
+            name = fest.name
+        asyncio.create_task(sync_festival_page(db, name))
+        asyncio.create_task(sync_festivals_index_page(db))
+        await callback.message.answer(
+            f"Обложка изменена на #{idx_i}.\nСтраницы фестиваля и лэндинг обновлены."
+        )
+        await callback.answer()
 
     elif data.startswith("togglesilent:"):
         eid = int(data.split(":")[1])
@@ -6006,6 +6074,7 @@ async def add_events_from_text(
             fest_name,
             full_name=festival_info.get("full_name"),
             photo_url=photo_u,
+            photo_urls=catbox_urls,
             start_date=start,
             end_date=end,
             location_name=loc_name,
@@ -6024,24 +6093,28 @@ async def add_events_from_text(
                     await session.commit()
                     fest_updated = True
                     festival_obj = fest_db
-        if created:
-            async def _safe_sync_fest(name: str) -> None:
-                try:
-                    await sync_festival_page(db, name)
-                except Exception:
-                    logging.exception("festival page sync failed for %s", name)
-                try:
-                    await sync_festival_vk_post(db, name, bot, strict=True)
-                except Exception:
-                    logging.exception("festival VK sync failed for %s", name)
-                    if bot:
-                        try:
-                            await notify_superadmin(
-                                db, bot, f"festival VK sync failed for {name}"
-                            )
-                        except Exception:
-                            logging.exception("notify_superadmin failed for %s", name)
+        async def _safe_sync_fest(name: str) -> None:
+            try:
+                await sync_festival_page(db, name)
+            except Exception:
+                logging.exception("festival page sync failed for %s", name)
+            try:
+                await sync_festivals_index_page(db)
+            except Exception:
+                logging.exception("festival index sync failed")
+            try:
+                await sync_festival_vk_post(db, name, bot, strict=True)
+            except Exception:
+                logging.exception("festival VK sync failed for %s", name)
+                if bot:
+                    try:
+                        await notify_superadmin(
+                            db, bot, f"festival VK sync failed for {name}"
+                        )
+                    except Exception:
+                        logging.exception("notify_superadmin failed for %s", name)
 
+        if created or fest_updated:
             await _safe_sync_fest(fest_obj.name)
             async with db.get_session() as session:
                 res = await session.execute(
@@ -6143,6 +6216,7 @@ async def add_events_from_text(
                 base_event.festival,
                 full_name=data.get("festival_full"),
                 photo_url=photo_u,
+                photo_urls=catbox_urls,
             )
 
         if base_event.event_type == "выставка" and not base_event.end_date:
@@ -10236,8 +10310,14 @@ async def build_festival_page_content(db: Database, fest: Festival) -> tuple[str
             )
         nodes.extend(links)
         nodes.extend(telegraph_br())
-    if fest.photo_url:
-        nodes.append({"tag": "img", "attrs": {"src": fest.photo_url}})
+    cover = fest.photo_url or (fest.photo_urls[0] if fest.photo_urls else None)
+    if cover:
+        nodes.append({"tag": "img", "attrs": {"src": cover}})
+        nodes.append({"tag": "p", "children": ["\u00a0"]})
+    for url in fest.photo_urls:
+        if url == cover:
+            continue
+        nodes.append({"tag": "img", "attrs": {"src": url}})
         nodes.append({"tag": "p", "children": ["\u00a0"]})
     start, end = festival_dates(fest, events)
     if start:
@@ -12313,6 +12393,12 @@ async def show_festival_edit_menu(user_id: int, fest: Festival, bot: Bot):
                 callback_data=f"festcover:{fest.id}",
             )
         ],
+        [
+            types.InlineKeyboardButton(
+                text="Иллюстрации / обложка",
+                callback_data=f"festimgs:{fest.id}",
+            )
+        ],
         [types.InlineKeyboardButton(text="Done", callback_data="festeditdone")],
     ]
     markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard)
@@ -13438,13 +13524,13 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
             if images:
 
                 buf = pending_media_groups.setdefault(gid, [])
-                if len(buf) < 3:
-                    buf.extend(images[: 3 - len(buf)])
+                if len(buf) < MAX_ALBUM_IMAGES:
+                    buf.extend(images[: MAX_ALBUM_IMAGES - len(buf)])
             logging.info("waiting for caption in album %s", gid)
             return
         stored = pending_media_groups.pop(gid, [])
-        if len(stored) < 3 and images:
-            stored.extend(images[: 3 - len(stored)])
+        if len(stored) < MAX_ALBUM_IMAGES and images:
+            stored.extend(images[: MAX_ALBUM_IMAGES - len(stored)])
         media = stored
 
         processed_media_groups.add(gid)
@@ -13452,7 +13538,7 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
         if not text:
             logging.info("forwarded message has no text")
             return
-        media = images[:3] if images else None
+        media = images[:MAX_ALBUM_IMAGES] if images else None
     async with db.get_session() as session:
         user = await session.get(User, message.from_user.id)
         if not user or user.blocked:
@@ -14178,6 +14264,8 @@ def create_app() -> web.Application:
         or c.data.startswith("festdel:")
         or c.data.startswith("setfest:")
         or c.data.startswith("festdays:")
+        or c.data.startswith("festimgs:")
+        or c.data.startswith("festsetcover:")
         or c.data.startswith("requeue:")
     ,
     )
