@@ -124,7 +124,7 @@ from markup import (
 from sections import replace_between_markers, content_hash
 from db import Database
 from scheduling import startup as scheduler_startup, cleanup as scheduler_cleanup
-from sqlalchemy import select, update, delete, text, func
+from sqlalchemy import select, update, delete, text, func, or_
 
 from models import (
     User,
@@ -5351,6 +5351,31 @@ NAV_TASKS = {
 
 async def _drain_nav_tasks(db: Database, event_id: int, timeout: float = 30.0) -> None:
     deadline = _time.monotonic() + timeout
+
+    keys: set[str] = set()
+    async with db.get_session() as session:
+        ev = await session.get(Event, event_id)
+        if ev:
+            month = ev.date.split("..", 1)[0][:7]
+            keys.add(f"month_pages:{month}")
+            d = parse_iso_date(ev.date)
+            if d:
+                week = d.isocalendar().week
+                keys.add(f"week_pages:{d.year}-{week:02d}")
+                w = weekend_start_for_date(d)
+                if w:
+                    keys.add(f"weekend_pages:{w.isoformat()}")
+            if ev.festival:
+                fest = (
+                    await session.execute(
+                        select(Festival.id).where(Festival.name == ev.festival)
+                    )
+                ).scalar_one_or_none()
+                if fest:
+                    keys.add(f"festival_pages:{fest}")
+
+    owners_limit = 5
+
     while True:
         await _run_due_jobs_once(
             db,
@@ -5362,22 +5387,71 @@ async def _drain_nav_tasks(db: Database, event_id: int, timeout: float = 30.0) -
             NAV_TASKS,
             True,
         )
+
         async with db.get_session() as session:
-            stmt = (
-                select(func.count())
-                .where(
-                    JobOutbox.event_id == event_id,
-                    JobOutbox.task.in_(NAV_TASKS),
-                    JobOutbox.status.in_([JobStatus.pending, JobStatus.running]),
+            rows = (
+                await session.execute(
+                    select(JobOutbox.event_id, JobOutbox.coalesce_key)
+                    .where(
+                        JobOutbox.status.in_([JobStatus.pending, JobStatus.running]),
+                        JobOutbox.task.in_(NAV_TASKS),
+                        JobOutbox.coalesce_key.in_(keys),
+                    )
                 )
+            ).all()
+
+        owners: dict[int, set[str]] = {}
+        for owner, key in rows:
+            if owner == event_id:
+                continue
+            owners.setdefault(owner, set()).add(key)
+
+        ran = False
+        for idx, (owner, oks) in enumerate(owners.items()):
+            if idx >= owners_limit:
+                break
+            logging.info(
+                "nav_drain owner_event=%s key=%s picked",
+                owner,
+                ",".join(sorted(oks)),
             )
-            remaining = (await session.execute(stmt)).scalar_one()
+            await _run_due_jobs_once(
+                db,
+                None,
+                None,
+                owner,
+                None,
+                None,
+                NAV_TASKS,
+                True,
+            )
+            ran = True
+
+        async with db.get_session() as session:
+            remaining = (
+                await session.execute(
+                    select(func.count())
+                    .where(
+                        JobOutbox.task.in_(NAV_TASKS),
+                        JobOutbox.status.in_([JobStatus.pending, JobStatus.running]),
+                        or_(
+                            JobOutbox.event_id == event_id,
+                            JobOutbox.coalesce_key.in_(keys),
+                        ),
+                    )
+                )
+            ).scalar_one()
         if not remaining:
             break
         if _time.monotonic() > deadline:
-            logging.warning("nav tasks drain timeout for event %s", event_id)
+            logging.warning(
+                "nav tasks drain timeout for event %s (remaining=%s)",
+                event_id,
+                remaining,
+            )
             break
-        await asyncio.sleep(1.0)
+        if not ran:
+            await asyncio.sleep(1.0)
 
 
 def missing_fields(event: dict | Event) -> list[str]:
