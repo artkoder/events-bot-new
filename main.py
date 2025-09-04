@@ -2542,6 +2542,45 @@ def _build_festival_cards(
     return nodes, with_img, without_img, spacers, compact_tail
 
 
+def _ensure_img_links(
+    page_html: str,
+    link_map: dict[str, tuple[str, int | None, str, str]],
+) -> tuple[str, int, int]:
+    """Ensure every image retains its link, add fallback if missing.
+
+    ``link_map`` maps image ``src`` to a tuple ``(url, fest_id, slug, name)``.
+    Returns updated HTML and counts of ok/fixed image links.
+    """
+
+    img_links_ok = 0
+    img_links_fixed = 0
+
+    def repl(match: re.Match[str]) -> str:
+        nonlocal img_links_ok, img_links_fixed
+        fig_html = match.group(0)
+        m = re.search(r'<img[^>]+src="([^"]+)"', fig_html)
+        if not m:
+            return fig_html
+        src = m.group(1)
+        info = link_map.get(src)
+        if not info:
+            return fig_html
+        url, fest_id, slug, name = info
+        if "<a" in fig_html:
+            img_links_ok += 1
+            return fig_html
+        img_links_fixed += 1
+        logging.warning(
+            "festivals_index img_link_missing",
+            extra={"festival_id": fest_id, "slug": slug, "festival": name},
+        )
+        fallback = f'<p><a href="{html.escape(url)}">Открыть страницу фестиваля →</a></p>'
+        return fig_html + fallback
+
+    updated_html = re.sub(r"<figure>.*?</figure>", repl, page_html, flags=re.DOTALL)
+    return updated_html, img_links_ok, img_links_fixed
+
+
 async def sync_festivals_index_page(db: Database) -> None:
     """Create or update landing page listing all festivals."""
     token = get_telegraph_token()
@@ -2557,6 +2596,18 @@ async def sync_festivals_index_page(db: Database) -> None:
     today = datetime.now(LOCAL_TZ).date()
     items = [t for t in items if t[1] is None or t[1] >= today]
     items.sort(key=lambda t: t[0] or date.max)
+    link_map = {}
+    for _, _, fest in items:
+        url = fest.telegraph_url or (
+            f"https://telegra.ph/{fest.telegraph_path}" if fest.telegraph_path else ""
+        )
+        if fest.photo_url and url:
+            link_map[fest.photo_url] = (
+                url,
+                fest.id,
+                fest.telegraph_path or "",
+                fest.name,
+            )
     nodes, with_img, without_img, spacers, compact_tail = _build_festival_cards(items)
     from telegraph.utils import nodes_to_html
 
@@ -2574,41 +2625,42 @@ async def sync_festivals_index_page(db: Database) -> None:
     try:
         if path:
             await telegraph_edit_page(tg, path, title=title, html_content=html)
-            logging.info(
-                "updated festivals index page",
-                extra={
-                    "action": "edited",
-                    "target": "tg",
-                    "path": path,
-                    "with_img": with_img,
-                    "without_img": without_img,
-                    "spacers": spacers,
-                    "compact_tail": compact_tail,
-                },
-            )
         else:
             data = await telegraph_create_page(tg, title=title, html_content=html)
             url = normalize_telegraph_url(data.get("url"))
             path = data.get("path")
-            logging.info(
-                "created festivals index page %s",
-                url,
-                extra={
-                    "action": "created",
-                    "target": "tg",
-                    "path": path,
-                    "url": url,
-                    "with_img": with_img,
-                    "without_img": without_img,
-                    "spacers": spacers,
-                    "compact_tail": compact_tail,
-                },
-            )
+        page = await telegraph_call(tg.get_page, path, return_html=True)
+        page_html = page.get("content_html", "")
+        page_html, img_ok, img_fix = _ensure_img_links(page_html, link_map)
+        if img_fix:
+            page_html = sanitize_telegraph_html(page_html)
+            await telegraph_edit_page(tg, path, title=title, html_content=page_html)
+        logging.info(
+            "updated festivals index page" if path else f"created festivals index page {url}",
+            extra={
+                "action": "edited" if path else "created",
+                "target": "tg",
+                "path": path,
+                "url": url,
+                "with_img": with_img,
+                "without_img": without_img,
+                "spacers": spacers,
+                "compact_tail": compact_tail,
+                "img_links_ok": img_ok,
+                "img_links_fixed": img_fix,
+            },
+        )
     except Exception as e:
         logging.error(
             "Failed to sync festivals index page: %s",
             e,
-            extra={"action": "error", "target": "tg", "path": path},
+            extra={
+                "action": "error",
+                "target": "tg",
+                "path": path,
+                "img_links_ok": 0,
+                "img_links_fixed": 0,
+            },
         )
         return
 
@@ -2634,6 +2686,18 @@ async def rebuild_festivals_index_if_needed(
 
     start_t = _time.perf_counter()
     items = await upcoming_festivals(db)
+    link_map: dict[str, tuple[str, int | None, str, str]] = {}
+    for _, _, fest in items:
+        url = fest.telegraph_url or (
+            f"https://telegra.ph/{fest.telegraph_path}" if fest.telegraph_path else ""
+        )
+        if fest.photo_url and url:
+            link_map[fest.photo_url] = (
+                url,
+                fest.id,
+                fest.telegraph_path or "",
+                fest.name,
+            )
     nodes, with_img, without_img, spacers, compact_tail = _build_festival_cards(items)
     from telegraph.utils import nodes_to_html
 
@@ -2671,6 +2735,8 @@ async def rebuild_festivals_index_if_needed(
                 "without_img": without_img,
                 "spacers": spacers,
                 "compact_tail": compact_tail,
+                "img_links_ok": 0,
+                "img_links_fixed": 0,
             },
         )
         return "nochange", url
@@ -2698,6 +2764,8 @@ async def rebuild_festivals_index_if_needed(
                     "without_img": without_img,
                     "spacers": spacers,
                     "compact_tail": compact_tail,
+                    "img_links_ok": 0,
+                    "img_links_fixed": 0,
                 },
             )
             return "nochange", url or ""
@@ -2719,6 +2787,14 @@ async def rebuild_festivals_index_if_needed(
             url = normalize_telegraph_url(data.get("url"))
             path = data.get("path")
             status = "built"
+        page = await telegraph_call(telegraph.get_page, path, return_html=True)
+        page_html = page.get("content_html", "")
+        page_html, img_ok, img_fix = _ensure_img_links(page_html, link_map)
+        if img_fix:
+            page_html = sanitize_telegraph_html(page_html)
+            await telegraph_edit_page(
+                telegraph, path, title=title, html_content=page_html
+            )
     except Exception as e:
         dur = (_time.perf_counter() - start_t) * 1000
         logging.error(
@@ -2739,6 +2815,8 @@ async def rebuild_festivals_index_if_needed(
                 "without_img": without_img,
                 "spacers": spacers,
                 "compact_tail": compact_tail,
+                "img_links_ok": 0,
+                "img_links_fixed": 0,
             },
         )
         raise
@@ -2767,6 +2845,8 @@ async def rebuild_festivals_index_if_needed(
             "without_img": without_img,
             "spacers": spacers,
             "compact_tail": compact_tail,
+            "img_links_ok": img_ok,
+            "img_links_fixed": img_fix,
         },
     )
     return status, url

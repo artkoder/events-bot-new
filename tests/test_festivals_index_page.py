@@ -49,6 +49,9 @@ async def test_sync_festivals_index_page_created(tmp_path: Path, monkeypatch, ca
             stored["edited"] = html_content
             return {}
 
+        def get_page(self, path, return_html=True):
+            return {"content_html": stored.get("html")}
+
     async def fake_telegraph_call(func, *args, **kwargs):
         return func(*args, **kwargs)
 
@@ -110,6 +113,9 @@ async def test_sync_festivals_index_page_updated(tmp_path: Path, monkeypatch, ca
             stored["edited"] = html_content
             return {}
 
+        def get_page(self, path, return_html=True):
+            return {"content_html": stored.get("edited")}
+
     async def fake_telegraph_call(func, *args, **kwargs):
         return func(*args, **kwargs)
 
@@ -167,6 +173,9 @@ async def test_sync_festivals_index_page_sorted(tmp_path: Path, monkeypatch):
         def edit_page(self, path, title, html_content, **kwargs):
             stored["html"] = html_content
             return {}
+
+        def get_page(self, path, return_html=True):
+            return {"content_html": stored.get("html")}
 
     monkeypatch.setattr(main, "Telegraph", DummyTelegraph)
     monkeypatch.setattr(main, "telegraph_call", lambda func, *a, **k: func(*a, **k))
@@ -227,6 +236,27 @@ def test_sanitize_telegraph_html_rewrites_and_checks():
         main.sanitize_telegraph_html("<p>ok</p><script>bad</script>")
 
 
+def test_sanitize_telegraph_html_keeps_linked_images():
+    html = (
+        '<figure><a href="https://example.com"><img src="https://e.com/i.jpg"/></a>'
+        "<figcaption>X</figcaption></figure>"
+    )
+    assert main.sanitize_telegraph_html(html) == html
+
+
+def test_build_festival_card_html_preserves_link():
+    fest = Festival(name="Fest", telegraph_path="fest", photo_url="https://example.com/i.jpg")
+    nodes, used_img, _ = main.build_festival_card_nodes(
+        fest, None, None, with_image=True, add_spacer=False
+    )
+    html = nodes_to_html(nodes)
+    assert (
+        '<a href="https://telegra.ph/fest"><img src="https://example.com/i.jpg"/></a>'
+        in html
+    )
+    assert main.sanitize_telegraph_html(html) == html
+
+
 @pytest.mark.asyncio
 async def test_rebuild_festivals_index_force_updates(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
@@ -248,6 +278,9 @@ async def test_rebuild_festivals_index_force_updates(tmp_path: Path, monkeypatch
 
         def create_page(self, title, html_content):
             return {"url": "https://telegra.ph/fests", "path": "fests"}
+
+        def get_page(self, path, return_html=True):
+            return {"content_html": ""}
 
     async def fake_call(func, *a, **k):
         return func(*a, **k)
