@@ -5520,10 +5520,18 @@ async def enqueue_job(
                 depends_on = [f"festival_pages:{fest}"]
         job_key = coalesce_key or f"{task.value}:{event_id}"
         if coalesce_key:
-            stmt = select(JobOutbox).where(JobOutbox.coalesce_key == coalesce_key)
+            stmt = (
+                select(JobOutbox)
+                .where(JobOutbox.coalesce_key == coalesce_key)
+                .order_by(JobOutbox.id.desc())
+                .limit(1)
+            )
         else:
-            stmt = select(JobOutbox).where(
-                JobOutbox.event_id == event_id, JobOutbox.task == task
+            stmt = (
+                select(JobOutbox)
+                .where(JobOutbox.event_id == event_id, JobOutbox.task == task)
+                .order_by(JobOutbox.id.desc())
+                .limit(1)
             )
         res = await session.execute(stmt)
         job = res.scalar_one_or_none()
@@ -5532,6 +5540,20 @@ async def enqueue_job(
             if job.status == JobStatus.done and task == JobTask.vk_sync:
                 logline("ENQ", event_id, "skipped", job_key=job_key)
                 return "skipped"
+            if job.status == JobStatus.running:
+                age = (now - job.updated_at).total_seconds()
+                if age > 600:
+                    job.status = JobStatus.error
+                    job.last_error = "stale"
+                    job.next_run_at = now
+                    job.updated_at = now
+                    session.add(job)
+                    await session.commit()
+                    logging.info(
+                        "OUTBOX_STALE_FIXED key=%s prev_owner=%s", job_key, job.event_id
+                    )
+                    job = None
+        if job:
             if job.status == JobStatus.pending:
                 if payload is not None:
                     job.payload = payload
