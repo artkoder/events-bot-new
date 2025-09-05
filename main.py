@@ -9740,8 +9740,6 @@ async def _sync_month_page_inner(
             await check_month_page_markers(tg, page.path2)
         if DEBUG:
             mem_info("month page after")
-        if not update_links:
-            await refresh_month_nav(db)
         changed = (
             created
             or page.content_hash != prev_hash
@@ -9755,7 +9753,8 @@ async def _sync_month_page_inner(
             logging.info("month page %s: edited path=%s size=%d", month, paths, size)
         else:
             logging.info("month page %s: nochange", month)
-
+    if not update_links:
+        await refresh_month_nav(db)
 
 async def sync_month_page(
     db: Database,
