@@ -5763,8 +5763,6 @@ async def schedule_event_update_tasks(
         results[JobTask.ics_publish] = await enqueue_job(
             db, eid, JobTask.ics_publish
         )
-    if not is_vk_wall_url(ev.source_post_url):
-        results[JobTask.vk_sync] = await enqueue_job(db, eid, JobTask.vk_sync)
     results[JobTask.month_pages] = await enqueue_job(db, eid, JobTask.month_pages)
     d = parse_iso_date(ev.date)
     if d:
@@ -5780,6 +5778,8 @@ async def schedule_event_update_tasks(
         results[JobTask.festival_pages] = await enqueue_job(
             db, eid, JobTask.festival_pages
         )
+    if not is_vk_wall_url(ev.source_post_url):
+        results[JobTask.vk_sync] = await enqueue_job(db, eid, JobTask.vk_sync)
     logging.info("scheduled event tasks for %s", eid)
     if drain_nav:
         await _drain_nav_tasks(db, eid)
@@ -6701,6 +6701,8 @@ TASK_LABELS = {
 
 # runtime storage for progress callbacks keyed by event id
 _EVENT_PROGRESS: dict[int, SimpleNamespace] = {}
+# mapping from coalesce key to events waiting for progress updates
+_EVENT_PROGRESS_KEYS: dict[str, set[int]] = {}
 
 
 async def _job_result_link(task: JobTask, event_id: int, db: Database) -> str | None:
@@ -6796,17 +6798,48 @@ async def _run_due_jobs_once(
     for job in jobs:
         async with db.get_session() as session:
             exists_stmt = (
-                select(JobOutbox.id)
+                select(
+                    JobOutbox.id,
+                    JobOutbox.task,
+                    JobOutbox.status,
+                    JobOutbox.next_run_at,
+                )
                 .where(
                     JobOutbox.event_id == job.event_id,
                     JobOutbox.id < job.id,
                     JobOutbox.status.in_([JobStatus.pending, JobStatus.running]),
+                    JobOutbox.next_run_at <= now,
                 )
                 .limit(1)
             )
             if job.task == JobTask.ics_publish:
                 exists_stmt = exists_stmt.where(JobOutbox.task == JobTask.ics_publish)
-            if (await session.execute(exists_stmt)).first():
+            early = (await session.execute(exists_stmt)).first()
+            if early:
+                ejob = early[0]
+                etask = early[1]
+                estat = early[2]
+                enext = early[3]
+                logging.info(
+                    "RUN skip eid=%s task=%s blocked_by id=%s task=%s status=%s next_run_at=%s",
+                    job.event_id,
+                    job.task.value,
+                    ejob,
+                    etask.value if isinstance(etask, JobTask) else etask,
+                    estat.value if isinstance(estat, JobStatus) else estat,
+                    enext.isoformat() if enext else None,
+                )
+                logline(
+                    "RUN",
+                    job.event_id,
+                    "skip",
+                    job_id=job.id,
+                    task=job.task.value,
+                    blocking_id=ejob,
+                    blocking_task=etask.value if isinstance(etask, JobTask) else etask,
+                    blocking_status=estat.value if isinstance(estat, JobStatus) else estat,
+                    blocking_run_at=enext.isoformat() if enext else None,
+                )
                 continue
             obj = await session.get(JobOutbox, job.id)
             if not obj or obj.status not in (JobStatus.pending, JobStatus.error):
@@ -6964,6 +6997,17 @@ async def _run_due_jobs_once(
                 await session.commit()
             if notify and send:
                 await notify(job.task, job.event_id, status, changed, link, err)
+            if job.coalesce_key:
+                for eid in _EVENT_PROGRESS_KEYS.get(job.coalesce_key, set()):
+                    if eid == job.event_id:
+                        continue
+                    ctx = _EVENT_PROGRESS.get(eid)
+                    if not ctx:
+                        continue
+                    try:
+                        await ctx.updater(job.task, eid, status, changed, link, err)
+                    except Exception:
+                        logging.exception("progress callback error eid=%s", eid)
         processed += 1
         if pause:
             await vk_captcha_pause_outbox(db)
@@ -7711,6 +7755,8 @@ async def publish_event_progress(
         w_start = weekend_start_for_date(d)
         if w_start:
             coalesce_keys.append(f"weekend_pages:{w_start.isoformat()}")
+    for key in coalesce_keys:
+        _EVENT_PROGRESS_KEYS.setdefault(key, set()).add(event.id)
     async with db.get_session() as session:
         jobs = await session.execute(
             select(JobOutbox.task, JobOutbox.status, JobOutbox.last_result).where(
@@ -7964,10 +8010,20 @@ async def publish_event_progress(
                 info["icon"] != "\U0001f504" for info in fest_sub.values()
             )
         if all_done:
-            _EVENT_PROGRESS.pop(event.id, None)
+            ctx = _EVENT_PROGRESS.pop(event.id, None)
+            if ctx and getattr(ctx, "keys", None):
+                for key in ctx.keys:
+                    ids = _EVENT_PROGRESS_KEYS.get(key)
+                    if ids:
+                        ids.discard(event.id)
+                        if not ids:
+                            _EVENT_PROGRESS_KEYS.pop(key, None)
 
     _EVENT_PROGRESS[event.id] = SimpleNamespace(
-        updater=updater, ics_progress=ics_progress, fest_progress=fest_progress
+        updater=updater,
+        ics_progress=ics_progress,
+        fest_progress=fest_progress,
+        keys=coalesce_keys,
     )
 
     deadline = _time.monotonic() + 30
@@ -8053,7 +8109,14 @@ async def publish_event_progress(
         )
     if fixed:
         logline("PROG", event.id, "reconcile", fixed=",".join(fixed))
-    _EVENT_PROGRESS.pop(event.id, None)
+    ctx = _EVENT_PROGRESS.pop(event.id, None)
+    if ctx and getattr(ctx, "keys", None):
+        for key in ctx.keys:
+            ids = _EVENT_PROGRESS_KEYS.get(key)
+            if ids:
+                ids.discard(event.id)
+                if not ids:
+                    _EVENT_PROGRESS_KEYS.pop(key, None)
 
 
 async def job_sync_vk_source_post(event_id: int, db: Database, bot: Bot | None) -> None:
