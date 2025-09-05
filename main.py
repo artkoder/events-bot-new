@@ -7421,9 +7421,11 @@ async def split_month_until_ok(
     avg = total_size / len(events) if events else total_size
     split_idx = min(len(events), max(1, int(TELEGRAPH_LIMIT // avg))) if events else 0
     logging.info(
-        "month_split start month=%s events=%d split_idx=%d",
+        "month_split start month=%s events=%d total_bytes=%d nav_bytes=%d split_idx=%d",
         month,
         len(events),
+        total_size,
+        len(nav_block),
         split_idx,
     )
     attempts = 0
@@ -7439,7 +7441,13 @@ async def split_month_until_ok(
         )
         rough1 = rough_size(content1) + len(nav_block) + 200
         logging.info(
-            "month_split try idx=%d rough1=%d rough2=%d", split_idx, rough1, rough2
+            "month_split try attempt=%d idx=%d first_events=%d second_events=%d rough1=%d rough2=%d",
+            attempts,
+            split_idx,
+            len(first),
+            len(second),
+            rough1,
+            rough2,
         )
         if rough1 > TELEGRAPH_LIMIT and rough2 > TELEGRAPH_LIMIT:
             logging.info("month_split forcing attempt idx=%d", split_idx)
@@ -7540,9 +7548,20 @@ async def split_month_until_ok(
             db_page.content_hash = page.content_hash
             db_page.content_hash2 = page.content_hash2
             await session.commit()
-        logging.info("month_split done month=%s idx=%d", month, split_idx)
+        logging.info(
+            "month_split done month=%s idx=%d first_bytes=%d second_bytes=%d",
+            month,
+            split_idx,
+            rough1,
+            rough2,
+        )
         return
-    logging.error("month_split failed month=%s attempts=%d", month, attempts)
+    logging.error(
+        "month_split failed month=%s attempts=%d last_idx=%d",
+        month,
+        attempts,
+        split_idx,
+    )
     raise TelegraphException("CONTENT_TOO_BIG")
 
 
@@ -9568,7 +9587,7 @@ async def _sync_month_page_inner(
         token = get_telegraph_token()
         if not token:
             logging.error("Telegraph token unavailable")
-            return
+            raise RuntimeError("Telegraph token unavailable")
         tg = Telegraph(access_token=token)
         async with db.get_session() as session:
             page = await session.get(MonthPage, month)
@@ -11993,6 +12012,7 @@ async def rebuild_pages(
     months_failed: dict[str, str] = {}
     weekends_failed: dict[str, str] = {}
     for month in months:
+        logging.info("rebuild month start %s", month)
         async with db.get_session() as session:
             prev = await session.get(MonthPage, month)
             prev_hash = prev.content_hash if prev else None
@@ -12015,7 +12035,14 @@ async def rebuild_pages(
                 logging.info("update month %s part%d done %s", month, idx, u)
         else:
             logging.info("update month %s no changes", month)
+        logging.info(
+            "rebuild month finish %s updated=%s failed=%s",
+            month,
+            month in months_updated,
+            month in months_failed,
+        )
     for start in weekends:
+        logging.info("rebuild weekend start %s", start)
         async with db.get_session() as session:
             prev = await session.get(WeekendPage, start)
             prev_hash = prev.content_hash if prev else None
@@ -12037,6 +12064,12 @@ async def rebuild_pages(
                 logging.info("update weekend %s done %s", start, u)
         else:
             logging.info("update weekend %s no changes", start)
+        logging.info(
+            "rebuild weekend finish %s updated=%s failed=%s",
+            start,
+            start in weekends_updated,
+            start in weekends_failed,
+        )
     logging.info("rebuild finished")
     return {
         "months": {"updated": months_updated, "failed": months_failed},
