@@ -229,6 +229,45 @@ async def test_month_page_has_festivals_link(tmp_path: Path, monkeypatch):
     assert '<a href="https://telegra.ph/fests">🎪 Все фестивали Калининградской области</a>' in html
 
 
+@pytest.mark.asyncio
+async def test_weekend_page_has_festivals_link(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    saturday = date(2025, 7, 12)
+    async with db.get_session() as session:
+        session.add(
+            Event(
+                title="E",
+                description="d",
+                source_text="s",
+                date=saturday.isoformat(),
+                time="18:00",
+                location_name="Hall",
+            )
+        )
+        await session.commit()
+
+    await main.set_setting_value(db, "fest_index_url", "https://telegra.ph/fests")
+
+    class FakeDate(date):
+        @classmethod
+        def today(cls):
+            return date(2025, 7, 10)
+
+    class FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2025, 7, 10, 12, 0, tzinfo=tz)
+
+    monkeypatch.setattr(main, "date", FakeDate)
+    monkeypatch.setattr(main, "datetime", FakeDatetime)
+
+    _, content, _ = await main.build_weekend_page_content(db, saturday.isoformat())
+    html = nodes_to_html(content)
+    assert '<a href="https://telegra.ph/fests">Ближайшие фестивали Калининградской области</a>' in html
+
+
 def test_sanitize_telegraph_html_rewrites_and_checks():
     html = "<h1>X</h1><h5>Y</h5><p>Z</p>"
     assert main.sanitize_telegraph_html(html) == "<h3>X</h3><h3>Y</h3><p>Z</p>"
