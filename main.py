@@ -3142,6 +3142,7 @@ async def build_month_nav_block(db: Database) -> str:
 
 
 async def refresh_month_nav(db: Database) -> None:
+    logging.info("refresh_month_nav start")
     today = datetime.now(LOCAL_TZ).date()
     start_nav = today.replace(day=1)
     end_nav = date(today.year + 1, 4, 1)
@@ -3164,8 +3165,15 @@ async def refresh_month_nav(db: Database) -> None:
     for m in months:
         page = page_map.get(m)
         update_links = bool(page and page.url)
-        await sync_month_page(db, m, update_links=update_links, force=True)
+        try:
+            await asyncio.wait_for(
+                sync_month_page(db, m, update_links=update_links, force=True),
+                timeout=55,
+            )
+        except asyncio.TimeoutError:
+            logging.error("refresh_month_nav timeout month=%s", m)
         await asyncio.sleep(0)
+    logging.info("refresh_month_nav finish")
 
 async def build_month_buttons(
     db: Database, limit: int = 3, debug: bool = False
@@ -9564,7 +9572,7 @@ async def _sync_month_page_inner(
     update_links: bool = False,
     force: bool = False,
     progress: Any | None = None,
-):
+) -> bool:
     tasks: list[Awaitable[None]] = []
     async with HEAVY_SEMAPHORE:
         now = _time.time()
@@ -9574,7 +9582,7 @@ async def _sync_month_page_inner(
             and now < _month_next_run[month]
         ):
             logging.debug("sync_month_page skipped, debounced")
-            return
+            return False
         _month_next_run[month] = now + 60
         logging.info(
             "sync_month_page start: month=%s update_links=%s force=%s",
@@ -9644,7 +9652,7 @@ async def _sync_month_page_inner(
                 )
                 setattr(page, hash_attr, content_hash(updated_html))
             await commit_page()
-            return
+            return False
 
         events, exhibitions = await get_month_data(db, month)
         nav_block = await build_month_nav_block(db)
@@ -9772,8 +9780,7 @@ async def _sync_month_page_inner(
             logging.info("month page %s: edited path=%s size=%d", month, paths, size)
         else:
             logging.info("month page %s: nochange", month)
-    if not update_links:
-        await refresh_month_nav(db)
+    return True
 
 async def sync_month_page(
     db: Database,
@@ -9783,7 +9790,11 @@ async def sync_month_page(
     progress: Any | None = None,
 ):
     async with _page_locks[f"month:{month}"]:
-        await _sync_month_page_inner(db, month, update_links, force, progress)
+        needs_nav = await _sync_month_page_inner(
+            db, month, update_links, force, progress
+        )
+    if needs_nav:
+        await refresh_month_nav(db)
 
 
 def week_start_for_date(d: date) -> date:
