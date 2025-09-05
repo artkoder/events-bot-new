@@ -7393,7 +7393,77 @@ def locate_month_day_page(page_html_1: str, page_html_2: str | None, d: date) ->
     return 1
 
 
-async def patch_month_page_for_date(db: Database, telegraph: Telegraph, month_key: str, d: date) -> bool:
+async def ensure_month_split(db: Database, tg: Telegraph, month: str) -> None:
+    async with _page_locks[f"month:{month}"]:
+        async with db.get_session() as session:
+            page = await session.get(MonthPage, month)
+            if not page or not page.path:
+                return
+        events, exhibitions = await get_month_data(db, month)
+        nav_block = await build_month_nav_block(db)
+        from telegraph.utils import nodes_to_html
+        title, content, _ = await build_month_page_content(db, month, events, exhibitions)
+        html_full = unescape_html_comments(nodes_to_html(content))
+        html_full = replace_between_markers(
+            html_full, NAV_MONTHS_START, NAV_MONTHS_END, nav_block
+        )
+        size = len(html_full.encode())
+        if size <= TELEGRAPH_LIMIT:
+            return
+        avg = size / len(events) if events else size
+        split_idx = max(1, int(TELEGRAPH_LIMIT // avg)) if events else 0
+        first, second = events[:split_idx], events[split_idx:]
+        logging.warning("month_patch split-inline month=%s", month)
+        # Second page
+        title2, content2, _ = await build_month_page_content(
+            db, month, second, exhibitions
+        )
+        html2 = unescape_html_comments(nodes_to_html(content2))
+        html2 = replace_between_markers(
+            html2, NAV_MONTHS_START, NAV_MONTHS_END, nav_block
+        )
+        hash2 = content_hash(html2)
+        if not page.path2:
+            logging.info("creating second page for %s", month)
+            data2 = await telegraph_create_page(tg, title=title2, html_content=html2)
+            page.url2 = normalize_telegraph_url(data2.get("url"))
+            page.path2 = data2.get("path")
+        else:
+            logging.info("updating second page for %s", month)
+            edit_start = _time.perf_counter()
+            await telegraph_edit_page(tg, page.path2, title=title2, html_content=html2)
+            edit_dur = (_time.perf_counter() - edit_start) * 1000
+            logging.info("editPage %s done in %.0f ms", page.path2, edit_dur)
+        page.content_hash2 = hash2
+        # First page
+        title1, content1, _ = await build_month_page_content(
+            db, month, first, [], continuation_url=page.url2
+        )
+        html1 = unescape_html_comments(nodes_to_html(content1))
+        html1 = replace_between_markers(
+            html1, NAV_MONTHS_START, NAV_MONTHS_END, nav_block
+        )
+        hash1 = content_hash(html1)
+        logging.info("updating first page for %s", month)
+        edit_start = _time.perf_counter()
+        await telegraph_edit_page(tg, page.path, title=title1, html_content=html1)
+        edit_dur = (_time.perf_counter() - edit_start) * 1000
+        logging.info("editPage %s done in %.0f ms", page.path, edit_dur)
+        page.content_hash = hash1
+        async with db.get_session() as session:
+            db_page = await session.get(MonthPage, month)
+            db_page.url = page.url
+            db_page.path = page.path
+            db_page.url2 = page.url2
+            db_page.path2 = page.path2
+            db_page.content_hash = page.content_hash
+            db_page.content_hash2 = page.content_hash2
+            await session.commit()
+
+
+async def patch_month_page_for_date(
+    db: Database, telegraph: Telegraph, month_key: str, d: date, _retried: bool = False
+) -> bool:
     """Patch a single day's section on a month page if it changed."""
     page_key = f"telegraph:month:{month_key}"
     section_key = f"day:{d.isoformat()}"
@@ -7556,15 +7626,17 @@ async def patch_month_page_for_date(db: Database, telegraph: Telegraph, month_ke
             "changed" if changed else "nochange",
         )
     except TelegraphException as e:
-        if "CONTENT_TOO_BIG" in str(e):
+        msg = str(e)
+        if ("CONTENT_TOO_BIG" in msg or "content too big" in msg.lower()) and not _retried:
             logging.warning(
-                "month_patch rebuild reason=too_big month=%s day=%s",
+                "month_patch split-inline month=%s day=%s",
                 month_key,
                 d.isoformat(),
             )
-            await sync_month_page(db, month_key, force=True)
-            await set_section_hash(db, page_key, section_key, new_hash)
-            return "rebuild"
+            await ensure_month_split(db, telegraph, month_key)
+            return await patch_month_page_for_date(
+                db, telegraph, month_key, d, _retried=True
+            )
         raise
 
     await set_section_hash(db, page_key, section_key, new_hash)
