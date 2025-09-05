@@ -9760,6 +9760,8 @@ async def build_weekend_page_content(
         res_f = await session.execute(select(Festival))
         fest_map = {f.name.casefold(): f for f in res_f.scalars().all()}
 
+    fest_index_url = await get_setting_value(db, "fest_index_url")
+
     for e in events:
         fest = fest_map.get((e.festival or "").casefold())
         await ensure_event_telegraph_link(e, fest, db)
@@ -9851,6 +9853,21 @@ async def build_weekend_page_content(
         add_many(telegraph_br())
         add_many(month_nav)
         add_many(telegraph_br())
+
+    if fest_index_url and not exceeded:
+        add_many(telegraph_br())
+        add(
+            {
+                "tag": "p",
+                "children": [
+                    {
+                        "tag": "a",
+                        "attrs": {"href": fest_index_url},
+                        "children": ["Ближайшие фестивали Калининградской области"],
+                    }
+                ],
+            }
+        )
 
     label = format_weekend_range(saturday)
     if saturday.month == sunday.month:
