@@ -3096,7 +3096,7 @@ def apply_footer_link(html_content: str) -> str:
     return html_content + FOOTER_LINK_HTML
 
 
-async def build_month_nav_html(db: Database) -> str:
+async def build_month_nav_html(db: Database, current_month: str | None = None) -> str:
     today = datetime.now(LOCAL_TZ).date()
     start_nav = today.replace(day=1)
     end_nav = date(today.year + 1, 4, 1)
@@ -3123,7 +3123,10 @@ async def build_month_nav_html(db: Database) -> str:
         if not p or not p.url:
             continue
         name = month_name_nominative(m)
-        links.append(f'<a href="{html.escape(p.url)}">{name}</a>')
+        if current_month and m == current_month:
+            links.append(name)
+        else:
+            links.append(f'<a href="{html.escape(p.url)}">{name}</a>')
         if idx < len(months) - 1:
             links.append(" ")
     if not links:
@@ -3131,9 +3134,15 @@ async def build_month_nav_html(db: Database) -> str:
     return "<br/><h4>" + "".join(links) + "</h4>"
 
 
-async def build_month_nav_block(db: Database) -> str:
-    """Return the Telegraph-ready month navigation block."""
-    nav_html = await build_month_nav_html(db)
+async def build_month_nav_block(
+    db: Database, current_month: str | None = None
+) -> str:
+    """Return the Telegraph-ready month navigation block.
+
+    ``current_month`` — month key (``YYYY-MM``) of the page being built. If
+    provided, this month will be shown as plain text instead of a link.
+    """
+    nav_html = await build_month_nav_html(db, current_month)
     if not nav_html:
         return ""
     if nav_html.startswith("<br/>"):
@@ -7747,7 +7756,7 @@ async def patch_month_page_for_date(
             )
             async with _page_locks[f"month:{month_key}"]:
                 events_m, exhibitions = await get_month_data(db, month_key)
-                nav_block = await build_month_nav_block(db)
+                nav_block = await build_month_nav_block(db, month_key)
                 await split_month_until_ok(
                     db, telegraph, page, month_key, events_m, exhibitions, nav_block
                 )
@@ -9620,7 +9629,7 @@ async def _sync_month_page_inner(
                 await s.commit()
 
         if update_links:
-            nav_block = await build_month_nav_block(db)
+            nav_block = await build_month_nav_block(db, month)
             for path_attr, hash_attr in (("path", "content_hash"), ("path2", "content_hash2")):
                 path = getattr(page, path_attr)
                 if not path:
@@ -9655,7 +9664,7 @@ async def _sync_month_page_inner(
             return False
 
         events, exhibitions = await get_month_data(db, month)
-        nav_block = await build_month_nav_block(db)
+        nav_block = await build_month_nav_block(db, month)
 
         from telegraph.utils import nodes_to_html
 
