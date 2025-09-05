@@ -6719,6 +6719,25 @@ TASK_LABELS = {
     "fest_nav:update_all": "Навигация",
 }
 
+JOB_TTL: dict[JobTask, int] = {
+    JobTask.telegraph_build: 600,
+    JobTask.ics_publish: 600,
+    JobTask.month_pages: 600,
+    JobTask.week_pages: 600,
+    JobTask.weekend_pages: 600,
+}
+
+JOB_MAX_RUNTIME: dict[JobTask, int] = {
+    JobTask.telegraph_build: 180,
+    JobTask.ics_publish: 60,
+    JobTask.month_pages: 180,
+    JobTask.week_pages: 180,
+    JobTask.weekend_pages: 180,
+}
+
+DEFAULT_JOB_TTL = 600
+DEFAULT_JOB_MAX_RUNTIME = 900
+
 # runtime storage for progress callbacks keyed by event id
 _EVENT_PROGRESS: dict[int, SimpleNamespace] = {}
 # mapping from coalesce key to events waiting for progress updates
@@ -6792,6 +6811,27 @@ async def _run_due_jobs_once(
 ) -> int:
     now = datetime.utcnow()
     async with db.get_session() as session:
+        running_rows = await session.execute(
+            select(JobOutbox).where(JobOutbox.status == JobStatus.running)
+        )
+        running_jobs = running_rows.scalars().all()
+        stale: list[str] = []
+        for rjob in running_jobs:
+            limit = JOB_MAX_RUNTIME.get(rjob.task, DEFAULT_JOB_MAX_RUNTIME)
+            age = (now - rjob.updated_at).total_seconds()
+            if age > limit:
+                rjob.status = JobStatus.error
+                rjob.last_error = "stale"
+                rjob.updated_at = now
+                rjob.next_run_at = now + timedelta(days=3650)
+                session.add(rjob)
+                stale.append(
+                    rjob.coalesce_key or f"{rjob.task.value}:{rjob.event_id}"
+                )
+        if stale:
+            logging.info("OUTBOX_STALE keys=%s", ",".join(stale))
+        await session.commit()
+    async with db.get_session() as session:
         stmt = (
             select(JobOutbox)
             .where(
@@ -6817,6 +6857,60 @@ async def _run_due_jobs_once(
     processed = 0
     for job in jobs:
         async with db.get_session() as session:
+            obj = await session.get(JobOutbox, job.id)
+            if not obj or obj.status not in (JobStatus.pending, JobStatus.error):
+                continue
+            ttl = JOB_TTL.get(obj.task, DEFAULT_JOB_TTL)
+            age = (now - obj.updated_at).total_seconds()
+            if age > ttl:
+                obj.status = JobStatus.error
+                obj.last_error = "expired"
+                obj.updated_at = now
+                obj.next_run_at = now + timedelta(days=3650)
+                session.add(obj)
+                await session.commit()
+                logging.info(
+                    "OUTBOX_EXPIRED key=%s",
+                    obj.coalesce_key or f"{obj.task.value}:{obj.event_id}",
+                )
+                logline(
+                    "RUN",
+                    obj.event_id,
+                    "skip",
+                    job_id=obj.id,
+                    task=obj.task.value,
+                    reason="expired",
+                )
+                continue
+            if obj.coalesce_key:
+                later = await session.execute(
+                    select(JobOutbox.id)
+                        .where(
+                            JobOutbox.coalesce_key == obj.coalesce_key,
+                            JobOutbox.id > obj.id,
+                            JobOutbox.status.in_([JobStatus.pending, JobStatus.running]),
+                        )
+                        .limit(1)
+                )
+                if later.first():
+                    obj.status = JobStatus.error
+                    obj.last_error = "superseded"
+                    obj.updated_at = now
+                    obj.next_run_at = now + timedelta(days=3650)
+                    session.add(obj)
+                    await session.commit()
+                    logging.info(
+                        "OUTBOX_SUPERSEDED key=%s", obj.coalesce_key
+                    )
+                    logline(
+                        "RUN",
+                        obj.event_id,
+                        "skip",
+                        job_id=obj.id,
+                        task=obj.task.value,
+                        reason="superseded",
+                    )
+                    continue
             exists_stmt = (
                 select(
                     JobOutbox.id,
@@ -6825,14 +6919,14 @@ async def _run_due_jobs_once(
                     JobOutbox.next_run_at,
                 )
                 .where(
-                    JobOutbox.event_id == job.event_id,
-                    JobOutbox.id < job.id,
+                    JobOutbox.event_id == obj.event_id,
+                    JobOutbox.id < obj.id,
                     JobOutbox.status.in_([JobStatus.pending, JobStatus.running]),
                     JobOutbox.next_run_at <= now,
                 )
                 .limit(1)
             )
-            if job.task == JobTask.ics_publish:
+            if obj.task == JobTask.ics_publish:
                 exists_stmt = exists_stmt.where(JobOutbox.task == JobTask.ics_publish)
             early = (await session.execute(exists_stmt)).first()
             if early:
@@ -6842,8 +6936,8 @@ async def _run_due_jobs_once(
                 enext = early[3]
                 logging.info(
                     "RUN skip eid=%s task=%s blocked_by id=%s task=%s status=%s next_run_at=%s",
-                    job.event_id,
-                    job.task.value,
+                    obj.event_id,
+                    obj.task.value,
                     ejob,
                     etask.value if isinstance(etask, JobTask) else etask,
                     estat.value if isinstance(estat, JobStatus) else estat,
@@ -6851,18 +6945,15 @@ async def _run_due_jobs_once(
                 )
                 logline(
                     "RUN",
-                    job.event_id,
+                    obj.event_id,
                     "skip",
-                    job_id=job.id,
-                    task=job.task.value,
+                    job_id=obj.id,
+                    task=obj.task.value,
                     blocking_id=ejob,
                     blocking_task=etask.value if isinstance(etask, JobTask) else etask,
                     blocking_status=estat.value if isinstance(estat, JobStatus) else estat,
                     blocking_run_at=enext.isoformat() if enext else None,
                 )
-                continue
-            obj = await session.get(JobOutbox, job.id)
-            if not obj or obj.status not in (JobStatus.pending, JobStatus.error):
                 continue
             obj.status = JobStatus.running
             obj.updated_at = datetime.utcnow()
@@ -6870,25 +6961,25 @@ async def _run_due_jobs_once(
             await session.commit()
         run_id = uuid.uuid4().hex
         attempt = job.attempts + 1
-        job_key = job.coalesce_key or f"{job.task.value}:{job.event_id}"
+        job_key = obj.coalesce_key or f"{obj.task.value}:{obj.event_id}"
         logging.info(
             "RUN pick key=%s owner_eid=%s started_at=%s attempts=%d",
             job_key,
-            job.event_id,
+            obj.event_id,
             obj.updated_at.isoformat(),
             attempt,
         )
         logline(
             "RUN",
-            job.event_id,
+            obj.event_id,
             "start",
-            job_id=job.id,
-            task=job.task.value,
+            job_id=obj.id,
+            task=obj.task.value,
             key=job_key,
         )
         start = _time.perf_counter()
         changed = True
-        handler = JOB_HANDLERS.get(job.task.value)
+        handler = JOB_HANDLERS.get(obj.task.value)
         pause = False
         if not handler:
             status = JobStatus.done
@@ -6898,36 +6989,36 @@ async def _run_due_jobs_once(
             took_ms = (_time.perf_counter() - start) * 1000
             logline(
                 "RUN",
-                job.event_id,
+                obj.event_id,
                 "done",
-                job_id=job.id,
-                task=job.task.value,
+                job_id=obj.id,
+                task=obj.task.value,
                 result="nochange",
             )
         else:
             try:
                 async with span(
-                    "event_pipeline", step=job.task.value, event_id=job.event_id
+                    "event_pipeline", step=obj.task.value, event_id=obj.event_id
                 ):
-                    if job.task == JobTask.ics_publish:
+                    if obj.task == JobTask.ics_publish:
                         prog = (
                             ics_progress.get(job.event_id)
                             if isinstance(ics_progress, dict)
                             else ics_progress
                         )
-                        res = await handler(job.event_id, db, bot, prog)
-                    elif job.task == JobTask.festival_pages:
+                        res = await handler(obj.event_id, db, bot, prog)
+                    elif obj.task == JobTask.festival_pages:
                         fest_prog = (
                             fest_progress.get(job.event_id)
                             if isinstance(fest_progress, dict)
                             else fest_progress
                         )
-                        res = await handler(job.event_id, db, bot, fest_prog)
+                        res = await handler(obj.event_id, db, bot, fest_prog)
                     else:
-                        res = await handler(job.event_id, db, bot)
+                        res = await handler(obj.event_id, db, bot)
                 rebuild = isinstance(res, str) and res == "rebuild"
                 changed = res if isinstance(res, bool) else True
-                link = await _job_result_link(job.task, job.event_id, db)
+                link = await _job_result_link(obj.task, obj.event_id, db)
                 if rebuild and link:
                     link += " (forced rebuild)"
                 status = JobStatus.done
@@ -6936,10 +7027,10 @@ async def _run_due_jobs_once(
                 short = link or ("ok" if changed else "nochange")
                 logline(
                     "RUN",
-                    job.event_id,
+                    obj.event_id,
                     "done",
-                    job_id=job.id,
-                    task=job.task.value,
+                    job_id=obj.id,
+                    task=obj.task.value,
                     result_url=link,
                     result="changed" if changed else "nochange",
                 )
@@ -6956,7 +7047,7 @@ async def _run_due_jobs_once(
                         _vk_captcha_key = job_key
                         logline(
                             "VK",
-                            job.event_id,
+                            obj.event_id,
                             "paused captcha",
                             group=f"@{VK_AFISHA_GROUP_ID}" if VK_AFISHA_GROUP_ID else None,
                         )
@@ -6975,10 +7066,10 @@ async def _run_due_jobs_once(
                     retry = True
                 logline(
                     "RUN",
-                    job.event_id,
+                    obj.event_id,
                     "error",
-                    job_id=job.id,
-                    task=job.task.value,
+                    job_id=obj.id,
+                    task=obj.task.value,
                     exc=err.splitlines()[0],
                 )
                 logging.exception("job %s failed", job.id)
@@ -6991,7 +7082,7 @@ async def _run_due_jobs_once(
         )
         text = None
         async with db.get_session() as session:
-            obj = await session.get(JobOutbox, job.id)
+            obj = await session.get(JobOutbox, obj.id)
             send = True
             if obj:
                 prev = obj.last_result
