@@ -617,6 +617,9 @@ VK_SEMAPHORE = asyncio.Semaphore(int(os.getenv("VK_CONCURRENCY", "1")))
 TELEGRAPH_SEMAPHORE = asyncio.Semaphore(int(os.getenv("TELEGRAPH_CONCURRENCY", "1")))
 ICS_SEMAPHORE: asyncio.Semaphore | None = None
 
+# Skip creation/update of individual event Telegraph pages
+DISABLE_EVENT_PAGE_UPDATES = False
+
 
 def get_ics_semaphore() -> asyncio.Semaphore:
     global ICS_SEMAPHORE
@@ -7205,6 +7208,11 @@ async def ensure_event_telegraph_link(e: Event, fest: Festival | None, db: Datab
 
     If mismatch is detected, rebuild the Telegraph page to match the slug.
     """
+    global DISABLE_EVENT_PAGE_UPDATES
+    if DISABLE_EVENT_PAGE_UPDATES:
+        if not e.telegraph_url:
+            e.telegraph_url = e.source_post_url
+        return
     slug = festival_event_slug(e, fest)
     if not slug:
         return
@@ -11972,7 +11980,7 @@ async def rebuild_pages(
     force: bool = False,
 ) -> dict[str, dict[str, dict[str, list[str] | str]]]:
     logging.info(
-        "rebuild_pages start months=%s weekends=%s force=%s",
+        "pages_rebuild start months=%s weekends=%s force=%s",
         months,
         weekends,
         force,
@@ -11988,41 +11996,33 @@ async def rebuild_pages(
             prev_hash2 = prev.content_hash2 if prev else None
         try:
             if force:
-                await sync_month_page(db, month, update_links=True, force=True)
+                await sync_month_page(db, month, update_links=False, force=True)
             else:
                 await sync_month_page(db, month, update_links=True)
         except Exception as e:  # pragma: no cover
-            logging.error("nightly_page_sync month %s failed: %s", month, e)
+            logging.error("update month %s failed %s", month, e)
             months_failed[month] = str(e)
             continue
         async with db.get_session() as session:
             page = await session.get(MonthPage, month)
-        if page and (
-            force
-            or prev is None
-            or page.content_hash != prev_hash
-            or page.content_hash2 != prev_hash2
-        ):
+        if page and (force or prev is None or page.content_hash != prev_hash or page.content_hash2 != prev_hash2):
             urls = [u for u in [page.url, page.url2] if u]
             months_updated[month] = urls
-            logging.info(
-                "month sync %s: updated %d pages %s", month, len(urls), urls
-            )
+            for idx, u in enumerate(urls, start=1):
+                logging.info("update month %s part%d done %s", month, idx, u)
         else:
-            logging.info("month sync %s: no changes", month)
+            logging.info("update month %s no changes", month)
     for start in weekends:
         async with db.get_session() as session:
             prev = await session.get(WeekendPage, start)
             prev_hash = prev.content_hash if prev else None
         try:
             if force:
-                await sync_weekend_page(
-                    db, start, update_links=True, post_vk=False, force=True
-                )
+                await sync_weekend_page(db, start, update_links=False, post_vk=False, force=True)
             else:
                 await sync_weekend_page(db, start, update_links=True, post_vk=False)
         except Exception as e:  # pragma: no cover
-            logging.error("nightly_page_sync weekend %s failed: %s", start, e)
+            logging.error("update weekend %s failed %s", start, e)
             weekends_failed[start] = str(e)
             continue
         async with db.get_session() as session:
@@ -12030,16 +12030,11 @@ async def rebuild_pages(
         if page and (force or prev is None or page.content_hash != prev_hash):
             urls = [page.url] if page.url else []
             weekends_updated[start] = urls
-            logging.info(
-                "weekend sync %s: updated %d pages %s", start, len(urls), urls
-            )
+            for u in urls:
+                logging.info("update weekend %s done %s", start, u)
         else:
-            logging.info("weekend sync %s: no changes", start)
-    logging.info(
-        "rebuild_pages done months=%d weekends=%d",
-        len(months),
-        len(weekends),
-    )
+            logging.info("update weekend %s no changes", start)
+    logging.info("rebuild finished")
     return {
         "months": {"updated": months_updated, "failed": months_failed},
         "weekends": {"updated": weekends_updated, "failed": weekends_failed},
@@ -12670,37 +12665,55 @@ def _weekends_for_months(months: list[str]) -> tuple[list[str], dict[str, list[s
 
 async def _perform_pages_rebuild(db: Database, months: list[str], force: bool = False) -> str:
     weekends, mapping = _weekends_for_months(months)
-    result = await rebuild_pages(db, months, weekends, force=force)
+    global DISABLE_EVENT_PAGE_UPDATES
+    DISABLE_EVENT_PAGE_UPDATES = True
+    try:
+        result = await rebuild_pages(db, months, weekends, force=force)
+    finally:
+        DISABLE_EVENT_PAGE_UPDATES = False
+
     lines = ["Telegraph month rebuild:"]
     for m in months:
         failed = result["months"]["failed"].get(m)
-        urls = result["months"]["updated"].get(m)
+        urls = result["months"]["updated"].get(m, [])
         if failed:
             lines.append(f"❌ {m} — ошибка: {failed}")
-        elif urls:
-            lines.append(f"✅ {m} — обновлено: {len(urls)} страниц")
-            for u in urls:
-                lines.append(f"   • {u}")
         else:
-            lines.append(f"➖ {m} — без изменений")
-    lines.append("Telegraph weekends rebuild:")
+            lines.append(f"✅ {m} — обновлено:")
+            if len(urls) == 2:
+                lines.append(f"  • Часть 1: {urls[0]}")
+                lines.append(f"  • Часть 2: {urls[1]}")
+            elif len(urls) == 1:
+                lines.append(f"  • {urls[0]}")
+            else:
+                lines.append("  • отсутствует")
+
+    lines.append("\nTelegraph weekends rebuild:")
     for m in months:
         w_list = mapping.get(m, [])
-        updated: list[str] = []
-        failed_msgs: list[str] = []
+        total = len(w_list)
+        success = 0
+        month_lines: list[str] = []
         for w in w_list:
-            updated.extend(result["weekends"]["updated"].get(w, []))
+            label = format_weekend_range(date.fromisoformat(w))
+            urls = result["weekends"]["updated"].get(w, [])
             err = result["weekends"]["failed"].get(w)
-            if err:
-                failed_msgs.append(f"{w}: {err}")
-        if failed_msgs:
-            lines.append(f"❌ {m} — ошибка: {'; '.join(failed_msgs)}")
-        elif updated:
-            lines.append(f"✅ {m} — обновлено: {len(updated)} страниц")
-            for u in updated:
-                lines.append(f"   • {u}")
+            if urls:
+                success += 1
+                month_lines.append(f"  • {label}: ✅ {urls[0]}")
+            elif err:
+                status = "⏳ перенесено" if "flood" in err.lower() else "❌"
+                month_lines.append(f"  • {label}: {status} {err}")
+            else:
+                month_lines.append(f"  • {label}: ❌ неизвестно")
+        if success == total:
+            lines.append(f"✅ {m} — обновлено: {total} страниц")
+        elif success == 0:
+            lines.append(f"❌ {m} — ошибка:")
         else:
-            lines.append(f"➖ {m} — без изменений")
+            lines.append(f"☑️ {success} из {total} обновлены:")
+        lines.extend(month_lines)
+
     return "\n".join(lines)
 
 
