@@ -7401,49 +7401,100 @@ def locate_month_day_page(page_html_1: str, page_html_2: str | None, d: date) ->
     return 1
 
 
-async def ensure_month_split(db: Database, tg: Telegraph, month: str) -> None:
-    async with _page_locks[f"month:{month}"]:
-        async with db.get_session() as session:
-            page = await session.get(MonthPage, month)
-            if not page or not page.path:
-                return
-        events, exhibitions = await get_month_data(db, month)
-        nav_block = await build_month_nav_block(db)
-        from telegraph.utils import nodes_to_html
-        title, content, _ = await build_month_page_content(db, month, events, exhibitions)
-        html_full = unescape_html_comments(nodes_to_html(content))
-        html_full = replace_between_markers(
-            html_full, NAV_MONTHS_START, NAV_MONTHS_END, nav_block
-        )
-        size = len(html_full.encode())
-        if size <= TELEGRAPH_LIMIT:
-            return
-        avg = size / len(events) if events else size
-        split_idx = max(1, int(TELEGRAPH_LIMIT // avg)) if events else 0
+async def split_month_until_ok(
+    db: Database,
+    tg: Telegraph,
+    page: MonthPage,
+    month: str,
+    events: list[Event],
+    exhibitions: list[Exhibition],
+    nav_block: str,
+) -> None:
+    from telegraph.utils import nodes_to_html
+
+    title, content, _ = await build_month_page_content(db, month, events, exhibitions)
+    html_full = unescape_html_comments(nodes_to_html(content))
+    html_full = replace_between_markers(
+        html_full, NAV_MONTHS_START, NAV_MONTHS_END, nav_block
+    )
+    total_size = len(html_full.encode())
+    avg = total_size / len(events) if events else total_size
+    split_idx = min(len(events), max(1, int(TELEGRAPH_LIMIT // avg))) if events else 0
+    logging.info(
+        "month_split start month=%s events=%d split_idx=%d",
+        month,
+        len(events),
+        split_idx,
+    )
+    attempts = 0
+    while attempts < 50:
+        attempts += 1
         first, second = events[:split_idx], events[split_idx:]
-        logging.warning("month_patch split-inline month=%s", month)
-        # Second page
         title2, content2, _ = await build_month_page_content(
             db, month, second, exhibitions
         )
+        rough2 = rough_size(content2) + len(nav_block)
+        title1, content1, _ = await build_month_page_content(
+            db, month, first, [], continuation_url="x"
+        )
+        rough1 = rough_size(content1) + len(nav_block) + 200
+        logging.info(
+            "month_split try idx=%d rough1=%d rough2=%d", split_idx, rough1, rough2
+        )
+        if rough1 > TELEGRAPH_LIMIT and rough2 > TELEGRAPH_LIMIT:
+            logging.info("month_split forcing attempt idx=%d", split_idx)
+        elif rough1 > TELEGRAPH_LIMIT:
+            delta = max(1, split_idx // 6)
+            new_idx = max(1, split_idx - delta)
+            if new_idx != split_idx:
+                split_idx = new_idx
+                logging.info(
+                    "month_split adjust idx=%d reason=rough_size target=first", split_idx
+                )
+                continue
+        elif rough2 > TELEGRAPH_LIMIT:
+            delta = max(1, (len(events) - split_idx) // 6)
+            new_idx = min(len(events) - 1, split_idx + delta)
+            if new_idx != split_idx:
+                split_idx = new_idx
+                logging.info(
+                    "month_split adjust idx=%d reason=rough_size target=second", split_idx
+                )
+                continue
         html2 = unescape_html_comments(nodes_to_html(content2))
         html2 = replace_between_markers(
             html2, NAV_MONTHS_START, NAV_MONTHS_END, nav_block
         )
         hash2 = content_hash(html2)
-        if not page.path2:
-            logging.info("creating second page for %s", month)
-            data2 = await telegraph_create_page(tg, title=title2, html_content=html2)
-            page.url2 = normalize_telegraph_url(data2.get("url"))
-            page.path2 = data2.get("path")
-        else:
-            logging.info("updating second page for %s", month)
-            edit_start = _time.perf_counter()
-            await telegraph_edit_page(tg, page.path2, title=title2, html_content=html2)
-            edit_dur = (_time.perf_counter() - edit_start) * 1000
-            logging.info("editPage %s done in %.0f ms", page.path2, edit_dur)
+        try:
+            if not page.path2:
+                logging.info("creating second page for %s", month)
+                data2 = await telegraph_create_page(
+                    tg, title=title2, html_content=html2
+                )
+                page.url2 = normalize_telegraph_url(data2.get("url"))
+                page.path2 = data2.get("path")
+            else:
+                logging.info("updating second page for %s", month)
+                start = _time.perf_counter()
+                await telegraph_edit_page(
+                    tg, page.path2, title=title2, html_content=html2
+                )
+                dur = (_time.perf_counter() - start) * 1000
+                logging.info("editPage %s done in %.0f ms", page.path2, dur)
+        except TelegraphException as e:
+            msg = str(e).lower()
+            if "content" in msg and "too" in msg and "big" in msg:
+                delta = max(1, (len(events) - split_idx) // 6)
+                split_idx = min(len(events) - 1, split_idx + delta)
+                logging.info(
+                    "month_split adjust idx=%d reason=telegraph_too_big target=second",
+                    split_idx,
+                )
+                continue
+            raise
         page.content_hash2 = hash2
-        # First page
+        await asyncio.sleep(0)
         title1, content1, _ = await build_month_page_content(
             db, month, first, [], continuation_url=page.url2
         )
@@ -7452,11 +7503,33 @@ async def ensure_month_split(db: Database, tg: Telegraph, month: str) -> None:
             html1, NAV_MONTHS_START, NAV_MONTHS_END, nav_block
         )
         hash1 = content_hash(html1)
-        logging.info("updating first page for %s", month)
-        edit_start = _time.perf_counter()
-        await telegraph_edit_page(tg, page.path, title=title1, html_content=html1)
-        edit_dur = (_time.perf_counter() - edit_start) * 1000
-        logging.info("editPage %s done in %.0f ms", page.path, edit_dur)
+        try:
+            if not page.path:
+                logging.info("creating first page for %s", month)
+                data1 = await telegraph_create_page(
+                    tg, title=title1, html_content=html1
+                )
+                page.url = normalize_telegraph_url(data1.get("url"))
+                page.path = data1.get("path")
+            else:
+                logging.info("updating first page for %s", month)
+                start = _time.perf_counter()
+                await telegraph_edit_page(
+                    tg, page.path, title=title1, html_content=html1
+                )
+                dur = (_time.perf_counter() - start) * 1000
+                logging.info("editPage %s done in %.0f ms", page.path, dur)
+        except TelegraphException as e:
+            msg = str(e).lower()
+            if "content" in msg and "too" in msg and "big" in msg:
+                delta = max(1, split_idx // 6)
+                split_idx = max(1, split_idx - delta)
+                logging.info(
+                    "month_split adjust idx=%d reason=telegraph_too_big target=first",
+                    split_idx,
+                )
+                continue
+            raise
         page.content_hash = hash1
         async with db.get_session() as session:
             db_page = await session.get(MonthPage, month)
@@ -7467,6 +7540,10 @@ async def ensure_month_split(db: Database, tg: Telegraph, month: str) -> None:
             db_page.content_hash = page.content_hash
             db_page.content_hash2 = page.content_hash2
             await session.commit()
+        logging.info("month_split done month=%s idx=%d", month, split_idx)
+        return
+    logging.error("month_split failed month=%s attempts=%d", month, attempts)
+    raise TelegraphException("CONTENT_TOO_BIG")
 
 
 async def patch_month_page_for_date(
@@ -7641,7 +7718,15 @@ async def patch_month_page_for_date(
                 month_key,
                 d.isoformat(),
             )
-            await ensure_month_split(db, telegraph, month_key)
+            async with _page_locks[f"month:{month_key}"]:
+                events_m, exhibitions = await get_month_data(db, month_key)
+                nav_block = await build_month_nav_block(db)
+                await split_month_until_ok(
+                    db, telegraph, page, month_key, events_m, exhibitions, nav_block
+                )
+            logging.info(
+                "month_patch retry month=%s day=%s", month_key, d.isoformat()
+            )
             return await patch_month_page_for_date(
                 db, telegraph, month_key, d, _retried=True
             )
@@ -9547,99 +9632,6 @@ async def _sync_month_page_inner(
 
         from telegraph.utils import nodes_to_html
 
-        def split_events(total_size: int) -> tuple[list[Event], list[Event]]:
-            avg = total_size / len(events) if events else total_size
-            split_idx = max(1, int(TELEGRAPH_LIMIT // avg)) if events else 0
-            return events[:split_idx], events[split_idx:]
-
-        async def update_split(first: list[Event], second: list[Event]) -> None:
-            nonlocal created
-            title2, content2, _ = await build_month_page_content(
-                db, month, second, exhibitions
-            )
-            html2 = unescape_html_comments(nodes_to_html(content2))
-            html2 = replace_between_markers(
-                html2, NAV_MONTHS_START, NAV_MONTHS_END, nav_block
-            )
-            hash2 = content_hash(html2)
-            if page.path2 and page.content_hash2 == hash2:
-                logging.debug("telegraph_update skipped (no changes)")
-            else:
-                rough2 = rough_size(content2)
-                if not page.path2:
-                    logging.info("creating second page for %s", month)
-                    data2 = await telegraph_create_page(
-                        tg, title=title2, html_content=html2
-                    )
-                    page.url2 = normalize_telegraph_url(data2.get("url"))
-                    page.path2 = data2.get("path")
-                else:
-                    logging.info("updating second page for %s", month)
-                    start = _time.perf_counter()
-                    await telegraph_edit_page(
-                        tg, page.path2, title=title2, html_content=html2
-                    )
-                    dur = (_time.perf_counter() - start) * 1000
-                    logging.info("editPage %s done in %.0f ms", page.path2, dur)
-                logging.debug(
-                    "telegraph_update page=%s nodes=%d bytes≈%d",
-                    page.path2,
-                    len(content2),
-                    rough2,
-                )
-                page.content_hash2 = hash2
-                await asyncio.sleep(0)
-
-            title1, content1, _ = await build_month_page_content(
-                db,
-                month,
-                first,
-                [],
-                continuation_url=page.url2,
-            )
-            html1 = unescape_html_comments(nodes_to_html(content1))
-            html1 = replace_between_markers(
-                html1, NAV_MONTHS_START, NAV_MONTHS_END, nav_block
-            )
-            hash1 = content_hash(html1)
-            if page.path and page.content_hash == hash1:
-                logging.debug("telegraph_update skipped (no changes)")
-            else:
-                rough1 = rough_size(content1)
-                if not page.path:
-                    logging.info("creating first page for %s", month)
-                    data1 = await telegraph_create_page(
-                        tg, title=title1, html_content=html1
-                    )
-                    page.url = normalize_telegraph_url(data1.get("url"))
-                    page.path = data1.get("path")
-                    created = True
-                else:
-                    logging.info("updating first page for %s", month)
-                    start = _time.perf_counter()
-                    await telegraph_edit_page(
-                        tg, page.path, title=title1, html_content=html1
-                    )
-                    dur = (_time.perf_counter() - start) * 1000
-                    logging.info("editPage %s done in %.0f ms", page.path, dur)
-                logging.debug(
-                    "telegraph_update page=%s nodes=%d bytes≈%d",
-                    page.path,
-                    len(content1),
-                    rough1,
-                )
-                page.content_hash = hash1
-                await asyncio.sleep(0)
-
-            logging.debug("month nav replaced with filtered block")
-
-            logging.info(
-                "%s month page %s split into two",
-                "Created" if created else "Edited",
-                month,
-            )
-            await commit_page()
-
         title, content, _ = await build_month_page_content(
             db, month, events, exhibitions
         )
@@ -9687,33 +9679,45 @@ async def _sync_month_page_inner(
                 )
                 await commit_page()
             else:
-                first, second = split_events(size)
                 logging.info(
                     "sync_month_page: splitting %s (events=%d)",
                     month,
                     len(events),
                 )
-                await update_split(first, second)
+                had_path = bool(page.path)
+                await split_month_until_ok(
+                    db, tg, page, month, events, exhibitions, nav_block
+                )
+                if not had_path and page.path:
+                    created = True
         except TelegraphException as e:
             msg = str(e).lower()
             if all(word in msg for word in ("content", "too", "big")):
-                first, second = split_events(size)
                 logging.warning("Month page %s too big, splitting", month)
-                await update_split(first, second)
+                had_path = bool(page.path)
+                await split_month_until_ok(
+                    db, tg, page, month, events, exhibitions, nav_block
+                )
+                if not had_path and page.path:
+                    created = True
             else:
                 logging.error("Failed to sync month page %s: %s", month, e)
                 raise
         except Exception as e:
             msg = str(e).lower()
             if all(word in msg for word in ("content", "too", "big")):
-                first, second = split_events(size)
                 logging.info(
                     "sync_month_page: splitting %s (events=%d)",
                     month,
                     len(events),
                 )
                 logging.warning("Month page %s too big, splitting", month)
-                await update_split(first, second)
+                had_path = bool(page.path)
+                await split_month_until_ok(
+                    db, tg, page, month, events, exhibitions, nav_block
+                )
+                if not had_path and page.path:
+                    created = True
             else:
                 logging.error("Failed to sync month page %s: %s", month, e)
 

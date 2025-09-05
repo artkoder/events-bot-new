@@ -80,26 +80,43 @@ async def test_patch_month_page_handles_content_too_big(tmp_path, monkeypatch):
     html = PERM_START + "perm" + PERM_END
 
     class FakeTelegraph:
+        def __init__(self):
+            self.calls = 0
+
         def get_page(self, path, return_html=True):
-            assert path == "p"
-            return {"content_html": html, "title": "Title"}
+            assert path in ("p", "p2")
+            return {"content_html": html if path == "p" else "", "title": "Title"}
 
-        def edit_page(self, path, title, html_content, **kwargs):
-            raise main.TelegraphException("CONTENT_TOO_BIG")
+        def edit_page(self, path, title=None, html_content=None, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                raise main.TelegraphException("CONTENT_TOO_BIG")
+            return {"path": path}
 
-    called = False
-
-    async def fake_sync(db_obj, month_key, update_links=False, **kwargs):
-        nonlocal called
-        called = True
-
-    monkeypatch.setattr(main, "sync_month_page", fake_sync)
+        def create_page(self, title=None, content=None, html_content=None, **kwargs):
+            return {"url": "u2", "path": "p2"}
 
     tg = FakeTelegraph()
-    changed = await main.patch_month_page_for_date(db, tg, "2025-08", date(2025, 8, 15))
-    assert changed == "rebuild"
-    assert called is True
-    h = await main.get_section_hash(db, "telegraph:month:2025-08", "day:2025-08-15")
+
+    async def create_page_async(tg_obj, *a, **k):
+        return tg_obj.create_page(*a, **k)
+
+    async def edit_page_async(tg_obj, path, **k):
+        return tg_obj.edit_page(path, **k)
+
+    monkeypatch.setattr(main, "telegraph_create_page", create_page_async)
+    monkeypatch.setattr(main, "telegraph_edit_page", edit_page_async)
+
+    changed = await main.patch_month_page_for_date(
+        db, tg, "2025-08", date(2025, 8, 15)
+    )
+    assert changed is True
+    async with db.get_session() as session:
+        page = await session.get(main.MonthPage, "2025-08")
+    assert page.url2 is not None
+    h = await main.get_section_hash(
+        db, "telegraph:month:2025-08", "day:2025-08-15"
+    )
     assert h is not None
 
 
