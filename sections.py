@@ -1,8 +1,9 @@
 import re
+import logging
 import hashlib
 from dataclasses import dataclass
 from datetime import date
-from typing import Any, List
+from typing import Any, List, Tuple
 
 
 def normalize_html(s: str) -> str:
@@ -55,7 +56,7 @@ class DaySection:
     end_idx: int
 
 
-def _nodes_from_html(html_or_nodes: Any) -> List[dict]:
+def _nodes_from_html(html_or_nodes: Any) -> List[dict | str]:
     if isinstance(html_or_nodes, str):
         from telegraph.utils import html_to_nodes
 
@@ -63,8 +64,27 @@ def _nodes_from_html(html_or_nodes: Any) -> List[dict]:
     return html_or_nodes
 
 
-def parse_month_sections(html_or_nodes: Any) -> List[DaySection]:
+def _header_text(node: dict) -> List[str]:
+    parts: List[str] = []
+    for ch in node.get("children", []):
+        if isinstance(ch, str):
+            parts.append(ch)
+        elif isinstance(ch, dict):
+            parts.extend(_header_text(ch))
+    return parts
+
+
+MONTH_RE = re.compile(
+    r"(\d{1,2})\s+(января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)"
+)
+
+
+def parse_month_sections(html_or_nodes: Any) -> Tuple[List[DaySection], bool]:
     """Return sections for each day found by ``h3`` headers.
+
+    Returns a tuple ``(sections, need_rebuild)`` where ``need_rebuild`` is
+    ``True`` when no ``h3`` headers were found which signals the caller to
+    perform a full rebuild.
 
     The function does not modify or normalise nodes; zero‑width spaces and
     other whitespace are preserved as is.  The returned ``start_idx`` points to
@@ -74,18 +94,19 @@ def parse_month_sections(html_or_nodes: Any) -> List[DaySection]:
 
     nodes = _nodes_from_html(html_or_nodes)
     sections: List[DaySection] = []
-    h3_positions = [i for i, n in enumerate(nodes) if n.get("tag") == "h3"]
+    h3_positions = [
+        i for i, n in enumerate(nodes) if isinstance(n, dict) and n.get("tag") == "h3"
+    ]
+    if not h3_positions:
+        logging.warning("month_rebuild_markers_missing")
+        return sections, True
     for idx, pos in enumerate(h3_positions):
         node = nodes[pos]
-        text_parts = []
-        for ch in node.get("children", []):
-            if isinstance(ch, str):
-                text_parts.append(ch)
-        text = "".join(text_parts)
+        text = "".join(_header_text(node))
         # remove emojis and extra spaces
         clean = re.sub(r"[^\w\s]", " ", text, flags=re.UNICODE)
         clean = re.sub(r"\s+", " ", clean).strip().lower()
-        m = re.match(r"(\d{1,2})\s+([а-я]+)", clean)
+        m = MONTH_RE.match(clean)
         if not m:
             continue
         day = int(m.group(1))
@@ -93,11 +114,10 @@ def parse_month_sections(html_or_nodes: Any) -> List[DaySection]:
         month = MONTHS_RU.get(month_name)
         if not month:
             continue
-        # year is irrelevant for ordering; use a placeholder
         d = date(2000, month, day)
         next_pos = h3_positions[idx + 1] if idx + 1 < len(h3_positions) else len(nodes)
         sections.append(
             DaySection(date=d, h3_idx=pos, start_idx=pos + 1, end_idx=next_pos)
         )
-    return sections
+    return sections, False
 
