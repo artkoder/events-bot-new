@@ -97,10 +97,6 @@ WEND_START = lambda key: Marker(f"<!--WEEKEND:{key} START-->")
 WEND_END = lambda key: Marker(f"<!--WEEKEND:{key} END-->")
 PERM_START: Marker = Marker("<!--PERMANENT_EXHIBITIONS START-->")
 PERM_END: Marker = Marker("<!--PERMANENT_EXHIBITIONS END-->")
-# Month navigation markers for month pages
-NAV_MONTHS_START: Marker = Marker("<!-- nav-months:start -->")
-NAV_MONTHS_END: Marker = Marker("<!-- nav-months:end -->")
-
 # Canonical festival navigation markers used across the project
 # ``FEST_NAV_*`` names are kept for backwards compatibility but map to the
 # new ``near-festivals`` markers required by the idempotent block logic.

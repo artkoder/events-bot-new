@@ -2967,9 +2967,7 @@ async def test_month_nav_and_exhibitions(tmp_path: Path, monkeypatch):
     _, content, _ = await main.build_month_page_content(db, "2025-07")
     html = main.unescape_html_comments(nodes_to_html(content))
     nav_block = await main.build_month_nav_block(db, "2025-07")
-    html = main.replace_between_markers(
-        html, main.NAV_MONTHS_START, main.NAV_MONTHS_END, nav_block
-    )
+    html = main.ensure_footer_nav_with_hr(html, nav_block, month="2025-07", page=1)
     assert 'href="m2"' in html
 
     idx_exh = next(

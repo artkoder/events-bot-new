@@ -61,9 +61,7 @@ async def test_footer_links_propagate_across_all_month_pages(tmp_path: Path, mon
         nav_block = await main.build_month_nav_block(db, m)
         _, content, _ = await main.build_month_page_content(db, m)
         html = main.unescape_html_comments(nodes_to_html(content))
-        html = main.replace_between_markers(
-            html, main.NAV_MONTHS_START, main.NAV_MONTHS_END, nav_block
-        )
+        html = main.ensure_footer_nav_with_hr(html, nav_block, month=m, page=1)
         for other in months:
             name = main.month_name_nominative(other)
             if other == m:
@@ -114,11 +112,9 @@ async def test_month_nav_skips_past_and_empty(tmp_path: Path, monkeypatch):
 
     _, content_aug, _ = await main.build_month_page_content(db, "2025-08")
     html_aug = main.unescape_html_comments(nodes_to_html(content_aug))
-    assert html_aug.count(main.NAV_MONTHS_START) == 1
-    assert html_aug.count(main.NAV_MONTHS_END) == 1
     nav_block_aug = await main.build_month_nav_block(db, "2025-08")
-    html_aug = main.replace_between_markers(
-        html_aug, main.NAV_MONTHS_START, main.NAV_MONTHS_END, nav_block_aug
+    html_aug = main.ensure_footer_nav_with_hr(
+        html_aug, nav_block_aug, month="2025-08", page=1
     )
     assert '<h4>август <a href="https://t.me/2025-09">сентябрь</a> <a href="https://t.me/2025-11">ноябрь</a></h4>' in html_aug
     assert "июль" not in html_aug
@@ -127,8 +123,8 @@ async def test_month_nav_skips_past_and_empty(tmp_path: Path, monkeypatch):
     _, content_sep, _ = await main.build_month_page_content(db, "2025-09")
     html_sep = main.unescape_html_comments(nodes_to_html(content_sep))
     nav_block_sep = await main.build_month_nav_block(db, "2025-09")
-    html_sep = main.replace_between_markers(
-        html_sep, main.NAV_MONTHS_START, main.NAV_MONTHS_END, nav_block_sep
+    html_sep = main.ensure_footer_nav_with_hr(
+        html_sep, nav_block_sep, month="2025-09", page=1
     )
     assert '<h4><a href="https://t.me/2025-08">август</a> сентябрь <a href="https://t.me/2025-11">ноябрь</a></h4>' in html_sep
     assert "октябрь" not in html_sep
@@ -149,8 +145,8 @@ async def test_month_nav_skips_past_and_empty(tmp_path: Path, monkeypatch):
     nav_block2 = await main.build_month_nav_block(db, "2025-08")
     _, content_aug2, _ = await main.build_month_page_content(db, "2025-08")
     html_aug2 = main.unescape_html_comments(nodes_to_html(content_aug2))
-    html_aug2 = main.replace_between_markers(
-        html_aug2, main.NAV_MONTHS_START, main.NAV_MONTHS_END, nav_block2
+    html_aug2 = main.ensure_footer_nav_with_hr(
+        html_aug2, nav_block2, month="2025-08", page=1
     )
     assert '<a href="https://t.me/2025-08">' not in html_aug2
     assert '<h4><a href="https://t.me/2025-09">сентябрь</a> <a href="https://t.me/2025-11">ноябрь</a></h4>' in html_aug2
