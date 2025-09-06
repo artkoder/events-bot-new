@@ -134,7 +134,7 @@ from markup import (
     expose_links_for_vk,
     sanitize_for_vk,
 )
-from sections import replace_between_markers, content_hash
+from sections import replace_between_markers, content_hash, parse_month_sections
 from db import Database
 from scheduling import startup as scheduler_startup, cleanup as scheduler_cleanup
 from sqlalchemy import select, update, delete, text, func, or_
@@ -7827,43 +7827,55 @@ async def patch_month_page_for_date(
         "page2" if part == 2 else "page1",
     )
 
-    start_marker = DAY_START(d)
-    end_marker = DAY_END(d)
-    legacy_start = f"<!-- DAY:{d.isoformat()} START -->"
-    legacy_end = f"<!-- DAY:{d.isoformat()} END -->"
-    legacy_header = f"<h3>🟥🟥🟥 {format_day_pretty(d)} 🟥🟥🟥</h3>"
-
-    if start_marker in html_content and end_marker in html_content:
-        marker_type = "new"
-        updated_html = replace_between_markers(
-            html_content, start_marker, end_marker, html_section
-        )
-    elif legacy_start in html_content and legacy_end in html_content:
-        marker_type = "legacy"
-        updated_html = replace_between_markers(
-            html_content, legacy_start, legacy_end, html_section
-        )
-        updated_html = updated_html.replace(legacy_start, start_marker).replace(
-            legacy_end, end_marker
-        )
-    elif legacy_header in html_content:
-        marker_type = "legacy"
-        updated_html = html_content.replace(
-            legacy_header, f"{start_marker}{html_section}{end_marker}"
-        )
-    else:
-        marker_type = "none"
-        html_content, _ = ensure_day_markers(html_content, d)
-        updated_html = replace_between_markers(
-            html_content, start_marker, end_marker, html_section
-        )
-
     logging.info(
-        "month_patch choose page=%s day=%s marker=%s",
-        "path2" if hash_attr == "content_hash2" else "path",
-        d.isoformat(),
-        marker_type,
+        "patch_month_day update_links=True anchor=h3 part=%s",
+        2 if hash_attr == "content_hash2" else 1,
     )
+
+    header = f"<h3>🟥🟥🟥 {format_day_pretty(d)} 🟥🟥🟥</h3>"
+    sections = parse_month_sections(html_content)
+    sec = next(
+        (s for s in sections if s.date.month == d.month and s.date.day == d.day),
+        None,
+    )
+    if sec:
+        # replace existing section
+        header_idx = html_content.find(header)
+        start_idx = html_content.rfind("<p", 0, header_idx)
+        if start_idx == -1:
+            start_idx = header_idx
+        next_sec = next((s for s in sections if s.h3_idx > sec.h3_idx), None)
+        if next_sec:
+            next_header = f"<h3>🟥🟥🟥 {format_day_pretty(date(d.year, next_sec.date.month, next_sec.date.day))} 🟥🟥🟥</h3>"
+            next_header_idx = html_content.find(next_header)
+            end_idx = html_content.rfind("<p", 0, next_header_idx)
+            if end_idx == -1:
+                end_idx = next_header_idx
+        else:
+            end_idx = html_content.find(PERM_START)
+            if end_idx == -1:
+                end_idx = len(html_content)
+        updated_html = html_content[:start_idx] + html_section + html_content[end_idx:]
+    else:
+        # insert new section
+        sections_sorted = sorted(sections, key=lambda s: (s.date.month, s.date.day))
+        insert_idx = None
+        for s in sections_sorted:
+            if (d.month, d.day) < (s.date.month, s.date.day):
+                next_header = f"<h3>🟥🟥🟥 {format_day_pretty(date(d.year, s.date.month, s.date.day))} 🟥🟥🟥</h3>"
+                next_header_idx = html_content.find(next_header)
+                insert_idx = html_content.rfind("<p", 0, next_header_idx)
+                if insert_idx == -1:
+                    insert_idx = next_header_idx
+                break
+        if insert_idx is None:
+            insert_idx = html_content.find(PERM_START)
+            if insert_idx == -1:
+                insert_idx = len(html_content)
+        updated_html = html_content[:insert_idx] + html_section + html_content[insert_idx:]
+        logging.info("patch_month_day insert_missing_section")
+
+    updated_html, _ = ensure_day_markers(updated_html, d)
 
     changed = content_hash(updated_html) != content_hash(html_content)
     updated_html = lint_telegraph_html(updated_html)
@@ -9038,8 +9050,9 @@ def format_event_md(e: Event, festival: Festival | None = None) -> str:
         cam = "\U0001f4f8" * max(0, e.photo_count)
         prefix = f"{cam} " if cam else ""
         more_line = f"{prefix}[подробнее]({e.telegraph_url})"
-        if e.ics_url:
-            more_line += f" \U0001f4c5 [добавить в календарь]({e.ics_url})"
+        ics = e.ics_url or e.ics_post_url
+        if ics:
+            more_line += f" \U0001f4c5 [добавить в календарь]({ics})"
         lines.append(more_line)
     loc = e.location_name
     addr = e.location_address
