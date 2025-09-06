@@ -5813,23 +5813,29 @@ async def schedule_event_update_tasks(
 ) -> dict[JobTask, str]:
     eid = ev.id
     results: dict[JobTask, str] = {}
-    results[JobTask.telegraph_build] = await enqueue_job(
-        db, eid, JobTask.telegraph_build
-    )
+    ics_dep: str | None = None
     if ev.time and "ics_publish" in JOB_HANDLERS:
-        results[JobTask.ics_publish] = await enqueue_job(
-            db, eid, JobTask.ics_publish
-        )
-    results[JobTask.month_pages] = await enqueue_job(db, eid, JobTask.month_pages)
+        ics_dep = await enqueue_job(db, eid, JobTask.ics_publish, depends_on=None)
+        results[JobTask.ics_publish] = ics_dep
+    telegraph_dep = [ics_dep] if ics_dep else None
+    results[JobTask.telegraph_build] = await enqueue_job(
+        db, eid, JobTask.telegraph_build, depends_on=telegraph_dep
+    )
+    page_deps = [results[JobTask.telegraph_build]]
+    if ics_dep:
+        page_deps.append(ics_dep)
+    results[JobTask.month_pages] = await enqueue_job(
+        db, eid, JobTask.month_pages, depends_on=page_deps
+    )
     d = parse_iso_date(ev.date)
     if d:
         results[JobTask.week_pages] = await enqueue_job(
-            db, eid, JobTask.week_pages
+            db, eid, JobTask.week_pages, depends_on=page_deps
         )
         w_start = weekend_start_for_date(d)
         if w_start:
             results[JobTask.weekend_pages] = await enqueue_job(
-                db, eid, JobTask.weekend_pages
+                db, eid, JobTask.weekend_pages, depends_on=page_deps
             )
     if ev.festival:
         results[JobTask.festival_pages] = await enqueue_job(
@@ -7833,7 +7839,9 @@ async def patch_month_page_for_date(
     )
 
     header = f"<h3>🟥🟥🟥 {format_day_pretty(d)} 🟥🟥🟥</h3>"
-    sections = parse_month_sections(html_content)
+    sections, need_rebuild = parse_month_sections(html_content)
+    if need_rebuild:
+        return "rebuild"
     sec = next(
         (s for s in sections if s.date.month == d.month and s.date.day == d.day),
         None,
