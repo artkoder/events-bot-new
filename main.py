@@ -12867,6 +12867,20 @@ def _expand_months(months: list[str], past: int, future: int) -> list[str]:
     return res
 
 
+async def _future_months_with_events(db: Database) -> list[str]:
+    today = date.today().replace(day=1).isoformat()
+    rows = await db.exec_driver_sql(
+        """
+        SELECT DISTINCT substr(date, 1, 7) as m
+        FROM event
+        WHERE date >= ?
+        ORDER BY m
+        """,
+        (today,),
+    )
+    return [r[0] for r in rows]
+
+
 def _weekends_for_months(months: list[str]) -> tuple[list[str], dict[str, list[str]]]:
     weekends: set[str] = set()
     mapping: dict[str, list[str]] = defaultdict(list)
@@ -12965,7 +12979,9 @@ def _parse_pages_rebuild_args(text: str) -> tuple[list[str], int, int, bool]:
 async def handle_pages_rebuild(message: types.Message, db: Database, bot: Bot):
     months, past, future, _ = _parse_pages_rebuild_args(message.text or "")
     if not months and (message.text or "").strip() == "/pages_rebuild":
-        options = _expand_months([], past, future)
+        options = await _future_months_with_events(db)
+        if not options:
+            options = _expand_months([], past, future)
         buttons = [
             [types.InlineKeyboardButton(text=m, callback_data=f"pages_rebuild:{m}")]
             for m in options
@@ -12991,7 +13007,9 @@ async def handle_pages_rebuild_cb(
     await callback.answer()
     val = callback.data.split(":", 1)[1]
     if val.upper() == "ALL":
-        months = _expand_months([], 0, 2)
+        months = await _future_months_with_events(db)
+        if not months:
+            months = _expand_months([], 0, 2)
     else:
         months = [val]
     report = await _perform_pages_rebuild(db, months, force=True)
