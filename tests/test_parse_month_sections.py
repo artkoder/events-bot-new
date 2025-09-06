@@ -15,3 +15,13 @@ def test_parse_month_sections_basic():
     assert sections[0].start_idx == 1
     assert sections[0].end_idx == 4
     assert sections[1].start_idx == 5
+
+
+def test_parse_month_sections_spaces_and_case():
+    html = (
+        '<h3>🟥🟥🟥  9  СЕНТЯБРЯ  🟥🟥🟥</h3>'
+        '<p>\u200b</p>'
+    )
+    sections = parse_month_sections(html)
+    assert len(sections) == 1
+    assert sections[0].date == date(2000, 9, 9)
