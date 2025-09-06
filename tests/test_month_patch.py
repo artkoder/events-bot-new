@@ -133,3 +133,120 @@ async def test_patch_split_updates_second_part(tmp_path):
     assert tg.edits[0][0] == "p2"
     assert "https://t.me/test" in tg.edits[0][1]
     assert "https://sup.ics" in tg.edits[0][1]
+
+
+@pytest.mark.asyncio
+async def test_patch_replace_keeps_position(tmp_path):
+    db = main.Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    async with db.get_session() as session:
+        session.add(MonthPage(month="2025-09", url="u", path="p"))
+        session.add(
+            Event(
+                title="Concert",
+                description="desc",
+                date="2025-09-27",
+                time="12:00",
+                location_name="loc",
+                source_text="src",
+                telegraph_url="https://t.me/test",
+                ics_url="https://sup.ics",
+            )
+        )
+        await session.commit()
+
+    html = (
+        main.render_month_day_section(date(2025, 9, 26), [])
+        + main.render_month_day_section(date(2025, 9, 27), [])
+        + main.render_month_day_section(date(2025, 9, 28), [])
+        + "<hr><p>nav</p>"
+    )
+    tg = FakeTelegraph(html)
+
+    changed = await main.patch_month_page_for_date(db, tg, "2025-09", date(2025, 9, 27))
+    assert changed is True
+    edited = tg.edited_html
+    assert edited.count("27 сентября") == 1
+    assert edited.index("26 сентября") < edited.index("27 сентября") < edited.index("28 сентября")
+    tail = edited.split("<hr>")[-1]
+    assert "<h3>" not in tail
+
+    tg.edited_html = None
+    changed2 = await main.patch_month_page_for_date(db, tg, "2025-09", date(2025, 9, 27))
+    assert changed2 is False
+    assert tg.edited_html is None
+
+
+@pytest.mark.asyncio
+async def test_patch_insert_sorted_between_dates(tmp_path):
+    db = main.Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    async with db.get_session() as session:
+        session.add(MonthPage(month="2025-09", url="u", path="p"))
+        session.add(
+            Event(
+                title="Concert",
+                description="desc",
+                date="2025-09-27",
+                time="12:00",
+                location_name="loc",
+                source_text="src",
+                telegraph_url="https://t.me/test",
+                ics_url="https://sup.ics",
+            )
+        )
+        await session.commit()
+
+    html = (
+        main.render_month_day_section(date(2025, 9, 26), [])
+        + main.render_month_day_section(date(2025, 9, 28), [])
+        + "<hr><p>nav</p>"
+    )
+    tg = FakeTelegraph(html)
+
+    changed = await main.patch_month_page_for_date(db, tg, "2025-09", date(2025, 9, 27))
+    assert changed is True
+    edited = tg.edited_html
+    assert edited.index("26 сентября") < edited.index("27 сентября") < edited.index("28 сентября")
+    tail = edited.split("<hr>")[-1]
+    assert "<h3>" not in tail
+
+    tg.edited_html = None
+    changed2 = await main.patch_month_page_for_date(db, tg, "2025-09", date(2025, 9, 27))
+    assert changed2 is False
+    assert tg.edited_html is None
+
+
+@pytest.mark.asyncio
+async def test_patch_insert_before_hr(tmp_path):
+    db = main.Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    async with db.get_session() as session:
+        session.add(MonthPage(month="2025-09", url="u", path="p"))
+        session.add(
+            Event(
+                title="Concert",
+                description="desc",
+                date="2025-09-30",
+                time="12:00",
+                location_name="loc",
+                source_text="src",
+                telegraph_url="https://t.me/test",
+                ics_url="https://sup.ics",
+            )
+        )
+        await session.commit()
+
+    html = (
+        main.render_month_day_section(date(2025, 9, 28), [])
+        + "<hr><p>nav</p>"
+    )
+    tg = FakeTelegraph(html)
+
+    changed = await main.patch_month_page_for_date(db, tg, "2025-09", date(2025, 9, 30))
+    assert changed is True
+    edited = tg.edited_html
+    assert "28 сентября" in edited and "30 сентября" in edited
+    assert edited.index("28 сентября") < edited.index("30 сентября")
+    tail = edited.split("<hr>")[-1]
+    assert "<h3>" not in tail

@@ -1,6 +1,7 @@
 import re
 import logging
 import hashlib
+import unicodedata
 from dataclasses import dataclass
 from datetime import date
 from typing import Any, List, Tuple
@@ -127,10 +128,15 @@ MONTHS_RU = {
 
 @dataclass
 class DaySection:
-    """Descriptor for a day's section on a month page."""
+    """Descriptor for a day's section on a month page.
+
+    ``start_idx`` points to the index of the ``<h3>`` header describing the
+    date.  ``end_idx`` points to the index of the next date header or the first
+    ``<hr>`` encountered afterwards.  The slice ``nodes[start_idx:end_idx]``
+    therefore contains the entire day's section including the header.
+    """
 
     date: date
-    h3_idx: int
     start_idx: int
     end_idx: int
 
@@ -161,42 +167,70 @@ MONTH_RE = re.compile(
 def parse_month_sections(html_or_nodes: Any) -> Tuple[List[DaySection], bool]:
     """Return sections for each day found by ``h3`` headers.
 
-    Returns a tuple ``(sections, need_rebuild)`` where ``need_rebuild`` is
-    ``True`` when no ``h3`` headers were found which signals the caller to
-    perform a full rebuild.
-
-    The function does not modify or normalise nodes; zero‑width spaces and
-    other whitespace are preserved as is.  The returned ``start_idx`` points to
-    the first node following the ``h3`` header.  ``end_idx`` points to the index
-    of the next ``h3`` or the end of the node list.
+    The function walks through the node list, recognising ``h3`` headers that
+    contain dates in the form ``DD <month_genitive>`` and ignoring other
+    headers such as weekdays.  The returned ``start_idx`` points to the index of
+    the date's ``<h3>``; ``end_idx`` points to the index of the next date header
+    or the first ``<hr>`` encountered after the section.  When no date headers
+    are found the second item of the returned tuple is ``True`` signalling the
+    caller to rebuild the entire page.
     """
 
     nodes = _nodes_from_html(html_or_nodes)
     sections: List[DaySection] = []
-    h3_positions = [
-        i for i, n in enumerate(nodes) if isinstance(n, dict) and n.get("tag") == "h3"
-    ]
-    if not h3_positions:
+    if not any(isinstance(n, dict) and n.get("tag") == "h3" for n in nodes):
         logging.warning("month_rebuild_markers_missing")
         return sections, True
-    for idx, pos in enumerate(h3_positions):
-        node = nodes[pos]
+
+    date_h3_indices: List[int] = []
+    for idx, node in enumerate(nodes):
+        if not (isinstance(node, dict) and node.get("tag") == "h3"):
+            continue
         text = "".join(_header_text(node))
-        # remove emojis and extra spaces
-        clean = re.sub(r"[^\w\s]", " ", text, flags=re.UNICODE)
-        clean = re.sub(r"\s+", " ", clean).strip().lower()
-        m = MONTH_RE.match(clean)
+        text = text.replace("\u00a0", " ").replace("\u200b", " ")
+        text = unicodedata.normalize("NFKC", text).strip().lower()
+        m = MONTH_RE.fullmatch(text)
         if not m:
             continue
         day = int(m.group(1))
-        month_name = m.group(2)
-        month = MONTHS_RU.get(month_name)
-        if not month:
-            continue
-        d = date(2000, month, day)
-        next_pos = h3_positions[idx + 1] if idx + 1 < len(h3_positions) else len(nodes)
-        sections.append(
-            DaySection(date=d, h3_idx=pos, start_idx=pos + 1, end_idx=next_pos)
-        )
+        month = MONTHS_RU[m.group(2)]
+        date_h3_indices.append(idx)
+        sections.append(DaySection(date=date(2000, month, day), start_idx=idx, end_idx=len(nodes)))
+
+    # determine end indices
+    if not sections:
+        return sections, False
+    for i, sec in enumerate(sections):
+        # search until next date_h3 or hr
+        search_limit = sections[i + 1].start_idx if i + 1 < len(sections) else len(nodes)
+        end = search_limit
+        for j in range(sec.start_idx + 1, search_limit):
+            n = nodes[j]
+            if isinstance(n, dict) and n.get("tag") == "hr":
+                end = j
+                break
+        sec.end_idx = end
+
     return sections, False
+
+
+def dedup_same_date(nodes: List[Any], target: date) -> Tuple[List[Any], int]:
+    """Remove duplicate sections for ``target`` date keeping the first one.
+
+    The ``nodes`` list is modified in place and returned.  The function returns
+    the possibly modified node list and the number of removed duplicate
+    sections.
+    """
+
+    sections, _ = parse_month_sections(nodes)
+    dupes = [
+        s
+        for s in sections
+        if s.date.month == target.month and s.date.day == target.day
+    ]
+    removed = 0
+    for sec in reversed(dupes[1:]):
+        del nodes[sec.start_idx:sec.end_idx]
+        removed += 1
+    return nodes, removed
 

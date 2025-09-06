@@ -58,7 +58,7 @@ def logline(tag: str, eid: int | None, msg: str, **kw) -> None:
 
 from datetime import date, datetime, timedelta, timezone, time
 from zoneinfo import ZoneInfo
-from typing import Optional, Tuple, Iterable, Any, Callable, Awaitable
+from typing import Optional, Tuple, Iterable, Any, Callable, Awaitable, List
 from urllib.parse import urlparse, parse_qs
 import uuid
 import textwrap
@@ -137,6 +137,7 @@ from sections import (
     content_hash,
     parse_month_sections,
     ensure_footer_nav_with_hr,
+    dedup_same_date,
 )
 from db import Database
 from scheduling import startup as scheduler_startup, cleanup as scheduler_cleanup
@@ -7784,50 +7785,79 @@ async def patch_month_page_for_date(
         2 if hash_attr == "content_hash2" else 1,
     )
 
-    header = f"<h3>🟥🟥🟥 {format_day_pretty(d)} 🟥🟥🟥</h3>"
-    sections, need_rebuild = parse_month_sections(html_content)
+    from telegraph.utils import html_to_nodes, nodes_to_html
+
+    nodes = html_to_nodes(html_content)
+    sections, need_rebuild = parse_month_sections(nodes)
     if need_rebuild:
         return "rebuild"
-    sec = next(
+
+    logging.info(
+        "TG-MONTH dates=%s page=%s",
+        [date(d.year, s.date.month, s.date.day).isoformat() for s in sections],
+        part,
+    )
+
+    day_nodes = html_to_nodes(html_section)
+
+    target_sec = next(
         (s for s in sections if s.date.month == d.month and s.date.day == d.day),
         None,
     )
-    if sec:
-        # replace existing section
-        header_idx = html_content.find(header)
-        start_idx = html_content.rfind("<p", 0, header_idx)
-        if start_idx == -1:
-            start_idx = header_idx
-        next_sec = next((s for s in sections if s.h3_idx > sec.h3_idx), None)
-        if next_sec:
-            next_header = f"<h3>🟥🟥🟥 {format_day_pretty(date(d.year, next_sec.date.month, next_sec.date.day))} 🟥🟥🟥</h3>"
-            next_header_idx = html_content.find(next_header)
-            end_idx = html_content.rfind("<p", 0, next_header_idx)
-            if end_idx == -1:
-                end_idx = next_header_idx
-        else:
-            end_idx = html_content.find(PERM_START)
-            if end_idx == -1:
-                end_idx = len(html_content)
-        updated_html = html_content[:start_idx] + html_section + html_content[end_idx:]
+
+    anchor: str
+    if target_sec:
+        nodes[target_sec.start_idx : target_sec.end_idx] = day_nodes
+        anchor = "replace"
     else:
-        # insert new section
-        sections_sorted = sorted(sections, key=lambda s: (s.date.month, s.date.day))
-        insert_idx = None
-        for s in sections_sorted:
-            if (d.month, d.day) < (s.date.month, s.date.day):
-                next_header = f"<h3>🟥🟥🟥 {format_day_pretty(date(d.year, s.date.month, s.date.day))} 🟥🟥🟥</h3>"
-                next_header_idx = html_content.find(next_header)
-                insert_idx = html_content.rfind("<p", 0, next_header_idx)
-                if insert_idx == -1:
-                    insert_idx = next_header_idx
-                break
-        if insert_idx is None:
-            insert_idx = html_content.find(PERM_START)
-            if insert_idx == -1:
-                insert_idx = len(html_content)
-        updated_html = html_content[:insert_idx] + html_section + html_content[insert_idx:]
-        logging.info("patch_month_day insert_missing_section")
+        after_sec = next(
+            (
+                s
+                for s in sections
+                if (s.date.month, s.date.day) > (d.month, d.day)
+            ),
+            None,
+        )
+
+        def _index_before_last_hr(nodes_list: List[Any]) -> int:
+            for idx in range(len(nodes_list) - 1, -1, -1):
+                n = nodes_list[idx]
+                if isinstance(n, dict) and n.get("tag") == "hr":
+                    return idx
+                if (
+                    isinstance(n, dict)
+                    and n.get("tag") in {"p", "figure"}
+                    and n.get("children")
+                    and isinstance(n["children"][0], dict)
+                    and n["children"][0].get("tag") == "hr"
+                ):
+                    return idx
+            return len(nodes_list)
+
+        if after_sec:
+            insert_at = after_sec.start_idx
+            anchor = "insert_before=" + date(d.year, after_sec.date.month, after_sec.date.day).isoformat()
+        else:
+            insert_at = _index_before_last_hr(nodes)
+            anchor = "insert_before_hr"
+        nodes[insert_at:insert_at] = day_nodes
+
+    before_footer = nodes_to_html(nodes)
+    nav_block = await build_month_nav_block(db, month_key)
+    nodes = ensure_footer_nav_with_hr(nodes, nav_block, month=month_key, page=part)
+    after_footer = nodes_to_html(nodes)
+    footer_fixed = before_footer != after_footer
+
+    nodes, removed = dedup_same_date(nodes, d)
+
+    logging.info(
+        "anchor=%s footer_fixed=%s dedup_removed=%d",
+        anchor,
+        str(footer_fixed).lower(),
+        removed,
+    )
+
+    updated_html = nodes_to_html(nodes)
 
     updated_html, _ = ensure_day_markers(updated_html, d)
 
@@ -7889,10 +7919,13 @@ async def patch_month_page_for_date(
     )
     url = db_page.url2 if part == 2 else db_page.url
     logging.info(
-        "TG-MONTH patch ym=%s date=%s target=%s changed=%s url=%s",
+        "TG-MONTH patch ym=%s date=%s target=%s anchor=%s footer_fixed=%s dedup_removed=%d changed=%s url=%s",
         month_key,
         d.isoformat(),
         "page2" if part == 2 else "page1",
+        anchor,
+        str(footer_fixed).lower(),
+        removed,
         str(changed).lower(),
         url,
     )
