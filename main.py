@@ -723,30 +723,53 @@ async def telegraph_call(func, /, *args, retries: int = 3, **kwargs):
         raise TelegraphException("Telegraph request failed") from last_exc
 
 
-async def telegraph_create_page(tg: Telegraph, *args, **kwargs):
+async def telegraph_create_page(
+    tg: Telegraph, *args, caller: str = "event_pipeline", eid: int | None = None, **kwargs
+):
     kwargs.setdefault("author_name", TELEGRAPH_AUTHOR_NAME)
     if TELEGRAPH_AUTHOR_URL:
         kwargs.setdefault("author_url", TELEGRAPH_AUTHOR_URL)
+    if eid is not None and caller != "event_pipeline":
+        logging.error(
+            "AGGREGATE_SHOULD_NOT_TOUCH_EVENTS create caller=%s eid=%s", caller, eid
+        )
+        return {}
     res = await telegraph_call(tg.create_page, *args, **kwargs)
     path = res.get("path") if isinstance(res, dict) else ""
     logging.info(
-        "telegraph_create_page author=%s url=%s path=%s",
+        "telegraph_create_page author=%s url=%s path=%s caller=%s eid=%s",
         kwargs.get("author_name"),
         kwargs.get("author_url"),
         path,
+        caller,
+        eid,
     )
     return res
 
 
-async def telegraph_edit_page(tg: Telegraph, path: str, **kwargs):
+async def telegraph_edit_page(
+    tg: Telegraph,
+    path: str,
+    *,
+    caller: str = "event_pipeline",
+    eid: int | None = None,
+    **kwargs,
+):
     kwargs.setdefault("author_name", TELEGRAPH_AUTHOR_NAME)
     if TELEGRAPH_AUTHOR_URL:
         kwargs.setdefault("author_url", TELEGRAPH_AUTHOR_URL)
+    if eid is not None and caller != "event_pipeline":
+        logging.error(
+            "AGGREGATE_SHOULD_NOT_TOUCH_EVENTS edit caller=%s eid=%s", caller, eid
+        )
+        return {}
     logging.info(
-        "telegraph_edit_page author=%s url=%s path=%s",
+        "telegraph_edit_page author=%s url=%s path=%s caller=%s eid=%s",
         kwargs.get("author_name"),
         kwargs.get("author_url"),
         path,
+        caller,
+        eid,
     )
     return await telegraph_call(tg.edit_page, path, **kwargs)
 
@@ -2647,9 +2670,13 @@ async def sync_festivals_index_page(db: Database) -> None:
 
     try:
         if path:
-            await telegraph_edit_page(tg, path, title=title, html_content=html)
+            await telegraph_edit_page(
+                tg, path, title=title, html_content=html, caller="festival_build"
+            )
         else:
-            data = await telegraph_create_page(tg, title=title, html_content=html)
+            data = await telegraph_create_page(
+                tg, title=title, html_content=html, caller="festival_build"
+            )
             url = normalize_telegraph_url(data.get("url"))
             path = data.get("path")
         page = await telegraph_call(tg.get_page, path, return_html=True)
@@ -2657,7 +2684,9 @@ async def sync_festivals_index_page(db: Database) -> None:
         page_html, img_ok, img_fix = _ensure_img_links(page_html, link_map)
         if img_fix:
             page_html = sanitize_telegraph_html(page_html)
-            await telegraph_edit_page(tg, path, title=title, html_content=page_html)
+            await telegraph_edit_page(
+                tg, path, title=title, html_content=page_html, caller="festival_build"
+            )
         logging.info(
             "updated festivals index page" if path else f"created festivals index page {url}",
             extra={
@@ -2798,14 +2827,18 @@ async def rebuild_festivals_index_if_needed(
     try:
         if path:
             await telegraph_edit_page(
-                telegraph, path, title=title, html_content=html
+                telegraph,
+                path,
+                title=title,
+                html_content=html,
+                caller="festival_build",
             )
             status = "updated"
             if not url:
                 url = f"https://telegra.ph/{path}"
         else:
             data = await telegraph_create_page(
-                telegraph, title=title, html_content=html
+                telegraph, title=title, html_content=html, caller="festival_build"
             )
             url = normalize_telegraph_url(data.get("url"))
             path = data.get("path")
@@ -2816,7 +2849,11 @@ async def rebuild_festivals_index_if_needed(
         if img_fix:
             page_html = sanitize_telegraph_html(page_html)
             await telegraph_edit_page(
-                telegraph, path, title=title, html_content=page_html
+                telegraph,
+                path,
+                title=title,
+                html_content=page_html,
+                caller="festival_build",
             )
     except Exception as e:
         dur = (_time.perf_counter() - start_t) * 1000
@@ -7312,26 +7349,23 @@ def festival_event_slug(ev: Event, fest: Festival | None) -> str | None:
 
 
 async def ensure_event_telegraph_link(e: Event, fest: Festival | None, db: Database) -> None:
-    """Ensure ``e.telegraph_url`` matches its festival slug.
-
-    If mismatch is detected, rebuild the Telegraph page to match the slug.
-    """
+    """Populate ``e.telegraph_url`` without creating/editing Telegraph pages."""
     global DISABLE_EVENT_PAGE_UPDATES
+    if e.telegraph_url:
+        return
     if DISABLE_EVENT_PAGE_UPDATES:
-        if not e.telegraph_url:
-            e.telegraph_url = e.source_post_url
+        e.telegraph_url = e.telegraph_url or e.source_post_url or ""
         return
-    slug = festival_event_slug(e, fest)
-    if not slug:
+    if e.telegraph_path:
+        url = normalize_telegraph_url(f"https://telegra.ph/{e.telegraph_path.lstrip('/')}")
+        e.telegraph_url = url
+        async with db.get_session() as session:
+            await session.execute(
+                update(Event).where(Event.id == e.id).values(telegraph_url=url)
+            )
+            await session.commit()
         return
-    if e.telegraph_path == slug:
-        return
-    await update_telegraph_event_page(e.id, db, None)
-    async with db.get_session() as session:
-        refreshed = await session.get(Event, e.id)
-        if refreshed:
-            e.telegraph_url = refreshed.telegraph_url or e.source_post_url
-            e.telegraph_path = refreshed.telegraph_path
+    e.telegraph_url = e.source_post_url or ""
 
 
 async def update_telegraph_event_page(
@@ -7341,13 +7375,6 @@ async def update_telegraph_event_page(
         ev = await session.get(Event, event_id)
         if not ev:
             return None
-        fest = None
-        if ev.festival:
-            res_f = await session.execute(
-                select(Festival).where(Festival.name == ev.festival)
-            )
-            fest = res_f.scalar_one_or_none()
-        slug = festival_event_slug(ev, fest)
         display_link = False if ev.source_post_url else True
         html_content, _, _ = await build_source_page_content(
             ev.title or "Event",
@@ -7364,9 +7391,7 @@ async def update_telegraph_event_page(
 
         nodes = html_to_nodes(html_content)
         new_hash = content_hash(html_content)
-        if ev.content_hash == new_hash and ev.telegraph_url and (
-            not slug or ev.telegraph_path == slug
-        ):
+        if ev.content_hash == new_hash and ev.telegraph_url:
             await session.commit()
             return ev.telegraph_url
         token = get_telegraph_token()
@@ -7376,12 +7401,14 @@ async def update_telegraph_event_page(
             return ev.telegraph_url
         tg = Telegraph(access_token=token)
         title = ev.title or "Event"
-        if not ev.telegraph_path or (slug and ev.telegraph_path != slug):
+        if not ev.telegraph_path:
             data = await telegraph_create_page(
                 tg,
                 title=title,
                 content=nodes,
                 return_content=False,
+                caller="event_pipeline",
+                eid=ev.id,
             )
             ev.telegraph_url = normalize_telegraph_url(data.get("url"))
             ev.telegraph_path = data.get("path")
@@ -7392,6 +7419,8 @@ async def update_telegraph_event_page(
                 title=title,
                 content=nodes,
                 return_content=False,
+                caller="event_pipeline",
+                eid=ev.id,
             )
         ev.content_hash = new_hash
         session.add(ev)
@@ -7586,7 +7615,10 @@ async def split_month_until_ok(
             if not page.path2:
                 logging.info("creating second page for %s", month)
                 data2 = await telegraph_create_page(
-                    tg, title=title2, html_content=html2
+                    tg,
+                    title=title2,
+                    html_content=html2,
+                    caller="month_build",
                 )
                 page.url2 = normalize_telegraph_url(data2.get("url"))
                 page.path2 = data2.get("path")
@@ -7594,7 +7626,11 @@ async def split_month_until_ok(
                 logging.info("updating second page for %s", month)
                 start = _time.perf_counter()
                 await telegraph_edit_page(
-                    tg, page.path2, title=title2, html_content=html2
+                    tg,
+                    page.path2,
+                    title=title2,
+                    html_content=html2,
+                    caller="month_build",
                 )
                 dur = (_time.perf_counter() - start) * 1000
                 logging.info("editPage %s done in %.0f ms", page.path2, dur)
@@ -7623,7 +7659,10 @@ async def split_month_until_ok(
             if not page.path:
                 logging.info("creating first page for %s", month)
                 data1 = await telegraph_create_page(
-                    tg, title=title1, html_content=html1
+                    tg,
+                    title=title1,
+                    html_content=html1,
+                    caller="month_build",
                 )
                 page.url = normalize_telegraph_url(data1.get("url"))
                 page.path = data1.get("path")
@@ -7631,7 +7670,11 @@ async def split_month_until_ok(
                 logging.info("updating first page for %s", month)
                 start = _time.perf_counter()
                 await telegraph_edit_page(
-                    tg, page.path, title=title1, html_content=html1
+                    tg,
+                    page.path,
+                    title=title1,
+                    html_content=html1,
+                    caller="month_build",
                 )
                 dur = (_time.perf_counter() - start) * 1000
                 logging.info("editPage %s done in %.0f ms", page.path, dur)
@@ -7828,7 +7871,11 @@ async def patch_month_page_for_date(
     try:
         edit_start = _time.perf_counter()
         await telegraph_edit_page(
-            telegraph, page_path, title=title, html_content=updated_html
+            telegraph,
+            page_path,
+            title=title,
+            html_content=updated_html,
+            caller="month_build",
         )
         edit_dur = (_time.perf_counter() - edit_start) * 1000
         logging.info(
@@ -8483,7 +8530,13 @@ async def update_festival_tg_nav(event_id: int, db: Database, bot: Bot | None) -
                 "legacy_markers_replaced": markers_replaced,
             }
             if changed:
-                await telegraph_edit_page(tg, path, title=title, html_content=new_html)
+                await telegraph_edit_page(
+                    tg,
+                    path,
+                    title=title,
+                    html_content=new_html,
+                    caller="festival_build",
+                )
                 fest.nav_hash = await get_setting_value(db, "fest_nav_hash")
                 session.add(fest)
                 await session.commit()
@@ -9748,7 +9801,11 @@ async def _sync_month_page_inner(
                     continue
                 title = page_data.get("title") or month_name_prepositional(month)
                 await telegraph_edit_page(
-                    tg, path, title=title, html_content=updated_html
+                    tg,
+                    path,
+                    title=title,
+                    html_content=updated_html,
+                    caller="month_build",
                 )
                 setattr(page, hash_attr, content_hash(updated_html))
             await commit_page()
@@ -9777,7 +9834,10 @@ async def _sync_month_page_inner(
                     if not page.path:
                         logging.info("creating month page %s", month)
                         data = await telegraph_create_page(
-                            tg, title=title, html_content=html_full
+                            tg,
+                            title=title,
+                            html_content=html_full,
+                            caller="month_build",
                         )
                         page.url = normalize_telegraph_url(data.get("url"))
                         page.path = data.get("path")
@@ -9786,7 +9846,11 @@ async def _sync_month_page_inner(
                         logging.info("updating month page %s", month)
                         start = _time.perf_counter()
                         await telegraph_edit_page(
-                            tg, page.path, title=title, html_content=html_full
+                            tg,
+                            page.path,
+                            title=title,
+                            html_content=html_full,
+                            caller="month_build",
                         )
                         dur = (_time.perf_counter() - start) * 1000
                         logging.info("editPage %s done in %.0f ms", page.path, dur)
@@ -10152,7 +10216,9 @@ async def _sync_weekend_page_inner(
             hash_new = content_hash(html)
             if not path:
                 title = re.sub(r"(\d+)-(\d+)", r"\1 - \2", title)
-                data = await telegraph_create_page(tg, title, content=content)
+                data = await telegraph_create_page(
+                    tg, title, content=content, caller="weekend_build"
+                )
                 page.url = normalize_telegraph_url(data.get("url"))
                 page.path = data.get("path")
                 created = True
@@ -10165,12 +10231,20 @@ async def _sync_weekend_page_inner(
                 )
                 page.content_hash = hash_new
                 if update_links:
-                    await telegraph_edit_page(tg, page.path, title=title, content=content)
+                    await telegraph_edit_page(
+                        tg,
+                        page.path,
+                        title=title,
+                        content=content,
+                        caller="weekend_build",
+                    )
             elif page.content_hash == hash_new and not update_links:
                 logging.debug("telegraph_update skipped (no changes)")
             else:
                 start_t = _time.perf_counter()
-                await telegraph_edit_page(tg, path, title=title, content=content)
+                await telegraph_edit_page(
+                    tg, path, title=title, content=content, caller="weekend_build"
+                )
                 dur = (_time.perf_counter() - start_t) * 1000
                 logging.info("editPage %s done in %.0f ms", path, dur)
                 rough = rough_size(content)
@@ -10755,7 +10829,11 @@ async def sync_festival_page(
                 }
                 if changed:
                     await telegraph_edit_page(
-                        tg, path, title=title, html_content=new_html
+                        tg,
+                        path,
+                        title=title,
+                        html_content=new_html,
+                        caller="festival_build",
                     )
                     logging.info(
                         "updated festival page %s in Telegraph", name,
@@ -10771,11 +10849,19 @@ async def sync_festival_page(
                 path = fest.telegraph_path
                 url = fest.telegraph_url
                 if path:
-                    await telegraph_edit_page(tg, path, title=title, content=content)
+                    await telegraph_edit_page(
+                        tg,
+                        path,
+                        title=title,
+                        content=content,
+                        caller="festival_build",
+                    )
                     changed = True
                     logging.info("updated festival page %s in Telegraph", name)
                 else:
-                    data = await telegraph_create_page(tg, title, content=content)
+                    data = await telegraph_create_page(
+                        tg, title, content=content, caller="festival_build"
+                    )
                     url = normalize_telegraph_url(data.get("url"))
                     path = data.get("path")
                     created = True
@@ -10841,7 +10927,11 @@ async def refresh_nav_on_all_festivals(
                 }
                 if changed:
                     await telegraph_edit_page(
-                        tg, path, title=title, html_content=new_html
+                        tg,
+                        path,
+                        title=title,
+                        html_content=new_html,
+                        caller="festival_build",
                     )
                     logging.info(
                         "updated festival page %s in Telegraph", name,
@@ -12132,7 +12222,7 @@ async def rebuild_pages(
             if force:
                 await sync_month_page(db, month, update_links=False, force=True)
             else:
-                await sync_month_page(db, month, update_links=True)
+                await sync_month_page(db, month, update_links=False)
         except Exception as e:  # pragma: no cover
             logging.error("update month %s failed %s", month, e)
             months_failed[month] = str(e)
@@ -12159,9 +12249,11 @@ async def rebuild_pages(
             prev_hash = prev.content_hash if prev else None
         try:
             if force:
-                await sync_weekend_page(db, start, update_links=False, post_vk=False, force=True)
+                await sync_weekend_page(
+                    db, start, update_links=False, post_vk=False, force=True
+                )
             else:
-                await sync_weekend_page(db, start, update_links=True, post_vk=False)
+                await sync_weekend_page(db, start, update_links=False, post_vk=False)
         except Exception as e:  # pragma: no cover
             logging.error("update weekend %s failed %s", start, e)
             weekends_failed[start] = str(e)
@@ -13498,7 +13590,7 @@ async def handle_telegraph_fix_author(message: types.Message, db: Database, bot:
     start = _time.perf_counter()
     for title, path in pages:
         try:
-            await telegraph_edit_page(tg, path, title=title)
+            await telegraph_edit_page(tg, path, title=title, caller="festival_build")
             updated.append((title, path))
         except Exception as e:  # pragma: no cover - network errors
             errors.append((title, str(e)))
@@ -14055,12 +14147,16 @@ async def telegraph_test():
         return
     tg = Telegraph(access_token=token)
     page = await telegraph_create_page(
-        tg, "Test Page", html_content="<p>test</p>"
+        tg, "Test Page", html_content="<p>test</p>", caller="event_pipeline"
     )
     logging.info("Created %s", page["url"])
     print("Created", page["url"])
     await telegraph_edit_page(
-        tg, page["path"], title="Test Page", html_content="<p>updated</p>"
+        tg,
+        page["path"],
+        title="Test Page",
+        html_content="<p>updated</p>",
+        caller="event_pipeline",
     )
     logging.info("Edited %s", page["url"])
     print("Edited", page["url"])
@@ -14112,7 +14208,11 @@ async def update_source_page(
         html_content = lint_telegraph_html(html_content)
         logging.info("Editing telegraph page %s", path)
         await telegraph_edit_page(
-            tg, path, title=title, html_content=html_content
+            tg,
+            path,
+            title=title,
+            html_content=html_content,
+            caller="event_pipeline",
         )
         logging.info("Updated telegraph page %s", path)
         return catbox_msg, len(urls)
@@ -14141,7 +14241,12 @@ async def update_source_page_ics(event_id: int, db: Database, url: str | None):
         html_content = apply_ics_link(html_content, url)
         html_content = apply_footer_link(html_content)
         await telegraph_edit_page(
-            tg, path, title=title, html_content=html_content
+            tg,
+            path,
+            title=title,
+            html_content=html_content,
+            caller="event_pipeline",
+            eid=ev.id,
         )
     except Exception as e:
         logging.error("Failed to update ICS link: %s", e)
@@ -14331,6 +14436,7 @@ async def create_source_page(
             author_name="Полюбить Калининград Анонсы",
             content=nodes,
             return_content=False,
+            caller="event_pipeline",
         )
     except Exception as e:
         logging.error("Failed to create telegraph page: %s", e)
