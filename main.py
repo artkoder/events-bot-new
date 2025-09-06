@@ -633,7 +633,9 @@ def get_ics_semaphore() -> asyncio.Semaphore:
 FEST_JOB_MULT = 100_000
 
 # Maximum number of images to accept in an album
-MAX_ALBUM_IMAGES = int(os.getenv("MAX_ALBUM_IMAGES", "10"))
+# The default was previously 10 but the pipeline now supports up to 12 images
+# per event source page.
+MAX_ALBUM_IMAGES = int(os.getenv("MAX_ALBUM_IMAGES", "12"))
 
 # Maximum size (in bytes) for downloaded files
 MAX_DOWNLOAD_SIZE = int(os.getenv("MAX_DOWNLOAD_SIZE", str(5 * 1024 * 1024)))
@@ -3025,7 +3027,13 @@ def apply_ics_link(html_content: str, url: str | None) -> str:
     if idx == -1:
         return link_html + html_content
     pos = idx + 4
-    img_pattern = re.compile(r"<img[^>]+><p></p>")
+    # Skip initial images: legacy pages may have ``<img><p></p>`` pairs while
+    # new pages wrap the first image in ``<figure>``.  We advance the insertion
+    # point past any such blocks so that the ICS link always appears under the
+    # title but after all leading images.
+    img_pattern = re.compile(
+        r"(?:<img[^>]+><p></p>|<figure><img[^>]+/></figure>)"
+    )
     for m in img_pattern.finditer(html_content, pos):
         pos = m.end()
     return html_content[:pos] + link_html + html_content[pos:]
@@ -14168,22 +14176,52 @@ async def update_source_page(
         else:
             catbox_urls, catbox_msg = await upload_images(images)
             urls = catbox_urls
-        for url in urls:
-            html_content += f'<img src="{html.escape(url)}"/><p></p>'
+        has_cover = "<img" in html_content
+        if has_cover:
+            cover: list[str] = []
+            tail = urls
+        else:
+            cover = urls[:1]
+            tail = urls[1:]
+        if cover:
+            idx = html_content.find("</p>")
+            insert_pos = idx + 4 if idx != -1 else 0
+            cover_html = f'<figure><img src="{html.escape(cover[0])}"/></figure>'
+            html_content = (
+                html_content[:insert_pos] + cover_html + html_content[insert_pos:]
+            )
         new_html = normalize_hashtag_dates(new_html)
         cleaned = re.sub(r"</?tg-(?:emoji|spoiler)[^>]*>", "", new_html)
         cleaned = cleaned.replace(
             "\U0001f193\U0001f193\U0001f193\U0001f193", "Бесплатно"
         )
-        html_content += (
+        new_block = (
             f"<p>{CONTENT_SEPARATOR}</p><p>" + cleaned.replace("\n", "<br/>") + "</p>"
         )
+        hr_idx = html_content.lower().rfind("<hr")
+        if hr_idx != -1:
+            hr_end = html_content.find(">", hr_idx)
+            if hr_end != -1:
+                html_content = html_content[:hr_idx] + new_block + html_content[hr_idx:]
+            else:
+                html_content += new_block
+        else:
+            html_content += new_block
+        nav_html = None
         if db:
             nav_html = await build_month_nav_html(db)
             html_content = apply_month_nav(html_content, nav_html)
+        existing_imgs = html_content.count("<img")
+        for url in tail:
+            html_content += f'<img src="{html.escape(url)}"/>'
+        total_imgs = existing_imgs + len(tail)
+        if nav_html and total_imgs >= 2:
+            html_content += nav_html
         html_content = apply_footer_link(html_content)
         html_content = lint_telegraph_html(html_content)
-        logging.info("Editing telegraph page %s", path)
+        logging.info(
+            "Editing telegraph page %s", path,
+        )
         await telegraph_edit_page(
             tg,
             path,
@@ -14191,7 +14229,15 @@ async def update_source_page(
             html_content=html_content,
             caller="event_pipeline",
         )
-        logging.info("Updated telegraph page %s", path)
+        logging.info(
+            "Updated telegraph page %s", path,
+        )
+        logging.info(
+            "update_source_page: cover=%d tail=%d nav_dup=%s",
+            len(cover),
+            len(tail),
+            bool(nav_html and total_imgs >= 2),
+        )
         return catbox_msg, len(urls)
     except Exception as e:
         logging.error("Failed to update telegraph page: %s", e)
@@ -14323,14 +14369,16 @@ async def build_source_page_content(
     else:
         catbox_urls, catbox_msg = await upload_images(images)
         urls = catbox_urls
+    cover = urls[:1]
+    tail = urls[1:]
     if source_url and display_link:
         html_content += (
             f'<p><a href="{html.escape(source_url)}"><strong>{html.escape(title)}</strong></a></p>'
         )
     else:
         html_content += f"<p><strong>{html.escape(title)}</strong></p>"
-    for url in urls:
-        html_content += f'<figure><img src="{html.escape(url)}"/></figure>'
+    if cover:
+        html_content += f'<figure><img src="{html.escape(cover[0])}"/></figure>'
     html_content = apply_ics_link(html_content, ics_url)
     if html_text:
         html_text = strip_title(html_text)
@@ -14353,11 +14401,22 @@ async def build_source_page_content(
             linked = linkify_for_telegraph(escaped)
             paragraphs.append(f"<p>{linked}</p>")
         html_content += "".join(paragraphs)
+    nav_html = None
     if db:
         nav_html = await build_month_nav_html(db)
         html_content = apply_month_nav(html_content, nav_html)
+    for url in tail:
+        html_content += f'<img src="{html.escape(url)}"/>'
+    if nav_html and len(urls) >= 2:
+        html_content += nav_html
     html_content = apply_footer_link(html_content)
     html_content = lint_telegraph_html(html_content)
+    logging.info(
+        "build_source_page_content: cover=%d tail=%d nav_dup=%s",
+        len(cover),
+        len(tail),
+        bool(nav_html and len(urls) >= 2),
+    )
     return html_content, catbox_msg, len(urls)
 
 
