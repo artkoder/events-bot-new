@@ -379,7 +379,7 @@ async def test_month_page_sync(tmp_path: Path, monkeypatch):
 
     called = {}
 
-    async def fake_sync(db_obj, month):
+    async def fake_sync(db_obj, month, update_links=True):
         called["month"] = month
 
     monkeypatch.setattr("main.create_source_page", fake_create)

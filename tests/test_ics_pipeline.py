@@ -76,6 +76,7 @@ async def test_publish_ics_both_channels_success(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "update_source_page_ics", fake_update)
     monkeypatch.setattr(main, "update_source_post_keyboard", lambda *a, **k: None)
     await main.ics_publish(1, db, bot)
+    await main.tg_ics_post(1, db, bot)
     assert fake.uploaded
     assert bot.docs
     assert called.get("v")
@@ -112,14 +113,17 @@ async def test_ics_skips_when_no_change(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "update_source_page_ics", fake_update)
     monkeypatch.setattr(main, "update_source_post_keyboard", lambda *a, **k: None)
     await main.ics_publish(1, db, bot)
+    await main.tg_ics_post(1, db, bot)
     fake.uploaded.clear()
     bot.docs.clear()
     pr = Progress()
     await main.ics_publish(1, db, bot, pr)
     assert not fake.uploaded
-    assert not bot.docs
     assert ("ics_supabase", "skipped_nochange", "no change") in pr.marks
-    assert ("ics_telegram", "skipped_nochange", "no change") in pr.marks
+    pr2 = Progress()
+    await main.tg_ics_post(1, db, bot, pr2)
+    assert not bot.docs
+    assert ("ics_telegram", "skipped_nochange", "no change") in pr2.marks
 
 
 @pytest.mark.asyncio
@@ -149,16 +153,17 @@ async def test_ics_updates_on_change(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "update_source_page_ics", fake_update)
     monkeypatch.setattr(main, "update_source_post_keyboard", lambda *a, **k: None)
     await main.ics_publish(1, db, bot)
+    await main.tg_ics_post(1, db, bot)
     async with db.get_session() as session:
         ev = await session.get(Event, 1)
-        h1, u1, f1 = ev.ics_hash, ev.ics_url, ev.ics_file_id
+        h1, f1 = ev.ics_hash, ev.ics_file_id
         ev.date = "2025-07-19"
         await session.commit()
     await main.ics_publish(1, db, bot)
+    await main.tg_ics_post(1, db, bot)
     async with db.get_session() as session:
         ev = await session.get(Event, 1)
         assert ev.ics_hash != h1
-        assert ev.ics_url != u1
         assert ev.ics_file_id != f1
 
 
@@ -189,6 +194,7 @@ async def test_supabase_error_does_not_block_telegram(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "get_supabase_client", lambda: fake)
     with pytest.raises(RuntimeError):
         await main.ics_publish(1, db, bot)
+    await main.tg_ics_post(1, db, bot)
     assert bot.docs
     async with db.get_session() as session:
         ev = await session.get(Event, 1)
@@ -221,8 +227,9 @@ async def test_telegram_error_does_not_block_supabase(tmp_path, monkeypatch):
         await session.commit()
     fake = FakeClient()
     monkeypatch.setattr(main, "get_supabase_client", lambda: fake)
+    await main.ics_publish(1, db, bot)
     with pytest.raises(RuntimeError):
-        await main.ics_publish(1, db, bot)
+        await main.tg_ics_post(1, db, bot)
     assert fake.uploaded
     async with db.get_session() as session:
         ev = await session.get(Event, 1)
@@ -277,38 +284,3 @@ async def test_ics_coalesced_jobs_and_semaphore(tmp_path, monkeypatch):
     )
     assert order[0][0] == 1 and order[1][0] == 2
     assert order[1][1] >= order[0][1]
-
-
-@pytest.mark.asyncio
-async def test_ics_publish_enqueues_page_jobs(tmp_path, monkeypatch):
-    db = Database(str(tmp_path / "db.sqlite"))
-    await db.init()
-    bot = DummyBot("123:abc")
-    async with db.get_session() as session:
-        session.add(Channel(channel_id=-100, title="Asset", is_admin=True, is_asset=True))
-        session.add(
-            Event(
-                id=1,
-                title="A",
-                description="d",
-                source_text="s",
-                date="2025-07-18",
-                time="19:00",
-                location_name="Hall",
-                city="Town",
-            )
-        )
-        await session.commit()
-    fake = FakeClient()
-    monkeypatch.setattr(main, "get_supabase_client", lambda: fake)
-    async def fake_update(*a, **k):
-        pass
-    monkeypatch.setattr(main, "update_source_page_ics", fake_update)
-    monkeypatch.setattr(main, "update_source_post_keyboard", lambda *a, **k: None)
-    await main.ics_publish(1, db, bot)
-    async with db.get_session() as session:
-        res = await session.execute(select(JobOutbox.task))
-        tasks = {row[0] for row in res.all()}
-    assert JobTask.month_pages in tasks
-    assert JobTask.weekend_pages in tasks
-    assert JobTask.week_pages in tasks

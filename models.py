@@ -158,6 +158,7 @@ class JobTask(str, Enum):
     telegraph_build = "telegraph_build"
     vk_sync = "vk_sync"
     ics_publish = "ics_publish"
+    tg_ics_post = "tg_ics_post"
     month_pages = "month_pages"
     weekend_pages = "weekend_pages"
     week_pages = "week_pages"

@@ -62,6 +62,7 @@ async def test_ics_fields_persist_and_update(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "update_source_page_ics", fake_update)
     monkeypatch.setattr(main, "update_source_post_keyboard", lambda *a, **k: None)
     await main.ics_publish(1, db, bot)
+    await main.tg_ics_post(1, db, bot)
     async with db.get_session() as session:
         ev = await session.get(Event, 1)
         h1, u1, f1, t1 = ev.ics_hash, ev.ics_url, ev.ics_file_id, ev.ics_updated_at
@@ -70,6 +71,7 @@ async def test_ics_fields_persist_and_update(tmp_path, monkeypatch):
         ev.time = "20:00"
         await session.commit()
     await main.ics_publish(1, db, bot)
+    await main.tg_ics_post(1, db, bot)
     async with db.get_session() as session:
         ev = await session.get(Event, 1)
         assert ev.ics_hash != h1

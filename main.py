@@ -3673,72 +3673,16 @@ async def ics_publish(event_id: int, db: Database, bot: Bot, progress=None) -> b
         except Exception as e:  # pragma: no cover - build failure
             if progress:
                 progress.mark("ics_supabase", "error", str(e))
-                progress.mark("ics_telegram", "error", str(e))
             raise
 
         ics_hash = hashlib.sha256(hash_source).hexdigest()
         filename = _ics_filename(ev)
-        errors: list[str] = []
         supabase_url: str | None = None
-        tg_file_id: str | None = None
-        tg_post_id: int | None = None
-        tg_post_url: str | None = None
 
         if ev.ics_hash == ics_hash:
             if progress:
                 progress.mark("ics_supabase", "skipped_nochange", "no change")
-            if ev.ics_file_id:
-                if progress:
-                    progress.mark("ics_telegram", "skipped_nochange", "no change")
-            else:
-                try:
-                    channel = await get_asset_channel(db)
-                    if channel:
-                        file = types.BufferedInputFile(ics_bytes, filename=filename)
-                        caption, parse_mode = format_event_caption(ev)
-                        try:
-                            async with span("tg-send"):
-                                msg = await bot.send_document(
-                                    channel.channel_id,
-                                    file,
-                                    caption=caption,
-                                    parse_mode=parse_mode,
-                                )
-                        except TelegramBadRequest:
-                            lines = caption.split("\n")
-                            if ev.telegraph_url and len(lines) >= 3:
-                                caption = "\n".join(
-                                    [lines[0], f"Подробнее: {ev.telegraph_url}", lines[2]]
-                                )
-                            async with span("tg-send"):
-                                msg = await bot.send_document(
-                                    channel.channel_id,
-                                    file,
-                                    caption=caption,
-                                )
-                        tg_file_id = msg.document.file_id
-                        tg_post_id = msg.message_id
-                        tg_post_url = message_link(msg.chat.id, msg.message_id)
-                        if progress:
-                            progress.mark(
-                                "ics_telegram",
-                                "done",
-                                message_link(msg.chat.id, msg.message_id),
-                            )
-                        logline("ICS", event_id, "telegram done", url=tg_post_url)
-                    else:
-                        logline("ICS", event_id, "telegram skipped", reason="no_channel")
-                except OSError:
-                    errors.append("temporary network error")
-                    if progress:
-                        progress.mark(
-                            "ics_telegram", "warn_net", "временная ошибка сети, будет повтор"
-                        )
-                except Exception as te:
-                    errors.append(str(te))
-                    if progress:
-                        progress.mark("ics_telegram", "error", str(te))
-            changed = tg_file_id is not None
+            changed = False
         else:
             supabase_disabled = os.getenv("SUPABASE_DISABLED") == "1"
             if not supabase_disabled:
@@ -3767,70 +3711,19 @@ async def ics_publish(event_id: int, db: Database, bot: Bot, progress=None) -> b
                         logging.info("ics_publish supabase_url=%s", supabase_url)
                         logline("ICS", event_id, "supabase done", url=supabase_url)
                 except OSError:
-                    errors.append("temporary network error")
                     if progress:
                         progress.mark(
                             "ics_supabase", "warn_net", "временная ошибка сети, будет повтор"
                         )
+                    raise RuntimeError("temporary network error")
                 except Exception as se:  # pragma: no cover - network failure
-                    errors.append(str(se))
                     if progress:
                         progress.mark("ics_supabase", "error", str(se))
+                    raise
             else:
                 logging.info("ics_publish SUPABASE_DISABLED=1")
                 if progress:
                     progress.mark("ics_supabase", "skipped_disabled", "disabled")
-
-            try:
-                    channel = await get_asset_channel(db)
-                    if channel:
-                        file = types.BufferedInputFile(ics_bytes, filename=filename)
-                        caption, parse_mode = format_event_caption(ev)
-                        try:
-                            async with span("tg-send"):
-                                msg = await bot.send_document(
-                                    channel.channel_id,
-                                    file,
-                                    caption=caption,
-                                    parse_mode=parse_mode,
-                                )
-                        except TelegramBadRequest:
-                            if ev.telegraph_url:
-                                caption = "\n".join(
-                                    [
-                                        caption.split("\n")[0],
-                                        f"Подробнее: {ev.telegraph_url}",
-                                        caption.split("\n")[-1],
-                                    ]
-                                )
-                            async with span("tg-send"):
-                                msg = await bot.send_document(
-                                    channel.channel_id,
-                                    file,
-                                    caption=caption,
-                                )
-                        tg_file_id = msg.document.file_id
-                        tg_post_id = msg.message_id
-                        tg_post_url = message_link(msg.chat.id, msg.message_id)
-                        if progress:
-                            progress.mark(
-                                "ics_telegram",
-                                "done",
-                                message_link(msg.chat.id, msg.message_id),
-                            )
-                        logline("ICS", event_id, "telegram done", url=tg_post_url)
-                    else:
-                        logline("ICS", event_id, "telegram skipped", reason="no_channel")
-            except OSError:
-                errors.append("temporary network error")
-                if progress:
-                    progress.mark(
-                        "ics_telegram", "warn_net", "временная ошибка сети, будет повтор"
-                    )
-            except Exception as te:  # pragma: no cover - network failure
-                errors.append(str(te))
-                if progress:
-                    progress.mark("ics_telegram", "error", str(te))
             changed = True
 
         async with db.get_session() as session:
@@ -3840,27 +3733,76 @@ async def ics_publish(event_id: int, db: Database, bot: Bot, progress=None) -> b
                 ev.ics_updated_at = datetime.utcnow()
                 if supabase_url is not None:
                     ev.ics_url = supabase_url
-                if tg_file_id is not None:
-                    ev.ics_file_id = tg_file_id
-                if tg_post_url is not None:
-                    ev.ics_post_url = tg_post_url
-                if tg_post_id is not None:
-                    ev.ics_post_id = tg_post_id
                 await session.commit()
-                committed = True
-            else:
-                committed = False
-
-        if committed:
-            await enqueue_job(db, event_id, JobTask.month_pages)
-            await enqueue_job(db, event_id, JobTask.weekend_pages)
-            await enqueue_job(db, event_id, JobTask.week_pages)
-            logging.info(
-                "ics_publish enqueued nav rebuild for %s", event_id
-            )
-
         if supabase_url is not None:
             await update_source_page_ics(event_id, db, supabase_url)
+        return changed
+
+
+async def tg_ics_post(event_id: int, db: Database, bot: Bot, progress=None) -> bool:
+    async with get_ics_semaphore():
+        async with db.get_session() as session:
+            ev = await session.get(Event, event_id)
+        if not ev:
+            return False
+
+        try:
+            content = await build_ics_content(db, ev)
+            ics_bytes = content.encode("utf-8")
+            hash_source = "\r\n".join(
+                l for l in content.split("\r\n") if not l.startswith(("UID:", "DTSTAMP:"))
+            ).encode("utf-8")
+        except Exception as e:  # pragma: no cover - build failure
+            if progress:
+                progress.mark("ics_telegram", "error", str(e))
+            raise
+
+        ics_hash = hashlib.sha256(hash_source).hexdigest()
+        if ev.ics_hash == ics_hash and ev.ics_file_id and ev.ics_post_url:
+            if progress:
+                progress.mark("ics_telegram", "skipped_nochange", "no change")
+            return False
+
+        channel = await get_asset_channel(db)
+        if not channel:
+            logline("ICS", event_id, "telegram skipped", reason="no_channel")
+            return False
+
+        filename = _ics_filename(ev)
+        file = types.BufferedInputFile(ics_bytes, filename=filename)
+        caption, parse_mode = format_event_caption(ev)
+        try:
+            async with span("tg-send"):
+                msg = await bot.send_document(
+                    channel.channel_id,
+                    file,
+                    caption=caption,
+                    parse_mode=parse_mode,
+                )
+        except TelegramBadRequest:
+            async with span("tg-send"):
+                msg = await bot.send_document(
+                    channel.channel_id,
+                    file,
+                    caption=caption,
+                )
+
+        tg_file_id = msg.document.file_id
+        tg_post_id = msg.message_id
+        tg_post_url = message_link(msg.chat.id, msg.message_id)
+
+        async with db.get_session() as session:
+            obj = await session.get(Event, event_id)
+            if obj:
+                obj.ics_file_id = tg_file_id
+                obj.ics_post_url = tg_post_url
+                obj.ics_post_id = tg_post_id
+                await session.commit()
+
+        if progress:
+            progress.mark("ics_telegram", "done", tg_post_url)
+        logline("ICS", event_id, "telegram done", url=tg_post_url)
+
         try:
             await update_source_post_keyboard(event_id, db, bot)
         except Exception as e:  # pragma: no cover - logging inside
@@ -3868,11 +3810,7 @@ async def ics_publish(event_id: int, db: Database, bot: Bot, progress=None) -> b
                 "update_source_post_keyboard failed for %s: %s", event_id, e
             )
 
-        if errors:
-            if all(err == "temporary network error" for err in errors):
-                raise RuntimeError("temporary network error")
-            raise RuntimeError("; ".join(errors))
-        return changed
+        return True
 
 @lru_cache(maxsize=1)
 def _read_base_prompt() -> str:
@@ -5821,6 +5759,13 @@ async def schedule_event_update_tasks(
     results[JobTask.telegraph_build] = await enqueue_job(
         db, eid, JobTask.telegraph_build, depends_on=telegraph_dep
     )
+    if "tg_ics_post" in JOB_HANDLERS:
+        tg_ics_deps = [results[JobTask.telegraph_build]]
+        if ics_dep:
+            tg_ics_deps.append(ics_dep)
+        results[JobTask.tg_ics_post] = await enqueue_job(
+            db, eid, JobTask.tg_ics_post, depends_on=tg_ics_deps
+        )
     page_deps = [results[JobTask.telegraph_build]]
     if ics_dep:
         page_deps.append(ics_dep)
@@ -6755,6 +6700,7 @@ TASK_LABELS = {
     "telegraph_build": "Telegraph (событие)",
     "vk_sync": "VK (событие)",
     "ics_publish": "Календарь (ICS)",
+    "tg_ics_post": "ICS (Telegram)",
     "month_pages": "Страница месяца",
     "week_pages": "VK (неделя)",
     "weekend_pages": "VK (выходные)",
@@ -6765,6 +6711,7 @@ TASK_LABELS = {
 JOB_TTL: dict[JobTask, int] = {
     JobTask.telegraph_build: 600,
     JobTask.ics_publish: 600,
+    JobTask.tg_ics_post: 600,
     JobTask.month_pages: 600,
     JobTask.week_pages: 600,
     JobTask.weekend_pages: 600,
@@ -6773,6 +6720,7 @@ JOB_TTL: dict[JobTask, int] = {
 JOB_MAX_RUNTIME: dict[JobTask, int] = {
     JobTask.telegraph_build: 180,
     JobTask.ics_publish: 60,
+    JobTask.tg_ics_post: 60,
     JobTask.month_pages: 180,
     JobTask.week_pages: 180,
     JobTask.weekend_pages: 180,
@@ -6798,6 +6746,8 @@ async def _job_result_link(task: JobTask, event_id: int, db: Database) -> str | 
             return ev.source_vk_post_url
         if task == JobTask.ics_publish:
             return ev.ics_url
+        if task == JobTask.tg_ics_post:
+            return ev.ics_post_url
         if task == JobTask.month_pages:
             d = parse_iso_date(ev.date.split("..", 1)[0])
             month_key = d.strftime("%Y-%m") if d else None
@@ -6890,6 +6840,7 @@ async def _run_due_jobs_once(
     priority = {
         JobTask.telegraph_build: 0,
         JobTask.ics_publish: 0,
+        JobTask.tg_ics_post: 0,
         JobTask.month_pages: 1,
         JobTask.week_pages: 1,
         JobTask.weekend_pages: 1,
@@ -7991,7 +7942,7 @@ async def update_month_pages_for(event_id: int, db: Database, bot: Bot | None) -
     rebuild_any = False
     for month, month_dates in months.items():
         # ensure the month page is created before attempting a patch
-        await sync_month_page(db, month)
+        await sync_month_page(db, month, update_links=True)
         for d in month_dates:
             logline("TG-MONTH", event_id, "patch start", month=month, day=d.isoformat())
             changed = await patch_month_page_for_date(db, tg, month, d)
@@ -8183,7 +8134,10 @@ async def publish_event_progress(
         link = event.ics_url
         suffix = f" — {link}" if link else ""
         ics_sub["ics_supabase"] = {"icon": "\U0001f504", "suffix": suffix}
-        ics_sub["ics_telegram"] = {"icon": "\U0001f504", "suffix": ""}
+    if JobTask.tg_ics_post in tasks:
+        link = event.ics_post_url
+        suffix = f" — {link}" if link else ""
+        ics_sub["ics_telegram"] = {"icon": "\U0001f504", "suffix": suffix}
     fest_sub: dict[str, dict[str, str]] = {}
     if JobTask.festival_pages in tasks:
         fest_sub["tg"] = {"icon": "\U0001f504", "suffix": ""}
@@ -8205,6 +8159,8 @@ async def publish_event_progress(
                 lines.append(
                     f"{ics_sub['ics_supabase']['icon']} ICS (Supabase){ics_sub['ics_supabase']['suffix']}"
                 )
+        elif t == JobTask.tg_ics_post:
+            lines.append(f"{info['icon']} {job_label(t)}{info['suffix']}")
             if "ics_telegram" in ics_sub:
                 lines.append(
                     f"{ics_sub['ics_telegram']['icon']} ICS (Telegram){ics_sub['ics_telegram']['suffix']}"
@@ -8258,6 +8214,8 @@ async def publish_event_progress(
                 sup = ics_sub.get("ics_supabase")
                 if sup:
                     lines.append(f"{sup['icon']} ICS (Supabase){sup['suffix']}")
+            elif t == JobTask.tg_ics_post:
+                lines.append(f"{info['icon']} {job_label(t)}{info['suffix']}")
                 tg = ics_sub.get("ics_telegram")
                 if tg:
                     lines.append(f"{tg['icon']} ICS (Telegram){tg['suffix']}")
@@ -8448,6 +8406,7 @@ async def publish_event_progress(
                 line = f"✅ ICS (Supabase) — {ev.ics_url}"
                 logline("PROG", event.id, "set", line=f'"{line}"')
                 fixed.append("ics_supabase")
+        if JobTask.tg_ics_post in progress:
             tg = ics_sub.get("ics_telegram")
             if ev.ics_post_url and tg and tg["icon"] == "\U0001f504":
                 ics_sub["ics_telegram"] = {
@@ -8689,6 +8648,7 @@ JOB_HANDLERS = {
     "telegraph_build": update_telegraph_event_page,
     "vk_sync": job_sync_vk_source_post,
     "ics_publish": ics_publish,
+    "tg_ics_post": tg_ics_post,
     "month_pages": update_month_pages_for,
     "week_pages": update_week_pages_for,
     "weekend_pages": update_weekend_pages_for,
@@ -11907,6 +11867,7 @@ async def sync_vk_source_post(
             message,
             db,
             bot,
+            token=VK_TOKEN,
         )
         if url:
             logging.info("sync_vk_source_post created %s", url)
