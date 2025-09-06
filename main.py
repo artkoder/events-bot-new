@@ -12868,17 +12868,17 @@ def _expand_months(months: list[str], past: int, future: int) -> list[str]:
 
 
 async def _future_months_with_events(db: Database) -> list[str]:
-    today = date.today().replace(day=1).isoformat()
-    rows = await db.exec_driver_sql(
-        """
-        SELECT DISTINCT substr(date, 1, 7) as m
-        FROM event
-        WHERE date >= ?
-        ORDER BY m
-        """,
-        (today,),
-    )
-    return [r[0] for r in rows]
+    today = date.today().replace(day=1)
+    rows = await db.exec_driver_sql("SELECT date FROM event")
+    months: set[str] = set()
+    for (raw_date,) in rows:
+        try:
+            dt = datetime.strptime(raw_date, "%Y-%m-%d").date()
+        except Exception:
+            continue
+        if dt >= today:
+            months.add(dt.strftime("%Y-%m"))
+    return sorted(months)
 
 
 def _weekends_for_months(months: list[str]) -> tuple[list[str], dict[str, list[str]]]:

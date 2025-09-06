@@ -125,3 +125,84 @@ async def test_pages_rebuild_cb_all(monkeypatch, tmp_path):
     await main.handle_pages_rebuild_cb(Callback(), db, Bot())
     assert captured["months"] == ["2025-09", "2025-12"]
 
+
+@pytest.mark.asyncio
+async def test_pages_rebuild_ignores_invalid_dates(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    async with db.get_session() as session:
+        session.add(
+            Event(
+                title="Valid",
+                description="D",
+                date="2025-10-05",
+                time="10:00",
+                location_name="loc",
+                source_text="src",
+            )
+        )
+        session.add(
+            Event(
+                title="Bad1",
+                description="D",
+                date="21.07.24",
+                time="10:00",
+                location_name="loc",
+                source_text="src",
+            )
+        )
+        session.add(
+            Event(
+                title="Bad2",
+                description="D",
+                date="лекция",
+                time="10:00",
+                location_name="loc",
+                source_text="src",
+            )
+        )
+        session.add(
+            Event(
+                title="Past",
+                description="D",
+                date="2024-01-01",
+                time="10:00",
+                location_name="loc",
+                source_text="src",
+            )
+        )
+        await session.commit()
+
+    class FixedDate(date):
+        @classmethod
+        def today(cls):
+            return cls(2025, 9, 1)
+
+    monkeypatch.setattr(main, "date", FixedDate)
+
+    class Button:
+        def __init__(self, text, callback_data):
+            self.text = text
+            self.callback_data = callback_data
+
+    class Markup:
+        def __init__(self, inline_keyboard):
+            self.inline_keyboard = inline_keyboard
+
+    monkeypatch.setattr(
+        main,
+        "types",
+        SimpleNamespace(InlineKeyboardButton=Button, InlineKeyboardMarkup=Markup),
+    )
+
+    sent = {}
+
+    class Bot:
+        async def send_message(self, chat_id, text, reply_markup=None):
+            sent["markup"] = reply_markup
+
+    message = SimpleNamespace(chat=SimpleNamespace(id=1), text="/pages_rebuild")
+    await main.handle_pages_rebuild(message, db, Bot())
+    months = [row[0].text for row in sent["markup"].inline_keyboard[:-1]]
+    assert months == ["2025-10"]
+
