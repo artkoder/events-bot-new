@@ -6,6 +6,85 @@ from datetime import date
 from typing import Any, List, Tuple
 
 
+def ensure_footer_nav_with_hr(
+    content: Any, nav_block: Any, *, month: str | None = None, page: int | None = None
+) -> Any:
+    """Ensure a single navigation block exists after the last ``<hr>``.
+
+    The function accepts either HTML string ``content``/``nav_block`` or Telegraph
+    node lists.  Any tail after the last ``<hr>`` is removed before appending the
+    provided navigation block.  When no ``<hr>`` is present it is appended to the
+    end of the content.  The operation is idempotent.
+    """
+
+    hr_found = False
+    removed_chars = 0
+
+    if isinstance(content, str):
+        pattern = re.compile(r"<hr\s*/?>", flags=re.I)
+        matches = list(pattern.finditer(content))
+        if matches:
+            hr_found = True
+            last = matches[-1]
+            removed_chars = len(content) - last.end()
+            content = content[: last.end()]
+        else:
+            content = content.rstrip() + "<hr>"
+        # nav_block is expected to be HTML string in this branch
+        content = content + ("\n" if not content.endswith("\n") else "") + nav_block
+    else:
+        from telegraph.utils import html_to_nodes, nodes_to_html
+
+        nodes: List[Any] = list(content)
+        last_hr_idx = None
+        for idx in range(len(nodes) - 1, -1, -1):
+            n = nodes[idx]
+            if isinstance(n, dict) and n.get("tag") == "hr":
+                last_hr_idx = idx
+                break
+            if isinstance(n, dict) and n.get("tag") in {"p", "figure"}:
+                ch = n.get("children", [])
+                if (
+                    len(ch) == 1
+                    and isinstance(ch[0], dict)
+                    and ch[0].get("tag") == "hr"
+                ):
+                    last_hr_idx = idx
+                    break
+        if last_hr_idx is not None:
+            hr_found = True
+            removed = nodes[last_hr_idx + 1 :]
+            n = nodes[last_hr_idx]
+            if isinstance(n, dict) and n.get("tag") in {"p", "figure"}:
+                removed = nodes[last_hr_idx:]
+                nodes = nodes[:last_hr_idx]
+                nodes.append({"tag": "hr"})
+                last_hr_idx = len(nodes) - 1
+            else:
+                nodes = nodes[: last_hr_idx + 1]
+            if removed:
+                removed_chars = len(nodes_to_html(removed))
+        else:
+            nodes.append({"tag": "hr"})
+            last_hr_idx = len(nodes) - 1
+        if isinstance(nav_block, str):
+            nav_nodes = html_to_nodes(nav_block)
+        else:
+            nav_nodes = nav_block
+        nodes[last_hr_idx + 1 :] = nav_nodes
+        content = nodes
+
+    logging.info(
+        "month=%s, page=%s: footer_hr_found=%s, tail_removed_chars=%d, nav_inserted=%s",
+        month,
+        page,
+        hr_found,
+        removed_chars,
+        True,
+    )
+    return content
+
+
 def normalize_html(s: str) -> str:
     """Normalize HTML by collapsing whitespace."""
     return re.sub(r"\s+", " ", s).strip()

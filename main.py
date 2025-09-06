@@ -126,15 +126,18 @@ from markup import (
     PERM_END,
     FEST_NAV_START,
     FEST_NAV_END,
-    NAV_MONTHS_START,
-    NAV_MONTHS_END,
     FEST_INDEX_INTRO_START,
     FEST_INDEX_INTRO_END,
     linkify_for_telegraph,
     expose_links_for_vk,
     sanitize_for_vk,
 )
-from sections import replace_between_markers, content_hash, parse_month_sections
+from sections import (
+    replace_between_markers,
+    content_hash,
+    parse_month_sections,
+    ensure_footer_nav_with_hr,
+)
 from db import Database
 from scheduling import startup as scheduler_startup, cleanup as scheduler_cleanup
 from sqlalchemy import select, update, delete, text, func, or_
@@ -2934,8 +2937,6 @@ async def rebuild_fest_nav_if_changed(db: Database) -> bool:
 
 
 ICS_LABEL = "Добавить в календарь на телефоне (ICS)"
-MONTH_NAV_START = NAV_MONTHS_START
-MONTH_NAV_END = NAV_MONTHS_END
 
 FOOTER_LINK_HTML = (
     '<p>&#8203;</p>'
@@ -3031,21 +3032,14 @@ def apply_ics_link(html_content: str, url: str | None) -> str:
 
 
 def apply_month_nav(html_content: str, html_block: str | None) -> str:
-    """Insert or replace the month navigation block."""
-    start = html_content.find(MONTH_NAV_START)
-    end = html_content.find(MONTH_NAV_END, start + len(MONTH_NAV_START)) if start != -1 else -1
-    if start != -1 and end != -1:
-        html_content = html_content[:start] + html_content[end + len(MONTH_NAV_END) :]
-    else:
-        legacy_start = "<!--month-nav-start-->"
-        legacy_end = "<!--month-nav-end-->"
-        ls = html_content.find(legacy_start)
-        le = html_content.find(legacy_end, ls + len(legacy_start)) if ls != -1 else -1
-        if ls != -1 and le != -1:
-            html_content = html_content[:ls] + html_content[le + len(legacy_end) :]
-    if html_block:
-        html_content += f"{MONTH_NAV_START}{html_block}{MONTH_NAV_END}"
-    return html_content
+    """Insert or remove the month navigation block anchored by ``<hr>``."""
+    if html_block is None:
+        pattern = re.compile(r"<hr\s*/?>", flags=re.I)
+        matches = list(pattern.finditer(html_content))
+        if matches:
+            html_content = html_content[: matches[-1].end()]
+        return html_content
+    return ensure_footer_nav_with_hr(html_content, html_block)
 
 
 def apply_festival_nav(
@@ -7508,9 +7502,7 @@ async def split_month_until_ok(
 
     title, content, _ = await build_month_page_content(db, month, events, exhibitions)
     html_full = unescape_html_comments(nodes_to_html(content))
-    html_full = replace_between_markers(
-        html_full, NAV_MONTHS_START, NAV_MONTHS_END, nav_block
-    )
+    html_full = ensure_footer_nav_with_hr(html_full, nav_block, month=month, page=1)
     total_size = len(html_full.encode())
     avg = total_size / len(events) if events else total_size
     split_idx = min(len(events), max(1, int(TELEGRAPH_LIMIT // avg))) if events else 0
@@ -7564,9 +7556,7 @@ async def split_month_until_ok(
                 )
                 continue
         html2 = unescape_html_comments(nodes_to_html(content2))
-        html2 = replace_between_markers(
-            html2, NAV_MONTHS_START, NAV_MONTHS_END, nav_block
-        )
+        html2 = ensure_footer_nav_with_hr(html2, nav_block, month=month, page=2)
         hash2 = content_hash(html2)
         try:
             if not page.path2:
@@ -7608,9 +7598,7 @@ async def split_month_until_ok(
             db, month, first, [], continuation_url=page.url2
         )
         html1 = unescape_html_comments(nodes_to_html(content1))
-        html1 = replace_between_markers(
-            html1, NAV_MONTHS_START, NAV_MONTHS_END, nav_block
-        )
+        html1 = ensure_footer_nav_with_hr(html1, nav_block, month=month, page=1)
         hash1 = content_hash(html1)
         try:
             if not page.path:
@@ -9640,9 +9628,6 @@ def _build_month_page_content_sync(
 
     add_day_sections(sorted(by_day), by_day, fest_map, add_many, use_markers=True)
 
-    nav_children: list = [month_name_nominative(month)]
-    month_nav: list[dict] = [{"tag": "h4", "children": nav_children}]
-
     if exhibitions and not exceeded:
         add_many([PERM_START])
         add({"tag": "h3", "children": ["Постоянные выставки"]})
@@ -9654,12 +9639,6 @@ def _build_month_page_content_sync(
             add_many(exhibition_to_nodes(ev))
         add_many([PERM_END])
 
-    if month_nav and not exceeded:
-        add_many([NAV_MONTHS_START])
-        add_many(telegraph_br())
-        add_many(month_nav)
-        add_many(telegraph_br())
-        add_many([NAV_MONTHS_END])
 
     if continuation_url and not exceeded:
         add_many(telegraph_br())
@@ -9774,8 +9753,8 @@ async def _sync_month_page_inner(
                                 html_content, parsed
                             )
                             changed_any = changed_any or changed
-                updated_html = replace_between_markers(
-                    html_content, NAV_MONTHS_START, NAV_MONTHS_END, nav_block
+                updated_html = ensure_footer_nav_with_hr(
+                    html_content, nav_block, month=month, page=1 if path_attr == "path" else 2
                 )
                 if not changed_any and content_hash(updated_html) == content_hash(html_content):
                     continue
@@ -9800,9 +9779,7 @@ async def _sync_month_page_inner(
             db, month, events, exhibitions
         )
         html_full = unescape_html_comments(nodes_to_html(content))
-        html_full = replace_between_markers(
-            html_full, NAV_MONTHS_START, NAV_MONTHS_END, nav_block
-        )
+        html_full = ensure_footer_nav_with_hr(html_full, nav_block, month=month, page=1)
         hash_full = content_hash(html_full)
         size = len(html_full.encode())
 
