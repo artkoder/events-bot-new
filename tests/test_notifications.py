@@ -404,14 +404,22 @@ async def test_publish_event_progress_ics(tmp_path, monkeypatch):
         await session.commit()
         await session.refresh(ev)
         session.add(JobOutbox(event_id=ev.id, task=JobTask.ics_publish))
+        session.add(JobOutbox(event_id=ev.id, task=JobTask.tg_ics_post))
         await session.commit()
 
     async def ics_handler(eid, db_obj, bot_obj, progress):
         progress.mark("ics_supabase", "done", "https://sup")
+        return True
+
+    async def tg_handler(eid, db_obj, bot_obj, progress):
         progress.mark("ics_telegram", "done", "https://tg")
         return True
 
-    monkeypatch.setattr(main, "JOB_HANDLERS", {"ics_publish": ics_handler})
+    monkeypatch.setattr(
+        main,
+        "JOB_HANDLERS",
+        {"ics_publish": ics_handler, "tg_ics_post": tg_handler},
+    )
 
     async def fake_link(task, eid, db_obj):
         return None

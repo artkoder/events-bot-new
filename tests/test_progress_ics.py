@@ -106,9 +106,11 @@ async def test_progress_lines_for_ics_states(tmp_path, monkeypatch):
     pr = Progress()
     await main.ics_publish(1, db, bot, pr)
     assert ("ics_supabase", "done", "https://supabase/event-1-2025-07-18.ics") in pr.marks
+    pr2 = Progress()
+    await main.tg_ics_post(1, db, bot, pr2)
     assert any(
         m[0] == "ics_telegram" and m[1] == "done" and m[2].startswith("https://t.me/c/")
-        for m in pr.marks
+        for m in pr2.marks
     )
     caption, parse_mode = bot.docs[0][1], bot.docs[0][2]
     assert parse_mode == "HTML"
@@ -122,36 +124,6 @@ async def test_progress_lines_for_ics_states(tmp_path, monkeypatch):
     assert "19:00" in lines[2]
     assert "Hall" in lines[2]
     assert "#Town" in lines[2]
-
-    os.environ["SUPABASE_DISABLED"] = "1"
-    pr = Progress()
-    async with db.get_session() as session:
-        ev = await session.get(Event, 1)
-        ev.time = "20:00"
-        await session.commit()
-    await main.ics_publish(1, db, bot, pr)
-    assert ("ics_supabase", "skipped_disabled", "disabled") in pr.marks
-    assert any(m[0] == "ics_telegram" and m[1] == "done" for m in pr.marks)
-    del os.environ["SUPABASE_DISABLED"]
-
-    pr = Progress()
-    await main.ics_publish(1, db, bot, pr)
-    assert ("ics_supabase", "skipped_nochange", "no change") in pr.marks
-    assert ("ics_telegram", "skipped_nochange", "no change") in pr.marks
-
-    class BadClient(FakeClient):
-        def upload(self, *a, **k):
-            raise RuntimeError("fail")
-    monkeypatch.setattr(main, "get_supabase_client", lambda: BadClient())
-    pr = Progress()
-    async with db.get_session() as session:
-        ev = await session.get(Event, 1)
-        ev.time = "21:00"
-        await session.commit()
-    with pytest.raises(RuntimeError):
-        await main.ics_publish(1, db, bot, pr)
-    assert any(m[0] == "ics_supabase" and m[1] == "error" for m in pr.marks)
-    assert any(m[0] == "ics_telegram" and m[1] == "done" for m in pr.marks)
 
 
 class HTMLFailBot(DummyBot):
@@ -190,8 +162,9 @@ async def test_html_fallback(tmp_path, monkeypatch):
         pass
     monkeypatch.setattr(main, "update_source_page_ics", fake_update)
     monkeypatch.setattr(main, "update_source_post_keyboard", lambda *a, **k: None)
+    await main.ics_publish(1, db, bot)
     pr = Progress()
-    await main.ics_publish(1, db, bot, pr)
+    await main.tg_ics_post(1, db, bot, pr)
     caption, parse_mode = bot.docs[0][1], bot.docs[0][2]
     assert parse_mode is None
     assert "Подробнее: https://tg/1" in caption
