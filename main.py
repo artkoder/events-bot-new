@@ -7740,17 +7740,16 @@ async def patch_month_page_for_date(
             .order_by(Event.time)
         )
         events = result.scalars().all()
-        fest_names = [e.festival for e in events if e.festival]
-        fest_map: dict[str, Festival] = {}
-        if fest_names:
-            res_f = await session.execute(
-                select(Festival).where(Festival.name.in_(fest_names))
-            )
-            fest_map = {f.name.casefold(): f for f in res_f.scalars().all()}
 
+    # обогащаем события ссылкой на телеграф-страницу, если она уже есть
+    async with db.get_session() as session:
+        res_f = await session.execute(select(Festival))
+        fest_map = {f.name.casefold(): f for f in res_f.scalars().all()}
     for ev in events:
-        if ev.festival:
-            setattr(ev, "_festival", fest_map.get(ev.festival.casefold()))
+        fest = fest_map.get((ev.festival or "").casefold())
+        await ensure_event_telegraph_link(ev, fest, db)
+        if fest:
+            setattr(ev, "_festival", fest)
 
     html_section = render_month_day_section(d, events)
     new_hash = content_hash(html_section)
@@ -11698,7 +11697,8 @@ async def post_vk_poll(
     if not attachment:
         logging.error("post_vk_poll: poll creation failed for group %s", group_id)
         return None
-    return await post_to_vk(group_id, "", db, bot, [attachment])
+    # ensure non-empty message to satisfy VK API
+    return await post_to_vk(group_id, question or "?", db, bot, [attachment])
 
 
 
