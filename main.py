@@ -9083,7 +9083,7 @@ def format_event_md(e: Event, festival: Festival | None = None) -> str:
         if price:
             lines.append(f"Билеты {price}")
     if e.telegraph_url:
-        cam = "\U0001f4f8" * max(0, e.photo_count)
+        cam = "\U0001f4f8" * min(2, max(0, e.photo_count))
         prefix = f"{cam} " if cam else ""
         more_line = f"{prefix}[подробнее]({e.telegraph_url})"
         ics = e.ics_url or e.ics_post_url
@@ -9341,7 +9341,7 @@ def format_exhibition_md(e: Event) -> str:
     elif e.ticket_price_max is not None:
         lines.append(f"Билеты {e.ticket_price_max}")
     if e.telegraph_url:
-        cam = "\U0001f4f8" * max(0, e.photo_count)
+        cam = "\U0001f4f8" * min(2, max(0, e.photo_count))
         prefix = f"{cam} " if cam else ""
         lines.append(f"{prefix}[подробнее]({e.telegraph_url})")
     loc = e.location_name
