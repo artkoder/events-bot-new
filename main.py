@@ -2939,7 +2939,7 @@ async def rebuild_fest_nav_if_changed(db: Database) -> bool:
     return True
 
 
-ICS_LABEL = "Добавить в календарь на телефоне (ICS)"
+ICS_LABEL = "Добавить в календарь"
 
 FOOTER_LINK_HTML = (
     '<p>&#8203;</p>'
@@ -14407,17 +14407,23 @@ async def build_source_page_content(
     else:
         catbox_urls, catbox_msg = await upload_images(images)
         urls = catbox_urls
+    # filter out video links and limit to first 12 images
+    urls = [
+        u for u in urls if not re.search(r"\.(?:mp4|webm|mkv|mov)(?:\?|$)", u, re.I)
+    ][:12]
     cover = urls[:1]
     tail = urls[1:]
-    if source_url and display_link:
-        html_content += (
-            f'<p><a href="{html.escape(source_url)}"><strong>{html.escape(title)}</strong></a></p>'
-        )
-    else:
-        html_content += f"<p><strong>{html.escape(title)}</strong></p>"
     if cover:
         html_content += f'<figure><img src="{html.escape(cover[0])}"/></figure>'
-    html_content = apply_ics_link(html_content, ics_url)
+        if ics_url:
+            html_content += (
+                f'<p>\U0001f4c5 <a href="{html.escape(ics_url)}">Добавить в календарь</a></p>'
+            )
+    else:
+        if ics_url:
+            html_content += (
+                f'<p>\U0001f4c5 <a href="{html.escape(ics_url)}">Добавить в календарь</a></p>'
+            )
     if html_text:
         html_text = strip_title(html_text)
         html_text = normalize_hashtag_dates(html_text)
