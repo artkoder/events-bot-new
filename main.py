@@ -7841,7 +7841,12 @@ async def patch_month_page_for_date(
             insert_at = _index_before_last_hr(nodes)
             anchor = "insert_before_hr"
         nodes[insert_at:insert_at] = day_nodes
-
+    logging.info(
+        "TG-MONTH anchor=%s page=%s target=%s",
+        anchor,
+        part,
+        d.isoformat(),
+    )
     before_footer = nodes_to_html(nodes)
     nav_block = await build_month_nav_block(db, month_key)
     nodes = ensure_footer_nav_with_hr(nodes, nav_block, month=month_key, page=part)
