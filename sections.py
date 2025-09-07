@@ -164,7 +164,9 @@ MONTH_RE = re.compile(
 )
 
 
-def parse_month_sections(html_or_nodes: Any) -> Tuple[List[DaySection], bool]:
+def parse_month_sections(
+    html_or_nodes: Any, page: int | None = None
+) -> Tuple[List[DaySection], bool]:
     """Return sections for each day found by ``h3`` headers.
 
     The function walks through the node list, recognising ``h3`` headers that
@@ -181,7 +183,10 @@ def parse_month_sections(html_or_nodes: Any) -> Tuple[List[DaySection], bool]:
     h3_total = sum(1 for n in nodes if isinstance(n, dict) and n.get("tag") == "h3")
     if h3_total == 0:
         logging.warning("month_rebuild_markers_missing")
-        logging.info("PARSE-MONTH: h3_total=0 matched=0 dates=[]")
+        logging.info(
+            "PARSE-MONTH page=%s h3_total=0 matched=0 dates=[]",
+            page if page is not None else "?",
+        )
         return sections, True
 
     date_h3_indices: List[int] = []
@@ -203,7 +208,8 @@ def parse_month_sections(html_or_nodes: Any) -> Tuple[List[DaySection], bool]:
         )
 
     logging.info(
-        "PARSE-MONTH: h3_total=%d matched=%d dates=%s",
+        "PARSE-MONTH page=%s h3_total=%d matched=%d dates=%s",
+        page if page is not None else "?",
         h3_total,
         len(sections),
         [f"{s.date.day:02d}.{s.date.month:02d}" for s in sections],
