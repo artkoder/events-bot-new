@@ -25,7 +25,7 @@
 
 
 
-| `/stats [events]` | optional `events` | Superadmin only. Show Telegraph view counts starting from the past month and weekend pages up to all current and future ones. Use `events` to list event page stats. |
+| `/stats [events]` | optional `events` | Superadmin only. Show Telegraph view counts starting from the past month and weekend pages up to all current and future ones. Festival stats include only upcoming or recently ended (within a week) festivals. Use `events` to list event page stats. |
 | `/dumpdb` | - | Superadmin only. Download a SQL dump and `telegraph_token.txt` plus restore instructions. |
 | `/restore` | attach file | Superadmin only. Replace current database with the uploaded dump. |
 
