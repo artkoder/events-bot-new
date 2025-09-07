@@ -69,6 +69,11 @@
 - Daily announcements no longer append a "подробнее" link to the event's
   Telegraph page.
 
+## v0.3.10 - Festival stats filter
+
+- `/stats` now lists festival statistics only for upcoming festivals or those
+  that ended within the last week.
+
 ## v0.3.9 - VK daily announcements
 
 - Daily announcements can be posted to a VK group. Set the group with `/vkgroup` and adjust

@@ -2706,12 +2706,25 @@ async def test_stats_festivals(tmp_path: Path, monkeypatch):
     bot = DummyBot("123:abc")
 
     async with db.get_session() as session:
+        future = (date.today() + timedelta(days=3)).isoformat()
+        past = (date.today() - timedelta(days=10)).isoformat()
         session.add(
             main.Festival(
                 name="Fest",
                 telegraph_url="http://fest",
                 telegraph_path="fp",
                 vk_post_url="https://vk.com/wall-1_2",
+                start_date=future,
+            )
+        )
+        session.add(
+            main.Festival(
+                name="OldFest",
+                telegraph_url="http://old",
+                telegraph_path="oldp",
+                vk_post_url="https://vk.com/wall-1_3",
+                start_date=past,
+                end_date=past,
             )
         )
         await session.commit()
@@ -2730,8 +2743,10 @@ async def test_stats_festivals(tmp_path: Path, monkeypatch):
 
     async def fake_vk_api(method, params, db=None, bot=None):
         if method == "wall.getById":
+            assert params.get("posts") == "-1_2"
             return {"response": [{"views": {"count": 70}}]}
         if method == "stats.getPostReach":
+            assert str(params.get("owner_id")) == "-1" and str(params.get("post_id")) == "2"
             return {"response": [{"reach_total": 40}]}
         raise AssertionError(method)
 
@@ -2763,6 +2778,7 @@ async def test_stats_festivals(tmp_path: Path, monkeypatch):
     assert "Фестивали (телеграм)" in lines
     assert any("Fest" in l and "50" in l for l in lines)
     assert any("Fest" in l and "70" in l and "40" in l for l in lines)
+    assert all("OldFest" not in l for l in lines)
 
 
 @pytest.mark.asyncio

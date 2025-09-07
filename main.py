@@ -13212,7 +13212,9 @@ async def collect_event_stats(db: Database) -> list[str]:
 
 
 async def collect_festival_telegraph_stats(db: Database) -> list[str]:
-    """Return Telegraph view counts for all festivals."""
+    """Return Telegraph view counts for upcoming and recent festivals."""
+    today = datetime.now(LOCAL_TZ).date()
+    week_ago = today - timedelta(days=7)
     async with db.get_session() as session:
         result = await session.execute(
             select(Festival).where(Festival.telegraph_path.is_not(None))
@@ -13220,6 +13222,10 @@ async def collect_festival_telegraph_stats(db: Database) -> list[str]:
         fests = result.scalars().all()
     stats: list[tuple[str, int]] = []
     for f in fests:
+        start = parse_iso_date(f.start_date) if f.start_date else None
+        end = parse_iso_date(f.end_date) if f.end_date else start
+        if not ((start and start >= today) or (end and end >= week_ago)):
+            continue
         views = await fetch_views(f.telegraph_path, f.telegraph_url)
         if views is not None:
             stats.append((f.name, views))
@@ -13290,7 +13296,9 @@ async def fetch_vk_post_stats(
 
 
 async def collect_festival_vk_stats(db: Database) -> list[str]:
-    """Return VK view and reach counts for all festivals."""
+    """Return VK view and reach counts for upcoming and recent festivals."""
+    today = datetime.now(LOCAL_TZ).date()
+    week_ago = today - timedelta(days=7)
     async with db.get_session() as session:
         result = await session.execute(
             select(Festival).where(Festival.vk_post_url.is_not(None))
@@ -13298,6 +13306,10 @@ async def collect_festival_vk_stats(db: Database) -> list[str]:
         fests = result.scalars().all()
     stats: list[tuple[str, int, int]] = []
     for f in fests:
+        start = parse_iso_date(f.start_date) if f.start_date else None
+        end = parse_iso_date(f.end_date) if f.end_date else start
+        if not ((start and start >= today) or (end and end >= week_ago)):
+            continue
         views, reach = await fetch_vk_post_stats(f.vk_post_url, db)
         if views is not None or reach is not None:
             stats.append((f.name, views or 0, reach or 0))
