@@ -2052,6 +2052,7 @@ async def extract_images(message: types.Message, bot: Bot) -> list[tuple[bytes, 
             await bot.download(message.photo[-1].file_id, destination=bio)
         data, name = ensure_jpeg(bio.getvalue(), "photo.jpg")
         images.append((data, name))
+        logging.info("IMG download type=photo name=%s size=%d", name, len(data))
     if (
         message.document
         and message.document.mime_type
@@ -2063,6 +2064,14 @@ async def extract_images(message: types.Message, bot: Bot) -> list[tuple[bytes, 
         name = message.document.file_name or "image.jpg"
         data, name = ensure_jpeg(bio.getvalue(), name)
         images.append((data, name))
+        logging.info("IMG download type=document name=%s size=%d", name, len(data))
+    names = [n for _, n in images[:MAX_ALBUM_IMAGES]]
+    logging.info(
+        "IMG extract done count=%d names=%s limit=%d",
+        len(names),
+        names,
+        MAX_ALBUM_IMAGES,
+    )
     return images[:MAX_ALBUM_IMAGES]
 
 
@@ -2070,10 +2079,12 @@ async def upload_images(images: list[tuple[bytes, str]]) -> tuple[list[str], str
     """Upload images to Catbox with retries."""
     catbox_urls: list[str] = []
     catbox_msg = ""
+    logging.info("CATBOX start images=%d limit=%d", len(images or []), MAX_ALBUM_IMAGES)
     if CATBOX_ENABLED and images:
         session = get_http_session()
         for data, name in images[:MAX_ALBUM_IMAGES]:
             data, name = ensure_jpeg(data, name)
+            logging.info("CATBOX candidate name=%s size=%d", name, len(data))
             if len(data) > 5 * 1024 * 1024:
                 logging.warning("catbox skip %s: too large", name)
                 catbox_msg += f"{name}: too large; "
@@ -2115,6 +2126,12 @@ async def upload_images(images: list[tuple[bytes, str]]) -> tuple[list[str], str
         catbox_msg = catbox_msg.strip("; ")
     elif images:
         catbox_msg = "disabled"
+    logging.info(
+        "CATBOX done uploaded=%d skipped=%d msg=%s",
+        len(catbox_urls),
+        max(0, len(images or []) - len(catbox_urls)),
+        catbox_msg,
+    )
     return catbox_urls, catbox_msg
 
 
@@ -13984,16 +14001,34 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
             return
         if not text:
             if images:
-
+                before = len(pending_media_groups.get(gid, []))
                 buf = pending_media_groups.setdefault(gid, [])
+                added = (
+                    min(len(images or []), MAX_ALBUM_IMAGES - len(buf)) if images else 0
+                )
+                logging.info(
+                    "IMG album buffer gid=%s before=%d add=%d", gid, before, added
+                )
                 if len(buf) < MAX_ALBUM_IMAGES:
                     buf.extend(images[: MAX_ALBUM_IMAGES - len(buf)])
+                logging.info(
+                    "IMG album buffer gid=%s after=%d", gid, len(buf)
+                )
             logging.info("waiting for caption in album %s", gid)
             return
         stored = pending_media_groups.pop(gid, [])
+        need = MAX_ALBUM_IMAGES - len(stored)
+        take = min(len(images or []), need) if images else 0
+        logging.info(
+            "IMG album flush gid=%s stored=%d add_from_msg=%d",
+            gid,
+            len(stored),
+            take,
+        )
         if len(stored) < MAX_ALBUM_IMAGES and images:
             stored.extend(images[: MAX_ALBUM_IMAGES - len(stored)])
         media = stored
+        logging.info("IMG album ready gid=%s media_len=%d", gid, len(media))
 
         processed_media_groups.add(gid)
     else:
@@ -14001,6 +14036,7 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
             logging.info("forwarded message has no text")
             return
         media = images[:MAX_ALBUM_IMAGES] if images else None
+        logging.info("IMG single message media_len=%d", len(media or []))
     async with db.get_session() as session:
         user = await session.get(User, message.from_user.id)
         if not user or user.blocked:
@@ -14011,6 +14047,7 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
     chat_id: int | None = None
     channel_name: str | None = None
 
+    allowed: bool | None = None
     if message.forward_from_chat and message.forward_from_message_id:
         chat = message.forward_from_chat
         msg_id = message.forward_from_message_id
@@ -14070,9 +14107,18 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
     if chat_id and msg_id:
         target_chat_id = chat_id
         target_message_id = msg_id
-
-    if link:
-        logging.info("source post url %s", link)
+    logging.info(
+        "FWD link=%s channel_id=%s name=%s allowed=%s",
+        link,
+        chat_id,
+        channel_name,
+        allowed,
+    )
+    logging.info(
+        "FWD summary text_len=%d media_len=%d",
+        len(text or ""),
+        len(media or []),
+    )
     logging.info("parsing forwarded text via LLM")
     try:
         results = await add_events_from_text(
@@ -14439,9 +14485,11 @@ async def build_source_page_content(
     if catbox_urls is not None:
         urls = list(catbox_urls)
         catbox_msg = ""
+        input_count = len(catbox_urls)
     else:
         catbox_urls, catbox_msg = await upload_images(images)
         urls = catbox_urls
+        input_count = 0
     # filter out video links and limit to first 12 images
     urls = [
         u for u in urls if not re.search(r"\.(?:mp4|webm|mkv|mov)(?:\?|$)", u, re.I)
@@ -14490,11 +14538,14 @@ async def build_source_page_content(
         html_content += nav_html
     html_content = apply_footer_link(html_content)
     html_content = lint_telegraph_html(html_content)
+    mode = "html" if html_text else "plain"
+    logging.info("SRC build mode=%s urls_total=%d input_urls=%d", mode, len(urls), input_count)
     logging.info(
-        "build_source_page_content: cover=%d tail=%d nav_dup=%s",
+        "build_source_page_content: cover=%d tail=%d nav_dup=%s catbox_msg=%s",
         len(cover),
         len(tail),
         bool(nav_html and len(urls) >= 2),
+        catbox_msg,
     )
     return html_content, catbox_msg, len(urls)
 
@@ -14541,6 +14592,7 @@ async def create_source_page(
         display_link=display_link,
         catbox_urls=catbox_urls,
     )
+    logging.info("SRC page compose uploaded=%d catbox_msg=%s", uploaded, catbox_msg)
     from telegraph.utils import html_to_nodes
 
     nodes = html_to_nodes(html_content)
@@ -14557,7 +14609,12 @@ async def create_source_page(
         logging.error("Failed to create telegraph page: %s", e)
         return None
     url = normalize_telegraph_url(page.get("url"))
-    logging.info("Created telegraph page %s", url)
+    logging.info(
+        "SRC page created title=%s uploaded=%d url=%s",
+        title,
+        uploaded,
+        url,
+    )
     return url, page.get("path"), catbox_msg, uploaded
 
 
