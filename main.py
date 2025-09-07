@@ -111,7 +111,7 @@ import contextlib
 import random
 import html
 from types import SimpleNamespace
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import sqlite3
 from io import BytesIO
 import aiosqlite
@@ -637,6 +637,17 @@ FEST_JOB_MULT = 100_000
 # The default was previously 10 but the pipeline now supports up to 12 images
 # per event source page.
 MAX_ALBUM_IMAGES = int(os.getenv("MAX_ALBUM_IMAGES", "12"))
+
+# Delay before finalizing a forwarded album (milliseconds)
+ALBUM_FINALIZE_DELAY_MS = int(os.getenv("ALBUM_FINALIZE_DELAY_MS", "1500"))
+
+# Time to keep album buffers without captions (seconds)
+ALBUM_PENDING_TTL_S = int(os.getenv("ALBUM_PENDING_TTL_S", "60"))
+
+# Maximum number of pending album timers
+MAX_PENDING_ALBUMS = int(os.getenv("MAX_PENDING_ALBUMS", "50"))
+
+LAST_CATBOX_MSG = ""
 
 # Maximum size (in bytes) for downloaded files
 MAX_DOWNLOAD_SIZE = int(os.getenv("MAX_DOWNLOAD_SIZE", str(5 * 1024 * 1024)))
@@ -2132,6 +2143,8 @@ async def upload_images(images: list[tuple[bytes, str]]) -> tuple[list[str], str
         max(0, len(images or []) - len(catbox_urls)),
         catbox_msg,
     )
+    global LAST_CATBOX_MSG
+    LAST_CATBOX_MSG = catbox_msg
     return catbox_urls, catbox_msg
 
 
@@ -13985,70 +13998,81 @@ async def handle_festival_edit_message(message: types.Message, db: Database, bot
 
 
 
+@dataclass
+class AlbumState:
+    images: list[tuple[bytes, str]]
+    text: str | None = None
+    html: str | None = None
+    message: types.Message | None = None
+    timer: asyncio.Task | None = None
+    created: float = field(default_factory=_time.monotonic)
+
+
+pending_albums: dict[str, AlbumState] = {}
 processed_media_groups: set[str] = set()
 
-# store up to three images for albums until the caption arrives
 
-pending_media_groups: dict[str, list[tuple[bytes, str]]] = {}
-
-
-async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
-    logging.info(
-        "received forwarded message %s from %s",
-        message.message_id,
-        message.from_user.id,
-    )
-    text = message.text or message.caption
-    images = await extract_images(message, bot)
-    logging.info(
-        "forward text len=%d photos=%d",
-        len(text or ""),
-        len(images or []),
-    )
-    media: list[tuple[bytes, str]] | None = None
-    if message.media_group_id:
-        gid = message.media_group_id
-        if gid in processed_media_groups:
-            logging.info("skip already processed album %s", gid)
-            return
-        if not text:
-            if images:
-                before = len(pending_media_groups.get(gid, []))
-                buf = pending_media_groups.setdefault(gid, [])
-                added = (
-                    min(len(images or []), MAX_ALBUM_IMAGES - len(buf)) if images else 0
-                )
-                logging.info(
-                    "IMG album buffer gid=%s before=%d add=%d", gid, before, added
-                )
-                if len(buf) < MAX_ALBUM_IMAGES:
-                    buf.extend(images[: MAX_ALBUM_IMAGES - len(buf)])
-                logging.info(
-                    "IMG album buffer gid=%s after=%d", gid, len(buf)
-                )
-            logging.info("waiting for caption in album %s", gid)
-            return
-        stored = pending_media_groups.pop(gid, [])
-        need = MAX_ALBUM_IMAGES - len(stored)
-        take = min(len(images or []), need) if images else 0
+async def _drop_album_after_ttl(gid: str) -> None:
+    await asyncio.sleep(ALBUM_PENDING_TTL_S)
+    state = pending_albums.get(gid)
+    if state and not state.text:
+        age = int(time.monotonic() - state.created)
         logging.info(
-            "IMG album flush gid=%s stored=%d add_from_msg=%d",
+            "album_drop_no_caption gid=%s buf_size=%d age_s=%d",
             gid,
-            len(stored),
-            take,
+            len(state.images),
+            age,
         )
-        if len(stored) < MAX_ALBUM_IMAGES and images:
-            stored.extend(images[: MAX_ALBUM_IMAGES - len(stored)])
-        media = stored
-        logging.info("IMG album ready gid=%s media_len=%d", gid, len(media))
+        pending_albums.pop(gid, None)
 
-        processed_media_groups.add(gid)
-    else:
-        if not text:
-            logging.info("forwarded message has no text")
-            return
-        media = images[:MAX_ALBUM_IMAGES] if images else None
-        logging.info("IMG single message media_len=%d", len(media or []))
+
+async def _finalize_album_after_delay(gid: str, db: Database, bot: Bot) -> None:
+    await asyncio.sleep(ALBUM_FINALIZE_DELAY_MS / 1000)
+    await finalize_album(gid, db, bot)
+
+
+async def finalize_album(gid: str, db: Database, bot: Bot) -> None:
+    state = pending_albums.pop(gid, None)
+    if not state or not state.text or not state.message:
+        return
+    start = _time.monotonic()
+    images_total = len(state.images)
+    logging.info(
+        "album_finalize_start gid=%s images_total=%d",
+        gid,
+        images_total,
+    )
+    processed_media_groups.add(gid)
+    global LAST_CATBOX_MSG
+    LAST_CATBOX_MSG = ""
+    await _process_forwarded(
+        state.message,
+        db,
+        bot,
+        state.text,
+        state.html,
+        state.images,
+    )
+    took = int((time.monotonic() - start) * 1000)
+    used = min(images_total, MAX_ALBUM_IMAGES)
+    logging.info(
+        "album_finalize_done gid=%s images_total=%d took_ms=%d used_images=%d catbox_result=%s",
+        gid,
+        images_total,
+        took,
+        used,
+        LAST_CATBOX_MSG,
+    )
+
+
+async def _process_forwarded(
+    message: types.Message,
+    db: Database,
+    bot: Bot,
+    text: str,
+    html: str | None,
+    media: list[tuple[bytes, str]] | None,
+) -> None:
     async with db.get_session() as session:
         user = await session.get(User, message.from_user.id)
         if not user or user.blocked:
@@ -14137,7 +14161,7 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
             db,
             text,
             link,
-            message.html_text or message.caption_html,
+            html,
             media,
             source_chat_id=target_chat_id,
             source_message_id=target_message_id,
@@ -14254,6 +14278,85 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
             await publish_event_progress(saved, db, bot, message.chat.id)
         except Exception as e:
             logging.error("failed to send event response: %s", e)
+
+
+async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
+    logging.info(
+        "received forwarded message %s from %s",
+        message.message_id,
+        message.from_user.id,
+    )
+    text = message.text or message.caption
+    images = await extract_images(message, bot)
+    logging.info(
+        "forward text len=%d photos=%d",
+        len(text or ""),
+        len(images or []),
+    )
+    if message.media_group_id:
+        gid = message.media_group_id
+        if gid in processed_media_groups:
+            logging.info("skip already processed album %s", gid)
+            return
+        state = pending_albums.get(gid)
+        if not state:
+            if len(pending_albums) >= MAX_PENDING_ALBUMS:
+                old_gid, old_state = min(
+                    pending_albums.items(), key=lambda kv: kv[1].created
+                )
+                if old_state.timer:
+                    old_state.timer.cancel()
+                age = int(time.monotonic() - old_state.created)
+                logging.info(
+                    "album_drop_no_caption gid=%s buf_size=%d age_s=%d",
+                    old_gid,
+                    len(old_state.images),
+                    age,
+                )
+                pending_albums.pop(old_gid, None)
+            state = AlbumState(images=[])
+            state.timer = asyncio.create_task(_drop_album_after_ttl(gid))
+            pending_albums[gid] = state
+        img_count = len(images or [])
+        if images and len(state.images) < MAX_ALBUM_IMAGES:
+            add = min(img_count, MAX_ALBUM_IMAGES - len(state.images))
+            state.images.extend(images[:add])
+        logging.info(
+            "album_collect gid=%s msg_id=%s has_text=%s images_in_msg=%d buf_size_after=%d",
+            gid,
+            message.message_id,
+            bool(text),
+            len(images or []),
+            len(state.images),
+        )
+        if text and not state.text:
+            state.text = text
+            state.html = message.html_text or message.caption_html
+            state.message = message
+            if state.timer:
+                state.timer.cancel()
+            logging.info(
+                "album_caption_seen gid=%s delay_ms=%d",
+                gid,
+                ALBUM_FINALIZE_DELAY_MS,
+            )
+            state.timer = asyncio.create_task(
+                _finalize_album_after_delay(gid, db, bot)
+            )
+        return
+    if not text:
+        logging.info("forwarded message has no text")
+        return
+    media = images[:MAX_ALBUM_IMAGES] if images else None
+    logging.info("IMG single message media_len=%d", len(media or []))
+    await _process_forwarded(
+        message,
+        db,
+        bot,
+        text,
+        message.html_text or message.caption_html,
+        media,
+    )
 
 
 async def telegraph_test():
