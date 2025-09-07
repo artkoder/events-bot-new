@@ -178,8 +178,10 @@ def parse_month_sections(html_or_nodes: Any) -> Tuple[List[DaySection], bool]:
 
     nodes = _nodes_from_html(html_or_nodes)
     sections: List[DaySection] = []
-    if not any(isinstance(n, dict) and n.get("tag") == "h3" for n in nodes):
+    h3_total = sum(1 for n in nodes if isinstance(n, dict) and n.get("tag") == "h3")
+    if h3_total == 0:
         logging.warning("month_rebuild_markers_missing")
+        logging.info("PARSE-MONTH: h3_total=0 matched=0 dates=[]")
         return sections, True
 
     date_h3_indices: List[int] = []
@@ -188,14 +190,24 @@ def parse_month_sections(html_or_nodes: Any) -> Tuple[List[DaySection], bool]:
             continue
         text = "".join(_header_text(node))
         text = text.replace("\u00a0", " ").replace("\u200b", " ")
-        text = unicodedata.normalize("NFKC", text).strip().lower()
+        text = unicodedata.normalize("NFKC", text).lower()
+        text = text.replace("🟥", "").strip()
         m = MONTH_RE.fullmatch(text)
         if not m:
             continue
         day = int(m.group(1))
         month = MONTHS_RU[m.group(2)]
         date_h3_indices.append(idx)
-        sections.append(DaySection(date=date(2000, month, day), start_idx=idx, end_idx=len(nodes)))
+        sections.append(
+            DaySection(date=date(2000, month, day), start_idx=idx, end_idx=len(nodes))
+        )
+
+    logging.info(
+        "PARSE-MONTH: h3_total=%d matched=%d dates=%s",
+        h3_total,
+        len(sections),
+        [f"{s.date.day:02d}.{s.date.month:02d}" for s in sections],
+    )
 
     # determine end indices
     if not sections:
