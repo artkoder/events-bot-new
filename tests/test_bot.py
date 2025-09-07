@@ -2117,6 +2117,9 @@ async def test_media_group_caption_first(tmp_path: Path, monkeypatch):
 
     monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
     monkeypatch.setattr("main.create_source_page", fake_create)
+    monkeypatch.setattr(main, "ALBUM_FINALIZE_DELAY_MS", 50)
+    main.pending_albums.clear()
+    main.processed_media_groups.clear()
 
     start_msg = types.Message.model_validate(
         {
@@ -2165,6 +2168,7 @@ async def test_media_group_caption_first(tmp_path: Path, monkeypatch):
         }
     )
     await main.handle_forwarded(msg2, db, bot)
+    await asyncio.sleep(0.2)
 
     async with db.get_session() as session:
         ev = (await session.execute(select(Event))).scalars().first()
@@ -2195,6 +2199,9 @@ async def test_media_group_caption_last(tmp_path: Path, monkeypatch):
 
     monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
     monkeypatch.setattr("main.create_source_page", fake_create)
+    monkeypatch.setattr(main, "ALBUM_FINALIZE_DELAY_MS", 50)
+    main.pending_albums.clear()
+    main.processed_media_groups.clear()
 
     start_msg = types.Message.model_validate(
         {
@@ -2243,6 +2250,7 @@ async def test_media_group_caption_last(tmp_path: Path, monkeypatch):
         }
     )
     await main.handle_forwarded(msg2, db, bot)
+    await asyncio.sleep(0.2)
 
     async with db.get_session() as session:
         evs = (await session.execute(select(Event))).scalars().all()
