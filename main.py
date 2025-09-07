@@ -7724,16 +7724,6 @@ async def patch_month_page_for_date(
                     continue
                 raise
 
-    def _dates_from_html(html: str) -> list[date]:
-        dates: list[date] = []
-        for m in re.finditer(r"<!--DAY:(\\d{4}-\\d{2}-\\d{2}) START-->", html):
-            dates.append(date.fromisoformat(m.group(1)))
-        for m in re.finditer(r"<h3>🟥🟥🟥 (\\d{1,2} [^<]+) 🟥🟥🟥</h3>", html):
-            parsed = _parse_pretty_date(m.group(1), d.year)
-            if parsed:
-                dates.append(parsed)
-        return dates
-
     split = bool(page.path2)
     if split:
         data1, data2 = await asyncio.gather(
@@ -7746,19 +7736,60 @@ async def patch_month_page_for_date(
         html2 = unescape_html_comments(
             data2.get("content") or data2.get("content_html") or ""
         )
-        part = locate_month_day_page(html1, html2, d)
-        p1_dates = _dates_from_html(html1)
-        p1_last = max(p1_dates).isoformat() if p1_dates else ""
+
+        from telegraph.utils import html_to_nodes
+
+        nodes1 = html_to_nodes(html1)
+        sections1, need_rebuild1 = parse_month_sections(nodes1, page=1)
+        if not sections1:
+            sections1, need_rebuild1 = parse_month_sections(nodes1, page=1)
+        nodes2 = html_to_nodes(html2)
+        sections2, need_rebuild2 = parse_month_sections(nodes2, page=2)
+
+        dates1 = [date(d.year, s.date.month, s.date.day) for s in sections1]
+        dates2 = [date(d.year, s.date.month, s.date.day) for s in sections2]
+        p1_min = min(dates1).isoformat() if dates1 else ""
+        p1_max = max(dates1).isoformat() if dates1 else ""
+        p2_min = min(dates2).isoformat() if dates2 else ""
+        p2_max = max(dates2).isoformat() if dates2 else ""
+
+        if not dates1:
+            part = 1
+        elif not dates2:
+            part = 2 if p1_max and d > date.fromisoformat(p1_max) else 1
+        elif d <= date.fromisoformat(p1_max):
+            part = 1
+        elif d >= date.fromisoformat(p2_min):
+            part = 2
+        else:
+            if len(dates1) < len(dates2):
+                part = 1
+            elif len(dates2) < len(dates1):
+                part = 2
+            else:
+                if len(html1) < len(html2):
+                    part = 1
+                elif len(html2) < len(html1):
+                    part = 2
+                else:
+                    part = 1
+
         if part == 1:
             html_content = html1
             page_path = page.path
             title = data1.get("title") or month_key
             hash_attr = "content_hash"
+            nodes = nodes1
+            sections = sections1
+            need_rebuild = need_rebuild1
         else:
             html_content = html2
             page_path = page.path2
             title = data2.get("title") or month_key
             hash_attr = "content_hash2"
+            nodes = nodes2
+            sections = sections2
+            need_rebuild = need_rebuild2
     else:
         data1 = await tg_call(telegraph.get_page, page.path, return_html=True)
         html_content = unescape_html_comments(
@@ -7768,27 +7799,31 @@ async def patch_month_page_for_date(
         title = data1.get("title") or month_key
         hash_attr = "content_hash"
         part = 1
-        p1_dates = _dates_from_html(html_content)
-        p1_last = max(p1_dates).isoformat() if p1_dates else ""
+        from telegraph.utils import html_to_nodes
+
+        nodes = html_to_nodes(html_content)
+        sections, need_rebuild = parse_month_sections(nodes, page=1)
+        dates1 = [date(d.year, s.date.month, s.date.day) for s in sections]
+        p1_min = min(dates1).isoformat() if dates1 else ""
+        p1_max = max(dates1).isoformat() if dates1 else ""
+        p2_min = p2_max = ""
 
     logging.info(
-        "TG-MONTH select ym=%s date=%s split=%s p1_last=%s target=%s",
-        month_key,
+        "TG-MONTH select: p1=[%s..%s], p2=[%s..%s], target=%s → page%s",
+        p1_min,
+        p1_max,
+        p2_min,
+        p2_max,
         d.isoformat(),
-        str(split).lower(),
-        p1_last,
-        "page2" if part == 2 else "page1",
+        "2" if part == 2 else "1",
     )
 
     logging.info(
         "patch_month_day update_links=True anchor=h3 part=%s",
         2 if hash_attr == "content_hash2" else 1,
     )
+    from telegraph.utils import nodes_to_html
 
-    from telegraph.utils import html_to_nodes, nodes_to_html
-
-    nodes = html_to_nodes(html_content)
-    sections, need_rebuild = parse_month_sections(nodes)
     if need_rebuild:
         return "rebuild"
 
