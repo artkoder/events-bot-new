@@ -151,6 +151,9 @@ class Festival(SQLModel, table=True):
     location_address: Optional[str] = None
     city: Optional[str] = None
     source_text: Optional[str] = None
+    source_post_url: Optional[str] = None
+    source_chat_id: Optional[int] = None
+    source_message_id: Optional[int] = None
     nav_hash: Optional[str] = None
 
 

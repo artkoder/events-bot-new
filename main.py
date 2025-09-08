@@ -1585,6 +1585,9 @@ async def ensure_festival(
     location_address: str | None = None,
     city: str | None = None,
     source_text: str | None = None,
+    source_post_url: str | None = None,
+    source_chat_id: int | None = None,
+    source_message_id: int | None = None,
 ) -> tuple[Festival, bool, bool]:
     """Return festival and flags (created, updated)."""
     async with db.get_session() as session:
@@ -1627,6 +1630,15 @@ async def ensure_festival(
             if source_text and source_text != fest.source_text:
                 fest.source_text = source_text
                 updated = True
+            if source_post_url and source_post_url != fest.source_post_url:
+                fest.source_post_url = source_post_url
+                updated = True
+            if source_chat_id and source_chat_id != fest.source_chat_id:
+                fest.source_chat_id = source_chat_id
+                updated = True
+            if source_message_id and source_message_id != fest.source_message_id:
+                fest.source_message_id = source_message_id
+                updated = True
             if updated:
                 session.add(fest)
                 await session.commit()
@@ -1643,6 +1655,9 @@ async def ensure_festival(
             location_address=location_address,
             city=city,
             source_text=source_text,
+            source_post_url=source_post_url,
+            source_chat_id=source_chat_id,
+            source_message_id=source_message_id,
         )
         session.add(fest)
         await session.commit()
@@ -4502,6 +4517,12 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                 fest.id,
                 fest.name,
             )
+            add_source = (
+                (end - start).days == 0
+                and bool(fest.source_post_url)
+                and bool(fest.source_chat_id)
+                and bool(fest.source_message_id)
+            )
             events: list[tuple[Event, bool]] = []
             for i in range((end - start).days + 1):
                 day = start + timedelta(days=i)
@@ -4515,6 +4536,9 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                     location_address=fest.location_address,
                     city=city_for_days,
                     source_text=f"{fest.name} — {day.isoformat()}",
+                    source_post_url=fest.source_post_url if add_source else None,
+                    source_chat_id=fest.source_chat_id if add_source else None,
+                    source_message_id=fest.source_message_id if add_source else None,
                     creator_id=user.user_id if user else None,
                 )
                 saved, added = await upsert_event(session, event)
@@ -6140,6 +6164,9 @@ async def add_events_from_text(
             location_address=loc_addr,
             city=city,
             source_text=source_text_clean,
+            source_post_url=source_link,
+            source_chat_id=source_chat_id,
+            source_message_id=source_message_id,
         )
         festival_obj = fest_obj
         fest_created = created
