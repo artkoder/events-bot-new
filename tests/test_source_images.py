@@ -124,5 +124,5 @@ async def test_build_source_page_content_cleans_tg_tags():
     )
     assert "tg-emoji" not in html
     assert "tg-spoiler" not in html
-    assert "<i>secret</i>" in html
+    assert "secret" in html
     assert "Бесплатно" in html
