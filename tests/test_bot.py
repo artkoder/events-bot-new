@@ -2068,6 +2068,9 @@ async def test_forward_add_festival(tmp_path: Path, monkeypatch):
     async with db.get_session() as session:
         fest = (await session.execute(select(Festival))).scalar_one()
         fid = fest.id
+        assert fest.source_post_url == "https://t.me/chan/10"
+        assert fest.source_chat_id == -100123
+        assert fest.source_message_id == 10
 
     text = bot.messages[-1][1]
     assert "telegraph: https://telegra.ph/test" in text
@@ -5882,6 +5885,9 @@ async def test_festdays_callback_creates_events(tmp_path: Path, monkeypatch):
             location_name="Hall",
             city="Town",
             telegraph_url="http://tg",
+            source_post_url="https://t.me/c/123/10",
+            source_chat_id=-100123,
+            source_message_id=10,
         )
         session.add(fest)
         await session.commit()
@@ -5941,10 +5947,88 @@ async def test_festdays_callback_creates_events(tmp_path: Path, monkeypatch):
         events = (await session.execute(select(Event))).scalars().all()
         assert len(events) == 2
         assert all(e.festival == "Jazz" for e in events)
+        assert all(e.source_post_url is None for e in events)
+        assert all(e.source_chat_id is None for e in events)
+        assert all(e.source_message_id is None for e in events)
     assert len(month_calls) == 1
     assert len(weekend_calls) == 1
     assert any("http://tg" in m for m in ans_msgs)
     assert any("Что дальше?" in m for m in ans_msgs)
+
+
+@pytest.mark.asyncio
+async def test_festdays_single_day_copies_source(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    start_day = main.next_weekend_start(date.today())
+    async with db.get_session() as session:
+        fest = Festival(
+            name="Solo",
+            start_date=start_day.isoformat(),
+            end_date=start_day.isoformat(),
+            location_name="Hall",
+            city="Town",
+            source_post_url="https://t.me/c/123/10",
+            source_chat_id=-100123,
+            source_message_id=10,
+        )
+        session.add(fest)
+        await session.commit()
+        fid = fest.id
+
+    async def fake_sync_month_page(db_obj, month):
+        pass
+
+    async def fake_sync_weekend_page(db_obj, start):
+        pass
+
+    async def fake_sync_festival_page(db_obj, name, **kwargs):
+        pass
+
+    async def fake_sync_vk(db_obj, name, bot_obj, strict=False):
+        pass
+
+    async def fake_notify(db_obj, bot_obj, user, event, added):
+        pass
+
+    monkeypatch.setattr(main, "sync_month_page", fake_sync_month_page)
+    monkeypatch.setattr(main, "sync_weekend_page", fake_sync_weekend_page)
+    monkeypatch.setattr(main, "sync_festival_page", fake_sync_festival_page)
+    monkeypatch.setattr(main, "sync_festival_vk_post", fake_sync_vk)
+    monkeypatch.setattr(main, "notify_event_added", fake_notify)
+
+    cb = types.CallbackQuery.model_validate(
+        {
+            "id": "1",
+            "data": f"festdays:{fid}",
+            "from": {"id": 1, "is_bot": False, "first_name": "U"},
+            "chat_instance": "1",
+            "message": {
+                "message_id": 1,
+                "date": 0,
+                "chat": {"id": 1, "type": "private"},
+                "text": "stub",
+            },
+        }
+    ).as_(bot)
+
+    async def dummy_answer(text=None, **kwargs):
+        return None
+
+    object.__setattr__(cb, "answer", dummy_answer)
+    object.__setattr__(cb.message, "answer", dummy_answer)
+
+    await process_request(cb, db, bot)
+
+    async with db.get_session() as session:
+        events = (await session.execute(select(Event))).scalars().all()
+        assert len(events) == 1
+        ev = events[0]
+        assert ev.source_post_url == "https://t.me/c/123/10"
+        assert ev.source_chat_id == -100123
+        assert ev.source_message_id == 10
 
 
 @pytest.mark.asyncio

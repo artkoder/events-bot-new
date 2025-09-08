@@ -201,7 +201,10 @@ class Database:
                     location_name TEXT,
                     location_address TEXT,
                     city TEXT,
-                    source_text TEXT
+                    source_text TEXT,
+                    source_post_url TEXT,
+                    source_chat_id INTEGER,
+                    source_message_id INTEGER
                 )
                 """
             )
@@ -212,6 +215,9 @@ class Database:
             await _add_column(conn, "festival", "ticket_url TEXT")
             await _add_column(conn, "festival", "nav_hash TEXT")
             await _add_column(conn, "festival", "photo_urls JSON")
+            await _add_column(conn, "festival", "source_post_url TEXT")
+            await _add_column(conn, "festival", "source_chat_id INTEGER")
+            await _add_column(conn, "festival", "source_message_id INTEGER")
 
             await conn.execute(
                 """
