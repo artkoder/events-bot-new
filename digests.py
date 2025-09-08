@@ -4,6 +4,7 @@ from collections import Counter
 from datetime import datetime, timedelta
 import logging
 import re
+import time
 from typing import Iterable, List, Tuple
 
 from sqlalchemy import select
@@ -50,7 +51,7 @@ def parse_start_time(raw: str) -> tuple[int, int] | None:
     return hh, mm
 
 
-def _event_start_datetime(event: Event) -> datetime:
+def _event_start_datetime(event: Event, digest_id: str | None = None) -> datetime:
     """Combine ``date`` and ``time`` fields of an event into a datetime."""
 
     cached = getattr(event, "_start_dt", None)
@@ -63,7 +64,8 @@ def _event_start_datetime(event: Event) -> datetime:
 
     if parsed is None:
         logging.warning(
-            'digest.time: event_id=%s, title="%s", raw="%s" -> parsed=None',
+            "digest.time.parse digest_id=%s event_id=%s title=%r time_raw=%r parsed=null reason_if_null=no_match",
+            digest_id,
             event.id,
             event.title,
             raw,
@@ -72,7 +74,8 @@ def _event_start_datetime(event: Event) -> datetime:
     else:
         hh, mm = parsed
         logging.info(
-            'digest.time: event_id=%s, title="%s", raw="%s" -> parsed=%02d:%02d',
+            "digest.time.parse digest_id=%s event_id=%s title=%r time_raw=%r parsed=%02d:%02d",
+            digest_id,
             event.id,
             event.title,
             raw,
@@ -86,7 +89,7 @@ def _event_start_datetime(event: Event) -> datetime:
 
 
 async def build_lectures_digest_candidates(
-    db: Database, now: datetime
+    db: Database, now: datetime, digest_id: str | None = None
 ) -> Tuple[List[Event], int]:
     """Select lecture events for the digest.
 
@@ -120,17 +123,17 @@ async def build_lectures_digest_candidates(
         events = list(res.scalars().all())
 
     cutoff = now + timedelta(hours=2)
-    events = [e for e in events if _event_start_datetime(e) >= cutoff]
-    events.sort(key=_event_start_datetime)
+    events = [e for e in events if _event_start_datetime(e, digest_id) >= cutoff]
+    events.sort(key=lambda e: _event_start_datetime(e, digest_id))
 
     horizon = 7
     end_7 = now + timedelta(days=7)
-    selected = [e for e in events if _event_start_datetime(e) <= end_7]
+    selected = [e for e in events if _event_start_datetime(e, digest_id) <= end_7]
 
     if len(selected) < 6:
         horizon = 14
         end_14 = now + timedelta(days=14)
-        selected = [e for e in events if _event_start_datetime(e) <= end_14]
+        selected = [e for e in events if _event_start_datetime(e, digest_id) <= end_14]
 
     return selected[:9], horizon
 
@@ -197,3 +200,40 @@ def make_intro(n: int, horizon_days: int, topics3: List[str]) -> str:
         topics_part = f"на {topics3[0]}, {topics3[1]} и {topics3[2]}"
 
     return f"Подобрали для вас {n} {lectures_part} {horizon_part} {topics_part}."
+
+
+async def build_lectures_digest_preview(
+    digest_id: str, db: Database, now: datetime
+) -> tuple[str, int, List[Event]]:
+    """Build digest preview text for lectures."""
+
+    start = time.monotonic()
+    logging.info(
+        "digest.collect.start digest_id=%s window_days=14 now=%s limit=9",
+        digest_id,
+        now.isoformat(),
+    )
+    events, horizon = await build_lectures_digest_candidates(db, now, digest_id)
+    duration_ms = int((time.monotonic() - start) * 1000)
+    cutoff_plus_2h = now + timedelta(hours=2)
+    logging.info(
+        "digest.collect.end digest_id=%s window_days=%s now=%s cutoff_plus_2h=%s count_found=%s count_after_filters=%s limit=9 duration_ms=%s",
+        digest_id,
+        horizon,
+        now.isoformat(),
+        cutoff_plus_2h.isoformat(),
+        len(events),
+        len(events),
+        duration_ms,
+    )
+
+    if not events:
+        return "", horizon, []
+
+    topics = aggregate_digest_topics(events)
+    intro = make_intro(len(events), horizon, topics)
+    lines = [intro, ""]
+    for ev in events:
+        lines.append(f"{ev.date} | {ev.title}")
+    text = "\n".join(lines)
+    return text, horizon, events

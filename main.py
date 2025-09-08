@@ -102,11 +102,7 @@ import shlex
 
 from telegraph import Telegraph, TelegraphException
 from net import http_call, VK_FALLBACK_CODES
-from digests import (
-    build_lectures_digest_candidates,
-    aggregate_digest_topics,
-    make_intro,
-)
+from digests import build_lectures_digest_preview
 
 from functools import partial, lru_cache
 from collections import defaultdict, deque
@@ -12997,7 +12993,7 @@ async def handle_events(message: types.Message, db: Database, bot: Bot):
     await bot.send_message(message.chat.id, text, reply_markup=markup)
 
 
-async def handle_digest(message: types.Message, db: Database, bot: Bot) -> None:
+async def show_digest_menu(message: types.Message, db: Database, bot: Bot) -> None:
     if not (message.text or "").startswith("/digest"):
         return
     async with db.get_session() as session:
@@ -13005,27 +13001,102 @@ async def handle_digest(message: types.Message, db: Database, bot: Bot) -> None:
         if not user or not user.is_superadmin:
             await bot.send_message(message.chat.id, "Not authorized")
             return
+
+    digest_id = uuid.uuid4().hex
+    keyboard = [
+        [
+            types.InlineKeyboardButton(
+                text="✅ Дайджест лекций",
+                callback_data=f"digest:select:lectures:{digest_id}",
+            ),
+            types.InlineKeyboardButton(text="⏳ Выходные", callback_data="digest:disabled"),
+        ],
+        [
+            types.InlineKeyboardButton(text="⏳ Популярное за неделю", callback_data="digest:disabled"),
+            types.InlineKeyboardButton(text="⏳ Новые выставки", callback_data="digest:disabled"),
+        ],
+    ]
+    markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard)
+    sent = await bot.send_message(
+        message.chat.id, "Выберите тип дайджеста:", reply_markup=markup
+    )
+    logging.info(
+        "digest.menu.shown digest_id=%s chat_id=%s user_id=%s message_id=%s",
+        digest_id,
+        message.chat.id,
+        message.from_user.id,
+        getattr(sent, "message_id", None),
+    )
+
+
+async def handle_digest_select_lectures(
+    callback: types.CallbackQuery, db: Database, bot: Bot
+) -> None:
+    parts = callback.data.split(":")
+    if len(parts) != 4:
+        return
+    digest_id = parts[3]
+
+    logging.info(
+        "digest.type.selected digest_id=%s type=lectures chat_id=%s user_id=%s callback_id=%s",
+        digest_id,
+        callback.message.chat.id if callback.message else None,
+        callback.from_user.id,
+        callback.id,
+    )
+
+    draft_key = f"draft:digest:{digest_id}"
+    existing = await get_setting_value(db, draft_key)
+    if existing:
+        data = json.loads(existing)
+        status = data.get("status")
+        if status == "collecting":
+            await callback.answer("Уже формируем этот дайджест", show_alert=False)
+            return
+
+    await set_setting_value(db, draft_key, json.dumps({"status": "collecting", "type": "lectures"}))
+
     offset = await get_tz_offset(db)
     tz = offset_to_timezone(offset)
     now = datetime.now(tz).replace(tzinfo=None)
+
     try:
-        events, horizon = await build_lectures_digest_candidates(db, now)
+        text, horizon, events = await build_lectures_digest_preview(
+            digest_id, db, now
+        )
         if not events:
             await bot.send_message(
-                message.chat.id,
-                f"Лекций в ближайшие {horizon} дней не нашлось с учётом правила “не раньше чем через 2 часа”.",
+                callback.message.chat.id,
+                f"Пока ничего нет в ближайшие {horizon} дней с учётом правила “+2 часа”.",
             )
+            await set_setting_value(db, draft_key, json.dumps({"status": "ready", "type": "lectures"}))
             return
-        topics = aggregate_digest_topics(events)
-        intro = make_intro(len(events), horizon, topics)
-        lines = [intro, ""]
-        for ev in events:
-            lines.append(f"{ev.date} | {ev.title}")
-        await bot.send_message(message.chat.id, "\n".join(lines))
+
+        caption_len = len(text)
+        logging.info(
+            "digest.caption.compose digest_id=%s length=%s fit_1024=%s applied_reduction=none lines=%s",
+            digest_id,
+            caption_len,
+            caption_len <= 1024,
+            text.count("\n") + 1,
+        )
+
+        msg = await bot.send_message(callback.message.chat.id, text)
+        logging.info(
+            "digest.preview.sent digest_id=%s admin_chat_id=%s album_size=%s text_separate=%s message_ids=%s",
+            digest_id,
+            callback.message.chat.id,
+            len(events),
+            True,
+            [getattr(msg, "message_id", None)],
+        )
+        await set_setting_value(
+            db, draft_key, json.dumps({"status": "ready", "type": "lectures"})
+        )
     except Exception:
-        logging.exception("digest.preview_failed")
+        logging.exception("digest.preview_failed digest_id=%s", digest_id)
         await bot.send_message(
-            message.chat.id,
+            callback.message.chat.id,
             "Не удалось собрать превью дайджеста (ошибка парсинга времени). Разберёмся — детали в логах.",
         )
 
@@ -15013,7 +15084,13 @@ def create_app() -> web.Application:
         await handle_exhibitions(message, db, bot)
 
     async def digest_wrapper(message: types.Message):
-        await handle_digest(message, db, bot)
+        await show_digest_menu(message, db, bot)
+
+    async def digest_select_wrapper(callback: types.CallbackQuery):
+        await handle_digest_select_lectures(callback, db, bot)
+
+    async def digest_disabled_wrapper(callback: types.CallbackQuery):
+        await callback.answer("Ещё не реализовано", show_alert=False)
 
     async def pages_wrapper(message: types.Message):
         await handle_pages(message, db, bot)
@@ -15222,6 +15299,12 @@ def create_app() -> web.Application:
     dp.message.register(daily_wrapper, Command("daily"))
     dp.message.register(exhibitions_wrapper, Command("exhibitions"))
     dp.message.register(digest_wrapper, Command("digest"))
+    dp.callback_query.register(
+        digest_select_wrapper, lambda c: c.data.startswith("digest:select:lectures:")
+    )
+    dp.callback_query.register(
+        digest_disabled_wrapper, lambda c: c.data == "digest:disabled"
+    )
     dp.message.register(fest_wrapper, Command("fest"))
 
     dp.message.register(pages_wrapper, Command("pages"))
