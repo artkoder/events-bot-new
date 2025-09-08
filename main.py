@@ -132,6 +132,7 @@ from markup import (
     expose_links_for_vk,
     sanitize_for_vk,
 )
+from aiogram.utils.text_decorations import html_decoration
 from sections import (
     replace_between_markers,
     content_hash,
@@ -648,6 +649,8 @@ ALBUM_PENDING_TTL_S = int(os.getenv("ALBUM_PENDING_TTL_S", "60"))
 MAX_PENDING_ALBUMS = int(os.getenv("MAX_PENDING_ALBUMS", "50"))
 
 LAST_CATBOX_MSG = ""
+LAST_HTML_MODE = "native"
+CUSTOM_EMOJI_MAP = {"\U0001f193" * 4: "Бесплатно"}
 
 # Maximum size (in bytes) for downloaded files
 MAX_DOWNLOAD_SIZE = int(os.getenv("MAX_DOWNLOAD_SIZE", str(5 * 1024 * 1024)))
@@ -2084,6 +2087,21 @@ async def extract_images(message: types.Message, bot: Bot) -> list[tuple[bytes, 
         MAX_ALBUM_IMAGES,
     )
     return images[:MAX_ALBUM_IMAGES]
+
+
+def ensure_html_text(message: types.Message) -> tuple[str | None, str]:
+    html = message.html_text or message.caption_html
+    mode = "native"
+    if not html:
+        text = message.text or message.caption
+        entities = message.entities or message.caption_entities or []
+        if text and entities:
+            html = html_decoration.unparse(text, entities)
+        mode = "rebuilt_from_entities"
+    global LAST_HTML_MODE
+    LAST_HTML_MODE = mode
+    logging.info("html_mode=%s", mode)
+    return html, mode
 
 
 async def upload_images(images: list[tuple[bytes, str]]) -> tuple[list[str], str]:
@@ -6421,7 +6439,7 @@ async def handle_add_event(
     creator_id = user.user_id if user else message.from_user.id
     images = await extract_images(message, bot)
     media = images if images else None
-    html_text = message.html_text or message.caption_html
+    html_text, _mode = ensure_html_text(message)
     if html_text:
         html_text = strip_leading_cmd(html_text)
     source_link = None
@@ -13999,10 +14017,19 @@ async def handle_festival_edit_message(message: types.Message, db: Database, bot
 
 
 @dataclass
+class AlbumImage:
+    data: bytes
+    name: str
+    seq: int
+    file_unique_id: str | None = None
+
+
+@dataclass
 class AlbumState:
-    images: list[tuple[bytes, str]]
+    images: list[AlbumImage]
     text: str | None = None
     html: str | None = None
+    html_mode: str = "native"
     message: types.Message | None = None
     timer: asyncio.Task | None = None
     created: float = field(default_factory=_time.monotonic)
@@ -14037,13 +14064,29 @@ async def finalize_album(gid: str, db: Database, bot: Bot) -> None:
         return
     start = _time.monotonic()
     images_total = len(state.images)
-    logging.info(
-        "album_finalize_start gid=%s images_total=%d",
-        gid,
-        images_total,
-    )
     processed_media_groups.add(gid)
-    global LAST_CATBOX_MSG
+    images_sorted = sorted(state.images, key=lambda im: im.seq)
+    uniq: list[AlbumImage] = []
+    seen: set[str] = set()
+    for im in images_sorted:
+        uid = im.file_unique_id
+        if uid and uid in seen:
+            continue
+        if uid:
+            seen.add(uid)
+        uniq.append(im)
+    used_images = uniq[:MAX_ALBUM_IMAGES]
+    order = [im.seq for im in used_images]
+    logging.info(
+        "album_finalize gid=%s images=%d order=%s",
+        gid,
+        len(used_images),
+        order,
+    )
+    logging.info("html_mode=%s", state.html_mode)
+    media = [(im.data, im.name) for im in used_images]
+    global LAST_CATBOX_MSG, LAST_HTML_MODE
+    LAST_HTML_MODE = state.html_mode
     LAST_CATBOX_MSG = ""
     await _process_forwarded(
         state.message,
@@ -14051,16 +14094,15 @@ async def finalize_album(gid: str, db: Database, bot: Bot) -> None:
         bot,
         state.text,
         state.html,
-        state.images,
+        media,
     )
     took = int((time.monotonic() - start) * 1000)
-    used = min(images_total, MAX_ALBUM_IMAGES)
     logging.info(
         "album_finalize_done gid=%s images_total=%d took_ms=%d used_images=%d catbox_result=%s",
         gid,
         images_total,
         took,
-        used,
+        len(used_images),
         LAST_CATBOX_MSG,
     )
 
@@ -14317,13 +14359,33 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
             state = AlbumState(images=[])
             state.timer = asyncio.create_task(_drop_album_after_ttl(gid))
             pending_albums[gid] = state
+        seq = message.forward_from_message_id
+        if not seq:
+            fo = getattr(message, "forward_origin", None)
+            if isinstance(fo, dict):
+                seq = fo.get("message_id")
+            else:
+                seq = getattr(fo, "message_id", None)
+        if not seq:
+            seq = message.message_id or int(message.date.timestamp())
         img_count = len(images or [])
         if images and len(state.images) < MAX_ALBUM_IMAGES:
             add = min(img_count, MAX_ALBUM_IMAGES - len(state.images))
-            state.images.extend(images[:add])
+            file_uid = None
+            if message.photo:
+                file_uid = message.photo[-1].file_unique_id
+            elif (
+                message.document
+                and message.document.mime_type
+                and message.document.mime_type.startswith("image/")
+            ):
+                file_uid = message.document.file_unique_id
+            for data, name in images[:add]:
+                state.images.append(AlbumImage(data=data, name=name, seq=seq, file_unique_id=file_uid))
         logging.info(
-            "album_collect gid=%s msg_id=%s has_text=%s images_in_msg=%d buf_size_after=%d",
+            "album_collect gid=%s seq=%s msg_id=%s has_text=%s images_in_msg=%d buf_size_after=%d",
             gid,
+            seq,
             message.message_id,
             bool(text),
             len(images or []),
@@ -14331,7 +14393,7 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
         )
         if text and not state.text:
             state.text = text
-            state.html = message.html_text or message.caption_html
+            state.html, state.html_mode = ensure_html_text(message)
             state.message = message
             if state.timer:
                 state.timer.cancel()
@@ -14349,12 +14411,13 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
         return
     media = images[:MAX_ALBUM_IMAGES] if images else None
     logging.info("IMG single message media_len=%d", len(media or []))
+    html, _mode = ensure_html_text(message)
     await _process_forwarded(
         message,
         db,
         bot,
         text,
-        message.html_text or message.caption_html,
+        html,
         media,
     )
 
@@ -14622,21 +14685,30 @@ async def build_source_page_content(
             html_content += (
                 f'<p>\U0001f4c5 <a href="{html.escape(ics_url)}">Добавить в календарь</a></p>'
             )
+    emoji_pat = re.compile(r"<tg-emoji[^>]*>(.*?)</tg-emoji>", re.DOTALL)
+    spoiler_pat = re.compile(r"<tg-spoiler[^>]*>(.*?)</tg-spoiler>", re.DOTALL)
+    tg_emoji_cleaned = 0
+    tg_spoiler_unwrapped = 0
     if html_text:
         html_text = strip_title(html_text)
         html_text = normalize_hashtag_dates(html_text)
-        cleaned = re.sub(r"</?tg-(?:emoji|spoiler)[^>]*>", "", html_text)
-        cleaned = cleaned.replace(
-            "\U0001f193\U0001f193\U0001f193\U0001f193", "Бесплатно"
-        )
+        tg_emoji_cleaned = len(emoji_pat.findall(html_text))
+        tg_spoiler_unwrapped = len(spoiler_pat.findall(html_text))
+        cleaned = emoji_pat.sub(r"\1", html_text)
+        cleaned = spoiler_pat.sub(r"<i>\1</i>", cleaned)
+        for k, v in CUSTOM_EMOJI_MAP.items():
+            cleaned = cleaned.replace(k, v)
         cleaned = linkify_for_telegraph(cleaned)
         html_content += f"<p>{cleaned.replace('\n', '<br/>')}</p>"
     else:
         clean_text = strip_title(text)
         clean_text = normalize_hashtag_dates(clean_text)
-        clean_text = clean_text.replace(
-            "\U0001f193\U0001f193\U0001f193\U0001f193", "Бесплатно"
-        )
+        tg_emoji_cleaned = len(emoji_pat.findall(clean_text))
+        tg_spoiler_unwrapped = len(spoiler_pat.findall(clean_text))
+        clean_text = emoji_pat.sub(r"\1", clean_text)
+        clean_text = spoiler_pat.sub(r"\1", clean_text)
+        for k, v in CUSTOM_EMOJI_MAP.items():
+            clean_text = clean_text.replace(k, v)
         paragraphs = []
         for line in clean_text.splitlines():
             escaped = html.escape(line)
@@ -14655,6 +14727,12 @@ async def build_source_page_content(
     html_content = lint_telegraph_html(html_content)
     mode = "html" if html_text else "plain"
     logging.info("SRC build mode=%s urls_total=%d input_urls=%d", mode, len(urls), input_count)
+    logging.info(
+        "html_mode=%s tg_emoji_cleaned=%d tg_spoiler_unwrapped=%d",
+        LAST_HTML_MODE,
+        tg_emoji_cleaned,
+        tg_spoiler_unwrapped,
+    )
     logging.info(
         "build_source_page_content: cover=%d tail=%d nav_dup=%s catbox_msg=%s",
         len(cover),

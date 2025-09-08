@@ -109,3 +109,20 @@ async def test_build_source_page_content_limit_and_no_video():
     assert uploaded == 12
     assert html.count('<img src="http://cat/') == 12
     assert 'vid.mp4' not in html
+
+
+@pytest.mark.asyncio
+async def test_build_source_page_content_cleans_tg_tags():
+    html, _, _ = await main.build_source_page_content(
+        "T",
+        "",
+        None,
+        "<tg-emoji emoji-id='1'>🆓</tg-emoji><tg-emoji emoji-id='1'>🆓</tg-emoji><tg-emoji emoji-id='1'>🆓</tg-emoji><tg-emoji emoji-id='1'>🆓</tg-emoji> <tg-spoiler>secret</tg-spoiler>",
+        None,
+        None,
+        None,
+    )
+    assert "tg-emoji" not in html
+    assert "tg-spoiler" not in html
+    assert "<i>secret</i>" in html
+    assert "Бесплатно" in html
