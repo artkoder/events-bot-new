@@ -32,4 +32,4 @@
 |US-28|User|follow the calendar link on a Telegraph page|ICS download on phone|
 |US-29|Moderator|manage recurring events|confirm regular schedule|
 |US-30|Admin|register calendar asset channel|ICS files available in Telegram|
-|US-D02|Admin|prepare and send lecture digests with images and quick channel buttons|faster announcements|
+|US-D02|Admin|manual lecture digest with preview and channel buttons|prepare and send posts quicker|
