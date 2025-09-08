@@ -166,40 +166,84 @@ def aggregate_digest_topics(events: Iterable[Event]) -> List[str]:
 
     ranked = sorted(counter.items(), key=lambda x: (-x[1], x[0]))
     return [t for t, _ in ranked[:3]]
+ 
 
+async def compose_digest_intro_via_4o(
+    n: int, horizon_days: int, topics3: List[str]
+) -> str:
+    """Generate an intro phrase for the digest via model 4o.
 
-def make_intro(n: int, horizon_days: int, topics3: List[str]) -> str:
-    """Construct intro phrase for the digest.
-
-    Parameters
-    ----------
-    n:
-        Number of lectures.
-    horizon_days:
-        Either 7 or 14 depending on the search horizon.
-    topics3:
-        List of up to three topics.
+    The helper imports :func:`main.ask_4o` lazily to avoid circular imports so
+    tests can easily monkeypatch the LLM call. Detailed request/response
+    information is logged with the ``digest.intro.llm.*`` tags.
     """
 
-    if n == 1:
-        lectures_part = "интересную лекцию"
-    elif 2 <= n <= 4:
-        lectures_part = "интересные лекции"
-    else:
-        lectures_part = "интересных лекций"
+    from main import ask_4o, FOUR_O_TIMEOUT  # local import to avoid cycle
+    import uuid
 
-    horizon_part = "ближайшей недели" if horizon_days == 7 else "ближайших двух недель"
+    run_id = uuid.uuid4().hex
+    horizon = "недели" if horizon_days == 7 else "двух недель"
+    topics_str = ", ".join(topics3[:3]) if topics3 else ""
+    prompt = (
+        "Напиши 1-2 коротких предложения до 180 символов на русском в"
+        " дружелюбном стиле. Это вступление к дайджесту лекций, в котором"
+        f" {n} событий на ближайшую {horizon}."
+    )
+    if topics_str:
+        prompt += f" Темы: {topics_str}."
 
-    if not topics3:
-        topics_part = "на разные темы"
-    elif len(topics3) == 1:
-        topics_part = f"на {topics3[0]}"
-    elif len(topics3) == 2:
-        topics_part = f"на {topics3[0]} и {topics3[1]}"
-    else:
-        topics_part = f"на {topics3[0]}, {topics3[1]} и {topics3[2]}"
+    logging.info(
+        "digest.intro.llm.request run_id=%s n=%s horizon=%s topics=%s prompt_size=%s timeout_s=%s",
+        run_id,
+        n,
+        horizon,
+        topics3,
+        len(prompt),
+        FOUR_O_TIMEOUT,
+    )
 
-    return f"Подобрали для вас {n} {lectures_part} {horizon_part} {topics_part}."
+    start = time.monotonic()
+    try:
+        text = await ask_4o(prompt, max_tokens=120)
+    except Exception:
+        took_ms = int((time.monotonic() - start) * 1000)
+        logging.info(
+            "digest.intro.llm.response run_id=%s ok=error text_len=0 took_ms=%s",
+            run_id,
+            took_ms,
+        )
+        raise
+
+    took_ms = int((time.monotonic() - start) * 1000)
+    text = text.strip()
+    logging.info(
+        "digest.intro.llm.response run_id=%s ok=ok text_len=%s took_ms=%s",
+        run_id,
+        len(text),
+        took_ms,
+    )
+    return text
+
+
+def pick_display_link(event: Event) -> str | None:
+    """Return a display link for ``event`` if available."""
+
+    return event.source_post_url or event.telegraph_url or None
+
+
+def format_event_line(event: Event) -> str:
+    """Format event information for digest list."""
+
+    dt = datetime.strptime(event.date, "%Y-%m-%d")
+    date_part = dt.strftime("%d.%m")
+    time_part = ""
+    parsed = parse_start_time(event.time or "")
+    if parsed is not None:
+        hh, mm = parsed
+        time_part = f" {hh:02d}:{mm:02d}"
+    link = pick_display_link(event)
+    link_part = f" {link}" if link else ""
+    return f"{date_part}{time_part} | {event.title}{link_part}"
 
 
 async def build_lectures_digest_preview(
@@ -231,9 +275,9 @@ async def build_lectures_digest_preview(
         return "", horizon, []
 
     topics = aggregate_digest_topics(events)
-    intro = make_intro(len(events), horizon, topics)
+    intro = await compose_digest_intro_via_4o(len(events), horizon, topics)
     lines = [intro, ""]
     for ev in events:
-        lines.append(f"{ev.date} | {ev.title}")
+        lines.append(format_event_line(ev))
     text = "\n".join(lines)
     return text, horizon, events

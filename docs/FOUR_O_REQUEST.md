@@ -39,6 +39,24 @@ The command `/ask4o <text>` sends an arbitrary user message to the same
 endpoint and returns the assistant reply. It is intended for quick diagnostics
 and available only to the superadmin.
 
+## Digest intro example
+
+To compose the introductory phrase for the lecture digest the bot sends a
+single-message chat completion describing the number of lectures, the horizon
+(``недели``/``двух недель``) and up to three topic hints. The response is plain
+text with 1–2 short sentences:
+
+```
+POST $FOUR_O_URL
+{ "model": "gpt-4o", "messages": [{"role": "user", "content": "..."}] }
+```
+
+Response:
+
+```
+{"choices": [{"message": {"content": "Подобрали для вас ..."}}]}
+```
+
 When a new event might duplicate an existing one (same date/time/city but
 slightly different title or venue), the bot sends both versions to 4o asking if
 they describe the same event. The model replies with JSON

@@ -20,7 +20,7 @@
 | `/regdailychannels` | - | Choose admin channels for daily announcements and set the VK group. |
 | `/daily` | - | Manage daily announcement channels and VK posting times; send test posts. |
 | `/exhibitions` | - | List active exhibitions similar to `/events`; each entry shows the period `c <start>` / `по <end>` and includes edit/delete buttons. |
-| `/digest` | - | Build lecture digest preview (superadmin only). |
+| `/digest` | - | Build lecture digest with images, toggles and quick send buttons (superadmin only). |
 | `/pages` | - | Show links to Telegraph month and weekend pages. |
 | `/fest` | - | List festivals with edit/delete options. Tap **Edit** to pick description or contact fields to update. |
 
