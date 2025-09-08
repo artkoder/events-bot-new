@@ -63,8 +63,8 @@ Edit this file to tweak how requests are sent to 4o.
 
 ## Digest intro (4o)
 
-Used to craft the opening phrase for the `/digest` lecture digest. The model
-receives the number of events, the horizon (``недели`` or ``двух недель``) and
-up to three topic hints. It should reply in Russian with 1–2 friendly sentences
-no longer than 180 characters mentioning the count and the horizon. Topics are
-mentioned tersely, e.g. "от кино до психологии".
+Используется для вступительной фразы дайджеста лекций. Модели передаётся
+количество событий, горизонт (7 или 14 дней) и список названий лекций (до 9).
+Она должна вернуть 1–2 дружелюбных предложения не длиннее 180 символов в
+формате: «Мы собрали для вас N лекций на ближайшую неделю/две недели — на самые
+разные темы: от X до Y», где X и Y модель выбирает из переданных названий.

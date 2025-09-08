@@ -102,7 +102,12 @@ import shlex
 
 from telegraph import Telegraph, TelegraphException
 from net import http_call, VK_FALLBACK_CODES
-from digests import build_lectures_digest_preview, format_event_line
+from digests import (
+    build_lectures_digest_preview,
+    format_event_line_html,
+    pick_display_link,
+    extract_catbox_covers_from_telegraph,
+)
 
 from functools import partial, lru_cache
 from collections import defaultdict, deque
@@ -13133,7 +13138,7 @@ async def handle_digest_select_lectures(
         two_messages = False
         if len(caption) > 1024:
             reduction = "shorten"
-            cleaned_lines = []
+            cleaned_lines: List[str] = []
             for ev in events:
                 title = re.sub(r"[\U00010000-\U0010ffff]", "", ev.title)
                 if len(title) > 60:
@@ -13147,7 +13152,9 @@ async def handle_digest_select_lectures(
                     telegraph_url=ev.telegraph_url,
                     telegraph_path=ev.telegraph_path,
                 )
-                cleaned_lines.append(format_event_line(tmp))
+                cleaned_lines.append(
+                    format_event_line_html(tmp, pick_display_link(tmp))
+                )
             caption = "\n".join([intro, "", *cleaned_lines])
             if len(caption) > 1024:
                 two_messages = True
@@ -13158,12 +13165,10 @@ async def handle_digest_select_lectures(
             caption_short = caption
 
         logging.info(
-            "digest.caption.fit digest_id=%s length=%s fit_1024=%s reduction=%s two_messages=%s",
+            "digest.caption.len digest_id=%s total=%s fit_1024=%s",
             digest_id,
             len(caption),
             len(caption) <= 1024,
-            reduction,
-            two_messages,
         )
 
         media: List[types.InputMediaPhoto] = []
@@ -13171,74 +13176,39 @@ async def handle_digest_select_lectures(
         for ev in events:
             url = None
             if ev.telegraph_url:
-                logging.info(
-                    "digest.cover.fetch start event_id=%s telegraph=%s",
-                    ev.id,
-                    ev.telegraph_url,
-                )
                 try:
-                    candidate = await extract_telegra_ph_cover_url(
+                    covers = await extract_catbox_covers_from_telegraph(
                         ev.telegraph_url, event_id=ev.id
                     )
+                    url = covers[0] if covers else None
                 except Exception:
-                    candidate = None
-                if candidate:
-                    ctype = ""
-                    try:
-                        async with httpx.AsyncClient(timeout=httpx.Timeout(HTTP_TIMEOUT)) as client:
-                            head = await client.head(candidate)
-                        ctype = head.headers.get("content-type", "")
-                    except Exception:
-                        pass
-                    logging.info(
-                        "digest.cover.candidate event_id=%s url=%s content_type=%s",
-                        ev.id,
-                        candidate,
-                        ctype,
-                    )
-                    if ctype.startswith("image/"):
-                        url = candidate
-                        logging.info(
-                            "digest.cover.accepted event_id=%s url=%s",
-                            ev.id,
-                            url,
-                        )
-                    else:
-                        logging.info(
-                            "digest.cover.fallback event_id=%s reason=bad_content_type",
-                            ev.id,
-                        )
-                else:
-                    logging.info(
-                        "digest.cover.fallback event_id=%s reason=no_image",
-                        ev.id,
-                    )
-            else:
-                logging.info("digest.cover.missing event_id=%s", ev.id)
-
+                    url = None
             image_urls.append(url)
             if url:
                 media.append(types.InputMediaPhoto(media=url))
 
+        logging.info(
+            "digest.album.compose digest_id=%s count_photos=%s count_items=%s",
+            digest_id,
+            len([u for u in image_urls if u]),
+            len(events),
+        )
+
         message_ids: List[int] = []
+        mode = "text_only"
         if media:
-            media[0].caption = caption_short
             media[0].parse_mode = "HTML"
-            sent = await bot.send_media_group(
-                callback.message.chat.id, media
-            )
+            media[0].caption = caption_short
+            sent = await bot.send_media_group(callback.message.chat.id, media)
             message_ids.extend(getattr(m, "message_id", None) for m in sent)
-            logging.info(
-                "digest.album.send digest_id=%s count=%s message_ids=%s",
-                digest_id,
-                len(media),
-                message_ids,
-            )
             if two_messages:
                 extra = await bot.send_message(
                     callback.message.chat.id, caption, parse_mode="HTML"
                 )
                 message_ids.append(getattr(extra, "message_id", None))
+                mode = "split_two_messages"
+            else:
+                mode = "media_caption"
         else:
             msg = await bot.send_message(
                 callback.message.chat.id, caption, parse_mode="HTML"
@@ -13246,11 +13216,9 @@ async def handle_digest_select_lectures(
             message_ids.append(getattr(msg, "message_id", None))
 
         logging.info(
-            "digest.preview.sent digest_id=%s admin_chat_id=%s album_size=%s text_separate=%s message_ids=%s",
+            "digest.send.preview digest_id=%s mode=%s message_ids=%s",
             digest_id,
-            callback.message.chat.id,
-            len(media),
-            two_messages,
+            mode,
             message_ids,
         )
 
@@ -13263,6 +13231,7 @@ async def handle_digest_select_lectures(
                 "event_ids": [e.id for e in events],
                 "excluded": [],
                 "intro_text": intro,
+                "horizon_days": horizon,
                 "image_urls": image_urls,
                 "caption_text": caption,
                 "two_messages": two_messages,

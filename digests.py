@@ -6,6 +6,7 @@ import logging
 import re
 import time
 from typing import Iterable, List, Tuple
+import httpx
 
 from sqlalchemy import select
 
@@ -166,6 +167,84 @@ def aggregate_digest_topics(events: Iterable[Event]) -> List[str]:
 
     ranked = sorted(counter.items(), key=lambda x: (-x[1], x[0]))
     return [t for t, _ in ranked[:3]]
+
+
+async def extract_catbox_covers_from_telegraph(
+    page_url: str, *, event_id: str | int | None = None
+) -> List[str]:
+    """Extract ``files.catbox.moe`` image URLs from a Telegraph page.
+
+    Parameters
+    ----------
+    page_url:
+        URL of the Telegraph page.
+
+    Returns
+    -------
+    list[str]
+        List of URLs in order of appearance. Only ``files.catbox.moe`` links
+        with typical image extensions are returned. No HEAD requests are
+        performed – validation is based solely on the file extension.
+    """
+
+    import uuid
+
+    run_id = uuid.uuid4().hex
+    start = time.monotonic()
+    logging.info(
+        "digest.cover.fetch.start event_id=%s run_id=%s telegraph_url=%s",
+        event_id,
+        run_id,
+        page_url,
+    )
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(page_url)
+    except Exception:
+        logging.info(
+            "digest.cover.missing event_id=%s run_id=%s reason=network_error",
+            event_id,
+            run_id,
+        )
+        return []
+    took_ms = int((time.monotonic() - start) * 1000)
+    logging.info(
+        "digest.cover.fetch.html.ok event_id=%s run_id=%s bytes=%s took_ms=%s",
+        event_id,
+        run_id,
+        len(resp.content or b""),
+        took_ms,
+    )
+    html = resp.text
+    pattern = re.compile(
+        r'(?:src|href)="(https://files\.catbox\.moe/[^"]+\.(?:jpg|jpeg|png|webp|gif))"',
+        re.IGNORECASE,
+    )
+    matches = pattern.findall(html)
+    results: List[str] = []
+    for url in matches:
+        ext = url.rsplit(".", 1)[-1].lower()
+        logging.info(
+            "digest.cover.candidate event_id=%s url=%s ext=%s",
+            event_id,
+            url,
+            ext,
+        )
+        results.append(url)
+
+    if results:
+        logging.info(
+            "digest.cover.accepted event_id=%s url=%s",
+            event_id,
+            results[0],
+        )
+    else:
+        logging.info(
+            "digest.cover.missing event_id=%s reason=no_catbox_in_html",
+            event_id,
+        )
+
+    return results
  
 
 async def compose_digest_intro_via_4o(
@@ -173,32 +252,32 @@ async def compose_digest_intro_via_4o(
 ) -> str:
     """Generate an intro phrase for the digest via model 4o.
 
-    The helper imports :func:`main.ask_4o` lazily to avoid circular imports so
-    tests can easily monkeypatch the LLM call. Detailed request/response
-    information is logged with the ``digest.intro.llm.*`` tags.
+    The helper imports :func:`main.ask_4o` lazily to avoid circular imports.
+    Request and response metrics are logged with ``digest.intro.llm.*`` tags.
     """
 
     from main import ask_4o, FOUR_O_TIMEOUT  # local import to avoid cycle
     import uuid
 
     run_id = uuid.uuid4().hex
-    horizon = "недели" if horizon_days == 7 else "двух недель"
+    horizon_word = "неделю" if horizon_days == 7 else "две недели"
     titles_str = "; ".join(titles[:9])
     prompt = (
-        "Напиши 1-2 коротких предложения до 180 символов на русском в"
-        " дружелюбном стиле. Это вступление к дайджесту лекций, в котором"
-        f" {n} событий на ближайшую {horizon}."
+        "Сформулируй 1–2 предложения (≤180 символов) во вступление к дайджесту"
+        f" из {n} лекций на ближайшую {horizon_word}. Используй форму: "
+        "'Мы собрали для вас N лекций на ближайшую ... — на самые разные темы: от X до Y.'"
+        " X и Y нужно выбрать из списка названий, переданных ниже."
     )
     if titles_str:
         prompt += f" Названия: {titles_str}."
 
     logging.info(
-        "digest.intro.llm.request run_id=%s n=%s titles=%s prompt_size=%s timeout_s=%s",
+        "digest.intro.llm.request run_id=%s n=%s horizon=%s titles_count=%s prompt_len=%s",
         run_id,
         n,
-        titles[:9],
+        horizon_days,
+        len(titles),
         len(prompt),
-        FOUR_O_TIMEOUT,
     )
 
     start = time.monotonic()
@@ -255,8 +334,8 @@ def pick_display_link(event: Event) -> str | None:
     return url
 
 
-def format_event_line(event: Event) -> str:
-    """Format event information for digest list."""
+def format_event_line_html(event: Event, link_url: str | None) -> str:
+    """Format event information for digest list as HTML."""
 
     dt = datetime.strptime(event.date, "%Y-%m-%d")
     date_part = dt.strftime("%d.%m")
@@ -271,9 +350,9 @@ def format_event_line(event: Event) -> str:
             getattr(event, "id", None),
             event.time,
         )
-    link = pick_display_link(event)
-    if link:
-        title_part = f'<a href="{link}">{event.title}</a>'
+
+    if link_url:
+        title_part = f'<a href="{link_url}">{event.title}</a>'
     else:
         title_part = event.title
     return f"{date_part}{time_part} | {title_part}"
@@ -314,5 +393,8 @@ async def build_lectures_digest_preview(
     intro = await compose_digest_intro_via_4o(
         len(events), horizon, [e.title for e in events]
     )
-    lines = [format_event_line(ev) for ev in events]
+    lines: List[str] = []
+    for ev in events:
+        link = pick_display_link(ev)
+        lines.append(format_event_line_html(ev, link))
     return intro, lines, horizon, events

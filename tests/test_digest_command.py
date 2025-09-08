@@ -79,22 +79,11 @@ async def test_handle_digest_sends_preview(tmp_path, monkeypatch):
     async def fake_ask(prompt, max_tokens=0):
         return "Интро"
 
-    async def fake_extract(url, event_id=None):
-        return "https://example.com/img.jpg"
-
-    class DummyClient:
-        def __init__(self, *a, **kw):
-            pass
-        async def __aenter__(self):
-            return self
-        async def __aexit__(self, exc_type, exc, tb):
-            return False
-        async def head(self, url):
-            return SimpleNamespace(headers={"content-type": "image/jpeg"})
+    async def fake_extract(url, **kw):
+        return ["https://example.com/img.jpg"]
 
     monkeypatch.setattr(main, "ask_4o", fake_ask)
-    monkeypatch.setattr(main, "extract_telegra_ph_cover_url", fake_extract)
-    monkeypatch.setattr(main.httpx, "AsyncClient", DummyClient)
+    monkeypatch.setattr(main, "extract_catbox_covers_from_telegraph", fake_extract)
 
     await main.show_digest_menu(msg, db, bot)
     menu_msg = bot.messages[0]
