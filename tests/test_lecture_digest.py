@@ -11,6 +11,7 @@ from digests import (
     aggregate_digest_topics,
     format_event_line_html,
     pick_display_link,
+    normalize_titles_via_4o,
 )
 
 
@@ -100,6 +101,20 @@ async def test_compose_intro_via_4o(monkeypatch, caplog):
     assert text == "интро"
     assert any("digest.intro.llm.request" in r.message for r in caplog.records)
     assert any("digest.intro.llm.response" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_normalize_titles_fallback(monkeypatch):
+    async def fake_ask(prompt, max_tokens=0):
+        raise RuntimeError("no llm")
+
+    monkeypatch.setattr("main.ask_4o", fake_ask)
+    titles = ["Лекция Алёны о тестах", "🎨 Лекция о цвете"]
+    res = await normalize_titles_via_4o(titles)
+    assert res[0]["emoji"] == ""
+    assert res[0]["title_clean"].startswith("Алёны")
+    assert res[1]["emoji"] == "🎨"
+    assert res[1]["title_clean"] == "о цвете"
 
 
 def test_format_event_line_and_link_priority():
