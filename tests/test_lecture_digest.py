@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from main import Database, Event
+import logging
 from digests import (
     build_lectures_digest_candidates,
     compose_digest_intro_via_4o,
@@ -12,6 +13,7 @@ from digests import (
     format_event_line_html,
     pick_display_link,
     normalize_titles_via_4o,
+    assemble_compact_caption,
 )
 
 
@@ -157,3 +159,23 @@ def test_aggregate_topics():
         "история россии",
         "музыка",
     ]
+
+
+def test_assemble_compact_caption(tmp_path, caplog):
+    intro = "Интро"
+    long_title = "«Очень длинное название лекции — о том как правильно писать тесты и ещё немного»"
+    long_url = "http://example.com/" + "a" * 60
+    lines = [
+        f"01.01 12:00 | <a href=\"{long_url}{i}\">{long_title} {i}</a>"
+        for i in range(9)
+    ]
+    caplog.set_level(logging.INFO)
+    caption, used = assemble_compact_caption(intro, lines, digest_id="x")
+    assert len(caption) <= 1024
+    assert len(used) >= 6
+    record = next(r for r in caplog.records if r.message.startswith("digest.caption.assembled"))
+    assert "truncate_titles" in record.message
+    assert "strip_quotes_dashes" in record.message
+    assert "drop_item" in record.message
+    for item in used:
+        assert "«" not in item and "»" not in item and "—" not in item

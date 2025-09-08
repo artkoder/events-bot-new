@@ -455,6 +455,73 @@ def format_event_line_html(
     return f"{date_part}{time_part} | {title_part}"
 
 
+def _truncate_html_title(line: str, limit: int) -> str:
+    """Truncate title text inside HTML link in ``line`` to ``limit`` chars."""
+
+    def repl(match: re.Match[str]) -> str:
+        url = match.group("url")
+        title = match.group("title")
+        if len(title) > limit:
+            title = title[: limit - 3] + "..."
+        return f'<a href="{url}">{title}</a>'
+
+    return re.sub(r'<a href="(?P<url>[^"]+)">(?P<title>[^<]+)</a>', repl, line)
+
+
+def _strip_quotes_dashes(line: str) -> str:
+    """Remove angle quotes and long dashes from title part of ``line``."""
+
+    def repl(match: re.Match[str]) -> str:
+        url = match.group("url")
+        title = match.group("title").replace("«", "").replace("»", "").replace("—", "-")
+        return f'<a href="{url}">{title}</a>'
+
+    return re.sub(r'<a href="(?P<url>[^"]+)">(?P<title>[^<]+)</a>', repl, line)
+
+
+def assemble_compact_caption(
+    intro: str, items_html: List[str], *, digest_id: str | None = None
+) -> tuple[str, List[str]]:
+    """Assemble caption ensuring HTML length \<=1024.
+
+    Returns tuple of final caption and list of items kept. Logs reduction steps.
+    """
+
+    steps: List[str] = []
+    items = list(items_html)
+
+    def build(items: List[str]) -> str:
+        return intro + "\n\n" + "\n".join(items)
+
+    caption = build(items)
+    if len(caption) > 1024:
+        steps.append("truncate_titles")
+        items = [_truncate_html_title(line, 60) for line in items]
+        caption = build(items)
+
+    if len(caption) > 1024:
+        steps.append("strip_quotes_dashes")
+        items = [_strip_quotes_dashes(line) for line in items]
+        caption = build(items)
+
+    if len(caption) > 1024:
+        while len(caption) > 1024 and len(items) > 6:
+            items = items[:-1]
+            steps.append("drop_item")
+            caption = build(items)
+
+    visible_len = len(re.sub(r"<[^>]+>", "", caption))
+    logging.info(
+        "digest.caption.assembled digest_id=%s html_len=%s visible_len=%s steps=%s kept_items=%s",
+        digest_id,
+        len(caption),
+        visible_len,
+        steps,
+        len(items),
+    )
+    return caption, items
+
+
 async def build_lectures_digest_preview(
     digest_id: str, db: Database, now: datetime
 ) -> tuple[str, List[str], int, List[Event]]:
