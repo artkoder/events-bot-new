@@ -1672,11 +1672,25 @@ async def ensure_festival(
         return fest, True, True
 
 
-async def extract_telegra_ph_cover_url(page_url: str) -> str | None:
-    """Return first https://telegra.ph/file/... image from a Telegraph page."""
+async def extract_telegra_ph_cover_url(
+    page_url: str, *, event_id: str | int | None = None
+) -> str | None:
+    """Return first image from a Telegraph page.
+
+    Besides ``/file/...`` paths (which are rewritten to ``https://telegra.ph``),
+    this helper now also accepts absolute ``https://`` links pointing to
+    external hosts such as ``catbox``. Only typical image extensions are
+    allowed; if the extension is unknown, a ``HEAD`` request is made to verify
+    that the ``Content-Type`` starts with ``image/``.
+    """
     url = page_url.split("#", 1)[0].split("?", 1)[0]
     cached = telegraph_first_image.get(url)
     if cached is not None:
+        logging.info(
+            "digest.cover.fetch event_id=%s result=found url=%s source=cache took_ms=0",
+            event_id,
+            cached,
+        )
         return cached
     parsed = urlparse(url)
     host = parsed.netloc.lower()
@@ -1687,6 +1701,7 @@ async def extract_telegra_ph_cover_url(page_url: str) -> str | None:
         return None
     api_url = f"https://api.telegra.ph/getPage/{path}?return_content=true"
     timeout = httpx.Timeout(HTTP_TIMEOUT)
+    start = time.monotonic()
     for _ in range(3):
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
@@ -1695,44 +1710,73 @@ async def extract_telegra_ph_cover_url(page_url: str) -> str | None:
             data = resp.json()
             content = data.get("result", {}).get("content") or []
 
-            def norm(src: str | None) -> str | None:
+            async def norm(src: str | None) -> str | None:
                 if not src:
                     return None
                 src = src.split("#", 1)[0].split("?", 1)[0]
-                if "/file/" not in src:
+                if src.startswith("/file/"):
+                    return f"https://telegra.ph{src}"
+                parsed_src = urlparse(src)
+                if parsed_src.scheme != "https":
                     return None
-                idx = src.find("/file/")
-                return f"https://telegra.ph{src[idx:]}"
+                lower = parsed_src.path.lower()
+                if any(lower.endswith(ext) for ext in [".jpg", ".jpeg", ".png", ".webp", ".gif"]):
+                    return src
+                # Unknown extension; try HEAD to check content-type
+                try:
+                    async with httpx.AsyncClient(timeout=timeout) as client:
+                        head = await client.head(src)
+                    ctype = head.headers.get("content-type", "")
+                    if ctype.startswith("image/"):
+                        return src
+                except Exception:
+                    pass
+                return None
 
-            def dfs(nodes) -> str | None:
+            async def dfs(nodes) -> str | None:
                 for node in nodes:
                     if isinstance(node, dict):
                         tag = node.get("tag")
                         attrs = node.get("attrs") or {}
                         if tag == "img":
-                            u = norm(attrs.get("src"))
+                            u = await norm(attrs.get("src"))
                             if u:
                                 return u
                         if tag == "a":
-                            u = norm(attrs.get("href"))
+                            u = await norm(attrs.get("href"))
                             if u:
                                 return u
                         children = node.get("children") or []
-                        found = dfs(children)
+                        found = await dfs(children)
                         if found:
                             return found
                 return None
 
-            cover = dfs(content)
+            cover = await dfs(content)
+            duration_ms = int((time.monotonic() - start) * 1000)
             if cover:
                 telegraph_first_image[url] = cover
-                logging.info("telegraph_cover: found")
+                logging.info(
+                    "digest.cover.fetch event_id=%s result=found url=%s source=telegraph_api took_ms=%s",
+                    event_id,
+                    cover,
+                    duration_ms,
+                )
                 return cover
-            logging.info("telegraph_cover: no_image")
+            logging.info(
+                "digest.cover.fetch event_id=%s result=none url='' source=telegraph_api took_ms=%s",
+                event_id,
+                duration_ms,
+            )
             return None
         except Exception:
-            logging.info("telegraph_cover: api_failed")
             await asyncio.sleep(1)
+    duration_ms = int((time.monotonic() - start) * 1000)
+    logging.info(
+        "digest.cover.fetch event_id=%s result=none url='' source=telegraph_api took_ms=%s",
+        event_id,
+        duration_ms,
+    )
     return None
 
 
