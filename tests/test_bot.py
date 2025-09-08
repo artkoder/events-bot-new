@@ -2307,6 +2307,84 @@ async def test_media_group_caption_last(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_add_event_media_group(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    captured: dict[str, int] = {}
+
+    async def fake_add_events_from_text(db, text, source, html_text, media, **kwargs):
+        captured["media_len"] = len(media or [])
+        ev = Event(
+            title="MG",
+            description="",
+            festival=None,
+            date=FUTURE_DATE,
+            time="18:00",
+            location_name="Club",
+            source_text=text,
+            creator_id=kwargs.get("creator_id"),
+        )
+        return [(ev, True, ["ok"], "added")]
+
+    async def fake_notify(*args, **kwargs):
+        pass
+
+    monkeypatch.setattr(main, "add_events_from_text", fake_add_events_from_text)
+    monkeypatch.setattr(main, "notify_event_added", fake_notify)
+    monkeypatch.setattr(main, "ALBUM_FINALIZE_DELAY_MS", 50)
+    main.pending_albums.clear()
+    main.processed_media_groups.clear()
+    main.add_event_sessions.clear()
+
+    main.add_event_sessions[1] = True
+
+    msg1 = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "media_group_id": "g3",
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "caption": "Announce",
+            "photo": [
+                {
+                    "file_id": "p1",
+                    "file_unique_id": "u1",
+                    "width": 1,
+                    "height": 1,
+                }
+            ],
+        }
+    )
+    await main.handle_add_event_media_group(msg1, db, bot)
+
+    msg2 = types.Message.model_validate(
+        {
+            "message_id": 2,
+            "date": 0,
+            "media_group_id": "g3",
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "photo": [
+                {
+                    "file_id": "p2",
+                    "file_unique_id": "u2",
+                    "width": 1,
+                    "height": 1,
+                }
+            ],
+        }
+    )
+    await main.handle_add_event_media_group(msg2, db, bot)
+
+    await asyncio.sleep(0.2)
+
+    assert captured["media_len"] == 2
+
+
+@pytest.mark.asyncio
 async def test_mark_free(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
