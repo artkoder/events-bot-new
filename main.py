@@ -1993,7 +1993,12 @@ async def notify_event_added(
         return
     role = "partner" if user.is_partner else "user"
     name = f"@{user.username}" if user.username else str(user.user_id)
-    text = f"{name} ({role}) added event {event.title} {event.date}"
+    link = event.telegraph_url
+    if not link and event.telegraph_path:
+        link = f"https://telegra.ph/{event.telegraph_path}"
+    text = f"{name} ({role}) added event {event.title}"
+    if link:
+        text += f" — {link}"
     await notify_superadmin(db, bot, text)
 
 
