@@ -6470,7 +6470,12 @@ def _event_lines(ev: Event) -> list[str]:
 
 
 async def handle_add_event(
-    message: types.Message, db: Database, bot: Bot, *, using_session: bool = False
+    message: types.Message,
+    db: Database,
+    bot: Bot,
+    *,
+    using_session: bool = False,
+    media: list[tuple[bytes, str]] | None = None,
 ):
     text_raw = message.text or message.caption or ""
     logging.info(
@@ -6491,8 +6496,9 @@ async def handle_add_event(
             await bot.send_message(message.chat.id, "Not authorized")
             return
     creator_id = user.user_id if user else message.from_user.id
-    images = await extract_images(message, bot)
-    media = images if images else None
+    if media is None:
+        images = await extract_images(message, bot)
+        media = images if images else None
     html_text, _mode = ensure_html_text(message)
     if html_text:
         html_text = strip_leading_cmd(html_text)
@@ -14222,16 +14228,27 @@ async def finalize_album(gid: str, db: Database, bot: Bot) -> None:
     logging.info("html_mode=%s", state.html_mode)
     media = [(im.data, im.name) for im in used_images]
     global LAST_CATBOX_MSG, LAST_HTML_MODE
-    LAST_HTML_MODE = state.html_mode
     LAST_CATBOX_MSG = ""
-    await _process_forwarded(
-        state.message,
-        db,
-        bot,
-        state.text,
-        state.html,
-        media,
-    )
+    LAST_HTML_MODE = state.html_mode
+    msg = state.message
+    if msg.forward_date or msg.forward_from_chat or getattr(msg, "forward_origin", None):
+        await _process_forwarded(
+            msg,
+            db,
+            bot,
+            state.text,
+            state.html,
+            media,
+        )
+    else:
+        await handle_add_event(
+            msg,
+            db,
+            bot,
+            using_session=True,
+            media=media,
+        )
+        add_event_sessions.pop(msg.from_user.id, None)
     took = int((time.monotonic() - start) * 1000)
     logging.info(
         "album_finalize_done gid=%s images_total=%d took_ms=%d used_images=%d catbox_result=%s",
@@ -14556,6 +14573,84 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
         html,
         media,
     )
+
+
+async def handle_add_event_media_group(
+    message: types.Message, db: Database, bot: Bot
+) -> None:
+    """Collect media group messages for /addevent sessions."""
+    logging.info(
+        "received add_event media group message %s from %s",
+        message.message_id,
+        message.from_user.id,
+    )
+    gid = message.media_group_id
+    if not gid:
+        return
+    if gid in processed_media_groups:
+        logging.info("skip already processed album %s", gid)
+        return
+    images = await extract_images(message, bot)
+    state = pending_albums.get(gid)
+    if not state:
+        if len(pending_albums) >= MAX_PENDING_ALBUMS:
+            old_gid, old_state = min(
+                pending_albums.items(), key=lambda kv: kv[1].created
+            )
+            if old_state.timer:
+                old_state.timer.cancel()
+            age = int(time.monotonic() - old_state.created)
+            logging.info(
+                "album_drop_no_caption gid=%s buf_size=%d age_s=%d",
+                old_gid,
+                len(old_state.images),
+                age,
+            )
+            pending_albums.pop(old_gid, None)
+        state = AlbumState(images=[])
+        state.timer = asyncio.create_task(_drop_album_after_ttl(gid))
+        pending_albums[gid] = state
+    seq = message.message_id or int(message.date.timestamp())
+    img_count = len(images or [])
+    if images and len(state.images) < MAX_ALBUM_IMAGES:
+        add = min(img_count, MAX_ALBUM_IMAGES - len(state.images))
+        file_uid = None
+        if message.photo:
+            file_uid = message.photo[-1].file_unique_id
+        elif (
+            message.document
+            and message.document.mime_type
+            and message.document.mime_type.startswith("image/")
+        ):
+            file_uid = message.document.file_unique_id
+        for data, name in images[:add]:
+            state.images.append(
+                AlbumImage(data=data, name=name, seq=seq, file_unique_id=file_uid)
+            )
+    text = message.text or message.caption
+    logging.info(
+        "album_collect gid=%s seq=%s msg_id=%s has_text=%s images_in_msg=%d buf_size_after=%d",
+        gid,
+        seq,
+        message.message_id,
+        bool(text),
+        len(images or []),
+        len(state.images),
+    )
+    if text and not state.text:
+        state.text = text
+        state.html, state.html_mode = ensure_html_text(message)
+        state.message = message
+        if state.timer:
+            state.timer.cancel()
+        logging.info(
+            "album_caption_seen gid=%s delay_ms=%d",
+            gid,
+            ALBUM_FINALIZE_DELAY_MS,
+        )
+        state.timer = asyncio.create_task(
+            _finalize_album_after_delay(gid, db, bot)
+        )
 
 
 async def telegraph_test():
@@ -15112,7 +15207,10 @@ def create_app() -> web.Application:
 
     async def add_event_session_wrapper(message: types.Message):
         logging.info("add_event_session_wrapper start: user=%s", message.from_user.id)
-        await enqueue_add_event(message, db, bot)
+        if message.media_group_id:
+            await handle_add_event_media_group(message, db, bot)
+        else:
+            await enqueue_add_event(message, db, bot)
 
     async def vk_link_cmd_wrapper(message: types.Message):
         logging.info("vk_link_cmd_wrapper start: user=%s", message.from_user.id)
