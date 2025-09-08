@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import Counter
 from datetime import datetime, timedelta
+import html
 import logging
 import re
 import time
@@ -330,28 +331,32 @@ async def compose_digest_intro_via_4o(
 
 
 async def normalize_titles_via_4o(titles: List[str]) -> List[dict[str, str]]:
-    """Normalize lecture titles using model 4o with regex fallback.
-
-    The model is asked to return a JSON array with objects of the form
-    ``{"emoji": "", "title_clean": ""}``. If the request fails or the
-    response cannot be parsed, a simple regular-expression based fallback is
-    used. Request/response metrics are logged similarly to
-    :func:`compose_digest_intro_via_4o`.
-    """
+    """Normalize lecture titles using model 4o with regex fallback."""
 
     from main import ask_4o  # local import to avoid a cycle
     import json
-    import uuid
 
-    run_id = uuid.uuid4().hex
-    logging.info("digest.titles.llm.request run_id=%s n=%s", run_id, len(titles))
     prompt_titles = " | ".join(titles)
     prompt = (
-        "Для каждого заголовка лекции верни объект JSON с полями 'emoji' и "
-        "'title_clean'. Нужно удалить слова 'Лекция', 'Лекторий' и т.п., "
-        "если указан лектор — оформить как 'Имя Фамилия: Название'. "
-        "Вынеси ведущий эмодзи в поле 'emoji'. Отдай только JSON массив без "
-        "дополнительного текста. Заголовки: " + prompt_titles
+        "Язык: русский.\n\n"
+        "Задача: вернуть JSON-массив объектов вида:\n\n"
+        '{"emoji": "📚" | "", "title_clean": "Имя Фамилия: Название"}\n\n'
+        "Требования:\n\n"
+        "Удалять слова «Лекция», «Лекторий» и т.п. из заголовка.\n\n"
+        "Если в исходном названии есть имя лектора (в любой форме), привести имя и фамилию к именительному падежу (И.п.), без отчества, падежов типа «Алёны», «Ильи» быть не должно.\n\n"
+        "Целевая форма: Имя Фамилия: Название (двоеточие между ФИ и названием).\n\n"
+        "Если лектора нет — просто «Название» (без «Лекция»).\n\n"
+        "Ведущий эмодзи (если был) вернуть в emoji (не внутри title_clean).\n\n"
+        "Без дополнительных слов/пояснений, только JSON.\n\n"
+        "Примеры:\n"
+        'Вход: «📚 Лекция Алёны Мирошниченко «Мода Франции…»» → {"emoji":"📚","title_clean":"Алёна Мирошниченко: Мода Франции…"}\n'
+        'Вход: «Лекторий Ильи Дементьева “От каменного века…”» → {"emoji":"","title_clean":"Илья Дементьев: От каменного века…"}\n'
+        'Вход: «Лекция «Древнерусское искусство. Мастера и эпохи»» → {"emoji":"","title_clean":"Древнерусское искусство. Мастера и эпохи"}\n\n'
+        "Заголовки: "
+        + prompt_titles
+    )
+    logging.info(
+        "digest.titles.llm.request n=%s prompt_len=%s", len(titles), len(prompt)
     )
     start = time.monotonic()
     try:
@@ -359,19 +364,14 @@ async def normalize_titles_via_4o(titles: List[str]) -> List[dict[str, str]]:
     except Exception:
         took_ms = int((time.monotonic() - start) * 1000)
         logging.info(
-            "digest.titles.llm.response run_id=%s ok=error text_len=0 took_ms=%s",
-            run_id,
-            took_ms,
+            "digest.titles.llm.response error text_len=0 took_ms=%s", took_ms
         )
         return [_normalize_title_fallback(t) for t in titles]
 
     took_ms = int((time.monotonic() - start) * 1000)
     text = text.strip()
     logging.info(
-        "digest.titles.llm.response run_id=%s ok=ok text_len=%s took_ms=%s",
-        run_id,
-        len(text),
-        took_ms,
+        "digest.titles.llm.response ok text_len=%s took_ms=%s", len(text), took_ms
     )
 
     try:
@@ -382,7 +382,7 @@ async def normalize_titles_via_4o(titles: List[str]) -> List[dict[str, str]]:
             title_clean = item.get("title_clean") or item.get("title") or orig
             result.append({"emoji": emoji, "title_clean": title_clean})
             logging.info(
-                "digest.titles.llm.transform before=%r after=%r emoji=%s",
+                "digest.titles.llm.sample before=%r after=%r emoji=%s",
                 orig,
                 title_clean,
                 emoji,
@@ -528,36 +528,31 @@ def _strip_quotes_dashes(line: str) -> str:
     return re.sub(r'<a href="(?P<url>[^"]+)">(?P<title>[^<]+)</a>', repl, line)
 
 
+def visible_html_length(html_text: str) -> int:
+    """Return the length of visible text after HTML parsing."""
+
+    s = re.sub(r"<[^>]+>", "", html_text)
+    s = html.unescape(s)
+    s = re.sub(r"[ \t]+", " ", s)
+    s = re.sub(r"\n{3,}", "\n\n", s)
+    return len(s)
+
+
 async def assemble_compact_caption(
     intro: str, items_html: List[str], *, digest_id: str | None = None
 ) -> tuple[str, List[str]]:
-    """Assemble caption ensuring HTML length \<=1024.
-
-    Before adding each line the URL is shortened. Intro may be truncated to a
-    single sentence if needed to fit more lines.
-    """
-
-    from shortlinks import shorten_url
+    """Assemble caption ensuring visible length \<=1024."""
 
     intro_used = intro
     kept: List[str] = []
-    for raw_line in items_html:
-        match = re.search(r'<a href="([^"]+)">', raw_line)
-        line = raw_line
-        if match:
-            long_url = match.group(1)
-            try:
-                short = await shorten_url(long_url)
-            except Exception as e:
-                logging.warning(
-                    "digest.caption.shortener_fail url=%s error=%r", long_url, e
-                )
-                short = long_url
-            line = raw_line.replace(long_url, short)
-
+    for idx, line in enumerate(items_html):
         candidate = intro_used + "\n\n" + "\n".join(kept + [line])
-        if len(candidate) <= 1024:
+        vis_len = visible_html_length(candidate)
+        if vis_len <= 1024:
             kept.append(line)
+            logging.info(
+                "digest.caption.line idx=%s visible_len_after=%s", idx, vis_len
+            )
             continue
 
         if intro_used == intro:
@@ -565,20 +560,24 @@ async def assemble_compact_caption(
             if len(parts) == 2:
                 intro_used = parts[0]
                 candidate = intro_used + "\n\n" + "\n".join(kept + [line])
-                if len(candidate) <= 1024:
+                vis_len = visible_html_length(candidate)
+                if vis_len <= 1024:
                     kept.append(line)
+                    logging.info(
+                        "digest.caption.line idx=%s visible_len_after=%s", idx, vis_len
+                    )
                     continue
+        logging.info(
+            "digest.caption.line idx=%s visible_len_after=%s", idx, vis_len
+        )
         break
 
     caption = intro_used + "\n\n" + "\n".join(kept)
-    visible_len = len(re.sub(r"<[^>]+>", "", caption))
+    visible_len = visible_html_length(caption)
     logging.info(
-        "digest.caption.assembled digest_id=%s html_len=%s visible_len=%s kept_items=%s intro_len=%s",
-        digest_id,
+        "digest.caption.metrics html_len_raw=%s visible_len=%s limit=1024",
         len(caption),
         visible_len,
-        len(kept),
-        len(intro_used),
     )
     return caption, kept
 

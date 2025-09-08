@@ -14,8 +14,8 @@ from digests import (
     pick_display_link,
     normalize_titles_via_4o,
     assemble_compact_caption,
+    visible_html_length,
 )
-import shortlinks
 
 
 @pytest.mark.asyncio
@@ -108,6 +108,13 @@ async def test_compose_intro_via_4o(monkeypatch, caplog):
     assert any("digest.intro.llm.response" in r.message for r in caplog.records)
 
 
+def test_visible_html_length_basic():
+    html = '<a href="https://very.long/url">Заголовок</a>'
+    assert visible_html_length(html) == len("Заголовок")
+    html2 = '&quot;A&nbsp;B&quot;'
+    assert visible_html_length(html2) == len('"A B"')
+
+
 @pytest.mark.asyncio
 async def test_normalize_titles_fallback(monkeypatch):
     async def fake_ask(prompt, max_tokens=0):
@@ -120,6 +127,26 @@ async def test_normalize_titles_fallback(monkeypatch):
     assert res[0]["title_clean"] == "Иван Иванов: О языке"
     assert res[1]["emoji"] == "🎨"
     assert res[1]["title_clean"] == "о цвете"
+
+
+@pytest.mark.asyncio
+async def test_normalize_titles_via_llm(monkeypatch):
+    async def fake_ask(prompt, max_tokens=0):
+        return (
+            '[{"emoji":"📚","title_clean":"Алёна Мирошниченко: Мода Франции"},'
+            '{"emoji":"","title_clean":"Илья Дементьев: От каменного века"}]'
+        )
+
+    monkeypatch.setattr("main.ask_4o", fake_ask)
+    titles = [
+        "📚 Лекция Алёны Мирошниченко «Мода Франции»",
+        "Лекторий Ильи Дементьева \"От каменного века\"",
+    ]
+    res = await normalize_titles_via_4o(titles)
+    assert res[0]["emoji"] == "📚"
+    assert res[0]["title_clean"] == "Алёна Мирошниченко: Мода Франции"
+    assert res[1]["emoji"] == ""
+    assert res[1]["title_clean"] == "Илья Дементьев: От каменного века"
 
 
 def test_format_event_line_and_link_priority():
@@ -165,39 +192,19 @@ def test_aggregate_topics():
 
 
 @pytest.mark.asyncio
-async def test_caption_shortening(monkeypatch, caplog):
+async def test_caption_visible_length(caplog):
     intro = "Интро. Второе предложение."  # intro longer than one sentence
     long_url = "http://example.com/" + "a" * 100
     lines = [
         f"01.01 12:00 | <a href=\"{long_url}{i}\">T{i}</a>" for i in range(9)
     ]
 
-    async def fake_shorten(url):
-        return "http://s.id/" + url[-1]
-
-    monkeypatch.setattr(shortlinks, "shorten_url", fake_shorten)
     caplog.set_level(logging.INFO)
     caption, used = await assemble_compact_caption(intro, lines, digest_id="x")
-    assert len(caption) <= 1024
+    assert visible_html_length(caption) <= 1024
     assert len(used) == 9
-    assert any("digest.caption.assembled" in r.message for r in caplog.records)
-
-
-@pytest.mark.asyncio
-async def test_caption_shortener_failure(monkeypatch):
-    intro = "Интро. Второе предложение."  # intro longer than one sentence
-    long_url = "http://example.com/" + "a" * 100
-    lines = [
-        f"01.01 12:00 | <a href=\"{long_url}{i}\">T{i}</a>" for i in range(9)
-    ]
-
-    async def fail(url):
-        raise RuntimeError("boom")
-
-    monkeypatch.setattr(shortlinks, "shorten_url", fail)
-    caption, used = await assemble_compact_caption(intro, lines, digest_id="x")
-    assert len(caption) <= 1024
-    assert len(used) < 9
+    assert any("digest.caption.metrics" in r.message for r in caplog.records)
+    assert any("digest.caption.line" in r.message for r in caplog.records)
 
 
 @pytest.mark.asyncio

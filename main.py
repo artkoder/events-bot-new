@@ -109,7 +109,6 @@ from digests import (
     extract_catbox_covers_from_telegraph,
     assemble_compact_caption,
 )
-from shortlinks import init as init_shortlinks
 
 from functools import partial, lru_cache
 from collections import defaultdict, deque
@@ -13134,7 +13133,6 @@ async def handle_digest_select_lectures(
             await set_setting_value(db, draft_key, json.dumps({"status": "ready", "type": "lectures"}))
             return
 
-        init_shortlinks(db)
         caption, lines = await assemble_compact_caption(intro, lines, digest_id=digest_id)
         kept = len(lines)
         events = events[:kept]
