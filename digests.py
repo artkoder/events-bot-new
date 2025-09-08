@@ -303,6 +303,80 @@ async def compose_digest_intro_via_4o(
     return text
 
 
+async def normalize_titles_via_4o(titles: List[str]) -> List[dict[str, str]]:
+    """Normalize lecture titles using model 4o with regex fallback.
+
+    The model is asked to return a JSON array with objects of the form
+    ``{"emoji": "", "title_clean": ""}``. If the request fails or the
+    response cannot be parsed, a simple regular-expression based fallback is
+    used. Request/response metrics are logged similarly to
+    :func:`compose_digest_intro_via_4o`.
+    """
+
+    from main import ask_4o  # local import to avoid a cycle
+    import json
+    import uuid
+
+    run_id = uuid.uuid4().hex
+    logging.info("digest.titles.llm.request run_id=%s n=%s", run_id, len(titles))
+    prompt_titles = " | ".join(titles)
+    prompt = (
+        "Для каждого заголовка лекции верни объект JSON с полями 'emoji' и "
+        "'title_clean' (без слова 'Лекция'). Отдай только JSON массив без "
+        "дополнительного текста. Заголовки: " + prompt_titles
+    )
+    start = time.monotonic()
+    try:
+        text = await ask_4o(prompt, max_tokens=300)
+    except Exception:
+        took_ms = int((time.monotonic() - start) * 1000)
+        logging.info(
+            "digest.titles.llm.response run_id=%s ok=error text_len=0 took_ms=%s",
+            run_id,
+            took_ms,
+        )
+        return [_normalize_title_fallback(t) for t in titles]
+
+    took_ms = int((time.monotonic() - start) * 1000)
+    text = text.strip()
+    logging.info(
+        "digest.titles.llm.response run_id=%s ok=ok text_len=%s took_ms=%s",
+        run_id,
+        len(text),
+        took_ms,
+    )
+
+    try:
+        data = json.loads(text)
+        result: List[dict[str, str]] = []
+        for orig, item in zip(titles, data):
+            emoji = item.get("emoji") or ""
+            title_clean = item.get("title_clean") or item.get("title") or orig
+            result.append({"emoji": emoji, "title_clean": title_clean})
+        if len(result) == len(titles):
+            return result
+    except Exception:
+        pass
+
+    return [_normalize_title_fallback(t) for t in titles]
+
+
+def _normalize_title_fallback(title: str) -> dict[str, str]:
+    """Fallback normalization used when LLM is unavailable."""
+
+    # Extract leading emoji if any
+    emoji_match = re.match(r"^[\U0001F300-\U0010FFFF]", title)
+    emoji = ""
+    if emoji_match:
+        emoji = emoji_match.group(0)
+        title = title[len(emoji) :]
+
+    title = re.sub(r"^(?:[^\w]*?)*Лекция[\s:—-]*", "", title, flags=re.IGNORECASE)
+    title = re.sub(r"^от\s+", "", title, flags=re.IGNORECASE)
+    title = re.sub(r"\s+", " ", title).strip()
+    return {"emoji": emoji, "title_clean": title}
+
+
 def pick_display_link(event: Event) -> str | None:
     """Return a display link for ``event`` if available.
 
@@ -334,8 +408,27 @@ def pick_display_link(event: Event) -> str | None:
     return url
 
 
-def format_event_line_html(event: Event, link_url: str | None) -> str:
-    """Format event information for digest list as HTML."""
+def format_event_line_html(
+    event: Event,
+    link_url: str | None,
+    *,
+    emoji: str = "",
+    title_override: str | None = None,
+) -> str:
+    """Format event information for digest list as HTML.
+
+    Parameters
+    ----------
+    event:
+        Source event.
+    link_url:
+        URL to wrap the title into. ``None`` disables the link.
+    emoji:
+        Optional emoji placed before the title. When present the ``|``
+        separator is omitted as the emoji acts as a visual marker.
+    title_override:
+        Normalized title to use instead of ``event.title``.
+    """
 
     dt = datetime.strptime(event.date, "%Y-%m-%d")
     date_part = dt.strftime("%d.%m")
@@ -351,10 +444,14 @@ def format_event_line_html(event: Event, link_url: str | None) -> str:
             event.time,
         )
 
+    title = title_override or event.title
     if link_url:
-        title_part = f'<a href="{link_url}">{event.title}</a>'
+        title_part = f'<a href="{link_url}">{title}</a>'
     else:
-        title_part = event.title
+        title_part = title
+
+    if emoji:
+        return f"{date_part}{time_part} {emoji} {title_part}".strip()
     return f"{date_part}{time_part} | {title_part}"
 
 
@@ -393,8 +490,17 @@ async def build_lectures_digest_preview(
     intro = await compose_digest_intro_via_4o(
         len(events), horizon, [e.title for e in events]
     )
+
+    normalized = await normalize_titles_via_4o([e.title for e in events])
     lines: List[str] = []
-    for ev in events:
+    for ev, norm in zip(events, normalized):
         link = pick_display_link(ev)
-        lines.append(format_event_line_html(ev, link))
+        lines.append(
+            format_event_line_html(
+                ev,
+                link,
+                emoji=norm.get("emoji", ""),
+                title_override=norm.get("title_clean"),
+            )
+        )
     return intro, lines, horizon, events
