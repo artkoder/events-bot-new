@@ -107,6 +107,7 @@ from digests import (
     format_event_line_html,
     pick_display_link,
     extract_catbox_covers_from_telegraph,
+    assemble_compact_caption,
 )
 
 from functools import partial, lru_cache
@@ -13132,37 +13133,9 @@ async def handle_digest_select_lectures(
             await set_setting_value(db, draft_key, json.dumps({"status": "ready", "type": "lectures"}))
             return
 
-        caption = "\n".join([intro, "", *lines])
-
-        reduction = "none"
-        two_messages = False
-        if len(caption) > 1024:
-            reduction = "shorten"
-            cleaned_lines: List[str] = []
-            for ev in events:
-                title = re.sub(r"[\U00010000-\U0010ffff]", "", ev.title)
-                if len(title) > 60:
-                    title = title[:57] + "..."
-                tmp = SimpleNamespace(
-                    id=ev.id,
-                    title=title,
-                    date=ev.date,
-                    time=ev.time,
-                    source_post_url=ev.source_post_url,
-                    telegraph_url=ev.telegraph_url,
-                    telegraph_path=ev.telegraph_path,
-                )
-                cleaned_lines.append(
-                    format_event_line_html(tmp, pick_display_link(tmp))
-                )
-            caption = "\n".join([intro, "", *cleaned_lines])
-            if len(caption) > 1024:
-                two_messages = True
-                caption_short = "\n".join([intro, "", *cleaned_lines[:3]])
-            else:
-                caption_short = caption
-        else:
-            caption_short = caption
+        caption, lines = assemble_compact_caption(intro, lines, digest_id=digest_id)
+        kept = len(lines)
+        events = events[:kept]
 
         logging.info(
             "digest.caption.len digest_id=%s total=%s fit_1024=%s",
@@ -13198,17 +13171,10 @@ async def handle_digest_select_lectures(
         mode = "text_only"
         if media:
             media[0].parse_mode = "HTML"
-            media[0].caption = caption_short
+            media[0].caption = caption
             sent = await bot.send_media_group(callback.message.chat.id, media)
             message_ids.extend(getattr(m, "message_id", None) for m in sent)
-            if two_messages:
-                extra = await bot.send_message(
-                    callback.message.chat.id, caption, parse_mode="HTML"
-                )
-                message_ids.append(getattr(extra, "message_id", None))
-                mode = "split_two_messages"
-            else:
-                mode = "media_caption"
+            mode = "media_caption"
         else:
             msg = await bot.send_message(
                 callback.message.chat.id, caption, parse_mode="HTML"
@@ -13234,7 +13200,6 @@ async def handle_digest_select_lectures(
                 "horizon_days": horizon,
                 "image_urls": image_urls,
                 "caption_text": caption,
-                "two_messages": two_messages,
             }),
         )
     except Exception:
