@@ -15,6 +15,7 @@ from digests import (
     normalize_titles_via_4o,
     assemble_compact_caption,
 )
+import shortlinks
 
 
 @pytest.mark.asyncio
@@ -34,6 +35,7 @@ async def test_build_lectures_digest_candidates_expand_to_14(tmp_path):
                 location_name="x",
                 source_text="s",
                 event_type="лекция",
+                source_post_url="http://example.com/" + title,
             )
             session.add(ev)
 
@@ -74,6 +76,7 @@ async def test_build_lectures_digest_candidates_limit(tmp_path):
                 location_name="x",
                 source_text="s",
                 event_type="лекция",
+                source_post_url="http://example.com/" + title,
             )
             session.add(ev)
 
@@ -111,10 +114,10 @@ async def test_normalize_titles_fallback(monkeypatch):
         raise RuntimeError("no llm")
 
     monkeypatch.setattr("main.ask_4o", fake_ask)
-    titles = ["Лекция Алёны о тестах", "🎨 Лекция о цвете"]
+    titles = ["Лекция Иван Иванов — О языке", "🎨 Лекторий о цвете"]
     res = await normalize_titles_via_4o(titles)
     assert res[0]["emoji"] == ""
-    assert res[0]["title_clean"].startswith("Алёны")
+    assert res[0]["title_clean"] == "Иван Иванов: О языке"
     assert res[1]["emoji"] == "🎨"
     assert res[1]["title_clean"] == "о цвете"
 
@@ -161,21 +164,66 @@ def test_aggregate_topics():
     ]
 
 
-def test_assemble_compact_caption(tmp_path, caplog):
-    intro = "Интро"
-    long_title = "«Очень длинное название лекции — о том как правильно писать тесты и ещё немного»"
-    long_url = "http://example.com/" + "a" * 60
+@pytest.mark.asyncio
+async def test_caption_shortening(monkeypatch, caplog):
+    intro = "Интро. Второе предложение."  # intro longer than one sentence
+    long_url = "http://example.com/" + "a" * 100
     lines = [
-        f"01.01 12:00 | <a href=\"{long_url}{i}\">{long_title} {i}</a>"
-        for i in range(9)
+        f"01.01 12:00 | <a href=\"{long_url}{i}\">T{i}</a>" for i in range(9)
     ]
+
+    async def fake_shorten(url):
+        return "http://s.id/" + url[-1]
+
+    monkeypatch.setattr(shortlinks, "shorten_url", fake_shorten)
     caplog.set_level(logging.INFO)
-    caption, used = assemble_compact_caption(intro, lines, digest_id="x")
+    caption, used = await assemble_compact_caption(intro, lines, digest_id="x")
     assert len(caption) <= 1024
-    assert len(used) >= 6
-    record = next(r for r in caplog.records if r.message.startswith("digest.caption.assembled"))
-    assert "truncate_titles" in record.message
-    assert "strip_quotes_dashes" in record.message
-    assert "drop_item" in record.message
-    for item in used:
-        assert "«" not in item and "»" not in item and "—" not in item
+    assert len(used) == 9
+    assert any("digest.caption.assembled" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_caption_shortener_failure(monkeypatch):
+    intro = "Интро. Второе предложение."  # intro longer than one sentence
+    long_url = "http://example.com/" + "a" * 100
+    lines = [
+        f"01.01 12:00 | <a href=\"{long_url}{i}\">T{i}</a>" for i in range(9)
+    ]
+
+    async def fail(url):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(shortlinks, "shorten_url", fail)
+    caption, used = await assemble_compact_caption(intro, lines, digest_id="x")
+    assert len(caption) <= 1024
+    assert len(used) < 9
+
+
+@pytest.mark.asyncio
+async def test_candidates_skip_no_link(tmp_path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    now = datetime(2025, 5, 1, 12, 0)
+
+    async with db.get_session() as session:
+        for i in range(11):
+            dt = now + timedelta(days=i)
+            session.add(
+                Event(
+                    title=f"e{i}",
+                    description="d",
+                    date=dt.strftime("%Y-%m-%d"),
+                    time="15:00",
+                    location_name="x",
+                    source_text="s",
+                    event_type="лекция",
+                    source_post_url=None if i == 5 else f"http://example.com/{i}",
+                )
+            )
+        await session.commit()
+
+    events, horizon = await build_lectures_digest_candidates(db, now)
+    titles = [e.title for e in events]
+    assert len(events) == 9
+    assert "e5" not in titles and "e9" in titles

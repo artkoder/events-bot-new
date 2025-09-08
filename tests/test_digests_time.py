@@ -1,6 +1,8 @@
 import pytest
 from datetime import datetime
 
+import pytest
+
 from digests import parse_start_time, build_lectures_digest_candidates
 from main import Database, Event
 
@@ -31,6 +33,7 @@ async def test_today_filter_with_dirty_time(tmp_path):
             location_name="x",
             source_text="s",
             event_type="лекция",
+            source_post_url="http://example.com/later",
         )
         early = Event(
             title="early",
@@ -40,6 +43,7 @@ async def test_today_filter_with_dirty_time(tmp_path):
             location_name="x",
             source_text="s",
             event_type="лекция",
+            source_post_url="http://example.com/early",
         )
         session.add_all([later, early])
         await session.commit()
