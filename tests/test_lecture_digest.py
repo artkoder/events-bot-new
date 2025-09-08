@@ -7,8 +7,10 @@ import pytest
 from main import Database, Event
 from digests import (
     build_lectures_digest_candidates,
-    make_intro,
+    compose_digest_intro_via_4o,
     aggregate_digest_topics,
+    format_event_line,
+    pick_display_link,
 )
 
 
@@ -87,11 +89,40 @@ async def test_build_lectures_digest_candidates_limit(tmp_path):
     assert events[0].title == "e1"
 
 
-def test_make_intro_morphology():
-    assert "интересную лекцию" in make_intro(1, 7, [])
-    assert "интересных лекций" in make_intro(7, 7, [])
-    assert "интересных лекций" in make_intro(9, 7, [])
-    assert "ближайших двух недель" in make_intro(3, 14, [])
+@pytest.mark.asyncio
+async def test_compose_intro_via_4o(monkeypatch, caplog):
+    async def fake_ask(prompt, max_tokens=0):
+        assert "дайджест" in prompt.lower()
+        return "интро"
+
+    monkeypatch.setattr("main.ask_4o", fake_ask)
+    text = await compose_digest_intro_via_4o(2, 7, ["искусство"])
+    assert text == "интро"
+    assert any("digest.intro.llm.request" in r.message for r in caplog.records)
+    assert any("digest.intro.llm.response" in r.message for r in caplog.records)
+
+
+def test_format_event_line_and_link_priority():
+    e = Event(
+        title="T",
+        description="d",
+        date="2025-05-10",
+        time="18:30",
+        location_name="L",
+        source_text="s",
+        event_type="лекция",
+        source_post_url="http://t.me/post",
+        telegraph_url="http://tg.ph",
+    )
+    assert pick_display_link(e) == "http://t.me/post"
+    line = format_event_line(e)
+    assert line.startswith("10.05 18:30 | T http://t.me/post")
+
+    e.time = "--"  # unparsable
+    e.source_post_url = None
+    assert pick_display_link(e) == "http://tg.ph"
+    line = format_event_line(e)
+    assert line == "10.05 | T http://tg.ph"
 
 
 def test_aggregate_topics():

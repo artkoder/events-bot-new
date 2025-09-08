@@ -60,3 +60,11 @@ Guidelines:
 All fields must be present. No additional text.
 
 Edit this file to tweak how requests are sent to 4o.
+
+## Digest intro (4o)
+
+Used to craft the opening phrase for the `/digest` lecture digest. The model
+receives the number of events, the horizon (``недели`` or ``двух недель``) and
+up to three topic hints. It should reply in Russian with 1–2 friendly sentences
+no longer than 180 characters mentioning the count and the horizon. Topics are
+mentioned tersely, e.g. "от кино до психологии".
