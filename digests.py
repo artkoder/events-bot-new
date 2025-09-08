@@ -169,7 +169,7 @@ def aggregate_digest_topics(events: Iterable[Event]) -> List[str]:
  
 
 async def compose_digest_intro_via_4o(
-    n: int, horizon_days: int, topics3: List[str]
+    n: int, horizon_days: int, titles: List[str]
 ) -> str:
     """Generate an intro phrase for the digest via model 4o.
 
@@ -183,21 +183,20 @@ async def compose_digest_intro_via_4o(
 
     run_id = uuid.uuid4().hex
     horizon = "недели" if horizon_days == 7 else "двух недель"
-    topics_str = ", ".join(topics3[:3]) if topics3 else ""
+    titles_str = "; ".join(titles[:9])
     prompt = (
         "Напиши 1-2 коротких предложения до 180 символов на русском в"
         " дружелюбном стиле. Это вступление к дайджесту лекций, в котором"
         f" {n} событий на ближайшую {horizon}."
     )
-    if topics_str:
-        prompt += f" Темы: {topics_str}."
+    if titles_str:
+        prompt += f" Названия: {titles_str}."
 
     logging.info(
-        "digest.intro.llm.request run_id=%s n=%s horizon=%s topics=%s prompt_size=%s timeout_s=%s",
+        "digest.intro.llm.request run_id=%s n=%s titles=%s prompt_size=%s timeout_s=%s",
         run_id,
         n,
-        horizon,
-        topics3,
+        titles[:9],
         len(prompt),
         FOUR_O_TIMEOUT,
     )
@@ -282,8 +281,12 @@ def format_event_line(event: Event) -> str:
 
 async def build_lectures_digest_preview(
     digest_id: str, db: Database, now: datetime
-) -> tuple[str, int, List[Event]]:
-    """Build digest preview text for lectures."""
+) -> tuple[str, List[str], int, List[Event]]:
+    """Build digest preview text for lectures.
+
+    Returns intro phrase, list of formatted event lines, horizon in days and
+    the underlying events.
+    """
 
     start = time.monotonic()
     logging.info(
@@ -306,12 +309,10 @@ async def build_lectures_digest_preview(
     )
 
     if not events:
-        return "", horizon, []
+        return "", [], horizon, []
 
-    topics = aggregate_digest_topics(events)
-    intro = await compose_digest_intro_via_4o(len(events), horizon, topics)
-    lines = [intro, ""]
-    for ev in events:
-        lines.append(format_event_line(ev))
-    text = "\n".join(lines)
-    return text, horizon, events
+    intro = await compose_digest_intro_via_4o(
+        len(events), horizon, [e.title for e in events]
+    )
+    lines = [format_event_line(ev) for ev in events]
+    return intro, lines, horizon, events

@@ -102,7 +102,7 @@ import shlex
 
 from telegraph import Telegraph, TelegraphException
 from net import http_call, VK_FALLBACK_CODES
-from digests import build_lectures_digest_preview
+from digests import build_lectures_digest_preview, format_event_line
 
 from functools import partial, lru_cache
 from collections import defaultdict, deque
@@ -13116,7 +13116,7 @@ async def handle_digest_select_lectures(
     now = datetime.now(tz).replace(tzinfo=None)
 
     try:
-        text, horizon, events = await build_lectures_digest_preview(
+        intro, lines, horizon, events = await build_lectures_digest_preview(
             digest_id, db, now
         )
         if not events:
@@ -13127,26 +13127,146 @@ async def handle_digest_select_lectures(
             await set_setting_value(db, draft_key, json.dumps({"status": "ready", "type": "lectures"}))
             return
 
-        caption_len = len(text)
+        caption = "\n".join([intro, "", *lines])
+
+        reduction = "none"
+        two_messages = False
+        if len(caption) > 1024:
+            reduction = "shorten"
+            cleaned_lines = []
+            for ev in events:
+                title = re.sub(r"[\U00010000-\U0010ffff]", "", ev.title)
+                if len(title) > 60:
+                    title = title[:57] + "..."
+                tmp = SimpleNamespace(
+                    id=ev.id,
+                    title=title,
+                    date=ev.date,
+                    time=ev.time,
+                    source_post_url=ev.source_post_url,
+                    telegraph_url=ev.telegraph_url,
+                    telegraph_path=ev.telegraph_path,
+                )
+                cleaned_lines.append(format_event_line(tmp))
+            caption = "\n".join([intro, "", *cleaned_lines])
+            if len(caption) > 1024:
+                two_messages = True
+                caption_short = "\n".join([intro, "", *cleaned_lines[:3]])
+            else:
+                caption_short = caption
+        else:
+            caption_short = caption
+
         logging.info(
-            "digest.caption.compose digest_id=%s length=%s fit_1024=%s applied_reduction=none lines=%s",
+            "digest.caption.fit digest_id=%s length=%s fit_1024=%s reduction=%s two_messages=%s",
             digest_id,
-            caption_len,
-            caption_len <= 1024,
-            text.count("\n") + 1,
+            len(caption),
+            len(caption) <= 1024,
+            reduction,
+            two_messages,
         )
 
-        msg = await bot.send_message(callback.message.chat.id, text)
+        media: List[types.InputMediaPhoto] = []
+        image_urls: List[str | None] = []
+        for ev in events:
+            url = None
+            if ev.telegraph_url:
+                logging.info(
+                    "digest.cover.fetch start event_id=%s telegraph=%s",
+                    ev.id,
+                    ev.telegraph_url,
+                )
+                try:
+                    candidate = await extract_telegra_ph_cover_url(
+                        ev.telegraph_url, event_id=ev.id
+                    )
+                except Exception:
+                    candidate = None
+                if candidate:
+                    ctype = ""
+                    try:
+                        async with httpx.AsyncClient(timeout=httpx.Timeout(HTTP_TIMEOUT)) as client:
+                            head = await client.head(candidate)
+                        ctype = head.headers.get("content-type", "")
+                    except Exception:
+                        pass
+                    logging.info(
+                        "digest.cover.candidate event_id=%s url=%s content_type=%s",
+                        ev.id,
+                        candidate,
+                        ctype,
+                    )
+                    if ctype.startswith("image/"):
+                        url = candidate
+                        logging.info(
+                            "digest.cover.accepted event_id=%s url=%s",
+                            ev.id,
+                            url,
+                        )
+                    else:
+                        logging.info(
+                            "digest.cover.fallback event_id=%s reason=bad_content_type",
+                            ev.id,
+                        )
+                else:
+                    logging.info(
+                        "digest.cover.fallback event_id=%s reason=no_image",
+                        ev.id,
+                    )
+            else:
+                logging.info("digest.cover.missing event_id=%s", ev.id)
+
+            image_urls.append(url)
+            if url:
+                media.append(types.InputMediaPhoto(media=url))
+
+        message_ids: List[int] = []
+        if media:
+            media[0].caption = caption_short
+            media[0].parse_mode = "HTML"
+            sent = await bot.send_media_group(
+                callback.message.chat.id, media
+            )
+            message_ids.extend(getattr(m, "message_id", None) for m in sent)
+            logging.info(
+                "digest.album.send digest_id=%s count=%s message_ids=%s",
+                digest_id,
+                len(media),
+                message_ids,
+            )
+            if two_messages:
+                extra = await bot.send_message(
+                    callback.message.chat.id, caption, parse_mode="HTML"
+                )
+                message_ids.append(getattr(extra, "message_id", None))
+        else:
+            msg = await bot.send_message(
+                callback.message.chat.id, caption, parse_mode="HTML"
+            )
+            message_ids.append(getattr(msg, "message_id", None))
+
         logging.info(
             "digest.preview.sent digest_id=%s admin_chat_id=%s album_size=%s text_separate=%s message_ids=%s",
             digest_id,
             callback.message.chat.id,
-            len(events),
-            True,
-            [getattr(msg, "message_id", None)],
+            len(media),
+            two_messages,
+            message_ids,
         )
+
         await set_setting_value(
-            db, draft_key, json.dumps({"status": "ready", "type": "lectures"})
+            db,
+            draft_key,
+            json.dumps({
+                "status": "ready",
+                "type": "lectures",
+                "event_ids": [e.id for e in events],
+                "excluded": [],
+                "intro_text": intro,
+                "image_urls": image_urls,
+                "caption_text": caption,
+                "two_messages": two_messages,
+            }),
         )
     except Exception:
         logging.exception("digest.preview_failed digest_id=%s", digest_id)

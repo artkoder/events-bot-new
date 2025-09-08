@@ -3,6 +3,7 @@ sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from datetime import datetime, timedelta
 import pytest
 from aiogram import types
+from types import SimpleNamespace
 
 import main
 from main import Database, User, Event
@@ -10,6 +11,7 @@ from main import Database, User, Event
 class DummyBot:
     def __init__(self):
         self.messages = []
+        self.media_groups = []
 
     async def send_message(self, chat_id, text, **kwargs):
         msg_id = len(self.messages) + 1
@@ -26,9 +28,28 @@ class DummyBot:
         self.messages.append(msg)
         return msg
 
+    async def send_media_group(self, chat_id, media, **kwargs):
+        self.media_groups.append((chat_id, media, kwargs))
+        msgs = []
+        for m in media:
+            msg_id = len(self.messages) + len(msgs) + 1
+            data = {
+                "message_id": msg_id,
+                "date": 0,
+                "chat": {"id": chat_id, "type": "private"},
+                "from": {"id": 0, "is_bot": True, "first_name": "B"},
+            }
+            if getattr(m, "caption", None):
+                data["caption"] = m.caption
+            msg = types.Message.model_validate(data)
+            msgs.append(msg)
+        self.messages.extend(msgs)
+        return msgs
+
 
 @pytest.mark.asyncio
-async def test_handle_digest_sends_preview(tmp_path):
+@pytest.mark.asyncio
+async def test_handle_digest_sends_preview(tmp_path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
     async with db.get_session() as session:
@@ -42,6 +63,7 @@ async def test_handle_digest_sends_preview(tmp_path):
             location_name="loc",
             source_text="s",
             event_type="лекция",
+            telegraph_url="https://telegra.ph/test",
         )
         session.add(ev)
         await session.commit()
@@ -53,6 +75,27 @@ async def test_handle_digest_sends_preview(tmp_path):
         "text": "/digest",
     })
     bot = DummyBot()
+
+    async def fake_ask(prompt, max_tokens=0):
+        return "Интро"
+
+    async def fake_extract(url, event_id=None):
+        return "https://example.com/img.jpg"
+
+    class DummyClient:
+        def __init__(self, *a, **kw):
+            pass
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+        async def head(self, url):
+            return SimpleNamespace(headers={"content-type": "image/jpeg"})
+
+    monkeypatch.setattr(main, "ask_4o", fake_ask)
+    monkeypatch.setattr(main, "extract_telegra_ph_cover_url", fake_extract)
+    monkeypatch.setattr(main.httpx, "AsyncClient", DummyClient)
+
     await main.show_digest_menu(msg, db, bot)
     menu_msg = bot.messages[0]
     digest_id = menu_msg.reply_markup.inline_keyboard[0][0].callback_data.split(":")[-1]
@@ -66,7 +109,9 @@ async def test_handle_digest_sends_preview(tmp_path):
         }
     )
     await main.handle_digest_select_lectures(cb, db, bot)
-    assert any("Подобрали для вас" in m.text for m in bot.messages)
+    assert bot.media_groups
+    caption = bot.media_groups[0][1][0].caption
+    assert "<a href=" in caption
 
 
 def test_help_contains_digest():
