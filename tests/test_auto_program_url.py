@@ -29,7 +29,7 @@ async def test_add_events_from_text_autofills_program_url(tmp_path: Path, monkey
     monkeypatch.setattr(main, "upload_images", fake_upload)
     monkeypatch.setattr(main, "sync_festival_page", fake_sync_page)
     monkeypatch.setattr(main, "sync_festival_vk_post", fake_sync_vk)
-    async def fake_extract(url):
+    async def fake_extract(url, *, event_id=None):
         return None
 
     monkeypatch.setattr(main, "extract_telegra_ph_cover_url", fake_extract)

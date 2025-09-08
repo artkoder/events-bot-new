@@ -226,9 +226,34 @@ async def compose_digest_intro_via_4o(
 
 
 def pick_display_link(event: Event) -> str | None:
-    """Return a display link for ``event`` if available."""
+    """Return a display link for ``event`` if available.
 
-    return event.source_post_url or event.telegraph_url or None
+    Priority:
+    1. ``source_post_url``
+    2. ``telegraph_url``
+    3. ``telegraph_path`` (normalized to ``https://telegra.ph``)
+
+    Additionally logs the chosen source.
+    """
+
+    chosen = "none"
+    url = None
+    if event.source_post_url:
+        url = event.source_post_url
+        chosen = "source_post"
+    elif event.telegraph_url:
+        url = event.telegraph_url
+        chosen = "telegraph"
+    elif event.telegraph_path:
+        url = f"https://telegra.ph/{event.telegraph_path.lstrip('/')}"
+        chosen = "path"
+    logging.info(
+        "digest.link.pick event_id=%s chosen=%s url=%s",
+        getattr(event, "id", None),
+        chosen,
+        url,
+    )
+    return url
 
 
 def format_event_line(event: Event) -> str:
@@ -241,9 +266,18 @@ def format_event_line(event: Event) -> str:
     if parsed is not None:
         hh, mm = parsed
         time_part = f" {hh:02d}:{mm:02d}"
+    else:
+        logging.warning(
+            "digest.time.format event_id=%s time_raw=%r parsed=none",
+            getattr(event, "id", None),
+            event.time,
+        )
     link = pick_display_link(event)
-    link_part = f" {link}" if link else ""
-    return f"{date_part}{time_part} | {event.title}{link_part}"
+    if link:
+        title_part = f'<a href="{link}">{event.title}</a>'
+    else:
+        title_part = event.title
+    return f"{date_part}{time_part} | {title_part}"
 
 
 async def build_lectures_digest_preview(

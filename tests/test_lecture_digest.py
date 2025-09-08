@@ -116,13 +116,17 @@ def test_format_event_line_and_link_priority():
     )
     assert pick_display_link(e) == "http://t.me/post"
     line = format_event_line(e)
-    assert line.startswith("10.05 18:30 | T http://t.me/post")
+    assert line.startswith('10.05 18:30 | <a href="http://t.me/post">T</a>')
 
     e.time = "--"  # unparsable
     e.source_post_url = None
     assert pick_display_link(e) == "http://tg.ph"
     line = format_event_line(e)
-    assert line == "10.05 | T http://tg.ph"
+    assert line == '10.05 | <a href="http://tg.ph">T</a>'
+
+    e.telegraph_url = None
+    e.telegraph_path = "foo"
+    assert pick_display_link(e) == "https://telegra.ph/foo"
 
 
 def test_aggregate_topics():

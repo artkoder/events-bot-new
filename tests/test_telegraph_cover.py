@@ -19,15 +19,26 @@ class FakeResponse:
 
 
 @pytest.mark.asyncio
-async def test_extract_cover_img(monkeypatch):
+async def test_extract_cover_img_external(monkeypatch):
     main.telegraph_first_image.clear()
 
     async def fake_get(self, url):
-        return FakeResponse({"result": {"content": [{"tag": "img", "attrs": {"src": "/file/x.jpg"}}]}})
+        return FakeResponse(
+            {
+                "result": {
+                    "content": [
+                        {
+                            "tag": "img",
+                            "attrs": {"src": "https://files.catbox.moe/a.jpg"},
+                        }
+                    ]
+                }
+            }
+        )
 
     monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
     url = await main.extract_telegra_ph_cover_url("https://telegra.ph/test")
-    assert url == "https://telegra.ph/file/x.jpg"
+    assert url == "https://files.catbox.moe/a.jpg"
 
 
 @pytest.mark.asyncio
@@ -52,7 +63,7 @@ async def test_try_set_fest_cover_from_program(tmp_path: Path, monkeypatch):
         await session.commit()
         fid = fest.id
 
-    async def fake_extract(url):
+    async def fake_extract(url, *, event_id=None):
         return "https://telegra.ph/file/cover.jpg"
 
     monkeypatch.setattr(main, "extract_telegra_ph_cover_url", fake_extract)
