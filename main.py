@@ -102,6 +102,11 @@ import shlex
 
 from telegraph import Telegraph, TelegraphException
 from net import http_call, VK_FALLBACK_CODES
+from digests import (
+    build_lectures_digest_candidates,
+    aggregate_digest_topics,
+    make_intro,
+)
 
 from functools import partial, lru_cache
 from collections import defaultdict, deque
@@ -845,6 +850,11 @@ HELP_COMMANDS = [
         "usage": "/exhibitions",
         "desc": "List active exhibitions",
         "roles": {"user", "superadmin"},
+    },
+    {
+        "usage": "/digest",
+        "desc": "Build lecture digest preview",
+        "roles": {"superadmin"},
     },
     {
         "usage": "/pages",
@@ -12960,6 +12970,29 @@ async def handle_events(message: types.Message, db: Database, bot: Bot):
     await bot.send_message(message.chat.id, text, reply_markup=markup)
 
 
+async def handle_digest(message: types.Message, db: Database, bot: Bot) -> None:
+    if not (message.text or "").startswith("/digest"):
+        return
+    async with db.get_session() as session:
+        user = await session.get(User, message.from_user.id)
+        if not user or not user.is_superadmin:
+            await bot.send_message(message.chat.id, "Not authorized")
+            return
+    offset = await get_tz_offset(db)
+    tz = offset_to_timezone(offset)
+    now = datetime.now(tz).replace(tzinfo=None)
+    events, horizon = await build_lectures_digest_candidates(db, now)
+    if not events:
+        await bot.send_message(message.chat.id, "No lectures found")
+        return
+    topics = aggregate_digest_topics(events)
+    intro = make_intro(len(events), horizon, topics)
+    lines = [intro, ""]
+    for ev in events:
+        lines.append(f"{ev.date} | {ev.title}")
+    await bot.send_message(message.chat.id, "\n".join(lines))
+
+
 async def handle_ask_4o(message: types.Message, db: Database, bot: Bot):
     parts = message.text.split(maxsplit=1)
     if len(parts) != 2:
@@ -14942,6 +14975,9 @@ def create_app() -> web.Application:
     async def exhibitions_wrapper(message: types.Message):
         await handle_exhibitions(message, db, bot)
 
+    async def digest_wrapper(message: types.Message):
+        await handle_digest(message, db, bot)
+
     async def pages_wrapper(message: types.Message):
         await handle_pages(message, db, bot)
 
@@ -15148,6 +15184,7 @@ def create_app() -> web.Application:
     dp.message.register(reg_daily_wrapper, Command("regdailychannels"))
     dp.message.register(daily_wrapper, Command("daily"))
     dp.message.register(exhibitions_wrapper, Command("exhibitions"))
+    dp.message.register(digest_wrapper, Command("digest"))
     dp.message.register(fest_wrapper, Command("fest"))
 
     dp.message.register(pages_wrapper, Command("pages"))
