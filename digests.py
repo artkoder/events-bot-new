@@ -129,14 +129,36 @@ async def build_lectures_digest_candidates(
 
     horizon = 7
     end_7 = now + timedelta(days=7)
-    selected = [e for e in events if _event_start_datetime(e, digest_id) <= end_7]
+    result: List[Event] = []
+    for ev in events:
+        if _event_start_datetime(ev, digest_id) > end_7:
+            continue
+        if pick_display_link(ev) is None:
+            logging.info(
+                "digest.skip.no_link event_id=%s title=%r", getattr(ev, "id", None), ev.title
+            )
+            continue
+        result.append(ev)
+        if len(result) == 9:
+            break
 
-    if len(selected) < 6:
+    if len(result) < 9:
         horizon = 14
         end_14 = now + timedelta(days=14)
-        selected = [e for e in events if _event_start_datetime(e, digest_id) <= end_14]
+        result = []
+        for ev in events:
+            if _event_start_datetime(ev, digest_id) > end_14:
+                continue
+            if pick_display_link(ev) is None:
+                logging.info(
+                    "digest.skip.no_link event_id=%s title=%r", getattr(ev, "id", None), ev.title
+                )
+                continue
+            result.append(ev)
+            if len(result) == 9:
+                break
 
-    return selected[:9], horizon
+    return result, horizon
 
 
 def normalize_topics(topics: Iterable[str]) -> List[str]:
@@ -263,10 +285,9 @@ async def compose_digest_intro_via_4o(
     horizon_word = "неделю" if horizon_days == 7 else "две недели"
     titles_str = "; ".join(titles[:9])
     prompt = (
-        "Сформулируй 1–2 предложения (≤180 символов) во вступление к дайджесту"
-        f" из {n} лекций на ближайшую {horizon_word}. Используй форму: "
-        "'Мы собрали для вас N лекций на ближайшую ... — на самые разные темы: от X до Y.'"
-        " X и Y нужно выбрать из списка названий, переданных ниже."
+        "Сформулируй 1–2 предложения (≤140 символов) во вступление к дайджесту"
+        f" из {n} лекций на ближайшую {horizon_word} без приветствий. Используй форму: "
+        "'N лекций на ближайшую ... — от X до Y.' X и Y выбери из названий ниже."
     )
     if titles_str:
         prompt += f" Названия: {titles_str}."
@@ -294,11 +315,16 @@ async def compose_digest_intro_via_4o(
 
     took_ms = int((time.monotonic() - start) * 1000)
     text = text.strip()
+    m = re.search(r"от\s+([^\s].*?)\s+до\s+([^\.]+)", text, re.IGNORECASE)
+    x = m.group(1).strip() if m else ""
+    y = m.group(2).strip() if m else ""
     logging.info(
-        "digest.intro.llm.response run_id=%s ok=ok text_len=%s took_ms=%s",
+        "digest.intro.llm.response run_id=%s ok=ok text_len=%s took_ms=%s x=%s y=%s",
         run_id,
         len(text),
         took_ms,
+        x,
+        y,
     )
     return text
 
@@ -322,7 +348,9 @@ async def normalize_titles_via_4o(titles: List[str]) -> List[dict[str, str]]:
     prompt_titles = " | ".join(titles)
     prompt = (
         "Для каждого заголовка лекции верни объект JSON с полями 'emoji' и "
-        "'title_clean' (без слова 'Лекция'). Отдай только JSON массив без "
+        "'title_clean'. Нужно удалить слова 'Лекция', 'Лекторий' и т.п., "
+        "если указан лектор — оформить как 'Имя Фамилия: Название'. "
+        "Вынеси ведущий эмодзи в поле 'emoji'. Отдай только JSON массив без "
         "дополнительного текста. Заголовки: " + prompt_titles
     )
     start = time.monotonic()
@@ -353,6 +381,12 @@ async def normalize_titles_via_4o(titles: List[str]) -> List[dict[str, str]]:
             emoji = item.get("emoji") or ""
             title_clean = item.get("title_clean") or item.get("title") or orig
             result.append({"emoji": emoji, "title_clean": title_clean})
+            logging.info(
+                "digest.titles.llm.transform before=%r after=%r emoji=%s",
+                orig,
+                title_clean,
+                emoji,
+            )
         if len(result) == len(titles):
             return result
     except Exception:
@@ -371,9 +405,24 @@ def _normalize_title_fallback(title: str) -> dict[str, str]:
         emoji = emoji_match.group(0)
         title = title[len(emoji) :]
 
-    title = re.sub(r"^(?:[^\w]*?)*Лекция[\s:—-]*", "", title, flags=re.IGNORECASE)
+    title = re.sub(
+        r"^(?:[^\w]*?)*(?:Лекция|Лекторий)[\s:—-]*",
+        "",
+        title,
+        flags=re.IGNORECASE,
+    )
     title = re.sub(r"^от\s+", "", title, flags=re.IGNORECASE)
     title = re.sub(r"\s+", " ", title).strip()
+
+    m = re.match(
+        r"^(?P<who>[\wЁёА-Яа-я-]+\s+[\wЁёА-Яа-я-]+)[\s—:-]+(?P<what>.+)$",
+        title,
+    )
+    if m:
+        who = m.group("who").strip()
+        what = m.group("what").strip()
+        title = f"{who}: {what}"
+
     return {"emoji": emoji, "title_clean": title}
 
 
@@ -479,47 +528,59 @@ def _strip_quotes_dashes(line: str) -> str:
     return re.sub(r'<a href="(?P<url>[^"]+)">(?P<title>[^<]+)</a>', repl, line)
 
 
-def assemble_compact_caption(
+async def assemble_compact_caption(
     intro: str, items_html: List[str], *, digest_id: str | None = None
 ) -> tuple[str, List[str]]:
     """Assemble caption ensuring HTML length \<=1024.
 
-    Returns tuple of final caption and list of items kept. Logs reduction steps.
+    Before adding each line the URL is shortened. Intro may be truncated to a
+    single sentence if needed to fit more lines.
     """
 
-    steps: List[str] = []
-    items = list(items_html)
+    from shortlinks import shorten_url
 
-    def build(items: List[str]) -> str:
-        return intro + "\n\n" + "\n".join(items)
+    intro_used = intro
+    kept: List[str] = []
+    for raw_line in items_html:
+        match = re.search(r'<a href="([^"]+)">', raw_line)
+        line = raw_line
+        if match:
+            long_url = match.group(1)
+            try:
+                short = await shorten_url(long_url)
+            except Exception as e:
+                logging.warning(
+                    "digest.caption.shortener_fail url=%s error=%r", long_url, e
+                )
+                short = long_url
+            line = raw_line.replace(long_url, short)
 
-    caption = build(items)
-    if len(caption) > 1024:
-        steps.append("truncate_titles")
-        items = [_truncate_html_title(line, 60) for line in items]
-        caption = build(items)
+        candidate = intro_used + "\n\n" + "\n".join(kept + [line])
+        if len(candidate) <= 1024:
+            kept.append(line)
+            continue
 
-    if len(caption) > 1024:
-        steps.append("strip_quotes_dashes")
-        items = [_strip_quotes_dashes(line) for line in items]
-        caption = build(items)
+        if intro_used == intro:
+            parts = re.split(r"(?<=\.)\s", intro.strip(), maxsplit=1)
+            if len(parts) == 2:
+                intro_used = parts[0]
+                candidate = intro_used + "\n\n" + "\n".join(kept + [line])
+                if len(candidate) <= 1024:
+                    kept.append(line)
+                    continue
+        break
 
-    if len(caption) > 1024:
-        while len(caption) > 1024 and len(items) > 6:
-            items = items[:-1]
-            steps.append("drop_item")
-            caption = build(items)
-
+    caption = intro_used + "\n\n" + "\n".join(kept)
     visible_len = len(re.sub(r"<[^>]+>", "", caption))
     logging.info(
-        "digest.caption.assembled digest_id=%s html_len=%s visible_len=%s steps=%s kept_items=%s",
+        "digest.caption.assembled digest_id=%s html_len=%s visible_len=%s kept_items=%s intro_len=%s",
         digest_id,
         len(caption),
         visible_len,
-        steps,
-        len(items),
+        len(kept),
+        len(intro_used),
     )
-    return caption, items
+    return caption, kept
 
 
 async def build_lectures_digest_preview(
