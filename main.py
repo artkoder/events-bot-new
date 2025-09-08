@@ -8918,20 +8918,49 @@ def next_month(month: str) -> str:
     return n.strftime("%Y-%m")
 
 
+_TG_TAG_RE = re.compile(r"</?tg-(?:emoji|spoiler)[^>]*?>", re.IGNORECASE)
+_ESCAPED_TG_TAG_RE = re.compile(r"&lt;/?tg-(?:emoji|spoiler).*?&gt;", re.IGNORECASE)
+
+
+def sanitize_telegram_html(html: str) -> str:
+    """Remove Telegram-specific HTML wrappers while keeping inner text.
+
+    >>> sanitize_telegram_html("<tg-emoji e=1/>")
+    ''
+    >>> sanitize_telegram_html("<tg-emoji e=1></tg-emoji>")
+    ''
+    >>> sanitize_telegram_html("<tg-emoji e=1>➡</tg-emoji>")
+    '➡'
+    >>> sanitize_telegram_html("&lt;tg-emoji e=1/&gt;")
+    ''
+    >>> sanitize_telegram_html("&lt;tg-emoji e=1&gt;&lt;/tg-emoji&gt;")
+    ''
+    >>> sanitize_telegram_html("&lt;tg-emoji e=1&gt;➡&lt;/tg-emoji&gt;")
+    '➡'
+    """
+    raw = len(_TG_TAG_RE.findall(html))
+    escaped = len(_ESCAPED_TG_TAG_RE.findall(html))
+    if raw or escaped:
+        logging.info("telegraph:sanitize tg-tags raw=%d escaped=%d", raw, escaped)
+    cleaned = _TG_TAG_RE.sub("", html)
+    cleaned = _ESCAPED_TG_TAG_RE.sub("", cleaned)
+    return cleaned
+
+
 @lru_cache(maxsize=8)
 def md_to_html(text: str) -> str:
     html_text = simple_md_to_html(text)
     html_text = linkify_for_telegraph(html_text)
-    html_text = re.sub(r"&lt;/?tg-(?:emoji|spoiler).*?&gt;", "", html_text)
+    html_text = sanitize_telegram_html(html_text)
     if not re.match(r"^<(?:h\d|p|ul|ol|blockquote|pre|table)", html_text):
         html_text = f"<p>{html_text}</p>"
     # Telegraph API does not allow h1/h2 or Telegram-specific tags
     html_text = re.sub(r"<(\/?)h[12]>", r"<\1h3>", html_text)
-    html_text = re.sub(r"</?tg-(?:emoji|spoiler)[^>]*>", "", html_text)
+    html_text = sanitize_telegram_html(html_text)
     return html_text
 
 _DISALLOWED_TAGS_RE = re.compile(
-    r"</?(?:span|div|style|script|tg-spoiler)[^>]*>", re.IGNORECASE
+    r"</?(?:span|div|style|script|tg-spoiler|tg-emoji)[^>]*>", re.IGNORECASE
 )
 
 
@@ -14729,14 +14758,11 @@ async def build_source_page_content(
     if html_text:
         html_text = strip_title(html_text)
         html_text = normalize_hashtag_dates(html_text)
-        tg_emoji_cleaned = len(emoji_pat.findall(html_text))
-        tg_spoiler_unwrapped = len(spoiler_pat.findall(html_text))
-        cleaned = emoji_pat.sub(r"\1", html_text)
-        cleaned = spoiler_pat.sub(r"<i>\1</i>", cleaned)
+        html_text = sanitize_telegram_html(html_text)
         for k, v in CUSTOM_EMOJI_MAP.items():
-            cleaned = cleaned.replace(k, v)
-        cleaned = linkify_for_telegraph(cleaned)
-        html_content += f"<p>{cleaned.replace('\n', '<br/>')}</p>"
+            html_text = html_text.replace(k, v)
+        html_text = linkify_for_telegraph(html_text)
+        html_content += f"<p>{html_text.replace('\n', '<br/>')}</p>"
     else:
         clean_text = strip_title(text)
         clean_text = normalize_hashtag_dates(clean_text)
