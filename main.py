@@ -13008,16 +13008,26 @@ async def handle_digest(message: types.Message, db: Database, bot: Bot) -> None:
     offset = await get_tz_offset(db)
     tz = offset_to_timezone(offset)
     now = datetime.now(tz).replace(tzinfo=None)
-    events, horizon = await build_lectures_digest_candidates(db, now)
-    if not events:
-        await bot.send_message(message.chat.id, "No lectures found")
-        return
-    topics = aggregate_digest_topics(events)
-    intro = make_intro(len(events), horizon, topics)
-    lines = [intro, ""]
-    for ev in events:
-        lines.append(f"{ev.date} | {ev.title}")
-    await bot.send_message(message.chat.id, "\n".join(lines))
+    try:
+        events, horizon = await build_lectures_digest_candidates(db, now)
+        if not events:
+            await bot.send_message(
+                message.chat.id,
+                f"Лекций в ближайшие {horizon} дней не нашлось с учётом правила “не раньше чем через 2 часа”.",
+            )
+            return
+        topics = aggregate_digest_topics(events)
+        intro = make_intro(len(events), horizon, topics)
+        lines = [intro, ""]
+        for ev in events:
+            lines.append(f"{ev.date} | {ev.title}")
+        await bot.send_message(message.chat.id, "\n".join(lines))
+    except Exception:
+        logging.exception("digest.preview_failed")
+        await bot.send_message(
+            message.chat.id,
+            "Не удалось собрать превью дайджеста (ошибка парсинга времени). Разберёмся — детали в логах.",
+        )
 
 
 async def handle_ask_4o(message: types.Message, db: Database, bot: Bot):

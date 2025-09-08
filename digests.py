@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from collections import Counter
 from datetime import datetime, timedelta
+import logging
+import re
 from typing import Iterable, List, Tuple
 
 from sqlalchemy import select
@@ -30,9 +32,57 @@ _REVERSE_SYNONYMS = {
 }
 
 
+def parse_start_time(raw: str) -> tuple[int, int] | None:
+    """Вернёт (hh, mm) из строки времени.
+
+    Берём ПЕРВОЕ валидное вхождение. Поддерживаем разделители ``:`` и ``.``
+    и сложные строки вроде ``18:30–20:00`` или ``18:30.15:30``. Часы и
+    минуты нормализуются в диапазоны 0–23 и 0–59 соответственно. Если время
+    не распознано, возвращается ``None``.
+    """
+
+    match = re.search(r"\b(\d{1,2})[:\.](\d{2})\b", raw)
+    if not match:
+        return None
+
+    hh = max(0, min(23, int(match.group(1))))
+    mm = max(0, min(59, int(match.group(2))))
+    return hh, mm
+
+
 def _event_start_datetime(event: Event) -> datetime:
     """Combine ``date`` and ``time`` fields of an event into a datetime."""
-    return datetime.strptime(f"{event.date} {event.time}", "%Y-%m-%d %H:%M")
+
+    cached = getattr(event, "_start_dt", None)
+    if cached is not None:
+        return cached
+
+    day = datetime.strptime(event.date, "%Y-%m-%d")
+    raw = event.time or ""
+    parsed = parse_start_time(raw)
+
+    if parsed is None:
+        logging.warning(
+            'digest.time: event_id=%s, title="%s", raw="%s" -> parsed=None',
+            event.id,
+            event.title,
+            raw,
+        )
+        dt = day
+    else:
+        hh, mm = parsed
+        logging.info(
+            'digest.time: event_id=%s, title="%s", raw="%s" -> parsed=%02d:%02d',
+            event.id,
+            event.title,
+            raw,
+            hh,
+            mm,
+        )
+        dt = day.replace(hour=hh, minute=mm)
+
+    setattr(event, "_start_dt", dt)
+    return dt
 
 
 async def build_lectures_digest_candidates(
