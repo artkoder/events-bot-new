@@ -6307,18 +6307,35 @@ async def add_events_from_text(
                     copy_e.end_date = None
                     events_to_add.append(copy_e)
         for event in events_to_add:
+            rejected_links: list[str] = []
+            if event.ticket_link and is_tg_folder_link(event.ticket_link):
+                rejected_links.append(event.ticket_link)
+                event.ticket_link = None
             if not is_valid_url(event.ticket_link):
-                try:
-                    extracted = next(links_iter)
-                except StopIteration:
-                    extracted = None
-                if extracted:
+                while True:
+                    try:
+                        extracted = next(links_iter)
+                    except StopIteration:
+                        extracted = None
+                    if extracted is None:
+                        break
+                    if is_tg_folder_link(extracted):
+                        rejected_links.append(extracted)
+                        continue
                     event.ticket_link = extracted
+                    break
 
             # skip events that have already finished - disabled for consistency in tests
 
             async with db.get_session() as session:
                 saved, added = await upsert_event(session, event)
+                if rejected_links:
+                    for url in rejected_links:
+                        logging.info(
+                            "ticket_link_rejected pattern=telegram_folder url=%s eid=%s",
+                            url,
+                            saved.id,
+                        )
             logline("FLOW", saved.id, "start add_event", user=creator_id)
             logline(
                 "FLOW",
@@ -9014,6 +9031,17 @@ def is_valid_url(text: str | None) -> bool:
     if not text:
         return False
     return bool(re.match(r"https?://", text))
+
+
+TELEGRAM_FOLDER_RX = re.compile(r"^https?://t\.me/addlist/[A-Za-z0-9_-]+/?$")
+
+
+def _strip_qf(u: str) -> str:
+    return u.split('#', 1)[0].split('?', 1)[0]
+
+
+def is_tg_folder_link(u: str) -> bool:
+    return bool(TELEGRAM_FOLDER_RX.match(_strip_qf(u)))
 
 
 def is_vk_wall_url(url: str | None) -> bool:
@@ -13778,8 +13806,17 @@ async def handle_edit_message(message: types.Message, db: Database, bot: Bot):
                     await bot.send_message(message.chat.id, "Invalid boolean")
                     return
                 setattr(event, field, bool_val)
-            elif field == "ticket_link" and value == "":
-                setattr(event, field, None)
+            elif field == "ticket_link":
+                if value == "":
+                    setattr(event, field, None)
+                elif is_tg_folder_link(value):
+                    await bot.send_message(
+                        message.chat.id,
+                        "Это ссылка на папку Telegram, не на регистрацию",
+                    )
+                    return
+                else:
+                    setattr(event, field, value)
             else:
                 setattr(event, field, value)
         await session.commit()

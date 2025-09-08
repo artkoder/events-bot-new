@@ -563,6 +563,50 @@ async def test_edit_remove_ticket_link(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_edit_reject_tg_folder_ticket_link(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
+        return "https://telegra.ph/test", "path", "", 0
+
+    monkeypatch.setattr("main.create_source_page", fake_create)
+
+    msg = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "M"},
+            "text": f"/addevent_raw Party|{FUTURE_DATE}|18:00|Club",
+        }
+    )
+    await handle_add_event_raw(msg, db, bot)
+
+    async with db.get_session() as session:
+        event = (await session.execute(select(Event))).scalars().first()
+
+    editing_sessions[1] = (event.id, "ticket_link")
+    edit_msg = types.Message.model_validate(
+        {
+            "message_id": 2,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "M"},
+            "text": "https://t.me/addlist/AAAA",
+        }
+    )
+    await handle_edit_message(edit_msg, db, bot)
+
+    # Ensure warning message sent and ticket_link unchanged
+    assert bot.messages[-1][1] == "Это ссылка на папку Telegram, не на регистрацию"
+    async with db.get_session() as session:
+        updated = await session.get(Event, event.id)
+    assert updated.ticket_link is None
+
+
+@pytest.mark.asyncio
 async def test_edit_event_forwarded(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
@@ -4498,6 +4542,108 @@ async def test_multiple_ticket_links(tmp_path: Path, monkeypatch):
     results = await main.add_events_from_text(db, "text", None, html, None)
     assert results[0][0].ticket_link == "https://l1"
     assert results[1][0].ticket_link == "https://l2"
+
+
+@pytest.mark.asyncio
+async def test_ticket_link_tg_folder_only(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async def fake_parse(text: str, source_channel: str | None = None) -> list[dict]:
+        return [
+            {
+                "title": "T",
+                "short_description": "d",
+                "date": FUTURE_DATE,
+                "time": "18:00",
+                "location_name": "Hall",
+                "ticket_link": None,
+                "event_type": "встреча",
+                "emoji": None,
+                "is_free": True,
+            }
+        ]
+
+    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
+        return "url", "p"
+
+    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.create_source_page", fake_create)
+
+    html = "Регистрация <a href='https://t.me/addlist/AAAA'>по ссылке</a>"
+    results = await main.add_events_from_text(db, "text", None, html, None)
+    ev = results[0][0]
+    assert ev.ticket_link is None
+
+
+@pytest.mark.asyncio
+async def test_ticket_link_tg_folder_with_other(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async def fake_parse(text: str, source_channel: str | None = None) -> list[dict]:
+        return [
+            {
+                "title": "T",
+                "short_description": "d",
+                "date": FUTURE_DATE,
+                "time": "18:00",
+                "location_name": "Hall",
+                "ticket_link": None,
+                "event_type": "встреча",
+                "emoji": None,
+                "is_free": True,
+            }
+        ]
+
+    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
+        return "url", "p"
+
+    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.create_source_page", fake_create)
+
+    html = (
+        "Смотри <a href='https://t.me/addlist/AAAA'>каналы</a> и "
+        "регистрация <a href='https://timepad.ru/e/123'>тут</a>"
+    )
+    results = await main.add_events_from_text(db, "text", None, html, None)
+    ev = results[0][0]
+    assert ev.ticket_link == "https://timepad.ru/e/123"
+
+
+@pytest.mark.asyncio
+async def test_ticket_link_tg_account_allowed(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async def fake_parse(text: str, source_channel: str | None = None) -> list[dict]:
+        return [
+            {
+                "title": "T",
+                "short_description": "d",
+                "date": FUTURE_DATE,
+                "time": "18:00",
+                "location_name": "Hall",
+                "ticket_link": None,
+                "event_type": "встреча",
+                "emoji": None,
+                "is_free": True,
+            }
+        ]
+
+    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
+        return "url", "p"
+
+    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr("main.create_source_page", fake_create)
+
+    html = "Регистрация <a href='https://t.me/someusername'>в TG</a>"
+    results = await main.add_events_from_text(db, "text", None, html, None)
+    ev = results[0][0]
+    assert ev.ticket_link == "https://t.me/someusername"
 
 
 @pytest.mark.asyncio
