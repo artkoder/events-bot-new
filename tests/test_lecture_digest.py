@@ -96,7 +96,7 @@ async def test_compose_intro_via_4o(monkeypatch, caplog):
         return "интро"
 
     monkeypatch.setattr("main.ask_4o", fake_ask)
-    text = await compose_digest_intro_via_4o(2, 7, ["искусство"])
+    text = await compose_digest_intro_via_4o(2, 7, ["e1", "e2"])
     assert text == "интро"
     assert any("digest.intro.llm.request" in r.message for r in caplog.records)
     assert any("digest.intro.llm.response" in r.message for r in caplog.records)
