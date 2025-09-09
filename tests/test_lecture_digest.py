@@ -16,7 +16,9 @@ from digests import (
     assemble_compact_caption,
     visible_caption_len,
     compose_digest_caption,
+    attach_caption_if_fits,
 )
+from aiogram import types
 
 
 @pytest.mark.asyncio
@@ -109,11 +111,11 @@ async def test_compose_intro_via_4o(monkeypatch, caplog):
     assert any("digest.intro.llm.response" in r.message for r in caplog.records)
 
 
-def test_visible_caption_len_basic():
+def test_visible_len_anchors():
     html = '<a href="https://very.long/url">Заголовок</a>'
     assert visible_caption_len(html) == len("Заголовок")
-    html2 = '&quot;A&nbsp;B&quot; https://example.com'
-    assert visible_caption_len(html2) == len('"A B"')
+    html2 = '<a href="http://a">A</a> <b>B</b>'
+    assert visible_caption_len(html2) == 3
 
 
 @pytest.mark.asyncio
@@ -209,7 +211,7 @@ async def test_caption_visible_length(caplog):
 
 
 @pytest.mark.asyncio
-async def test_compose_digest_caption_exclude(caplog):
+async def test_compose_caption_excluded(caplog):
     intro = "intro"
     lines = ["l1", "l2", "l3"]
     footer = "<b>f</b>"
@@ -220,7 +222,8 @@ async def test_compose_digest_caption_exclude(caplog):
     assert used == ["l1", "l3"]
     assert "l2" not in caption
     assert caption.endswith("\n\n<b>f</b>")
-    assert any("digest.caption.compose" in r.message for r in caplog.records)
+    assert visible_caption_len(caption) <= 4096
+    assert any("fit_1024" in r.message for r in caplog.records)
 
 
 @pytest.mark.asyncio
@@ -250,3 +253,12 @@ async def test_candidates_skip_no_link(tmp_path):
     titles = [e.title for e in events]
     assert len(events) == 9
     assert "e5" not in titles and "e9" in titles
+
+
+def test_publish_attach_caption_switch():
+    media = [types.InputMediaPhoto(media="u1")]
+    attach, visible = attach_caption_if_fits(media, "a" * 980)
+    assert attach and visible == 980 and media[0].caption
+    media2 = [types.InputMediaPhoto(media="u2")]
+    attach2, visible2 = attach_caption_if_fits(media2, "b" * 1100)
+    assert not attach2 and visible2 == 1100 and media2[0].caption is None

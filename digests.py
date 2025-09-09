@@ -551,6 +551,29 @@ def visible_caption_len(html_text: str) -> int:
     return len(s)
 
 
+def attach_caption_if_fits(
+    media: List["types.InputMediaPhoto"], caption_html: str
+) -> tuple[bool, int]:
+    """Attach caption to first media item if visible length allows.
+
+    Returns a tuple ``(attached, visible_len)`` where ``attached`` indicates
+    whether the caption was placed on the first photo and ``visible_len`` is the
+    human‑visible length of ``caption_html``.  The function mutates ``media`` in
+    place when attaching the caption.
+    """
+
+    from aiogram import types
+
+    visible_len = visible_caption_len(caption_html)
+    if media and visible_len <= 1024:
+        first = media[0]
+        media[0] = types.InputMediaPhoto(
+            media=first.media, caption=caption_html, parse_mode="HTML"
+        )
+        return True, visible_len
+    return False, visible_len
+
+
 async def compose_digest_caption(
     intro_text: str,
     lines_html: List[str],

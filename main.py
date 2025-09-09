@@ -109,6 +109,7 @@ from digests import (
     extract_catbox_covers_from_telegraph,
     assemble_compact_caption,
     visible_caption_len,
+    attach_caption_if_fits,
 )
 
 from functools import partial, lru_cache
@@ -13137,7 +13138,6 @@ async def handle_digest_select_lectures(
         caption, lines = await assemble_compact_caption(intro, lines, digest_id=digest_id)
         kept = len(lines)
         events = events[:kept]
-        vis_len = visible_caption_len(caption)
 
         media: List[types.InputMediaPhoto] = []
         image_urls: List[str | None] = []
@@ -13162,25 +13162,30 @@ async def handle_digest_select_lectures(
             len(events),
         )
 
+        attach, vis_len = attach_caption_if_fits(media, caption)
         preview_album_msg_ids: List[int] = []
+        caption_msg: types.Message | None = None
         if media:
             sent = await bot.send_media_group(callback.message.chat.id, media)
             preview_album_msg_ids.extend(m.message_id for m in sent)
+        if not attach:
+            caption_msg = await bot.send_message(
+                callback.message.chat.id,
+                caption,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
 
-        caption_msg = await bot.send_message(
-            callback.message.chat.id,
-            caption,
-            parse_mode="HTML",
-            disable_web_page_preview=True,
-        )
-
+        log_message_ids = preview_album_msg_ids.copy()
+        if caption_msg:
+            log_message_ids.append(caption_msg.message_id)
         logging.info(
-            "digest.preview.sent digest_id=%s photos=%s caption_visible_len=%s album_msg_ids=%s caption_msg_id=%s",
+            "digest.preview.sent digest_id=%s album_size=%s attach_caption=%s visible_len=%s message_ids=%s",
             digest_id,
             len([u for u in image_urls if u]),
+            attach,
             vis_len,
-            preview_album_msg_ids,
-            caption_msg.message_id,
+            log_message_ids,
         )
 
         # build panel message with publish buttons
@@ -13230,7 +13235,11 @@ async def handle_digest_select_lectures(
                     "caption_text": caption,
                     "panel_msg_id": panel.message_id,
                     "preview_album_msg_ids": preview_album_msg_ids,
-                    "preview_caption_msg_id": caption_msg.message_id,
+                    "preview_caption_msg_id": (
+                        caption_msg.message_id
+                        if caption_msg
+                        else (preview_album_msg_ids[0] if attach and preview_album_msg_ids else None)
+                    ),
                     "published_to": {},
                 }
             ),
@@ -13279,28 +13288,41 @@ async def handle_digest_publish(
     caption_text = data.get("caption_text") or ""
 
     media = [types.InputMediaPhoto(media=url) for url in image_urls if url]
+    attach, vis_len = attach_caption_if_fits(media, caption_text)
+    logging.info(
+        "digest.publish decision attach_caption=%s visible_len=%s photos=%s digest_id=%s",
+        attach,
+        vis_len,
+        len(media),
+        digest_id,
+    )
     album_msg_ids: List[int] = []
+    caption_msg_id: int | None = None
 
     logging.info(
-        "digest.publish.start digest_id=%s channel_id=%s", digest_id, channel_id
+        "digest.send.start digest_id=%s channel=%s", digest_id, channel_id
     )
 
     try:
         if media:
             sent = await bot.send_media_group(channel_id, media)
             album_msg_ids = [m.message_id for m in sent]
-        msg = await bot.send_message(
-            channel_id,
-            caption_text,
-            parse_mode="HTML",
-            disable_web_page_preview=True,
-        )
-    except Exception as e:
+        if not attach or not media:
+            msg = await bot.send_message(
+                channel_id,
+                caption_text,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+            caption_msg_id = msg.message_id
+        else:
+            caption_msg_id = album_msg_ids[0] if album_msg_ids else None
+    except Exception:
         logging.exception(
             "digest.publish.error digest_id=%s channel_id=%s", digest_id, channel_id
         )
-        # try to send text once more if album succeeded
-        if album_msg_ids:
+        # try to send text once more if album succeeded and caption wasn't sent
+        if album_msg_ids and (not attach or not media):
             try:
                 msg = await bot.send_message(
                     channel_id,
@@ -13308,11 +13330,11 @@ async def handle_digest_publish(
                     parse_mode="HTML",
                     disable_web_page_preview=True,
                 )
+                caption_msg_id = msg.message_id
             except Exception:
                 await callback.answer("Текст не отправлен", show_alert=True)
                 panel_id = data.get("panel_msg_id")
                 if panel_id:
-                    # notify admin via panel message
                     async with db.get_session() as session:
                         result = await session.execute(
                             select(Channel).where(Channel.daily_time.is_not(None))
@@ -13332,7 +13354,17 @@ async def handle_digest_publish(
             await callback.answer("Ошибка отправки", show_alert=True)
             return
 
-    caption_msg_id = msg.message_id
+    logging.info(
+        "digest.send.end digest_id=%s channel=%s photos=%s attach_caption=%s visible_len=%s message_id=%s",
+        digest_id,
+        channel_id,
+        len(album_msg_ids),
+        attach,
+        vis_len,
+        caption_msg_id,
+    )
+
+    caption_msg_id = caption_msg_id or 0
     post_url = build_channel_post_url(ch, caption_msg_id) if ch else None
 
     published_to[str(channel_id)] = {
