@@ -15,6 +15,7 @@ from digests import (
     normalize_titles_via_4o,
     assemble_compact_caption,
     visible_caption_len,
+    compose_digest_caption,
 )
 
 
@@ -203,8 +204,23 @@ async def test_caption_visible_length(caplog):
     caption, used = await assemble_compact_caption(intro, lines, digest_id="x")
     assert visible_caption_len(caption) <= 4096
     assert len(used) == 9
-    assert any("digest.caption.visible_len" in r.message for r in caplog.records)
+    assert any("digest.caption.compose" in r.message for r in caplog.records)
     assert caption.endswith('\n\n<a href="https://t.me/kenigevents">Полюбить Калининград | Анонсы</a>')
+
+
+@pytest.mark.asyncio
+async def test_compose_digest_caption_exclude(caplog):
+    intro = "intro"
+    lines = ["l1", "l2", "l3"]
+    footer = "<b>f</b>"
+    caplog.set_level(logging.INFO)
+    caption, used = await compose_digest_caption(
+        intro, lines, footer, excluded={1}, digest_id="d1"
+    )
+    assert used == ["l1", "l3"]
+    assert "l2" not in caption
+    assert caption.endswith("\n\n<b>f</b>")
+    assert any("digest.caption.compose" in r.message for r in caplog.records)
 
 
 @pytest.mark.asyncio
