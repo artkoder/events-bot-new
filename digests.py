@@ -551,37 +551,52 @@ def visible_caption_len(html_text: str) -> int:
     return len(s)
 
 
+async def compose_digest_caption(
+    intro_text: str,
+    lines_html: List[str],
+    footer_html: str,
+    excluded: Iterable[int] | None = None,
+    *,
+    digest_id: str | None = None,
+) -> tuple[str, List[str]]:
+    """Compose digest caption respecting Telegram visible length limits."""
+
+    excluded_set = set(excluded or [])
+    lines = [
+        line for idx, line in enumerate(lines_html) if idx not in excluded_set
+    ]
+
+    def build_caption(current: List[str]) -> str:
+        body = intro_text.strip()
+        if current:
+            body += "\n\n" + "\n".join(current)
+        body += "\n\n" + footer_html
+        return body
+
+    caption = build_caption(lines)
+    visible_len = visible_caption_len(caption)
+    while lines and visible_len > 4096:
+        lines.pop()
+        caption = build_caption(lines)
+        visible_len = visible_caption_len(caption)
+    logging.info(
+        "digest.caption.compose digest_id=%s visible_len=%s fit_1024=%s",
+        digest_id,
+        visible_len,
+        int(visible_len <= 1024),
+    )
+    return caption, lines
+
+
 async def assemble_compact_caption(
     intro: str, items_html: List[str], *, digest_id: str | None = None
 ) -> tuple[str, List[str]]:
     """Assemble caption trimmed to Telegram's 4096 char visible limit."""
 
-    lines = list(items_html)
     footer = '<a href="https://t.me/kenigevents">Полюбить Калининград | Анонсы</a>'
-
-    def build_caption(current: List[str]) -> str:
-        body = intro.strip()
-        if current:
-            body += "\n\n" + "\n".join(current)
-        body += "\n\n" + footer
-        return body
-
-    caption = build_caption(lines)
-    before = visible_caption_len(caption)
-    trimmed = 0
-    while lines and visible_caption_len(caption) > 4096:
-        lines.pop()
-        trimmed += 1
-        caption = build_caption(lines)
-    after = visible_caption_len(caption)
-    logging.info(
-        "digest.caption.visible_len before=%s after=%s items=%s trimmed=%s",
-        before,
-        after,
-        len(lines),
-        trimmed,
+    return await compose_digest_caption(
+        intro, items_html, footer, excluded=None, digest_id=digest_id
     )
-    return caption, lines
 
 
 async def build_lectures_digest_preview(
