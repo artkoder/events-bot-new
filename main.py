@@ -1712,7 +1712,7 @@ async def extract_telegra_ph_cover_url(
         return None
     api_url = f"https://api.telegra.ph/getPage/{path}?return_content=true"
     timeout = httpx.Timeout(HTTP_TIMEOUT)
-    start = time.monotonic()
+    start = _time.monotonic()
     for _ in range(3):
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
@@ -1764,7 +1764,7 @@ async def extract_telegra_ph_cover_url(
                 return None
 
             cover = await dfs(content)
-            duration_ms = int((time.monotonic() - start) * 1000)
+            duration_ms = int((_time.monotonic() - start) * 1000)
             if cover:
                 telegraph_first_image[url] = cover
                 logging.info(
@@ -1782,7 +1782,7 @@ async def extract_telegra_ph_cover_url(
             return None
         except Exception:
             await asyncio.sleep(1)
-    duration_ms = int((time.monotonic() - start) * 1000)
+    duration_ms = int((_time.monotonic() - start) * 1000)
     logging.info(
         "digest.cover.fetch event_id=%s result=none url='' source=telegraph_api took_ms=%s",
         event_id,
@@ -13374,7 +13374,7 @@ async def handle_digest_refresh(callback: types.CallbackQuery, bot: Bot) -> None
     )
 
     titles = [session["items"][i]["norm_title"] for i in remaining]
-    start = time.monotonic()
+    start = _time.monotonic()
     logging.info(
         "digest.intro.llm.request digest_id=%s titles=%s",
         digest_id,
@@ -13383,7 +13383,7 @@ async def handle_digest_refresh(callback: types.CallbackQuery, bot: Bot) -> None
     intro = await compose_digest_intro_via_4o(
         len(remaining), session.get("horizon_days", 0), titles
     )
-    duration_ms = int((time.monotonic() - start) * 1000)
+    duration_ms = int((_time.monotonic() - start) * 1000)
     logging.info(
         "digest.intro.llm.response digest_id=%s text_len=%s took_ms=%s",
         digest_id,
@@ -13450,8 +13450,8 @@ async def handle_digest_send(callback: types.CallbackQuery, bot: Bot) -> None:
     caption_msg_id: int | None = None
     media = [types.InputMediaPhoto(media=url) for url in media_urls]
     if attach and media:
-        media[0].caption = caption
         media[0].parse_mode = "HTML"
+        media[0].caption = caption
     if media:
         sent = await bot.send_media_group(channel_id, media)
         album_msg_ids = [m.message_id for m in sent]
@@ -14682,7 +14682,7 @@ async def _drop_album_after_ttl(gid: str) -> None:
     await asyncio.sleep(ALBUM_PENDING_TTL_S)
     state = pending_albums.get(gid)
     if state and not state.text:
-        age = int(time.monotonic() - state.created)
+        age = int(_time.monotonic() - state.created)
         logging.info(
             "album_drop_no_caption gid=%s buf_size=%d age_s=%d",
             gid,
@@ -14746,7 +14746,7 @@ async def finalize_album(gid: str, db: Database, bot: Bot) -> None:
             media=media,
         )
         add_event_sessions.pop(msg.from_user.id, None)
-    took = int((time.monotonic() - start) * 1000)
+    took = int((_time.monotonic() - start) * 1000)
     logging.info(
         "album_finalize_done gid=%s images_total=%d took_ms=%d used_images=%d catbox_result=%s",
         gid,
@@ -14998,7 +14998,7 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
                 )
                 if old_state.timer:
                     old_state.timer.cancel()
-                age = int(time.monotonic() - old_state.created)
+                age = int(_time.monotonic() - old_state.created)
                 logging.info(
                     "album_drop_no_caption gid=%s buf_size=%d age_s=%d",
                     old_gid,
@@ -15096,7 +15096,7 @@ async def handle_add_event_media_group(
             )
             if old_state.timer:
                 old_state.timer.cancel()
-            age = int(time.monotonic() - old_state.created)
+            age = int(_time.monotonic() - old_state.created)
             logging.info(
                 "album_drop_no_caption gid=%s buf_size=%d age_s=%d",
                 old_gid,
