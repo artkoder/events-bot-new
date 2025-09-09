@@ -41,8 +41,12 @@ browse upcoming announcements. The command accepts dates like `2025-07-10`,
   export TELEGRAPH_TOKEN=your_telegraph_token
   # User access token for VK posts (scopes: wall,groups,offline)
   export VK_USER_TOKEN=vk_user_token
-  # Optional: group token used as a fallback
+  # IDs of VK groups (without @)
+  export VK_MAIN_GROUP_ID=123
+  export VK_AFISHA_GROUP_ID=231828790
+  # Group tokens
   export VK_TOKEN=vk_group_token
+  export VK_TOKEN_AFISHA=vk_afisha_group_token
   # Sending images to VK is disabled by default. Use /vkphotos to enable it.
   # Optional behaviour tuning
   export VK_ACTOR_MODE=auto  # group|user|auto
@@ -88,8 +92,12 @@ browse upcoming announcements. The command accepts dates like `2025-07-10`,
    fly secrets set TELEGRAPH_TOKEN=<token>
    # User access token for VK posts (scopes: wall,groups,offline)
    fly secrets set VK_USER_TOKEN=<token>
-   # Optional: group token used as a fallback
+   # IDs of VK groups (without @)
+   fly secrets set VK_MAIN_GROUP_ID=<id>
+   fly secrets set VK_AFISHA_GROUP_ID=<id>
+   # Group tokens
    fly secrets set VK_TOKEN=<token>
+   fly secrets set VK_TOKEN_AFISHA=<token>
    # Sending images to VK is disabled by default. Toggle with /vkphotos.
    ```
 3. Deploy:

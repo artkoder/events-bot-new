@@ -79,3 +79,19 @@ async def test_vk_actor_auto_no_fallback(monkeypatch):
     assert calls == ["g"]
     assert main.vk_fallback_group_to_user_total["wall.post"] == 0
 
+
+def test_choose_vk_actor(monkeypatch):
+    monkeypatch.setattr(main, "VK_MAIN_GROUP_ID", "1")
+    monkeypatch.setattr(main, "VK_AFISHA_GROUP_ID", "2")
+    monkeypatch.setattr(main, "VK_TOKEN", "gm")
+    monkeypatch.setattr(main, "VK_TOKEN_AFISHA", "ga")
+    monkeypatch.setattr(main, "VK_USER_TOKEN", "u")
+
+    actors_main = main.choose_vk_actor(-1, "wall.post")
+    assert [a.label for a in actors_main] == ["group:main", "user"]
+    assert actors_main[0].token == "gm"
+
+    actors_afisha = main.choose_vk_actor(-2, "wall.post")
+    assert [a.label for a in actors_afisha] == ["group:afisha", "user"]
+    assert actors_afisha[0].token == "ga"
+
