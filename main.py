@@ -108,6 +108,7 @@ from digests import (
     pick_display_link,
     extract_catbox_covers_from_telegraph,
     assemble_compact_caption,
+    visible_caption_len,
 )
 
 from functools import partial, lru_cache
@@ -13136,13 +13137,7 @@ async def handle_digest_select_lectures(
         caption, lines = await assemble_compact_caption(intro, lines, digest_id=digest_id)
         kept = len(lines)
         events = events[:kept]
-
-        logging.info(
-            "digest.caption.len digest_id=%s total=%s fit_1024=%s",
-            digest_id,
-            len(caption),
-            len(caption) <= 1024,
-        )
+        vis_len = visible_caption_len(caption)
 
         media: List[types.InputMediaPhoto] = []
         image_urls: List[str | None] = []
@@ -13182,9 +13177,11 @@ async def handle_digest_select_lectures(
             message_ids.append(getattr(msg, "message_id", None))
 
         logging.info(
-            "digest.send.preview digest_id=%s mode=%s message_ids=%s",
+            "digest.preview.sent digest_id=%s mode=%s photos=%s caption_visible_len=%s message_ids=%s",
             digest_id,
             mode,
+            len([u for u in image_urls if u]),
+            vis_len,
             message_ids,
         )
 
