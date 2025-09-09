@@ -29,7 +29,7 @@ async def test_sync_vk_source_post_includes_calendar_link(monkeypatch):
     captured_message = {}
 
     async def fake_post_to_vk(
-        group_id, message, db=None, bot=None, attachments=None, token=None
+        group_id, message, db=None, bot=None, attachments=None
     ):
         captured_message["text"] = message
         return "https://vk.com/wall-1_2"

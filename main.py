@@ -58,7 +58,7 @@ def logline(tag: str, eid: int | None, msg: str, **kw) -> None:
 
 from datetime import date, datetime, timedelta, timezone, time
 from zoneinfo import ZoneInfo
-from typing import Optional, Tuple, Iterable, Any, Callable, Awaitable, List
+from typing import Optional, Tuple, Iterable, Any, Callable, Awaitable, List, Literal
 from urllib.parse import urlparse, parse_qs
 import uuid
 import textwrap
@@ -311,6 +311,7 @@ SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "events-ics")
 VK_TOKEN = os.getenv("VK_TOKEN")
 VK_TOKEN_AFISHA = os.getenv("VK_TOKEN_AFISHA")  # NEW
 VK_USER_TOKEN = os.getenv("VK_USER_TOKEN")
+VK_MAIN_GROUP_ID = os.getenv("VK_MAIN_GROUP_ID")
 VK_AFISHA_GROUP_ID = os.getenv("VK_AFISHA_GROUP_ID")
 
 # which actor token to use for VK API calls
@@ -339,6 +340,45 @@ CAPTCHA_RETRY_AT = os.getenv("CAPTCHA_RETRY_AT", "08:10")
 VK_CAPTCHA_TTL_MIN = int(os.getenv("VK_CAPTCHA_TTL_MIN", "60"))
 # quiet hours for captcha notifications (HH:MM-HH:MM, empty = disabled)
 VK_CAPTCHA_QUIET = os.getenv("VK_CAPTCHA_QUIET", "")
+
+logging.info(
+    "vk.config groups: main=-%s, afisha=-%s; user_token=%s, token_main=%s, token_afisha=%s",
+    VK_MAIN_GROUP_ID,
+    VK_AFISHA_GROUP_ID,
+    "present" if VK_USER_TOKEN else "missing",
+    "present" if VK_TOKEN else "missing",
+    "present" if VK_TOKEN_AFISHA else "missing",
+)
+
+
+@dataclass
+class VkActor:
+    kind: Literal["group", "user"]
+    token: str | None
+    label: str  # for logs: "group:main", "group:afisha", "user"
+
+
+def choose_vk_actor(owner_id: int, intent: str) -> list[VkActor]:
+    actors: list[VkActor] = []
+    try:
+        main_id = int(VK_MAIN_GROUP_ID) if VK_MAIN_GROUP_ID else None
+    except ValueError:
+        main_id = None
+    try:
+        afisha_id = int(VK_AFISHA_GROUP_ID) if VK_AFISHA_GROUP_ID else None
+    except ValueError:
+        afisha_id = None
+    if owner_id == -(afisha_id or 0):
+        if VK_TOKEN_AFISHA:
+            actors.append(VkActor("group", VK_TOKEN_AFISHA, "group:afisha"))
+    elif owner_id == -(main_id or 0):
+        if VK_TOKEN:
+            actors.append(VkActor("group", VK_TOKEN, "group:main"))
+    elif VK_TOKEN:
+        actors.append(VkActor("group", VK_TOKEN, "group:main"))
+    if VK_USER_TOKEN:
+        actors.append(VkActor("user", None, "user"))
+    return actors
 
 # metrics counters
 vk_fallback_group_to_user_total: dict[str, int] = defaultdict(int)
@@ -1486,66 +1526,101 @@ async def upload_vk_photo(
     url: str,
     db: Database | None = None,
     bot: Bot | None = None,
-    token: str | None = None,
 ) -> str | None:
     """Upload an image to VK and return attachment id."""
     if not url:
         return None
     try:
-        if DEBUG:
-            mem_info("VK upload before")
-        data = await _vk_api(
-            "photos.getWallUploadServer",
-            {"group_id": group_id.lstrip("-")},
-            db,
-            bot,
-            token=token,
-        )
-        upload_url = data["response"]["upload_url"]
-        session = get_http_session()
-        async def _download():
-            async with span("http"):
-                async with HTTP_SEMAPHORE:
-                    async with session.get(url) as resp:
-                        if resp.content_length and resp.content_length > MAX_DOWNLOAD_SIZE:
-                            raise ValueError("file too large")
-                        data = await resp.content.read(MAX_DOWNLOAD_SIZE + 1)
-                        if len(data) > MAX_DOWNLOAD_SIZE:
-                            raise ValueError("file too large")
-                        return data
+        owner_id = -int(group_id.lstrip("-"))
+        actors = choose_vk_actor(owner_id, "photos.getWallUploadServer")
+        if not actors:
+            raise VKAPIError(None, "VK token missing", method="photos.getWallUploadServer")
+        for idx, actor in enumerate(actors, start=1):
+            logging.info(
+                "vk.call method=photos.getWallUploadServer owner_id=%s try=%d/%d actor=%s",
+                owner_id,
+                idx,
+                len(actors),
+                actor.label,
+            )
+            token = actor.token if actor.kind == "group" else VK_USER_TOKEN
+            try:
+                if DEBUG:
+                    mem_info("VK upload before")
+                data = await _vk_api(
+                    "photos.getWallUploadServer",
+                    {"group_id": group_id.lstrip("-")},
+                    db,
+                    bot,
+                    token=token,
+                    token_kind=actor.kind,
+                    skip_captcha=(actor.kind == "group"),
+                )
+                upload_url = data["response"]["upload_url"]
+                session = get_http_session()
 
-        img_bytes = await asyncio.wait_for(_download(), HTTP_TIMEOUT)
-        img_bytes, _ = ensure_jpeg(img_bytes, "image.jpg")
-        form = FormData()
-        form.add_field(
-            "photo",
-            img_bytes,
-            filename="image.jpg",
-            content_type="image/jpeg",
-        )
-        async def _upload():
-            async with span("http"):
-                async with HTTP_SEMAPHORE:
-                    async with session.post(upload_url, data=form) as up:
-                        return await up.json()
+                async def _download():
+                    async with span("http"):
+                        async with HTTP_SEMAPHORE:
+                            async with session.get(url) as resp:
+                                if resp.content_length and resp.content_length > MAX_DOWNLOAD_SIZE:
+                                    raise ValueError("file too large")
+                                data = await resp.content.read(MAX_DOWNLOAD_SIZE + 1)
+                                if len(data) > MAX_DOWNLOAD_SIZE:
+                                    raise ValueError("file too large")
+                                return data
 
-        upload_result = await asyncio.wait_for(_upload(), HTTP_TIMEOUT)
-        save = await _vk_api(
-            "photos.saveWallPhoto",
-            {
-                "group_id": group_id.lstrip("-"),
-                "photo": upload_result.get("photo"),
-                "server": upload_result.get("server"),
-                "hash": upload_result.get("hash"),
-            },
-            db,
-            bot,
-            token=token,
-        )
-        info = save["response"][0]
-        if DEBUG:
-            mem_info("VK upload after")
-        return f"photo{info['owner_id']}_{info['id']}"
+                img_bytes = await asyncio.wait_for(_download(), HTTP_TIMEOUT)
+                img_bytes, _ = ensure_jpeg(img_bytes, "image.jpg")
+                form = FormData()
+                form.add_field(
+                    "photo",
+                    img_bytes,
+                    filename="image.jpg",
+                    content_type="image/jpeg",
+                )
+
+                async def _upload():
+                    async with span("http"):
+                        async with HTTP_SEMAPHORE:
+                            async with session.post(upload_url, data=form) as up:
+                                return await up.json()
+
+                upload_result = await asyncio.wait_for(_upload(), HTTP_TIMEOUT)
+                save = await _vk_api(
+                    "photos.saveWallPhoto",
+                    {
+                        "group_id": group_id.lstrip("-"),
+                        "photo": upload_result.get("photo"),
+                        "server": upload_result.get("server"),
+                        "hash": upload_result.get("hash"),
+                    },
+                    db,
+                    bot,
+                    token=token,
+                    token_kind=actor.kind,
+                    skip_captcha=(actor.kind == "group"),
+                )
+                info = save["response"][0]
+                if DEBUG:
+                    mem_info("VK upload after")
+                return f"photo{info['owner_id']}_{info['id']}"
+            except VKAPIError as e:
+                msg_l = (e.message or "").lower()
+                perm = (
+                    e.code in VK_FALLBACK_CODES
+                    or "method is unavailable with group auth" in msg_l
+                    or "access denied" in msg_l
+                )
+                if idx < len(actors) and perm:
+                    logging.info(
+                        "vk.retry reason=%s actor_next=%s",
+                        e.code or e.message,
+                        actors[idx].label,
+                    )
+                    continue
+                raise
+        return None
     except Exception as e:
         logging.error("VK photo upload failed: %s", e)
         return None
@@ -11834,8 +11909,6 @@ async def post_to_vk(
     db: Database | None = None,
     bot: Bot | None = None,
     attachments: list[str] | None = None,
-    token: str | None = None,
-    token_kind: str = "group",
 ) -> str | None:
     if not group_id:
         return None
@@ -11845,37 +11918,76 @@ async def post_to_vk(
         len(message),
         len(attachments or []),
     )
-    params = {
-        "owner_id": f"-{group_id.lstrip('-')}",
-        "from_group": 1,
-        "message": message,
-    }
+    owner_id = -int(group_id.lstrip("-"))
+    params_base = {"owner_id": f"-{group_id.lstrip('-')}", "message": message}
     if attachments:
-        params["attachments"] = ",".join(attachments)
-    if DEBUG:
-        mem_info("VK post before")
-    data = await _vk_api("wall.post", params, db, bot, token=token, token_kind=token_kind)
-    if DEBUG:
-        mem_info("VK post after")
-    post_id = data.get("response", {}).get("post_id")
-    if post_id:
-        url = f"https://vk.com/wall-{group_id.lstrip('-')}_{post_id}"
+        params_base["attachments"] = ",".join(attachments)
+    actors = choose_vk_actor(owner_id, "wall.post")
+    if not actors:
+        raise VKAPIError(None, "VK token missing", method="wall.post")
+    for idx, actor in enumerate(actors, start=1):
+        params = params_base.copy()
+        if actor.kind == "user" and owner_id < 0:
+            params["from_group"] = 1
         logging.info(
-            "post_to_vk ok group=%s post_id=%s len=%d attachments=%d",
-            group_id,
-            post_id,
-            len(message),
-            len(attachments or []),
+            "vk.call method=wall.post owner_id=%s try=%d/%d actor=%s",
+            owner_id,
+            idx,
+            len(actors),
+            actor.label,
         )
-        return url
-    err_code = data.get("error", {}).get("error_code") if isinstance(data, dict) else None
-    logging.error(
-        "post_to_vk fail group=%s code=%s len=%d attachments=%d",
-        group_id,
-        err_code,
-        len(message),
-        len(attachments or []),
-    )
+        token = actor.token if actor.kind == "group" else VK_USER_TOKEN
+        try:
+            if DEBUG:
+                mem_info("VK post before")
+            data = await _vk_api(
+                "wall.post",
+                params,
+                db,
+                bot,
+                token=token,
+                token_kind=actor.kind,
+                skip_captcha=(actor.kind == "group"),
+            )
+            if DEBUG:
+                mem_info("VK post after")
+            post_id = data.get("response", {}).get("post_id")
+            if post_id:
+                url = f"https://vk.com/wall-{group_id.lstrip('-')}_{post_id}"
+                logging.info(
+                    "post_to_vk ok group=%s post_id=%s len=%d attachments=%d",
+                    group_id,
+                    post_id,
+                    len(message),
+                    len(attachments or []),
+                )
+                return url
+            err_code = (
+                data.get("error", {}).get("error_code") if isinstance(data, dict) else None
+            )
+            logging.error(
+                "post_to_vk fail group=%s code=%s len=%d attachments=%d",
+                group_id,
+                err_code,
+                len(message),
+                len(attachments or []),
+            )
+            return None
+        except VKAPIError as e:
+            msg_l = (e.message or "").lower()
+            perm = (
+                e.code in VK_FALLBACK_CODES
+                or "method is unavailable with group auth" in msg_l
+                or "access denied" in msg_l
+            )
+            if idx < len(actors) and perm:
+                logging.info(
+                    "vk.retry reason=%s actor_next=%s",
+                    e.code or e.message,
+                    actors[idx].label,
+                )
+                continue
+            raise
     return None
 
 
@@ -12126,28 +12238,12 @@ async def sync_vk_source_post(
         message = build_vk_source_message(
             event, text, festival=festival, ics_url=ics_url
         )
-        try:
-            # Пытаемся постить group-токеном именно группы Афиши (если он задан),
-            # иначе — старым VK_TOKEN как fallback.
-            url = await post_to_vk(
-                VK_AFISHA_GROUP_ID,
-                message,
-                db,
-                bot,
-                token=(VK_TOKEN_AFISHA or VK_TOKEN),
-            )
-        except VKAPIError as e:
-            # Если запрет на post от group-токена — повторяем без фиксированного токена,
-            # позволяем _vk_api сработать в режиме авто-фоллбека на user-токен.
-            msg = (e.message or "").lower()
-            if e.code in VK_FALLBACK_CODES or \
-               "method is unavailable with group auth" in msg or \
-               "access denied" in msg or \
-               "access to adding post denied" in msg:
-                logging.warning("post_to_vk(afisha): group token failed (%s), retrying with auto actor", e.message)
-                url = await post_to_vk(VK_AFISHA_GROUP_ID, message, db, bot)
-            else:
-                raise
+        url = await post_to_vk(
+            VK_AFISHA_GROUP_ID,
+            message,
+            db,
+            bot,
+        )
         if url:
             logging.info("sync_vk_source_post created %s", url)
     return url

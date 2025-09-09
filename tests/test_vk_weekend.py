@@ -90,7 +90,7 @@ async def test_sync_weekend_page_posts_vk(tmp_path: Path, monkeypatch):
     posted: list[str] = []
 
     async def fake_post_to_vk(
-        group_id, message, db=None, bot=None, attachments=None, token=None
+        group_id, message, db=None, bot=None, attachments=None
     ):
         posted.append(message)
         return 'https://vk.com/wall-1_111'
@@ -156,7 +156,7 @@ async def test_sync_vk_weekend_post_recreates_deleted(tmp_path: Path, monkeypatc
 
     created: list[str] = []
 
-    async def fake_post_to_vk(group_id, message, db=None, bot=None, attachments=None, token=None):
+    async def fake_post_to_vk(group_id, message, db=None, bot=None, attachments=None):
         created.append(message)
         return 'https://vk.com/wall-1_2'
 
