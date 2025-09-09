@@ -340,17 +340,16 @@ async def normalize_titles_via_4o(titles: List[str]) -> List[dict[str, str]]:
     prompt = (
         "Язык: русский.\n\n"
         "Задача: вернуть JSON-массив объектов вида:\n\n"
-        '{"emoji": "📚" | "", "title_clean": "Имя Фамилия: Название"}\n\n'
+        '{"emoji": "📚" | "", "title_clean": "Лекция Имя Фамилия: Название" | "Название"}\n\n'
         "Требования:\n\n"
-        "Удалять слова «Лекция», «Лекторий» и т.п. из заголовка.\n\n"
-        "Если в исходном названии есть имя лектора (в любой форме), привести имя и фамилию к именительному падежу (И.п.), без отчества, падежов типа «Алёны», «Ильи» быть не должно.\n\n"
-        "Целевая форма: Имя Фамилия: Название (двоеточие между ФИ и названием).\n\n"
-        "Если лектора нет — просто «Название» (без «Лекция»).\n\n"
-        "Ведущий эмодзи (если был) вернуть в emoji (не внутри title_clean).\n\n"
+        "Удалять слова «Лекция», «Лекторий» и т.п. из исходного заголовка.\n\n"
+        "Если в исходном названии есть имя лектора (в любой форме), привести имя и фамилию к родительному падежу (Р.п.) без отчества и сформировать заголовок: 'Лекция Имя Фамилия: Название'.\n\n"
+        "Если лектора нет — просто 'Название' без слова 'Лекция'.\n\n"
+        "Ведущий эмодзи (если был) вернуть в поле emoji (не внутри title_clean).\n\n"
         "Без дополнительных слов/пояснений, только JSON.\n\n"
         "Примеры:\n"
-        'Вход: «📚 Лекция Алёны Мирошниченко «Мода Франции…»» → {"emoji":"📚","title_clean":"Алёна Мирошниченко: Мода Франции…"}\n'
-        'Вход: «Лекторий Ильи Дементьева “От каменного века…”» → {"emoji":"","title_clean":"Илья Дементьев: От каменного века…"}\n'
+        'Вход: «📚 Лекция Алёны Мирошниченко «Мода Франции…»» → {"emoji":"📚","title_clean":"Лекция Алёны Мирошниченко: Мода Франции…"}\n'
+        'Вход: «Лекторий Ильи Дементьева “От каменного века…”» → {"emoji":"","title_clean":"Лекция Ильи Дементьева: От каменного века…"}\n'
         'Вход: «Лекция «Древнерусское искусство. Мастера и эпохи»» → {"emoji":"","title_clean":"Древнерусское искусство. Мастера и эпохи"}\n\n'
         "Заголовки: "
         + prompt_titles
@@ -421,7 +420,7 @@ def _normalize_title_fallback(title: str) -> dict[str, str]:
     if m:
         who = m.group("who").strip()
         what = m.group("what").strip()
-        title = f"{who}: {what}"
+        title = f"Лекция {who}: {what}"
 
     return {"emoji": emoji, "title_clean": title}
 
@@ -528,58 +527,61 @@ def _strip_quotes_dashes(line: str) -> str:
     return re.sub(r'<a href="(?P<url>[^"]+)">(?P<title>[^<]+)</a>', repl, line)
 
 
-def visible_html_length(html_text: str) -> int:
-    """Return the length of visible text after HTML parsing."""
+def visible_caption_len(html_text: str) -> int:
+    """Return length of caption text visible to humans.
 
-    s = re.sub(r"<[^>]+>", "", html_text)
+    The function removes HTML tags while keeping the inner text of
+    anchors, strips raw ``http(s)://`` URLs and collapses repeating
+    whitespace and newlines. The result mirrors the length counted by
+    Telegram for media group captions.
+    """
+
+    # Replace anchors with their inner text
+    s = re.sub(r"<a\s+[^>]*>(.*?)</a>", r"\1", html_text, flags=re.IGNORECASE | re.DOTALL)
+    # Drop all remaining tags
+    s = re.sub(r"<[^>]+>", "", s)
+    # Decode HTML entities
     s = html.unescape(s)
+    # Remove raw URLs that might remain in text
+    s = re.sub(r"https?://\S+", "", s)
+    # Normalize whitespace and newlines
     s = re.sub(r"[ \t]+", " ", s)
-    s = re.sub(r"\n{3,}", "\n\n", s)
+    s = re.sub(r"\n+", "\n", s)
+    s = s.strip()
     return len(s)
 
 
 async def assemble_compact_caption(
     intro: str, items_html: List[str], *, digest_id: str | None = None
 ) -> tuple[str, List[str]]:
-    """Assemble caption ensuring visible length \<=1024."""
+    """Assemble caption trimmed to Telegram's 4096 char visible limit."""
 
-    intro_used = intro
-    kept: List[str] = []
-    for idx, line in enumerate(items_html):
-        candidate = intro_used + "\n\n" + "\n".join(kept + [line])
-        vis_len = visible_html_length(candidate)
-        if vis_len <= 1024:
-            kept.append(line)
-            logging.info(
-                "digest.caption.line idx=%s visible_len_after=%s", idx, vis_len
-            )
-            continue
+    lines = list(items_html)
+    footer = '<a href="https://t.me/kenigevents">Полюбить Калининград | Анонсы</a>'
 
-        if intro_used == intro:
-            parts = re.split(r"(?<=\.)\s", intro.strip(), maxsplit=1)
-            if len(parts) == 2:
-                intro_used = parts[0]
-                candidate = intro_used + "\n\n" + "\n".join(kept + [line])
-                vis_len = visible_html_length(candidate)
-                if vis_len <= 1024:
-                    kept.append(line)
-                    logging.info(
-                        "digest.caption.line idx=%s visible_len_after=%s", idx, vis_len
-                    )
-                    continue
-        logging.info(
-            "digest.caption.line idx=%s visible_len_after=%s", idx, vis_len
-        )
-        break
+    def build_caption(current: List[str]) -> str:
+        body = intro.strip()
+        if current:
+            body += "\n\n" + "\n".join(current)
+        body += "\n\n" + footer
+        return body
 
-    caption = intro_used + "\n\n" + "\n".join(kept)
-    visible_len = visible_html_length(caption)
+    caption = build_caption(lines)
+    before = visible_caption_len(caption)
+    trimmed = 0
+    while lines and visible_caption_len(caption) > 4096:
+        lines.pop()
+        trimmed += 1
+        caption = build_caption(lines)
+    after = visible_caption_len(caption)
     logging.info(
-        "digest.caption.metrics html_len_raw=%s visible_len=%s limit=1024",
-        len(caption),
-        visible_len,
+        "digest.caption.visible_len before=%s after=%s items=%s trimmed=%s",
+        before,
+        after,
+        len(lines),
+        trimmed,
     )
-    return caption, kept
+    return caption, lines
 
 
 async def build_lectures_digest_preview(

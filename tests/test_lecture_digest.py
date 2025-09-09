@@ -14,7 +14,7 @@ from digests import (
     pick_display_link,
     normalize_titles_via_4o,
     assemble_compact_caption,
-    visible_html_length,
+    visible_caption_len,
 )
 
 
@@ -108,11 +108,11 @@ async def test_compose_intro_via_4o(monkeypatch, caplog):
     assert any("digest.intro.llm.response" in r.message for r in caplog.records)
 
 
-def test_visible_html_length_basic():
+def test_visible_caption_len_basic():
     html = '<a href="https://very.long/url">Заголовок</a>'
-    assert visible_html_length(html) == len("Заголовок")
-    html2 = '&quot;A&nbsp;B&quot;'
-    assert visible_html_length(html2) == len('"A B"')
+    assert visible_caption_len(html) == len("Заголовок")
+    html2 = '&quot;A&nbsp;B&quot; https://example.com'
+    assert visible_caption_len(html2) == len('"A B"')
 
 
 @pytest.mark.asyncio
@@ -124,7 +124,7 @@ async def test_normalize_titles_fallback(monkeypatch):
     titles = ["Лекция Иван Иванов — О языке", "🎨 Лекторий о цвете"]
     res = await normalize_titles_via_4o(titles)
     assert res[0]["emoji"] == ""
-    assert res[0]["title_clean"] == "Иван Иванов: О языке"
+    assert res[0]["title_clean"] == "Лекция Иван Иванов: О языке"
     assert res[1]["emoji"] == "🎨"
     assert res[1]["title_clean"] == "о цвете"
 
@@ -133,8 +133,8 @@ async def test_normalize_titles_fallback(monkeypatch):
 async def test_normalize_titles_via_llm(monkeypatch):
     async def fake_ask(prompt, max_tokens=0):
         return (
-            '[{"emoji":"📚","title_clean":"Алёна Мирошниченко: Мода Франции"},'
-            '{"emoji":"","title_clean":"Илья Дементьев: От каменного века"}]'
+            '[{"emoji":"📚","title_clean":"Лекция Алёны Мирошниченко: Мода Франции"},'
+            '{"emoji":"","title_clean":"Лекция Ильи Дементьева: От каменного века"}]'
         )
 
     monkeypatch.setattr("main.ask_4o", fake_ask)
@@ -144,9 +144,9 @@ async def test_normalize_titles_via_llm(monkeypatch):
     ]
     res = await normalize_titles_via_4o(titles)
     assert res[0]["emoji"] == "📚"
-    assert res[0]["title_clean"] == "Алёна Мирошниченко: Мода Франции"
+    assert res[0]["title_clean"] == "Лекция Алёны Мирошниченко: Мода Франции"
     assert res[1]["emoji"] == ""
-    assert res[1]["title_clean"] == "Илья Дементьев: От каменного века"
+    assert res[1]["title_clean"] == "Лекция Ильи Дементьева: От каменного века"
 
 
 def test_format_event_line_and_link_priority():
@@ -201,10 +201,10 @@ async def test_caption_visible_length(caplog):
 
     caplog.set_level(logging.INFO)
     caption, used = await assemble_compact_caption(intro, lines, digest_id="x")
-    assert visible_html_length(caption) <= 1024
+    assert visible_caption_len(caption) <= 4096
     assert len(used) == 9
-    assert any("digest.caption.metrics" in r.message for r in caplog.records)
-    assert any("digest.caption.line" in r.message for r in caplog.records)
+    assert any("digest.caption.visible_len" in r.message for r in caplog.records)
+    assert caption.endswith('\n\n<a href="https://t.me/kenigevents">Полюбить Калининград | Анонсы</a>')
 
 
 @pytest.mark.asyncio
