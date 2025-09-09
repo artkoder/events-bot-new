@@ -108,6 +108,7 @@ from digests import (
     pick_display_link,
     extract_catbox_covers_from_telegraph,
     compose_digest_caption,
+    compose_digest_intro_via_4o,
     visible_caption_len,
     attach_caption_if_fits,
 )
@@ -13380,17 +13381,25 @@ async def handle_digest_refresh(callback: types.CallbackQuery, bot: Bot) -> None
         digest_id,
         len(titles),
     )
-    intro = await compose_digest_intro_via_4o(
-        len(remaining), session.get("horizon_days", 0), titles
-    )
-    duration_ms = int((_time.monotonic() - start) * 1000)
-    logging.info(
-        "digest.intro.llm.response digest_id=%s text_len=%s took_ms=%s",
-        digest_id,
-        len(intro),
-        duration_ms,
-    )
-    session["intro_html"] = intro
+    try:
+        intro = await compose_digest_intro_via_4o(
+            len(remaining), session.get("horizon_days", 0), titles
+        )
+    except Exception as e:
+        logging.error(
+            "digest.intro.llm.error digest_id=%s err=\"%s\"",
+            digest_id,
+            e,
+        )
+    else:
+        duration_ms = int((_time.monotonic() - start) * 1000)
+        logging.info(
+            "digest.intro.llm.response digest_id=%s text_len=%s took_ms=%s",
+            digest_id,
+            len(intro),
+            duration_ms,
+        )
+        session["intro_html"] = intro
 
     for mid in session.get("preview_msg_ids", []):
         try:
@@ -13419,6 +13428,11 @@ async def handle_digest_refresh(callback: types.CallbackQuery, bot: Bot) -> None
         digest_id,
         len(session.get("current_media_urls", [])),
         int(attach),
+    )
+    logging.info(
+        "digest.panel.refresh.sent digest_id=%s panel_msg_id=%s",
+        digest_id,
+        session.get("panel_msg_id"),
     )
     await callback.answer()
 
