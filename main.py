@@ -13162,42 +13162,78 @@ async def handle_digest_select_lectures(
             len(events),
         )
 
-        message_ids: List[int] = []
-        mode = "text_only"
+        preview_album_msg_ids: List[int] = []
         if media:
-            media[0].parse_mode = "HTML"
-            media[0].caption = caption
             sent = await bot.send_media_group(callback.message.chat.id, media)
-            message_ids.extend(getattr(m, "message_id", None) for m in sent)
-            mode = "media_caption"
-        else:
-            msg = await bot.send_message(
-                callback.message.chat.id, caption, parse_mode="HTML"
-            )
-            message_ids.append(getattr(msg, "message_id", None))
+            preview_album_msg_ids.extend(m.message_id for m in sent)
+
+        caption_msg = await bot.send_message(
+            callback.message.chat.id,
+            caption,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
 
         logging.info(
-            "digest.preview.sent digest_id=%s mode=%s photos=%s caption_visible_len=%s message_ids=%s",
+            "digest.preview.sent digest_id=%s photos=%s caption_visible_len=%s album_msg_ids=%s caption_msg_id=%s",
             digest_id,
-            mode,
             len([u for u in image_urls if u]),
             vis_len,
-            message_ids,
+            preview_album_msg_ids,
+            caption_msg.message_id,
+        )
+
+        # build panel message with publish buttons
+        async with db.get_session() as session:
+            result = await session.execute(
+                select(Channel).where(Channel.daily_time.is_not(None))
+            )
+            channels = result.scalars().all()
+
+        keyboard = [
+            [
+                types.InlineKeyboardButton(
+                    text=f"📤 Отправить в «{ch.title or ch.username or ch.channel_id}»",
+                    callback_data=f"digest:send:{digest_id}:{ch.channel_id}",
+                )
+            ]
+            for ch in channels
+        ]
+        panel = await bot.send_message(
+            callback.message.chat.id,
+            "Управление дайджестом лекций\nВыберите канал, чтобы опубликовать пост.",
+            reply_markup=types.InlineKeyboardMarkup(inline_keyboard=keyboard) if keyboard else None,
+            reply_to_message_id=caption_msg.message_id
+            if caption_msg
+            else (preview_album_msg_ids[0] if preview_album_msg_ids else None),
+        )
+
+        logging.info(
+            "digest.panel.sent digest_id=%s panel_msg_id=%s channels=%s",
+            digest_id,
+            panel.message_id,
+            [ch.channel_id for ch in channels],
         )
 
         await set_setting_value(
             db,
             draft_key,
-            json.dumps({
-                "status": "ready",
-                "type": "lectures",
-                "event_ids": [e.id for e in events],
-                "excluded": [],
-                "intro_text": intro,
-                "horizon_days": horizon,
-                "image_urls": image_urls,
-                "caption_text": caption,
-            }),
+            json.dumps(
+                {
+                    "status": "ready",
+                    "type": "lectures",
+                    "event_ids": [e.id for e in events],
+                    "excluded": [],
+                    "intro_text": intro,
+                    "horizon_days": horizon,
+                    "image_urls": image_urls,
+                    "caption_text": caption,
+                    "panel_msg_id": panel.message_id,
+                    "preview_album_msg_ids": preview_album_msg_ids,
+                    "preview_caption_msg_id": caption_msg.message_id,
+                    "published_to": {},
+                }
+            ),
         )
     except Exception:
         logging.exception("digest.preview_failed digest_id=%s", digest_id)
@@ -13205,6 +13241,162 @@ async def handle_digest_select_lectures(
             callback.message.chat.id,
             "Не удалось собрать превью дайджеста (ошибка парсинга времени). Разберёмся — детали в логах.",
         )
+
+
+async def handle_digest_publish(
+    callback: types.CallbackQuery, db: Database, bot: Bot
+) -> None:
+    parts = callback.data.split(":")
+    if len(parts) != 4:
+        return
+    _, _, digest_id, channel_id_str = parts
+    channel_id = int(channel_id_str)
+
+    async with db.get_session() as session:
+        user = await session.get(User, callback.from_user.id)
+        if not user or not user.is_superadmin:
+            await callback.answer("Нет доступа", show_alert=False)
+            return
+        ch = await session.get(Channel, channel_id)
+
+    draft_key = f"draft:digest:{digest_id}"
+    raw = await get_setting_value(db, draft_key)
+    if not raw:
+        await callback.answer("Черновик не найден", show_alert=False)
+        return
+    data = json.loads(raw)
+    published_to = data.setdefault("published_to", {})
+    if str(channel_id) in published_to:
+        await callback.answer("Уже отправлено", show_alert=False)
+        logging.info(
+            "digest.publish.skip digest_id=%s channel_id=%s reason=already_sent",
+            digest_id,
+            channel_id,
+        )
+        return
+
+    image_urls = data.get("image_urls") or []
+    caption_text = data.get("caption_text") or ""
+
+    media = [types.InputMediaPhoto(media=url) for url in image_urls if url]
+    album_msg_ids: List[int] = []
+
+    logging.info(
+        "digest.publish.start digest_id=%s channel_id=%s", digest_id, channel_id
+    )
+
+    try:
+        if media:
+            sent = await bot.send_media_group(channel_id, media)
+            album_msg_ids = [m.message_id for m in sent]
+        msg = await bot.send_message(
+            channel_id,
+            caption_text,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+    except Exception as e:
+        logging.exception(
+            "digest.publish.error digest_id=%s channel_id=%s", digest_id, channel_id
+        )
+        # try to send text once more if album succeeded
+        if album_msg_ids:
+            try:
+                msg = await bot.send_message(
+                    channel_id,
+                    caption_text,
+                    parse_mode="HTML",
+                    disable_web_page_preview=True,
+                )
+            except Exception:
+                await callback.answer("Текст не отправлен", show_alert=True)
+                panel_id = data.get("panel_msg_id")
+                if panel_id:
+                    # notify admin via panel message
+                    async with db.get_session() as session:
+                        result = await session.execute(
+                            select(Channel).where(Channel.daily_time.is_not(None))
+                        )
+                        channels = result.scalars().all()
+                    markup = _build_digest_panel_markup(
+                        channels, digest_id, published_to
+                    )
+                    await bot.edit_message_text(
+                        "Управление дайджестом лекций\n⚠️ Текст не отправлен, попробуйте ещё раз\nВыберите канал, чтобы опубликовать пост.",
+                        callback.message.chat.id,
+                        panel_id,
+                        reply_markup=markup,
+                    )
+                return
+        else:
+            await callback.answer("Ошибка отправки", show_alert=True)
+            return
+
+    caption_msg_id = msg.message_id
+    post_url = build_channel_post_url(ch, caption_msg_id) if ch else None
+
+    published_to[str(channel_id)] = {
+        "album_msg_ids": album_msg_ids,
+        "caption_msg_id": caption_msg_id,
+    }
+    if post_url:
+        published_to[str(channel_id)]["post_url"] = post_url
+    data["published_to"] = published_to
+
+    await set_setting_value(db, draft_key, json.dumps(data))
+
+    logging.info(
+        "digest.publish.ok digest_id=%s channel_id=%s album=%s caption_len_visible=%s post_url=%s",
+        digest_id,
+        channel_id,
+        len(album_msg_ids),
+        visible_caption_len(caption_text),
+        post_url,
+    )
+
+    panel_id = data.get("panel_msg_id")
+    if panel_id:
+        async with db.get_session() as session:
+            result = await session.execute(
+                select(Channel).where(Channel.daily_time.is_not(None))
+            )
+            channels = result.scalars().all()
+        markup = _build_digest_panel_markup(channels, digest_id, published_to)
+        await bot.edit_message_reply_markup(
+            callback.message.chat.id, panel_id, reply_markup=markup
+        )
+
+    await callback.answer("Опубликовано", show_alert=False)
+
+
+def _build_digest_panel_markup(
+    channels: list[Channel], digest_id: str, published_to: dict
+) -> types.InlineKeyboardMarkup:
+    rows = []
+    for ch in channels:
+        name = ch.title or ch.username or str(ch.channel_id)
+        info = published_to.get(str(ch.channel_id))
+        if info:
+            buttons = [
+                types.InlineKeyboardButton(
+                    text=f"✅ Отправлено в «{name}»",
+                    callback_data=f"digest:send:{digest_id}:{ch.channel_id}",
+                )
+            ]
+            url = info.get("post_url")
+            if url:
+                buttons.append(types.InlineKeyboardButton(text="🔗 Открыть", url=url))
+            rows.append(buttons)
+        else:
+            rows.append(
+                [
+                    types.InlineKeyboardButton(
+                        text=f"📤 Отправить в «{name}»",
+                        callback_data=f"digest:send:{digest_id}:{ch.channel_id}",
+                    )
+                ]
+            )
+    return types.InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 async def handle_ask_4o(message: types.Message, db: Database, bot: Bot):
@@ -15287,6 +15479,9 @@ def create_app() -> web.Application:
     async def digest_disabled_wrapper(callback: types.CallbackQuery):
         await callback.answer("Ещё не реализовано", show_alert=False)
 
+    async def digest_publish_wrapper(callback: types.CallbackQuery):
+        await handle_digest_publish(callback, db, bot)
+
     async def pages_wrapper(message: types.Message):
         await handle_pages(message, db, bot)
 
@@ -15502,6 +15697,9 @@ def create_app() -> web.Application:
     )
     dp.callback_query.register(
         digest_disabled_wrapper, lambda c: c.data == "digest:disabled"
+    )
+    dp.callback_query.register(
+        digest_publish_wrapper, lambda c: c.data.startswith("digest:send:")
     )
     dp.message.register(fest_wrapper, Command("fest"))
 
