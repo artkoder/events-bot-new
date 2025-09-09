@@ -47,6 +47,8 @@ browse upcoming announcements. The command accepts dates like `2025-07-10`,
   # Group tokens
   export VK_TOKEN=vk_group_token
   export VK_TOKEN_AFISHA=vk_afisha_group_token
+  # Optional: max photos per VK post (default 10)
+  export VK_MAX_ATTACHMENTS=10
   # Sending images to VK is disabled by default. Use /vkphotos to enable it.
   # Optional behaviour tuning
   export VK_ACTOR_MODE=auto  # group|user|auto
@@ -98,6 +100,8 @@ browse upcoming announcements. The command accepts dates like `2025-07-10`,
    # Group tokens
    fly secrets set VK_TOKEN=<token>
    fly secrets set VK_TOKEN_AFISHA=<token>
+   # Optional: max photos per VK post
+   fly secrets set VK_MAX_ATTACHMENTS=10
    # Sending images to VK is disabled by default. Toggle with /vkphotos.
    ```
 3. Deploy:

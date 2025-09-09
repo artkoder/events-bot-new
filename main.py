@@ -313,6 +313,10 @@ VK_TOKEN_AFISHA = os.getenv("VK_TOKEN_AFISHA")  # NEW
 VK_USER_TOKEN = os.getenv("VK_USER_TOKEN")
 VK_MAIN_GROUP_ID = os.getenv("VK_MAIN_GROUP_ID")
 VK_AFISHA_GROUP_ID = os.getenv("VK_AFISHA_GROUP_ID")
+try:
+    VK_MAX_ATTACHMENTS = int(os.getenv("VK_MAX_ATTACHMENTS", "10"))
+except ValueError:
+    VK_MAX_ATTACHMENTS = 10
 
 # which actor token to use for VK API calls
 VK_ACTOR_MODE = os.getenv("VK_ACTOR_MODE", "auto")
@@ -1526,13 +1530,19 @@ async def upload_vk_photo(
     url: str,
     db: Database | None = None,
     bot: Bot | None = None,
+    *,
+    token: str | None = None,
+    token_kind: str = "group",
 ) -> str | None:
     """Upload an image to VK and return attachment id."""
     if not url:
         return None
     try:
         owner_id = -int(group_id.lstrip("-"))
-        actors = choose_vk_actor(owner_id, "photos.getWallUploadServer")
+        if token:
+            actors = [VkActor(token_kind, token, f"{token_kind}:explicit")]
+        else:
+            actors = choose_vk_actor(owner_id, "photos.getWallUploadServer")
         if not actors:
             raise VKAPIError(None, "VK token missing", method="photos.getWallUploadServer")
         for idx, actor in enumerate(actors, start=1):
@@ -12164,6 +12174,22 @@ async def sync_vk_source_post(
             )
             festival = res.scalars().first()
 
+    attachments: list[str] | None = None
+    if VK_PHOTOS_ENABLED and event.photo_urls:
+        token = VK_TOKEN_AFISHA or VK_TOKEN
+        if token:
+            ids: list[str] = []
+            for url in event.photo_urls[:VK_MAX_ATTACHMENTS]:
+                photo_id = await upload_vk_photo(
+                    VK_AFISHA_GROUP_ID, url, db, bot, token=token, token_kind="group"
+                )
+                if photo_id:
+                    ids.append(photo_id)
+            if ids:
+                attachments = ids
+        else:
+            logging.info("VK photo upload skipped: no group token")
+
     if event.source_vk_post_url:
         existing = ""
         try:
@@ -12231,6 +12257,7 @@ async def sync_vk_source_post(
             new_message,
             db,
             bot,
+            attachments,
         )
         url = event.source_vk_post_url
         logging.info("sync_vk_source_post updated %s", url)
@@ -12243,6 +12270,7 @@ async def sync_vk_source_post(
             message,
             db,
             bot,
+            attachments,
         )
         if url:
             logging.info("sync_vk_source_post created %s", url)
@@ -12302,14 +12330,16 @@ async def edit_vk_post(
             old_attachments = current.copy()
     except Exception as e:
         logging.error("failed to fetch VK post attachments: %s", e)
-    if attachments:
-        for a in attachments:
-            if a not in current:
-                current.append(a)
+    if attachments is not None:
+        current = attachments[:]
+    else:
+        current = old_attachments.copy()
     if post_text == message and current == old_attachments:
         logging.info("edit_vk_post: no changes for %s", post_url)
         return False
-    if current:
+    if attachments is not None:
+        params["attachments"] = ",".join(current) if current else ""
+    elif current:
         params["attachments"] = ",".join(current)
     await _vk_api("wall.edit", params, db, bot, token=user_token, token_kind="user")
     logging.info("edit_vk_post done: %s", post_url)
