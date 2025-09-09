@@ -61,6 +61,84 @@ async def test_sync_vk_source_post_includes_calendar_link(monkeypatch):
     assert captured_message["text"].endswith(main.VK_SOURCE_FOOTER)
 
 
+@pytest.mark.asyncio
+async def test_sync_vk_source_post_attaches_photos(monkeypatch):
+    main.VK_AFISHA_GROUP_ID = "1"
+    main.VK_PHOTOS_ENABLED = True
+    main.VK_TOKEN_AFISHA = "ga"
+    main.VK_MAX_ATTACHMENTS = 1
+
+    event = main.Event(
+        title="Title",
+        description="",
+        date="2024-01-01",
+        time="00:00",
+        location_name="Place",
+        photo_urls=["http://img1", "http://img2"],
+    )
+
+    uploaded: list[tuple[str, str]] = []
+
+    async def fake_upload(group_id, url, db=None, bot=None, *, token=None, token_kind="group"):
+        uploaded.append((url, token))
+        return f"ph{url[-1]}"
+
+    attachments: dict[str, list[str] | None] = {}
+
+    async def fake_post(group_id, message, db=None, bot=None, attachments=None):
+        attachments["vals"] = attachments
+        return "https://vk.com/wall-1_2"
+
+    monkeypatch.setattr(main, "upload_vk_photo", fake_upload)
+    monkeypatch.setattr(main, "post_to_vk", fake_post)
+
+    url = await main.sync_vk_source_post(event, "Text", None, None)
+
+    assert url == "https://vk.com/wall-1_2"
+    assert uploaded == [("http://img1", "ga")]
+    assert attachments["vals"] == ["ph1"]
+
+
+@pytest.mark.asyncio
+async def test_sync_vk_source_post_updates_attachments(monkeypatch):
+    main.VK_AFISHA_GROUP_ID = "1"
+    main.VK_PHOTOS_ENABLED = True
+    main.VK_TOKEN_AFISHA = "ga"
+
+    event = main.Event(
+        title="T",
+        description="",
+        date="2024-01-01",
+        time="00:00",
+        location_name="Place",
+        photo_urls=["http://img1"],
+    )
+    event.source_vk_post_url = "https://vk.com/wall-1_1"
+
+    async def fake_vk_api(method, params, db=None, bot=None, token=None, **kwargs):
+        if method == "wall.getById":
+            msg = main.build_vk_source_message(event, "old")
+            return {"response": [{"text": msg}]}
+        return {"response": {}}
+
+    async def fake_upload(group_id, url, db=None, bot=None, *, token=None, token_kind="group"):
+        return "ph1"
+
+    edited: dict[str, list[str] | None] = {}
+
+    async def fake_edit(url, message, db=None, bot=None, attachments=None):
+        edited["attachments"] = attachments
+
+    monkeypatch.setattr(main, "_vk_api", fake_vk_api)
+    monkeypatch.setattr(main, "upload_vk_photo", fake_upload)
+    monkeypatch.setattr(main, "edit_vk_post", fake_edit)
+
+    url = await main.sync_vk_source_post(event, "new", None, None)
+
+    assert url == "https://vk.com/wall-1_1"
+    assert edited["attachments"] == ["ph1"]
+
+
 def test_build_vk_source_message_converts_links():
     text = "Регистрация [здесь](http://reg) и <a href=\"http://pay\">билеты</a>"
     event = main.Event(
