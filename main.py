@@ -452,6 +452,9 @@ events_date_sessions: TTLCache[int, bool] = TTLCache(maxsize=64, ttl=3600)
 # digest_id -> session data for lecture digest preview
 digest_preview_sessions: TTLCache[str, dict] = TTLCache(maxsize=64, ttl=30 * 60)
 
+# ожидание фото после выбора выходных: user_id -> start(YYYY-MM-DD)
+weekend_img_wait: TTLCache[int, str] = TTLCache(maxsize=100, ttl=900)
+
 # remove leading command like /addevent or /addevent@bot
 def strip_leading_cmd(text: str, cmds: tuple[str, ...] = ("addevent",)) -> str:
     """Strip a leading command and following whitespace from *text*.
@@ -1040,6 +1043,15 @@ HELP_COMMANDS = [
         "roles": {"superadmin"},
     },
 ]
+
+HELP_COMMANDS.insert(
+    0,
+    {
+        "usage": "/weekendimg",
+        "desc": "Добавить обложку к странице выходных: выбрать дату и загрузить фото в Catbox",
+        "roles": {"superadmin"},
+    },
+)
 
 
 class IPv4AiohttpSession(AiohttpSession):
@@ -2272,61 +2284,69 @@ def ensure_html_text(message: types.Message) -> tuple[str | None, str]:
     return html, mode
 
 
-async def upload_images(images: list[tuple[bytes, str]]) -> tuple[list[str], str]:
+async def upload_images(
+    images: list[tuple[bytes, str]],
+    limit: int = MAX_ALBUM_IMAGES,
+    *,
+    force: bool = False,
+) -> tuple[list[str], str]:
     """Upload images to Catbox with retries."""
     catbox_urls: list[str] = []
     catbox_msg = ""
-    logging.info("CATBOX start images=%d limit=%d", len(images or []), MAX_ALBUM_IMAGES)
-    if CATBOX_ENABLED and images:
-        session = get_http_session()
-        for data, name in images[:MAX_ALBUM_IMAGES]:
-            data, name = ensure_jpeg(data, name)
-            logging.info("CATBOX candidate name=%s size=%d", name, len(data))
-            if len(data) > 5 * 1024 * 1024:
-                logging.warning("catbox skip %s: too large", name)
-                catbox_msg += f"{name}: too large; "
-                continue
-            if not detect_image_type(data):
-                logging.warning("catbox upload %s: not image", name)
-                catbox_msg += f"{name}: not image; "
-            success = False
-            delays = [0.5, 1.0, 2.0]
-            for attempt in range(1, 4):
-                logging.info("catbox try %d/3", attempt)
-                try:
-                    form = FormData()
-                    form.add_field("reqtype", "fileupload")
-                    form.add_field("fileToUpload", data, filename=name)
-                    async with span("http"):
-                        async with HTTP_SEMAPHORE:
-                            async with session.post(
-                                "https://catbox.moe/user/api.php", data=form
-                            ) as resp:
-                                text_r = await resp.text()
-                                if resp.status == 200 and text_r.startswith("http"):
-                                    url = text_r.strip()
-                                    catbox_urls.append(url)
-                                    catbox_msg += "ok; "
-                                    logging.info("catbox ok %s", url)
-                                    success = True
-                                    break
-                                reason = f"{resp.status} {text_r}".strip()
-                except Exception as e:  # pragma: no cover - network errors
-                    reason = str(e)
-                if success:
-                    break
-                if attempt < 3:
-                    await asyncio.sleep(delays[attempt - 1])
-            if not success:
-                logging.warning("catbox failed %s", reason)
-                catbox_msg += f"{name}: failed; "
+    if not images:
+        return [], ""
+    logging.info("CATBOX start images=%d limit=%d", len(images or []), limit)
+    if not CATBOX_ENABLED and not force:
+        logging.info("CATBOX disabled")
+        return [], "disabled"
+
+    session = get_http_session()
+    for data, name in images[:limit]:
+        data, name = ensure_jpeg(data, name)
+        logging.info("CATBOX candidate name=%s size=%d", name, len(data))
+        if len(data) > 5 * 1024 * 1024:
+            logging.warning("catbox skip %s: too large", name)
+            catbox_msg += f"{name}: too large; "
+            continue
+        if not detect_image_type(data):
+            logging.warning("catbox upload %s: not image", name)
+            catbox_msg += f"{name}: not image; "
+        success = False
+        delays = [0.5, 1.0, 2.0]
+        for attempt in range(1, 4):
+            logging.info("catbox try %d/3", attempt)
+            try:
+                form = FormData()
+                form.add_field("reqtype", "fileupload")
+                form.add_field("fileToUpload", data, filename=name)
+                async with span("http"):
+                    async with HTTP_SEMAPHORE:
+                        async with session.post(
+                            "https://catbox.moe/user/api.php", data=form
+                        ) as resp:
+                            text_r = await resp.text()
+                            if resp.status == 200 and text_r.startswith("http"):
+                                url = text_r.strip()
+                                catbox_urls.append(url)
+                                catbox_msg += "ok; "
+                                logging.info("catbox ok %s", url)
+                                success = True
+                                break
+                            reason = f"{resp.status} {text_r}".strip()
+            except Exception as e:  # pragma: no cover - network errors
+                reason = str(e)
+            if success:
+                break
+            if attempt < 3:
+                await asyncio.sleep(delays[attempt - 1])
+        if not success:
+            logging.warning("catbox failed %s", reason)
+            catbox_msg += f"{name}: failed; "
         catbox_msg = catbox_msg.strip("; ")
-    elif images:
-        catbox_msg = "disabled"
     logging.info(
         "CATBOX done uploaded=%d skipped=%d msg=%s",
         len(catbox_urls),
-        max(0, len(images or []) - len(catbox_urls)),
+        max(0, len(images[:limit]) - len(catbox_urls)),
         catbox_msg,
     )
     global LAST_CATBOX_MSG
@@ -10396,6 +10416,18 @@ async def build_weekend_page_content(
             if exceeded:
                 break
             add(n)
+    # NEW: weekend cover
+    cover_url = await get_setting_value(db, f"weekend_cover:{start}")
+    if cover_url and not exceeded:
+        add(
+            {
+                "tag": "figure",
+                "children": [
+                    {"tag": "img", "attrs": {"src": cover_url}, "children": []}
+                ],
+            }
+        )
+        add_many(telegraph_br())
 
     add(
         {
@@ -13866,6 +13898,77 @@ async def handle_pages(message: types.Message, db: Database, bot: Bot):
     await bot.send_message(message.chat.id, "\n".join(lines))
 
 
+async def handle_weekendimg_cmd(message: types.Message, db: Database, bot: Bot):
+    async with db.get_session() as session:
+        user = await session.get(User, message.from_user.id)
+        if not user or not user.is_superadmin:
+            return
+    today = datetime.now(LOCAL_TZ).date()
+    first = next_weekend_start(today)
+    dates = [first + timedelta(days=7 * i) for i in range(5)]
+    kb = types.InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                types.InlineKeyboardButton(
+                    text=f"Выходные {format_weekend_range(d)}",
+                    callback_data=f"weekimg:{d.isoformat()}",
+                )
+            ]
+            for d in dates
+        ]
+    )
+    await message.answer("Выберите выходные для обложки:", reply_markup=kb)
+
+
+async def handle_weekendimg_cb(callback: types.CallbackQuery, db: Database, bot: Bot):
+    async with db.get_session() as session:
+        user = await session.get(User, callback.from_user.id)
+        if not user or not user.is_superadmin:
+            await callback.answer("Недостаточно прав", show_alert=True)
+            return
+    if not callback.data:
+        return
+    start = callback.data.split(":", 1)[1]
+    weekend_img_wait[callback.from_user.id] = start
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await callback.message.answer(
+        f"Выбраны выходные {format_weekend_range(date.fromisoformat(start))}.\n"
+        "Пришлите обложку одним сообщением (фото или файл).",
+    )
+    await callback.answer()
+
+
+async def handle_weekendimg_photo(message: types.Message, db: Database, bot: Bot):
+    start = weekend_img_wait.get(message.from_user.id)
+    if not start:
+        return
+
+    images = (await extract_images(message, bot))[:1]
+    if not images:
+        await message.reply("Не вижу изображения. Пришлите одно фото/файл в ответ.")
+        return
+
+    urls, _ = await upload_images(images, limit=1, force=True)
+    if not urls:
+        await message.reply("Не удалось загрузить в Catbox. Попробуйте другое фото.")
+        return
+
+    cover = urls[0]
+    await set_setting_value(db, f"weekend_cover:{start}", cover)
+    await sync_weekend_page(db, start, update_links=True, post_vk=False, force=True)
+
+    async with db.get_session() as session:
+        page = await session.get(WeekendPage, start)
+    if page and page.url:
+        await message.reply(f"Готово! Обложка добавлена.\n{page.url}")
+    else:
+        await message.reply(
+            "Обложка сохранена, но страницу не удалось обновить. Попробуйте ещё раз."
+        )
+
+    weekend_img_wait.pop(message.from_user.id, None)
+
+
 def _shift_month(d: date, offset: int) -> date:
     year = d.year + (d.month - 1 + offset) // 12
     month = (d.month - 1 + offset) % 12 + 1
@@ -15916,6 +16019,15 @@ def create_app() -> web.Application:
     async def pages_rebuild_wrapper(message: types.Message):
         await handle_pages_rebuild(message, db, bot)
 
+    async def weekendimg_cmd_wrapper(message: types.Message):
+        await handle_weekendimg_cmd(message, db, bot)
+
+    async def weekendimg_cb_wrapper(callback: types.CallbackQuery):
+        await handle_weekendimg_cb(callback, db, bot)
+
+    async def weekendimg_photo_wrapper(message: types.Message):
+        await handle_weekendimg_photo(message, db, bot)
+
     async def stats_wrapper(message: types.Message):
         await handle_stats(message, db, bot)
 
@@ -16142,6 +16254,14 @@ def create_app() -> web.Application:
         digest_hide_wrapper, lambda c: c.data.startswith("dg:x:")
     )
     dp.message.register(fest_wrapper, Command("fest"))
+
+    dp.message.register(weekendimg_cmd_wrapper, Command("weekendimg"))
+    dp.callback_query.register(
+        weekendimg_cb_wrapper, lambda c: c.data and c.data.startswith("weekimg:")
+    )
+    dp.message.register(
+        weekendimg_photo_wrapper, lambda m: m.from_user.id in weekend_img_wait
+    )
 
     dp.message.register(pages_wrapper, Command("pages"))
     dp.message.register(pages_rebuild_wrapper, Command("pages_rebuild"))
