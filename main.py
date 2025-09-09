@@ -107,7 +107,7 @@ from digests import (
     format_event_line_html,
     pick_display_link,
     extract_catbox_covers_from_telegraph,
-    assemble_compact_caption,
+    compose_digest_caption,
     visible_caption_len,
     attach_caption_if_fits,
 )
@@ -402,6 +402,9 @@ telegraph_first_image: TTLCache[str, str] = TTLCache(maxsize=128, ttl=24 * 3600)
 add_event_sessions: TTLCache[int, bool] = TTLCache(maxsize=64, ttl=3600)
 # waiting for a date for events listing
 events_date_sessions: TTLCache[int, bool] = TTLCache(maxsize=64, ttl=3600)
+
+# digest_id -> session data for lecture digest preview
+digest_preview_sessions: TTLCache[str, dict] = TTLCache(maxsize=64, ttl=30 * 60)
 
 # remove leading command like /addevent or /addevent@bot
 def strip_leading_cmd(text: str, cmds: tuple[str, ...] = ("addevent",)) -> str:
@@ -13092,6 +13095,84 @@ async def show_digest_menu(message: types.Message, db: Database, bot: Bot) -> No
     )
 
 
+PANEL_TEXT = (
+    "Управление дайджестом лекций\nВыключите лишнее и нажмите «Обновить превью»."
+)
+
+
+def _build_digest_panel_markup(digest_id: str, session: dict) -> types.InlineKeyboardMarkup:
+    buttons = []
+    for item in session["items"]:
+        mark = "✅" if item["enabled"] else "⬜️"
+        buttons.append(
+            types.InlineKeyboardButton(
+                text=f"{mark} {item['index']}",
+                callback_data=f"dg:t:{digest_id}:{item['index']}",
+            )
+        )
+    rows = [buttons[i : i + 3] for i in range(0, len(buttons), 3)]
+    rows.append(
+        [types.InlineKeyboardButton(text="🔄 Обновить превью", callback_data=f"dg:r:{digest_id}")]
+    )
+    for ch in session.get("channels", []):
+        rows.append(
+            [
+                types.InlineKeyboardButton(
+                    text=f"🚀 Отправить в «{ch['name']}»",
+                    callback_data=f"dg:s:{digest_id}:{ch['channel_id']}",
+                )
+            ]
+        )
+    rows.append(
+        [types.InlineKeyboardButton(text="🗑 Скрыть панель", callback_data=f"dg:x:{digest_id}")]
+    )
+    return types.InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _compose_from_session(session: dict, digest_id: str):
+    lines_html = [item["line_html"] for item in session["items"]]
+    excluded = [i for i, it in enumerate(session["items"]) if not it["enabled"]]
+    caption, used_lines = await compose_digest_caption(
+        session["intro_html"],
+        lines_html,
+        session["footer_html"],
+        excluded=excluded,
+        digest_id=digest_id,
+    )
+    enabled_items = [it for it in session["items"] if it["enabled"]]
+    used_items = enabled_items[: len(used_lines)]
+    media = [
+        types.InputMediaPhoto(media=it["cover_url"]) for it in used_items if it["cover_url"]
+    ]
+    attach, _ = attach_caption_if_fits(media, caption)
+    vis_len = visible_caption_len(caption)
+    return caption, media, attach, vis_len, len(used_items)
+
+
+async def _send_preview(session: dict, digest_id: str, bot: Bot):
+    caption, media, attach, vis_len, kept = await _compose_from_session(session, digest_id)
+    msg_ids: List[int] = []
+    if media:
+        sent = await bot.send_media_group(session["chat_id"], media)
+        msg_ids.extend(m.message_id for m in sent)
+    if not attach or not media:
+        msg = await bot.send_message(
+            session["chat_id"],
+            caption,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+        msg_ids.append(msg.message_id)
+    panel = await bot.send_message(
+        session["chat_id"],
+        PANEL_TEXT,
+        reply_markup=_build_digest_panel_markup(digest_id, session),
+    )
+    session["preview_msg_ids"] = msg_ids
+    session["panel_msg_id"] = panel.message_id
+    return caption, attach, vis_len, kept
+
+
 async def handle_digest_select_lectures(
     callback: types.CallbackQuery, db: Database, bot: Bot
 ) -> None:
@@ -13108,165 +13189,255 @@ async def handle_digest_select_lectures(
         callback.id,
     )
 
-    draft_key = f"draft:digest:{digest_id}"
-    existing = await get_setting_value(db, draft_key)
-    if existing:
-        data = json.loads(existing)
-        status = data.get("status")
-        if status == "collecting":
-            await callback.answer("Уже формируем этот дайджест", show_alert=False)
-            return
-
-    await set_setting_value(db, draft_key, json.dumps({"status": "collecting", "type": "lectures"}))
-
     offset = await get_tz_offset(db)
     tz = offset_to_timezone(offset)
     now = datetime.now(tz).replace(tzinfo=None)
 
-    try:
-        intro, lines, horizon, events = await build_lectures_digest_preview(
-            digest_id, db, now
-        )
-        if not events:
-            await bot.send_message(
-                callback.message.chat.id,
-                f"Пока ничего нет в ближайшие {horizon} дней с учётом правила “+2 часа”.",
-            )
-            await set_setting_value(db, draft_key, json.dumps({"status": "ready", "type": "lectures"}))
-            return
-
-        caption, lines = await assemble_compact_caption(intro, lines, digest_id=digest_id)
-        kept = len(lines)
-        events = events[:kept]
-
-        media: List[types.InputMediaPhoto] = []
-        image_urls: List[str | None] = []
-        for ev in events:
-            url = None
-            if ev.telegraph_url:
-                try:
-                    covers = await extract_catbox_covers_from_telegraph(
-                        ev.telegraph_url, event_id=ev.id
-                    )
-                    url = covers[0] if covers else None
-                except Exception:
-                    url = None
-            image_urls.append(url)
-            if url:
-                media.append(types.InputMediaPhoto(media=url))
-
-        logging.info(
-            "digest.album.compose digest_id=%s count_photos=%s count_items=%s",
-            digest_id,
-            len([u for u in image_urls if u]),
-            len(events),
-        )
-
-        attach, vis_len = attach_caption_if_fits(media, caption)
-        preview_album_msg_ids: List[int] = []
-        caption_msg: types.Message | None = None
-        if media:
-            sent = await bot.send_media_group(callback.message.chat.id, media)
-            preview_album_msg_ids.extend(m.message_id for m in sent)
-        if not attach:
-            caption_msg = await bot.send_message(
-                callback.message.chat.id,
-                caption,
-                parse_mode="HTML",
-                disable_web_page_preview=True,
-            )
-
-        log_message_ids = preview_album_msg_ids.copy()
-        if caption_msg:
-            log_message_ids.append(caption_msg.message_id)
-        logging.info(
-            "digest.preview.sent digest_id=%s album_size=%s attach_caption=%s visible_len=%s message_ids=%s",
-            digest_id,
-            len([u for u in image_urls if u]),
-            attach,
-            vis_len,
-            log_message_ids,
-        )
-
-        # build panel message with publish buttons
-        async with db.get_session() as session:
-            result = await session.execute(
-                select(Channel).where(Channel.daily_time.is_not(None))
-            )
-            channels = result.scalars().all()
-
-        keyboard = [
-            [
-                types.InlineKeyboardButton(
-                    text=f"📤 Отправить в «{ch.title or ch.username or ch.channel_id}»",
-                    callback_data=f"digest:send:{digest_id}:{ch.channel_id}",
-                )
-            ]
-            for ch in channels
-        ]
-        panel = await bot.send_message(
-            callback.message.chat.id,
-            "Управление дайджестом лекций\nВыберите канал, чтобы опубликовать пост.",
-            reply_markup=types.InlineKeyboardMarkup(inline_keyboard=keyboard) if keyboard else None,
-            reply_to_message_id=caption_msg.message_id
-            if caption_msg
-            else (preview_album_msg_ids[0] if preview_album_msg_ids else None),
-        )
-
-        logging.info(
-            "digest.panel.sent digest_id=%s panel_msg_id=%s channels=%s",
-            digest_id,
-            panel.message_id,
-            [ch.channel_id for ch in channels],
-        )
-
-        await set_setting_value(
-            db,
-            draft_key,
-            json.dumps(
-                {
-                    "status": "ready",
-                    "type": "lectures",
-                    "event_ids": [e.id for e in events],
-                    "excluded": [],
-                    "intro_text": intro,
-                    "horizon_days": horizon,
-                    "image_urls": image_urls,
-                    "caption_text": caption,
-                    "panel_msg_id": panel.message_id,
-                    "preview_album_msg_ids": preview_album_msg_ids,
-                    "preview_caption_msg_id": (
-                        caption_msg.message_id
-                        if caption_msg
-                        else (preview_album_msg_ids[0] if attach and preview_album_msg_ids else None)
-                    ),
-                    "published_to": {},
-                }
-            ),
-        )
-    except Exception:
-        logging.exception("digest.preview_failed digest_id=%s", digest_id)
+    intro, lines, horizon, events = await build_lectures_digest_preview(
+        digest_id, db, now
+    )
+    if not events:
         await bot.send_message(
             callback.message.chat.id,
-            "Не удалось собрать превью дайджеста (ошибка парсинга времени). Разберёмся — детали в логах.",
+            f"Пока ничего нет в ближайшие {horizon} дней с учётом правила “+2 часа”.",
+        )
+        return
+
+    items: List[dict] = []
+    for idx, (ev, line) in enumerate(zip(events, lines), start=1):
+        cover_url = None
+        if ev.telegraph_url:
+            try:
+                covers = await extract_catbox_covers_from_telegraph(
+                    ev.telegraph_url, event_id=ev.id
+                )
+                cover_url = covers[0] if covers else None
+            except Exception:
+                cover_url = None
+        items.append(
+            {
+                "event_id": ev.id,
+                "index": idx,
+                "title": ev.title,
+                "emoji": "",
+                "link": pick_display_link(ev),
+                "cover_url": cover_url,
+                "enabled": True,
+                "line_html": line,
+            }
         )
 
+    async with db.get_session() as session_db:
+        result = await session_db.execute(
+            select(Channel).where(Channel.daily_time.is_not(None))
+        )
+        channels = result.scalars().all()
 
-async def handle_digest_publish(
-    callback: types.CallbackQuery, db: Database, bot: Bot
-) -> None:
+    session_data = {
+        "chat_id": callback.message.chat.id,
+        "preview_msg_ids": [],
+        "panel_msg_id": None,
+        "items": items,
+        "intro_html": intro,
+        "footer_html": '<a href="https://t.me/kenigevents">Полюбить Калининград | Анонсы</a>',
+        "channels": [
+            {
+                "channel_id": ch.channel_id,
+                "name": ch.title or ch.username or str(ch.channel_id),
+                "username": ch.username,
+            }
+            for ch in channels
+        ],
+    }
+
+    digest_preview_sessions[digest_id] = session_data
+
+    caption, attach, vis_len, kept = await _send_preview(
+        session_data, digest_id, bot
+    )
+
+    logging.info(
+        "digest.panel.new digest_id=%s total=%s caption_len_visible=%s attached=%s",
+        digest_id,
+        len(items),
+        vis_len,
+        int(attach),
+    )
+
+    await callback.answer()
+
+
+async def handle_digest_toggle(callback: types.CallbackQuery, bot: Bot) -> None:
     parts = callback.data.split(":")
     if len(parts) != 4:
         return
-    _, _, digest_id, channel_id_str = parts
-    channel_id = int(channel_id_str)
+    _, _, digest_id, idx_str = parts
+    session = digest_preview_sessions.get(digest_id)
+    if not session:
+        await callback.answer(
+            "Сессия превью истекла, соберите новый дайджест командой /digest",
+            show_alert=True,
+        )
+        return
+    index = int(idx_str) - 1
+    if 0 <= index < len(session["items"]):
+        session["items"][index]["enabled"] = not session["items"][index]["enabled"]
+    disabled = len([it for it in session["items"] if not it["enabled"]])
+    markup = _build_digest_panel_markup(digest_id, session)
+    try:
+        await bot.edit_message_reply_markup(
+            session["chat_id"], session["panel_msg_id"], reply_markup=markup
+        )
+    except Exception:
+        logging.exception(
+            "digest.panel.toggle edit_error digest_id=%s message_id=%s",
+            digest_id,
+            session.get("panel_msg_id"),
+        )
+    logging.info(
+        "digest.panel.toggle digest_id=%s index=%s enabled=%s total=%s disabled=%s",
+        digest_id,
+        index + 1,
+        int(session["items"][index]["enabled"]),
+        len(session["items"]),
+        disabled,
+    )
+    await callback.answer()
 
-    async with db.get_session() as session:
-        user = await session.get(User, callback.from_user.id)
-        if not user or not user.is_superadmin:
-            await callback.answer("Нет доступа", show_alert=False)
-            return
-        ch = await session.get(Channel, channel_id)
+
+async def handle_digest_refresh(callback: types.CallbackQuery, bot: Bot) -> None:
+    parts = callback.data.split(":")
+    if len(parts) != 3:
+        return
+    _, _, digest_id = parts
+    session = digest_preview_sessions.get(digest_id)
+    if not session:
+        await callback.answer(
+            "Сессия превью истекла, соберите новый дайджест командой /digest",
+            show_alert=True,
+        )
+        return
+    if not any(it["enabled"] for it in session["items"]):
+        await callback.answer("Нечего публиковать", show_alert=True)
+        return
+    for mid in session.get("preview_msg_ids", []):
+        try:
+            await bot.delete_message(session["chat_id"], mid)
+        except Exception:
+            logging.error(
+                "digest.panel.refresh delete_error digest_id=%s message_id=%s",
+                digest_id,
+                mid,
+            )
+    if session.get("panel_msg_id"):
+        try:
+            await bot.delete_message(session["chat_id"], session["panel_msg_id"])
+        except Exception:
+            logging.error(
+                "digest.panel.refresh delete_error digest_id=%s message_id=%s",
+                digest_id,
+                session["panel_msg_id"],
+            )
+
+    caption, attach, vis_len, kept = await _send_preview(
+        session, digest_id, bot
+    )
+    dropped = len(session["items"]) - kept
+    logging.info(
+        "digest.panel.refresh digest_id=%s kept=%s dropped=%s caption_len_visible=%s attached=%s",
+        digest_id,
+        kept,
+        dropped,
+        vis_len,
+        int(attach),
+    )
+    await callback.answer()
+
+
+async def handle_digest_send(callback: types.CallbackQuery, bot: Bot) -> None:
+    parts = callback.data.split(":")
+    if len(parts) != 4:
+        return
+    _, _, digest_id, ch_id_str = parts
+    channel_id = int(ch_id_str)
+    session = digest_preview_sessions.get(digest_id)
+    if not session:
+        await callback.answer(
+            "Сессия превью истекла, соберите новый дайджест командой /digest",
+            show_alert=True,
+        )
+        return
+    if not any(it["enabled"] for it in session["items"]):
+        await callback.answer("Нечего публиковать", show_alert=True)
+        return
+
+    caption, media, attach, vis_len, kept = await _compose_from_session(
+        session, digest_id
+    )
+
+    album_msg_ids: List[int] = []
+    caption_msg_id: int | None = None
+    if media:
+        sent = await bot.send_media_group(channel_id, media)
+        album_msg_ids = [m.message_id for m in sent]
+    if not attach or not media:
+        msg = await bot.send_message(
+            channel_id,
+            caption,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+        caption_msg_id = msg.message_id
+    else:
+        caption_msg_id = album_msg_ids[0] if album_msg_ids else None
+
+    ch_info = next(
+        (c for c in session.get("channels", []) if c["channel_id"] == channel_id),
+        None,
+    )
+    if ch_info and caption_msg_id is not None:
+        ch_obj = SimpleNamespace(
+            channel_id=ch_info["channel_id"],
+            title=ch_info.get("name"),
+            username=ch_info.get("username"),
+        )
+        link = build_channel_post_url(ch_obj, caption_msg_id)
+        await bot.send_message(session["chat_id"], link)
+
+    logging.info(
+        "digest.publish digest_id=%s channel_id=%s message_id=%s attached=%s kept=%s",
+        digest_id,
+        channel_id,
+        caption_msg_id,
+        int(attach),
+        kept,
+    )
+    await callback.answer("Опубликовано", show_alert=False)
+
+
+async def handle_digest_hide(callback: types.CallbackQuery, bot: Bot) -> None:
+    parts = callback.data.split(":")
+    if len(parts) != 3:
+        return
+    _, _, digest_id = parts
+    session = digest_preview_sessions.get(digest_id)
+    if not session:
+        await callback.answer(
+            "Сессия превью истекла, соберите новый дайджест командой /digest",
+            show_alert=True,
+        )
+        return
+    if session.get("panel_msg_id"):
+        try:
+            await bot.delete_message(session["chat_id"], session["panel_msg_id"])
+        except Exception:
+            logging.error(
+                "digest.panel.hide delete_error digest_id=%s message_id=%s",
+                digest_id,
+                session["panel_msg_id"],
+            )
+        session["panel_msg_id"] = None
+    await callback.answer()
 
     draft_key = f"draft:digest:{digest_id}"
     raw = await get_setting_value(db, draft_key)
@@ -13286,150 +13457,6 @@ async def handle_digest_publish(
 
     image_urls = data.get("image_urls") or []
     caption_text = data.get("caption_text") or ""
-
-    media = [types.InputMediaPhoto(media=url) for url in image_urls if url]
-    attach, vis_len = attach_caption_if_fits(media, caption_text)
-    logging.info(
-        "digest.publish decision attach_caption=%s visible_len=%s photos=%s digest_id=%s",
-        attach,
-        vis_len,
-        len(media),
-        digest_id,
-    )
-    album_msg_ids: List[int] = []
-    caption_msg_id: int | None = None
-
-    logging.info(
-        "digest.send.start digest_id=%s channel=%s", digest_id, channel_id
-    )
-
-    try:
-        if media:
-            sent = await bot.send_media_group(channel_id, media)
-            album_msg_ids = [m.message_id for m in sent]
-        if not attach or not media:
-            msg = await bot.send_message(
-                channel_id,
-                caption_text,
-                parse_mode="HTML",
-                disable_web_page_preview=True,
-            )
-            caption_msg_id = msg.message_id
-        else:
-            caption_msg_id = album_msg_ids[0] if album_msg_ids else None
-    except Exception:
-        logging.exception(
-            "digest.publish.error digest_id=%s channel_id=%s", digest_id, channel_id
-        )
-        # try to send text once more if album succeeded and caption wasn't sent
-        if album_msg_ids and (not attach or not media):
-            try:
-                msg = await bot.send_message(
-                    channel_id,
-                    caption_text,
-                    parse_mode="HTML",
-                    disable_web_page_preview=True,
-                )
-                caption_msg_id = msg.message_id
-            except Exception:
-                await callback.answer("Текст не отправлен", show_alert=True)
-                panel_id = data.get("panel_msg_id")
-                if panel_id:
-                    async with db.get_session() as session:
-                        result = await session.execute(
-                            select(Channel).where(Channel.daily_time.is_not(None))
-                        )
-                        channels = result.scalars().all()
-                    markup = _build_digest_panel_markup(
-                        channels, digest_id, published_to
-                    )
-                    await bot.edit_message_text(
-                        "Управление дайджестом лекций\n⚠️ Текст не отправлен, попробуйте ещё раз\nВыберите канал, чтобы опубликовать пост.",
-                        callback.message.chat.id,
-                        panel_id,
-                        reply_markup=markup,
-                    )
-                return
-        else:
-            await callback.answer("Ошибка отправки", show_alert=True)
-            return
-
-    logging.info(
-        "digest.send.end digest_id=%s channel=%s photos=%s attach_caption=%s visible_len=%s message_id=%s",
-        digest_id,
-        channel_id,
-        len(album_msg_ids),
-        attach,
-        vis_len,
-        caption_msg_id,
-    )
-
-    caption_msg_id = caption_msg_id or 0
-    post_url = build_channel_post_url(ch, caption_msg_id) if ch else None
-
-    published_to[str(channel_id)] = {
-        "album_msg_ids": album_msg_ids,
-        "caption_msg_id": caption_msg_id,
-    }
-    if post_url:
-        published_to[str(channel_id)]["post_url"] = post_url
-    data["published_to"] = published_to
-
-    await set_setting_value(db, draft_key, json.dumps(data))
-
-    logging.info(
-        "digest.publish.ok digest_id=%s channel_id=%s album=%s caption_len_visible=%s post_url=%s",
-        digest_id,
-        channel_id,
-        len(album_msg_ids),
-        visible_caption_len(caption_text),
-        post_url,
-    )
-
-    panel_id = data.get("panel_msg_id")
-    if panel_id:
-        async with db.get_session() as session:
-            result = await session.execute(
-                select(Channel).where(Channel.daily_time.is_not(None))
-            )
-            channels = result.scalars().all()
-        markup = _build_digest_panel_markup(channels, digest_id, published_to)
-        await bot.edit_message_reply_markup(
-            callback.message.chat.id, panel_id, reply_markup=markup
-        )
-
-    await callback.answer("Опубликовано", show_alert=False)
-
-
-def _build_digest_panel_markup(
-    channels: list[Channel], digest_id: str, published_to: dict
-) -> types.InlineKeyboardMarkup:
-    rows = []
-    for ch in channels:
-        name = ch.title or ch.username or str(ch.channel_id)
-        info = published_to.get(str(ch.channel_id))
-        if info:
-            buttons = [
-                types.InlineKeyboardButton(
-                    text=f"✅ Отправлено в «{name}»",
-                    callback_data=f"digest:send:{digest_id}:{ch.channel_id}",
-                )
-            ]
-            url = info.get("post_url")
-            if url:
-                buttons.append(types.InlineKeyboardButton(text="🔗 Открыть", url=url))
-            rows.append(buttons)
-        else:
-            rows.append(
-                [
-                    types.InlineKeyboardButton(
-                        text=f"📤 Отправить в «{name}»",
-                        callback_data=f"digest:send:{digest_id}:{ch.channel_id}",
-                    )
-                ]
-            )
-    return types.InlineKeyboardMarkup(inline_keyboard=rows)
-
 
 async def handle_ask_4o(message: types.Message, db: Database, bot: Bot):
     parts = message.text.split(maxsplit=1)
@@ -15511,8 +15538,17 @@ def create_app() -> web.Application:
     async def digest_disabled_wrapper(callback: types.CallbackQuery):
         await callback.answer("Ещё не реализовано", show_alert=False)
 
-    async def digest_publish_wrapper(callback: types.CallbackQuery):
-        await handle_digest_publish(callback, db, bot)
+    async def digest_toggle_wrapper(callback: types.CallbackQuery):
+        await handle_digest_toggle(callback, bot)
+
+    async def digest_refresh_wrapper(callback: types.CallbackQuery):
+        await handle_digest_refresh(callback, bot)
+
+    async def digest_send_wrapper(callback: types.CallbackQuery):
+        await handle_digest_send(callback, bot)
+
+    async def digest_hide_wrapper(callback: types.CallbackQuery):
+        await handle_digest_hide(callback, bot)
 
     async def pages_wrapper(message: types.Message):
         await handle_pages(message, db, bot)
@@ -15731,7 +15767,16 @@ def create_app() -> web.Application:
         digest_disabled_wrapper, lambda c: c.data == "digest:disabled"
     )
     dp.callback_query.register(
-        digest_publish_wrapper, lambda c: c.data.startswith("digest:send:")
+        digest_toggle_wrapper, lambda c: c.data.startswith("dg:t:")
+    )
+    dp.callback_query.register(
+        digest_refresh_wrapper, lambda c: c.data.startswith("dg:r:")
+    )
+    dp.callback_query.register(
+        digest_send_wrapper, lambda c: c.data.startswith("dg:s:")
+    )
+    dp.callback_query.register(
+        digest_hide_wrapper, lambda c: c.data.startswith("dg:x:")
     )
     dp.message.register(fest_wrapper, Command("fest"))
 

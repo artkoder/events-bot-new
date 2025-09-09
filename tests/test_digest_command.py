@@ -12,6 +12,8 @@ class DummyBot:
     def __init__(self):
         self.messages = []
         self.media_groups = []
+        self.edited = []
+        self.deleted = []
 
     async def send_message(self, chat_id, text, **kwargs):
         msg_id = len(self.messages) + 1
@@ -45,6 +47,18 @@ class DummyBot:
             msgs.append(msg)
         self.messages.extend(msgs)
         return msgs
+
+    async def edit_message_reply_markup(self, chat_id, message_id, reply_markup):
+        for idx, m in enumerate(self.messages):
+            if m.message_id == message_id:
+                data = m.model_dump()
+                data["reply_markup"] = reply_markup
+                self.messages[idx] = types.Message.model_validate(data)
+                break
+        self.edited.append((chat_id, message_id, reply_markup))
+
+    async def delete_message(self, chat_id, message_id):
+        self.deleted.append((chat_id, message_id))
 
 
 @pytest.mark.asyncio
@@ -88,19 +102,22 @@ async def test_handle_digest_sends_preview(tmp_path, monkeypatch):
     await main.show_digest_menu(msg, db, bot)
     menu_msg = bot.messages[0]
     digest_id = menu_msg.reply_markup.inline_keyboard[0][0].callback_data.split(":")[-1]
-    cb = types.CallbackQuery.model_validate(
-        {
-            "id": "1",
-            "from": {"id": 1, "is_bot": False, "first_name": "U"},
-            "message": menu_msg.model_dump(),
-            "chat_instance": "1",
-            "data": f"digest:select:lectures:{digest_id}",
-        }
+    async def answer(**kw):
+        return None
+    cb = SimpleNamespace(
+        id="1",
+        from_user=SimpleNamespace(id=1),
+        message=menu_msg,
+        data=f"digest:select:lectures:{digest_id}",
+        answer=answer,
     )
     await main.handle_digest_select_lectures(cb, db, bot)
     assert bot.media_groups
     caption = bot.media_groups[0][1][0].caption
     assert "<a href=" in caption
+    panel = bot.messages[-1]
+    assert panel.text.startswith("Управление дайджестом лекций")
+    assert panel.reply_markup.inline_keyboard[0][0].callback_data.startswith("dg:t:")
 
 
 def test_help_contains_digest():
