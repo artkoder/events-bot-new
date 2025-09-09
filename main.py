@@ -13255,6 +13255,7 @@ async def handle_digest_select_lectures(
         items.append(
             {
                 "event_id": ev.id,
+                "creator_id": ev.creator_id,
                 "index": idx,
                 "title": ev.title,
                 "norm_title": norm_title,
@@ -13437,7 +13438,7 @@ async def handle_digest_refresh(callback: types.CallbackQuery, bot: Bot) -> None
     await callback.answer()
 
 
-async def handle_digest_send(callback: types.CallbackQuery, bot: Bot) -> None:
+async def handle_digest_send(callback: types.CallbackQuery, db: Database, bot: Bot) -> None:
     parts = callback.data.split(":")
     if len(parts) != 4:
         return
@@ -13493,6 +13494,60 @@ async def handle_digest_send(callback: types.CallbackQuery, bot: Bot) -> None:
         link = build_channel_post_url(ch_obj, caption_msg_id)
         await bot.send_message(session["chat_id"], link)
 
+        used_indices = session.get("current_used_indices", [])
+        items = session.get("items", [])
+        event_ids = [
+            items[i]["event_id"]
+            for i in used_indices
+            if i < len(items) and items[i].get("event_id")
+        ]
+        creator_ids = {
+            items[i].get("creator_id")
+            for i in used_indices
+            if i < len(items) and items[i].get("creator_id")
+        }
+        draft_key = f"draft:digest:{digest_id}"
+        raw = await get_setting_value(db, draft_key)
+        data = json.loads(raw) if raw else {}
+        published_to = data.setdefault("published_to", {})
+        published_to[str(channel_id)] = {
+            "message_url": link,
+            "event_ids": event_ids,
+            "notified_partner_ids": [],
+        }
+        await set_setting_value(db, draft_key, json.dumps(data))
+
+        partners: list[User] = []
+        if creator_ids:
+            async with db.get_session() as session_db:
+                result = await session_db.execute(
+                    select(User).where(
+                        User.user_id.in_(creator_ids), User.is_partner == True
+                    )
+                )
+                partners = result.scalars().all()
+        if partners:
+            markup = types.InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        types.InlineKeyboardButton(
+                            text="Уведомить партнёров",
+                            callback_data=f"dg:np:{digest_id}:{channel_id}",
+                        )
+                    ]
+                ]
+            )
+            await bot.send_message(
+                session["chat_id"],
+                "В дайджесте есть события, добавленные партнёрами.",
+                reply_markup=markup,
+            )
+        else:
+            await bot.send_message(
+                session["chat_id"],
+                "В дайджесте нет событий, добавленных партнёрами.",
+            )
+
     logging.info(
         "digest.publish digest_id=%s channel_id=%s message_id=%s attached=%s kept=%s",
         digest_id,
@@ -13502,6 +13557,77 @@ async def handle_digest_send(callback: types.CallbackQuery, bot: Bot) -> None:
         len(media_urls),
     )
     await callback.answer("Опубликовано", show_alert=False)
+
+
+async def handle_digest_notify_partners(
+    callback: types.CallbackQuery, db: Database, bot: Bot
+) -> None:
+    parts = callback.data.split(":")
+    if len(parts) != 4:
+        return
+    _, _, digest_id, ch_id_str = parts
+    channel_id = int(ch_id_str)
+    draft_key = f"draft:digest:{digest_id}"
+    raw = await get_setting_value(db, draft_key)
+    if not raw:
+        await callback.answer("Сначала опубликуйте дайджест", show_alert=True)
+        return
+    data = json.loads(raw)
+    published_to = data.get("published_to", {})
+    entry = published_to.get(str(channel_id))
+    if not entry:
+        await callback.answer("Сначала опубликуйте дайджест", show_alert=True)
+        return
+    event_ids = entry.get("event_ids", [])
+    notified_ids = set(entry.get("notified_partner_ids", []))
+    async with db.get_session() as session_db:
+        if event_ids:
+            res_ev = await session_db.execute(
+                select(Event).where(Event.id.in_(event_ids))
+            )
+            events = res_ev.scalars().all()
+            creator_ids = {ev.creator_id for ev in events if ev.creator_id}
+        else:
+            creator_ids = set()
+        if creator_ids:
+            res_users = await session_db.execute(
+                select(User).where(
+                    User.user_id.in_(creator_ids), User.is_partner == True
+                )
+            )
+            partners = res_users.scalars().all()
+        else:
+            partners = []
+    to_notify = [u for u in partners if u.user_id not in notified_ids]
+    if not to_notify:
+        await callback.answer("Уже уведомлено", show_alert=False)
+        return
+    notified_now: list[int] = []
+    for u in to_notify:
+        try:
+            await bot.send_message(
+                u.user_id, f"Ваше событие попало в дайджест: {entry.get('message_url')}"
+            )
+            notified_now.append(u.user_id)
+        except Exception as e:
+            logging.error("digest.notify_partner failed user_id=%s err=%s", u.user_id, e)
+    usernames: list[str] = []
+    for u in to_notify:
+        if u.username:
+            usernames.append(f"@{u.username}")
+        else:
+            usernames.append(f'<a href="tg://user?id={u.user_id}">Партнёр</a>')
+    if callback.message:
+        await bot.send_message(
+            callback.message.chat.id,
+            f"Уведомлено: {', '.join(usernames)}",
+            parse_mode="HTML",
+        )
+    entry["notified_partner_ids"] = list(notified_ids | set(notified_now))
+    published_to[str(channel_id)] = entry
+    data["published_to"] = published_to
+    await set_setting_value(db, draft_key, json.dumps(data))
+    await callback.answer()
 
 
 async def handle_digest_hide(callback: types.CallbackQuery, bot: Bot) -> None:
@@ -15634,7 +15760,10 @@ def create_app() -> web.Application:
         await handle_digest_refresh(callback, bot)
 
     async def digest_send_wrapper(callback: types.CallbackQuery):
-        await handle_digest_send(callback, bot)
+        await handle_digest_send(callback, db, bot)
+
+    async def digest_notify_partners_wrapper(callback: types.CallbackQuery):
+        await handle_digest_notify_partners(callback, db, bot)
 
     async def digest_hide_wrapper(callback: types.CallbackQuery):
         await handle_digest_hide(callback, bot)
@@ -15863,6 +15992,9 @@ def create_app() -> web.Application:
     )
     dp.callback_query.register(
         digest_send_wrapper, lambda c: c.data.startswith("dg:s:")
+    )
+    dp.callback_query.register(
+        digest_notify_partners_wrapper, lambda c: c.data.startswith("dg:np:")
     )
     dp.callback_query.register(
         digest_hide_wrapper, lambda c: c.data.startswith("dg:x:")
