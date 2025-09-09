@@ -309,6 +309,7 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "events-ics")
 VK_TOKEN = os.getenv("VK_TOKEN")
+VK_TOKEN_AFISHA = os.getenv("VK_TOKEN_AFISHA")  # NEW
 VK_USER_TOKEN = os.getenv("VK_USER_TOKEN")
 VK_AFISHA_GROUP_ID = os.getenv("VK_AFISHA_GROUP_ID")
 
@@ -12125,13 +12126,28 @@ async def sync_vk_source_post(
         message = build_vk_source_message(
             event, text, festival=festival, ics_url=ics_url
         )
-        url = await post_to_vk(
-            VK_AFISHA_GROUP_ID,
-            message,
-            db,
-            bot,
-            token=VK_TOKEN,
-        )
+        try:
+            # Пытаемся постить group-токеном именно группы Афиши (если он задан),
+            # иначе — старым VK_TOKEN как fallback.
+            url = await post_to_vk(
+                VK_AFISHA_GROUP_ID,
+                message,
+                db,
+                bot,
+                token=(VK_TOKEN_AFISHA or VK_TOKEN),
+            )
+        except VKAPIError as e:
+            # Если запрет на post от group-токена — повторяем без фиксированного токена,
+            # позволяем _vk_api сработать в режиме авто-фоллбека на user-токен.
+            msg = (e.message or "").lower()
+            if e.code in VK_FALLBACK_CODES or \
+               "method is unavailable with group auth" in msg or \
+               "access denied" in msg or \
+               "access to adding post denied" in msg:
+                logging.warning("post_to_vk(afisha): group token failed (%s), retrying with auto actor", e.message)
+                url = await post_to_vk(VK_AFISHA_GROUP_ID, message, db, bot)
+            else:
+                raise
         if url:
             logging.info("sync_vk_source_post created %s", url)
     return url
