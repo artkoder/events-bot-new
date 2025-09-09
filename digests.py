@@ -624,11 +624,11 @@ async def assemble_compact_caption(
 
 async def build_lectures_digest_preview(
     digest_id: str, db: Database, now: datetime
-) -> tuple[str, List[str], int, List[Event]]:
+) -> tuple[str, List[str], int, List[Event], List[str]]:
     """Build digest preview text for lectures.
 
-    Returns intro phrase, list of formatted event lines, horizon in days and
-    the underlying events.
+    Returns intro phrase, list of formatted event lines, horizon in days,
+    the underlying events and normalized titles.
     """
 
     start = time.monotonic()
@@ -652,7 +652,7 @@ async def build_lectures_digest_preview(
     )
 
     if not events:
-        return "", [], horizon, []
+        return "", [], horizon, [], []
 
     intro = await compose_digest_intro_via_4o(
         len(events), horizon, [e.title for e in events]
@@ -660,14 +660,17 @@ async def build_lectures_digest_preview(
 
     normalized = await normalize_titles_via_4o([e.title for e in events])
     lines: List[str] = []
+    norm_titles: List[str] = []
     for ev, norm in zip(events, normalized):
         link = pick_display_link(ev)
+        title_clean = norm.get("title_clean")
+        norm_titles.append(title_clean or ev.title)
         lines.append(
             format_event_line_html(
                 ev,
                 link,
                 emoji=norm.get("emoji", ""),
-                title_override=norm.get("title_clean"),
+                title_override=title_clean,
             )
         )
-    return intro, lines, horizon, events
+    return intro, lines, horizon, events, norm_titles
