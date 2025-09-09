@@ -70,6 +70,7 @@ async def test_digest_toggle_refresh_publish(tmp_path, monkeypatch):
 
     session_data = main.digest_preview_sessions[digest_id]
     assert len(session_data["items"]) == 2
+    assert session_data["excluded"] == set()
 
     panel_msg = bot.messages[-1]
     async def ans2(**kw):
@@ -85,7 +86,8 @@ async def test_digest_toggle_refresh_publish(tmp_path, monkeypatch):
     await main.handle_digest_toggle(cb_toggle, bot)
     assert len(bot.media_groups) == prev_groups
     updated_panel = next(m for m in bot.messages if m.message_id == panel_msg.message_id)
-    assert updated_panel.reply_markup.inline_keyboard[0][0].text.startswith("⬜️")
+    assert updated_panel.reply_markup.inline_keyboard[0][0].text.startswith("❌")
+    assert 0 in session_data["excluded"]
 
     async def ans3(**kw):
         return None

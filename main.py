@@ -13101,9 +13101,10 @@ PANEL_TEXT = (
 
 
 def _build_digest_panel_markup(digest_id: str, session: dict) -> types.InlineKeyboardMarkup:
-    buttons = []
-    for item in session["items"]:
-        mark = "✅" if item["enabled"] else "⬜️"
+    buttons: List[types.InlineKeyboardButton] = []
+    excluded: set[int] = session.get("excluded", set())
+    for idx, item in enumerate(session["items"]):
+        mark = "✅" if idx not in excluded else "❌"
         buttons.append(
             types.InlineKeyboardButton(
                 text=f"{mark} {item['index']}",
@@ -13126,32 +13127,60 @@ def _build_digest_panel_markup(digest_id: str, session: dict) -> types.InlineKey
     rows.append(
         [types.InlineKeyboardButton(text="🗑 Скрыть панель", callback_data=f"dg:x:{digest_id}")]
     )
+    logging.info(
+        "digest.controls.render digest_id=%s count=%s excluded=%s",
+        digest_id,
+        len(session["items"]),
+        sorted(excluded),
+    )
     return types.InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-async def _compose_from_session(session: dict, digest_id: str):
-    lines_html = [item["line_html"] for item in session["items"]]
-    excluded = [i for i, it in enumerate(session["items"]) if not it["enabled"]]
+async def _compose_from_session(
+    session: dict, digest_id: str
+) -> tuple[str, List[str], bool, int, List[int]]:
+    excluded: set[int] = session.get("excluded", set())
+    indices = [i for i in range(len(session["items"])) if i not in excluded]
+    lines_html = [session["items"][i]["line_html"] for i in indices]
     caption, used_lines = await compose_digest_caption(
         session["intro_html"],
         lines_html,
         session["footer_html"],
-        excluded=excluded,
         digest_id=digest_id,
     )
-    enabled_items = [it for it in session["items"] if it["enabled"]]
-    used_items = enabled_items[: len(used_lines)]
-    media = [
-        types.InputMediaPhoto(media=it["cover_url"]) for it in used_items if it["cover_url"]
+    used_indices = indices[: len(used_lines)]
+    media_urls = [
+        session["items"][i]["cover_url"]
+        for i in used_indices
+        if session["items"][i]["cover_url"]
     ]
+    media = [types.InputMediaPhoto(media=url) for url in media_urls]
     attach, _ = attach_caption_if_fits(media, caption)
     vis_len = visible_caption_len(caption)
-    return caption, media, attach, vis_len, len(used_items)
+    logging.info(
+        "digest.caption.visible_len digest_id=%s visible=%s attach=%s",
+        digest_id,
+        vis_len,
+        int(attach),
+    )
+    return caption, media_urls, attach, vis_len, used_indices
 
 
 async def _send_preview(session: dict, digest_id: str, bot: Bot):
-    caption, media, attach, vis_len, kept = await _compose_from_session(session, digest_id)
+    caption, media_urls, attach, vis_len, used_indices = await _compose_from_session(
+        session, digest_id
+    )
+    session["current_caption_html"] = caption
+    session["current_media_urls"] = media_urls
+    session["current_attach"] = attach
+    session["current_visible_len"] = vis_len
+    session["current_used_indices"] = used_indices
+
     msg_ids: List[int] = []
+    media = [types.InputMediaPhoto(media=url) for url in media_urls]
+    if attach and media:
+        media[0].caption = caption
+        media[0].parse_mode = "HTML"
     if media:
         sent = await bot.send_media_group(session["chat_id"], media)
         msg_ids.extend(m.message_id for m in sent)
@@ -13170,7 +13199,7 @@ async def _send_preview(session: dict, digest_id: str, bot: Bot):
     )
     session["preview_msg_ids"] = msg_ids
     session["panel_msg_id"] = panel.message_id
-    return caption, attach, vis_len, kept
+    return caption, attach, vis_len, len(used_indices)
 
 
 async def handle_digest_select_lectures(
@@ -13193,7 +13222,7 @@ async def handle_digest_select_lectures(
     tz = offset_to_timezone(offset)
     now = datetime.now(tz).replace(tzinfo=None)
 
-    intro, lines, horizon, events = await build_lectures_digest_preview(
+    intro, lines, horizon, events, norm_titles = await build_lectures_digest_preview(
         digest_id, db, now
     )
     if not events:
@@ -13204,7 +13233,9 @@ async def handle_digest_select_lectures(
         return
 
     items: List[dict] = []
-    for idx, (ev, line) in enumerate(zip(events, lines), start=1):
+    for idx, (ev, line, norm_title) in enumerate(
+        zip(events, lines, norm_titles), start=1
+    ):
         cover_url = None
         if ev.telegraph_url:
             try:
@@ -13219,10 +13250,9 @@ async def handle_digest_select_lectures(
                 "event_id": ev.id,
                 "index": idx,
                 "title": ev.title,
-                "emoji": "",
+                "norm_title": norm_title,
                 "link": pick_display_link(ev),
                 "cover_url": cover_url,
-                "enabled": True,
                 "line_html": line,
             }
         )
@@ -13240,6 +13270,8 @@ async def handle_digest_select_lectures(
         "items": items,
         "intro_html": intro,
         "footer_html": '<a href="https://t.me/kenigevents">Полюбить Калининград | Анонсы</a>',
+        "excluded": set(),
+        "horizon_days": horizon,
         "channels": [
             {
                 "channel_id": ch.channel_id,
@@ -13280,9 +13312,16 @@ async def handle_digest_toggle(callback: types.CallbackQuery, bot: Bot) -> None:
         )
         return
     index = int(idx_str) - 1
+    excluded: set[int] = session.setdefault("excluded", set())
     if 0 <= index < len(session["items"]):
-        session["items"][index]["enabled"] = not session["items"][index]["enabled"]
-    disabled = len([it for it in session["items"] if not it["enabled"]])
+        if index in excluded:
+            excluded.remove(index)
+            active = True
+        else:
+            excluded.add(index)
+            active = False
+    else:
+        active = False
     markup = _build_digest_panel_markup(digest_id, session)
     try:
         await bot.edit_message_reply_markup(
@@ -13295,12 +13334,10 @@ async def handle_digest_toggle(callback: types.CallbackQuery, bot: Bot) -> None:
             session.get("panel_msg_id"),
         )
     logging.info(
-        "digest.panel.toggle digest_id=%s index=%s enabled=%s total=%s disabled=%s",
+        "digest.controls.toggle digest_id=%s idx=%s active=%s",
         digest_id,
-        index + 1,
-        int(session["items"][index]["enabled"]),
-        len(session["items"]),
-        disabled,
+        index,
+        str(active).lower(),
     )
     await callback.answer()
 
@@ -13317,9 +13354,38 @@ async def handle_digest_refresh(callback: types.CallbackQuery, bot: Bot) -> None
             show_alert=True,
         )
         return
-    if not any(it["enabled"] for it in session["items"]):
-        await callback.answer("Нечего публиковать", show_alert=True)
+    excluded: set[int] = session.get("excluded", set())
+    remaining = [i for i in range(len(session["items"])) if i not in excluded]
+    if not remaining:
+        await callback.answer("Нет выбранных лекций", show_alert=True)
         return
+
+    logging.info(
+        "digest.preview.recompose.start digest_id=%s kept=%s excluded=%s",
+        digest_id,
+        len(remaining),
+        len(excluded),
+    )
+
+    titles = [session["items"][i]["norm_title"] for i in remaining]
+    start = time.monotonic()
+    logging.info(
+        "digest.intro.llm.request digest_id=%s titles=%s",
+        digest_id,
+        len(titles),
+    )
+    intro = await compose_digest_intro_via_4o(
+        len(remaining), session.get("horizon_days", 0), titles
+    )
+    duration_ms = int((time.monotonic() - start) * 1000)
+    logging.info(
+        "digest.intro.llm.response digest_id=%s text_len=%s took_ms=%s",
+        digest_id,
+        len(intro),
+        duration_ms,
+    )
+    session["intro_html"] = intro
+
     for mid in session.get("preview_msg_ids", []):
         try:
             await bot.delete_message(session["chat_id"], mid)
@@ -13342,13 +13408,10 @@ async def handle_digest_refresh(callback: types.CallbackQuery, bot: Bot) -> None
     caption, attach, vis_len, kept = await _send_preview(
         session, digest_id, bot
     )
-    dropped = len(session["items"]) - kept
     logging.info(
-        "digest.panel.refresh digest_id=%s kept=%s dropped=%s caption_len_visible=%s attached=%s",
+        "digest.preview.recompose.done digest_id=%s media=%s caption_attached=%s",
         digest_id,
-        kept,
-        dropped,
-        vis_len,
+        len(session.get("current_media_urls", [])),
         int(attach),
     )
     await callback.answer()
@@ -13367,16 +13430,22 @@ async def handle_digest_send(callback: types.CallbackQuery, bot: Bot) -> None:
             show_alert=True,
         )
         return
-    if not any(it["enabled"] for it in session["items"]):
-        await callback.answer("Нечего публиковать", show_alert=True)
+
+    excluded: set[int] = session.get("excluded", set())
+    if len(session["items"]) - len(excluded) == 0:
+        await callback.answer("Нет выбранных лекций", show_alert=True)
         return
 
-    caption, media, attach, vis_len, kept = await _compose_from_session(
-        session, digest_id
-    )
+    caption = session.get("current_caption_html", "")
+    media_urls = session.get("current_media_urls", [])
+    attach = session.get("current_attach", False)
 
     album_msg_ids: List[int] = []
     caption_msg_id: int | None = None
+    media = [types.InputMediaPhoto(media=url) for url in media_urls]
+    if attach and media:
+        media[0].caption = caption
+        media[0].parse_mode = "HTML"
     if media:
         sent = await bot.send_media_group(channel_id, media)
         album_msg_ids = [m.message_id for m in sent]
@@ -13410,7 +13479,7 @@ async def handle_digest_send(callback: types.CallbackQuery, bot: Bot) -> None:
         channel_id,
         caption_msg_id,
         int(attach),
-        kept,
+        len(media_urls),
     )
     await callback.answer("Опубликовано", show_alert=False)
 
