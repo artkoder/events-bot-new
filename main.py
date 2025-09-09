@@ -13177,10 +13177,16 @@ async def _send_preview(session: dict, digest_id: str, bot: Bot):
     session["current_used_indices"] = used_indices
 
     msg_ids: List[int] = []
-    media = [types.InputMediaPhoto(media=url) for url in media_urls]
-    if attach and media:
-        media[0].caption = caption
-        media[0].parse_mode = "HTML"
+    media: List[types.InputMediaPhoto] = []
+    for i, url in enumerate(media_urls):
+        if i == 0 and attach:
+            media.append(
+                types.InputMediaPhoto(
+                    media=url, caption=caption, parse_mode="HTML"
+                )
+            )
+        else:
+            media.append(types.InputMediaPhoto(media=url))
     if media:
         sent = await bot.send_media_group(session["chat_id"], media)
         msg_ids.extend(m.message_id for m in sent)
