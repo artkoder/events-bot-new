@@ -15405,9 +15405,9 @@ async def handle_vk_crawl_now(message: types.Message, db: Database, bot: Bot) ->
 async def handle_vk_queue(message: types.Message, db: Database, bot: Bot) -> None:
     async with db.get_session() as session:
         user = await session.get(User, message.from_user.id)
-        if not user or not user.is_superadmin:
-            await bot.send_message(message.chat.id, "Not authorized")
-            return
+    if not user:
+        await bot.send_message(message.chat.id, "Not authorized")
+        return
     async with db.raw_conn() as conn:
         cur = await conn.execute(
             "SELECT status, COUNT(*) FROM vk_inbox GROUP BY status"
@@ -15421,7 +15421,11 @@ async def handle_vk_queue(message: types.Message, db: Database, bot: Bot) -> Non
         f"imported: {counts.get('imported', 0)}",
         f"rejected: {counts.get('rejected', 0)}",
     ]
-    await bot.send_message(message.chat.id, "\n".join(lines))
+    markup = types.ReplyKeyboardMarkup(
+        keyboard=[[types.KeyboardButton(text=VK_BTN_CHECK_EVENTS)]],
+        resize_keyboard=True,
+    )
+    await bot.send_message(message.chat.id, "\n".join(lines), reply_markup=markup)
 
 
 async def handle_vk_next_callback(callback: types.CallbackQuery, db: Database, bot: Bot) -> None:

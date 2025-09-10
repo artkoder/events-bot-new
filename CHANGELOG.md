@@ -238,3 +238,8 @@
 - The review flow now reads candidates from the persistent `vk_inbox` table.
 - Operators can choose to repost accepted events to the Afisha VK group.
 - Removed remaining references to the deprecated publish queue from docs.
+
+## v0.3.38 - VK queue summary
+
+- `/vk_queue` displays current inbox counts and offers a button to start the
+  review flow.

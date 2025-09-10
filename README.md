@@ -13,6 +13,8 @@ them by event keywords and date patterns. Matching posts land in the persistent
 skip a candidate. Accepted items go through the standard import pipeline to
 create a Telegraph page and calendar links. The operator may additionally
 trigger a repost to the Afisha VK group; there is no separate publish queue.
+Operators can run `/vk_queue` to see current inbox counts and get a button to
+start reviewing candidates.
 
 This is an MVP using **aiogram 3** and SQLite. It is designed for deployment on
 Fly.io with a webhook.
