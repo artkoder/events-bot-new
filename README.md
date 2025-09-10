@@ -10,8 +10,8 @@ Superadmins can use `/vk` to monitor VK communities: add or remove groups and ma
 Background crawling collects posts from configured VK communities and filters
 them by event keywords and date patterns. Matching posts land in an operator
 review queue where they can be accepted, enriched with extra info, rejected or
-skipped. Accepted items are processed through the existing pipeline to create a
-Telegraph page, calendar links and a VK publish queue item.
+skipped. Accepted items go through the existing pipeline to create a Telegraph
+page, calendar links and, if desired, a VK repost.
 
 This is an MVP using **aiogram 3** and SQLite. It is designed for deployment on
 Fly.io with a webhook.
