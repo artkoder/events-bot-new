@@ -3,6 +3,8 @@
 Telegram bot for publishing event announcements. Daily announcements can also be posted to a VK group.
 Use `/regdailychannels` and `/daily` to manage both Telegram channels and the VK group including posting times.
 
+Superadmins can use `/vk` to monitor VK communities: add or remove groups and manually fetch posts from the last three days.
+
 This is an MVP using **aiogram 3** and SQLite. It is designed for deployment on
 Fly.io with a webhook.
 
@@ -47,6 +49,8 @@ browse upcoming announcements. The command accepts dates like `2025-07-10`,
   # Group tokens
   export VK_TOKEN=vk_group_token
   export VK_TOKEN_AFISHA=vk_afisha_group_token
+  # Optional: override VK API version (default 5.199)
+  export VK_API_VERSION=5.199
   # Optional: max photos per VK post (default 10)
   export VK_MAX_ATTACHMENTS=10
   # Sending images to VK is disabled by default. Use /vkphotos to enable it.

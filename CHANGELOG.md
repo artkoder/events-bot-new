@@ -79,6 +79,11 @@
 - Daily announcements can be posted to a VK group. Set the group with `/vkgroup` and adjust
   times via `/vktime`. Use the `VK_TOKEN` secret for API access.
 
+## v0.3.11 - VK monitoring MVP
+
+- Added `/vk` command for manual monitoring of VK communities: add/list/delete groups and review posts from the last three days.
+- New `VK_API_VERSION` environment variable to override VK API version.
+
 ## v0.3.10 - Unified daily management
 
 - `/regdailychannels` and `/daily` now show the VK group alongside Telegram channels.
