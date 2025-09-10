@@ -150,3 +150,43 @@ async def test_month_nav_skips_past_and_empty(tmp_path: Path, monkeypatch):
     )
     assert '<a href="https://t.me/2025-08">' not in html_aug2
     assert '<h4><a href="https://t.me/2025-09">сентябрь</a> <a href="https://t.me/2025-11">ноябрь</a></h4>' in html_aug2
+
+
+@pytest.mark.asyncio
+async def test_month_nav_includes_festival_link(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    await main.set_setting_value(db, "fest_index_url", "https://telegra.ph/fests")
+
+    class FakeDate(date):
+        @classmethod
+        def today(cls):
+            return date(2025, 8, 26)
+
+    class FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2025, 8, 26, 12, 0, tzinfo=tz)
+
+    monkeypatch.setattr(main, "date", FakeDate)
+    monkeypatch.setattr(main, "datetime", FakeDatetime)
+
+    async with db.get_session() as session:
+        session.add(
+            Event(
+                title="E",
+                description="d",
+                source_text="s",
+                date="2025-08-26",
+                time="18:00",
+                location_name="Hall",
+            )
+        )
+        session.add(MonthPage(month="2025-08", url="https://t.me/2025-08", path="2025-08"))
+        await session.commit()
+
+    nav_block = await main.build_month_nav_block(db, "2025-08")
+    assert (
+        '</h4><br/><h3><a href="https://telegra.ph/fests">Фестивали</a></h3>'
+        in nav_block
+    )
