@@ -1328,6 +1328,14 @@ def redact_token(tok: str) -> str:
     return tok[:6] + "…" + tok[-4:] if tok and len(tok) > 10 else "<redacted>"
 
 
+def redact_params(params: dict[str, Any]) -> dict[str, Any]:
+    """Redact sensitive parameters like access tokens."""
+    redacted: dict[str, Any] = {}
+    for k, v in params.items():
+        redacted[k] = "<redacted>" if "token" in k else v
+    return redacted
+
+
 def _vk_user_token() -> str | None:
     """Return user token unless it was previously marked invalid."""
     token = os.getenv("VK_USER_TOKEN")
@@ -1359,28 +1367,50 @@ async def vk_api(method: str, **params: Any) -> Any:
     if "error" in data:
         err = data["error"]
         logging.error(
-            "vk api %s error=%s msg=%s", method, err.get("error_code"), err.get("error_msg")
+            "VK API error: method=%s code=%s msg=%s params=%s",
+            method,
+            err.get("error_code"),
+            err.get("error_msg"),
+            redact_params(call_params),
         )
-        raise RuntimeError(f"VK API error {err.get('error_code')}")
+        raise RuntimeError(err.get("error_msg") or f"VK API error {err.get('error_code')}")
     return data.get("response")
 
 
+_VK_URL_RE = re.compile(r"(?:https?://)?(?:www\.)?vk\.com/([^/?#]+)")
+
+
 async def vk_resolve_group(screen_or_url: str) -> tuple[int, str, str]:
-    """Resolve group by screen name or URL and return id, name, screen_name."""
-    screen = screen_or_url.strip()
-    if screen.startswith("http"):
-        screen = urlparse(screen).path.strip("/")
-    screen = re.sub(r"^(club|public)", "", screen)
+    """Return (group_id, name, screen_name) for a VK community."""
+    raw = (screen_or_url or "").strip()
+    m = _VK_URL_RE.search(raw)
+    screen = m.group(1) if m else raw.lstrip("@/")
+
+    if screen.startswith(("club", "public")) and screen[len("club"):].isdigit():
+        screen = screen.split("b", 1)[-1] if screen.startswith("club") else screen.split("c", 1)[-1]
+
+    gid: int | None = None
     try:
-        gid = int(screen)
-    except ValueError:
-        res = await vk_api("utils.resolveScreenName", screen_name=screen)
-        if not res or res.get("type") != "group":
-            raise RuntimeError("Group not found")
-        gid = int(res["object_id"])
-    info = await vk_api("groups.getById", group_id=gid)
-    group = info[0]
-    return int(group["id"]), group.get("name", ""), group.get("screen_name", "")
+        rs = await vk_api("utils.resolveScreenName", screen_name=screen)
+        if rs and rs.get("type") == "group" and int(rs.get("object_id", 0)) > 0:
+            gid = int(rs["object_id"])
+    except Exception:
+        pass
+
+    try:
+        arg = gid if gid is not None else screen
+        gb = await vk_api("groups.getById", group_ids=arg, fields="screen_name")
+        resp = gb if isinstance(gb, list) else (gb.get("groups") or [gb])
+        if not isinstance(resp, list) or not resp:
+            raise ValueError("Empty response from groups.getById")
+        g = resp[0]
+        group_id = int(g["id"])
+        name = g.get("name") or str(group_id)
+        screen_name = g.get("screen_name") or screen
+        return group_id, name, screen_name
+    except Exception as e:
+        logging.error("vk_resolve_group failed: %s", e)
+        raise
 
 
 def _pick_biggest_photo(photo: dict) -> str | None:
@@ -1553,6 +1583,13 @@ async def _vk_api(
                     )
                 return data
             err = data["error"]
+            logging.error(
+                "VK API error: method=%s code=%s msg=%s params=%s",
+                method,
+                err.get("error_code"),
+                err.get("error_msg"),
+                redact_params(call_params),
+            )
             msg = err.get("error_msg", "")
             code = err.get("error_code")
             if code == 14:
@@ -15099,8 +15136,13 @@ async def handle_vk_add_message(message: types.Message, db: Database, bot: Bot) 
     try:
         gid, name, screen_name = await vk_resolve_group(screen)
     except Exception as e:
-        logging.error("vk_resolve_group failed: %s", e)
-        await bot.send_message(message.chat.id, "Не удалось определить сообщество")
+        logging.exception("vk_resolve_group failed")
+        await bot.send_message(
+            message.chat.id,
+            "Не удалось определить сообщество.\n"
+            "Проверьте ссылку/скриннейм (пример: https://vk.com/muzteatr39).\n"
+            f"Технические детали: {e}.",
+        )
         return
     async with db.raw_conn() as conn:
         await conn.execute(
