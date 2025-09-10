@@ -87,6 +87,7 @@ class Event(SQLModel, table=True):
     ics_url: Optional[str] = None
     source_post_url: Optional[str] = None
     source_vk_post_url: Optional[str] = None
+    vk_repost_url: Optional[str] = None
     ics_hash: Optional[str] = None
     ics_file_id: Optional[str] = None
     ics_updated_at: Optional[datetime] = None

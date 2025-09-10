@@ -221,3 +221,7 @@
 
 - Added database tables and helpers for VK crawling and review queue.
 - Introduced `vk_intake` module with keyword and date detection utilities.
+
+## v0.3.35 - VK repost link storage
+
+- Event records now include an optional `vk_repost_url` to track reposts in the VK afisha.
