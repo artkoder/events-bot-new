@@ -3547,7 +3547,14 @@ async def build_month_nav_html(db: Database, current_month: str | None = None) -
             links.append(" ")
     if not links:
         return ""
-    return "<br/><h4>" + "".join(links) + "</h4>"
+    result = "<br/><h4>" + "".join(links) + "</h4>"
+    fest_index_url = await get_setting_value(db, "fest_index_url")
+    if fest_index_url:
+        result += (
+            f'<br/><h3><a href="{html.escape(fest_index_url)}">'
+            f"Фестивали</a></h3>"
+        )
+    return result
 
 
 async def build_month_nav_block(
