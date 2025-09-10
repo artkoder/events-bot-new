@@ -1,0 +1,39 @@
+import types
+import pytest
+from aiohttp.test_utils import make_mocked_request
+
+import vk_intake
+import main
+
+
+@pytest.mark.asyncio
+async def test_vk_intake_processing_time_metric(monkeypatch):
+    vk_intake.processing_time_seconds_total = 0.0
+
+    async def fake_build(text, **kwargs):
+        return vk_intake.EventDraft(title="T")
+
+    async def fake_persist(draft, photos):
+        return vk_intake.PersistResult(
+            event_id=1,
+            telegraph_url="t",
+            ics_supabase_url="s",
+            ics_tg_url="tg",
+            event_date="2025-01-01",
+        )
+
+    monkeypatch.setattr(vk_intake, "build_event_payload_from_vk", fake_build)
+    monkeypatch.setattr(vk_intake, "persist_event_and_pages", fake_persist)
+
+    times = iter([1.0, 2.0])
+    monkeypatch.setattr(vk_intake.time, "perf_counter", lambda: next(times))
+
+    await vk_intake.process_event("text", photos=[])
+
+    assert vk_intake.processing_time_seconds_total == pytest.approx(1.0)
+
+    req = make_mocked_request("GET", "/metrics")
+    resp = await main.metrics_handler(req)
+    assert (
+        "vk_intake_processing_time_seconds_total 1" in resp.text
+    )

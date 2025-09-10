@@ -98,6 +98,7 @@ import re
 import httpx
 import hashlib
 import unicodedata
+import vk_intake
 import argparse
 import shlex
 
@@ -388,6 +389,25 @@ def choose_vk_actor(owner_id: int, intent: str) -> list[VkActor]:
 
 # metrics counters
 vk_fallback_group_to_user_total: dict[str, int] = defaultdict(int)
+
+
+def format_metrics() -> str:
+    lines: list[str] = []
+    for method, count in vk_fallback_group_to_user_total.items():
+        lines.append(
+            f"vk_fallback_group_to_user_total{{method=\"{method}\"}} {count}"
+        )
+    lines.append(
+        "vk_intake_processing_time_seconds_total "
+        f"{vk_intake.processing_time_seconds_total:.6f}"
+    )
+    return "\n".join(lines) + "\n"
+
+
+async def metrics_handler(request: web.Request) -> web.Response:
+    return web.Response(
+        text=format_metrics(), content_type="text/plain; version=0.0.4"
+    )
 # circuit breaker for group-token permission errors
 VK_CB_TTL = 12 * 3600
 vk_group_blocked: dict[str, float] = {}
@@ -16718,6 +16738,7 @@ def create_app() -> web.Application:
             return web.Response(text="ok")
 
     app.router.add_get("/healthz", health_handler)
+    app.router.add_get("/metrics", metrics_handler)
 
     async def on_startup(app: web.Application):
         loop = asyncio.get_running_loop()
