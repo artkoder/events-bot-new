@@ -389,6 +389,24 @@ def choose_vk_actor(owner_id: int, intent: str) -> list[VkActor]:
 
 # metrics counters
 vk_fallback_group_to_user_total: dict[str, int] = defaultdict(int)
+vk_crawl_groups_total = 0
+vk_crawl_posts_scanned_total = 0
+vk_crawl_matched_total = 0
+vk_crawl_duplicates_total = 0
+vk_inbox_inserted_total = 0
+vk_review_actions_total: dict[str, int] = defaultdict(int)
+vk_repost_attempts_total = 0
+vk_repost_errors_total = 0
+
+# histogram buckets for VK import duration in seconds
+vk_import_duration_buckets: dict[float, int] = {
+    1.0: 0,
+    2.5: 0,
+    5.0: 0,
+    10.0: 0,
+}
+vk_import_duration_sum = 0.0
+vk_import_duration_count = 0
 
 
 def format_metrics() -> str:
@@ -397,6 +415,29 @@ def format_metrics() -> str:
         lines.append(
             f"vk_fallback_group_to_user_total{{method=\"{method}\"}} {count}"
         )
+    lines.append(f"vk_crawl_groups_total {vk_crawl_groups_total}")
+    lines.append(f"vk_crawl_posts_scanned_total {vk_crawl_posts_scanned_total}")
+    lines.append(f"vk_crawl_matched_total {vk_crawl_matched_total}")
+    lines.append(f"vk_crawl_duplicates_total {vk_crawl_duplicates_total}")
+    lines.append(f"vk_inbox_inserted_total {vk_inbox_inserted_total}")
+    for action, count in vk_review_actions_total.items():
+        lines.append(
+            f"vk_review_actions_total{{action=\"{action}\"}} {count}"
+        )
+    lines.append(f"vk_repost_attempts_total {vk_repost_attempts_total}")
+    lines.append(f"vk_repost_errors_total {vk_repost_errors_total}")
+
+    cumulative = 0
+    for bound in sorted(vk_import_duration_buckets):
+        cumulative += vk_import_duration_buckets[bound]
+        lines.append(
+            f"vk_import_duration_seconds_bucket{{le=\"{bound}\"}} {cumulative}"
+        )
+    lines.append(
+        f"vk_import_duration_seconds_bucket{{le=\"+Inf\"}} {vk_import_duration_count}"
+    )
+    lines.append(f"vk_import_duration_seconds_sum {vk_import_duration_sum:.6f}")
+    lines.append(f"vk_import_duration_seconds_count {vk_import_duration_count}")
     lines.append(
         "vk_intake_processing_time_seconds_total "
         f"{vk_intake.processing_time_seconds_total:.6f}"
@@ -15346,12 +15387,17 @@ async def handle_vk_crawl_now(message: types.Message, db: Database, bot: Bot) ->
             await bot.send_message(message.chat.id, "Not authorized")
             return
     stats = await vk_intake.crawl_once(db)
+    q = stats.get("queue", {})
     msg = (
-        f"\u041f\u0440\u043e\u0432\u0435\u0440\u0435\u043d\u043e {stats['groups_checked']} \u0441\u043e\u043e\u0431\u0449\u0435\u0441\u0442\u0432, "
-        f"\u043f\u0440\u043e\u0441\u043c\u043e\u0442\u0440\u0435\u043d\u043e {stats['posts_scanned']} \u043f\u043e\u0441\u0442\u043e\u0432, "
-        f"\u0441\u043e\u0432\u043f\u0430\u043b\u043e {stats['posts_matched']}, "
-        f"\u0434\u0443\u0431\u043b\u0438\u043a\u0430\u0442\u043e\u0432 {stats['duplicates']}. "
-        f"\u0412 \u043e\u0447\u0435\u0440\u0435\u0434\u0438 \u0441\u0435\u0439\u0447\u0430\u0441 {stats['inbox_total']}"
+        f"Проверено {stats['groups_checked']} сообществ, "
+        f"просмотрено {stats['posts_scanned']} постов, "
+        f"совпало {stats['matches']}, "
+        f"дубликатов {stats['duplicates']}, "
+        f"добавлено {stats['added']}, "
+        f"теперь в очереди {stats['inbox_total']} "
+        f"(pending: {q.get('pending',0)}, locked: {q.get('locked',0)}, "
+        f"skipped: {q.get('skipped',0)}, imported: {q.get('imported',0)}, "
+        f"rejected: {q.get('rejected',0)})"
     )
     await bot.send_message(message.chat.id, msg)
 
