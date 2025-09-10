@@ -244,6 +244,42 @@ class Database:
 
             await conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS vk_source(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    group_id INTEGER NOT NULL,
+                    screen_name TEXT,
+                    name TEXT,
+                    location TEXT,
+                    default_time TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            await conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ux_vk_source_group ON vk_source(group_id)"
+            )
+
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS vk_tmp_post(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    batch TEXT NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    group_id INTEGER NOT NULL,
+                    post_id INTEGER NOT NULL,
+                    date INTEGER NOT NULL,
+                    text TEXT,
+                    photos JSON,
+                    url TEXT
+                )
+                """
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_vk_tmp_post_batch ON vk_tmp_post(batch, id)"
+            )
+
+            await conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS page_section_cache(
                     page_key TEXT NOT NULL,
                     section_key TEXT NOT NULL,

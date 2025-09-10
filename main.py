@@ -313,6 +313,7 @@ VK_TOKEN_AFISHA = os.getenv("VK_TOKEN_AFISHA")  # NEW
 VK_USER_TOKEN = os.getenv("VK_USER_TOKEN")
 VK_MAIN_GROUP_ID = os.getenv("VK_MAIN_GROUP_ID")
 VK_AFISHA_GROUP_ID = os.getenv("VK_AFISHA_GROUP_ID")
+VK_API_VERSION = os.getenv("VK_API_VERSION", "5.199")
 try:
     VK_MAX_ATTACHMENTS = int(os.getenv("VK_MAX_ATTACHMENTS", "10"))
 except ValueError:
@@ -435,6 +436,8 @@ daily_time_sessions: TTLCache[int, int] = TTLCache(maxsize=64, ttl=3600)
 vk_group_sessions: set[int] = set()
 # user_id -> section (today/added) for VK time update
 vk_time_sessions: TTLCache[int, str] = TTLCache(maxsize=64, ttl=3600)
+# waiting for VK source add input
+vk_add_source_sessions: set[int] = set()
 
 # superadmin user_id -> pending partner user_id
 partner_info_sessions: TTLCache[int, int] = TTLCache(maxsize=64, ttl=3600)
@@ -863,6 +866,9 @@ def seconds_to_next_minute(now: datetime) -> float:
 # main menu buttons
 MENU_ADD_EVENT = "\u2795 Добавить событие"
 MENU_EVENTS = "\U0001f4c5 События"
+VK_BTN_ADD_SOURCE = "\u2795 Добавить сообщество"
+VK_BTN_LIST_SOURCES = "\U0001f4cb Показать список сообществ"
+VK_BTN_CHECK_EVENTS = "\U0001f50e Проверить события"
 
 # command help descriptions by role
 # roles: guest (not registered), user (registered), superadmin
@@ -931,6 +937,11 @@ HELP_COMMANDS = [
         "usage": "/vklink <event_id> <VK post link>",
         "desc": "Attach VK post link to an event",
         "roles": {"user", "superadmin"},
+    },
+    {
+        "usage": "/vk",
+        "desc": "VK monitoring: add/list/check groups",
+        "roles": {"superadmin"},
     },
     {
         "usage": "/requests",
@@ -1326,6 +1337,97 @@ def _vk_user_token() -> str | None:
     if token and token != _vk_user_token_bad:
         return token
     return None
+
+
+async def vk_api(method: str, **params: Any) -> Any:
+    """Simple VK API GET request with token and version."""
+    token = VK_USER_TOKEN or VK_TOKEN or VK_TOKEN_AFISHA
+    if not token:
+        raise RuntimeError("VK token not set")
+    call_params = params.copy()
+    call_params["access_token"] = token
+    call_params["v"] = VK_API_VERSION
+    async with VK_SEMAPHORE:
+        resp = await http_call(
+            f"vk.{method}",
+            "GET",
+            f"https://api.vk.com/method/{method}",
+            timeout=HTTP_TIMEOUT,
+            params=call_params,
+        )
+    data = resp.json()
+    if "error" in data:
+        err = data["error"]
+        logging.error(
+            "vk api %s error=%s msg=%s", method, err.get("error_code"), err.get("error_msg")
+        )
+        raise RuntimeError(f"VK API error {err.get('error_code')}")
+    return data.get("response")
+
+
+async def vk_resolve_group(screen_or_url: str) -> tuple[int, str, str]:
+    """Resolve group by screen name or URL and return id, name, screen_name."""
+    screen = screen_or_url.strip()
+    if screen.startswith("http"):
+        screen = urlparse(screen).path.strip("/")
+    screen = re.sub(r"^(club|public)", "", screen)
+    try:
+        gid = int(screen)
+    except ValueError:
+        res = await vk_api("utils.resolveScreenName", screen_name=screen)
+        if not res or res.get("type") != "group":
+            raise RuntimeError("Group not found")
+        gid = int(res["object_id"])
+    info = await vk_api("groups.getById", group_id=gid)
+    group = info[0]
+    return int(group["id"]), group.get("name", ""), group.get("screen_name", "")
+
+
+def _pick_biggest_photo(photo: dict) -> str | None:
+    sizes = photo.get("sizes") or []
+    if not sizes:
+        return None
+    best = max(sizes, key=lambda s: s.get("width", 0))
+    return best.get("url")
+
+
+def _extract_post_photos(post: dict) -> list[str]:
+    photos: list[str] = []
+    for att in post.get("attachments", []):
+        if att.get("type") == "photo":
+            url = _pick_biggest_photo(att["photo"])
+            if url:
+                photos.append(url)
+    return photos
+
+
+async def vk_wall_since(group_id: int, since_ts: int) -> list[dict]:
+    """Return wall posts for a group since timestamp."""
+    resp = await vk_api(
+        "wall.get",
+        owner_id=-group_id,
+        count=100,
+        filter="owner",
+    )
+    items = resp.get("items", []) if isinstance(resp, dict) else resp["items"]
+    posts: list[dict] = []
+    for item in items:
+        if item.get("date", 0) < since_ts:
+            continue
+        src = item.get("copy_history", [item])[0]
+        photos = _extract_post_photos(src)
+        posts.append(
+            {
+                "group_id": group_id,
+                "post_id": item["id"],
+                "date": item["date"],
+                "text": src.get("text", ""),
+                "photos": photos,
+                "url": f"https://vk.com/wall-{group_id}_{item['id']}",
+            }
+        )
+    posts.sort(key=lambda p: (p["date"], p["post_id"]), reverse=True)
+    return posts
 
 
 class VKAPIError(Exception):
@@ -14946,6 +15048,229 @@ async def handle_vk_time_message(message: types.Message, db: Database, bot: Bot)
     await bot.send_message(message.chat.id, f"Time set to {value}")
 
 
+async def handle_vk_command(message: types.Message, db: Database, bot: Bot) -> None:
+    async with db.get_session() as session:
+        user = await session.get(User, message.from_user.id)
+    if not (user and user.is_superadmin):
+        await bot.send_message(message.chat.id, "Access denied")
+        return
+    if not (VK_USER_TOKEN or VK_TOKEN or VK_TOKEN_AFISHA):
+        await bot.send_message(message.chat.id, "VK token not configured")
+        return
+    buttons = [
+        [types.KeyboardButton(text=VK_BTN_ADD_SOURCE)],
+        [types.KeyboardButton(text=VK_BTN_LIST_SOURCES)],
+        [types.KeyboardButton(text=VK_BTN_CHECK_EVENTS)],
+    ]
+    markup = types.ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
+    await bot.send_message(message.chat.id, "VK мониторинг", reply_markup=markup)
+
+
+async def handle_vk_add_start(message: types.Message, db: Database, bot: Bot) -> None:
+    async with db.get_session() as session:
+        user = await session.get(User, message.from_user.id)
+    if not (user and user.is_superadmin):
+        await bot.send_message(message.chat.id, "Access denied")
+        return
+    vk_add_source_sessions.add(message.from_user.id)
+    await bot.send_message(
+        message.chat.id,
+        "Отправьте ссылку или скриннейм, опционально локацию и время через |",
+    )
+
+
+async def handle_vk_add_message(message: types.Message, db: Database, bot: Bot) -> None:
+    if message.from_user.id not in vk_add_source_sessions:
+        return
+    vk_add_source_sessions.discard(message.from_user.id)
+    text = (message.text or "").strip()
+    parts = [p.strip() for p in text.split("|") if p.strip()]
+    if not parts:
+        await bot.send_message(message.chat.id, "Пустой ввод")
+        return
+    screen = parts[-1]
+    location = None
+    default_time = None
+    for p in parts[:-1]:
+        if re.match(r"^\d{1,2}:\d{2}$", p):
+            default_time = p if len(p.split(":")[0]) == 2 else f"0{p}"
+        else:
+            location = p
+    try:
+        gid, name, screen_name = await vk_resolve_group(screen)
+    except Exception as e:
+        logging.error("vk_resolve_group failed: %s", e)
+        await bot.send_message(message.chat.id, "Не удалось определить сообщество")
+        return
+    async with db.raw_conn() as conn:
+        await conn.execute(
+            "INSERT OR IGNORE INTO vk_source(group_id, screen_name, name, location, default_time) VALUES(?,?,?,?,?)",
+            (gid, screen_name, name, location, default_time),
+        )
+        await conn.commit()
+    extra = []
+    if location:
+        extra.append(location)
+    if default_time:
+        extra.append(default_time)
+    suffix = f" — {', '.join(extra)}" if extra else ""
+    await bot.send_message(
+        message.chat.id,
+        f"Добавлено: {name} (vk.com/{screen_name}){suffix}",
+    )
+
+
+async def _fetch_vk_sources(db: Database) -> list[tuple[int, int, str, str, str | None, str | None]]:
+    async with db.raw_conn() as conn:
+        cursor = await conn.execute(
+            "SELECT id, group_id, screen_name, name, location, default_time FROM vk_source ORDER BY id"
+        )
+        rows = await cursor.fetchall()
+    return rows
+
+
+async def handle_vk_list(message: types.Message, db: Database, bot: Bot, edit: types.Message | None = None) -> None:
+    rows = await _fetch_vk_sources(db)
+    if not rows:
+        if edit:
+            await edit.edit_text("Список пуст")
+        else:
+            await bot.send_message(message.chat.id, "Список пуст")
+        return
+    lines: list[str] = []
+    buttons: list[list[types.InlineKeyboardButton]] = []
+    for row in rows:
+        rid, gid, screen, name, loc, dtime = row
+        extras = []
+        if loc:
+            extras.append(loc)
+        if dtime:
+            extras.append(dtime)
+        extra = f" — id={gid} {', '.join(extras)}" if extras else f" — id={gid}"
+        lines.append(f"• {name} (vk.com/{screen}){extra}")
+        buttons.append(
+            [
+                types.InlineKeyboardButton(
+                    text=f"❌ Удалить {name}", callback_data=f"vkdel:{rid}"
+                )
+            ]
+        )
+    text = "\n".join(lines)
+    markup = types.InlineKeyboardMarkup(inline_keyboard=buttons)
+    if edit:
+        await edit.edit_text(text, reply_markup=markup)
+    else:
+        await bot.send_message(message.chat.id, text, reply_markup=markup)
+
+
+async def handle_vk_delete_callback(callback: types.CallbackQuery, db: Database, bot: Bot) -> None:
+    try:
+        vid = int(callback.data.split(":", 1)[1])
+    except Exception:
+        await callback.answer()
+        return
+    async with db.raw_conn() as conn:
+        await conn.execute("DELETE FROM vk_source WHERE id=?", (vid,))
+        await conn.commit()
+    await callback.answer("Удалено")
+    await handle_vk_list(callback.message, db, bot, edit=callback.message)
+
+
+async def send_vk_tmp_post(chat_id: int, batch: str, idx: int, total: int, db: Database, bot: Bot) -> None:
+    async with db.raw_conn() as conn:
+        cursor = await conn.execute(
+            "SELECT text, photos, url FROM vk_tmp_post WHERE batch=? ORDER BY date DESC, post_id DESC LIMIT 1 OFFSET ?",
+            (batch, idx),
+        )
+        row = await cursor.fetchone()
+    if not row:
+        await bot.send_message(chat_id, "Это был последний пост.")
+        return
+    text, photos_json, url = row
+    photos = json.loads(photos_json) if photos_json else []
+    if photos:
+        if len(photos) > 1:
+            media = [types.InputMediaPhoto(media=p) for p in photos[:10]]
+            try:
+                await bot.send_media_group(chat_id, media)
+            except TelegramBadRequest as e:
+                logging.error("sendMediaGroup failed: %s", e)
+                await bot.send_photo(chat_id, photos[0])
+        else:
+            await bot.send_photo(chat_id, photos[0])
+    msg = (text or "").strip()
+    if len(msg) > 3500:
+        msg = msg[:3500] + "…"
+    msg = msg + f"\n\n{url}"
+    if idx + 1 < total:
+        markup = types.InlineKeyboardMarkup(
+            inline_keyboard=[[types.InlineKeyboardButton(text="Следующее ▶️", callback_data=f"vknext:{batch}:{idx+1}")]]
+        )
+        await bot.send_message(chat_id, msg, reply_markup=markup)
+    else:
+        await bot.send_message(chat_id, msg)
+        await bot.send_message(chat_id, "Это был последний пост.")
+
+
+async def handle_vk_check(message: types.Message, db: Database, bot: Bot) -> None:
+    rows = await _fetch_vk_sources(db)
+    if not rows:
+        await bot.send_message(message.chat.id, "Список сообществ пуст")
+        return
+    since_ts = int(time.time()) - 3 * 24 * 3600
+    batch = f"{int(time.time())}:{message.from_user.id}"
+    async with db.raw_conn() as conn:
+        await conn.execute("DELETE FROM vk_tmp_post WHERE user_id=?", (message.from_user.id,))
+        await conn.commit()
+    total = 0
+    for _, gid, _, _, _, _ in rows:
+        try:
+            posts = await vk_wall_since(gid, since_ts)
+        except Exception as e:
+            logging.error("vk_wall_since failed gid=%s: %s", gid, e)
+            continue
+        if not posts:
+            continue
+        async with db.raw_conn() as conn:
+            for p in posts:
+                await conn.execute(
+                    "INSERT INTO vk_tmp_post(batch,user_id,group_id,post_id,date,text,photos,url) VALUES(?,?,?,?,?,?,?,?)",
+                    (
+                        batch,
+                        message.from_user.id,
+                        p["group_id"],
+                        p["post_id"],
+                        p["date"],
+                        p.get("text"),
+                        json.dumps(p.get("photos")),
+                        p["url"],
+                    ),
+                )
+            await conn.commit()
+        total += len(posts)
+    if total == 0:
+        await bot.send_message(message.chat.id, "За последние 3 дня постов не найдено")
+        return
+    await bot.send_message(message.chat.id, f"Найдено постов: {total}. Показываю по одному")
+    await send_vk_tmp_post(message.chat.id, batch, 0, total, db, bot)
+
+
+async def handle_vk_next_callback(callback: types.CallbackQuery, db: Database, bot: Bot) -> None:
+    try:
+        _, batch, idx = callback.data.split(":", 2)
+        index = int(idx)
+    except Exception:
+        await callback.answer()
+        return
+    async with db.raw_conn() as conn:
+        cursor = await conn.execute(
+            "SELECT COUNT(*) FROM vk_tmp_post WHERE batch=?", (batch,)
+        )
+        total = (await cursor.fetchone())[0]
+    await send_vk_tmp_post(callback.message.chat.id, batch, index, total, db, bot)
+    await callback.answer()
+
+
 async def handle_partner_info_message(message: types.Message, db: Database, bot: Bot):
     uid = partner_info_sessions.get(message.from_user.id)
     if not uid:
@@ -16129,6 +16454,26 @@ def create_app() -> web.Application:
         logging.info("vk_link_cmd_wrapper start: user=%s", message.from_user.id)
         await handle_vk_link_command(message, db, bot)
 
+    async def vk_cmd_wrapper(message: types.Message):
+        await handle_vk_command(message, db, bot)
+
+    async def vk_add_start_wrapper(message: types.Message):
+        await handle_vk_add_start(message, db, bot)
+
+    async def vk_add_msg_wrapper(message: types.Message):
+        await handle_vk_add_message(message, db, bot)
+
+    async def vk_list_wrapper(message: types.Message):
+        await handle_vk_list(message, db, bot)
+
+    async def vk_check_wrapper(message: types.Message):
+        await handle_vk_check(message, db, bot)
+
+    async def vk_delete_wrapper(callback: types.CallbackQuery):
+        await handle_vk_delete_callback(callback, db, bot)
+
+    async def vk_next_wrapper(callback: types.CallbackQuery):
+        await handle_vk_next_callback(callback, db, bot)
     async def status_wrapper(message: types.Message):
         await handle_status(message, db, bot, app)
 
@@ -16227,6 +16572,11 @@ def create_app() -> web.Application:
     dp.message.register(events_date_wrapper, lambda m: m.from_user.id in events_date_sessions)
     dp.message.register(add_event_start_wrapper, lambda m: m.text == MENU_ADD_EVENT)
     dp.message.register(vk_link_cmd_wrapper, Command("vklink"))
+    dp.message.register(vk_cmd_wrapper, Command("vk"))
+    dp.message.register(vk_add_start_wrapper, lambda m: m.text == VK_BTN_ADD_SOURCE)
+    dp.message.register(vk_list_wrapper, lambda m: m.text == VK_BTN_LIST_SOURCES)
+    dp.message.register(vk_check_wrapper, lambda m: m.text == VK_BTN_CHECK_EVENTS)
+    dp.message.register(vk_add_msg_wrapper, lambda m: m.from_user.id in vk_add_source_sessions)
     dp.message.register(partner_info_wrapper, lambda m: m.from_user.id in partner_info_sessions)
     dp.message.register(channels_wrapper, Command("channels"))
     dp.message.register(reg_daily_wrapper, Command("regdailychannels"))
@@ -16292,6 +16642,8 @@ def create_app() -> web.Application:
     dp.message.register(
         vk_time_msg_wrapper, lambda m: m.from_user.id in vk_time_sessions
     )
+    dp.callback_query.register(vk_delete_wrapper, lambda c: c.data.startswith("vkdel:"))
+    dp.callback_query.register(vk_next_wrapper, lambda c: c.data.startswith("vknext:"))
     dp.message.register(
 
         festival_edit_wrapper, lambda m: m.from_user.id in festival_edit_sessions
