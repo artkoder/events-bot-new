@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
-import time
+import time as unixtime
 import time as _time
 
 
@@ -45,6 +45,7 @@ def configure_logging() -> None:
 
 
 configure_logging()
+logger = logging.getLogger(__name__)
 
 def logline(tag: str, eid: int | None, msg: str, **kw) -> None:
     kv = " ".join(f"{k}={v}" for k, v in kw.items() if v is not None)
@@ -15230,16 +15231,14 @@ async def send_vk_tmp_post(chat_id: int, batch: str, idx: int, total: int, db: D
         return
     text, photos_json, url = row
     photos = json.loads(photos_json) if photos_json else []
-    if photos:
-        if len(photos) > 1:
-            media = [types.InputMediaPhoto(media=p) for p in photos[:10]]
-            try:
-                await bot.send_media_group(chat_id, media)
-            except TelegramBadRequest as e:
-                logging.error("sendMediaGroup failed: %s", e)
-                await bot.send_photo(chat_id, photos[0])
-        else:
+    if len(photos) >= 2:
+        media = [types.InputMediaPhoto(media=p) for p in photos[:10]]
+        try:
+            await bot.send_media_group(chat_id, media)
+        except Exception:
             await bot.send_photo(chat_id, photos[0])
+    elif len(photos) == 1:
+        await bot.send_photo(chat_id, photos[0])
     msg = (text or "").strip()
     if len(msg) > 3500:
         msg = msg[:3500] + "…"
@@ -15255,46 +15254,51 @@ async def send_vk_tmp_post(chat_id: int, batch: str, idx: int, total: int, db: D
 
 
 async def handle_vk_check(message: types.Message, db: Database, bot: Bot) -> None:
-    rows = await _fetch_vk_sources(db)
-    if not rows:
-        await bot.send_message(message.chat.id, "Список сообществ пуст")
-        return
-    since_ts = int(time.time()) - 3 * 24 * 3600
-    batch = f"{int(time.time())}:{message.from_user.id}"
-    async with db.raw_conn() as conn:
-        await conn.execute("DELETE FROM vk_tmp_post WHERE user_id=?", (message.from_user.id,))
-        await conn.commit()
-    total = 0
-    for _, gid, _, _, _, _ in rows:
-        try:
-            posts = await vk_wall_since(gid, since_ts)
-        except Exception as e:
-            logging.error("vk_wall_since failed gid=%s: %s", gid, e)
-            continue
-        if not posts:
-            continue
+    try:
+        rows = await _fetch_vk_sources(db)
+        if not rows:
+            await message.answer("Список сообществ пуст")
+            return
+        since_ts = int(unixtime.time()) - 3 * 24 * 3600
+        batch = f"{int(unixtime.time())}:{message.from_user.id}"
         async with db.raw_conn() as conn:
-            for p in posts:
-                await conn.execute(
-                    "INSERT INTO vk_tmp_post(batch,user_id,group_id,post_id,date,text,photos,url) VALUES(?,?,?,?,?,?,?,?)",
-                    (
-                        batch,
-                        message.from_user.id,
-                        p["group_id"],
-                        p["post_id"],
-                        p["date"],
-                        p.get("text"),
-                        json.dumps(p.get("photos")),
-                        p["url"],
-                    ),
-                )
+            await conn.execute("DELETE FROM vk_tmp_post WHERE user_id=?", (message.from_user.id,))
             await conn.commit()
-        total += len(posts)
-    if total == 0:
-        await bot.send_message(message.chat.id, "За последние 3 дня постов не найдено")
+        total = 0
+        for _, gid, _, _, _, _ in rows:
+            try:
+                posts = await vk_wall_since(gid, since_ts)
+            except Exception as e:
+                logging.error("vk_wall_since failed gid=%s: %s", gid, e)
+                continue
+            if not posts:
+                continue
+            async with db.raw_conn() as conn:
+                for p in posts:
+                    await conn.execute(
+                        "INSERT INTO vk_tmp_post(batch,user_id,group_id,post_id,date,text,photos,url) VALUES(?,?,?,?,?,?,?,?)",
+                        (
+                            batch,
+                            message.from_user.id,
+                            p["group_id"],
+                            p["post_id"],
+                            p["date"],
+                            p.get("text"),
+                            json.dumps(p.get("photos")),
+                            p["url"],
+                        ),
+                    )
+                await conn.commit()
+            total += len(posts)
+        if total == 0:
+            await message.answer("За последние 3 дня постов не нашлось.")
+            return
+        await message.answer(f"Найдено постов: {total}. Показываю по одному")
+        await send_vk_tmp_post(message.chat.id, batch, 0, total, db, bot)
+    except Exception as e:
+        logger.exception("vk_check failed")
+        await message.answer(f"Не удалось проверить посты: {e}")
         return
-    await bot.send_message(message.chat.id, f"Найдено постов: {total}. Показываю по одному")
-    await send_vk_tmp_post(message.chat.id, batch, 0, total, db, bot)
 
 
 async def handle_vk_next_callback(callback: types.CallbackQuery, db: Database, bot: Bot) -> None:
