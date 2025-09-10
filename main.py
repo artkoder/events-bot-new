@@ -10053,16 +10053,17 @@ def _build_month_page_content_sync(
         add_many(telegraph_br())
         add(
             {
-                "tag": "p",
+                "tag": "h3",
                 "children": [
                     {
                         "tag": "a",
                         "attrs": {"href": fest_index_url},
-                        "children": ["🎪 Все фестивали Калининградской области"],
+                        "children": ["Фестивали"],
                     }
                 ],
             }
         )
+        add_many(telegraph_br())
 
     title = (
         f"События Калининграда в {month_name_prepositional(month)}: полный анонс от Полюбить Калининград Анонсы"
@@ -10496,16 +10497,17 @@ async def build_weekend_page_content(
         add_many(telegraph_br())
         add(
             {
-                "tag": "p",
+                "tag": "h3",
                 "children": [
                     {
                         "tag": "a",
                         "attrs": {"href": fest_index_url},
-                        "children": ["Ближайшие фестивали Калининградской области"],
+                        "children": ["Фестивали"],
                     }
                 ],
             }
         )
+        add_many(telegraph_br())
 
     label = format_weekend_range(saturday)
     if saturday.month == sunday.month:
@@ -11132,18 +11134,17 @@ async def build_festival_page_content(db: Database, fest: Festival) -> tuple[str
         )
         nodes.append(
             {
-                "tag": "p",
+                "tag": "h3",
                 "children": [
                     {
                         "tag": "a",
                         "attrs": {"href": fest_index_url},
-                        "children": [
-                            "\U0001f3aa Все фестивали Калининградской области →"
-                        ],
+                        "children": ["Фестивали"],
                     }
                 ],
             }
         )
+        nodes.extend(telegraph_br())
     title = fest.full_name or fest.name
     return title, nodes
 

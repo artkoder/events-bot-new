@@ -226,7 +226,7 @@ async def test_month_page_has_festivals_link(tmp_path: Path, monkeypatch):
 
     _, content, _ = await main.build_month_page_content(db, "2025-07")
     html = nodes_to_html(content)
-    assert '<a href="https://telegra.ph/fests">🎪 Все фестивали Калининградской области</a>' in html
+    assert '<h3><a href="https://telegra.ph/fests">Фестивали</a></h3>' in html
 
 
 @pytest.mark.asyncio
@@ -265,7 +265,7 @@ async def test_weekend_page_has_festivals_link(tmp_path: Path, monkeypatch):
 
     _, content, _ = await main.build_weekend_page_content(db, saturday.isoformat())
     html = nodes_to_html(content)
-    assert '<a href="https://telegra.ph/fests">Ближайшие фестивали Калининградской области</a>' in html
+    assert '<h3><a href="https://telegra.ph/fests">Фестивали</a></h3>' in html
 
 
 def test_sanitize_telegraph_html_rewrites_and_checks():

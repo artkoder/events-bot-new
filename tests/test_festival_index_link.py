@@ -22,10 +22,7 @@ async def test_festival_page_has_index_link(tmp_path: Path, caplog):
     with caplog.at_level(logging.INFO):
         _, nodes = await main.build_festival_page_content(db, fest)
     html = nodes_to_html(nodes)
-    assert (
-        '<a href="https://telegra.ph/fests">🎪 Все фестивали Калининградской области →</a>'
-        in html
-    )
+    assert '<h3><a href="https://telegra.ph/fests">Фестивали</a></h3>' in html
     rec = next(r for r in caplog.records if r.message == "festival_page_index_link")
     assert rec.festival == "Fest"
     assert rec.fest_index_url == "https://telegra.ph/fests"
