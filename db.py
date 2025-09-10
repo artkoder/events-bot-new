@@ -120,6 +120,7 @@ class Database:
                     ics_url TEXT,
                     source_post_url TEXT,
                     source_vk_post_url TEXT,
+                    vk_repost_url TEXT,
                     ics_hash TEXT,
                     ics_file_id TEXT,
                     ics_updated_at TIMESTAMP,
@@ -141,6 +142,7 @@ class Database:
             await _add_column(conn, "event", "ics_updated_at TIMESTAMP")
             await _add_column(conn, "event", "ics_post_url TEXT")
             await _add_column(conn, "event", "ics_post_id INTEGER")
+            await _add_column(conn, "event", "vk_repost_url TEXT")
 
             await conn.execute(
                 """
