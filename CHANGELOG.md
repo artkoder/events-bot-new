@@ -225,3 +225,10 @@
 ## v0.3.35 - VK repost link storage
 
 - Event records now include an optional `vk_repost_url` to track reposts in the VK afisha.
+
+## v0.3.36 - VK crawl utility
+
+- Introduced `vk_intake.crawl_once` for cursor-based crawling and enqueueing of
+  matching posts.
+- Dropped the unused VK publish queue in favor of operator-triggered reposts;
+  documentation updated.
