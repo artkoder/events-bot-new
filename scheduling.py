@@ -5,10 +5,11 @@ import logging
 import os
 import time as _time
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from functools import partial
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from apscheduler.events import (
     EVENT_JOB_ERROR,
@@ -431,6 +432,7 @@ def startup(db, bot) -> AsyncIOScheduler:
     from main import (
         vk_scheduler,
         vk_poll_scheduler,
+        vk_crawl_cron,
         cleanup_scheduler,
         partner_notification_scheduler,
         nightly_page_sync,
@@ -510,6 +512,36 @@ def startup(db, bot) -> AsyncIOScheduler:
     logging.info(
         "SCHED registered job id=%s next_run=%s", job.id, _job_next_run(job)
     )
+
+    times_raw = os.getenv("VK_CRAWL_TIMES_LOCAL", "09:15,13:15,17:15,21:15")
+    tz_name = os.getenv("VK_CRAWL_TZ", "Europe/Kaliningrad")
+    tz = ZoneInfo(tz_name)
+    for idx, t in enumerate(times_raw.split(",")):
+        t = t.strip()
+        if not t:
+            continue
+        try:
+            hh, mm = map(int, t.split(":"))
+        except ValueError:
+            logging.warning("invalid VK_CRAWL_TIMES_LOCAL entry: %s", t)
+            continue
+        now_local = datetime.now(tz).replace(hour=hh, minute=mm, second=0, microsecond=0)
+        now_utc = now_local.astimezone(timezone.utc)
+        job = _scheduler.add_job(
+            _job_wrapper("vk_crawl_cron", vk_crawl_cron),
+            "cron",
+            id=f"vk_crawl_cron_{idx}",
+            hour=str(now_utc.hour),
+            minute=str(now_utc.minute),
+            args=[db, bot],
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=30,
+        )
+        logging.info(
+            "SCHED registered job id=%s next_run=%s", job.id, _job_next_run(job)
+        )
 
     if os.getenv("ENABLE_NIGHTLY_PAGE_SYNC") == "1":
         job = _scheduler.add_job(

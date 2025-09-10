@@ -342,20 +342,6 @@ class Database:
             )
 
             await conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS vk_publish_queue (
-                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-                    event_id     INTEGER NOT NULL,
-                    payload      JSON NOT NULL,
-                    status       TEXT NOT NULL DEFAULT 'queued',
-                    last_error   TEXT,
-                    created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    sent_at      TIMESTAMP
-                )
-                """
-            )
-
-            await conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_festival_name ON festival(name)"
             )
             await conn.execute(

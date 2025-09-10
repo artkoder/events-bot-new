@@ -12714,6 +12714,16 @@ async def vk_scheduler(db: Database, bot: Bot, run_id: str | None = None):
             logging.error("vk daily added failed: %s", e)
 
 
+async def vk_crawl_cron(db: Database, bot: Bot, run_id: str | None = None) -> None:
+    """Scheduled VK crawl according to ``VK_CRAWL_TIMES_LOCAL``."""
+    now = datetime.now(LOCAL_TZ).strftime("%H:%M")
+    logging.info("vk.crawl.cron.fire time=%s", now)
+    try:
+        await vk_intake.crawl_once(db)
+    except Exception:
+        logging.exception("vk.crawl.cron.error")
+
+
 async def cleanup_old_events(db: Database, now_utc: datetime | None = None) -> int:
     """Delete events that finished more than a week ago."""
     cutoff = (now_utc or datetime.utcnow()) - timedelta(days=7)
@@ -15328,6 +15338,46 @@ async def handle_vk_check(message: types.Message, db: Database, bot: Bot) -> Non
         return
 
 
+async def handle_vk_crawl_now(message: types.Message, db: Database, bot: Bot) -> None:
+    """Manually trigger VK crawling."""
+    async with db.get_session() as session:
+        user = await session.get(User, message.from_user.id)
+        if not user or not user.is_superadmin:
+            await bot.send_message(message.chat.id, "Not authorized")
+            return
+    stats = await vk_intake.crawl_once(db)
+    msg = (
+        f"\u041f\u0440\u043e\u0432\u0435\u0440\u0435\u043d\u043e {stats['groups_checked']} \u0441\u043e\u043e\u0431\u0449\u0435\u0441\u0442\u0432, "
+        f"\u043f\u0440\u043e\u0441\u043c\u043e\u0442\u0440\u0435\u043d\u043e {stats['posts_scanned']} \u043f\u043e\u0441\u0442\u043e\u0432, "
+        f"\u0441\u043e\u0432\u043f\u0430\u043b\u043e {stats['posts_matched']}, "
+        f"\u0434\u0443\u0431\u043b\u0438\u043a\u0430\u0442\u043e\u0432 {stats['duplicates']}. "
+        f"\u0412 \u043e\u0447\u0435\u0440\u0435\u0434\u0438 \u0441\u0435\u0439\u0447\u0430\u0441 {stats['inbox_total']}"
+    )
+    await bot.send_message(message.chat.id, msg)
+
+
+async def handle_vk_queue(message: types.Message, db: Database, bot: Bot) -> None:
+    async with db.get_session() as session:
+        user = await session.get(User, message.from_user.id)
+        if not user or not user.is_superadmin:
+            await bot.send_message(message.chat.id, "Not authorized")
+            return
+    async with db.raw_conn() as conn:
+        cur = await conn.execute(
+            "SELECT status, COUNT(*) FROM vk_inbox GROUP BY status"
+        )
+        rows = await cur.fetchall()
+    counts = {r[0]: r[1] for r in rows}
+    lines = [
+        f"pending: {counts.get('pending', 0)}",
+        f"locked: {counts.get('locked', 0)}",
+        f"skipped: {counts.get('skipped', 0)}",
+        f"imported: {counts.get('imported', 0)}",
+        f"rejected: {counts.get('rejected', 0)}",
+    ]
+    await bot.send_message(message.chat.id, "\n".join(lines))
+
+
 async def handle_vk_next_callback(callback: types.CallbackQuery, db: Database, bot: Bot) -> None:
     try:
         _, batch, idx = callback.data.split(":", 2)
@@ -16547,6 +16597,10 @@ def create_app() -> web.Application:
 
     async def vk_next_wrapper(callback: types.CallbackQuery):
         await handle_vk_next_callback(callback, db, bot)
+    async def vk_crawl_now_wrapper(message: types.Message):
+        await handle_vk_crawl_now(message, db, bot)
+    async def vk_queue_wrapper(message: types.Message):
+        await handle_vk_queue(message, db, bot)
     async def status_wrapper(message: types.Message):
         await handle_status(message, db, bot, app)
 
@@ -16646,6 +16700,8 @@ def create_app() -> web.Application:
     dp.message.register(add_event_start_wrapper, lambda m: m.text == MENU_ADD_EVENT)
     dp.message.register(vk_link_cmd_wrapper, Command("vklink"))
     dp.message.register(vk_cmd_wrapper, Command("vk"))
+    dp.message.register(vk_crawl_now_wrapper, Command("vk_crawl_now"))
+    dp.message.register(vk_queue_wrapper, Command("vk_queue"))
     dp.message.register(vk_add_start_wrapper, lambda m: m.text == VK_BTN_ADD_SOURCE)
     dp.message.register(vk_list_wrapper, lambda m: m.text == VK_BTN_LIST_SOURCES)
     dp.message.register(vk_check_wrapper, lambda m: m.text == VK_BTN_CHECK_EVENTS)
