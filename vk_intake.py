@@ -72,6 +72,7 @@ class EventDraft:
     venue: str | None = None
     price: str | None = None
     links: List[str] | None = None
+    source_text: str | None = None
 
 
 @dataclass
@@ -91,15 +92,84 @@ async def build_event_payload_from_vk(
     default_time: str | None = None,
     operator_extra: str | None = None,
 ) -> EventDraft:
-    """Placeholder for LLM-based event extraction from VK posts."""
-    raise NotImplementedError
+    """Parse VK post text into an :class:`EventDraft` using the existing LLM."""
+    from main import parse_event_via_4o
+
+    llm_text = text
+    if operator_extra:
+        llm_text = f"{llm_text}\n{operator_extra}"
+
+    extra: dict[str, str] = {}
+    if source_name:
+        # ``parse_event_via_4o`` accepts ``channel_title`` for context
+        extra["channel_title"] = source_name
+
+    parsed = await parse_event_via_4o(llm_text, **extra)
+    if not parsed:
+        raise RuntimeError("LLM returned no event")
+    data = parsed[0]
+
+    price: str | None = None
+    if data.get("ticket_price_min") or data.get("ticket_price_max"):
+        lo = data.get("ticket_price_min")
+        hi = data.get("ticket_price_max")
+        if lo and hi and lo != hi:
+            price = f"{lo}-{hi}"
+        else:
+            price = str(lo or hi)
+
+    links = [data["ticket_link"]] if data.get("ticket_link") else None
+    return EventDraft(
+        title=data.get("title", ""),
+        date=data.get("date"),
+        time=data.get("time") or default_time,
+        venue=data.get("location_name"),
+        price=price,
+        links=links,
+        source_text=text,
+    )
 
 
 async def persist_event_and_pages(
     draft: EventDraft, photos: list[str]
 ) -> PersistResult:
-    """Placeholder for persistence and page generation pipeline."""
-    raise NotImplementedError
+    """Persist a drafted event and schedule page generation tasks."""
+    from datetime import datetime
+    from main import (
+        db,
+        Event,
+        upsert_event,
+        schedule_event_update_tasks,
+    )
+
+    event = Event(
+        title=draft.title,
+        description="",
+        festival=None,
+        date=draft.date or datetime.utcnow().date().isoformat(),
+        time=draft.time or "00:00",
+        location_name=draft.venue or "",
+        source_text=draft.source_text or draft.title,
+        ticket_link=(draft.links[0] if draft.links else None),
+        photo_urls=photos,
+        photo_count=len(photos),
+    )
+
+    async with db.get_session() as session:
+        saved, _ = await upsert_event(session, event)
+
+    await schedule_event_update_tasks(db, saved)
+
+    async with db.get_session() as session:
+        saved = await session.get(Event, saved.id)
+
+    return PersistResult(
+        event_id=saved.id,
+        telegraph_url=saved.telegraph_url or "",
+        ics_supabase_url=saved.ics_url or "",
+        ics_tg_url=saved.ics_post_url or "",
+        event_date=saved.date,
+    )
 
 
 async def process_event(
@@ -157,8 +227,8 @@ async def crawl_once(db, *, broadcast: bool = False) -> dict[str, int]:
 
     for gid in groups:
         stats["groups_checked"] += 1
-        # pause between groups
-        await asyncio.sleep(random.uniform(0.4, 0.6))
+        # pause between groups (safety: 0.7–1.2s)
+        await asyncio.sleep(random.uniform(0.7, 1.2))
         try:
             async with db.raw_conn() as conn:
                 cur = await conn.execute(
@@ -231,12 +301,14 @@ async def crawl_once(db, *, broadcast: bool = False) -> dict[str, int]:
         )
         stats["inbox_total"] = (await cur.fetchone())[0]
 
-    duration = time.perf_counter() - start
+    took_ms = int((time.perf_counter() - start) * 1000)
     logging.info(
-        "vk.crawl done checked=%s matched=%s inbox_total=%s dur=%.2fs",
+        "vk.crawl.finish groups=%s posts_scanned=%s matched=%s dups=%s inbox_total=%s took_ms=%s",
+        stats["groups_checked"],
         stats["posts_scanned"],
         stats["posts_matched"],
+        stats["duplicates"],
         stats["inbox_total"],
-        duration,
+        took_ms,
     )
     return stats
