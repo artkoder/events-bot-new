@@ -5,6 +5,14 @@ Use `/regdailychannels` and `/daily` to manage both Telegram channels and the VK
 
 Superadmins can use `/vk` to monitor VK communities: add or remove groups and manually fetch posts from the last three days.
 
+## VK Intake & Review v1.1
+
+Background crawling collects posts from configured VK communities and filters
+them by event keywords and date patterns. Matching posts land in an operator
+review queue where they can be accepted, enriched with extra info, rejected or
+skipped. Accepted items are processed through the existing pipeline to create a
+Telegraph page, calendar links and a VK publish queue item.
+
 This is an MVP using **aiogram 3** and SQLite. It is designed for deployment on
 Fly.io with a webhook.
 

@@ -216,3 +216,8 @@
 - Caption length for lecture digests now uses visible HTML text to fit up to 9 lines.
 - Removed URL shortener functionality and related configuration.
 - 4o title normalization returns lecturer names in nominative form with `Имя Фамилия: Название` layout.
+
+## v0.3.34 - VK Intake & Review v1.1
+
+- Added database tables and helpers for VK crawling and review queue.
+- Introduced `vk_intake` module with keyword and date detection utilities.

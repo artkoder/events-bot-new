@@ -294,6 +294,66 @@ class Database:
             )
 
             await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS vk_crawl_cursor (
+                    group_id     INTEGER PRIMARY KEY,
+                    last_seen_ts INTEGER DEFAULT 0,
+                    last_post_id INTEGER DEFAULT 0,
+                    updated_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS vk_inbox (
+                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                    group_id     INTEGER NOT NULL,
+                    post_id      INTEGER NOT NULL,
+                    date         INTEGER NOT NULL,
+                    text         TEXT NOT NULL,
+                    matched_kw   TEXT,
+                    has_date     INTEGER NOT NULL,
+                    status       TEXT NOT NULL DEFAULT 'pending',
+                    locked_by    INTEGER,
+                    locked_at    TIMESTAMP,
+                    imported_event_id INTEGER,
+                    review_batch TEXT,
+                    created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            await conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ux_vk_inbox_unique ON vk_inbox(group_id, post_id)"
+            )
+
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS vk_review_batch (
+                    batch_id     TEXT PRIMARY KEY,
+                    operator_id  INTEGER NOT NULL,
+                    months_csv   TEXT NOT NULL,
+                    started_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    finished_at  TIMESTAMP
+                )
+                """
+            )
+
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS vk_publish_queue (
+                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_id     INTEGER NOT NULL,
+                    payload      JSON NOT NULL,
+                    status       TEXT NOT NULL DEFAULT 'queued',
+                    last_error   TEXT,
+                    created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    sent_at      TIMESTAMP
+                )
+                """
+            )
+
+            await conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_festival_name ON festival(name)"
             )
             await conn.execute(
