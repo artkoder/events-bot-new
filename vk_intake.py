@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import random
 import re
 import time
 from dataclasses import dataclass
-from typing import List
+from typing import List, Any
 
 # Keywords used to detect potential event posts
 KEYWORDS: list[str] = [
@@ -223,14 +224,16 @@ async def process_event(
     return result
 
 
-async def crawl_once(db, *, broadcast: bool = False) -> dict[str, int]:
+async def crawl_once(db, *, broadcast: bool = False, bot: Any | None = None) -> dict[str, int]:
     """Crawl configured VK groups once and enqueue matching posts.
 
     The function scans groups listed in ``vk_source`` and uses cursors from
     ``vk_crawl_cursor`` to fetch only new posts. Posts containing event
     keywords and a date mention are inserted into ``vk_inbox`` with status
     ``pending``. Basic statistics are returned for reporting purposes.
-    ``broadcast`` is accepted for API parity but is not used directly here.
+
+    If ``broadcast`` is True and ``bot`` is supplied, a crawl summary is sent
+    to the admin chat specified by ``ADMIN_CHAT_ID`` environment variable.
     """
 
     from main import vk_wall_since  # imported lazily to avoid circular import
@@ -353,4 +356,23 @@ async def crawl_once(db, *, broadcast: bool = False) -> dict[str, int]:
         stats["inbox_total"],
         took_ms,
     )
+    if broadcast and bot:
+        admin_chat = os.getenv("ADMIN_CHAT_ID")
+        if admin_chat:
+            q = stats.get("queue", {})
+            msg = (
+                f"Проверено {stats['groups_checked']} сообществ, "
+                f"просмотрено {stats['posts_scanned']} постов, "
+                f"совпало {stats['matches']}, "
+                f"дубликатов {stats['duplicates']}, "
+                f"добавлено {stats['added']}, "
+                f"теперь в очереди {stats['inbox_total']} "
+                f"(pending: {q.get('pending',0)}, locked: {q.get('locked',0)}, "
+                f"skipped: {q.get('skipped',0)}, imported: {q.get('imported',0)}, "
+                f"rejected: {q.get('rejected',0)})"
+            )
+            try:
+                await bot.send_message(int(admin_chat), msg)
+            except Exception:
+                logging.exception("vk.crawl.broadcast.error")
     return stats

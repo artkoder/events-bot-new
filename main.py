@@ -12760,7 +12760,7 @@ async def vk_crawl_cron(db: Database, bot: Bot, run_id: str | None = None) -> No
     now = datetime.now(LOCAL_TZ).strftime("%H:%M")
     logging.info("vk.crawl.cron.fire time=%s", now)
     try:
-        await vk_intake.crawl_once(db)
+        await vk_intake.crawl_once(db, broadcast=True, bot=bot)
     except Exception:
         logging.exception("vk.crawl.cron.error")
 
@@ -15386,7 +15386,7 @@ async def handle_vk_crawl_now(message: types.Message, db: Database, bot: Bot) ->
         if not user or not user.is_superadmin:
             await bot.send_message(message.chat.id, "Not authorized")
             return
-    stats = await vk_intake.crawl_once(db)
+    stats = await vk_intake.crawl_once(db, broadcast=True, bot=bot)
     q = stats.get("queue", {})
     msg = (
         f"Проверено {stats['groups_checked']} сообществ, "
