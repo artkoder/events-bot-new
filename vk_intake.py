@@ -92,7 +92,17 @@ async def build_event_payload_from_vk(
     default_time: str | None = None,
     operator_extra: str | None = None,
 ) -> EventDraft:
-    """Parse VK post text into an :class:`EventDraft` using the existing LLM."""
+    """Return a normalised event draft extracted from a VK post.
+
+    The function delegates parsing to the same LLM helper used by ``/add`` and
+    forwarded posts.  When ``operator_extra`` is supplied it takes precedence
+    over conflicting fragments of the original text.  ``source_name`` and
+    ``location_hint`` are passed to the extractor for additional context and
+    ``default_time`` is used when the post does not mention a time explicitly.
+
+    The resulting :class:`EventDraft` contains basic event attributes such as
+    title, date, time, venue, price and relevant links.
+    """
     from main import parse_event_via_4o
 
     llm_text = text
@@ -133,7 +143,13 @@ async def build_event_payload_from_vk(
 async def persist_event_and_pages(
     draft: EventDraft, photos: list[str]
 ) -> PersistResult:
-    """Persist a drafted event and schedule page generation tasks."""
+    """Store a drafted event and produce all public artefacts.
+
+    The helper encapsulates the legacy import pipeline used by the bot.  It
+    persists the event to the database, uploads images to Catbox and creates the
+    Telegraph page, generates an ICS file and posts it to the asset channel.
+    Links to these artefacts are returned in :class:`PersistResult`.
+    """
     from datetime import datetime
     from main import (
         db,

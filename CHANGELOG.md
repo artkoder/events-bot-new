@@ -232,3 +232,9 @@
   matching posts.
 - Dropped the unused VK publish queue in favor of operator-triggered reposts;
   documentation updated.
+
+## v0.3.37 - VK inbox review
+
+- The review flow now reads candidates from the persistent `vk_inbox` table.
+- Operators can choose to repost accepted events to the Afisha VK group.
+- Removed remaining references to the deprecated publish queue from docs.
