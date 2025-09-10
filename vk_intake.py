@@ -210,6 +210,16 @@ async def process_event(
     duration = time.perf_counter() - start
     global processing_time_seconds_total
     processing_time_seconds_total += duration
+    try:
+        import main
+
+        main.vk_import_duration_sum += duration
+        main.vk_import_duration_count += 1
+        for bound in main.vk_import_duration_buckets:
+            if duration <= bound:
+                main.vk_import_duration_buckets[bound] += 1
+    except Exception:
+        pass
     return result
 
 
@@ -229,10 +239,12 @@ async def crawl_once(db, *, broadcast: bool = False) -> dict[str, int]:
     stats = {
         "groups_checked": 0,
         "posts_scanned": 0,
-        "posts_matched": 0,
+        "matches": 0,
         "duplicates": 0,
+        "added": 0,
         "errors": 0,
         "inbox_total": 0,
+        "queue": {},
     }
 
     async with db.raw_conn() as conn:
@@ -269,6 +281,7 @@ async def crawl_once(db, *, broadcast: bool = False) -> dict[str, int]:
                 kw_ok, kws = match_keywords(post["text"])
                 has_date = detect_date(post["text"])
                 if kw_ok and has_date:
+                    stats["matches"] += 1
                     try:
                         async with db.raw_conn() as conn:
                             cur = await conn.execute(
@@ -290,7 +303,7 @@ async def crawl_once(db, *, broadcast: bool = False) -> dict[str, int]:
                         if cur.rowcount == 0:
                             stats["duplicates"] += 1
                         else:
-                            stats["posts_matched"] += 1
+                            stats["added"] += 1
                             group_matched += 1
                     except Exception:
                         stats["errors"] += 1
@@ -313,17 +326,30 @@ async def crawl_once(db, *, broadcast: bool = False) -> dict[str, int]:
 
     async with db.raw_conn() as conn:
         cur = await conn.execute(
-            "SELECT COUNT(*) FROM vk_inbox WHERE status='pending'"
+            "SELECT status, COUNT(*) FROM vk_inbox GROUP BY status"
         )
-        stats["inbox_total"] = (await cur.fetchone())[0]
+        rows = await cur.fetchall()
+    for st, cnt in rows:
+        stats["queue"][st] = cnt
+    stats["inbox_total"] = sum(stats["queue"].values())
+    try:
+        import main
+        main.vk_crawl_groups_total += stats["groups_checked"]
+        main.vk_crawl_posts_scanned_total += stats["posts_scanned"]
+        main.vk_crawl_matched_total += stats["matches"]
+        main.vk_crawl_duplicates_total += stats["duplicates"]
+        main.vk_inbox_inserted_total += stats["added"]
+    except Exception:
+        pass
 
     took_ms = int((time.perf_counter() - start) * 1000)
     logging.info(
-        "vk.crawl.finish groups=%s posts_scanned=%s matched=%s dups=%s inbox_total=%s took_ms=%s",
+        "vk.crawl.finish groups=%s posts_scanned=%s matches=%s dups=%s added=%s inbox_total=%s took_ms=%s",
         stats["groups_checked"],
         stats["posts_scanned"],
-        stats["posts_matched"],
+        stats["matches"],
         stats["duplicates"],
+        stats["added"],
         stats["inbox_total"],
         took_ms,
     )
