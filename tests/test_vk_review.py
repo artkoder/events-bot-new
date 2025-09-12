@@ -5,6 +5,8 @@ import pytest
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
+import time as _time
+
 import vk_review
 from db import Database
 
@@ -15,9 +17,10 @@ async def test_pick_next_and_skip(tmp_path):
     await db.init()
     # insert two posts with different dates
     async with db.raw_conn() as conn:
+        future_ts = int(_time.time()) + 10_000
         rows = [
-            (1, 1, 100, "t1", "k", 1, None, "pending"),
-            (1, 2, 200, "t2", "k", 1, None, "pending"),
+            (1, 1, 100, "t1", "k", 1, future_ts, "pending"),
+            (1, 2, 200, "t2", "k", 1, future_ts, "pending"),
         ]
         await conn.executemany(
             "INSERT INTO vk_inbox(group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status) VALUES(?,?,?,?,?,?,?,?)",
@@ -51,9 +54,10 @@ async def test_mark_imported_accumulates_month(tmp_path):
             "INSERT INTO vk_review_batch(batch_id, operator_id, months_csv) VALUES(?,?,?)",
             ("batch1", 10, ""),
         )
+        future_ts = int(_time.time()) + 10_000
         await conn.execute(
             "INSERT INTO vk_inbox(group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status) VALUES(?,?,?,?,?,?,?,?)",
-            (1, 1, 100, "t1", "k", 1, None, "pending"),
+            (1, 1, 100, "t1", "k", 1, future_ts, "pending"),
         )
         await conn.commit()
     post = await vk_review.pick_next(db, 10, "batch1")

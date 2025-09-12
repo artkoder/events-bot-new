@@ -423,7 +423,7 @@ async def crawl_once(db, *, broadcast: bool = False, bot: Any | None = None) -> 
     async with db.raw_conn() as conn:
         cutoff = int(time.time()) + 2 * 3600
         await conn.execute(
-            "UPDATE vk_inbox SET status='rejected' WHERE status IN ('pending','skipped') AND event_ts_hint IS NOT NULL AND event_ts_hint < ?",
+            "UPDATE vk_inbox SET status='rejected' WHERE status IN ('pending','skipped') AND (event_ts_hint IS NULL OR event_ts_hint < ?)",
             (cutoff,),
         )
         cur = await conn.execute("SELECT group_id, default_time FROM vk_source")
@@ -515,7 +515,7 @@ async def crawl_once(db, *, broadcast: bool = False, bot: Any | None = None) -> 
                 has_date = detect_date(post["text"])
                 event_ts_hint = extract_event_ts_hint(post["text"], default_time)
                 if kw_ok and has_date:
-                    if event_ts_hint is not None and event_ts_hint < int(time.time()) + 2 * 3600:
+                    if event_ts_hint is None or event_ts_hint < int(time.time()) + 2 * 3600:
                         continue
                     stats["matches"] += 1
                     try:
