@@ -8,6 +8,9 @@ import re
 import time
 from dataclasses import dataclass
 from typing import List, Any
+from datetime import datetime, timedelta
+
+from sections import MONTHS_RU
 
 # Keywords used to detect potential event posts
 KEYWORDS: list[str] = [
@@ -47,6 +50,13 @@ DATE_PATTERNS: list[str] = [
 
 COMPILED_DATE_PATTERNS = [re.compile(p, re.IGNORECASE) for p in DATE_PATTERNS]
 
+NUM_DATE_RE = re.compile(r"\b(\d{1,2})[./-](\d{1,2})\b")
+MONTH_NAME_RE = re.compile(
+    r"\b(\d{1,2})\s+(января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)\b",
+    re.IGNORECASE,
+)
+TIME_RE = re.compile(r"\b([01]?\d|2[0-3]):[0-5]\d\b")
+
 # cumulative processing time for VK event intake (seconds)
 processing_time_seconds_total: float = 0.0
 
@@ -63,6 +73,60 @@ def match_keywords(text: str) -> tuple[bool, list[str]]:
 def detect_date(text: str) -> bool:
     """Heuristically detect a date or time mention in the text."""
     return any(p.search(text) for p in COMPILED_DATE_PATTERNS)
+
+
+def _extract_event_ts_hint(text: str, default_time: str | None = None) -> int | None:
+    """Return Unix timestamp for the nearest future datetime mentioned in text."""
+    from main import LOCAL_TZ
+
+    now = datetime.now(LOCAL_TZ)
+    text_low = text.lower()
+
+    day = month = None
+    m = NUM_DATE_RE.search(text_low)
+    if m:
+        day, month = int(m.group(1)), int(m.group(2))
+    else:
+        m = MONTH_NAME_RE.search(text_low)
+        if m:
+            day = int(m.group(1))
+            month = MONTHS_RU.get(m.group(2).lower())
+
+    if day is None or month is None:
+        if "сегодня" in text_low:
+            dt = now
+        elif "завтра" in text_low:
+            dt = now + timedelta(days=1)
+        elif "послезавтра" in text_low:
+            dt = now + timedelta(days=2)
+        else:
+            return None
+    else:
+        year = now.year
+        try:
+            dt = datetime(year, month, day, tzinfo=LOCAL_TZ)
+        except ValueError:
+            return None
+        if dt < now:
+            try:
+                dt = datetime(year + 1, month, day, tzinfo=LOCAL_TZ)
+            except ValueError:
+                return None
+
+    tm = TIME_RE.search(text_low)
+    if tm:
+        hour, minute = map(int, tm.group(0).split(":"))
+    elif default_time:
+        try:
+            hour, minute = map(int, default_time.split(":"))
+        except Exception:
+            hour = minute = 0
+    else:
+        hour = minute = 0
+    dt = dt.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if dt < now:
+        return None
+    return int(dt.timestamp())
 
 
 @dataclass
@@ -251,12 +315,18 @@ async def crawl_once(db, *, broadcast: bool = False, bot: Any | None = None) -> 
     }
 
     async with db.raw_conn() as conn:
-        cur = await conn.execute("SELECT group_id FROM vk_source")
-        groups = [row[0] for row in await cur.fetchall()]
+        cutoff = int(time.time()) + 2 * 3600
+        await conn.execute(
+            "UPDATE vk_inbox SET status='rejected' WHERE status IN ('pending','skipped') AND event_ts_hint IS NOT NULL AND event_ts_hint < ?",
+            (cutoff,),
+        )
+        cur = await conn.execute("SELECT group_id, default_time FROM vk_source")
+        groups = [(row[0], row[1]) for row in await cur.fetchall()]
+        await conn.commit()
 
     logging.info("vk.crawl start groups=%d", len(groups))
 
-    for gid in groups:
+    for gid, default_time in groups:
         stats["groups_checked"] += 1
         # pause between groups (safety: 0.7–1.2s)
         await asyncio.sleep(random.uniform(0.7, 1.2))
@@ -283,15 +353,18 @@ async def crawl_once(db, *, broadcast: bool = False, bot: Any | None = None) -> 
                 group_posts += 1
                 kw_ok, kws = match_keywords(post["text"])
                 has_date = detect_date(post["text"])
+                event_ts_hint = _extract_event_ts_hint(post["text"], default_time)
                 if kw_ok and has_date:
+                    if event_ts_hint is not None and event_ts_hint < int(time.time()) + 2 * 3600:
+                        continue
                     stats["matches"] += 1
                     try:
                         async with db.raw_conn() as conn:
                             cur = await conn.execute(
                                 """
                                 INSERT OR IGNORE INTO vk_inbox(
-                                    group_id, post_id, date, text, matched_kw, has_date, status
-                                ) VALUES (?, ?, ?, ?, ?, ?, 'pending')
+                                    group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status
+                                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')
                                 """,
                                 (
                                     gid,
@@ -300,6 +373,7 @@ async def crawl_once(db, *, broadcast: bool = False, bot: Any | None = None) -> 
                                     post["text"],
                                     ",".join(kws),
                                     int(has_date),
+                                    event_ts_hint,
                                 ),
                             )
                             await conn.commit()

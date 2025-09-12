@@ -33,13 +33,18 @@ async def pick_next(db: Database, operator_id: int, batch_id: str) -> Optional[I
     ``None`` is returned when the queue is empty.
     """
 
+    cutoff = int(_time.time()) + 2 * 3600
     async with db.raw_conn() as conn:
+        await conn.execute(
+            "UPDATE vk_inbox SET status='rejected', locked_by=NULL, locked_at=NULL WHERE status IN ('pending','skipped') AND event_ts_hint IS NOT NULL AND event_ts_hint < ?",
+            (cutoff,),
+        )
         cursor = await conn.execute(
             """
             WITH next AS (
                 SELECT id FROM vk_inbox
-                WHERE status IN ('pending','skipped')
-                ORDER BY date DESC, id DESC
+                WHERE status IN ('pending','skipped') AND (event_ts_hint IS NULL OR event_ts_hint >= ?)
+                ORDER BY CASE WHEN event_ts_hint IS NULL THEN 1 ELSE 0 END, event_ts_hint ASC, date DESC, id DESC
                 LIMIT 1
             )
             UPDATE vk_inbox
@@ -47,10 +52,11 @@ async def pick_next(db: Database, operator_id: int, batch_id: str) -> Optional[I
             WHERE id = (SELECT id FROM next)
             RETURNING id, group_id, post_id, date, text, matched_kw, has_date, status, review_batch
             """,
-            (operator_id, batch_id),
+            (cutoff, operator_id, batch_id),
         )
         row = await cursor.fetchone()
         if not row:
+            await conn.commit()
             return None
         await conn.commit()
     post = InboxPost(*row)

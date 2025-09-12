@@ -935,6 +935,7 @@ MENU_EVENTS = "\U0001f4c5 События"
 VK_BTN_ADD_SOURCE = "\u2795 Добавить сообщество"
 VK_BTN_LIST_SOURCES = "\U0001f4cb Показать список сообществ"
 VK_BTN_CHECK_EVENTS = "\U0001f50e Проверить события"
+VK_BTN_QUEUE_SUMMARY = "\U0001f4ca Сводка очереди"
 
 # command help descriptions by role
 # roles: guest (not registered), user (registered), superadmin
@@ -15180,7 +15181,10 @@ async def handle_vk_command(message: types.Message, db: Database, bot: Bot) -> N
     buttons = [
         [types.KeyboardButton(text=VK_BTN_ADD_SOURCE)],
         [types.KeyboardButton(text=VK_BTN_LIST_SOURCES)],
-        [types.KeyboardButton(text=VK_BTN_CHECK_EVENTS)],
+        [
+            types.KeyboardButton(text=VK_BTN_CHECK_EVENTS),
+            types.KeyboardButton(text=VK_BTN_QUEUE_SUMMARY),
+        ],
     ]
     markup = types.ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
     await bot.send_message(message.chat.id, "VK мониторинг", reply_markup=markup)
@@ -15438,7 +15442,10 @@ async def _vkrev_show_next(chat_id: int, batch_id: str, operator_id: int, db: Da
         buttons = [
             [types.KeyboardButton(text=VK_BTN_ADD_SOURCE)],
             [types.KeyboardButton(text=VK_BTN_LIST_SOURCES)],
-            [types.KeyboardButton(text=VK_BTN_CHECK_EVENTS)],
+            [
+                types.KeyboardButton(text=VK_BTN_CHECK_EVENTS),
+                types.KeyboardButton(text=VK_BTN_QUEUE_SUMMARY),
+            ],
         ]
         markup = types.ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
         await bot.send_message(chat_id, "Очередь пуста", reply_markup=markup)
@@ -15571,7 +15578,10 @@ async def handle_vk_review_cb(callback: types.CallbackQuery, db: Database, bot: 
         buttons = [
             [types.KeyboardButton(text=VK_BTN_ADD_SOURCE)],
             [types.KeyboardButton(text=VK_BTN_LIST_SOURCES)],
-            [types.KeyboardButton(text=VK_BTN_CHECK_EVENTS)],
+            [
+                types.KeyboardButton(text=VK_BTN_CHECK_EVENTS),
+                types.KeyboardButton(text=VK_BTN_QUEUE_SUMMARY),
+            ],
         ]
         markup = types.ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
         await bot.send_message(callback.message.chat.id, "Остановлено", reply_markup=markup)
@@ -16982,6 +16992,7 @@ def create_app() -> web.Application:
     dp.message.register(vk_add_start_wrapper, lambda m: m.text == VK_BTN_ADD_SOURCE)
     dp.message.register(vk_list_wrapper, lambda m: m.text == VK_BTN_LIST_SOURCES)
     dp.message.register(vk_check_wrapper, lambda m: m.text == VK_BTN_CHECK_EVENTS)
+    dp.message.register(vk_queue_wrapper, lambda m: m.text == VK_BTN_QUEUE_SUMMARY)
     dp.message.register(vk_add_msg_wrapper, lambda m: m.from_user.id in vk_add_source_sessions)
     dp.message.register(vk_extra_msg_wrapper, lambda m: m.from_user.id in vk_review_extra_sessions)
     dp.message.register(partner_info_wrapper, lambda m: m.from_user.id in partner_info_sessions)
