@@ -15533,10 +15533,16 @@ async def _vkrev_import_flow(
         )
         await bot.send_message(int(admin_chat), links)
     markup = types.InlineKeyboardMarkup(
-        inline_keyboard=[[types.InlineKeyboardButton(text="↪️ Репостнуть в Vk", callback_data=f"vkrev:repost:{res.event_id}")]]
+        inline_keyboard=[
+            [
+                types.InlineKeyboardButton(
+                    text="↪️ Репостнуть в Vk",
+                    callback_data=f"vkrev:repost:{batch_id}",
+                )
+            ]
+        ]
     )
     await bot.send_message(chat_id, "Импортировано", reply_markup=markup)
-    await _vkrev_show_next(chat_id, batch_id, operator_id, db, bot)
 
 
 async def handle_vk_review_cb(callback: types.CallbackQuery, db: Database, bot: Bot) -> None:
@@ -15602,47 +15608,41 @@ async def handle_vk_review_cb(callback: types.CallbackQuery, db: Database, bot: 
         else:
             await bot.send_message(callback.message.chat.id, "Нет месяцев для обновления")
     elif action == "repost":
-        event_id = int(parts[2]) if len(parts) > 2 else 0
-        await _vkrev_handle_repost(callback, event_id, db, bot)
+        batch_id = parts[2] if len(parts) > 2 else ""
+        await _vkrev_handle_repost(callback, batch_id, db, bot)
     await callback.answer()
 
 
-async def _vkrev_handle_repost(callback: types.CallbackQuery, event_id: int, db: Database, bot: Bot) -> None:
-    async with db.raw_conn() as conn:
-        cur = await conn.execute(
-            "SELECT group_id, post_id FROM vk_inbox WHERE imported_event_id=?",
-            (event_id,),
-        )
-        row = await cur.fetchone()
-    if not row:
-        await bot.send_message(callback.message.chat.id, "Исходный пост не найден")
+async def _vkrev_handle_repost(callback: types.CallbackQuery, batch_id: str, db: Database, bot: Bot) -> None:
+    info = await vk_review.get_last_imported_event(db, batch_id)
+    if not info:
+        await bot.send_message(callback.message.chat.id, "❌ Репост не удался: нет события")
+        await _vkrev_show_next(callback.message.chat.id, batch_id, callback.from_user.id, db, bot)
         return
-    group_id, post_id = row
+    group_id, post_id, event_id = info
     object_id = f"wall-{group_id}_{post_id}"
     target_group = int(VK_AFISHA_GROUP_ID.lstrip('-')) if VK_AFISHA_GROUP_ID else None
     params = {"object": object_id}
     if target_group:
         params["group_id"] = target_group
+    global vk_repost_attempts_total, vk_repost_errors_total
+    vk_repost_attempts_total += 1
     try:
         data = await _vk_api("wall.repost", params, db, bot, token=VK_TOKEN_AFISHA)
         post = data.get("response", {}).get("post_id")
-        if post:
-            url = f"https://vk.com/wall-{VK_AFISHA_GROUP_ID.lstrip('-')}_{post}"
-            async with db.raw_conn() as conn:
-                await conn.execute(
-                    "UPDATE event SET vk_repost_url=? WHERE id=?",
-                    (url, event_id),
-                )
-                await conn.commit()
-            await bot.send_message(callback.message.chat.id, f"Готово: {url}")
-        else:
-            await bot.send_message(callback.message.chat.id, "Не удалось репостнуть")
-    except Exception as e:
+        if not post:
+            raise RuntimeError("no post_id")
+        url = f"https://vk.com/wall-{VK_AFISHA_GROUP_ID.lstrip('-')}_{post}"
+        await vk_review.save_repost_url(db, event_id, url)
+        await bot.send_message(callback.message.chat.id, url)
+    except Exception as e:  # pragma: no cover
+        vk_repost_errors_total += 1
         logging.exception("vk repost failed")
         await bot.send_message(
             callback.message.chat.id,
-            f"Не удалось репостнуть: {getattr(e, 'code', '')}",
+            f"❌ Репост не удался: {getattr(e, 'code', getattr(e, 'message', str(e)))}",
         )
+    await _vkrev_show_next(callback.message.chat.id, batch_id, callback.from_user.id, db, bot)
 
 
 async def handle_vk_extra_message(message: types.Message, db: Database, bot: Bot) -> None:
