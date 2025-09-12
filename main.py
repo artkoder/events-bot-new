@@ -15479,7 +15479,7 @@ async def _vkrev_show_next(chat_id: int, batch_id: str, operator_id: int, db: Da
         return
     photos = await _vkrev_fetch_photos(post.group_id, post.post_id, db, bot)
     if photos:
-        media = [types.InputMediaPhoto(p) for p in photos[:10]]
+        media = [types.InputMediaPhoto(media=p) for p in photos[:10]]
         with contextlib.suppress(Exception):
             await bot.send_media_group(chat_id, media)
     url = f"https://vk.com/wall-{post.group_id}_{post.post_id}"
