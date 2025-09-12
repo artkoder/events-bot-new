@@ -3,9 +3,15 @@
 Telegram bot for publishing event announcements. Daily announcements can also be posted to a VK group.
 Use `/regdailychannels` and `/daily` to manage both Telegram channels and the VK group including posting times.
 
-Superadmins can use `/vk` to monitor VK communities: add or remove groups and manually fetch posts from the last three days.
+Superadmins can use `/vk` to manage VK Intake: add or list sources, check or review events, and open the queue summary.
 
-## VK Intake & Review
+## VK Intake & Review v1.1
+
+Commands:
+
+- `/vk` — add/list sources, check/review events, and open queue summary.
+- `/vk_queue` — show VK inbox summary (pending/locked/skipped/imported/rejected) and a "🔎 Проверить события" button to start the review flow.
+- `/vk_crawl_now` — run VK crawling now (admin only); reports "добавлено N, всего M" to the admin chat.
 
 Background crawling collects posts from configured VK communities and filters
 them by event keywords and date patterns. Matching posts land in the persistent

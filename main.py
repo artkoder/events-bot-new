@@ -1008,7 +1008,17 @@ HELP_COMMANDS = [
     },
     {
         "usage": "/vk",
-        "desc": "VK monitoring: add/list/check groups",
+        "desc": "VK Intake: add/list sources, check/review events, and open queue summary",
+        "roles": {"superadmin"},
+    },
+    {
+        "usage": "/vk_queue",
+        "desc": "Show VK inbox summary (pending/locked/skipped/imported/rejected) and a \"🔎 Проверить события\" button to start the review flow",
+        "roles": {"superadmin"},
+    },
+    {
+        "usage": "/vk_crawl_now",
+        "desc": "Run VK crawling now (admin only); reports \"добавлено N, всего M\" to the admin chat",
         "roles": {"superadmin"},
     },
     {
