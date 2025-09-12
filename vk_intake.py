@@ -12,50 +12,97 @@ from datetime import datetime, timedelta
 
 from sections import MONTHS_RU
 
-# Keywords used to detect potential event posts
-KEYWORDS: list[str] = [
-    "показ",
-    "кинопоказ",
-    "премьера",
-    "мюзикл",
-    "спектакль",
+# Crawl tuning parameters
+VK_CRAWL_PAGE_SIZE = int(os.getenv("VK_CRAWL_PAGE_SIZE", "30"))
+VK_CRAWL_MAX_PAGES_INC = int(os.getenv("VK_CRAWL_MAX_PAGES_INC", "1"))
+VK_CRAWL_OVERLAP_SEC = int(os.getenv("VK_CRAWL_OVERLAP_SEC", "300"))
+VK_CRAWL_PAGE_SIZE_BACKFILL = int(os.getenv("VK_CRAWL_PAGE_SIZE_BACKFILL", "50"))
+VK_CRAWL_MAX_PAGES_BACKFILL = int(os.getenv("VK_CRAWL_MAX_PAGES_BACKFILL", "3"))
+VK_CRAWL_BACKFILL_DAYS = int(os.getenv("VK_CRAWL_BACKFILL_DAYS", "14"))
+VK_CRAWL_BACKFILL_AFTER_IDLE_H = int(os.getenv("VK_CRAWL_BACKFILL_AFTER_IDLE_H", "24"))
+VK_USE_PYMORPHY = os.getenv("VK_USE_PYMORPHY", "false").lower() == "true"
+
+# optional pymorphy3 initialisation
+MORPH = None
+if VK_USE_PYMORPHY:  # pragma: no cover - optional dependency
+    try:
+        import pymorphy3
+
+        MORPH = pymorphy3.MorphAnalyzer()
+    except Exception:
+        VK_USE_PYMORPHY = False
+
+# Keyword patterns for regex-based matching
+KEYWORD_PATTERNS = [
+    r"лекци(я|и|й|е|ю|ями|ях)",
+    r"спектакл(ь|я|ю|ем|е|и|ей|ям|ями|ях)",
+    r"концерт(ы|а|у|е|ом|ов|ам|ами|ах)",
+    r"фестивал(ь|я|ю|е|ем|и|ей|ям|ями|ях)|festival",
+    r"м(?:а|а?стер)[-\s]?класс(ы|а|е|ом|ов|ам|ами|ах)|мк\b",
+    r"воркшоп(ы|а|е|ом|ов|ам|ами|ах)|workshop",
+    r"показ(ы|а|е|ом|ов|ам|ами|ах)|кинопоказ",
+    r"лекто(р|рия|рий|рии|риями|риях)|кинолекторий",
+    r"выставк(а|и|е|у|ой|ам|ами|ах)",
+    r"экскурси(я|и|е|ю|ей|ям|ями|ях)",
+    r"читк(а|и|е|у|ой|ам|ами|ах)",
+    r"перформанс(ы|а|е|ом|ов|ам|ами|ах)",
+    r"встреч(а|и|е|у|ей|ам|ами|ах)",
+    r"бронировани(е|я|ю|ем)|билет(ы|а|ов)|регистраци(я|и|ю|ей)|афиш(а|и|е|у)",
+]
+KEYWORD_RE = re.compile(r"\b#?(?:" + "|".join(KEYWORD_PATTERNS) + r")\b", re.I | re.U)
+
+# Canonical keywords for morphological mode
+KEYWORD_LEMMAS = {
     "лекция",
-    "лектор",
+    "спектакль",
     "концерт",
     "фестиваль",
     "мастер-класс",
     "воркшоп",
-    "встреча",
+    "показ",
+    "кинопоказ",
+    "лекторий",
+    "кинолекторий",
+    "выставка",
     "экскурсия",
     "читка",
-    "выставка",
     "перформанс",
-    "кинолекторий",
+    "встреча",
     "бронирование",
-    "билеты",
+    "билет",
     "регистрация",
     "афиша",
+}
+
+# Date/time patterns used for quick detection
+MONTH_NAMES_DET = "|".join(sorted(re.escape(m) for m in MONTHS_RU.keys()))
+DATE_PATTERNS = [
+    r"\b\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?\b",
+    r"\b\d{1,2}[–-]\d{1,2}(?:[./]\d{1,2})\b",
+    rf"\b\d{{1,2}}\s+(?:{MONTH_NAMES_DET})\.?\b",
+    r"\b(понед(?:ельник)?|вторник|сред(?:а)?|четверг|пятниц(?:а)?|суббот(?:а)?|воскресень(?:е|е)|пн|вт|ср|чт|пт|сб|вс)\b",
+    r"\b(сегодня|завтра|послезавтра|в эти выходные)\b",
+    r"\b([01]?\d|2[0-3])[:.][0-5]\d\b",
+    r"\bв\s*([01]?\d|2[0-3])\s*(?:ч|час(?:а|ов)?)\b",
+    r"\bс\s*([01]?\d|2[0-3])(?:[:.][0-5]\d)?\s*до\s*([01]?\d|2[0-3])(?:[:.][0-5]\d)?\b",
+    r"\b20\d{2}\b",
 ]
 
-# Date patterns roughly covering common forms seen in Russian posts
-DATE_PATTERNS: list[str] = [
-    r"\b\d{1,2}[./-]\d{1,2}\b",
-    r"\b\d{1,2}\s+(января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)\b",
-    r"\bсегодня\b",
-    r"\bзавтра\b",
-    r"\bпослезавтра\b",
-    r"\b(понедельник|вторник|среда|четверг|пятница|суббота|воскресенье|пн|вт|ср|чт|пт|сб|вс)\b",
-    r"\b([01]?\d|2[0-3]):[0-5]\d\b",
-]
+COMPILED_DATE_PATTERNS = [re.compile(p, re.I | re.U) for p in DATE_PATTERNS]
 
-COMPILED_DATE_PATTERNS = [re.compile(p, re.IGNORECASE) for p in DATE_PATTERNS]
-
-NUM_DATE_RE = re.compile(r"\b(\d{1,2})[./-](\d{1,2})\b")
-MONTH_NAME_RE = re.compile(
-    r"\b(\d{1,2})\s+(января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)\b",
-    re.IGNORECASE,
+NUM_DATE_RE = re.compile(r"\b(\d{1,2})[./-](\d{1,2})(?:[./-](\d{2,4}))?\b")
+DATE_RANGE_RE = re.compile(r"\b(\d{1,2})[–-](\d{1,2})(?:[./](\d{1,2}))\b")
+MONTH_NAME_RE = re.compile(r"\b(\d{1,2})\s+([а-яё.]+)\b", re.I)
+TIME_RE = re.compile(r"\b([01]?\d|2[0-3])[:.][0-5]\d\b")
+TIME_H_RE = re.compile(r"\bв\s*([01]?\d|2[0-3])\s*(?:ч|час(?:а|ов)?)\b")
+TIME_RANGE_RE = re.compile(
+    r"\bс\s*([01]?\d|2[0-3])(?:[:.](\d{2}))?\s*до\s*([01]?\d|2[0-3])(?:[:.](\d{2}))?\b"
 )
-TIME_RE = re.compile(r"\b([01]?\d|2[0-3]):[0-5]\d\b")
+DOW_RE = re.compile(
+    r"\b(понед(?:ельник)?|вторник|сред(?:а)?|четверг|пятниц(?:а)?|суббот(?:а)?|воскресень(?:е|е)|пн|вт|ср|чт|пт|сб|вс)\b",
+    re.I,
+)
+WEEKEND_RE = re.compile(r"в\s+эти\s+выходны", re.I)
 
 # cumulative processing time for VK event intake (seconds)
 processing_time_seconds_total: float = 0.0
@@ -63,10 +110,16 @@ processing_time_seconds_total: float = 0.0
 
 def match_keywords(text: str) -> tuple[bool, list[str]]:
     """Return True and list of matched keywords if any are found."""
-    matched: list[str] = []
-    for kw in KEYWORDS:
-        if re.search(rf"\b{re.escape(kw)}\b", text, re.IGNORECASE):
-            matched.append(kw)
+    text_low = text.lower()
+    if VK_USE_PYMORPHY and MORPH:
+        tokens = re.findall(r"\w+", text_low)
+        matched: list[str] = []
+        for t in tokens:
+            lemma = MORPH.parse(t)[0].normal_form
+            if lemma in KEYWORD_LEMMAS and lemma not in matched:
+                matched.append(lemma)
+        return bool(matched), matched
+    matched = [m.group(0).lstrip("#") for m in KEYWORD_RE.finditer(text_low)]
     return bool(matched), matched
 
 
@@ -75,22 +128,34 @@ def detect_date(text: str) -> bool:
     return any(p.search(text) for p in COMPILED_DATE_PATTERNS)
 
 
-def _extract_event_ts_hint(text: str, default_time: str | None = None) -> int | None:
+def extract_event_ts_hint(text: str, default_time: str | None = None) -> int | None:
     """Return Unix timestamp for the nearest future datetime mentioned in text."""
     from main import LOCAL_TZ
 
     now = datetime.now(LOCAL_TZ)
     text_low = text.lower()
 
-    day = month = None
+    day = month = year = None
     m = NUM_DATE_RE.search(text_low)
     if m:
         day, month = int(m.group(1)), int(m.group(2))
+        if m.group(3):
+            y = m.group(3)
+            year = int("20" + y if len(y) == 2 else y)
     else:
-        m = MONTH_NAME_RE.search(text_low)
+        m = DATE_RANGE_RE.search(text_low)
         if m:
             day = int(m.group(1))
-            month = MONTHS_RU.get(m.group(2).lower())
+            month = int(m.group(3))
+        else:
+            m = MONTH_NAME_RE.search(text_low)
+            if m:
+                day = int(m.group(1))
+                mon_word = m.group(2).rstrip(".")
+                month = MONTHS_RU.get(mon_word)
+                y = re.search(r"\b20\d{2}\b", text_low[m.end():])
+                if y:
+                    year = int(y.group(0))
 
     if day is None or month is None:
         if "сегодня" in text_low:
@@ -100,9 +165,38 @@ def _extract_event_ts_hint(text: str, default_time: str | None = None) -> int | 
         elif "послезавтра" in text_low:
             dt = now + timedelta(days=2)
         else:
-            return None
+            dow_m = DOW_RE.search(text_low)
+            if dow_m:
+                dow_map = {
+                    "понедельник": 0,
+                    "понед": 0,
+                    "пн": 0,
+                    "вторник": 1,
+                    "вт": 1,
+                    "среда": 2,
+                    "ср": 2,
+                    "четверг": 3,
+                    "чт": 3,
+                    "пятница": 4,
+                    "пт": 4,
+                    "суббота": 5,
+                    "сб": 5,
+                    "воскресенье": 6,
+                    "вс": 6,
+                }
+                key = dow_m.group(1).lower().rstrip(".")
+                dow = dow_map.get(key)
+                if dow is None:
+                    dow = dow_map.get(key[:2])
+                days_ahead = (dow - now.weekday()) % 7
+                dt = now + timedelta(days=days_ahead)
+            elif WEEKEND_RE.search(text_low):
+                days_ahead = (5 - now.weekday()) % 7
+                dt = now + timedelta(days=days_ahead)
+            else:
+                return None
     else:
-        year = now.year
+        year = year or now.year
         try:
             dt = datetime(year, month, day, tzinfo=LOCAL_TZ)
         except ValueError:
@@ -115,14 +209,26 @@ def _extract_event_ts_hint(text: str, default_time: str | None = None) -> int | 
 
     tm = TIME_RE.search(text_low)
     if tm:
-        hour, minute = map(int, tm.group(0).split(":"))
-    elif default_time:
-        try:
-            hour, minute = map(int, default_time.split(":"))
-        except Exception:
-            hour = minute = 0
+        hhmm = tm.group(0).replace(".", ":")
+        hour, minute = map(int, hhmm.split(":"))
     else:
-        hour = minute = 0
+        tr = TIME_RANGE_RE.search(text_low)
+        if tr:
+            hour = int(tr.group(1))
+            minute = int(tr.group(2) or 0)
+        else:
+            th = TIME_H_RE.search(text_low)
+            if th:
+                hour = int(th.group(1))
+                minute = 0
+            elif default_time:
+                try:
+                    hour, minute = map(int, default_time.split(":"))
+                except Exception:
+                    hour = minute = 0
+            else:
+                hour = minute = 0
+
     dt = dt.replace(hour=hour, minute=minute, second=0, microsecond=0)
     if dt < now:
         return None
@@ -324,22 +430,76 @@ async def crawl_once(db, *, broadcast: bool = False, bot: Any | None = None) -> 
         groups = [(row[0], row[1]) for row in await cur.fetchall()]
         await conn.commit()
 
-    logging.info("vk.crawl start groups=%d", len(groups))
+    random.shuffle(groups)
+    logging.info(
+        "vk.crawl start groups=%d overlap=%s", len(groups), VK_CRAWL_OVERLAP_SEC
+    )
 
+    pages_per_group: list[int] = []
+
+    now_ts = int(time.time())
     for gid, default_time in groups:
         stats["groups_checked"] += 1
-        # pause between groups (safety: 0.7–1.2s)
-        await asyncio.sleep(random.uniform(0.7, 1.2))
+        await asyncio.sleep(random.uniform(0.7, 1.2))  # safety pause
         try:
             async with db.raw_conn() as conn:
                 cur = await conn.execute(
-                    "SELECT last_seen_ts, last_post_id FROM vk_crawl_cursor WHERE group_id=?",
+                    "SELECT last_seen_ts, last_post_id, updated_at FROM vk_crawl_cursor WHERE group_id=?",
                     (gid,),
                 )
                 row = await cur.fetchone()
-                last_seen_ts, last_post_id = row if row else (0, 0)
+            if row:
+                last_seen_ts, last_post_id, updated_at = row
+                updated_at_ts = int(
+                    datetime.fromisoformat(updated_at).timestamp() if isinstance(updated_at, str) else updated_at
+                )
+            else:
+                last_seen_ts = last_post_id = 0
+                updated_at_ts = 0
 
-            posts = await vk_wall_since(gid, last_seen_ts)
+            idle_h = (now_ts - updated_at_ts) / 3600 if updated_at_ts else None
+            backfill = last_seen_ts == 0 or (
+                idle_h is not None and idle_h >= VK_CRAWL_BACKFILL_AFTER_IDLE_H
+            )
+
+            posts: list[dict] = []
+            pages_loaded = 0
+
+            if backfill:
+                horizon = now_ts - VK_CRAWL_BACKFILL_DAYS * 86400
+                offset = 0
+                while pages_loaded < VK_CRAWL_MAX_PAGES_BACKFILL:
+                    page = await vk_wall_since(
+                        gid, 0, count=VK_CRAWL_PAGE_SIZE_BACKFILL, offset=offset
+                    )
+                    pages_loaded += 1
+                    posts.extend(p for p in page if p["date"] >= horizon)
+                    if len(page) < VK_CRAWL_PAGE_SIZE_BACKFILL:
+                        break
+                    if page and min(p["date"] for p in page) < horizon:
+                        break
+                    offset += VK_CRAWL_PAGE_SIZE_BACKFILL
+            else:
+                since = max(0, last_seen_ts - VK_CRAWL_OVERLAP_SEC)
+                offset = 0
+                while True:
+                    page = await vk_wall_since(
+                        gid, since, count=VK_CRAWL_PAGE_SIZE, offset=offset
+                    )
+                    pages_loaded += 1
+                    posts.extend(page)
+                    if (
+                        len(page) == VK_CRAWL_PAGE_SIZE
+                        and page
+                        and min(p["date"] for p in page) >= since
+                        and pages_loaded < 1 + VK_CRAWL_MAX_PAGES_INC
+                    ):
+                        offset += VK_CRAWL_PAGE_SIZE
+                        continue
+                    break
+
+            pages_per_group.append(pages_loaded)
+
             group_posts = 0
             group_matched = 0
             max_ts, max_pid = last_seen_ts, last_post_id
@@ -353,7 +513,7 @@ async def crawl_once(db, *, broadcast: bool = False, bot: Any | None = None) -> 
                 group_posts += 1
                 kw_ok, kws = match_keywords(post["text"])
                 has_date = detect_date(post["text"])
-                event_ts_hint = _extract_event_ts_hint(post["text"], default_time)
+                event_ts_hint = extract_event_ts_hint(post["text"], default_time)
                 if kw_ok and has_date:
                     if event_ts_hint is not None and event_ts_hint < int(time.time()) + 2 * 3600:
                         continue
@@ -395,8 +555,14 @@ async def crawl_once(db, *, broadcast: bool = False, bot: Any | None = None) -> 
                 )
                 await conn.commit()
 
+            mode = "backfill" if backfill else "inc"
             logging.info(
-                "vk.crawl group=%s posts=%s matched=%s", gid, group_posts, group_matched
+                "vk.crawl group=%s posts=%s matched=%s pages=%s mode=%s",
+                gid,
+                group_posts,
+                group_matched,
+                pages_loaded,
+                mode,
             )
         except Exception:
             stats["errors"] += 1
@@ -409,6 +575,8 @@ async def crawl_once(db, *, broadcast: bool = False, bot: Any | None = None) -> 
     for st, cnt in rows:
         stats["queue"][st] = cnt
     stats["inbox_total"] = sum(stats["queue"].values())
+    stats["pages_per_group"] = pages_per_group
+    stats["overlap_sec"] = VK_CRAWL_OVERLAP_SEC
     try:
         import main
         main.vk_crawl_groups_total += stats["groups_checked"]
@@ -421,13 +589,15 @@ async def crawl_once(db, *, broadcast: bool = False, bot: Any | None = None) -> 
 
     took_ms = int((time.perf_counter() - start) * 1000)
     logging.info(
-        "vk.crawl.finish groups=%s posts_scanned=%s matches=%s dups=%s added=%s inbox_total=%s took_ms=%s",
+        "vk.crawl.finish groups=%s posts_scanned=%s matches=%s dups=%s added=%s inbox_total=%s pages=%s overlap=%s took_ms=%s",
         stats["groups_checked"],
         stats["posts_scanned"],
         stats["matches"],
         stats["duplicates"],
         stats["added"],
         stats["inbox_total"],
+        "/".join(str(p) for p in pages_per_group),
+        VK_CRAWL_OVERLAP_SEC,
         took_ms,
     )
     if broadcast and bot:
@@ -443,7 +613,9 @@ async def crawl_once(db, *, broadcast: bool = False, bot: Any | None = None) -> 
                 f"теперь в очереди {stats['inbox_total']} "
                 f"(pending: {q.get('pending',0)}, locked: {q.get('locked',0)}, "
                 f"skipped: {q.get('skipped',0)}, imported: {q.get('imported',0)}, "
-                f"rejected: {q.get('rejected',0)})"
+                f"rejected: {q.get('rejected',0)}), "
+                f"страниц на группу: {'/'.join(str(p) for p in stats['pages_per_group'])}, "
+                f"перекрытие: {stats['overlap_sec']} сек"
             )
             try:
                 await bot.send_message(int(admin_chat), msg)

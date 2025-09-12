@@ -348,6 +348,7 @@ CAPTCHA_RETRY_AT = os.getenv("CAPTCHA_RETRY_AT", "08:10")
 VK_CAPTCHA_TTL_MIN = int(os.getenv("VK_CAPTCHA_TTL_MIN", "60"))
 # quiet hours for captcha notifications (HH:MM-HH:MM, empty = disabled)
 VK_CAPTCHA_QUIET = os.getenv("VK_CAPTCHA_QUIET", "")
+VK_CRAWL_JITTER_SEC = int(os.getenv("VK_CRAWL_JITTER_SEC", "600"))
 
 logging.info(
     "vk.config groups: main=-%s, afisha=-%s; user_token=%s, token_main=%s, token_afisha=%s",
@@ -1498,12 +1499,19 @@ def _extract_post_photos(post: dict) -> list[str]:
     return photos
 
 
-async def vk_wall_since(group_id: int, since_ts: int) -> list[dict]:
-    """Return wall posts for a group since timestamp."""
+async def vk_wall_since(
+    group_id: int, since_ts: int, *, count: int = 100, offset: int = 0
+) -> list[dict]:
+    """Return wall posts for a group since timestamp.
+
+    ``count`` and ``offset`` are forwarded to :func:`wall.get` allowing
+    pagination.
+    """
     resp = await vk_api(
         "wall.get",
         owner_id=-group_id,
-        count=100,
+        count=count,
+        offset=offset,
         filter="owner",
     )
     items = resp.get("items", []) if isinstance(resp, dict) else resp["items"]
@@ -12768,6 +12776,9 @@ async def vk_crawl_cron(db: Database, bot: Bot, run_id: str | None = None) -> No
     """Scheduled VK crawl according to ``VK_CRAWL_TIMES_LOCAL``."""
     now = datetime.now(LOCAL_TZ).strftime("%H:%M")
     logging.info("vk.crawl.cron.fire time=%s", now)
+    delay = max(0, random.uniform(-VK_CRAWL_JITTER_SEC, VK_CRAWL_JITTER_SEC))
+    if delay:
+        await asyncio.sleep(delay)
     try:
         await vk_intake.crawl_once(db, broadcast=True, bot=bot)
     except Exception:
@@ -15379,6 +15390,8 @@ async def handle_vk_crawl_now(message: types.Message, db: Database, bot: Bot) ->
         f"(pending: {q.get('pending',0)}, locked: {q.get('locked',0)}, "
         f"skipped: {q.get('skipped',0)}, imported: {q.get('imported',0)}, "
         f"rejected: {q.get('rejected',0)})"
+        f", страниц на группу: {'/'.join(str(p) for p in stats.get('pages_per_group', []))}, "
+        f"перекрытие: {stats.get('overlap_sec')} сек"
     )
     await bot.send_message(message.chat.id, msg)
 

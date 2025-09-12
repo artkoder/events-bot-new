@@ -252,3 +252,12 @@
 - The "🧹 Завершить…" button rebuilds affected months sequentially.
 - Operators can repost events to the Afisha VK group via a dedicated button
   storing the final post link.
+
+## v0.3.40 - VK intake improvements
+
+- Incremental crawling with pagination, overlap and optional 14‑day backfill.
+- Randomised group order and schedule jitter to reduce API load.
+- Keyword detector switched to regex stems with optional `pymorphy3` lemma
+  matching via `VK_USE_PYMORPHY`.
+- Date and time parser recognises more Russian variants and returns precise
+  timestamps for scheduling.
