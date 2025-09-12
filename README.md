@@ -11,10 +11,12 @@ Background crawling collects posts from configured VK communities and filters
 them by event keywords and date patterns. Matching posts land in the persistent
 `vk_inbox` queue where an operator can accept, enrich with extra info, reject or
 skip a candidate. Accepted items go through the standard import pipeline to
-create a Telegraph page and calendar links. The operator may additionally
-trigger a repost to the Afisha VK group; there is no separate publish queue.
-Operators can run `/vk_queue` to see current inbox counts and get a button to
-start reviewing candidates.
+create a Telegraph page and calendar links. After each import the admin chat
+receives links to the generated Telegraph and ICS pages, and the operator can
+manually repost the source to the Afisha VK group via a dedicated button. The
+batch can be finished with "🧹 Завершить…" which sequentially rebuilds all
+affected month pages. Operators can run `/vk_queue` to see current inbox counts
+and get a button to start reviewing candidates.
 
 This is an MVP using **aiogram 3** and SQLite. It is designed for deployment on
 Fly.io with a webhook.

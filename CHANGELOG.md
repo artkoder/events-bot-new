@@ -243,3 +243,12 @@
 
 - `/vk_queue` displays current inbox counts and offers a button to start the
   review flow.
+
+## v0.3.39 - VK review UI polish
+
+- Review flow now presents media cards with action buttons and logs rebuilds
+  per month.
+- Accepted events immediately send Telegraph and ICS links to the admin chat.
+- The "🧹 Завершить…" button rebuilds affected months sequentially.
+- Operators can repost events to the Afisha VK group via a dedicated button
+  storing the final post link.

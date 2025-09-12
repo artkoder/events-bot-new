@@ -80,8 +80,8 @@ async def test_finish_batch_clears_months(tmp_path):
 
     called = []
 
-    async def fake_rebuild(_db, months):
-        called.extend(months)
+    async def fake_rebuild(_db, month):
+        called.append(month)
 
     months = await vk_review.finish_batch(db, "batch1", fake_rebuild)
     assert called == ["2025-09", "2025-10"]

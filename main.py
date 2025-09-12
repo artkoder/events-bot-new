@@ -99,6 +99,7 @@ import httpx
 import hashlib
 import unicodedata
 import vk_intake
+import vk_review
 import argparse
 import shlex
 
@@ -500,6 +501,9 @@ vk_group_sessions: set[int] = set()
 vk_time_sessions: TTLCache[int, str] = TTLCache(maxsize=64, ttl=3600)
 # waiting for VK source add input
 vk_add_source_sessions: set[int] = set()
+
+# operator_id -> (inbox_id, batch_id) awaiting extra info during VK review
+vk_review_extra_sessions: dict[int, tuple[int, str]] = {}
 
 # superadmin user_id -> pending partner user_id
 partner_info_sessions: TTLCache[int, int] = TTLCache(maxsize=64, ttl=3600)
@@ -15332,51 +15336,20 @@ async def send_vk_tmp_post(chat_id: int, batch: str, idx: int, total: int, db: D
 
 
 async def handle_vk_check(message: types.Message, db: Database, bot: Bot) -> None:
-    try:
-        rows = await _fetch_vk_sources(db)
-        if not rows:
-            await message.answer("Список сообществ пуст")
-            return
-        since_ts = int(unixtime.time()) - 3 * 24 * 3600
-        batch = f"{int(unixtime.time())}:{message.from_user.id}"
-        async with db.raw_conn() as conn:
-            await conn.execute("DELETE FROM vk_tmp_post WHERE user_id=?", (message.from_user.id,))
-            await conn.commit()
-        total = 0
-        for _, gid, _, _, _, _ in rows:
-            try:
-                posts = await vk_wall_since(gid, since_ts)
-            except Exception as e:
-                logging.error("vk_wall_since failed gid=%s: %s", gid, e)
-                continue
-            if not posts:
-                continue
-            async with db.raw_conn() as conn:
-                for p in posts:
-                    await conn.execute(
-                        "INSERT INTO vk_tmp_post(batch,user_id,group_id,post_id,date,text,photos,url) VALUES(?,?,?,?,?,?,?,?)",
-                        (
-                            batch,
-                            message.from_user.id,
-                            p["group_id"],
-                            p["post_id"],
-                            p["date"],
-                            p.get("text"),
-                            json.dumps(p.get("photos")),
-                            p["url"],
-                        ),
-                    )
-                await conn.commit()
-            total += len(posts)
-        if total == 0:
-            await message.answer("За последние 3 дня постов не нашлось.")
-            return
-        await message.answer(f"Найдено постов: {total}. Показываю по одному")
-        await send_vk_tmp_post(message.chat.id, batch, 0, total, db, bot)
-    except Exception as e:
-        logger.exception("vk_check failed")
-        await message.answer(f"Не удалось проверить посты: {e}")
+    """Start VK inbox review."""
+    async with db.get_session() as session:
+        user = await session.get(User, message.from_user.id)
+    if not user:
+        await message.answer("Not authorized")
         return
+    batch_id = f"{int(unixtime.time())}:{message.from_user.id}"
+    async with db.raw_conn() as conn:
+        await conn.execute(
+            "INSERT INTO vk_review_batch(batch_id, operator_id, months_csv) VALUES(?,?,?)",
+            (batch_id, message.from_user.id, ""),
+        )
+        await conn.commit()
+    await _vkrev_show_next(message.chat.id, batch_id, message.from_user.id, db, bot)
 
 
 async def handle_vk_crawl_now(message: types.Message, db: Database, bot: Bot) -> None:
@@ -15426,6 +15399,252 @@ async def handle_vk_queue(message: types.Message, db: Database, bot: Bot) -> Non
         resize_keyboard=True,
     )
     await bot.send_message(message.chat.id, "\n".join(lines), reply_markup=markup)
+
+async def _vkrev_queue_size(db: Database) -> int:
+    async with db.raw_conn() as conn:
+        cur = await conn.execute(
+            "SELECT COUNT(*) FROM vk_inbox WHERE status IN ('pending','skipped')",
+        )
+        (cnt,) = await cur.fetchone()
+    return cnt
+
+
+async def _vkrev_fetch_photos(group_id: int, post_id: int, db: Database, bot: Bot) -> list[str]:
+    try:
+        data = await _vk_api(
+            "wall.getById",
+            {"posts": f"-{group_id}_{post_id}"},
+            db,
+            bot,
+        )
+    except Exception as e:  # pragma: no cover
+        logging.error("wall.getById failed gid=%s post=%s: %s", group_id, post_id, e)
+        return []
+    items = data.get("response") or []
+    photos: list[str] = []
+    for item in items:
+        for att in item.get("attachments", []):
+            if att.get("type") == "photo":
+                sizes = att["photo"].get("sizes", [])
+                if sizes:
+                    best = max(sizes, key=lambda s: s.get("width", 0) * s.get("height", 0))
+                    photos.append(best.get("url", ""))
+    return photos
+
+
+async def _vkrev_show_next(chat_id: int, batch_id: str, operator_id: int, db: Database, bot: Bot) -> None:
+    post = await vk_review.pick_next(db, operator_id, batch_id)
+    if not post:
+        buttons = [
+            [types.KeyboardButton(text=VK_BTN_ADD_SOURCE)],
+            [types.KeyboardButton(text=VK_BTN_LIST_SOURCES)],
+            [types.KeyboardButton(text=VK_BTN_CHECK_EVENTS)],
+        ]
+        markup = types.ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
+        await bot.send_message(chat_id, "Очередь пуста", reply_markup=markup)
+        return
+    photos = await _vkrev_fetch_photos(post.group_id, post.post_id, db, bot)
+    if photos:
+        media = [types.InputMediaPhoto(p) for p in photos[:10]]
+        with contextlib.suppress(Exception):
+            await bot.send_media_group(chat_id, media)
+    url = f"https://vk.com/wall-{post.group_id}_{post.post_id}"
+    pending = await _vkrev_queue_size(db)
+    status_line = f"ключи: {post.matched_kw or '-'} | дата: {'да' if post.has_date else 'нет'} | в очереди: {pending}"
+    markup = types.InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                types.InlineKeyboardButton(text="✅ Добавить", callback_data=f"vkrev:accept:{post.id}"),
+                types.InlineKeyboardButton(text="📝 Добавить с доп.инфо", callback_data=f"vkrev:accept_extra:{post.id}"),
+            ],
+            [
+                types.InlineKeyboardButton(text="✖️ Отклонить", callback_data=f"vkrev:reject:{post.id}"),
+                types.InlineKeyboardButton(text="⏭ Пропустить", callback_data=f"vkrev:skip:{post.id}"),
+            ],
+            [types.InlineKeyboardButton(text="⏹ Стоп", callback_data=f"vkrev:stop:{batch_id}")],
+            [
+                types.InlineKeyboardButton(
+                    text="🧹 Завершить и обновить страницы месяцев",
+                    callback_data=f"vkrev:finish:{batch_id}",
+                )
+            ],
+        ]
+    )
+    await bot.send_message(
+        chat_id,
+        f"{post.text}\n{url}\n\n{status_line}",
+        reply_markup=markup,
+    )
+
+
+async def _vkrev_import_flow(
+    chat_id: int,
+    operator_id: int,
+    inbox_id: int,
+    batch_id: str,
+    db: Database,
+    bot: Bot,
+    operator_extra: str | None = None,
+) -> None:
+    async with db.raw_conn() as conn:
+        cur = await conn.execute(
+            "SELECT group_id, post_id, text FROM vk_inbox WHERE id=?",
+            (inbox_id,),
+        )
+        row = await cur.fetchone()
+    if not row:
+        await bot.send_message(chat_id, "Инбокс не найден")
+        return
+    group_id, post_id, text = row
+    async with db.raw_conn() as conn:
+        cur = await conn.execute(
+            "SELECT name, location, default_time FROM vk_source WHERE group_id=?",
+            (group_id,),
+        )
+        source = await cur.fetchone()
+    photos = await _vkrev_fetch_photos(group_id, post_id, db, bot)
+    draft = await vk_intake.build_event_payload_from_vk(
+        text,
+        source_name=source[0] if source else None,
+        location_hint=source[1] if source else None,
+        default_time=source[2] if source else None,
+        operator_extra=operator_extra,
+    )
+    res = await vk_intake.persist_event_and_pages(draft, photos)
+    await vk_review.mark_imported(db, inbox_id, batch_id, res.event_id, res.event_date)
+    vk_review_actions_total["imported"] += 1
+    admin_chat = os.getenv("ADMIN_CHAT_ID")
+    if admin_chat:
+        links = (
+            f"✅ Telegraph — {res.telegraph_url}\n"
+            f"✅ Календарь (ICS) — {res.ics_supabase_url}\n"
+            f"✅ ICS (Telegram) — {res.ics_tg_url}"
+        )
+        await bot.send_message(int(admin_chat), links)
+    markup = types.InlineKeyboardMarkup(
+        inline_keyboard=[[types.InlineKeyboardButton(text="↪️ Репостнуть в Vk", callback_data=f"vkrev:repost:{res.event_id}")]]
+    )
+    await bot.send_message(chat_id, "Импортировано", reply_markup=markup)
+    await _vkrev_show_next(chat_id, batch_id, operator_id, db, bot)
+
+
+async def handle_vk_review_cb(callback: types.CallbackQuery, db: Database, bot: Bot) -> None:
+    assert callback.data
+    parts = callback.data.split(":")
+    action = parts[1] if len(parts) > 1 else ""
+    if action in {"accept", "accept_extra", "reject", "skip"}:
+        inbox_id = int(parts[2]) if len(parts) > 2 else 0
+        async with db.raw_conn() as conn:
+            cur = await conn.execute(
+                "SELECT review_batch FROM vk_inbox WHERE id=?",
+                (inbox_id,),
+            )
+            row = await cur.fetchone()
+        batch_id = row[0] if row else ""
+        if action == "accept":
+            await _vkrev_import_flow(
+                callback.message.chat.id,
+                callback.from_user.id,
+                inbox_id,
+                batch_id,
+                db,
+                bot,
+            )
+        elif action == "accept_extra":
+            vk_review_extra_sessions[callback.from_user.id] = (inbox_id, batch_id)
+            await bot.send_message(callback.message.chat.id, "Отправьте доп. информацию одним сообщением")
+        elif action == "reject":
+            await vk_review.mark_rejected(db, inbox_id)
+            vk_review_actions_total["rejected"] += 1
+            await _vkrev_show_next(callback.message.chat.id, batch_id, callback.from_user.id, db, bot)
+        elif action == "skip":
+            await vk_review.mark_skipped(db, inbox_id)
+            vk_review_actions_total["skipped"] += 1
+            await _vkrev_show_next(callback.message.chat.id, batch_id, callback.from_user.id, db, bot)
+    elif action == "stop":
+        async with db.raw_conn() as conn:
+            await conn.execute(
+                "UPDATE vk_inbox SET status='pending', locked_by=NULL, locked_at=NULL WHERE locked_by=?",
+                (callback.from_user.id,),
+            )
+            await conn.commit()
+        buttons = [
+            [types.KeyboardButton(text=VK_BTN_ADD_SOURCE)],
+            [types.KeyboardButton(text=VK_BTN_LIST_SOURCES)],
+            [types.KeyboardButton(text=VK_BTN_CHECK_EVENTS)],
+        ]
+        markup = types.ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
+        await bot.send_message(callback.message.chat.id, "Остановлено", reply_markup=markup)
+    elif action == "finish":
+        batch_id = parts[2] if len(parts) > 2 else ""
+        async def rebuild_cb(db_: Database, month: str) -> None:
+            await _perform_pages_rebuild(db_, [month], force=True)
+        months = await vk_review.finish_batch(db, batch_id, rebuild_cb)
+        if months:
+            await bot.send_message(
+                callback.message.chat.id,
+                "Запущен rebuild для: " + ", ".join(months),
+            )
+        else:
+            await bot.send_message(callback.message.chat.id, "Нет месяцев для обновления")
+    elif action == "repost":
+        event_id = int(parts[2]) if len(parts) > 2 else 0
+        await _vkrev_handle_repost(callback, event_id, db, bot)
+    await callback.answer()
+
+
+async def _vkrev_handle_repost(callback: types.CallbackQuery, event_id: int, db: Database, bot: Bot) -> None:
+    async with db.raw_conn() as conn:
+        cur = await conn.execute(
+            "SELECT group_id, post_id FROM vk_inbox WHERE imported_event_id=?",
+            (event_id,),
+        )
+        row = await cur.fetchone()
+    if not row:
+        await bot.send_message(callback.message.chat.id, "Исходный пост не найден")
+        return
+    group_id, post_id = row
+    object_id = f"wall-{group_id}_{post_id}"
+    target_group = int(VK_AFISHA_GROUP_ID.lstrip('-')) if VK_AFISHA_GROUP_ID else None
+    params = {"object": object_id}
+    if target_group:
+        params["group_id"] = target_group
+    try:
+        data = await _vk_api("wall.repost", params, db, bot, token=VK_TOKEN_AFISHA)
+        post = data.get("response", {}).get("post_id")
+        if post:
+            url = f"https://vk.com/wall-{VK_AFISHA_GROUP_ID.lstrip('-')}_{post}"
+            async with db.raw_conn() as conn:
+                await conn.execute(
+                    "UPDATE event SET vk_repost_url=? WHERE id=?",
+                    (url, event_id),
+                )
+                await conn.commit()
+            await bot.send_message(callback.message.chat.id, f"Готово: {url}")
+        else:
+            await bot.send_message(callback.message.chat.id, "Не удалось репостнуть")
+    except Exception as e:
+        logging.exception("vk repost failed")
+        await bot.send_message(
+            callback.message.chat.id,
+            f"Не удалось репостнуть: {getattr(e, 'code', '')}",
+        )
+
+
+async def handle_vk_extra_message(message: types.Message, db: Database, bot: Bot) -> None:
+    info = vk_review_extra_sessions.pop(message.from_user.id, None)
+    if not info:
+        return
+    inbox_id, batch_id = info
+    await _vkrev_import_flow(
+        message.chat.id,
+        message.from_user.id,
+        inbox_id,
+        batch_id,
+        db,
+        bot,
+        operator_extra=message.text or "",
+    )
 
 
 async def handle_vk_next_callback(callback: types.CallbackQuery, db: Database, bot: Bot) -> None:
@@ -16647,8 +16866,16 @@ def create_app() -> web.Application:
 
     async def vk_next_wrapper(callback: types.CallbackQuery):
         await handle_vk_next_callback(callback, db, bot)
+
+    async def vk_review_cb_wrapper(callback: types.CallbackQuery):
+        await handle_vk_review_cb(callback, db, bot)
+
+    async def vk_extra_msg_wrapper(message: types.Message):
+        await handle_vk_extra_message(message, db, bot)
+
     async def vk_crawl_now_wrapper(message: types.Message):
         await handle_vk_crawl_now(message, db, bot)
+
     async def vk_queue_wrapper(message: types.Message):
         await handle_vk_queue(message, db, bot)
     async def status_wrapper(message: types.Message):
@@ -16756,6 +16983,7 @@ def create_app() -> web.Application:
     dp.message.register(vk_list_wrapper, lambda m: m.text == VK_BTN_LIST_SOURCES)
     dp.message.register(vk_check_wrapper, lambda m: m.text == VK_BTN_CHECK_EVENTS)
     dp.message.register(vk_add_msg_wrapper, lambda m: m.from_user.id in vk_add_source_sessions)
+    dp.message.register(vk_extra_msg_wrapper, lambda m: m.from_user.id in vk_review_extra_sessions)
     dp.message.register(partner_info_wrapper, lambda m: m.from_user.id in partner_info_sessions)
     dp.message.register(channels_wrapper, Command("channels"))
     dp.message.register(reg_daily_wrapper, Command("regdailychannels"))
@@ -16823,6 +17051,7 @@ def create_app() -> web.Application:
     )
     dp.callback_query.register(vk_delete_wrapper, lambda c: c.data.startswith("vkdel:"))
     dp.callback_query.register(vk_next_wrapper, lambda c: c.data.startswith("vknext:"))
+    dp.callback_query.register(vk_review_cb_wrapper, lambda c: c.data and c.data.startswith("vkrev:"))
     dp.message.register(
 
         festival_edit_wrapper, lambda m: m.from_user.id in festival_edit_sessions

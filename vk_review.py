@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Any
+from typing import Optional, Any, Awaitable, Callable
+
+import logging
+import time as _time
 
 from db import Database
 
@@ -13,6 +16,8 @@ class InboxPost:
     post_id: int
     date: int
     text: str
+    matched_kw: Optional[str]
+    has_date: int
     status: str
     review_batch: Optional[str]
 
@@ -40,7 +45,7 @@ async def pick_next(db: Database, operator_id: int, batch_id: str) -> Optional[I
             UPDATE vk_inbox
             SET status='locked', locked_by=?, locked_at=CURRENT_TIMESTAMP, review_batch=?
             WHERE id = (SELECT id FROM next)
-            RETURNING id, group_id, post_id, date, text, status, review_batch
+            RETURNING id, group_id, post_id, date, text, matched_kw, has_date, status, review_batch
             """,
             (operator_id, batch_id),
         )
@@ -48,7 +53,16 @@ async def pick_next(db: Database, operator_id: int, batch_id: str) -> Optional[I
         if not row:
             return None
         await conn.commit()
-    return InboxPost(*row)
+    post = InboxPost(*row)
+    logging.info(
+        "vk_review pick_next id=%s group=%s post=%s kw=%s has_date=%s",
+        post.id,
+        post.group_id,
+        post.post_id,
+        post.matched_kw,
+        post.has_date,
+    )
+    return post
 
 
 async def mark_skipped(db: Database, inbox_id: int) -> None:
@@ -104,16 +118,24 @@ async def mark_imported(
             (months_csv, batch_id),
         )
         await conn.commit()
+    logging.info(
+        "vk_review mark_imported inbox_id=%s event_id=%s month=%s",
+        inbox_id,
+        event_id,
+        month,
+    )
 
 
 async def finish_batch(
-    db: Database, batch_id: str, rebuild_cb: Any
+    db: Database,
+    batch_id: str,
+    rebuild_cb: Callable[[Database, str], Awaitable[Any]],
 ) -> list[str]:
-    """Finish review batch and rebuild affected months.
+    """Finish review batch and rebuild affected months sequentially.
 
-    ``rebuild_cb`` is a callable accepting ``(db, months)`` and returning a
-    report string.  The function clears ``months_csv`` and sets ``finished_at``
-    timestamp.  Returns the list of months that were rebuilt.
+    ``rebuild_cb`` is awaited for every month individually to guarantee
+    sequential rebuilds.  The function clears ``months_csv`` and sets
+    ``finished_at`` timestamp.  Returns the list of months that were rebuilt.
     """
 
     async with db.raw_conn() as conn:
@@ -122,8 +144,12 @@ async def finish_batch(
         )
         row = await cur.fetchone()
         months = [m for m in (row[0].split(',') if row and row[0] else []) if m]
-    if months:
-        await rebuild_cb(db, months)
+    for month in months:
+        start = _time.perf_counter() if "_time" in globals() else None
+        await rebuild_cb(db, month)
+        if start is not None:
+            took = int((_time.perf_counter() - start) * 1000)
+            logging.info("vk_review rebuild month=%s took_ms=%d", month, took)
     async with db.raw_conn() as conn:
         await conn.execute(
             "UPDATE vk_review_batch SET months_csv='', finished_at=CURRENT_TIMESTAMP WHERE batch_id=?",
