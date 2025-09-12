@@ -18,9 +18,9 @@ Payload:
 }
 ```
 
-When a post is forwarded from a channel, its title is appended to the user
-message on a new line. This helps the model infer the venue when it is omitted
-in the text.
+When a post is forwarded from a channel or imported from a VK group, its title
+is appended to the user message on a new line. This helps the model infer the
+venue when it is omitted in the text.
 
 If `docs/LOCATIONS.md` exists, its lines are appended to the system prompt as a
 list of known venues. This helps the model normalise `location_name` to a
@@ -30,9 +30,9 @@ The response must be JSON with the fields listed in `docs/PROMPTS.md`. When the
 text describes multiple events, return an array of such objects.
 The prefix "Today is YYYY-MM-DD." helps the model infer the correct year for
 dates that omit it and lets the model ignore any events scheduled before today.
-When a post is forwarded from a Telegram channel, the channel title is added
-before the announcement text as `Channel: <name>.` so the model can guess the
-venue.
+When a post is forwarded from a Telegram channel or imported from a VK group,
+the channel or group title is added before the announcement text as
+`Channel: <name>.` so the model can guess the venue.
 Edit this file or `docs/PROMPTS.md` to fine‑tune the request details.
 
 The command `/ask4o <text>` sends an arbitrary user message to the same
