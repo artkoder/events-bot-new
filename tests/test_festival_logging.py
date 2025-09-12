@@ -58,7 +58,7 @@ async def test_rebuild_festivals_index_logs_img_counts(tmp_path, monkeypatch, ca
         def __init__(self, *a, **k):
             pass
 
-        def create_page(self, title, html_content):
+        def create_page(self, title, html_content, **_):
             self.html = html_content
             return {"url": "https://telegra.ph/f", "path": "f"}
 
@@ -112,7 +112,7 @@ async def test_rebuild_festivals_index_fallback(tmp_path, monkeypatch, caplog):
         def __init__(self, *a, **k):
             pass
 
-        def create_page(self, title, html_content):
+        def create_page(self, title, html_content, **_):
             stored["html"] = html_content
             return {"url": "https://telegra.ph/f", "path": "f"}
 
@@ -167,7 +167,7 @@ async def test_rebuild_festivals_index_compact_tail(tmp_path, monkeypatch, caplo
         def __init__(self, *a, **k):
             pass
 
-        def create_page(self, title, html_content):
+        def create_page(self, title, html_content, **_):
             self.html = html_content
             return {"url": "https://telegra.ph/f", "path": "f"}
 

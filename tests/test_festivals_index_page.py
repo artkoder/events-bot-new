@@ -41,7 +41,7 @@ async def test_sync_festivals_index_page_created(tmp_path: Path, monkeypatch, ca
         def __init__(self, *args, **kwargs):
             pass
 
-        def create_page(self, title, html_content):
+        def create_page(self, title, html_content, **_):
             stored["html"] = html_content
             return {"url": "https://telegra.ph/fests", "path": "fests"}
 
@@ -80,6 +80,12 @@ async def test_sync_festivals_index_page_created(tmp_path: Path, monkeypatch, ca
         '<figure><a href="https://telegra.ph/withimg"><img src="https://example.com/i.jpg"/></a>'
         in html
     )
+    assert (
+        html.index(
+            '<figure><a href="https://telegra.ph/withimg"><img src="https://example.com/i.jpg"/></a>'
+        )
+        < html.index('<h3><a href="https://telegra.ph/withimg">WithImg</a></h3>')
+    )
     assert html.count('<p dir="auto">\u200b</p>') == 1
     assert html.count(FEST_INDEX_INTRO_START) == 1
     assert html.count(FEST_INDEX_INTRO_END) == 1
@@ -88,7 +94,9 @@ async def test_sync_festivals_index_page_created(tmp_path: Path, monkeypatch, ca
     path = await main.get_setting_value(db, "fest_index_path")
     assert url == "https://telegra.ph/fests"
     assert path == "fests"
-    rec = next(r for r in caplog.records if getattr(r, "action", None) == "created")
+    rec = next(
+        r for r in caplog.records if getattr(r, "action", None) in {"created", "edited"}
+    )
     assert rec.target == "tg"
     assert rec.path == "fests"
     assert rec.url == "https://telegra.ph/fests"
@@ -166,7 +174,7 @@ async def test_sync_festivals_index_page_sorted(tmp_path: Path, monkeypatch):
         def __init__(self, *a, **k):
             pass
 
-        def create_page(self, title, html_content):
+        def create_page(self, title, html_content, **_):
             stored["html"] = html_content
             return {"url": "https://telegra.ph/fests", "path": "fests"}
 
@@ -293,6 +301,7 @@ def test_build_festival_card_html_preserves_link():
         '<a href="https://telegra.ph/fest"><img src="https://example.com/i.jpg"/></a>'
         in html
     )
+    assert html.index("<figure>") < html.index("<h3>")
     assert main.sanitize_telegraph_html(html) == html
 
 
@@ -315,7 +324,7 @@ async def test_rebuild_festivals_index_force_updates(tmp_path: Path, monkeypatch
             calls["edited"] += 1
             return {}
 
-        def create_page(self, title, html_content):
+        def create_page(self, title, html_content, **_):
             return {"url": "https://telegra.ph/fests", "path": "fests"}
 
         def get_page(self, path, return_html=True):
