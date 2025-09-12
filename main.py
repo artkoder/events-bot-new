@@ -6744,8 +6744,12 @@ async def add_events_from_text(
                 saved, added = await upsert_event(session, event)
                 if rejected_links:
                     for url in rejected_links:
+                        pattern = (
+                            "telegram_folder" if is_tg_folder_link(url) else "unknown"
+                        )
                         logging.info(
-                            "ticket_link_rejected pattern=telegram_folder url=%s eid=%s",
+                            "ticket_link_rejected pattern=%s url=%s eid=%s",
+                            pattern,
                             url,
                             saved.id,
                         )
