@@ -86,8 +86,23 @@ browse upcoming announcements. The command accepts dates like `2025-07-10`,
   export VK_CAPTCHA_TTL_MIN=60
   # optional quiet hours for captcha notifications (HH:MM-HH:MM)
   export VK_CAPTCHA_QUIET=
- python main.py
+  # VK intake tuning (defaults shown)
+  export VK_CRAWL_PAGE_SIZE=30
+  export VK_CRAWL_MAX_PAGES_INC=1
+  export VK_CRAWL_OVERLAP_SEC=300
+  export VK_CRAWL_PAGE_SIZE_BACKFILL=50
+  export VK_CRAWL_MAX_PAGES_BACKFILL=3
+  export VK_CRAWL_BACKFILL_DAYS=14
+  export VK_CRAWL_BACKFILL_AFTER_IDLE_H=24
+  export VK_CRAWL_JITTER_SEC=600
+  # keyword matching: regex by default; set to true to use pymorphy3 lemmas
+  export VK_USE_PYMORPHY=false
+  python main.py
   ```
+
+By default the crawler uses regular-expression stems to detect event keywords.
+Setting `VK_USE_PYMORPHY=true` (and installing `pymorphy3`) switches matching to
+lemmatised forms for better coverage of Russian morphology.
 
 ## Deployment on Fly.io
 

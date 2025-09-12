@@ -110,19 +110,45 @@ def replace_between_markers(html: str, start: str, end: str, new_block: str) -> 
     return html + start + new_block + end
 
 
+# Map various Russian month name forms to their numeric value
+#
+# The dictionary intentionally includes genitive, nominative and common
+# abbreviations without a trailing dot.  The dot is stripped before lookup by
+# the callers.
 MONTHS_RU = {
     "января": 1,
+    "январь": 1,
+    "янв": 1,
     "февраля": 2,
+    "февраль": 2,
+    "фев": 2,
     "марта": 3,
+    "март": 3,
+    "мар": 3,
     "апреля": 4,
+    "апрель": 4,
+    "апр": 4,
     "мая": 5,
+    "май": 5,
     "июня": 6,
+    "июнь": 6,
     "июля": 7,
+    "июль": 7,
     "августа": 8,
+    "август": 8,
+    "авг": 8,
     "сентября": 9,
+    "сентябрь": 9,
+    "сент": 9,
     "октября": 10,
+    "октябрь": 10,
+    "окт": 10,
     "ноября": 11,
+    "ноябрь": 11,
+    "нояб": 11,
     "декабря": 12,
+    "декабрь": 12,
+    "дек": 12,
 }
 
 
