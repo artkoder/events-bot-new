@@ -261,3 +261,8 @@
   matching via `VK_USE_PYMORPHY`.
 - Date and time parser recognises more Russian variants and returns precise
   timestamps for scheduling.
+
+## v0.3.41 - VK group context for 4o
+
+- VK event imports now send the group title to 4o so venues can be inferred from
+  `docs/LOCATIONS.md` when posts omit them.
