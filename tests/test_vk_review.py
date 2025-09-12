@@ -16,11 +16,11 @@ async def test_pick_next_and_skip(tmp_path):
     # insert two posts with different dates
     async with db.raw_conn() as conn:
         rows = [
-            (1, 1, 100, "t1", "k", 1, "pending"),
-            (1, 2, 200, "t2", "k", 1, "pending"),
+            (1, 1, 100, "t1", "k", 1, None, "pending"),
+            (1, 2, 200, "t2", "k", 1, None, "pending"),
         ]
         await conn.executemany(
-            "INSERT INTO vk_inbox(group_id, post_id, date, text, matched_kw, has_date, status) VALUES(?,?,?,?,?,?,?)",
+            "INSERT INTO vk_inbox(group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status) VALUES(?,?,?,?,?,?,?,?)",
             rows,
         )
         await conn.commit()
@@ -52,8 +52,8 @@ async def test_mark_imported_accumulates_month(tmp_path):
             ("batch1", 10, ""),
         )
         await conn.execute(
-            "INSERT INTO vk_inbox(group_id, post_id, date, text, matched_kw, has_date, status) VALUES(?,?,?,?,?,?,?)",
-            (1, 1, 100, "t1", "k", 1, "pending"),
+            "INSERT INTO vk_inbox(group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status) VALUES(?,?,?,?,?,?,?,?)",
+            (1, 1, 100, "t1", "k", 1, None, "pending"),
         )
         await conn.commit()
     post = await vk_review.pick_next(db, 10, "batch1")

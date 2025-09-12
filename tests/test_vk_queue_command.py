@@ -35,15 +35,15 @@ async def test_handle_vk_queue_shows_counts_and_button(tmp_path):
         await session.commit()
     async with db.raw_conn() as conn:
         rows = [
-            (1, 1, 0, "t", None, 1, "pending"),
-            (1, 2, 0, "t", None, 1, "pending"),
-            (1, 3, 0, "t", None, 1, "locked"),
-            (1, 4, 0, "t", None, 1, "skipped"),
-            (1, 5, 0, "t", None, 1, "imported"),
-            (1, 6, 0, "t", None, 1, "rejected"),
+            (1, 1, 0, "t", None, 1, None, "pending"),
+            (1, 2, 0, "t", None, 1, None, "pending"),
+            (1, 3, 0, "t", None, 1, None, "locked"),
+            (1, 4, 0, "t", None, 1, None, "skipped"),
+            (1, 5, 0, "t", None, 1, None, "imported"),
+            (1, 6, 0, "t", None, 1, None, "rejected"),
         ]
         await conn.executemany(
-            "INSERT INTO vk_inbox(group_id, post_id, date, text, matched_kw, has_date, status) VALUES(?,?,?,?,?,?,?)",
+            "INSERT INTO vk_inbox(group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status) VALUES(?,?,?,?,?,?,?,?)",
             rows,
         )
         await conn.commit()

@@ -316,6 +316,7 @@ class Database:
                     text         TEXT NOT NULL,
                     matched_kw   TEXT,
                     has_date     INTEGER NOT NULL,
+                    event_ts_hint INTEGER,
                     status       TEXT NOT NULL DEFAULT 'pending',
                     locked_by    INTEGER,
                     locked_at    TIMESTAMP,
@@ -328,6 +329,8 @@ class Database:
             await conn.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS ux_vk_inbox_unique ON vk_inbox(group_id, post_id)"
             )
+
+            await _add_column(conn, "vk_inbox", "event_ts_hint INTEGER")
 
             await conn.execute(
                 """
