@@ -20,7 +20,7 @@ location_address  - street address if present (omit the city name)
 city              - city name
 ticket_price_min  - minimum ticket price as integer or null
 ticket_price_max  - maximum ticket price as integer or null
-ticket_link       - URL for purchasing tickets **or** registration form if present
+ticket_link       - URL for purchasing tickets **or** registration form if present; ignore map service links such as https://yandex.ru/maps/
 is_free           - true if explicitly stated the event is free
 pushkin_card     - true if the event accepts the Пушкинская карта
 event_type       - one of: спектакль, выставка, концерт, ярмарка, лекция, встреча, мастер-класс, кинопоказ
