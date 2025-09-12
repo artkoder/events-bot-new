@@ -2959,17 +2959,15 @@ def build_festival_card_nodes(
     )
     title = fest.full_name or fest.name
     if url:
-        nodes.append(
-            {
-                "tag": "h3",
-                "children": [
-                    {"tag": "a", "attrs": {"href": url}, "children": [title]}
-                ],
-            }
-        )
+        title_node = {
+            "tag": "h3",
+            "children": [
+                {"tag": "a", "attrs": {"href": url}, "children": [title]}
+            ],
+        }
     else:
         logging.debug("festival_card_missing_url", extra={"fest": title})
-        nodes.append({"tag": "h3", "children": [title]})
+        title_node = {"tag": "h3", "children": [title]}
 
     period = _festival_period_str(start, end)
     used_img = False
@@ -2983,8 +2981,10 @@ def build_festival_card_nodes(
         if period:
             fig_children.append({"tag": "figcaption", "children": [f"📅 {period}"]})
         nodes.append({"tag": "figure", "children": fig_children})
+        nodes.append(title_node)
         used_img = True
     else:
+        nodes.append(title_node)
         if period:
             nodes.append({"tag": "p", "children": [f"📅 {period}"]})
 
