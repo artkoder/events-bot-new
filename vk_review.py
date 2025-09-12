@@ -132,31 +132,6 @@ async def mark_imported(
     )
 
 
-async def get_last_imported_event(db: Database, batch_id: str) -> Optional[tuple[int, int, int]]:
-    """Return group_id, post_id and event_id for the latest imported item.
-
-    Only events without ``vk_repost_url`` are considered.  ``None`` is
-    returned if there is nothing to repost.
-    """
-
-    async with db.raw_conn() as conn:
-        cursor = await conn.execute(
-            """
-            SELECT i.group_id, i.post_id, i.imported_event_id
-            FROM vk_inbox i
-            JOIN event e ON e.id = i.imported_event_id
-            WHERE i.review_batch=? AND i.status='imported' AND e.vk_repost_url IS NULL
-            ORDER BY i.id DESC
-            LIMIT 1
-            """,
-            (batch_id,),
-        )
-        row = await cursor.fetchone()
-    if not row:
-        return None
-    return row[0], row[1], row[2]
-
-
 async def save_repost_url(db: Database, event_id: int, url: str) -> None:
     """Persist ``vk_repost_url`` for the event."""
 
