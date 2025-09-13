@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from typing import List, Any
 from datetime import datetime, timedelta
 
+from db import Database
+
 from sections import MONTHS_RU
 
 # Crawl tuning parameters
@@ -312,7 +314,7 @@ async def build_event_payload_from_vk(
 
 
 async def persist_event_and_pages(
-    draft: EventDraft, photos: list[str]
+    draft: EventDraft, photos: list[str], db: Database
 ) -> PersistResult:
     """Store a drafted event and produce all public artefacts.
 
@@ -322,12 +324,14 @@ async def persist_event_and_pages(
     Links to these artefacts are returned in :class:`PersistResult`.
     """
     from datetime import datetime
-    from main import (
-        db,
-        Event,
-        upsert_event,
-        schedule_event_update_tasks,
-    )
+    from models import Event
+    import sys
+
+    main_mod = sys.modules.get("main") or sys.modules.get("__main__")
+    if main_mod is None:  # pragma: no cover - defensive
+        raise RuntimeError("main module not found")
+    upsert_event = main_mod.upsert_event
+    schedule_event_update_tasks = main_mod.schedule_event_update_tasks
 
     event = Event(
         title=draft.title,
@@ -367,6 +371,7 @@ async def process_event(
     location_hint: str | None = None,
     default_time: str | None = None,
     operator_extra: str | None = None,
+    db: Database,
 ) -> PersistResult:
     """Process VK post text into an event and track processing time."""
     start = time.perf_counter()
@@ -377,18 +382,21 @@ async def process_event(
         default_time=default_time,
         operator_extra=operator_extra,
     )
-    result = await persist_event_and_pages(draft, photos or [])
+    result = await persist_event_and_pages(draft, photos or [], db)
     duration = time.perf_counter() - start
     global processing_time_seconds_total
     processing_time_seconds_total += duration
     try:
-        import main
+        import sys
 
-        main.vk_import_duration_sum += duration
-        main.vk_import_duration_count += 1
-        for bound in main.vk_import_duration_buckets:
-            if duration <= bound:
-                main.vk_import_duration_buckets[bound] += 1
+        main_mod = sys.modules.get("main") or sys.modules.get("__main__")
+        if main_mod is not None:
+            main_mod.vk_import_duration_sum += duration
+            main_mod.vk_import_duration_count += 1
+            for bound in main_mod.vk_import_duration_buckets:
+                if duration <= bound:
+                    main_mod.vk_import_duration_buckets[bound] += 1
+                    break
     except Exception:
         pass
     return result

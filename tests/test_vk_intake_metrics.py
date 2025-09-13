@@ -13,7 +13,7 @@ async def test_vk_intake_processing_time_metric(monkeypatch):
     async def fake_build(text, **kwargs):
         return vk_intake.EventDraft(title="T")
 
-    async def fake_persist(draft, photos):
+    async def fake_persist(draft, photos, db):
         return vk_intake.PersistResult(
             event_id=1,
             telegraph_url="t",
@@ -28,7 +28,7 @@ async def test_vk_intake_processing_time_metric(monkeypatch):
     times = iter([1.0, 2.0])
     monkeypatch.setattr(vk_intake.time, "perf_counter", lambda: next(times))
 
-    await vk_intake.process_event("text", photos=[])
+    await vk_intake.process_event("text", photos=[], db=main.db)
 
     assert vk_intake.processing_time_seconds_total == pytest.approx(1.0)
 
