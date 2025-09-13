@@ -301,6 +301,7 @@ def _week_vk_lock(start: str) -> asyncio.Lock:
     return asyncio.Lock()
 
 DB_PATH = os.getenv("DB_PATH", "/data/db.sqlite")
+db: Database | None = None
 TELEGRAPH_TOKEN_FILE = os.getenv("TELEGRAPH_TOKEN_FILE", "/data/telegraph_token.txt")
 TELEGRAPH_AUTHOR_NAME = os.getenv(
     "TELEGRAPH_AUTHOR_NAME", "Полюбить Калининград Анонсы"
@@ -16681,6 +16682,7 @@ async def create_source_page(
 
 
 def create_app() -> web.Application:
+    global db
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is missing")
