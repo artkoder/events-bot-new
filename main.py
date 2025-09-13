@@ -15545,7 +15545,7 @@ async def _vkrev_import_flow(
         default_time=source[2] if source else None,
         operator_extra=operator_extra,
     )
-    res = await vk_intake.persist_event_and_pages(draft, photos)
+    res = await vk_intake.persist_event_and_pages(draft, photos, db)
     await vk_review.mark_imported(db, inbox_id, batch_id, res.event_id, res.event_date)
     vk_review_actions_total["imported"] += 1
     admin_chat = os.getenv("ADMIN_CHAT_ID")
