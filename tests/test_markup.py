@@ -39,6 +39,13 @@ def test_linkify_text_url():
 def test_linkify_markdown_link():
     assert linkify_for_telegraph("[site](https://example.com)") == '<a href="https://example.com">site</a>'
 
+
+def test_linkify_vk_internal_link():
+    assert (
+        linkify_for_telegraph("[club9118984|Калининградском музее]")
+        == '<a href="https://vk.com/club9118984">Калининградском музее</a>'
+    )
+
 def test_expose_links_from_html():
     assert expose_links_for_vk('see <a href="https://example.com">site</a>') == 'see site (https://example.com)'
 

@@ -9,6 +9,7 @@ MD_HEADER = re.compile(r'^(#{1,6})\s+(.+)$', re.M)
 
 _BARE_LINK_RE = re.compile(r'(?<!href=["\'])(https?://[^\s<>)]+)')
 _TEXT_LINK_RE = re.compile(r'([^<\[]+?)\s*\((https?://[^)]+)\)')
+_VK_LINK_RE = re.compile(r'\[([^|\]]+)\|([^\]]+)\]')
 
 def simple_md_to_html(text: str) -> str:
     """Конвертирует небольшой подмножество markdown → HTML для Telegraph."""
@@ -32,7 +33,13 @@ def linkify_for_telegraph(text_or_html: str) -> str:
         url = m.group(1)
         return f'<a href="{url}">{url}</a>'
 
-    text = MD_LINK.sub(lambda m: f'<a href="{m[2]}">{m[1]}</a>', text_or_html)
+    def repl_vk(m: re.Match[str]) -> str:
+        target, label = m.group(1), m.group(2)
+        href = target if target.startswith(("http://", "https://")) else f"https://vk.com/{target}"
+        return f'<a href="{href}">{label}</a>'
+
+    text = _VK_LINK_RE.sub(repl_vk, text_or_html)
+    text = MD_LINK.sub(lambda m: f'<a href="{m[2]}">{m[1]}</a>', text)
     text = _TEXT_LINK_RE.sub(repl_text, text)
     text = _BARE_LINK_RE.sub(repl_bare, text)
     return text
