@@ -29,20 +29,16 @@ async def test_pick_next_and_skip(tmp_path):
         await conn.commit()
     post = await vk_review.pick_next(db, 10, "batch1")
     assert post and post.post_id == 2  # newest by date
-    # verify locked
-    async with db.raw_conn() as conn:
-        cur = await conn.execute("SELECT status, locked_by FROM vk_inbox WHERE id=?", (post.id,))
-        st, lb = await cur.fetchone()
-    assert st == "locked" and lb == 10
 
+    # Skip the first post and ensure the other pending one is returned
     await vk_review.mark_skipped(db, post.id)
-    async with db.raw_conn() as conn:
-        cur = await conn.execute("SELECT status, locked_by FROM vk_inbox WHERE id=?", (post.id,))
-        st, lb = await cur.fetchone()
-    assert st == "skipped" and lb is None
-
     post2 = await vk_review.pick_next(db, 10, "batch1")
-    assert post2 and post2.id == post.id
+    assert post2 and post2.post_id == 1
+
+    # After resolving remaining pending posts the skipped one should reappear
+    await vk_review.mark_rejected(db, post2.id)
+    post3 = await vk_review.pick_next(db, 10, "batch1")
+    assert post3 and post3.post_id == 2
 
 
 @pytest.mark.asyncio

@@ -25,10 +25,13 @@ class InboxPost:
 async def pick_next(db: Database, operator_id: int, batch_id: str) -> Optional[InboxPost]:
     """Select the next inbox item and lock it for the operator.
 
-    Rows with status ``pending`` or ``skipped`` are considered, ordered by
-    ``date`` and ``id`` descending.  The selected row is atomically updated to
-    ``locked`` state with ``locked_by`` and ``locked_at`` set.  ``review_batch``
-    is also recorded so later imports can accumulate months for this batch.
+    Rows in ``pending`` state are preferred.  When none are available, all
+    rows in ``skipped`` state are moved back to ``pending`` and the selection is
+    repeated.  Items are ordered by ``event_ts_hint`` ascending and, within the
+    same hint, by ``date`` and ``id`` descending.  The selected row is
+    atomically updated to ``locked`` state with ``locked_by`` and ``locked_at``
+    set and ``review_batch`` recorded so later imports can accumulate months
+    for this batch.
 
     ``None`` is returned when the queue is empty.
     """
@@ -39,11 +42,22 @@ async def pick_next(db: Database, operator_id: int, batch_id: str) -> Optional[I
             "UPDATE vk_inbox SET status='rejected', locked_by=NULL, locked_at=NULL WHERE status IN ('pending','skipped') AND (event_ts_hint IS NULL OR event_ts_hint < ?)",
             (cutoff,),
         )
+        cur = await conn.execute(
+            "SELECT 1 FROM vk_inbox WHERE status='pending' AND event_ts_hint >= ? LIMIT 1",
+            (cutoff,),
+        )
+        has_pending = await cur.fetchone() is not None
+        if not has_pending:
+            await conn.execute(
+                "UPDATE vk_inbox SET status='pending' WHERE status='skipped' AND event_ts_hint >= ?",
+                (cutoff,),
+            )
+
         cursor = await conn.execute(
             """
             WITH next AS (
                 SELECT id FROM vk_inbox
-                WHERE status IN ('pending','skipped') AND event_ts_hint >= ?
+                WHERE status='pending' AND event_ts_hint >= ?
                 ORDER BY event_ts_hint ASC, date DESC, id DESC
                 LIMIT 1
             )
@@ -55,10 +69,9 @@ async def pick_next(db: Database, operator_id: int, batch_id: str) -> Optional[I
             (cutoff, operator_id, batch_id),
         )
         row = await cursor.fetchone()
-        if not row:
-            await conn.commit()
-            return None
         await conn.commit()
+        if not row:
+            return None
     post = InboxPost(*row)
     logging.info(
         "vk_review pick_next id=%s group=%s post=%s kw=%s has_date=%s",
