@@ -2837,6 +2837,7 @@ async def test_stats_festivals(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
     bot = DummyBot("123:abc")
+    main.settings_cache.clear()
 
     async with db.get_session() as session:
         future = (date.today() + timedelta(days=3)).isoformat()
@@ -2860,6 +2861,8 @@ async def test_stats_festivals(tmp_path: Path, monkeypatch):
                 end_date=past,
             )
         )
+        session.add(main.Setting(key="festivals_index_path", value="landing"))
+        session.add(main.Setting(key="festivals_index_url", value="http://landing"))
         await session.commit()
 
     class DummyTG:
@@ -2867,7 +2870,7 @@ async def test_stats_festivals(tmp_path: Path, monkeypatch):
             pass
 
         def get_views(self, path, **_):
-            return {"fp": {"views": 50}}[path]
+            return {"fp": {"views": 50}, "landing": {"views": 30}}[path]
 
     monkeypatch.setenv("TELEGRAPH_TOKEN", "t")
     monkeypatch.setattr(
@@ -2908,6 +2911,7 @@ async def test_stats_festivals(tmp_path: Path, monkeypatch):
     await handle_stats(msg, db, bot)
 
     lines = bot.messages[-1][1].splitlines()
+    assert any("Лендинг фестивалей" in l and "30" in l for l in lines)
     assert "Фестивали (телеграм)" in lines
     assert any("Fest" in l and "50" in l for l in lines)
     assert any("Fest" in l and "70" in l and "40" in l for l in lines)

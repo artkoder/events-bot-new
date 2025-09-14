@@ -268,3 +268,7 @@
 
 ## v0.3.42 - VK review media
 - VK review: поддержаны фото из репостов (copy_history), link-preview, doc-preview; для video берём только превью-картинки, видео не загружаем
+
+## v0.3.43 - Festival landing stats
+
+- `/stats` now shows view counts for the festivals landing page.
