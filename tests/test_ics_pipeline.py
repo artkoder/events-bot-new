@@ -127,6 +127,49 @@ async def test_ics_skips_when_no_change(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_tg_ics_post_updates_source_keyboard_on_skip(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+    async with db.get_session() as session:
+        session.add(Channel(channel_id=-100, title="Asset", is_admin=True, is_asset=True))
+        session.add(
+            Event(
+                id=1,
+                title="A",
+                description="d",
+                source_text="s",
+                date="2025-07-18",
+                time="19:00",
+                location_name="Hall",
+                city="Town",
+                source_chat_id=1,
+                source_message_id=2,
+                ics_post_url="https://t.me/c/1/2",
+            )
+        )
+        await session.commit()
+    fake = FakeClient()
+    monkeypatch.setattr(main, "get_supabase_client", lambda: fake)
+    async def fake_update_page(*a, **k):
+        pass
+    monkeypatch.setattr(main, "update_source_page_ics", fake_update_page)
+    # Initial run to populate ics_hash and file id
+    monkeypatch.setattr(main, "update_source_post_keyboard", lambda *a, **k: None)
+    await main.ics_publish(1, db, bot)
+    await main.tg_ics_post(1, db, bot)
+    # second run should skip but still trigger keyboard update
+    called = {}
+    async def fake_update(*a, **k):
+        called["v"] = True
+    monkeypatch.setattr(main, "update_source_post_keyboard", fake_update)
+    pr = Progress()
+    await main.tg_ics_post(1, db, bot, pr)
+    assert ("ics_telegram", "skipped_nochange", "no change") in pr.marks
+    assert called.get("v")
+
+
+@pytest.mark.asyncio
 async def test_ics_updates_on_change(tmp_path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
