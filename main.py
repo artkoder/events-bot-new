@@ -14509,6 +14509,27 @@ async def collect_event_stats(db: Database) -> list[str]:
     return [f"{url}: {v}" for url, v in stats]
 
 
+async def collect_festivals_landing_stats(db: Database) -> str | None:
+    """Return Telegraph view count for the festivals landing page."""
+    path = await get_setting_value(db, "festivals_index_path") or await get_setting_value(
+        db, "fest_index_path"
+    )
+    url = await get_setting_value(db, "festivals_index_url") or await get_setting_value(
+        db, "fest_index_url"
+    )
+    if not path and url:
+        try:
+            path = url.split("//", 1)[1].split("/", 1)[1]
+        except Exception:
+            path = None
+    if not path:
+        return None
+    views = await fetch_views(path, url)
+    if views is None:
+        return None
+    return f"Лендинг фестивалей: {views} просмотров"
+
+
 async def collect_festival_telegraph_stats(db: Database) -> list[str]:
     """Return Telegraph view counts for upcoming and recent festivals."""
     today = datetime.now(LOCAL_TZ).date()
@@ -14865,8 +14886,12 @@ async def handle_stats(message: types.Message, db: Database, bot: Bot):
         lines = await collect_event_stats(db)
     else:
         lines = await collect_page_stats(db)
+        fest_landing = await collect_festivals_landing_stats(db)
         fest_tg = await collect_festival_telegraph_stats(db)
         fest_vk = await collect_festival_vk_stats(db)
+        if fest_landing:
+            lines.append("")
+            lines.append(fest_landing)
         if fest_tg:
             lines.append("")
             lines.append("Фестивали (телеграм)")
