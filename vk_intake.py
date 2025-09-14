@@ -353,7 +353,11 @@ async def persist_event_and_pages(
 
     async with db.get_session() as session:
         saved, _ = await upsert_event(session, event)
-
+    async with db.get_session() as session:
+        saved = await session.get(Event, saved.id)
+    logging.info(
+        "persist_event_and_pages: source_post_url=%s", saved.source_post_url
+    )
     await schedule_event_update_tasks(db, saved)
 
     async with db.get_session() as session:
