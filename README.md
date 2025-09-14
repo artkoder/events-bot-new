@@ -11,7 +11,7 @@ Commands:
 
 - `/vk` — add/list sources, check/review events, and open queue summary.
 - `/vk_queue` — show VK inbox summary (pending/locked/skipped/imported/rejected) and a "🔎 Проверить события" button to start the review flow.
-- `/vk_crawl_now` — run VK crawling now (admin only); reports "добавлено N, всего M" to the admin chat.
+- `/vk_crawl_now` — run VK crawling now (admin only); reports "добавлено N, всего постов M" to the admin chat.
 
 Background crawling collects posts from configured VK communities and filters
 them by event keywords and date patterns. Matching posts land in the persistent
