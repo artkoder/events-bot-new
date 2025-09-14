@@ -517,6 +517,11 @@ vk_add_source_sessions: set[int] = set()
 # operator_id -> (inbox_id, batch_id) awaiting extra info during VK review
 vk_review_extra_sessions: dict[int, tuple[int, str]] = {}
 
+# event_id -> operator chat id awaiting shortpost publication
+vk_shortpost_ops: dict[int, int] = {}
+# admin user_id -> (event_id, admin_chat_message_id) awaiting custom shortpost text
+vk_shortpost_edit_sessions: dict[int, tuple[int, int]] = {}
+
 # superadmin user_id -> pending partner user_id
 partner_info_sessions: TTLCache[int, int] = TTLCache(maxsize=64, ttl=3600)
 # user_id -> (festival_id, field?) for festival editing
@@ -1039,7 +1044,7 @@ HELP_COMMANDS = [
     },
     {
         "usage": "✂️ Сокращённый рерайт",
-        "desc": "LLM-сжатый текст и фото по ID",
+        "desc": "LLM-сжатый текст без фото, предпросмотр и правка перед публикацией",
         "roles": {"user", "superadmin"},
     },
     {
@@ -15921,6 +15926,19 @@ async def handle_vk_review_cb(callback: types.CallbackQuery, db: Database, bot: 
     elif action == "shortpost":
         event_id = int(parts[2]) if len(parts) > 2 else 0
         await _vkrev_handle_shortpost(callback, event_id, db, bot)
+    elif action == "shortpost_pub":
+        event_id = int(parts[2]) if len(parts) > 2 else 0
+        await _vkrev_publish_shortpost(event_id, db, bot, callback.message.chat.id)
+    elif action == "shortpost_edit":
+        event_id = int(parts[2]) if len(parts) > 2 else 0
+        vk_shortpost_edit_sessions[callback.from_user.id] = (
+            event_id,
+            callback.message.message_id,
+        )
+        await bot.send_message(
+            callback.message.chat.id,
+            "Отправьте новый текст поста одной строкой/сообщением",
+        )
     await callback.answer()
 
 
@@ -16011,38 +16029,7 @@ async def _vkrev_handle_repost(callback: types.CallbackQuery, event_id: int, db:
     await _vkrev_show_next(callback.message.chat.id, batch_id, callback.from_user.id, db, bot)
 
 
-async def _vkrev_handle_shortpost(callback: types.CallbackQuery, event_id: int, db: Database, bot: Bot) -> None:
-    async with db.raw_conn() as conn:
-        cur = await conn.execute(
-            "SELECT group_id, post_id, review_batch FROM vk_inbox WHERE imported_event_id=?",
-            (event_id,),
-        )
-        row = await cur.fetchone()
-    if not row:
-        await bot.send_message(callback.message.chat.id, "❌ Не удалось: нет события")
-        return
-    group_id, post_id, batch_id = row
-    vk_url = f"https://vk.com/wall-{group_id}_{post_id}"
-    async with db.get_session() as session:
-        ev = await session.get(Event, event_id)
-    if not ev:
-        await bot.send_message(callback.message.chat.id, "❌ Не удалось: нет события")
-        return
-
-    try:
-        data = await _vk_api(
-            "wall.getById",
-            {"posts": f"-{group_id}_{post_id}"},
-            db,
-            bot,
-            token=VK_TOKEN_AFISHA,
-        )
-    except Exception:
-        data = {"response": []}
-    items = data.get("response") or []
-    photos = _vkrev_collect_photo_ids(items, VK_SHORTPOST_MAX_PHOTOS)
-    attachments = ",".join(photos) if photos else (ev.telegraph_url or vk_url)
-
+async def _vkrev_build_shortpost(ev: Event, vk_url: str) -> tuple[str, str]:
     text_len = len(ev.source_text or "")
     if text_len < 200:
         max_sent = 1
@@ -16053,14 +16040,12 @@ async def _vkrev_handle_shortpost(callback: types.CallbackQuery, event_id: int, 
     else:
         max_sent = 4
     summary = await build_short_vk_text(ev, ev.source_text or "", max_sent)
-
     day = int(ev.date.split("-")[2])
     month = int(ev.date.split("-")[1])
     month_name = MONTHS[month - 1]
     tags = [f"#{day}_{month_name}", f"#{day}{month_name}"]
     if ev.event_type:
         tags.append("#" + ev.event_type.replace(" ", "_"))
-
     lines = [
         ev.title.upper(),
         "",
@@ -16086,7 +16071,81 @@ async def _vkrev_handle_shortpost(callback: types.CallbackQuery, event_id: int, 
         excess = len(message) - 4096
         lines[summary_idx] = lines[summary_idx][: -excess]
         message = "\n".join(lines)
+    attachments = ev.telegraph_url or vk_url
+    return message, attachments
 
+
+async def _vkrev_handle_shortpost(callback: types.CallbackQuery, event_id: int, db: Database, bot: Bot) -> None:
+    async with db.raw_conn() as conn:
+        cur = await conn.execute(
+            "SELECT group_id, post_id, review_batch FROM vk_inbox WHERE imported_event_id=?",
+            (event_id,),
+        )
+        row = await cur.fetchone()
+    if not row:
+        await bot.send_message(callback.message.chat.id, "❌ Не удалось: нет события")
+        return
+    group_id, post_id, batch_id = row
+    vk_url = f"https://vk.com/wall-{group_id}_{post_id}"
+    async with db.get_session() as session:
+        ev = await session.get(Event, event_id)
+    if not ev:
+        await bot.send_message(callback.message.chat.id, "❌ Не удалось: нет события")
+        return
+
+    message, _ = await _vkrev_build_shortpost(ev, vk_url)
+    admin_chat = os.getenv("ADMIN_CHAT_ID")
+    if admin_chat:
+        markup = types.InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    types.InlineKeyboardButton(
+                        text="Опубликовать",
+                        callback_data=f"vkrev:shortpost_pub:{event_id}",
+                    ),
+                    types.InlineKeyboardButton(
+                        text="Изменить",
+                        callback_data=f"vkrev:shortpost_edit:{event_id}",
+                    ),
+                ]
+            ]
+        )
+        await bot.send_message(int(admin_chat), message, reply_markup=markup)
+        logging.info("shortpost_preview_sent", extra={"eid": event_id, "admin_chat": admin_chat})
+    vk_shortpost_ops[event_id] = callback.message.chat.id
+    await bot.send_message(callback.message.chat.id, "Черновик отправлен в админ-чат")
+    await _vkrev_show_next(callback.message.chat.id, batch_id, callback.from_user.id, db, bot)
+
+
+async def _vkrev_publish_shortpost(
+    event_id: int,
+    db: Database,
+    bot: Bot,
+    actor_chat_id: int,
+    text: str | None = None,
+    edited: bool = False,
+) -> None:
+    async with db.raw_conn() as conn:
+        cur = await conn.execute(
+            "SELECT group_id, post_id FROM vk_inbox WHERE imported_event_id=?",
+            (event_id,),
+        )
+        row = await cur.fetchone()
+    if not row:
+        await bot.send_message(actor_chat_id, "❌ Не удалось: нет события")
+        return
+    group_id, post_id = row
+    vk_url = f"https://vk.com/wall-{group_id}_{post_id}"
+    async with db.get_session() as session:
+        ev = await session.get(Event, event_id)
+    if not ev:
+        await bot.send_message(actor_chat_id, "❌ Не удалось: нет события")
+        return
+    if text is None:
+        message, attachments = await _vkrev_build_shortpost(ev, vk_url)
+    else:
+        message = text
+        attachments = ev.telegraph_url or vk_url
     params = {
         "owner_id": int(VK_AFISHA_GROUP_ID),
         "from_group": 1,
@@ -16095,6 +16154,7 @@ async def _vkrev_handle_shortpost(callback: types.CallbackQuery, event_id: int, 
         "copyright": vk_url,
         "signed": 0,
     }
+    operator_chat = vk_shortpost_ops.get(event_id)
     try:
         data = await _vk_api("wall.post", params, db, bot, token=VK_TOKEN_AFISHA)
         post = data.get("response", {}).get("post_id")
@@ -16102,24 +16162,26 @@ async def _vkrev_handle_shortpost(callback: types.CallbackQuery, event_id: int, 
             raise RuntimeError("no post_id")
         url = f"https://vk.com/wall-{VK_AFISHA_GROUP_ID.lstrip('-')}_{post}"
         await vk_review.save_repost_url(db, event_id, url)
-        await bot.send_message(callback.message.chat.id, f"✅ Опубликовано: {url}")
+        await bot.send_message(actor_chat_id, f"✅ Опубликовано: {url}")
+        if operator_chat:
+            await bot.send_message(operator_chat, f"✅ Опубликовано: {url}")
+        logging.info("shortpost_publish", extra={"eid": event_id, "edited": edited})
+        vk_shortpost_ops.pop(event_id, None)
     except VKAPIError as e:
         if e.code == 14:
-            await bot.send_message(
-                callback.message.chat.id,
-                "Капча, публикацию не делаем. Попробуйте позже",
-            )
+            msg = "Капча, публикацию не делаем. Попробуйте позже"
         else:
-            await bot.send_message(
-                callback.message.chat.id,
-                f"❌ Не удалось: {e.message}",
-            )
+            msg = f"❌ Не удалось: {e.message}"
+        await bot.send_message(actor_chat_id, msg)
+        if operator_chat:
+            await bot.send_message(operator_chat, msg)
+        logging.warning("shortpost_publish_failed", extra={"eid": event_id, "code": e.code})
     except Exception as e:  # pragma: no cover
-        await bot.send_message(
-            callback.message.chat.id,
-            f"❌ Не удалось: {getattr(e, 'message', str(e))}",
-        )
-    await _vkrev_show_next(callback.message.chat.id, batch_id, callback.from_user.id, db, bot)
+        msg = f"❌ Не удалось: {getattr(e, 'message', str(e))}"
+        await bot.send_message(actor_chat_id, msg)
+        if operator_chat:
+            await bot.send_message(operator_chat, msg)
+        logging.warning("shortpost_publish_failed", extra={"eid": event_id, "error": str(e)})
 
 
 async def handle_vk_extra_message(message: types.Message, db: Database, bot: Bot) -> None:
@@ -16135,6 +16197,21 @@ async def handle_vk_extra_message(message: types.Message, db: Database, bot: Bot
         db,
         bot,
         operator_extra=message.text or "",
+    )
+
+
+async def handle_vk_shortpost_edit_message(message: types.Message, db: Database, bot: Bot) -> None:
+    info = vk_shortpost_edit_sessions.pop(message.from_user.id, None)
+    if not info:
+        return
+    event_id, _ = info
+    await _vkrev_publish_shortpost(
+        event_id,
+        db,
+        bot,
+        message.chat.id,
+        text=message.text or "",
+        edited=True,
     )
 
 
@@ -17371,6 +17448,9 @@ def create_app() -> web.Application:
     async def vk_extra_msg_wrapper(message: types.Message):
         await handle_vk_extra_message(message, db, bot)
 
+    async def vk_shortpost_edit_msg_wrapper(message: types.Message):
+        await handle_vk_shortpost_edit_message(message, db, bot)
+
     async def vk_crawl_now_wrapper(message: types.Message):
         await handle_vk_crawl_now(message, db, bot)
 
@@ -17487,6 +17567,10 @@ def create_app() -> web.Application:
     dp.message.register(vk_queue_wrapper, lambda m: m.text == VK_BTN_QUEUE_SUMMARY)
     dp.message.register(vk_add_msg_wrapper, lambda m: m.from_user.id in vk_add_source_sessions)
     dp.message.register(vk_extra_msg_wrapper, lambda m: m.from_user.id in vk_review_extra_sessions)
+    dp.message.register(
+        vk_shortpost_edit_msg_wrapper,
+        lambda m: m.from_user.id in vk_shortpost_edit_sessions,
+    )
     dp.message.register(partner_info_wrapper, lambda m: m.from_user.id in partner_info_sessions)
     dp.message.register(channels_wrapper, Command("channels"))
     dp.message.register(reg_daily_wrapper, Command("regdailychannels"))

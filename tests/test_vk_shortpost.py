@@ -58,29 +58,13 @@ async def test_shortpost_wall_post(tmp_path, monkeypatch):
         await conn.commit()
     monkeypatch.setenv("VK_AFISHA_GROUP_ID", "-5")
     main.VK_AFISHA_GROUP_ID = "-5"
+    monkeypatch.setenv("ADMIN_CHAT_ID", "100")
     calls = []
     async def fake_api(method, params, db=None, bot=None, token=None, **kwargs):
         calls.append((method, params))
-        if method == "wall.getById":
-            return {
-                "response": [
-                    {
-                        "copy_history": [
-                            {
-                                "attachments": [
-                                    {"type": "photo", "photo": {"owner_id": 9, "id": 9}},
-                                ]
-                            }
-                        ],
-                        "attachments": [
-                            {"type": "photo", "photo": {"owner_id": 8, "id": 8, "access_key": "a"}},
-                        ],
-                    }
-                ]
-            }
-        elif method == "wall.post":
+        if method == "wall.post":
             assert params["from_group"] == 1
-            assert "photo9_9" in params["attachments"]
+            assert params["attachments"] == "https://t"
             assert len(params["message"]) <= 4096
             return {"response": {"post_id": 42}}
         else:
@@ -104,6 +88,18 @@ async def test_shortpost_wall_post(tmp_path, monkeypatch):
     )
     cb._bot = bot
     await main.handle_vk_review_cb(cb, db, bot)
+    # now simulate publish from admin chat
+    cb_pub = types.CallbackQuery.model_validate(
+        {
+            "id": "2",
+            "from": {"id": 10, "is_bot": False, "first_name": "A"},
+            "chat_instance": "1",
+            "data": "vkrev:shortpost_pub:77",
+            "message": {"message_id": 2, "date": 0, "chat": {"id": 100, "type": "private"}},
+        }
+    )
+    cb_pub._bot = bot
+    await main.handle_vk_review_cb(cb_pub, db, bot)
     assert any("✅ Опубликовано" in m.text for m in bot.messages)
     assert any(m == "wall.post" for m, _ in calls)
     async with db.get_session() as session:
@@ -127,9 +123,8 @@ async def test_shortpost_captcha(tmp_path, monkeypatch):
         await conn.commit()
     monkeypatch.setenv("VK_AFISHA_GROUP_ID", "-5")
     main.VK_AFISHA_GROUP_ID = "-5"
+    monkeypatch.setenv("ADMIN_CHAT_ID", "100")
     async def fake_api(method, params, db=None, bot=None, token=None, **kwargs):
-        if method == "wall.getById":
-            return {"response": []}
         raise main.VKAPIError(14, "captcha")
     monkeypatch.setattr(main, "_vk_api", fake_api)
     async def fake_build(event, src, max_sent):
@@ -150,5 +145,16 @@ async def test_shortpost_captcha(tmp_path, monkeypatch):
     )
     cb._bot = bot
     await main.handle_vk_review_cb(cb, db, bot)
+    cb_pub = types.CallbackQuery.model_validate(
+        {
+            "id": "2",
+            "from": {"id": 10, "is_bot": False, "first_name": "A"},
+            "chat_instance": "1",
+            "data": "vkrev:shortpost_pub:77",
+            "message": {"message_id": 2, "date": 0, "chat": {"id": 100, "type": "private"}},
+        }
+    )
+    cb_pub._bot = bot
+    await main.handle_vk_review_cb(cb_pub, db, bot)
     texts = [m.text for m in bot.messages]
     assert "Капча, публикацию не делаем. Попробуйте позже" in texts
