@@ -272,6 +272,8 @@ async def build_event_payload_from_vk(
     over conflicting fragments of the original text.  ``source_name`` and
     ``location_hint`` are passed to the extractor for additional context and
     ``default_time`` is used when the post does not mention a time explicitly.
+    The extractor is also instructed to apply ``default_time`` when no time is
+    present in the post.
 
     The resulting :class:`EventDraft` contains basic event attributes such as
     title, date, time, venue, price and relevant links.
@@ -281,6 +283,8 @@ async def build_event_payload_from_vk(
     llm_text = text
     if operator_extra:
         llm_text = f"{llm_text}\n{operator_extra}"
+    if default_time:
+        llm_text = f"{llm_text}\nЕсли время не указано, предположи начало в {default_time}."
 
     extra: dict[str, str] = {}
     if source_name:

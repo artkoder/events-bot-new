@@ -501,6 +501,8 @@ daily_time_sessions: TTLCache[int, int] = TTLCache(maxsize=64, ttl=3600)
 vk_group_sessions: set[int] = set()
 # user_id -> section (today/added) for VK time update
 vk_time_sessions: TTLCache[int, str] = TTLCache(maxsize=64, ttl=3600)
+# user_id -> vk_source_id for default time update
+vk_default_time_sessions: TTLCache[int, int] = TTLCache(maxsize=64, ttl=3600)
 # waiting for VK source add input
 vk_add_source_sessions: set[int] = set()
 
@@ -15294,20 +15296,19 @@ async def handle_vk_list(message: types.Message, db: Database, bot: Bot, edit: t
         return
     lines: list[str] = []
     buttons: list[list[types.InlineKeyboardButton]] = []
-    for row in rows:
+    for idx, row in enumerate(rows, start=1):
         rid, gid, screen, name, loc, dtime = row
-        extras = []
+        info_parts = [f"id={gid}"]
         if loc:
-            extras.append(loc)
-        if dtime:
-            extras.append(dtime)
-        extra = f" — id={gid} {', '.join(extras)}" if extras else f" — id={gid}"
-        lines.append(f"• {name} (vk.com/{screen}){extra}")
+            info_parts.append(loc)
+        info = ", ".join(info_parts)
+        lines.append(
+            f"{idx}. {name} (vk.com/{screen}) — {info}, типовое время: {dtime or '-'}"
+        )
         buttons.append(
             [
-                types.InlineKeyboardButton(
-                    text=f"❌ Удалить {name}", callback_data=f"vkdel:{rid}"
-                )
+                types.InlineKeyboardButton(text=f"❌ {idx}", callback_data=f"vkdel:{rid}"),
+                types.InlineKeyboardButton(text=f"🕒 {idx}", callback_data=f"vkdt:{rid}"),
             ]
         )
     text = "\n".join(lines)
@@ -15329,6 +15330,58 @@ async def handle_vk_delete_callback(callback: types.CallbackQuery, db: Database,
         await conn.commit()
     await callback.answer("Удалено")
     await handle_vk_list(callback.message, db, bot, edit=callback.message)
+
+
+async def handle_vk_dtime_callback(callback: types.CallbackQuery, db: Database, bot: Bot) -> None:
+    try:
+        vid = int(callback.data.split(":", 1)[1])
+    except Exception:
+        await callback.answer()
+        return
+    vk_default_time_sessions[callback.from_user.id] = vid
+    async with db.raw_conn() as conn:
+        cur = await conn.execute(
+            "SELECT name, default_time FROM vk_source WHERE id=?", (vid,)
+        )
+        row = await cur.fetchone()
+    name = row[0] if row else ""
+    current = row[1] if row else None
+    await bot.send_message(
+        callback.message.chat.id,
+        f"{name}: типовое время сейчас — {current or 'не установлено'}. "
+        "Отправьте время в формате HH:MM или '-' для удаления.",
+    )
+    await callback.answer()
+
+
+async def handle_vk_dtime_message(message: types.Message, db: Database, bot: Bot) -> None:
+    vid = vk_default_time_sessions.pop(message.from_user.id, None)
+    if not vid:
+        return
+    text = (message.text or "").strip()
+    if text in {"", "-"}:
+        new_time: str | None = None
+    else:
+        if not re.match(r"^\d{1,2}:\d{2}$", text):
+            await bot.send_message(
+                message.chat.id,
+                "Неверный формат. Используйте HH:MM или '-' для удаления.",
+            )
+            return
+        new_time = text if len(text.split(":")[0]) == 2 else f"0{text}"
+    async with db.raw_conn() as conn:
+        await conn.execute(
+            "UPDATE vk_source SET default_time=? WHERE id=?", (new_time, vid)
+        )
+        await conn.commit()
+        cur = await conn.execute("SELECT name FROM vk_source WHERE id=?", (vid,))
+        row = await cur.fetchone()
+    name = row[0] if row else ""
+    if new_time:
+        msg = f"Типовое время для {name} установлено: {new_time}"
+    else:
+        msg = f"Типовое время для {name} удалено"
+    await bot.send_message(message.chat.id, msg)
 
 
 async def send_vk_tmp_post(chat_id: int, batch: str, idx: int, total: int, db: Database, bot: Bot) -> None:
@@ -16916,6 +16969,12 @@ def create_app() -> web.Application:
     async def vk_delete_wrapper(callback: types.CallbackQuery):
         await handle_vk_delete_callback(callback, db, bot)
 
+    async def vk_dtime_cb_wrapper(callback: types.CallbackQuery):
+        await handle_vk_dtime_callback(callback, db, bot)
+
+    async def vk_dtime_msg_wrapper(message: types.Message):
+        await handle_vk_dtime_message(message, db, bot)
+
     async def vk_next_wrapper(callback: types.CallbackQuery):
         await handle_vk_next_callback(callback, db, bot)
 
@@ -17102,7 +17161,11 @@ def create_app() -> web.Application:
     dp.message.register(
         vk_time_msg_wrapper, lambda m: m.from_user.id in vk_time_sessions
     )
+    dp.message.register(
+        vk_dtime_msg_wrapper, lambda m: m.from_user.id in vk_default_time_sessions
+    )
     dp.callback_query.register(vk_delete_wrapper, lambda c: c.data.startswith("vkdel:"))
+    dp.callback_query.register(vk_dtime_cb_wrapper, lambda c: c.data.startswith("vkdt:"))
     dp.callback_query.register(vk_next_wrapper, lambda c: c.data.startswith("vknext:"))
     dp.callback_query.register(vk_review_cb_wrapper, lambda c: c.data and c.data.startswith("vkrev:"))
     dp.message.register(
