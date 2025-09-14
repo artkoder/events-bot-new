@@ -24,6 +24,10 @@ batch can be finished with "🧹 Завершить…" which sequentially rebui
 affected month pages. Operators can run `/vk_queue` to see current inbox counts
 and get a button to start reviewing candidates.
 
+Reposts use images from the original post, link and doc attachments rely on their
+previews, and only preview frames from videos are shown—video files are never
+downloaded.
+
 This is an MVP using **aiogram 3** and SQLite. It is designed for deployment on
 Fly.io with a webhook.
 

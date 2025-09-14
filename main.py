@@ -15505,15 +15505,72 @@ async def _vkrev_fetch_photos(group_id: int, post_id: int, db: Database, bot: Bo
     except Exception as e:  # pragma: no cover
         logging.error("wall.getById failed gid=%s post=%s: %s", group_id, post_id, e)
         return []
+    def best_url(sizes: list[dict]) -> str:
+        if not sizes:
+            return ""
+        best = max(sizes, key=lambda s: s.get("width", 0) * s.get("height", 0))
+        return best.get("url") or best.get("src", "")
+
     items = data.get("response") or []
     photos: list[str] = []
-    for item in items:
-        for att in item.get("attachments", []):
+    seen: set[str] = set()
+
+    def process_atts(atts: list[dict], source: str) -> bool:
+        counts = {"photo": 0, "link": 0, "video_thumbs": 0, "doc": 0}
+        for att in atts or []:
+            url = ""
             if att.get("type") == "photo":
-                sizes = att["photo"].get("sizes", [])
-                if sizes:
-                    best = max(sizes, key=lambda s: s.get("width", 0) * s.get("height", 0))
-                    photos.append(best.get("url", ""))
+                url = best_url(att["photo"].get("sizes", []))
+                if url:
+                    counts["photo"] += 1
+            elif att.get("type") == "link":
+                sizes = ((att.get("link") or {}).get("photo") or {}).get("sizes", [])
+                url = best_url(sizes)
+                if url:
+                    counts["link"] += 1
+            elif att.get("type") == "video":
+                images = att["video"].get("first_frame") or att["video"].get("image", [])
+                url = best_url(images)
+                if url:
+                    counts["video_thumbs"] += 1
+            elif att.get("type") == "doc":
+                sizes = (
+                    (att["doc"].get("preview") or {})
+                    .get("photo", {})
+                    .get("sizes", [])
+                )
+                url = best_url(sizes)
+                if url:
+                    counts["doc"] += 1
+            if url and url not in seen:
+                seen.add(url)
+                photos.append(url)
+                if len(photos) >= 10:
+                    break
+        total = sum(counts.values())
+        logging.info(
+            "found_photos=%s (photo=%s, link=%s, video_thumbs=%s, doc=%s) source=%s",
+            total,
+            counts["photo"],
+            counts["link"],
+            counts["video_thumbs"],
+            counts["doc"],
+            source,
+        )
+        return len(photos) >= 10
+
+    for item in items:
+        copy = (item.get("copy_history") or [{}])[0].get("attachments")
+        if copy and process_atts(copy, "copy_history"):
+            break
+        if len(photos) >= 10:
+            break
+        atts = item.get("attachments") or []
+        if process_atts(atts, "attachments"):
+            break
+
+    if not photos:
+        logging.info("no media found for -%s_%s", group_id, post_id)
     return photos
 
 
