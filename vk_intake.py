@@ -318,7 +318,7 @@ async def build_event_payload_from_vk(
 
 
 async def persist_event_and_pages(
-    draft: EventDraft, photos: list[str], db: Database
+    draft: EventDraft, photos: list[str], db: Database, source_post_url: str | None = None
 ) -> PersistResult:
     """Store a drafted event and produce all public artefacts.
 
@@ -348,6 +348,7 @@ async def persist_event_and_pages(
         ticket_link=(draft.links[0] if draft.links else None),
         photo_urls=photos,
         photo_count=len(photos),
+        source_post_url=source_post_url,
     )
 
     async with db.get_session() as session:

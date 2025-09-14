@@ -15510,6 +15510,50 @@ async def handle_vk_queue(message: types.Message, db: Database, bot: Bot) -> Non
     )
     await bot.send_message(message.chat.id, "\n".join(lines), reply_markup=markup)
 
+
+async def handle_vk_requeue_imported(
+    message: types.Message, db: Database, bot: Bot
+) -> None:
+    parts = message.text.split()
+    n = 1
+    if len(parts) > 1:
+        try:
+            n = int(parts[1])
+        except ValueError:
+            await bot.send_message(message.chat.id, "Usage: /vk_requeue_imported [N]")
+            return
+    async with db.get_session() as session:
+        user = await session.get(User, message.from_user.id)
+    if not user:
+        await bot.send_message(message.chat.id, "Not authorized")
+        return
+    async with db.raw_conn() as conn:
+        cur = await conn.execute(
+            """
+            SELECT id FROM vk_inbox
+            WHERE status='imported' AND review_batch IN (
+                SELECT batch_id FROM vk_review_batch WHERE operator_id=?
+            )
+            ORDER BY id DESC LIMIT ?
+            """,
+            (message.from_user.id, n),
+        )
+        rows = await cur.fetchall()
+        ids = [r[0] for r in rows]
+        if ids:
+            placeholders = ",".join(["?"] * len(ids))
+            await conn.execute(
+                f"""
+                UPDATE vk_inbox
+                SET status='pending', imported_event_id=NULL, review_batch=NULL,
+                    locked_by=NULL, locked_at=NULL
+                WHERE id IN ({placeholders})
+                """,
+                ids,
+            )
+            await conn.commit()
+    await bot.send_message(message.chat.id, f"Requeued {len(ids)} item(s)")
+
 async def _vkrev_queue_size(db: Database) -> int:
     async with db.raw_conn() as conn:
         cur = await conn.execute(
@@ -15689,17 +15733,21 @@ async def _vkrev_import_flow(
         default_time=source[2] if source else None,
         operator_extra=operator_extra,
     )
-    res = await vk_intake.persist_event_and_pages(draft, photos, db)
+    source_post_url = f"https://vk.com/wall-{group_id}_{post_id}"
+    res = await vk_intake.persist_event_and_pages(
+        draft, photos, db, source_post_url=source_post_url
+    )
     await vk_review.mark_imported(db, inbox_id, batch_id, res.event_id, res.event_date)
     vk_review_actions_total["imported"] += 1
+    links = (
+        f"✅ Telegraph — {res.telegraph_url}\n"
+        f"✅ Календарь (ICS) — {res.ics_supabase_url}\n"
+        f"✅ ICS (Telegram) — {res.ics_tg_url}"
+    )
     admin_chat = os.getenv("ADMIN_CHAT_ID")
     if admin_chat:
-        links = (
-            f"✅ Telegraph — {res.telegraph_url}\n"
-            f"✅ Календарь (ICS) — {res.ics_supabase_url}\n"
-            f"✅ ICS (Telegram) — {res.ics_tg_url}"
-        )
         await bot.send_message(int(admin_chat), links)
+    await bot.send_message(chat_id, links)
     markup = types.InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -17071,6 +17119,9 @@ def create_app() -> web.Application:
 
     async def vk_queue_wrapper(message: types.Message):
         await handle_vk_queue(message, db, bot)
+
+    async def vk_requeue_imported_wrapper(message: types.Message):
+        await handle_vk_requeue_imported(message, db, bot)
     async def status_wrapper(message: types.Message):
         await handle_status(message, db, bot, app)
 
@@ -17172,6 +17223,7 @@ def create_app() -> web.Application:
     dp.message.register(vk_cmd_wrapper, Command("vk"))
     dp.message.register(vk_crawl_now_wrapper, Command("vk_crawl_now"))
     dp.message.register(vk_queue_wrapper, Command("vk_queue"))
+    dp.message.register(vk_requeue_imported_wrapper, Command("vk_requeue_imported"))
     dp.message.register(vk_add_start_wrapper, lambda m: m.text == VK_BTN_ADD_SOURCE)
     dp.message.register(vk_list_wrapper, lambda m: m.text == VK_BTN_LIST_SOURCES)
     dp.message.register(vk_check_wrapper, lambda m: m.text == VK_BTN_CHECK_EVENTS)
