@@ -4234,6 +4234,12 @@ async def tg_ics_post(event_id: int, db: Database, bot: Bot, progress=None) -> b
         if ev.ics_hash == ics_hash and ev.ics_file_id and ev.ics_post_url:
             if progress:
                 progress.mark("ics_telegram", "skipped_nochange", "no change")
+            try:
+                await update_source_post_keyboard(event_id, db, bot)
+            except Exception as e:  # pragma: no cover - logging inside
+                logging.warning(
+                    "update_source_post_keyboard failed for %s: %s", event_id, e
+                )
             return False
 
         channel = await get_asset_channel(db)
