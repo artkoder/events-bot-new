@@ -58,7 +58,6 @@
 
 - `/stats events` lists stats for event source pages sorted by views.
 
-
 ## v0.3.7 - Large month pages
 
 - Month pages are split in two when the content exceeds ~64&nbsp;kB. The first
@@ -266,3 +265,6 @@
 
 - VK event imports now send the group title to 4o so venues can be inferred from
   `docs/LOCATIONS.md` when posts omit them.
+
+## v0.3.42 - VK review media
+- VK review: поддержаны фото из репостов (copy_history), link-preview, doc-preview; для video берём только превью-картинки, видео не загружаем
