@@ -42,6 +42,37 @@ async def test_pick_next_and_skip(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_pick_next_rejects_outdated(tmp_path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    async with db.raw_conn() as conn:
+        now = int(_time.time())
+        rows = [
+            # event starting in ~100s should be rejected
+            (1, 1, 100, "old", "k", 1, now + 100, "pending"),
+            # far future event should be shown first
+            (1, 2, 200, "future", "k", 1, now + 10_000, "pending"),
+            # event without timestamp should remain in queue
+            (1, 3, 300, "unknown", "k", 0, None, "pending"),
+        ]
+        await conn.executemany(
+            "INSERT INTO vk_inbox(group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status) VALUES(?,?,?,?,?,?,?,?)",
+            rows,
+        )
+        await conn.commit()
+
+    post = await vk_review.pick_next(db, 10, "batch1")
+    assert post and post.post_id == 2
+    async with db.raw_conn() as conn:
+        cur = await conn.execute("SELECT status FROM vk_inbox WHERE post_id=1")
+        assert (await cur.fetchone())[0] == "rejected"
+
+    await vk_review.mark_rejected(db, post.id)
+    post2 = await vk_review.pick_next(db, 10, "batch1")
+    assert post2 and post2.post_id == 3
+
+
+@pytest.mark.asyncio
 async def test_mark_imported_accumulates_month(tmp_path):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
