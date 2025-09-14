@@ -6274,7 +6274,9 @@ async def schedule_event_update_tasks(
         results[JobTask.festival_pages] = await enqueue_job(
             db, eid, JobTask.festival_pages
         )
-    if not is_vk_wall_url(ev.source_post_url):
+    if is_vk_wall_url(ev.source_post_url) or ev.source_vk_post_url:
+        pass
+    else:
         results[JobTask.vk_sync] = await enqueue_job(db, eid, JobTask.vk_sync)
     logging.info("scheduled event tasks for %s", eid)
     if drain_nav:
@@ -9025,6 +9027,12 @@ async def job_sync_vk_source_post(event_id: int, db: Database, bot: Bot | None) 
         raise VKPermissionError(None, "permission error")
     async with db.get_session() as session:
         ev = await session.get(Event, event_id)
+    logging.info(
+        "job_sync_vk_source_post: event_id=%s source_post_url=%s is_wall=%s",
+        event_id,
+        ev.source_post_url if ev else None,
+        is_vk_wall_url(ev.source_post_url) if ev else None,
+    )
     if not ev or is_vk_wall_url(ev.source_post_url):
         return
     new_hash = content_hash(ev.source_text or "")
