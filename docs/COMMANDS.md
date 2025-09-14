@@ -13,6 +13,8 @@
 | `/vkgroup <id|off>` | required id or `off` | Set or disable VK group for daily announcements. |
 | `/vktime today|added <HH:MM>` | required type and time | Change VK posting times (default 08:00/20:00). |
 | `/vkphotos` | - | Toggle sending images to VK posts. |
+| `↪️ Репостнуть в Vk` | - | Safe repost via `wall.post` with photo IDs. |
+| `✂️ Сокращённый рерайт` | - | Short LLM rewrite and photo IDs. |
 | `/ask4o <text>` | any text | Send query to model 4o and show plain response (superadmin only). |
 | `/events [DATE]` | optional date `YYYY-MM-DD`, `DD.MM.YYYY` or `D месяц [YYYY]` | List events for the day with delete and edit buttons. Dates are shown as `DD.MM.YYYY`. Choosing **Edit** lists all fields with inline buttons including a toggle for "Бесплатно". |
 | `/setchannel` | - | Choose an admin channel and register it as an announcement or calendar asset source. |
