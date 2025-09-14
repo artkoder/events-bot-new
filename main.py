@@ -15483,6 +15483,15 @@ async def _vkrev_show_next(chat_id: int, batch_id: str, operator_id: int, db: Da
         media = [types.InputMediaPhoto(media=p) for p in photos[:10]]
         with contextlib.suppress(Exception):
             await bot.send_media_group(chat_id, media)
+
+    async with db.raw_conn() as conn:
+        cur = await conn.execute(
+            "SELECT name FROM vk_source WHERE group_id=?",
+            (post.group_id,),
+        )
+        row = await cur.fetchone()
+    group_name = row[0] if row else f"group {post.group_id}"
+
     url = f"https://vk.com/wall-{post.group_id}_{post.post_id}"
     pending = await _vkrev_queue_size(db)
     status_line = f"ключи: {post.matched_kw or '-'} | дата: {'да' if post.has_date else 'нет'} | в очереди: {pending}"
@@ -15507,7 +15516,7 @@ async def _vkrev_show_next(chat_id: int, batch_id: str, operator_id: int, db: Da
     )
     await bot.send_message(
         chat_id,
-        f"{post.text}\n{url}\n\n{status_line}",
+        f"{post.text}\n{group_name}\n\n{url}\n\n{status_line}",
         reply_markup=markup,
     )
 
