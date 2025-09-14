@@ -277,3 +277,9 @@
 
 - VK review reposts now use safe `wall.post` with photo IDs.
 - Added "✂️ Сокращённый рерайт" button that publishes LLM‑compressed text.
+
+## v0.3.45 - VK shortpost preview
+
+- "✂️ Сокращённый рерайт" отправляет черновик в админ-чат с кнопками
+  публикации и правки.
+- Посты больше не прикрепляют фотографии, только ссылку с превью.
