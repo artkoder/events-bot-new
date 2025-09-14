@@ -272,3 +272,8 @@
 ## v0.3.43 - Festival landing stats
 
 - `/stats` now shows view counts for the festivals landing page.
+
+## v0.3.44 - VK short posts
+
+- VK review reposts now use safe `wall.post` with photo IDs.
+- Added "✂️ Сокращённый рерайт" button that publishes LLM‑compressed text.

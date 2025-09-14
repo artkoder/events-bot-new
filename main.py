@@ -323,6 +323,14 @@ try:
 except ValueError:
     VK_MAX_ATTACHMENTS = 10
 
+VK_ALLOW_TRUE_REPOST = (
+    os.getenv("VK_ALLOW_TRUE_REPOST", "false").lower() == "true"
+)
+try:
+    VK_SHORTPOST_MAX_PHOTOS = int(os.getenv("VK_SHORTPOST_MAX_PHOTOS", "4"))
+except ValueError:
+    VK_SHORTPOST_MAX_PHOTOS = 4
+
 # which actor token to use for VK API calls
 VK_ACTOR_MODE = os.getenv("VK_ACTOR_MODE", "auto")
 
@@ -1023,6 +1031,16 @@ HELP_COMMANDS = [
         "usage": "/vk_crawl_now",
         "desc": "Run VK crawling now (admin only); reports \"добавлено N, всего M\" to the admin chat",
         "roles": {"superadmin"},
+    },
+    {
+        "usage": "↪️ Репостнуть в Vk",
+        "desc": "Опубликовать пост с фото по ID",
+        "roles": {"user", "superadmin"},
+    },
+    {
+        "usage": "✂️ Сокращённый рерайт",
+        "desc": "LLM-сжатый текст и фото по ID",
+        "roles": {"user", "superadmin"},
     },
     {
         "usage": "/requests",
@@ -15657,6 +15675,62 @@ async def _vkrev_fetch_photos(group_id: int, post_id: int, db: Database, bot: Bo
     return photos
 
 
+def _vkrev_collect_photo_ids(items: list[dict], max_photos: int) -> list[str]:
+    photos: list[str] = []
+    seen: set[str] = set()
+
+    def process(atts: list[dict]) -> bool:
+        for att in atts or []:
+            if att.get("type") != "photo":
+                continue
+            ph = att.get("photo", {})
+            owner = ph.get("owner_id")
+            pid = ph.get("id")
+            if owner is None or pid is None:
+                continue
+            key = f"{owner}_{pid}"
+            access = ph.get("access_key")
+            if access:
+                key = f"{key}_{access}"
+            if key in seen:
+                continue
+            seen.add(key)
+            photos.append("photo" + key)
+            if len(photos) >= max_photos:
+                return True
+        return False
+
+    for item in items:
+        copy = (item.get("copy_history") or [{}])[0].get("attachments")
+        if process(copy):
+            break
+        if process(item.get("attachments") or []):
+            break
+    return photos
+
+
+async def build_short_vk_text(
+    event: Event, source_text: str, max_sentences: int = 4
+) -> str:
+    text = source_text.strip()
+    prompt = (
+        "Сократи описание ниже без выдумок максимум до "
+        f"{max_sentences} предложений. Разрешены эмодзи.\n\n{text}"
+    )
+    try:
+        raw = await ask_4o(
+            prompt,
+            system_prompt=
+            "Ты сжимаешь текст фактически, без новых деталей. Эмодзи допустимы.",
+            max_tokens=400,
+        )
+    except Exception:
+        sentences = re.split(r"(?<=[.!?])\s+", text)
+        raw = " ".join(sentences[: min(max_sentences, 2)])
+    sentences = re.split(r"(?<=[.!?])\s+", raw.strip())
+    return " ".join(sentences[:max_sentences]).strip()
+
+
 async def _vkrev_show_next(chat_id: int, batch_id: str, operator_id: int, db: Database, bot: Bot) -> None:
     post = await vk_review.pick_next(db, operator_id, batch_id)
     if not post:
@@ -15768,7 +15842,11 @@ async def _vkrev_import_flow(
                 types.InlineKeyboardButton(
                     text="↪️ Репостнуть в Vk",
                     callback_data=f"vkrev:repost:{res.event_id}",
-                )
+                ),
+                types.InlineKeyboardButton(
+                    text="✂️ Сокращённый рерайт",
+                    callback_data=f"vkrev:shortpost:{res.event_id}",
+                ),
             ]
         ]
     )
@@ -15840,6 +15918,9 @@ async def handle_vk_review_cb(callback: types.CallbackQuery, db: Database, bot: 
     elif action == "repost":
         event_id = int(parts[2]) if len(parts) > 2 else 0
         await _vkrev_handle_repost(callback, event_id, db, bot)
+    elif action == "shortpost":
+        event_id = int(parts[2]) if len(parts) > 2 else 0
+        await _vkrev_handle_shortpost(callback, event_id, db, bot)
     await callback.answer()
 
 
@@ -15854,27 +15935,189 @@ async def _vkrev_handle_repost(callback: types.CallbackQuery, event_id: int, db:
         await bot.send_message(callback.message.chat.id, "❌ Репост не удался: нет события")
         return
     group_id, post_id, batch_id = row
-    object_id = f"wall-{group_id}_{post_id}"
-    target_group = int(VK_AFISHA_GROUP_ID.lstrip('-')) if VK_AFISHA_GROUP_ID else None
-    params = {"object": object_id}
-    if target_group:
-        params["group_id"] = target_group
-    global vk_repost_attempts_total, vk_repost_errors_total
-    vk_repost_attempts_total += 1
+    vk_url = f"https://vk.com/wall-{group_id}_{post_id}"
+    async with db.get_session() as session:
+        ev = await session.get(Event, event_id)
+    if not ev:
+        await bot.send_message(callback.message.chat.id, "❌ Репост не удался: нет события")
+        return
+
+    if VK_ALLOW_TRUE_REPOST:
+        object_id = f"wall-{group_id}_{post_id}"
+        target_group = int(VK_AFISHA_GROUP_ID.lstrip('-')) if VK_AFISHA_GROUP_ID else None
+        params = {"object": object_id}
+        if target_group:
+            params["group_id"] = target_group
+        global vk_repost_attempts_total, vk_repost_errors_total
+        vk_repost_attempts_total += 1
+        try:
+            data = await _vk_api("wall.repost", params, db, bot, token=VK_TOKEN_AFISHA)
+            post = data.get("response", {}).get("post_id")
+            if not post:
+                raise RuntimeError("no post_id")
+            url = f"https://vk.com/wall-{VK_AFISHA_GROUP_ID.lstrip('-')}_{post}"
+            await vk_review.save_repost_url(db, event_id, url)
+            await bot.send_message(callback.message.chat.id, url)
+        except Exception as e:  # pragma: no cover
+            vk_repost_errors_total += 1
+            logging.exception("vk repost failed")
+            await bot.send_message(
+                callback.message.chat.id,
+                f"❌ Репост не удался: {getattr(e, 'code', getattr(e, 'message', str(e)))}",
+            )
+        await _vkrev_show_next(callback.message.chat.id, batch_id, callback.from_user.id, db, bot)
+        return
+
     try:
-        data = await _vk_api("wall.repost", params, db, bot, token=VK_TOKEN_AFISHA)
+        data = await _vk_api(
+            "wall.getById",
+            {"posts": f"-{group_id}_{post_id}"},
+            db,
+            bot,
+            token=VK_TOKEN_AFISHA,
+        )
+    except Exception:
+        data = {"response": []}
+    items = data.get("response") or []
+    photos = _vkrev_collect_photo_ids(items, VK_SHORTPOST_MAX_PHOTOS)
+    attachments = ",".join(photos) if photos else vk_url
+    message = f"Репост: {ev.title}\n\nИсточник: {vk_url}"
+    params = {
+        "owner_id": int(VK_AFISHA_GROUP_ID),
+        "from_group": 1,
+        "message": message,
+        "attachments": attachments,
+        "copyright": vk_url,
+        "signed": 0,
+    }
+    try:
+        data = await _vk_api("wall.post", params, db, bot, token=VK_TOKEN_AFISHA)
         post = data.get("response", {}).get("post_id")
         if not post:
             raise RuntimeError("no post_id")
         url = f"https://vk.com/wall-{VK_AFISHA_GROUP_ID.lstrip('-')}_{post}"
         await vk_review.save_repost_url(db, event_id, url)
         await bot.send_message(callback.message.chat.id, url)
-    except Exception as e:  # pragma: no cover
-        vk_repost_errors_total += 1
-        logging.exception("vk repost failed")
+    except VKAPIError as e:
         await bot.send_message(
             callback.message.chat.id,
-            f"❌ Репост не удался: {getattr(e, 'code', getattr(e, 'message', str(e)))}",
+            f"❌ Репост не удался: {e.message}",
+        )
+    except Exception as e:  # pragma: no cover
+        await bot.send_message(
+            callback.message.chat.id,
+            f"❌ Репост не удался: {getattr(e, 'message', str(e))}",
+        )
+    await _vkrev_show_next(callback.message.chat.id, batch_id, callback.from_user.id, db, bot)
+
+
+async def _vkrev_handle_shortpost(callback: types.CallbackQuery, event_id: int, db: Database, bot: Bot) -> None:
+    async with db.raw_conn() as conn:
+        cur = await conn.execute(
+            "SELECT group_id, post_id, review_batch FROM vk_inbox WHERE imported_event_id=?",
+            (event_id,),
+        )
+        row = await cur.fetchone()
+    if not row:
+        await bot.send_message(callback.message.chat.id, "❌ Не удалось: нет события")
+        return
+    group_id, post_id, batch_id = row
+    vk_url = f"https://vk.com/wall-{group_id}_{post_id}"
+    async with db.get_session() as session:
+        ev = await session.get(Event, event_id)
+    if not ev:
+        await bot.send_message(callback.message.chat.id, "❌ Не удалось: нет события")
+        return
+
+    try:
+        data = await _vk_api(
+            "wall.getById",
+            {"posts": f"-{group_id}_{post_id}"},
+            db,
+            bot,
+            token=VK_TOKEN_AFISHA,
+        )
+    except Exception:
+        data = {"response": []}
+    items = data.get("response") or []
+    photos = _vkrev_collect_photo_ids(items, VK_SHORTPOST_MAX_PHOTOS)
+    attachments = ",".join(photos) if photos else (ev.telegraph_url or vk_url)
+
+    text_len = len(ev.source_text or "")
+    if text_len < 200:
+        max_sent = 1
+    elif text_len < 500:
+        max_sent = 2
+    elif text_len < 800:
+        max_sent = 3
+    else:
+        max_sent = 4
+    summary = await build_short_vk_text(ev, ev.source_text or "", max_sent)
+
+    day = int(ev.date.split("-")[2])
+    month = int(ev.date.split("-")[1])
+    month_name = MONTHS[month - 1]
+    tags = [f"#{day}_{month_name}", f"#{day}{month_name}"]
+    if ev.event_type:
+        tags.append("#" + ev.event_type.replace(" ", "_"))
+
+    lines = [
+        ev.title.upper(),
+        "",
+        f"🗓 {day} {month_name}" + (f" ⏰ {ev.time}" if ev.time else ""),
+    ]
+    if ev.ticket_link:
+        lines.append(f"🎟 Билеты: {ev.ticket_link}")
+    loc_parts = [ev.location_name]
+    if ev.location_address:
+        loc_parts.append(ev.location_address)
+    if ev.city:
+        loc_parts.append(ev.city)
+    lines.append("📍 Локация: " + ", ".join(filter(None, loc_parts)))
+    lines.append("")
+    lines.append(summary)
+    summary_idx = len(lines) - 1
+    lines.append("")
+    lines.append(f"Источник: {vk_url}")
+    lines.append("")
+    lines.append(" ".join(tags))
+    message = "\n".join(lines)
+    if len(message) > 4096:
+        excess = len(message) - 4096
+        lines[summary_idx] = lines[summary_idx][: -excess]
+        message = "\n".join(lines)
+
+    params = {
+        "owner_id": int(VK_AFISHA_GROUP_ID),
+        "from_group": 1,
+        "message": message,
+        "attachments": attachments,
+        "copyright": vk_url,
+        "signed": 0,
+    }
+    try:
+        data = await _vk_api("wall.post", params, db, bot, token=VK_TOKEN_AFISHA)
+        post = data.get("response", {}).get("post_id")
+        if not post:
+            raise RuntimeError("no post_id")
+        url = f"https://vk.com/wall-{VK_AFISHA_GROUP_ID.lstrip('-')}_{post}"
+        await vk_review.save_repost_url(db, event_id, url)
+        await bot.send_message(callback.message.chat.id, f"✅ Опубликовано: {url}")
+    except VKAPIError as e:
+        if e.code == 14:
+            await bot.send_message(
+                callback.message.chat.id,
+                "Капча, публикацию не делаем. Попробуйте позже",
+            )
+        else:
+            await bot.send_message(
+                callback.message.chat.id,
+                f"❌ Не удалось: {e.message}",
+            )
+    except Exception as e:  # pragma: no cover
+        await bot.send_message(
+            callback.message.chat.id,
+            f"❌ Не удалось: {getattr(e, 'message', str(e))}",
         )
     await _vkrev_show_next(callback.message.chat.id, batch_id, callback.from_user.id, db, bot)
 

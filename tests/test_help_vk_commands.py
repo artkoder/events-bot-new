@@ -49,6 +49,8 @@ async def test_help_superadmin_lists_vk_commands(tmp_path):
     assert any(line.startswith("/vk ") for line in lines)
     assert any(line.startswith("/vk_queue") for line in lines)
     assert any(line.startswith("/vk_crawl_now") for line in lines)
+    assert any("↪️ Репостнуть в Vk" in line for line in lines)
+    assert any("✂️ Сокращённый рерайт" in line for line in lines)
 
 
 @pytest.mark.asyncio
@@ -73,4 +75,6 @@ async def test_help_user_hides_vk_queue_and_crawl(tmp_path):
     lines = bot.messages[0].text.splitlines()
     assert not any(line.startswith("/vk_queue") for line in lines)
     assert not any(line.startswith("/vk_crawl_now") for line in lines)
+    assert any("↪️ Репостнуть в Vk" in line for line in lines)
+    assert any("✂️ Сокращённый рерайт" in line for line in lines)
 
