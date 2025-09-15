@@ -58,7 +58,6 @@ async def test_shortpost_wall_post(tmp_path, monkeypatch):
         await conn.commit()
     monkeypatch.setenv("VK_AFISHA_GROUP_ID", "-5")
     main.VK_AFISHA_GROUP_ID = "-5"
-    monkeypatch.setenv("ADMIN_CHAT_ID", "100")
     calls = []
     async def fake_api(method, params, db=None, bot=None, token=None, **kwargs):
         calls.append((method, params))
@@ -88,14 +87,14 @@ async def test_shortpost_wall_post(tmp_path, monkeypatch):
     )
     cb._bot = bot
     await main.handle_vk_review_cb(cb, db, bot)
-    # now simulate publish from admin chat
+    # now simulate publish from the same chat
     cb_pub = types.CallbackQuery.model_validate(
         {
             "id": "2",
             "from": {"id": 10, "is_bot": False, "first_name": "A"},
             "chat_instance": "1",
             "data": "vkrev:shortpost_pub:77",
-            "message": {"message_id": 2, "date": 0, "chat": {"id": 100, "type": "private"}},
+            "message": {"message_id": 2, "date": 0, "chat": {"id": 1, "type": "private"}},
         }
     )
     cb_pub._bot = bot
@@ -123,7 +122,6 @@ async def test_shortpost_captcha(tmp_path, monkeypatch):
         await conn.commit()
     monkeypatch.setenv("VK_AFISHA_GROUP_ID", "-5")
     main.VK_AFISHA_GROUP_ID = "-5"
-    monkeypatch.setenv("ADMIN_CHAT_ID", "100")
     async def fake_api(method, params, db=None, bot=None, token=None, **kwargs):
         raise main.VKAPIError(14, "captcha")
     monkeypatch.setattr(main, "_vk_api", fake_api)
@@ -151,7 +149,7 @@ async def test_shortpost_captcha(tmp_path, monkeypatch):
             "from": {"id": 10, "is_bot": False, "first_name": "A"},
             "chat_instance": "1",
             "data": "vkrev:shortpost_pub:77",
-            "message": {"message_id": 2, "date": 0, "chat": {"id": 100, "type": "private"}},
+            "message": {"message_id": 2, "date": 0, "chat": {"id": 1, "type": "private"}},
         }
     )
     cb_pub._bot = bot

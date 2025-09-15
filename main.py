@@ -16094,26 +16094,26 @@ async def _vkrev_handle_shortpost(callback: types.CallbackQuery, event_id: int, 
         return
 
     message, _ = await _vkrev_build_shortpost(ev, vk_url)
-    admin_chat = os.getenv("ADMIN_CHAT_ID")
-    if admin_chat:
-        markup = types.InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    types.InlineKeyboardButton(
-                        text="Опубликовать",
-                        callback_data=f"vkrev:shortpost_pub:{event_id}",
-                    ),
-                    types.InlineKeyboardButton(
-                        text="Изменить",
-                        callback_data=f"vkrev:shortpost_edit:{event_id}",
-                    ),
-                ]
+    markup = types.InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                types.InlineKeyboardButton(
+                    text="Опубликовать",
+                    callback_data=f"vkrev:shortpost_pub:{event_id}",
+                ),
+                types.InlineKeyboardButton(
+                    text="Изменить",
+                    callback_data=f"vkrev:shortpost_edit:{event_id}",
+                ),
             ]
-        )
-        await bot.send_message(int(admin_chat), message, reply_markup=markup)
-        logging.info("shortpost_preview_sent", extra={"eid": event_id, "admin_chat": admin_chat})
+        ]
+    )
+    await bot.send_message(callback.message.chat.id, message, reply_markup=markup)
+    logging.info(
+        "shortpost_preview_sent",
+        extra={"eid": event_id, "chat_id": callback.message.chat.id},
+    )
     vk_shortpost_ops[event_id] = callback.message.chat.id
-    await bot.send_message(callback.message.chat.id, "Черновик отправлен в админ-чат")
     await _vkrev_show_next(callback.message.chat.id, batch_id, callback.from_user.id, db, bot)
 
 
@@ -16163,7 +16163,7 @@ async def _vkrev_publish_shortpost(
         url = f"https://vk.com/wall-{VK_AFISHA_GROUP_ID.lstrip('-')}_{post}"
         await vk_review.save_repost_url(db, event_id, url)
         await bot.send_message(actor_chat_id, f"✅ Опубликовано: {url}")
-        if operator_chat:
+        if operator_chat and operator_chat != actor_chat_id:
             await bot.send_message(operator_chat, f"✅ Опубликовано: {url}")
         logging.info("shortpost_publish", extra={"eid": event_id, "edited": edited})
         vk_shortpost_ops.pop(event_id, None)
@@ -16173,13 +16173,13 @@ async def _vkrev_publish_shortpost(
         else:
             msg = f"❌ Не удалось: {e.message}"
         await bot.send_message(actor_chat_id, msg)
-        if operator_chat:
+        if operator_chat and operator_chat != actor_chat_id:
             await bot.send_message(operator_chat, msg)
         logging.warning("shortpost_publish_failed", extra={"eid": event_id, "code": e.code})
     except Exception as e:  # pragma: no cover
         msg = f"❌ Не удалось: {getattr(e, 'message', str(e))}"
         await bot.send_message(actor_chat_id, msg)
-        if operator_chat:
+        if operator_chat and operator_chat != actor_chat_id:
             await bot.send_message(operator_chat, msg)
         logging.warning("shortpost_publish_failed", extra={"eid": event_id, "error": str(e)})
 
