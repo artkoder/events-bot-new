@@ -15738,12 +15738,31 @@ def _vkrev_collect_photo_ids(items: list[dict], max_photos: int) -> list[str]:
 async def build_short_vk_text(
     event: Event, source_text: str, max_sentences: int = 4
 ) -> str:
-    text = source_text.strip()
+    text = (source_text or "").strip()
+    fallback_from_title = False
+    if not text:
+        desc = (event.description or "").strip()
+        if desc:
+            text = desc
+        else:
+            title = (event.title or "").strip()
+            text = title
+            fallback_from_title = True
+    if not text:
+        return ""
+    if fallback_from_title:
+        return text
+
+    def _fallback_summary() -> str:
+        sentences = re.split(r"(?<=[.!?])\s+", text)
+        fallback = " ".join(sentences[: min(max_sentences, 2)]).strip()
+        return fallback or text
+
     prompt = (
         "Сократи описание ниже без выдумок, сохраняя все важные детали "
         "и перечисленных ключевых участников, максимум до "
         f"{max_sentences} предложений. Разрешены эмодзи. "
-        "Разбивай текст на абзацы для удобства чтения.\n\n{text}"
+        f"Разбивай текст на абзацы для удобства чтения.\n\n{text}"
     )
     try:
         raw = await ask_4o(
@@ -15754,10 +15773,18 @@ async def build_short_vk_text(
             max_tokens=400,
         )
     except Exception:
-        sentences = re.split(r"(?<=[.!?])\s+", text)
-        raw = " ".join(sentences[: min(max_sentences, 2)])
-    sentences = re.split(r"(?<=[.!?])\s+", raw.strip())
-    return " ".join(sentences[:max_sentences]).strip()
+        return _fallback_summary()
+    cleaned = raw.strip()
+    cleaned_lower = cleaned.lower()
+    if not cleaned:
+        return _fallback_summary()
+    if ("предостав" in cleaned_lower and "текст" in cleaned_lower) or (
+        "provide" in cleaned_lower and "text" in cleaned_lower
+    ):
+        return _fallback_summary()
+    sentences = re.split(r"(?<=[.!?])\s+", cleaned)
+    summary = " ".join(sentences[:max_sentences]).strip()
+    return summary or _fallback_summary()
 
 
 async def build_short_vk_tags(event: Event, summary: str) -> list[str]:

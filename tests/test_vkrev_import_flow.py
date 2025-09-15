@@ -70,3 +70,49 @@ async def test_vkrev_import_flow_persists_url_and_skips_vk_sync(tmp_path, monkey
         ev = await session.get(Event, captured["event_id"])
     assert ev.source_post_url == "https://vk.com/wall-1_2"
     assert JobTask.vk_sync not in tasks
+
+
+@pytest.mark.asyncio
+async def test_build_event_payload_includes_operator_extra(monkeypatch):
+    async def fake_parse(text, *args, **kwargs):
+        lower = text.lower()
+        assert "original" in lower
+        assert "extra" in lower
+        return [
+            {
+                "title": "T",
+                "date": "2025-09-02",
+                "time": "10:00",
+                "location_name": "Hall",
+            }
+        ]
+
+    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
+
+    draft = await vk_intake.build_event_payload_from_vk(
+        "Original announcement", operator_extra=" Extra context "
+    )
+
+    assert draft.source_text == "Original announcement\n\nExtra context"
+
+
+@pytest.mark.asyncio
+async def test_build_event_payload_uses_extra_when_text_missing(monkeypatch):
+    async def fake_parse(text, *args, **kwargs):
+        assert text.strip() == "Only extra"
+        return [
+            {
+                "title": "T",
+                "date": "2025-09-02",
+                "time": "10:00",
+                "location_name": "Hall",
+            }
+        ]
+
+    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
+
+    draft = await vk_intake.build_event_payload_from_vk(
+        "", operator_extra="  Only extra  "
+    )
+
+    assert draft.source_text == "Only extra"

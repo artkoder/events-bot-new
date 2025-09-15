@@ -296,6 +296,12 @@ async def build_event_payload_from_vk(
         raise RuntimeError("LLM returned no event")
     data = parsed[0]
 
+    combined_text = text or ""
+    extra_clean = (operator_extra or "").strip()
+    if extra_clean:
+        trimmed = combined_text.rstrip()
+        combined_text = f"{trimmed}\n\n{extra_clean}" if trimmed else extra_clean
+
     price: str | None = None
     if data.get("ticket_price_min") or data.get("ticket_price_max"):
         lo = data.get("ticket_price_min")
@@ -313,7 +319,7 @@ async def build_event_payload_from_vk(
         venue=data.get("location_name"),
         price=price,
         links=links,
-        source_text=text,
+        source_text=combined_text,
     )
 
 
