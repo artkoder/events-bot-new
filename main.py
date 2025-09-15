@@ -15762,14 +15762,17 @@ async def build_short_vk_text(
         "Сократи описание ниже без выдумок, сохраняя все важные детали "
         "и перечисленных ключевых участников, максимум до "
         f"{max_sentences} предложений. Разрешены эмодзи. "
+        "Пиши дружелюбно и не добавляй прямых рекламных призывов (например, про покупку билетов). "
         f"Разбивай текст на абзацы для удобства чтения.\n\n{text}"
     )
     try:
         raw = await ask_4o(
             prompt,
-            system_prompt=
-            "Ты сжимаешь текст фактически, без новых деталей и не упуская важные факты. "
-            "Эмодзи допустимы. Делай текст читабельным, разбивая его на абзацы.",
+            system_prompt=(
+                "Ты сжимаешь текст фактически, без новых деталей и не упуская важные факты. "
+                "Эмодзи допустимы. Делай текст читабельным и дружелюбным, разбивая его на абзацы. "
+                "Не используй прямые рекламные формулировки, в том числе призывы покупать билеты."
+            ),
             max_tokens=400,
         )
     except Exception:
@@ -15792,36 +15795,74 @@ async def build_short_vk_tags(event: Event, summary: str) -> list[str]:
     day = int(event.date.split("-")[2])
     month = int(event.date.split("-")[1])
     month_name = MONTHS[month - 1]
-    tags = [f"#{day}_{month_name}", f"#{day}{month_name}"]
+    current_year = date.today().year
+    tags: list[str] = []
+    seen: set[str] = set()
+
+    def add_tag(tag: str) -> None:
+        tag_clean = (tag or "").strip()
+        if not tag_clean:
+            return
+        if not tag_clean.startswith("#"):
+            tag_clean = "#" + tag_clean.lstrip("#")
+        tag_lower = tag_clean.lower()
+        if tag_lower in seen:
+            return
+        years = re.findall(r"\d{4}", tag_lower)
+        for year_text in years:
+            try:
+                if int(year_text) < current_year:
+                    return
+            except ValueError:  # pragma: no cover
+                continue
+        tags.append(tag_clean)
+        seen.add(tag_lower)
+
+    add_tag(f"#{day}_{month_name}")
+    add_tag(f"#{day}{month_name}")
     if event.event_type:
-        tags.append("#" + event.event_type.replace(" ", "_"))
+        normalized_event_type = re.sub(
+            r"[^0-9a-zа-яё]+", "_", event.event_type.lower()
+        ).strip("_")
+        if normalized_event_type:
+            add_tag(f"#{normalized_event_type}")
     needed = 7 - len(tags)
     if needed > 0:
         prompt = (
             "Подбери ещё {n} коротких и актуальных хештегов "
             "для поста о событии. Используй русский язык, "
-            "начинай каждый хештег с #, не добавляй пояснений.\n"
+            "начинай каждый хештег с #, не добавляй пояснений. "
+            "Добавь хештег с форматом события (например, #спектакль, #мастеркласс, #лекция). "
+            "Не предлагай хештеги со старыми годами (раньше {current_year}).\n"
             "Название: {title}\nОписание: {desc}"
-        ).format(n=needed, title=event.title, desc=summary)
+        ).format(
+            n=needed,
+            current_year=current_year,
+            title=event.title,
+            desc=summary,
+        )
         try:
             raw = await ask_4o(
                 prompt,
-                system_prompt="Ты подбираешь хештеги к событию, отвечай только хештегами.",
+                system_prompt=(
+                    "Ты подбираешь хештеги к событию, отвечай только хештегами. "
+                    "Избегай устаревших годов и рекламных формулировок."
+                ),
                 max_tokens=60,
             )
             extra = re.findall(r"#[^\s#]+", raw.lower())
             for t in extra:
-                if t not in tags:
-                    tags.append(t)
-                    if len(tags) >= 7:
-                        break
+                add_tag(t)
+                if len(tags) >= 7:
+                    break
         except Exception:
             pass
     if len(tags) < 5:
-        fallback = ["#афиша", "#кудапойти", "#событие", "#культура", "#калининград"]
+        fallback = ["#афиша", "#кудапойти", "#событие", "#выходные", "#калининград"]
         for t in fallback:
-            if t not in tags:
-                tags.append(t)
+            if len(tags) >= 5:
+                break
+            add_tag(t)
             if len(tags) >= 5:
                 break
     return tags[:7]
