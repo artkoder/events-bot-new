@@ -11396,9 +11396,6 @@ async def build_festival_page_content(db: Database, fest: Festival) -> tuple[str
         nodes.extend(telegraph_br())
         nodes.append({"tag": "h3", "children": ["Мероприятия фестиваля"]})
         for e in events:
-            if e.photo_urls:
-                nodes.append({"tag": "img", "attrs": {"src": e.photo_urls[0]}})
-                nodes.append({"tag": "p", "children": ["\u00a0"]})
             nodes.extend(event_to_nodes(e, festival=fest, show_festival=False))
     else:
         nodes.extend(telegraph_br())
