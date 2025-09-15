@@ -49,7 +49,9 @@ async def test_vkrev_import_flow_persists_url_and_skips_vk_sync(tmp_path, monkey
 
     captured = {}
 
-    async def fake_mark_imported(db_, inbox_id, batch_id, event_id, event_date):
+    async def fake_mark_imported(
+        db_, inbox_id, batch_id, operator_id, event_id, event_date
+    ):
         captured["event_id"] = event_id
 
     tasks = []

@@ -16018,7 +16018,9 @@ async def _vkrev_import_flow(
     res = await vk_intake.persist_event_and_pages(
         draft, photos, db, source_post_url=source_post_url
     )
-    await vk_review.mark_imported(db, inbox_id, batch_id, res.event_id, res.event_date)
+    await vk_review.mark_imported(
+        db, inbox_id, batch_id, operator_id, res.event_id, res.event_date
+    )
     vk_review_actions_total["imported"] += 1
     links = (
         f"✅ Telegraph — {res.telegraph_url}\n"
@@ -16098,14 +16100,21 @@ async def handle_vk_review_cb(callback: types.CallbackQuery, db: Database, bot: 
         await bot.send_message(callback.message.chat.id, "Остановлено", reply_markup=markup)
     elif action == "finish":
         batch_id = parts[2] if len(parts) > 2 else ""
+        reports: list[tuple[str, str]] = []
+
         async def rebuild_cb(db_: Database, month: str) -> None:
-            await _perform_pages_rebuild(db_, [month], force=True)
+            report = await _perform_pages_rebuild(db_, [month], force=True)
+            reports.append((month, report))
+
         months = await vk_review.finish_batch(db, batch_id, rebuild_cb)
         if months:
             await bot.send_message(
                 callback.message.chat.id,
                 "Запущен rebuild для: " + ", ".join(months),
             )
+            for _, report in reports:
+                if report:
+                    await bot.send_message(callback.message.chat.id, report)
         else:
             await bot.send_message(callback.message.chat.id, "Нет месяцев для обновления")
     elif action == "repost":

@@ -171,7 +171,12 @@ async def mark_rejected(db: Database, inbox_id: int) -> None:
 
 
 async def mark_imported(
-    db: Database, inbox_id: int, batch_id: str, event_id: int, event_date: str
+    db: Database,
+    inbox_id: int,
+    batch_id: str,
+    operator_id: int,
+    event_id: int,
+    event_date: str,
 ) -> None:
     """Mark inbox row as imported and accumulate affected month.
 
@@ -180,8 +185,17 @@ async def mark_imported(
     row is unlocked and linked with ``event_id``.
     """
 
-    month = event_date[:7]
+    month = (event_date or "")[:7]
     async with db.raw_conn() as conn:
+        if not batch_id:
+            cur = await conn.execute(
+                "SELECT review_batch FROM vk_inbox WHERE id=?",
+                (inbox_id,),
+            )
+            row = await cur.fetchone()
+            if row and row[0]:
+                batch_id = row[0]
+
         await conn.execute(
             """
             UPDATE vk_inbox
@@ -191,19 +205,38 @@ async def mark_imported(
             """,
             (event_id, batch_id, inbox_id),
         )
-        cur = await conn.execute(
-            "SELECT months_csv FROM vk_review_batch WHERE batch_id=?", (batch_id,)
-        )
-        row = await cur.fetchone()
-        months: set[str] = set()
-        if row and row[0]:
-            months = set(filter(None, row[0].split(',')))
-        months.add(month)
-        months_csv = ",".join(sorted(months))
-        await conn.execute(
-            "UPDATE vk_review_batch SET months_csv=? WHERE batch_id=?",
-            (months_csv, batch_id),
-        )
+        if batch_id:
+            await conn.execute(
+                """
+                INSERT OR IGNORE INTO vk_review_batch(batch_id, operator_id, months_csv)
+                VALUES(?,?,?)
+                """,
+                (batch_id, operator_id, ""),
+            )
+            cur = await conn.execute(
+                "SELECT months_csv FROM vk_review_batch WHERE batch_id=?",
+                (batch_id,),
+            )
+            row = await cur.fetchone()
+            months: set[str] = set()
+            if row and row[0]:
+                months = set(filter(None, row[0].split(',')))
+            if month:
+                months.add(month)
+            months_csv = ",".join(sorted(months))
+            await conn.execute(
+                "UPDATE vk_review_batch SET months_csv=?, finished_at=NULL WHERE batch_id=?",
+                (months_csv, batch_id),
+            )
+        else:
+            logging.warning(
+                "vk_review mark_imported missing_batch",
+                extra={
+                    "inbox_id": inbox_id,
+                    "event_id": event_id,
+                    "event_date": event_date,
+                },
+            )
         await conn.commit()
     logging.info(
         "vk_review mark_imported inbox_id=%s event_id=%s month=%s",
