@@ -1969,12 +1969,13 @@ async def ensure_festival(
                 if merged != fest.photo_urls:
                     fest.photo_urls = merged
                     updated = True
-            if photo_url and photo_url != fest.photo_url:
-                fest.photo_url = photo_url
-                updated = True
-            elif not fest.photo_url and photo_urls:
-                fest.photo_url = photo_urls[0]
-                updated = True
+            if not fest.photo_url:
+                if photo_url:
+                    fest.photo_url = photo_url
+                    updated = True
+                elif photo_urls:
+                    fest.photo_url = photo_urls[0]
+                    updated = True
             if full_name and full_name != fest.full_name:
                 fest.full_name = full_name
                 updated = True
