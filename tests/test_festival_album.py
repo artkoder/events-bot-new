@@ -76,5 +76,17 @@ async def test_build_festival_page_content_shows_album(tmp_path: Path):
     async with db.get_session() as session:
         fest = await session.get(Festival, fid)
     _, nodes = await main.build_festival_page_content(db, fest)
-    imgs = [n for n in nodes if n.get("tag") == "img"]
-    assert [img["attrs"]["src"] for img in imgs] == [urls[1], urls[0], urls[2]]
+
+    def _collect_img_srcs(nodes):
+        srcs = []
+        for n in nodes:
+            if n.get("tag") == "img":
+                srcs.append(n["attrs"]["src"])
+            elif n.get("tag") == "figure":
+                for ch in n.get("children", []):
+                    if isinstance(ch, dict) and ch.get("tag") == "img":
+                        srcs.append(ch["attrs"]["src"])
+        return srcs
+
+    srcs = _collect_img_srcs(nodes)
+    assert srcs == [urls[1], urls[0], urls[2]]

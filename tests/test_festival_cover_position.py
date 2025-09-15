@@ -27,8 +27,11 @@ async def test_festival_cover_comes_first(tmp_path: Path):
 
     _, nodes = await main.build_festival_page_content(db, fest)
 
-    assert nodes[0]["tag"] == "img"
-    assert nodes[0]["attrs"]["src"] == "https://example.com/cover.jpg"
+    assert nodes[0]["tag"] == "figure"
+    img = next(
+        ch for ch in nodes[0].get("children", []) if isinstance(ch, dict) and ch.get("tag") == "img"
+    )
+    assert img["attrs"]["src"] == "https://example.com/cover.jpg"
     h2_idx = next(i for i, n in enumerate(nodes) if n.get("tag") == "h2")
     assert h2_idx > 0
 
