@@ -19,7 +19,9 @@ them by event keywords and date patterns. Matching posts land in the persistent
 skip a candidate. Accepted items go through the standard import pipeline to
 create a Telegraph page and calendar links. After each import the admin chat
 receives links to the generated Telegraph and ICS pages, and the operator can
-manually repost the source to the Afisha VK group via a dedicated button. The
+manually repost the source to the Afisha VK group via a dedicated button. Choosing
+the ✂️ "Short post" action shows the draft with Publish/Edit buttons in the same
+chat where the operator clicked. The
 batch can be finished with "🧹 Завершить…" which sequentially rebuilds all
 affected month pages. Operators can run `/vk_queue` to see current inbox counts
 and get a button to start reviewing candidates.
