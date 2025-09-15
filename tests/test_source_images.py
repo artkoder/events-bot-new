@@ -56,7 +56,7 @@ async def test_update_source_page_cover_tail_nav(monkeypatch):
     )
     html = dummy.html
     assert uploaded == 2
-    assert '<figure><img src="http://cat/1.jpg"/></figure>' in html
+    assert html.startswith('<figure><img src="http://cat/1.jpg"/></figure>')
     assert html.count('<img src="http://cat/') == 2
     assert html.count("<p>NAV</p>") == 2
     first_nav = html.index("<p>NAV</p>")
