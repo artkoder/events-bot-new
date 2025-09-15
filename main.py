@@ -11396,6 +11396,9 @@ async def build_festival_page_content(db: Database, fest: Festival) -> tuple[str
         nodes.extend(telegraph_br())
         nodes.append({"tag": "h3", "children": ["Мероприятия фестиваля"]})
         for e in events:
+            if e.photo_urls:
+                nodes.append({"tag": "img", "attrs": {"src": e.photo_urls[0]}})
+                nodes.append({"tag": "p", "children": ["\u00a0"]})
             nodes.extend(event_to_nodes(e, festival=fest, show_festival=False))
     else:
         nodes.extend(telegraph_br())
@@ -15612,15 +15615,22 @@ async def _vkrev_queue_size(db: Database) -> int:
 
 
 async def _vkrev_fetch_photos(group_id: int, post_id: int, db: Database, bot: Bot) -> list[str]:
+    user_token = _vk_user_token()
+    if not user_token:
+        logging.error(
+            "VK_USER_TOKEN missing, cannot fetch photos gid=%s post=%s",
+            group_id,
+            post_id,
+        )
+        return []
     try:
         data = await _vk_api(
             "wall.getById",
             {"posts": f"-{group_id}_{post_id}"},
             db,
             bot,
-            token=VK_TOKEN_AFISHA,
-            token_kind="group",
-            skip_captcha=True,
+            token=user_token,
+            token_kind="user",
         )
     except Exception as e:  # pragma: no cover
         logging.error("wall.getById failed gid=%s post=%s: %s", group_id, post_id, e)

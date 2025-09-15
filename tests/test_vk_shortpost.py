@@ -21,6 +21,36 @@ class DummyBot:
 
 
 @pytest.mark.asyncio
+async def test_vkrev_fetch_photos_uses_user_token(monkeypatch):
+    calls = []
+
+    async def fake_api(method, params, db=None, bot=None, token=None, token_kind=None, **kwargs):
+        calls.append((token, token_kind))
+        return {"response": []}
+
+    monkeypatch.setattr(main, "_vk_api", fake_api)
+    monkeypatch.setattr(main, "_vk_user_token", lambda: "user-token")
+
+    photos = await main._vkrev_fetch_photos(1, 2, None, None)
+
+    assert photos == []
+    assert calls == [("user-token", "user")]
+
+
+@pytest.mark.asyncio
+async def test_vkrev_fetch_photos_no_user_token(monkeypatch):
+    async def fake_api(*args, **kwargs):  # pragma: no cover
+        raise AssertionError("_vk_api should not be called without user token")
+
+    monkeypatch.setattr(main, "_vk_api", fake_api)
+    monkeypatch.setattr(main, "_vk_user_token", lambda: None)
+
+    photos = await main._vkrev_fetch_photos(1, 2, None, None)
+
+    assert photos == []
+
+
+@pytest.mark.asyncio
 async def test_collect_photo_ids():
     items = [
         {

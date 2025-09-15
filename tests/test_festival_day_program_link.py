@@ -161,6 +161,7 @@ async def test_build_festival_page_content_event_gallery_order(tmp_path: Path):
                 "https://example.com/gallery.jpg",
             ],
         )
+
         ev = Event(
             title="Day 1",
             description="",
@@ -191,3 +192,4 @@ async def test_build_festival_page_content_event_gallery_order(tmp_path: Path):
     gallery_idx = html.index("https://example.com/gallery.jpg")
     nav_idx = html.index("Ближайшие фестивали")
     assert cover_idx < events_idx < gallery_idx < nav_idx
+
