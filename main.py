@@ -15737,6 +15737,46 @@ async def build_short_vk_text(
     return " ".join(sentences[:max_sentences]).strip()
 
 
+async def build_short_vk_tags(event: Event, summary: str) -> list[str]:
+    """Generate 5-7 hashtags for the short VK post."""
+    day = int(event.date.split("-")[2])
+    month = int(event.date.split("-")[1])
+    month_name = MONTHS[month - 1]
+    tags = [f"#{day}_{month_name}", f"#{day}{month_name}"]
+    if event.event_type:
+        tags.append("#" + event.event_type.replace(" ", "_"))
+    needed = 7 - len(tags)
+    if needed > 0:
+        prompt = (
+            "Подбери ещё {n} коротких и актуальных хештегов "
+            "для поста о событии. Используй русский язык, "
+            "начинай каждый хештег с #, не добавляй пояснений.\n"
+            "Название: {title}\nОписание: {desc}"
+        ).format(n=needed, title=event.title, desc=summary)
+        try:
+            raw = await ask_4o(
+                prompt,
+                system_prompt="Ты подбираешь хештеги к событию, отвечай только хештегами.",
+                max_tokens=60,
+            )
+            extra = re.findall(r"#[^\s#]+", raw.lower())
+            for t in extra:
+                if t not in tags:
+                    tags.append(t)
+                    if len(tags) >= 7:
+                        break
+        except Exception:
+            pass
+    if len(tags) < 5:
+        fallback = ["#афиша", "#кудапойти", "#событие", "#культура", "#калининград"]
+        for t in fallback:
+            if t not in tags:
+                tags.append(t)
+            if len(tags) >= 5:
+                break
+    return tags[:7]
+
+
 async def _vkrev_show_next(chat_id: int, batch_id: str, operator_id: int, db: Database, bot: Bot) -> None:
     post = await vk_review.pick_next(db, operator_id, batch_id)
     if not post:
@@ -16044,9 +16084,7 @@ async def _vkrev_build_shortpost(ev: Event, vk_url: str) -> tuple[str, str]:
     day = int(ev.date.split("-")[2])
     month = int(ev.date.split("-")[1])
     month_name = MONTHS[month - 1]
-    tags = [f"#{day}_{month_name}", f"#{day}{month_name}"]
-    if ev.event_type:
-        tags.append("#" + ev.event_type.replace(" ", "_"))
+    tags = await build_short_vk_tags(ev, summary)
     lines = [
         ev.title.upper(),
         "",
