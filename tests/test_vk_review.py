@@ -88,7 +88,7 @@ async def test_mark_imported_accumulates_month(tmp_path):
         )
         await conn.commit()
     post = await vk_review.pick_next(db, 10, "batch1")
-    await vk_review.mark_imported(db, post.id, "batch1", 77, "2025-09-10")
+    await vk_review.mark_imported(db, post.id, "batch1", 10, 77, "2025-09-10")
     async with db.raw_conn() as conn:
         cur = await conn.execute("SELECT status, imported_event_id FROM vk_inbox WHERE id=?", (post.id,))
         st, eid = await cur.fetchone()
@@ -96,6 +96,43 @@ async def test_mark_imported_accumulates_month(tmp_path):
         months = (await cur.fetchone())[0]
     assert st == "imported" and eid == 77
     assert months == "2025-09"
+
+
+@pytest.mark.asyncio
+async def test_mark_imported_creates_batch_when_missing(tmp_path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    async with db.raw_conn() as conn:
+        future_ts = int(_time.time()) + 10_000
+        await conn.execute(
+            "INSERT INTO vk_inbox(group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status) VALUES(?,?,?,?,?,?,?,?)",
+            (1, 5, 300, "t-new", "k", 1, future_ts, "pending"),
+        )
+        await conn.commit()
+
+    post = await vk_review.pick_next(db, 42, "batch-new")
+    assert post is not None
+
+    await vk_review.mark_imported(db, post.id, "batch-new", 42, 99, "2025-10-01")
+
+    async with db.raw_conn() as conn:
+        cur = await conn.execute(
+            "SELECT status, review_batch, imported_event_id FROM vk_inbox WHERE id=?",
+            (post.id,),
+        )
+        status, review_batch, imported_event_id = await cur.fetchone()
+        cur = await conn.execute(
+            "SELECT operator_id, months_csv, finished_at FROM vk_review_batch WHERE batch_id=?",
+            ("batch-new",),
+        )
+        operator_id, months_csv, finished_at = await cur.fetchone()
+
+    assert status == "imported"
+    assert review_batch == "batch-new"
+    assert imported_event_id == 99
+    assert operator_id == 42
+    assert months_csv == "2025-10"
+    assert finished_at is None
 
 
 @pytest.mark.asyncio
