@@ -15608,6 +15608,9 @@ async def _vkrev_fetch_photos(group_id: int, post_id: int, db: Database, bot: Bo
             {"posts": f"-{group_id}_{post_id}"},
             db,
             bot,
+            token=VK_TOKEN_AFISHA,
+            token_kind="group",
+            skip_captcha=True,
         )
     except Exception as e:  # pragma: no cover
         logging.error("wall.getById failed gid=%s post=%s: %s", group_id, post_id, e)
@@ -16042,7 +16045,7 @@ async def _vkrev_handle_repost(callback: types.CallbackQuery, event_id: int, db:
     attachments = ",".join(photos) if photos else vk_url
     message = f"Репост: {ev.title}\n\nИсточник: {vk_url}"
     params = {
-        "owner_id": int(VK_AFISHA_GROUP_ID),
+        "owner_id": f"-{VK_AFISHA_GROUP_ID.lstrip('-')}",
         "from_group": 1,
         "message": message,
         "attachments": attachments,
@@ -16050,7 +16053,14 @@ async def _vkrev_handle_repost(callback: types.CallbackQuery, event_id: int, db:
         "signed": 0,
     }
     try:
-        data = await _vk_api("wall.post", params, db, bot, token=VK_TOKEN_AFISHA)
+        data = await _vk_api(
+            "wall.post",
+            params,
+            db,
+            bot,
+            token=VK_TOKEN_AFISHA,
+            skip_captcha=True,
+        )
         post = data.get("response", {}).get("post_id")
         if not post:
             raise RuntimeError("no post_id")
@@ -16186,7 +16196,7 @@ async def _vkrev_publish_shortpost(
         message = text
         attachments = ev.telegraph_url or vk_url
     params = {
-        "owner_id": int(VK_AFISHA_GROUP_ID),
+        "owner_id": f"-{VK_AFISHA_GROUP_ID.lstrip('-')}",
         "from_group": 1,
         "message": message,
         "attachments": attachments,
@@ -16195,7 +16205,14 @@ async def _vkrev_publish_shortpost(
     }
     operator_chat = vk_shortpost_ops.get(event_id)
     try:
-        data = await _vk_api("wall.post", params, db, bot, token=VK_TOKEN_AFISHA)
+        data = await _vk_api(
+            "wall.post",
+            params,
+            db,
+            bot,
+            token=VK_TOKEN_AFISHA,
+            skip_captcha=True,
+        )
         post = data.get("response", {}).get("post_id")
         if not post:
             raise RuntimeError("no post_id")

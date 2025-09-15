@@ -5,11 +5,16 @@ import pytest
 
 import main
 
+main.VK_TOKEN_AFISHA = "ga"
+
 
 @pytest.mark.asyncio
 async def test_copy_history_photo(monkeypatch):
-    async def fake_vk_api(method, params, db, bot):
+    async def fake_vk_api(method, params, db, bot, **kwargs):
         assert method == "wall.getById"
+        assert kwargs.get("token_kind") == "group"
+        assert kwargs.get("token") == main.VK_TOKEN_AFISHA
+        assert kwargs.get("skip_captcha") is True
         return {
             "response": [
                 {
@@ -39,7 +44,7 @@ async def test_copy_history_photo(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_link_preview(monkeypatch):
-    async def fake_vk_api(method, params, db, bot):
+    async def fake_vk_api(method, params, db, bot, **kwargs):
         return {
             "response": [
                 {
@@ -72,7 +77,7 @@ async def test_link_preview(monkeypatch):
 async def test_video_preview(monkeypatch):
     calls = []
 
-    async def fake_vk_api(method, params, db, bot):
+    async def fake_vk_api(method, params, db, bot, **kwargs):
         calls.append(method)
         return {
             "response": [
@@ -99,7 +104,7 @@ async def test_video_preview(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_doc_preview(monkeypatch):
-    async def fake_vk_api(method, params, db, bot):
+    async def fake_vk_api(method, params, db, bot, **kwargs):
         return {
             "response": [
                 {
@@ -143,7 +148,7 @@ async def test_dedup_and_limit(monkeypatch):
     copy_atts = [make_photo(u) for u in urls[:6]]
     atts = [make_photo(u) for u in urls[5:]]  # overlap at url[5]
 
-    async def fake_vk_api(method, params, db, bot):
+    async def fake_vk_api(method, params, db, bot, **kwargs):
         return {
             "response": [
                 {
