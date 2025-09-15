@@ -21,6 +21,36 @@ class DummyBot:
 
 
 @pytest.mark.asyncio
+async def test_vkrev_fetch_photos_uses_user_token(monkeypatch):
+    calls = []
+
+    async def fake_api(method, params, db=None, bot=None, token=None, token_kind=None, **kwargs):
+        calls.append((token, token_kind))
+        return {"response": []}
+
+    monkeypatch.setattr(main, "_vk_api", fake_api)
+    monkeypatch.setattr(main, "_vk_user_token", lambda: "user-token")
+
+    photos = await main._vkrev_fetch_photos(1, 2, None, None)
+
+    assert photos == []
+    assert calls == [("user-token", "user")]
+
+
+@pytest.mark.asyncio
+async def test_vkrev_fetch_photos_no_user_token(monkeypatch):
+    async def fake_api(*args, **kwargs):  # pragma: no cover
+        raise AssertionError("_vk_api should not be called without user token")
+
+    monkeypatch.setattr(main, "_vk_api", fake_api)
+    monkeypatch.setattr(main, "_vk_user_token", lambda: None)
+
+    photos = await main._vkrev_fetch_photos(1, 2, None, None)
+
+    assert photos == []
+
+
+@pytest.mark.asyncio
 async def test_collect_photo_ids():
     items = [
         {
@@ -190,3 +220,56 @@ async def test_shortpost_no_time(monkeypatch):
     msg, _ = await main._vkrev_build_shortpost(ev, "https://vk.com/wall-1_1")
     assert "⏰" not in msg
     assert "[https://vk.com/wall-1_1|Источник]" in msg
+
+
+@pytest.mark.asyncio
+async def test_shortpost_midnight_time_hidden(monkeypatch):
+    async def fake_build_text(event, src, max_sent):
+        return "short summary"
+
+    async def fake_tags(event, summary):
+        return ["#a", "#b", "#c", "#d", "#e"]
+
+    monkeypatch.setattr(main, "build_short_vk_text", fake_build_text)
+    monkeypatch.setattr(main, "build_short_vk_tags", fake_tags)
+
+    ev = Event(
+        id=1,
+        title="T",
+        description="d",
+        date="2025-09-27",
+        time="00:00",
+        location_name="Place",
+        source_text="src",
+    )
+
+    msg, _ = await main._vkrev_build_shortpost(ev, "https://vk.com/wall-1_1")
+    assert "⏰" not in msg
+
+
+@pytest.mark.asyncio
+async def test_shortpost_preview_link(monkeypatch):
+    async def fake_build_text(event, src, max_sent):
+        return "short summary"
+
+    async def fake_tags(event, summary):
+        return ["#a", "#b", "#c", "#d", "#e"]
+
+    monkeypatch.setattr(main, "build_short_vk_text", fake_build_text)
+    monkeypatch.setattr(main, "build_short_vk_tags", fake_tags)
+
+    ev = Event(
+        id=1,
+        title="T",
+        description="d",
+        date="2025-09-27",
+        time="",
+        location_name="Place",
+        source_text="src",
+    )
+
+    msg, _ = await main._vkrev_build_shortpost(
+        ev, "https://vk.com/wall-1_1", for_preview=True
+    )
+    assert "[https://vk.com/wall-1_1|Источник]" not in msg
+    assert "Источник\nhttps://vk.com/wall-1_1" in msg
