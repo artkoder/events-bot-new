@@ -17111,6 +17111,24 @@ async def build_source_page_content(
             linked = linkify_for_telegraph(escaped)
             paragraphs.append(f"<p>{linked}</p>")
         html_content += "".join(paragraphs)
+    if db and hasattr(db, "get_session") and text and text.strip():
+        from models import Event, Festival
+        from sqlalchemy import select
+
+        async with db.get_session() as session:
+            res = await session.execute(
+                select(Event.festival, Festival.telegraph_path, Festival.telegraph_url)
+                .join(Festival, Event.festival == Festival.name)
+                .where(Event.source_text == text)
+            )
+            row = res.first()
+            if row and row.telegraph_path:
+                href = row.telegraph_url or f"https://telegra.ph/{row.telegraph_path.lstrip('/')}"
+                html_content += (
+                    '<p>&#8203;</p>'
+                    f'<p>✨ <a href="{html.escape(href)}">{html.escape(row.festival)}</a></p>'
+                    '<p>&#8203;</p>'
+                )
     nav_html = None
     if db:
         nav_html = await build_month_nav_html(db)
