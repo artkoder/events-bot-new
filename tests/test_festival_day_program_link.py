@@ -149,11 +149,19 @@ async def test_build_festival_page_content_autoday_no_program(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_build_festival_page_content_event_image_and_link(tmp_path: Path):
+async def test_build_festival_page_content_event_gallery_order(tmp_path: Path):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
     async with db.get_session() as session:
-        fest = Festival(name="Fest", description="d")
+        fest = Festival(
+            name="Fest",
+            description="d",
+            photo_urls=[
+                "https://example.com/cover.jpg",
+                "https://example.com/gallery.jpg",
+            ],
+        )
+
         ev = Event(
             title="Day 1",
             description="",
@@ -165,10 +173,23 @@ async def test_build_festival_page_content_event_image_and_link(tmp_path: Path):
             telegraph_path="ev",
             photo_urls=["https://example.com/img.jpg"],
         )
+        other = Festival(
+            name="Other",
+            description="o",
+            start_date="2030-01-05",
+            end_date="2030-01-06",
+        )
         session.add(fest)
         session.add(ev)
+        session.add(other)
         await session.commit()
     _, nodes = await main.build_festival_page_content(db, fest)
     html = nodes_to_html(nodes)
-    assert '<img src="https://example.com/img.jpg"' in html
+    assert '<img src="https://example.com/img.jpg"' not in html
     assert '<a href="https://telegra.ph/ev">Day 1</a>' in html
+    cover_idx = html.index("https://example.com/cover.jpg")
+    events_idx = html.index("Мероприятия фестиваля")
+    gallery_idx = html.index("https://example.com/gallery.jpg")
+    nav_idx = html.index("Ближайшие фестивали")
+    assert cover_idx < events_idx < gallery_idx < nav_idx
+

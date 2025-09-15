@@ -11290,7 +11290,9 @@ async def build_festival_page_content(db: Database, fest: Festival) -> tuple[str
                 await session.commit()
 
     nodes: list[dict] = []
-    cover = fest.photo_url or (fest.photo_urls[0] if fest.photo_urls else None)
+    photo_urls = list(fest.photo_urls or [])
+    cover = fest.photo_url or (photo_urls[0] if photo_urls else None)
+    gallery_photos = [url for url in photo_urls if url != cover]
     if cover:
         nodes.append(
             {
@@ -11328,11 +11330,6 @@ async def build_festival_page_content(db: Database, fest: Festival) -> tuple[str
             )
         nodes.extend(links)
         nodes.extend(telegraph_br())
-    for url in fest.photo_urls:
-        if url == cover:
-            continue
-        nodes.append({"tag": "img", "attrs": {"src": url}})
-        nodes.append({"tag": "p", "children": ["\u00a0"]})
     start, end = festival_dates(fest, events)
     if start:
         date_text = format_day_pretty(start)
@@ -11407,6 +11404,11 @@ async def build_festival_page_content(db: Database, fest: Festival) -> tuple[str
         nodes.extend(telegraph_br())
         nodes.extend(telegraph_br())
         nodes.append({"tag": "p", "children": ["Расписание скоро обновим"]})
+    if gallery_photos:
+        nodes.extend(telegraph_br())
+        for url in gallery_photos:
+            nodes.append({"tag": "img", "attrs": {"src": url}})
+            nodes.append({"tag": "p", "children": ["\u00a0"]})
     nav_nodes, _ = await _build_festival_nav_block(db, exclude=fest.name)
     if nav_nodes:
         from telegraph.utils import nodes_to_html, html_to_nodes
