@@ -9958,10 +9958,13 @@ def event_title_nodes(e: Event) -> list:
     if e.emoji and not e.title.strip().startswith(e.emoji):
         nodes.append(f"{e.emoji} ")
     title_text = e.title
-    if e.source_post_url:
-        nodes.append(
-            {"tag": "a", "attrs": {"href": e.source_post_url}, "children": [title_text]}
-        )
+    url = e.telegraph_url
+    if not url and e.telegraph_path:
+        url = f"https://telegra.ph/{e.telegraph_path.lstrip('/')}"
+    if not url and e.source_post_url:
+        url = e.source_post_url
+    if url:
+        nodes.append({"tag": "a", "attrs": {"href": url}, "children": [title_text]})
     else:
         nodes.append(title_text)
     return nodes
@@ -11396,6 +11399,9 @@ async def build_festival_page_content(db: Database, fest: Festival) -> tuple[str
         nodes.extend(telegraph_br())
         nodes.append({"tag": "h3", "children": ["Мероприятия фестиваля"]})
         for e in events:
+            if e.photo_urls:
+                nodes.append({"tag": "img", "attrs": {"src": e.photo_urls[0]}})
+                nodes.append({"tag": "p", "children": ["\u00a0"]})
             nodes.extend(event_to_nodes(e, festival=fest, show_festival=False))
     else:
         nodes.extend(telegraph_br())
