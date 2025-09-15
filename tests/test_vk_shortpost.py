@@ -65,6 +65,8 @@ async def test_shortpost_wall_post(tmp_path, monkeypatch):
             assert params["from_group"] == 1
             assert params["attachments"] == "https://t"
             assert len(params["message"]) <= 4096
+            tags = [w for w in params["message"].split() if w.startswith("#")]
+            assert 5 <= len(tags) <= 7
             return {"response": {"post_id": 42}}
         else:
             raise AssertionError
@@ -72,6 +74,9 @@ async def test_shortpost_wall_post(tmp_path, monkeypatch):
     async def fake_build(event, src, max_sent):
         return "short"
     monkeypatch.setattr(main, "build_short_vk_text", fake_build)
+    async def fake_ask(prompt, **kwargs):
+        return "#a #b #c #d #e"
+    monkeypatch.setattr(main, "ask_4o", fake_ask)
     bot = DummyBot()
     async def fake_answer(self, *args, **kwargs):
         return None
@@ -128,6 +133,9 @@ async def test_shortpost_captcha(tmp_path, monkeypatch):
     async def fake_build(event, src, max_sent):
         return "short"
     monkeypatch.setattr(main, "build_short_vk_text", fake_build)
+    async def fake_ask(prompt, **kwargs):
+        return "#a #b #c #d #e"
+    monkeypatch.setattr(main, "ask_4o", fake_ask)
     bot = DummyBot()
     async def fake_answer(self, *args, **kwargs):
         return None
