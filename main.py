@@ -15723,14 +15723,15 @@ async def build_short_vk_text(
 ) -> str:
     text = source_text.strip()
     prompt = (
-        "Сократи описание ниже без выдумок максимум до "
+        "Сократи описание ниже без выдумок, сохраняя все важные детали "
+        "и перечисленных ключевых участников, максимум до "
         f"{max_sentences} предложений. Разрешены эмодзи.\n\n{text}"
     )
     try:
         raw = await ask_4o(
             prompt,
             system_prompt=
-            "Ты сжимаешь текст фактически, без новых деталей. Эмодзи допустимы.",
+            "Ты сжимаешь текст фактически, без новых деталей и не упуская важные факты. Эмодзи допустимы.",
             max_tokens=400,
         )
     except Exception:
@@ -16043,7 +16044,7 @@ async def _vkrev_handle_repost(callback: types.CallbackQuery, event_id: int, db:
     items = data.get("response") or []
     photos = _vkrev_collect_photo_ids(items, VK_SHORTPOST_MAX_PHOTOS)
     attachments = ",".join(photos) if photos else vk_url
-    message = f"Репост: {ev.title}\n\nИсточник: {vk_url}"
+    message = f"Репост: {ev.title}\n\n[{vk_url}|Источник]"
     params = {
         "owner_id": f"-{VK_AFISHA_GROUP_ID.lstrip('-')}",
         "from_group": 1,
@@ -16112,7 +16113,7 @@ async def _vkrev_build_shortpost(ev: Event, vk_url: str) -> tuple[str, str]:
     lines.append(summary)
     summary_idx = len(lines) - 1
     lines.append("")
-    lines.append(f"Источник: {vk_url}")
+    lines.append(f"[{vk_url}|Источник]")
     lines.append("")
     lines.append(" ".join(tags))
     message = "\n".join(lines)
