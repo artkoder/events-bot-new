@@ -46,6 +46,10 @@ async def test_handle_vk_queue_shows_counts_and_button(tmp_path):
             "INSERT INTO vk_inbox(group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status) VALUES(?,?,?,?,?,?,?,?)",
             rows,
         )
+        await conn.execute(
+            "UPDATE vk_inbox SET locked_by=?, locked_at=CURRENT_TIMESTAMP WHERE post_id=?",
+            (1, 3),
+        )
         await conn.commit()
     msg = types.Message.model_validate(
         {

@@ -15498,13 +15498,26 @@ async def handle_vk_check(message: types.Message, db: Database, bot: Bot) -> Non
     if not user:
         await message.answer("Not authorized")
         return
-    batch_id = f"{int(unixtime.time())}:{message.from_user.id}"
     async with db.raw_conn() as conn:
-        await conn.execute(
-            "INSERT INTO vk_review_batch(batch_id, operator_id, months_csv) VALUES(?,?,?)",
-            (batch_id, message.from_user.id, ""),
+        cur = await conn.execute(
+            """
+            SELECT batch_id FROM vk_review_batch
+            WHERE operator_id=? AND finished_at IS NULL
+            ORDER BY started_at DESC LIMIT 1
+            """,
+            (message.from_user.id,),
         )
-        await conn.commit()
+        row = await cur.fetchone()
+    if row:
+        batch_id = row[0]
+    else:
+        batch_id = f"{int(unixtime.time())}:{message.from_user.id}"
+        async with db.raw_conn() as conn:
+            await conn.execute(
+                "INSERT INTO vk_review_batch(batch_id, operator_id, months_csv) VALUES(?,?,?)",
+                (batch_id, message.from_user.id, ""),
+            )
+            await conn.commit()
     await _vkrev_show_next(message.chat.id, batch_id, message.from_user.id, db, bot)
 
 
@@ -15539,6 +15552,7 @@ async def handle_vk_queue(message: types.Message, db: Database, bot: Bot) -> Non
     if not user:
         await bot.send_message(message.chat.id, "Not authorized")
         return
+    await vk_review.release_stale_locks(db)
     async with db.raw_conn() as conn:
         cur = await conn.execute(
             "SELECT status, COUNT(*) FROM vk_inbox GROUP BY status"
@@ -15881,6 +15895,48 @@ async def _vkrev_show_next(chat_id: int, batch_id: str, operator_id: int, db: Da
         ]
         markup = types.ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
         await bot.send_message(chat_id, "Очередь пуста", reply_markup=markup)
+        async with db.raw_conn() as conn:
+            cur = await conn.execute(
+                """
+                SELECT batch_id, months_csv
+                FROM vk_review_batch
+                WHERE operator_id=? AND finished_at IS NULL AND months_csv<>''
+                ORDER BY started_at DESC
+                """,
+                (operator_id,),
+            )
+            rows = await cur.fetchall()
+        inline_buttons: list[list[types.InlineKeyboardButton]] = []
+        summaries: list[str] = []
+        for batch_id_db, months_csv in rows:
+            months = [m for m in months_csv.split(',') if m]
+            if not months:
+                continue
+            months_display = ", ".join(months)
+            summaries.append(months_display)
+            base_text = "🧹 Завершить и обновить страницы месяцев"
+            suffix = f" ({months_display})" if months_display else ""
+            button_text = base_text
+            if suffix and len(base_text + suffix) <= 64:
+                button_text = base_text + suffix
+            inline_buttons.append(
+                [
+                    types.InlineKeyboardButton(
+                        text=button_text,
+                        callback_data=f"vkrev:finish:{batch_id_db}",
+                    )
+                ]
+            )
+        if inline_buttons:
+            info_lines = ["Опубликованные события ждут обновления страниц месяцев."]
+            if summaries:
+                info_lines.append("; ".join(summaries))
+            info_lines.append("Нажмите кнопку ниже, чтобы запустить обновление.")
+            await bot.send_message(
+                chat_id,
+                "\n".join(info_lines),
+                reply_markup=types.InlineKeyboardMarkup(inline_keyboard=inline_buttons),
+            )
         return
     photos = await _vkrev_fetch_photos(post.group_id, post.post_id, db, bot)
     if photos:

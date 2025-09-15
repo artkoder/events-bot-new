@@ -9,6 +9,41 @@ import time as _time
 from db import Database
 
 
+LOCK_TIMEOUT_SECONDS = 10 * 60
+"""Maximum time a row may remain locked before being returned to the queue."""
+
+
+async def _unlock_stale(conn) -> int:
+    """Return stale locks back to the queue.
+
+    Rows older than :data:`LOCK_TIMEOUT_SECONDS` are switched back to ``pending``
+    state with ``review_batch`` cleared so they can be picked again by any
+    operator.  Returns number of rows that were unlocked.
+    """
+
+    cursor = await conn.execute(
+        """
+        UPDATE vk_inbox
+        SET status='pending', locked_by=NULL, locked_at=NULL, review_batch=NULL
+        WHERE status='locked'
+          AND (locked_at IS NULL OR locked_at < datetime('now', ?))
+        """,
+        (f"-{LOCK_TIMEOUT_SECONDS} seconds",),
+    )
+    return cursor.rowcount
+
+
+async def release_stale_locks(db: Database) -> int:
+    """Public helper to unlock stale rows outside of review flow."""
+
+    async with db.raw_conn() as conn:
+        count = await _unlock_stale(conn)
+        await conn.commit()
+    if count:
+        logging.info("vk_review release_stale_locks count=%s", count)
+    return count
+
+
 @dataclass
 class InboxPost:
     id: int
@@ -38,6 +73,38 @@ async def pick_next(db: Database, operator_id: int, batch_id: str) -> Optional[I
 
     cutoff = int(_time.time()) + 2 * 3600
     async with db.raw_conn() as conn:
+        await _unlock_stale(conn)
+
+        # Continue reviewing rows that remain locked for this operator.
+        cur = await conn.execute(
+            """
+            SELECT id, group_id, post_id, date, text, matched_kw, has_date, status, review_batch
+            FROM vk_inbox
+            WHERE status='locked' AND locked_by=?
+            ORDER BY locked_at ASC, id ASC
+            LIMIT 1
+            """,
+            (operator_id,),
+        )
+        row = await cur.fetchone()
+        if row:
+            inbox_id = row[0]
+            await conn.execute(
+                "UPDATE vk_inbox SET review_batch=?, locked_at=CURRENT_TIMESTAMP WHERE id=?",
+                (batch_id, inbox_id),
+            )
+            await conn.commit()
+            row = list(row)
+            row[8] = batch_id
+            post = InboxPost(*row)
+            logging.info(
+                "vk_review resume_locked id=%s operator=%s batch=%s",
+                post.id,
+                operator_id,
+                batch_id,
+            )
+            return post
+
         await conn.execute(
             "UPDATE vk_inbox SET status='rejected', locked_by=NULL, locked_at=NULL WHERE status IN ('pending','skipped') AND event_ts_hint IS NOT NULL AND event_ts_hint < ?",
             (cutoff,),
