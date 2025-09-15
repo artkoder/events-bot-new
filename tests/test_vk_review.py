@@ -121,3 +121,78 @@ async def test_finish_batch_clears_months(tmp_path):
         cur = await conn.execute("SELECT months_csv, finished_at FROM vk_review_batch WHERE batch_id=?", ("batch1",))
         months_csv, finished_at = await cur.fetchone()
     assert months_csv == "" and finished_at is not None
+
+
+@pytest.mark.asyncio
+async def test_pick_next_resumes_locked_for_operator(tmp_path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    async with db.raw_conn() as conn:
+        future_ts = int(_time.time()) + 10_000
+        await conn.execute(
+            "INSERT INTO vk_review_batch(batch_id, operator_id, months_csv) VALUES(?,?,?)",
+            ("oldbatch", 5, ""),
+        )
+        await conn.execute(
+            """
+            INSERT INTO vk_inbox(
+                group_id, post_id, date, text, matched_kw, has_date,
+                event_ts_hint, status, locked_by, locked_at, review_batch
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (1, 1, 123, "locked", "k", 1, future_ts, "locked", 5, None, "oldbatch"),
+        )
+        await conn.commit()
+    post = await vk_review.pick_next(db, 5, "newbatch")
+    assert post and post.post_id == 1
+    assert post.review_batch == "newbatch"
+    async with db.raw_conn() as conn:
+        cur = await conn.execute(
+            "SELECT status, locked_by, review_batch FROM vk_inbox WHERE id=?",
+            (post.id,),
+        )
+        status, locked_by, review_batch = await cur.fetchone()
+    assert status == "locked" and locked_by == 5 and review_batch == "newbatch"
+
+
+@pytest.mark.asyncio
+async def test_pick_next_unlocks_stale_rows(tmp_path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    async with db.raw_conn() as conn:
+        future_ts = int(_time.time()) + 10_000
+        await conn.execute(
+            "INSERT INTO vk_review_batch(batch_id, operator_id, months_csv) VALUES(?,?,?)",
+            ("batch", 10, ""),
+        )
+        await conn.execute(
+            """
+            INSERT INTO vk_inbox(
+                group_id, post_id, date, text, matched_kw, has_date,
+                event_ts_hint, status, locked_by, locked_at, review_batch
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                1,
+                2,
+                456,
+                "stale",
+                "k",
+                1,
+                future_ts,
+                "locked",
+                99,
+                "2000-01-01 00:00:00",
+                "oldbatch",
+            ),
+        )
+        await conn.commit()
+    post = await vk_review.pick_next(db, 10, "batch")
+    assert post and post.post_id == 2
+    async with db.raw_conn() as conn:
+        cur = await conn.execute(
+            "SELECT status, locked_by, review_batch FROM vk_inbox WHERE id=?",
+            (post.id,),
+        )
+        status, locked_by, review_batch = await cur.fetchone()
+    assert status == "locked" and locked_by == 10 and review_batch == "batch"
