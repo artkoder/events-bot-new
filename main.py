@@ -11287,6 +11287,15 @@ async def build_festival_page_content(db: Database, fest: Festival) -> tuple[str
                 await session.commit()
 
     nodes: list[dict] = []
+    cover = fest.photo_url or (fest.photo_urls[0] if fest.photo_urls else None)
+    if cover:
+        nodes.append(
+            {
+                "tag": "figure",
+                "children": [{"tag": "img", "attrs": {"src": cover}}],
+            }
+        )
+        nodes.append({"tag": "p", "children": ["\u00a0"]})
     if fest.program_url:
         nodes.append({"tag": "h2", "children": ["ПРОГРАММА"]})
         links = [
@@ -11316,10 +11325,6 @@ async def build_festival_page_content(db: Database, fest: Festival) -> tuple[str
             )
         nodes.extend(links)
         nodes.extend(telegraph_br())
-    cover = fest.photo_url or (fest.photo_urls[0] if fest.photo_urls else None)
-    if cover:
-        nodes.append({"tag": "img", "attrs": {"src": cover}})
-        nodes.append({"tag": "p", "children": ["\u00a0"]})
     for url in fest.photo_urls:
         if url == cover:
             continue
