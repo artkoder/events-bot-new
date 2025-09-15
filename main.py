@@ -16881,12 +16881,8 @@ async def update_source_page(
             cover = urls[:1]
             tail = urls[1:]
         if cover:
-            idx = html_content.find("</p>")
-            insert_pos = idx + 4 if idx != -1 else 0
             cover_html = f'<figure><img src="{html.escape(cover[0])}"/></figure>'
-            html_content = (
-                html_content[:insert_pos] + cover_html + html_content[insert_pos:]
-            )
+            html_content = cover_html + html_content
         new_html = normalize_hashtag_dates(new_html)
         cleaned = re.sub(r"</?tg-(?:emoji|spoiler)[^>]*>", "", new_html)
         cleaned = cleaned.replace(
