@@ -16172,7 +16172,7 @@ async def _vkrev_handle_repost(callback: types.CallbackQuery, event_id: int, db:
 
 async def _vkrev_build_shortpost(
     ev: Event, vk_url: str, *, for_preview: bool = False
-) -> tuple[str, str]:
+) -> tuple[str, str | None]:
     text_len = len(ev.source_text or "")
     if text_len < 200:
         max_sent = 1
@@ -16217,8 +16217,8 @@ async def _vkrev_build_shortpost(
         excess = len(message) - 4096
         lines[summary_idx] = lines[summary_idx][: -excess]
         message = "\n".join(lines)
-    attachments = ev.telegraph_url or vk_url
-    return message, attachments
+    link_attachment = ev.telegraph_url or vk_url
+    return message, link_attachment
 
 
 async def _vkrev_handle_shortpost(callback: types.CallbackQuery, event_id: int, db: Database, bot: Bot) -> None:
@@ -16288,18 +16288,72 @@ async def _vkrev_publish_shortpost(
         await bot.send_message(actor_chat_id, "❌ Не удалось: нет события")
         return
     if text is None:
-        message, attachments = await _vkrev_build_shortpost(ev, vk_url)
+        message, link_attachment = await _vkrev_build_shortpost(ev, vk_url)
     else:
         message = text
-        attachments = ev.telegraph_url or vk_url
+        link_attachment = ev.telegraph_url or vk_url
+
+    photo_attachments: list[str] = []
+    try:
+        data = await _vk_api(
+            "wall.getById",
+            {"posts": f"-{group_id}_{post_id}"},
+            db,
+            bot,
+        )
+    except Exception as exc:  # pragma: no cover - logging only
+        logging.error(
+            "shortpost_fetch_photos_failed gid=%s post=%s: %s",
+            group_id,
+            post_id,
+            exc,
+        )
+    else:
+        items = data.get("response") or []
+        photo_attachments.extend(
+            _vkrev_collect_photo_ids(items, VK_SHORTPOST_MAX_PHOTOS)
+        )
+
+    if not photo_attachments and VK_PHOTOS_ENABLED and ev.photo_urls:
+        token = VK_TOKEN_AFISHA or VK_TOKEN
+        if token:
+            uploaded: list[str] = []
+            for url in ev.photo_urls[:VK_SHORTPOST_MAX_PHOTOS]:
+                photo_id = await upload_vk_photo(
+                    VK_AFISHA_GROUP_ID,
+                    url,
+                    db,
+                    bot,
+                    token=token,
+                    token_kind="group",
+                )
+                if photo_id:
+                    uploaded.append(photo_id)
+            photo_attachments.extend(uploaded)
+        else:
+            logging.info(
+                "shortpost_photo_upload_skipped gid=%s post=%s reason=no_token",
+                group_id,
+                post_id,
+            )
+
+    attachments: list[str] = []
+    if photo_attachments:
+        attachments.extend(photo_attachments)
+        if link_attachment:
+            attachments.append(link_attachment)
+
+    attachments_str = ",".join(attachments) if attachments else None
+
     params = {
         "owner_id": f"-{VK_AFISHA_GROUP_ID.lstrip('-')}",
         "from_group": 1,
         "message": message,
-        "attachments": attachments,
         "copyright": vk_url,
         "signed": 0,
     }
+    if attachments_str:
+        params["attachments"] = attachments_str
     operator_chat = vk_shortpost_ops.get(event_id)
     try:
         data = await _vk_api(
