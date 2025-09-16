@@ -407,8 +407,9 @@ async def test_shortpost_type_line_for_hyphenated_type(monkeypatch):
     assert lines[date_idx - 1] == "#мастеркласс"
 
     hashtags_line = lines[-1]
-    assert "#мастеркласс" in hashtags_line
-    assert "#мастер_класс" in hashtags_line
+    hashtags = hashtags_line.split()
+    assert "#мастер_класс" in hashtags
+    assert "#мастеркласс" not in hashtags
 
 
 @pytest.mark.asyncio
