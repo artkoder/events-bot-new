@@ -15759,8 +15759,18 @@ async def _vkrev_queue_size(db: Database) -> int:
 
 
 async def _vkrev_fetch_photos(group_id: int, post_id: int, db: Database, bot: Bot) -> list[str]:
+    token = _vk_user_token()
+    if not token:
+        return []
     try:
-        response = await vk_api("wall.getById", posts=f"-{group_id}_{post_id}")
+        data = await _vk_api(
+            "wall.getById",
+            {"posts": f"-{group_id}_{post_id}"},
+            db,
+            bot,
+            token=token,
+            token_kind="user",
+        )
     except VKAPIError as e:  # pragma: no cover
         logging.error(
             "wall.getById failed gid=%s post=%s actor=%s token=%s code=%s msg=%s",
@@ -15775,6 +15785,7 @@ async def _vkrev_fetch_photos(group_id: int, post_id: int, db: Database, bot: Bo
     except Exception as e:  # pragma: no cover
         logging.error("wall.getById failed gid=%s post=%s: %s", group_id, post_id, e)
         return []
+    response = data.get("response") if isinstance(data, dict) else data
     def best_url(sizes: list[dict]) -> str:
         if not sizes:
             return ""
@@ -15972,11 +15983,20 @@ async def build_short_vk_tags(event: Event, summary: str) -> list[str]:
         if normalized_city:
             add_tag(f"#{normalized_city}")
     if event.event_type:
-        normalized_event_type = re.sub(
-            r"[^0-9a-zа-яё]+", "_", event.event_type.lower()
-        ).strip("_")
-        if normalized_event_type:
-            add_tag(f"#{normalized_event_type}")
+        raw_event_type = event.event_type.strip()
+        if raw_event_type:
+            event_type_lower = raw_event_type.casefold()
+            normalized_event_type = re.sub(
+                r"[^0-9a-zа-яё]+", "_", event_type_lower
+            ).strip("_")
+            if normalized_event_type:
+                add_tag(f"#{normalized_event_type}")
+            if re.search(r"[-–—]", raw_event_type):
+                hyphen_free_variant = re.sub(
+                    r"[^0-9a-zа-яё]", "", event_type_lower
+                )
+                if hyphen_free_variant:
+                    add_tag(f"#{hyphen_free_variant}")
     needed = 7 - len(tags)
     if needed > 0:
         prompt = (
@@ -16460,12 +16480,29 @@ async def _vkrev_build_shortpost(
         time_part = f" ⏰ {ev.time}" if ev.time and ev.time != "00:00" else ""
         date_line = f"🗓 {default_date_str}{time_part}"
 
+    type_line: str | None = None
+    raw_event_type = (ev.event_type or "").strip()
+    if raw_event_type:
+        event_type_lower = raw_event_type.casefold()
+        normalized_event_type = re.sub(
+            r"[^0-9a-zа-яё]+", "_", event_type_lower
+        ).strip("_")
+        if normalized_event_type:
+            type_hashtag = normalized_event_type
+            if re.search(r"[-–—]", raw_event_type):
+                hyphen_free = re.sub(r"[^0-9a-zа-яё]", "", event_type_lower)
+                if hyphen_free:
+                    type_hashtag = hyphen_free
+            type_line = f"#{type_hashtag}"
+
     tags = await build_short_vk_tags(ev, summary)
     lines = [
         ev.title.upper(),
         "",
-        date_line,
     ]
+    if type_line:
+        lines.append(type_line)
+    lines.append(date_line)
     if ev.ticket_link:
         lines.append(f"🎟 Билеты: {ev.ticket_link}")
     loc_parts: list[str] = []
