@@ -74,6 +74,12 @@ browse upcoming announcements. The command accepts dates like `2025-07-10`,
   # Group tokens
   export VK_TOKEN=vk_group_token
   export VK_TOKEN_AFISHA=vk_afisha_group_token
+  # Optional: server-side token for read-only VK calls
+  export VK_SERVICE_TOKEN=vk_service_token
+  # Optional: disable service token reads (default true)
+  export VK_READ_VIA_SERVICE=true
+  # Optional: throttle VK requests (ms between calls, default 350)
+  export VK_MIN_INTERVAL_MS=350
   # Optional: override VK API version (default 5.199)
   export VK_API_VERSION=5.199
   # Optional: max photos per VK post (default 10)
@@ -116,6 +122,14 @@ By default the crawler uses regular-expression stems to detect event keywords.
 Setting `VK_USE_PYMORPHY=true` (and installing `pymorphy3`) switches matching to
 lemmatised forms for better coverage of Russian morphology.
 
+## Service token
+
+A VK service (server) token helps keep read-only API traffic away from the user token.
+
+- **Why?** Crawling and preparing reposts rely on `wall.get*` and similar methods; using the service token reduces captcha prompts on these safe reads.
+- **How do I enable it?** Set the `VK_SERVICE_TOKEN` secret and keep `VK_READ_VIA_SERVICE=true` (the default). Without the secret the bot behaves as before.
+- **What does it cover?** Only public, read-only endpoints such as `utils.resolveScreenName`, `groups.getById`, `wall.get`, `wall.getById`, `photos.getById`, and `video.get*`. Publishing still uses user/group tokens.
+
 ## Deployment on Fly.io
 
 1. Initialize app (once):
@@ -144,6 +158,10 @@ lemmatised forms for better coverage of Russian morphology.
    # Group tokens
    fly secrets set VK_TOKEN=<token>
    fly secrets set VK_TOKEN_AFISHA=<token>
+   # Optional: server-side token for read-only VK calls
+   fly secrets set VK_SERVICE_TOKEN=<token>
+   fly secrets set VK_READ_VIA_SERVICE=true
+   fly secrets set VK_MIN_INTERVAL_MS=350
    # Optional: max photos per VK post
    fly secrets set VK_MAX_ATTACHMENTS=10
    # Sending images to VK is disabled by default. Toggle with /vkphotos.
