@@ -16406,15 +16406,56 @@ async def _vkrev_build_shortpost(
     else:
         max_sent = 4
     summary = await build_short_vk_text(ev, ev.source_text or "", max_sent)
-    day = int(ev.date.split("-")[2])
-    month = int(ev.date.split("-")[1])
-    month_name = MONTHS[month - 1]
+
+    start_date: date | None = None
+    try:
+        start_date = date.fromisoformat(ev.date)
+    except (TypeError, ValueError):
+        start_date = None
+
+    end_date_obj: date | None = None
+    if ev.end_date:
+        try:
+            end_date_obj = date.fromisoformat(ev.end_date)
+        except (TypeError, ValueError):
+            end_date_obj = None
+
+    if start_date:
+        default_date_str = f"{start_date.day} {MONTHS[start_date.month - 1]}"
+    else:
+        try:
+            parts = ev.date.split("-")
+            day = int(parts[2])
+            month = int(parts[1])
+        except (AttributeError, IndexError, ValueError):
+            default_date_str = ev.date
+        else:
+            default_date_str = f"{day} {MONTHS[month - 1]}"
+
+    today = date.today()
+
+    ongoing_exhibition = (
+        ev.event_type == "выставка"
+        and start_date is not None
+        and end_date_obj is not None
+        and start_date <= today <= end_date_obj
+    )
+
+    if ongoing_exhibition:
+        end_month_name = MONTHS[end_date_obj.month - 1]
+        year_suffix = ""
+        if start_date.year != end_date_obj.year:
+            year_suffix = f" {end_date_obj.year}"
+        date_line = f"🗓 по {end_date_obj.day} {end_month_name}{year_suffix}"
+    else:
+        time_part = f" ⏰ {ev.time}" if ev.time and ev.time != "00:00" else ""
+        date_line = f"🗓 {default_date_str}{time_part}"
+
     tags = await build_short_vk_tags(ev, summary)
-    time_part = f" ⏰ {ev.time}" if ev.time and ev.time != "00:00" else ""
     lines = [
         ev.title.upper(),
         "",
-        f"🗓 {day} {month_name}{time_part}",
+        date_line,
     ]
     if ev.ticket_link:
         lines.append(f"🎟 Билеты: {ev.ticket_link}")

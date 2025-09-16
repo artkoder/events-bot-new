@@ -2,6 +2,7 @@ import os, sys
 import pytest
 import os, sys
 from types import SimpleNamespace
+from datetime import date as real_date
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
@@ -339,6 +340,41 @@ async def test_shortpost_midnight_time_hidden(monkeypatch):
     )
 
     msg, _ = await main._vkrev_build_shortpost(ev, "https://vk.com/wall-1_1")
+    assert "⏰" not in msg
+
+
+@pytest.mark.asyncio
+async def test_shortpost_ongoing_exhibition(monkeypatch):
+    async def fake_build_text(event, src, max_sent):
+        return "short summary"
+
+    async def fake_tags(event, summary):
+        return ["#a", "#b", "#c", "#d", "#e"]
+
+    monkeypatch.setattr(main, "build_short_vk_text", fake_build_text)
+    monkeypatch.setattr(main, "build_short_vk_tags", fake_tags)
+
+    class FakeDate(real_date):
+        @classmethod
+        def today(cls):
+            return cls(2025, 9, 28)
+
+    monkeypatch.setattr(main, "date", FakeDate)
+
+    ev = Event(
+        id=1,
+        title="T",
+        description="d",
+        date="2025-09-20",
+        end_date="2025-10-05",
+        time="18:00",
+        location_name="Place",
+        source_text="src",
+        event_type="выставка",
+    )
+
+    msg, _ = await main._vkrev_build_shortpost(ev, "https://vk.com/wall-1_1")
+    assert "🗓 по 5 октября" in msg
     assert "⏰" not in msg
 
 
