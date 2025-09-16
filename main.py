@@ -15966,6 +15966,11 @@ async def build_short_vk_tags(event: Event, summary: str) -> list[str]:
 
     add_tag(f"#{day}_{month_name}")
     add_tag(f"#{day}{month_name}")
+    city = (event.city or "").strip()
+    if city:
+        normalized_city = re.sub(r"[^0-9a-zа-яё]+", "", city.lower())
+        if normalized_city:
+            add_tag(f"#{normalized_city}")
     if event.event_type:
         normalized_event_type = re.sub(
             r"[^0-9a-zа-яё]+", "_", event.event_type.lower()
