@@ -5253,6 +5253,71 @@ async def test_exhibition_auto_year_end(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_add_events_from_text_adds_exhibition_with_end_only(
+    tmp_path: Path, monkeypatch
+):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    class FakeDate(date):
+        @classmethod
+        def today(cls):
+            return date(2025, 8, 10)
+
+    class FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            if tz:
+                return datetime(2025, 8, 10, 12, 0, tzinfo=tz)
+            return datetime(2025, 8, 10, 12, 0)
+
+    async def fake_parse(text: str, source_channel: str | None = None, festival_names=None):
+        return [
+            {
+                "title": "EndExpo",
+                "short_description": "d",
+                "location_name": "Hall",
+                "event_type": "выставка",
+                "date": "",
+                "end_date": "2025-08-20",
+                "time": "11:00",
+                "city": "Калининград",
+            }
+        ]
+
+    async def fake_create(*args, db=None, **kwargs):
+        return "url", "path"
+
+    monkeypatch.setattr(main, "date", FakeDate)
+    monkeypatch.setattr(main, "datetime", FakeDatetime)
+    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
+    monkeypatch.setattr(main, "create_source_page", fake_create)
+
+    results = await main.add_events_from_text(db, "text", None, None, None)
+
+    assert results
+    saved, added, _, status = results[0]
+    assert added and status == "added"
+    assert saved.date == date(2025, 8, 10).isoformat()
+    assert saved.end_date == "2025-08-20"
+    assert saved.event_type == "выставка"
+
+    _, content, _ = await main.build_month_page_content(db, "2025-08")
+    found = False
+    exh_section = False
+    for node in content:
+        if node.get("tag") == "h3" and "Постоянные" in "".join(node.get("children", [])):
+            exh_section = True
+        elif exh_section and isinstance(node, dict) and node.get("tag") == "h4":
+            if any("EndExpo" in str(child) for child in node.get("children", [])):
+                found = True
+                break
+        elif exh_section and isinstance(node, dict) and node.get("tag") == "h3":
+            break
+    assert found
+
+
+@pytest.mark.asyncio
 async def test_month_links_future(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
