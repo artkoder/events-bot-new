@@ -18188,12 +18188,6 @@ def create_app() -> web.Application:
     return app
 
 
-if __name__ == "__main__":
-    import sys
-    if len(sys.argv) > 1 and sys.argv[1] == "test_telegraph":
-        asyncio.run(telegraph_test())
-    else:
-        web.run_app(create_app(), port=int(os.getenv("PORT", 8080)))
 async def _handle_digest_select(
     callback: types.CallbackQuery,
     db: Database,
@@ -18335,3 +18329,11 @@ async def handle_digest_select_masterclasses(
         items_noun="мастер-классов",
         panel_text="Управление дайджестом мастер-классов\nВыключите лишнее и нажмите «Обновить превью».",
     )
+
+
+if __name__ == "__main__":
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "test_telegraph":
+        asyncio.run(telegraph_test())
+    else:
+        web.run_app(create_app(), port=int(os.getenv("PORT", 8080)))
