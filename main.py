@@ -13759,11 +13759,14 @@ async def _compose_from_session(
         digest_id=digest_id,
     )
     used_indices = indices[: len(used_lines)]
-    media_urls = [
-        session["items"][i]["cover_url"]
-        for i in used_indices
-        if session["items"][i]["cover_url"]
-    ]
+    media_urls: List[str] = []
+    seen_urls: set[str] = set()
+    for i in used_indices:
+        url = session["items"][i]["cover_url"]
+        if not url or url in seen_urls:
+            continue
+        seen_urls.add(url)
+        media_urls.append(url)
     media = [types.InputMediaPhoto(media=url) for url in media_urls]
     attach, _ = attach_caption_if_fits(media, caption)
     vis_len = visible_caption_len(caption)

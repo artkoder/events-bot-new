@@ -178,5 +178,48 @@ async def test_handle_digest_sends_masterclasses_preview(tmp_path, monkeypatch):
     assert main.digest_preview_sessions[digest_id]["items_noun"] == "мастер-классов"
 
 
+@pytest.mark.asyncio
+async def test_digest_preview_deduplicates_media(monkeypatch):
+    session = {
+        "chat_id": 123,
+        "intro_html": "Intro",
+        "footer_html": "Footer",
+        "items": [
+            {
+                "index": 1,
+                "line_html": "<b>Event 1</b>",
+                "cover_url": "https://example.com/img.jpg",
+            },
+            {
+                "index": 2,
+                "line_html": "<b>Event 2</b>",
+                "cover_url": "https://example.com/img.jpg",
+            },
+        ],
+        "channels": [],
+    }
+
+    async def fake_compose(intro_html, lines_html, footer_html, *, digest_id):
+        parts = [intro_html] if intro_html else []
+        parts.extend(lines_html)
+        if footer_html:
+            parts.append(footer_html)
+        return "\n".join(parts), lines_html
+
+    def fake_attach(media, caption_html):
+        return False, len(caption_html)
+
+    monkeypatch.setattr(main, "compose_digest_caption", fake_compose)
+    monkeypatch.setattr(main, "attach_caption_if_fits", fake_attach)
+
+    bot = DummyBot()
+    await main._send_preview(session, "digest-test", bot)
+
+    assert session["current_media_urls"] == ["https://example.com/img.jpg"]
+    caption = session["current_caption_html"]
+    assert "Event 1" in caption
+    assert "Event 2" in caption
+
+
 def test_help_contains_digest():
     assert any(cmd["usage"].startswith("/digest") for cmd in main.HELP_COMMANDS)
