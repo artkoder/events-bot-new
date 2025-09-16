@@ -93,16 +93,6 @@ async def test_shortpost_wall_post(tmp_path, monkeypatch):
 
     async def fake_api(method, params, db=None, bot=None, token=None, **kwargs):
         calls.append((method, params))
-        if method == "wall.getById":
-            return {
-                "response": [
-                    {
-                        "attachments": [
-                            {"type": "photo", "photo": {"owner_id": 1, "id": 2}},
-                        ]
-                    }
-                ]
-            }
         if method == "wall.post":
             assert params["from_group"] == 1
             assert params["attachments"] == "photo1_2,https://t"
@@ -111,7 +101,20 @@ async def test_shortpost_wall_post(tmp_path, monkeypatch):
             assert 5 <= len(tags) <= 7
             return {"response": {"post_id": 42}}
         raise AssertionError
+
+    async def fake_vk_api(method, **params):
+        if method == "wall.getById":
+            return [
+                {
+                    "attachments": [
+                        {"type": "photo", "photo": {"owner_id": 1, "id": 2}},
+                    ]
+                }
+            ]
+        raise AssertionError
+
     monkeypatch.setattr(main, "_vk_api", fake_api)
+    monkeypatch.setattr(main, "vk_api", fake_vk_api)
     async def fake_build(event, src, max_sent):
         return "short"
     monkeypatch.setattr(main, "build_short_vk_text", fake_build)
@@ -372,6 +375,40 @@ async def test_shortpost_city_not_duplicated(monkeypatch):
     )
     assert location_line == "📍 Локация: Place, City"
     assert "City, City" not in msg
+
+
+@pytest.mark.asyncio
+async def test_shortpost_type_line_for_hyphenated_type(monkeypatch):
+    async def fake_build_text(event, src, max_sent):
+        return "короткое описание"
+
+    async def fake_ask(prompt, **kwargs):
+        return "#доптег1 #доптег2"
+
+    monkeypatch.setattr(main, "build_short_vk_text", fake_build_text)
+    monkeypatch.setattr(main, "ask_4o", fake_ask)
+
+    ev = Event(
+        id=1,
+        title="Мастерство",
+        description="d",
+        date="2025-09-27",
+        time="19:00",
+        location_name="Place",
+        city="Калининград",
+        source_text="src",
+        event_type="мастер-класс",
+    )
+
+    msg, _ = await main._vkrev_build_shortpost(ev, "https://vk.com/wall-1_1")
+
+    lines = msg.splitlines()
+    date_idx = next(i for i, line in enumerate(lines) if line.startswith("🗓"))
+    assert lines[date_idx - 1] == "#мастеркласс"
+
+    hashtags_line = lines[-1]
+    assert "#мастеркласс" in hashtags_line
+    assert "#мастер_класс" in hashtags_line
 
 
 @pytest.mark.asyncio
