@@ -20,6 +20,10 @@ async def test_vk_intake_processing_time_metric(monkeypatch):
             ics_supabase_url="s",
             ics_tg_url="tg",
             event_date="2025-01-01",
+            event_end_date=None,
+            event_time="10:00",
+            event_type=None,
+            is_free=False,
         )
 
     monkeypatch.setattr(vk_intake, "build_event_payload_from_vk", fake_build)

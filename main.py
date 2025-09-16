@@ -16177,7 +16177,19 @@ async def _vkrev_import_flow(
             ]
         ]
     )
-    await bot.send_message(chat_id, "Импортировано", reply_markup=markup)
+    def _display(value: str | None) -> str:
+        return value if value else "—"
+
+    info_lines = [
+        "Импортировано",
+        f"Тип: {_display(res.event_type)}",
+        f"Дата начала: {_display(res.event_date)}",
+        f"Дата окончания: {_display(res.event_end_date)}",
+        f"Время: {_display(res.event_time)}",
+        f"Бесплатное: {'да' if res.is_free else 'нет'}",
+    ]
+
+    await bot.send_message(chat_id, "\n".join(info_lines), reply_markup=markup)
 
 
 async def handle_vk_review_cb(callback: types.CallbackQuery, db: Database, bot: Bot) -> None:
