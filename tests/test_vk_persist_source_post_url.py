@@ -30,6 +30,52 @@ async def test_persist_event_and_pages_sets_source_post_url_and_skips_vk_sync(tm
 
 
 @pytest.mark.asyncio
+async def test_persist_event_and_pages_persists_extended_fields(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async def fake_schedule_event_update_tasks(db_, ev, drain_nav=True):
+        return {}
+
+    monkeypatch.setattr(main, "schedule_event_update_tasks", fake_schedule_event_update_tasks)
+
+    draft = vk_intake.EventDraft(
+        title="Выставка",
+        date="2025-09-01",
+        time="10:00",
+        venue="Музей",
+        description="Описание",
+        festival="Фестиваль",
+        location_address="Адрес",
+        city="Калининград",
+        ticket_price_min=100,
+        ticket_price_max=250,
+        event_type="выставка",
+        emoji="🎨",
+        end_date="2025-09-10",
+        is_free=True,
+        pushkin_card=True,
+        source_text="Источник",
+    )
+
+    res = await vk_intake.persist_event_and_pages(draft, [], db)
+
+    async with db.get_session() as session:
+        saved = await session.get(Event, res.event_id)
+
+    assert saved.event_type == "выставка"
+    assert saved.end_date == "2025-09-10"
+    assert saved.city == "Калининград"
+    assert saved.ticket_price_min == 100
+    assert saved.ticket_price_max == 250
+    assert saved.is_free is True
+    assert saved.pushkin_card is True
+    assert saved.emoji == "🎨"
+    assert saved.description == "Описание"
+    assert saved.festival == "Фестиваль"
+
+
+@pytest.mark.asyncio
 async def test_schedule_event_update_tasks_enqueues_and_runs_vk_sync(tmp_path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()

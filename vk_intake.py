@@ -243,7 +243,17 @@ class EventDraft:
     date: str | None = None
     time: str | None = None
     venue: str | None = None
-    price: str | None = None
+    description: str | None = None
+    festival: str | None = None
+    location_address: str | None = None
+    city: str | None = None
+    ticket_price_min: int | None = None
+    ticket_price_max: int | None = None
+    event_type: str | None = None
+    emoji: str | None = None
+    end_date: str | None = None
+    is_free: bool = False
+    pushkin_card: bool = False
     links: List[str] | None = None
     source_text: str | None = None
 
@@ -275,8 +285,9 @@ async def build_event_payload_from_vk(
     The extractor is also instructed to apply ``default_time`` when no time is
     present in the post.
 
-    The resulting :class:`EventDraft` contains basic event attributes such as
-    title, date, time, venue, price and relevant links.
+    The resulting :class:`EventDraft` contains normalised event attributes such
+    as title, schedule, venue, ticket details and other metadata needed by the
+    import pipeline.
     """
     from main import parse_event_via_4o
 
@@ -302,22 +313,71 @@ async def build_event_payload_from_vk(
         trimmed = combined_text.rstrip()
         combined_text = f"{trimmed}\n\n{extra_clean}" if trimmed else extra_clean
 
-    price: str | None = None
-    if data.get("ticket_price_min") or data.get("ticket_price_max"):
-        lo = data.get("ticket_price_min")
-        hi = data.get("ticket_price_max")
-        if lo and hi and lo != hi:
-            price = f"{lo}-{hi}"
-        else:
-            price = str(lo or hi)
+    def clean_int(value: Any) -> int | None:
+        if value in (None, ""):
+            return None
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)):
+            return int(value)
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                return None
+            try:
+                return int(float(value))
+            except ValueError:
+                return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
 
+    def clean_str(value: Any) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            value = value.strip()
+            return value or None
+        return str(value)
+
+    def clean_bool(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return False
+        if isinstance(value, str):
+            val = value.strip().lower()
+            if not val:
+                return False
+            if val in {"true", "1", "yes", "да", "y"}:
+                return True
+            if val in {"false", "0", "no", "нет", "n"}:
+                return False
+        try:
+            return bool(int(value))
+        except (TypeError, ValueError):
+            return bool(value)
+
+    ticket_price_min = clean_int(data.get("ticket_price_min"))
+    ticket_price_max = clean_int(data.get("ticket_price_max"))
     links = [data["ticket_link"]] if data.get("ticket_link") else None
     return EventDraft(
         title=data.get("title", ""),
         date=data.get("date"),
         time=data.get("time") or default_time,
         venue=data.get("location_name"),
-        price=price,
+        description=data.get("short_description"),
+        festival=clean_str(data.get("festival")),
+        location_address=clean_str(data.get("location_address")),
+        city=clean_str(data.get("city")),
+        ticket_price_min=ticket_price_min,
+        ticket_price_max=ticket_price_max,
+        event_type=clean_str(data.get("event_type")),
+        emoji=clean_str(data.get("emoji")),
+        end_date=clean_str(data.get("end_date")),
+        is_free=clean_bool(data.get("is_free")),
+        pushkin_card=clean_bool(data.get("pushkin_card")),
         links=links,
         source_text=combined_text,
     )
@@ -345,13 +405,22 @@ async def persist_event_and_pages(
 
     event = Event(
         title=draft.title,
-        description="",
-        festival=None,
+        description=(draft.description or ""),
+        festival=(draft.festival or None),
         date=draft.date or datetime.utcnow().date().isoformat(),
         time=draft.time or "00:00",
         location_name=draft.venue or "",
-        source_text=draft.source_text or draft.title,
+        location_address=draft.location_address or None,
+        city=draft.city or None,
+        ticket_price_min=draft.ticket_price_min,
+        ticket_price_max=draft.ticket_price_max,
         ticket_link=(draft.links[0] if draft.links else None),
+        event_type=draft.event_type or None,
+        emoji=draft.emoji or None,
+        end_date=draft.end_date or None,
+        is_free=bool(draft.is_free),
+        pushkin_card=bool(draft.pushkin_card),
+        source_text=draft.source_text or draft.title,
         photo_urls=photos,
         photo_count=len(photos),
         source_post_url=source_post_url,
