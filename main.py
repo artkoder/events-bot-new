@@ -107,6 +107,7 @@ from telegraph import Telegraph, TelegraphException
 from net import http_call, VK_FALLBACK_CODES
 from digests import (
     build_lectures_digest_preview,
+    build_masterclasses_digest_preview,
     format_event_line_html,
     pick_display_link,
     extract_catbox_covers_from_telegraph,
@@ -560,7 +561,7 @@ add_event_sessions: TTLCache[int, bool] = TTLCache(maxsize=64, ttl=3600)
 # waiting for a date for events listing
 events_date_sessions: TTLCache[int, bool] = TTLCache(maxsize=64, ttl=3600)
 
-# digest_id -> session data for lecture digest preview
+# digest_id -> session data for digest preview
 digest_preview_sessions: TTLCache[str, dict] = TTLCache(maxsize=64, ttl=30 * 60)
 
 # ожидание фото после выбора выходных: user_id -> start(YYYY-MM-DD)
@@ -1024,7 +1025,7 @@ HELP_COMMANDS = [
     },
     {
         "usage": "/digest",
-        "desc": "Build lecture digest preview",
+        "desc": "Build digest preview for lectures and master-classes",
         "roles": {"superadmin"},
     },
     {
@@ -13678,10 +13679,16 @@ async def show_digest_menu(message: types.Message, db: Database, bot: Bot) -> No
                 text="✅ Дайджест лекций",
                 callback_data=f"digest:select:lectures:{digest_id}",
             ),
-            types.InlineKeyboardButton(text="⏳ Выходные", callback_data="digest:disabled"),
+            types.InlineKeyboardButton(
+                text="✅ Мастер-классы",
+                callback_data=f"digest:select:masterclasses:{digest_id}",
+            ),
         ],
         [
+            types.InlineKeyboardButton(text="⏳ Выходные", callback_data="digest:disabled"),
             types.InlineKeyboardButton(text="⏳ Популярное за неделю", callback_data="digest:disabled"),
+        ],
+        [
             types.InlineKeyboardButton(text="⏳ Новые выставки", callback_data="digest:disabled"),
         ],
     ]
@@ -13698,8 +13705,8 @@ async def show_digest_menu(message: types.Message, db: Database, bot: Bot) -> No
     )
 
 
-PANEL_TEXT = (
-    "Управление дайджестом лекций\nВыключите лишнее и нажмите «Обновить превью»."
+DEFAULT_PANEL_TEXT = (
+    "Управление дайджестом\nВыключите лишнее и нажмите «Обновить превью»."
 )
 
 
@@ -13803,7 +13810,7 @@ async def _send_preview(session: dict, digest_id: str, bot: Bot):
         msg_ids.append(msg.message_id)
     panel = await bot.send_message(
         session["chat_id"],
-        PANEL_TEXT,
+        session.get("panel_text", DEFAULT_PANEL_TEXT),
         reply_markup=_build_digest_panel_markup(digest_id, session),
     )
     session["preview_msg_ids"] = msg_ids
@@ -13811,102 +13818,6 @@ async def _send_preview(session: dict, digest_id: str, bot: Bot):
     return caption, attach, vis_len, len(used_indices)
 
 
-async def handle_digest_select_lectures(
-    callback: types.CallbackQuery, db: Database, bot: Bot
-) -> None:
-    parts = callback.data.split(":")
-    if len(parts) != 4:
-        return
-    digest_id = parts[3]
-
-    logging.info(
-        "digest.type.selected digest_id=%s type=lectures chat_id=%s user_id=%s callback_id=%s",
-        digest_id,
-        callback.message.chat.id if callback.message else None,
-        callback.from_user.id,
-        callback.id,
-    )
-
-    offset = await get_tz_offset(db)
-    tz = offset_to_timezone(offset)
-    now = datetime.now(tz).replace(tzinfo=None)
-
-    intro, lines, horizon, events, norm_titles = await build_lectures_digest_preview(
-        digest_id, db, now
-    )
-    if not events:
-        await bot.send_message(
-            callback.message.chat.id,
-            f"Пока ничего нет в ближайшие {horizon} дней с учётом правила “+2 часа”.",
-        )
-        return
-
-    items: List[dict] = []
-    for idx, (ev, line, norm_title) in enumerate(
-        zip(events, lines, norm_titles), start=1
-    ):
-        cover_url = None
-        if ev.telegraph_url:
-            try:
-                covers = await extract_catbox_covers_from_telegraph(
-                    ev.telegraph_url, event_id=ev.id
-                )
-                cover_url = covers[0] if covers else None
-            except Exception:
-                cover_url = None
-        items.append(
-            {
-                "event_id": ev.id,
-                "creator_id": ev.creator_id,
-                "index": idx,
-                "title": ev.title,
-                "norm_title": norm_title,
-                "link": pick_display_link(ev),
-                "cover_url": cover_url,
-                "line_html": line,
-            }
-        )
-
-    async with db.get_session() as session_db:
-        result = await session_db.execute(
-            select(Channel).where(Channel.daily_time.is_not(None))
-        )
-        channels = result.scalars().all()
-
-    session_data = {
-        "chat_id": callback.message.chat.id,
-        "preview_msg_ids": [],
-        "panel_msg_id": None,
-        "items": items,
-        "intro_html": intro,
-        "footer_html": '<a href="https://t.me/kenigevents">Полюбить Калининград | Анонсы</a>',
-        "excluded": set(),
-        "horizon_days": horizon,
-        "channels": [
-            {
-                "channel_id": ch.channel_id,
-                "name": ch.title or ch.username or str(ch.channel_id),
-                "username": ch.username,
-            }
-            for ch in channels
-        ],
-    }
-
-    digest_preview_sessions[digest_id] = session_data
-
-    caption, attach, vis_len, kept = await _send_preview(
-        session_data, digest_id, bot
-    )
-
-    logging.info(
-        "digest.panel.new digest_id=%s total=%s caption_len_visible=%s attached=%s",
-        digest_id,
-        len(items),
-        vis_len,
-        int(attach),
-    )
-
-    await callback.answer()
 
 
 async def handle_digest_toggle(callback: types.CallbackQuery, bot: Bot) -> None:
@@ -13967,7 +13878,8 @@ async def handle_digest_refresh(callback: types.CallbackQuery, bot: Bot) -> None
     excluded: set[int] = session.get("excluded", set())
     remaining = [i for i in range(len(session["items"])) if i not in excluded]
     if not remaining:
-        await callback.answer("Нет выбранных лекций", show_alert=True)
+        noun = session.get("items_noun", "лекций")
+        await callback.answer(f"Нет выбранных {noun}", show_alert=True)
         return
 
     logging.info(
@@ -13986,7 +13898,10 @@ async def handle_digest_refresh(callback: types.CallbackQuery, bot: Bot) -> None
     )
     try:
         intro = await compose_digest_intro_via_4o(
-            len(remaining), session.get("horizon_days", 0), titles
+            len(remaining),
+            session.get("horizon_days", 0),
+            titles,
+            event_noun=session.get("items_noun", "лекций"),
         )
     except Exception as e:
         logging.error(
@@ -14056,7 +13971,8 @@ async def handle_digest_send(callback: types.CallbackQuery, db: Database, bot: B
 
     excluded: set[int] = session.get("excluded", set())
     if len(session["items"]) - len(excluded) == 0:
-        await callback.answer("Нет выбранных лекций", show_alert=True)
+        noun = session.get("items_noun", "лекций")
+        await callback.answer(f"Нет выбранных {noun}", show_alert=True)
         return
 
     caption = session.get("current_caption_html", "")
@@ -17795,6 +17711,9 @@ def create_app() -> web.Application:
     async def digest_select_wrapper(callback: types.CallbackQuery):
         await handle_digest_select_lectures(callback, db, bot)
 
+    async def digest_select_masterclasses_wrapper(callback: types.CallbackQuery):
+        await handle_digest_select_masterclasses(callback, db, bot)
+
     async def digest_disabled_wrapper(callback: types.CallbackQuery):
         await callback.answer("Ещё не реализовано", show_alert=False)
 
@@ -18094,6 +18013,10 @@ def create_app() -> web.Application:
         digest_select_wrapper, lambda c: c.data.startswith("digest:select:lectures:")
     )
     dp.callback_query.register(
+        digest_select_masterclasses_wrapper,
+        lambda c: c.data.startswith("digest:select:masterclasses:"),
+    )
+    dp.callback_query.register(
         digest_disabled_wrapper, lambda c: c.data == "digest:disabled"
     )
     dp.callback_query.register(
@@ -18215,3 +18138,144 @@ if __name__ == "__main__":
         asyncio.run(telegraph_test())
     else:
         web.run_app(create_app(), port=int(os.getenv("PORT", 8080)))
+async def _handle_digest_select(
+    callback: types.CallbackQuery,
+    db: Database,
+    bot: Bot,
+    *,
+    digest_type: str,
+    preview_builder: Callable[[str, Database, datetime], Awaitable[tuple[str, List[str], int, List[Event], List[str]]]],
+    items_noun: str,
+    panel_text: str,
+) -> None:
+    parts = callback.data.split(":")
+    if len(parts) != 4 or parts[2] != digest_type:
+        return
+    digest_id = parts[3]
+
+    chat_id = callback.message.chat.id if callback.message else None
+    if chat_id is None:
+        await callback.answer()
+        return
+
+    logging.info(
+        "digest.type.selected digest_id=%s type=%s chat_id=%s user_id=%s callback_id=%s",
+        digest_id,
+        digest_type,
+        chat_id,
+        callback.from_user.id,
+        callback.id,
+    )
+
+    offset = await get_tz_offset(db)
+    tz = offset_to_timezone(offset)
+    now = datetime.now(tz).replace(tzinfo=None)
+
+    intro, lines, horizon, events, norm_titles = await preview_builder(
+        digest_id, db, now
+    )
+    if not events:
+        await bot.send_message(
+            chat_id,
+            f"Пока ничего нет в ближайшие {horizon} дней с учётом правила “+2 часа”.",
+        )
+        return
+
+    items: List[dict] = []
+    for idx, (ev, line, norm_title) in enumerate(
+        zip(events, lines, norm_titles), start=1
+    ):
+        cover_url = None
+        if ev.telegraph_url:
+            try:
+                covers = await extract_catbox_covers_from_telegraph(
+                    ev.telegraph_url, event_id=ev.id
+                )
+                cover_url = covers[0] if covers else None
+            except Exception:
+                cover_url = None
+        items.append(
+            {
+                "event_id": ev.id,
+                "creator_id": ev.creator_id,
+                "index": idx,
+                "title": ev.title,
+                "norm_title": norm_title,
+                "link": pick_display_link(ev),
+                "cover_url": cover_url,
+                "line_html": line,
+            }
+        )
+
+    async with db.get_session() as session_db:
+        result = await session_db.execute(
+            select(Channel).where(Channel.daily_time.is_not(None))
+        )
+        channels = result.scalars().all()
+
+    session_data = {
+        "chat_id": chat_id,
+        "preview_msg_ids": [],
+        "panel_msg_id": None,
+        "items": items,
+        "intro_html": intro,
+        "footer_html": '<a href="https://t.me/kenigevents">Полюбить Калининград | Анонсы</a>',
+        "excluded": set(),
+        "horizon_days": horizon,
+        "channels": [
+            {
+                "channel_id": ch.channel_id,
+                "name": ch.title or ch.username or str(ch.channel_id),
+                "username": ch.username,
+            }
+            for ch in channels
+        ],
+        "items_noun": items_noun,
+        "panel_text": panel_text,
+        "digest_type": digest_type,
+    }
+
+    digest_preview_sessions[digest_id] = session_data
+
+    caption, attach, vis_len, kept = await _send_preview(
+        session_data, digest_id, bot
+    )
+
+    logging.info(
+        "digest.panel.new digest_id=%s type=%s total=%s caption_len_visible=%s attached=%s",
+        digest_id,
+        digest_type,
+        len(items),
+        vis_len,
+        int(attach),
+    )
+
+    await callback.answer()
+
+
+async def handle_digest_select_lectures(
+    callback: types.CallbackQuery, db: Database, bot: Bot
+) -> None:
+    await _handle_digest_select(
+        callback,
+        db,
+        bot,
+        digest_type="lectures",
+        preview_builder=build_lectures_digest_preview,
+        items_noun="лекций",
+        panel_text="Управление дайджестом лекций\nВыключите лишнее и нажмите «Обновить превью».",
+    )
+
+
+async def handle_digest_select_masterclasses(
+    callback: types.CallbackQuery, db: Database, bot: Bot
+) -> None:
+    await _handle_digest_select(
+        callback,
+        db,
+        bot,
+        digest_type="masterclasses",
+        preview_builder=build_masterclasses_digest_preview,
+        items_noun="мастер-классов",
+        panel_text="Управление дайджестом мастер-классов\nВыключите лишнее и нажмите «Обновить превью».",
+    )

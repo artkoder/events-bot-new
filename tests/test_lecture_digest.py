@@ -8,6 +8,7 @@ from main import Database, Event
 import logging
 from digests import (
     build_lectures_digest_candidates,
+    build_masterclasses_digest_candidates,
     compose_digest_intro_via_4o,
     aggregate_digest_topics,
     format_event_line_html,
@@ -63,6 +64,39 @@ async def test_build_lectures_digest_candidates_expand_to_14(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_build_masterclasses_digest_candidates(tmp_path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    now = datetime(2025, 5, 1, 12, 0)
+
+    async with db.get_session() as session:
+        def add(offset_days: int, time: str, title: str):
+            dt = now + timedelta(days=offset_days)
+            ev = Event(
+                title=title,
+                description="d",
+                date=dt.strftime("%Y-%m-%d"),
+                time=time,
+                location_name="x",
+                source_text="s",
+                event_type="мастер-класс",
+                source_post_url="http://example.com/" + title,
+            )
+            session.add(ev)
+
+        add(0, "15:00", "m0")
+        add(3, "12:00", "m3")
+        add(8, "12:00", "m8")
+        await session.commit()
+
+    events, horizon = await build_masterclasses_digest_candidates(db, now)
+    titles = [e.title for e in events]
+
+    assert horizon == 14
+    assert titles == ["m0", "m3", "m8"]
+
+
+@pytest.mark.asyncio
 async def test_build_lectures_digest_candidates_limit(tmp_path):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
@@ -102,6 +136,7 @@ async def test_build_lectures_digest_candidates_limit(tmp_path):
 async def test_compose_intro_via_4o(monkeypatch, caplog):
     async def fake_ask(prompt, max_tokens=0):
         assert "дайджест" in prompt.lower()
+        assert "лекций" in prompt
         return "интро"
 
     monkeypatch.setattr("main.ask_4o", fake_ask)
@@ -109,6 +144,19 @@ async def test_compose_intro_via_4o(monkeypatch, caplog):
     assert text == "интро"
     assert any("digest.intro.llm.request" in r.message for r in caplog.records)
     assert any("digest.intro.llm.response" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_compose_intro_via_4o_masterclass(monkeypatch):
+    async def fake_ask(prompt, max_tokens=0):
+        assert "мастер-классов" in prompt
+        return "интро"
+
+    monkeypatch.setattr("main.ask_4o", fake_ask)
+    text = await compose_digest_intro_via_4o(
+        3, 14, ["a", "b", "c"], event_noun="мастер-классов"
+    )
+    assert text == "интро"
 
 
 def test_visible_len_anchors():
@@ -133,6 +181,23 @@ async def test_normalize_titles_fallback(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_normalize_titles_masterclass_fallback(monkeypatch):
+    async def fake_ask(prompt, max_tokens=0):
+        raise RuntimeError("no llm")
+
+    monkeypatch.setattr("main.ask_4o", fake_ask)
+    titles = [
+        "Мастер-класс Иван Иванов — Акварель",
+        "🎨 Мастер класс Цвет",
+    ]
+    res = await normalize_titles_via_4o(titles, event_kind="masterclass")
+    assert res[0]["emoji"] == ""
+    assert res[0]["title_clean"] == "Мастер-класс Иван Иванов: Акварель"
+    assert res[1]["emoji"] == "🎨"
+    assert res[1]["title_clean"] == "Цвет"
+
+
+@pytest.mark.asyncio
 async def test_normalize_titles_via_llm(monkeypatch):
     async def fake_ask(prompt, max_tokens=0):
         return (
@@ -150,6 +215,27 @@ async def test_normalize_titles_via_llm(monkeypatch):
     assert res[0]["title_clean"] == "Лекция Алёны Мирошниченко: Мода Франции"
     assert res[1]["emoji"] == ""
     assert res[1]["title_clean"] == "Лекция Ильи Дементьева: От каменного века"
+
+
+@pytest.mark.asyncio
+async def test_normalize_titles_via_llm_masterclass(monkeypatch):
+    async def fake_ask(prompt, max_tokens=0):
+        assert "Мастер-класс" in prompt
+        return (
+            '[{"emoji":"🎨","title_clean":"Мастер-класс Марии Ивановой: Акварель"},'
+            '{"emoji":"","title_clean":"Готовим штрудель"}]'
+        )
+
+    monkeypatch.setattr("main.ask_4o", fake_ask)
+    titles = [
+        "🎨 Мастер-класс Мария Иванова Акварель",
+        "Мастер класс Готовим штрудель",
+    ]
+    res = await normalize_titles_via_4o(titles, event_kind="masterclass")
+    assert res[0]["emoji"] == "🎨"
+    assert res[0]["title_clean"] == "Мастер-класс Марии Ивановой: Акварель"
+    assert res[1]["emoji"] == ""
+    assert res[1]["title_clean"] == "Готовим штрудель"
 
 
 def test_format_event_line_and_link_priority():

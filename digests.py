@@ -6,7 +6,7 @@ import html
 import logging
 import re
 import time
-from typing import Iterable, List, Tuple
+from typing import Iterable, List, Tuple, Callable, Awaitable
 import httpx
 
 from sqlalchemy import select
@@ -90,24 +90,10 @@ def _event_start_datetime(event: Event, digest_id: str | None = None) -> datetim
     return dt
 
 
-async def build_lectures_digest_candidates(
-    db: Database, now: datetime, digest_id: str | None = None
+async def _build_digest_candidates(
+    event_type: str, db: Database, now: datetime, digest_id: str | None = None
 ) -> Tuple[List[Event], int]:
-    """Select lecture events for the digest.
-
-    Parameters
-    ----------
-    db:
-        Database instance.
-    now:
-        Current moment in local timezone.
-
-    Returns
-    -------
-    tuple[list[Event], int]
-        A tuple with selected events ordered by start datetime and the
-        horizon in days (7 or 14) that was used.
-    """
+    """Select events of ``event_type`` for the digest window."""
 
     start_date = now.date().isoformat()
     end_date = (now + timedelta(days=14)).date().isoformat()
@@ -116,7 +102,7 @@ async def build_lectures_digest_candidates(
         res = await session.execute(
             select(Event)
             .where(
-                Event.event_type == "лекция",
+                Event.event_type == event_type,
                 Event.date >= start_date,
                 Event.date <= end_date,
             )
@@ -136,7 +122,10 @@ async def build_lectures_digest_candidates(
             continue
         if pick_display_link(ev) is None:
             logging.info(
-                "digest.skip.no_link event_id=%s title=%r", getattr(ev, "id", None), ev.title
+                "digest.skip.no_link event_id=%s title=%r event_type=%s",
+                getattr(ev, "id", None),
+                ev.title,
+                event_type,
             )
             continue
         result.append(ev)
@@ -152,7 +141,10 @@ async def build_lectures_digest_candidates(
                 continue
             if pick_display_link(ev) is None:
                 logging.info(
-                    "digest.skip.no_link event_id=%s title=%r", getattr(ev, "id", None), ev.title
+                    "digest.skip.no_link event_id=%s title=%r event_type=%s",
+                    getattr(ev, "id", None),
+                    ev.title,
+                    event_type,
                 )
                 continue
             result.append(ev)
@@ -160,6 +152,22 @@ async def build_lectures_digest_candidates(
                 break
 
     return result, horizon
+
+
+async def build_lectures_digest_candidates(
+    db: Database, now: datetime, digest_id: str | None = None
+) -> Tuple[List[Event], int]:
+    """Select lecture events for the digest."""
+
+    return await _build_digest_candidates("лекция", db, now, digest_id)
+
+
+async def build_masterclasses_digest_candidates(
+    db: Database, now: datetime, digest_id: str | None = None
+) -> Tuple[List[Event], int]:
+    """Select master-class events for the digest."""
+
+    return await _build_digest_candidates("мастер-класс", db, now, digest_id)
 
 
 def normalize_topics(topics: Iterable[str]) -> List[str]:
@@ -271,7 +279,7 @@ async def extract_catbox_covers_from_telegraph(
  
 
 async def compose_digest_intro_via_4o(
-    n: int, horizon_days: int, titles: List[str]
+    n: int, horizon_days: int, titles: List[str], *, event_noun: str = "лекций"
 ) -> str:
     """Generate an intro phrase for the digest via model 4o.
 
@@ -287,8 +295,8 @@ async def compose_digest_intro_via_4o(
     titles_str = "; ".join(titles[:9])
     prompt = (
         "Сформулируй 1–2 предложения (≤140 символов) во вступление к дайджесту"
-        f" из {n} лекций на ближайшую {horizon_word} без приветствий. Используй форму: "
-        "'N лекций на ближайшую ... — от X до Y.' X и Y выбери из названий ниже."
+        f" из {n} {event_noun} на ближайшую {horizon_word} без приветствий. Используй форму: "
+        f"'N {event_noun} на ближайшую ... — от X до Y.' X и Y выбери из названий ниже."
     )
     if titles_str:
         prompt += f" Названия: {titles_str}."
@@ -330,32 +338,57 @@ async def compose_digest_intro_via_4o(
     return text
 
 
-async def normalize_titles_via_4o(titles: List[str]) -> List[dict[str, str]]:
-    """Normalize lecture titles using model 4o with regex fallback."""
+async def normalize_titles_via_4o(
+    titles: List[str], *, event_kind: str = "lecture"
+) -> List[dict[str, str]]:
+    """Normalize event titles using model 4o with regex fallback."""
 
     from main import ask_4o  # local import to avoid a cycle
     import json
 
     prompt_titles = " | ".join(titles)
+    kind = event_kind if event_kind in {"lecture", "masterclass"} else "lecture"
+    if kind == "masterclass":
+        event_word = "Мастер-класс"
+        removal_phrase = "«Мастер-класс», «Мастер класс»"
+        role_word = "ведущего"
+        examples = [
+            'Вход: «🎨 Мастер-класс Марии Ивановой «Ботаническая иллюстрация»» → {"emoji":"🎨","title_clean":"Мастер-класс Марии Ивановой: Ботаническая иллюстрация"}\n',
+            'Вход: «Мастер класс “Готовим штрудель”» → {"emoji":"","title_clean":"Готовим штрудель"}\n',
+            'Вход: «🧵 Мастер-класс «Вышивка гладью для начинающих»» → {"emoji":"🧵","title_clean":"Вышивка гладью для начинающих"}\n',
+        ]
+    else:
+        event_word = "Лекция"
+        removal_phrase = "«Лекция», «Лекторий»"
+        role_word = "лектора"
+        examples = [
+            'Вход: «📚 Лекция Алёны Мирошниченко «Мода Франции…»» → {"emoji":"📚","title_clean":"Лекция Алёны Мирошниченко: Мода Франции…"}\n',
+            'Вход: «Лекторий Ильи Дементьева “От каменного века…”» → {"emoji":"","title_clean":"Лекция Ильи Дементьева: От каменного века…"}\n',
+            'Вход: «Лекция «Древнерусское искусство. Мастера и эпохи»» → {"emoji":"","title_clean":"Древнерусское искусство. Мастера и эпохи"}\n',
+        ]
+
+    examples_str = "".join(examples)
     prompt = (
         "Язык: русский.\n\n"
         "Задача: вернуть JSON-массив объектов вида:\n\n"
-        '{"emoji": "📚" | "", "title_clean": "Лекция Имя Фамилия: Название" | "Название"}\n\n'
+        f'{{"emoji": "📚" | "", "title_clean": "{event_word} Имя Фамилия: Название" | "Название"}}\n\n'
         "Требования:\n\n"
-        "Удалять слова «Лекция», «Лекторий» и т.п. из исходного заголовка.\n\n"
-        "Если в исходном названии есть имя лектора (в любой форме), привести имя и фамилию к родительному падежу (Р.п.) без отчества и сформировать заголовок: 'Лекция Имя Фамилия: Название'.\n\n"
-        "Если лектора нет — просто 'Название' без слова 'Лекция'.\n\n"
+        f"Удалять слова {removal_phrase} и т.п. из исходного заголовка.\n\n"
+        f"Если в исходном названии есть имя {role_word} (в любой форме), привести имя и фамилию к родительному падежу (Р.п.) без отчества и сформировать заголовок: '{event_word} Имя Фамилия: Название'.\n\n"
+        f"Если {role_word} нет — просто 'Название' без слова '{event_word}'.\n\n"
         "Ведущий эмодзи (если был) вернуть в поле emoji (не внутри title_clean).\n\n"
         "Без дополнительных слов/пояснений, только JSON.\n\n"
         "Примеры:\n"
-        'Вход: «📚 Лекция Алёны Мирошниченко «Мода Франции…»» → {"emoji":"📚","title_clean":"Лекция Алёны Мирошниченко: Мода Франции…"}\n'
-        'Вход: «Лекторий Ильи Дементьева “От каменного века…”» → {"emoji":"","title_clean":"Лекция Ильи Дементьева: От каменного века…"}\n'
-        'Вход: «Лекция «Древнерусское искусство. Мастера и эпохи»» → {"emoji":"","title_clean":"Древнерусское искусство. Мастера и эпохи"}\n\n'
+        + examples_str
+        + "\n"
         "Заголовки: "
         + prompt_titles
     )
     logging.info(
-        "digest.titles.llm.request n=%s prompt_len=%s", len(titles), len(prompt)
+        "digest.titles.llm.request kind=%s n=%s prompt_len=%s",
+        kind,
+        len(titles),
+        len(prompt),
     )
     start = time.monotonic()
     try:
@@ -365,7 +398,7 @@ async def normalize_titles_via_4o(titles: List[str]) -> List[dict[str, str]]:
         logging.info(
             "digest.titles.llm.response error text_len=0 took_ms=%s", took_ms
         )
-        return [_normalize_title_fallback(t) for t in titles]
+        return [_normalize_title_fallback(t, event_kind=kind) for t in titles]
 
     took_ms = int((time.monotonic() - start) * 1000)
     text = text.strip()
@@ -381,7 +414,8 @@ async def normalize_titles_via_4o(titles: List[str]) -> List[dict[str, str]]:
             title_clean = item.get("title_clean") or item.get("title") or orig
             result.append({"emoji": emoji, "title_clean": title_clean})
             logging.info(
-                "digest.titles.llm.sample before=%r after=%r emoji=%s",
+                "digest.titles.llm.sample kind=%s before=%r after=%r emoji=%s",
+                kind,
                 orig,
                 title_clean,
                 emoji,
@@ -391,10 +425,12 @@ async def normalize_titles_via_4o(titles: List[str]) -> List[dict[str, str]]:
     except Exception:
         pass
 
-    return [_normalize_title_fallback(t) for t in titles]
+    return [_normalize_title_fallback(t, event_kind=kind) for t in titles]
 
 
-def _normalize_title_fallback(title: str) -> dict[str, str]:
+def _normalize_title_fallback(
+    title: str, *, event_kind: str = "lecture"
+) -> dict[str, str]:
     """Fallback normalization used when LLM is unavailable."""
 
     # Extract leading emoji if any
@@ -404,12 +440,15 @@ def _normalize_title_fallback(title: str) -> dict[str, str]:
         emoji = emoji_match.group(0)
         title = title[len(emoji) :]
 
-    title = re.sub(
-        r"^(?:[^\w]*?)*(?:Лекция|Лекторий)[\s:—-]*",
-        "",
-        title,
-        flags=re.IGNORECASE,
-    )
+    kind = event_kind if event_kind in {"lecture", "masterclass"} else "lecture"
+    if kind == "masterclass":
+        removal_pattern = r"^(?:[^\w]*?)*(?:Мастер[\s-]*класс)[\s:—-]*"
+        prefix = "Мастер-класс"
+    else:
+        removal_pattern = r"^(?:[^\w]*?)*(?:Лекция|Лекторий)[\s:—-]*"
+        prefix = "Лекция"
+
+    title = re.sub(removal_pattern, "", title, flags=re.IGNORECASE)
     title = re.sub(r"^от\s+", "", title, flags=re.IGNORECASE)
     title = re.sub(r"\s+", " ", title).strip()
 
@@ -420,7 +459,7 @@ def _normalize_title_fallback(title: str) -> dict[str, str]:
     if m:
         who = m.group("who").strip()
         what = m.group("what").strip()
-        title = f"Лекция {who}: {what}"
+        title = f"{prefix} {who}: {what}"
 
     return {"emoji": emoji, "title_clean": title}
 
@@ -622,27 +661,34 @@ async def assemble_compact_caption(
     )
 
 
-async def build_lectures_digest_preview(
-    digest_id: str, db: Database, now: datetime
+async def _build_digest_preview(
+    digest_id: str,
+    db: Database,
+    now: datetime,
+    *,
+    kind: str,
+    event_noun: str,
+    event_kind: str,
+    candidates_builder: Callable[
+        [Database, datetime, str | None], Awaitable[Tuple[List[Event], int]]
+    ],
 ) -> tuple[str, List[str], int, List[Event], List[str]]:
-    """Build digest preview text for lectures.
-
-    Returns intro phrase, list of formatted event lines, horizon in days,
-    the underlying events and normalized titles.
-    """
+    """Generic helper for assembling digest previews."""
 
     start = time.monotonic()
     logging.info(
-        "digest.collect.start digest_id=%s window_days=14 now=%s limit=9",
+        "digest.collect.start digest_id=%s kind=%s window_days=14 now=%s limit=9",
         digest_id,
+        kind,
         now.isoformat(),
     )
-    events, horizon = await build_lectures_digest_candidates(db, now, digest_id)
+    events, horizon = await candidates_builder(db, now, digest_id)
     duration_ms = int((time.monotonic() - start) * 1000)
     cutoff_plus_2h = now + timedelta(hours=2)
     logging.info(
-        "digest.collect.end digest_id=%s window_days=%s now=%s cutoff_plus_2h=%s count_found=%s count_after_filters=%s limit=9 duration_ms=%s",
+        "digest.collect.end digest_id=%s kind=%s window_days=%s now=%s cutoff_plus_2h=%s count_found=%s count_after_filters=%s limit=9 duration_ms=%s",
         digest_id,
+        kind,
         horizon,
         now.isoformat(),
         cutoff_plus_2h.isoformat(),
@@ -655,10 +701,12 @@ async def build_lectures_digest_preview(
         return "", [], horizon, [], []
 
     intro = await compose_digest_intro_via_4o(
-        len(events), horizon, [e.title for e in events]
+        len(events), horizon, [e.title for e in events], event_noun=event_noun
     )
 
-    normalized = await normalize_titles_via_4o([e.title for e in events])
+    normalized = await normalize_titles_via_4o(
+        [e.title for e in events], event_kind=event_kind
+    )
     lines: List[str] = []
     norm_titles: List[str] = []
     for ev, norm in zip(events, normalized):
@@ -674,3 +722,37 @@ async def build_lectures_digest_preview(
             )
         )
     return intro, lines, horizon, events, norm_titles
+
+
+async def build_lectures_digest_preview(
+    digest_id: str, db: Database, now: datetime
+) -> tuple[str, List[str], int, List[Event], List[str]]:
+    """Build digest preview text for lectures."""
+
+    return await _build_digest_preview(
+        digest_id,
+        db,
+        now,
+        kind="lectures",
+        event_noun="лекций",
+        event_kind="lecture",
+        candidates_builder=build_lectures_digest_candidates,
+    )
+
+
+async def build_masterclasses_digest_preview(
+    digest_id: str, db: Database, now: datetime
+) -> tuple[str, List[str], int, List[Event], List[str]]:
+    """Build digest preview text for master-classes."""
+
+    return await _build_digest_preview(
+        digest_id,
+        db,
+        now,
+        kind="masterclasses",
+        event_noun="мастер-классов",
+        event_kind="masterclass",
+        candidates_builder=build_masterclasses_digest_candidates,
+    )
+
+
