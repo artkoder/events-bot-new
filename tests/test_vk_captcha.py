@@ -38,11 +38,15 @@ async def test_vk_api_captcha_cached(monkeypatch):
     assert e1.value.code == 14
     assert e1.value.captcha_sid == "sid"
     assert e1.value.captcha_img == "img"
+    assert e1.value.actor == "group"
+    assert e1.value.token == "<redacted>"
     assert calls == 1
     with pytest.raises(main.VKAPIError) as e2:
         await main._vk_api("wall.get", {}, token="t")
     assert e2.value.captcha_sid == "sid"
     assert e2.value.captcha_img == "img"
+    assert e2.value.actor is None
+    assert e2.value.token is None
     assert calls == 1
 
 

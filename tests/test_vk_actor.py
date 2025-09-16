@@ -1,3 +1,4 @@
+import logging
 import pytest
 from collections import defaultdict
 import main
@@ -55,7 +56,7 @@ async def test_vk_actor_auto_fallback_and_circuit_breaker(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_vk_actor_auto_no_fallback(monkeypatch):
+async def test_vk_actor_auto_no_fallback(monkeypatch, caplog):
     monkeypatch.setattr(main, "_vk_captcha_needed", False)
     monkeypatch.setattr(main, "VK_ACTOR_MODE", "auto")
     monkeypatch.setattr(main, "VK_TOKEN", "g")
@@ -73,11 +74,18 @@ async def test_vk_actor_auto_no_fallback(monkeypatch):
 
     monkeypatch.setattr(main, "http_call", fake_http_call)
 
+    caplog.set_level(logging.ERROR)
     with pytest.raises(main.VKAPIError) as e:
         await main._vk_api("wall.post", {}, db=None, bot=None)
     assert e.value.code == 3
+    assert e.value.actor == "group"
+    assert e.value.token == "<redacted>"
     assert calls == ["g"]
     assert main.vk_fallback_group_to_user_total["wall.post"] == 0
+    assert any(
+        "actor=group" in rec.getMessage() and "token=<redacted>" in rec.getMessage()
+        for rec in caplog.records
+    )
 
 
 def test_choose_vk_actor(monkeypatch):

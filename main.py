@@ -1481,14 +1481,24 @@ async def vk_api(method: str, **params: Any) -> Any:
     service_allowed = method in VK_SERVICE_READ_METHODS or any(
         method.startswith(prefix) for prefix in VK_SERVICE_READ_PREFIXES
     )
+    token: str | None = None
+    kind: str | None = None
     if VK_READ_VIA_SERVICE and VK_SERVICE_TOKEN and service_allowed:
         token = VK_SERVICE_TOKEN
-        actor = "service"
+        kind = "service"
     else:
-        token = VK_USER_TOKEN or VK_TOKEN or VK_TOKEN_AFISHA
-        actor = "user/group"
+        if VK_USER_TOKEN:
+            token = VK_USER_TOKEN
+            kind = "user"
+        elif VK_TOKEN:
+            token = VK_TOKEN
+            kind = "group"
+        elif VK_TOKEN_AFISHA:
+            token = VK_TOKEN_AFISHA
+            kind = "group"
     if not token:
-        raise RuntimeError("VK token not set")
+        raise VKAPIError(None, "VK token not set", method=method)
+    redacted_token = redact_token(token)
     call_params = params.copy()
     call_params["access_token"] = token
     call_params["v"] = VK_API_VERSION
@@ -1501,18 +1511,28 @@ async def vk_api(method: str, **params: Any) -> Any:
             timeout=HTTP_TIMEOUT,
             params=call_params,
         )
-    logging.info("vk.actor=%s method=%s", actor, method)
+    logging.info("vk.actor=%s method=%s", kind or "unknown", method)
     data = resp.json()
     if "error" in data:
         err = data["error"]
         logging.error(
-            "VK API error: method=%s code=%s msg=%s params=%s",
+            "VK API error: method=%s code=%s msg=%s params=%s actor=%s token=%s",
             method,
             err.get("error_code"),
             err.get("error_msg"),
             redact_params(call_params),
+            kind,
+            redacted_token,
         )
-        raise RuntimeError(err.get("error_msg") or f"VK API error {err.get('error_code')}")
+        raise VKAPIError(
+            err.get("error_code"),
+            err.get("error_msg", ""),
+            err.get("captcha_sid"),
+            err.get("captcha_img"),
+            method,
+            actor=kind,
+            token=redacted_token,
+        )
     return data.get("response")
 
 
@@ -1616,6 +1636,8 @@ class VKAPIError(Exception):
         captcha_sid: str | None = None,
         captcha_img: str | None = None,
         method: str | None = None,
+        actor: str | None = None,
+        token: str | None = None,
     ) -> None:
         self.code = code
         self.message = message
@@ -1623,6 +1645,8 @@ class VKAPIError(Exception):
         # additional info for captcha challenge
         self.captcha_sid = captcha_sid
         self.captcha_img = captcha_img
+        self.actor = actor
+        self.token = token
         super().__init__(message)
 
 
@@ -1690,18 +1714,21 @@ async def _vk_api(
         if not tokens and mode == "auto" and method == "wall.post" and blocked_until > now and not user_token:
             raise VKPermissionError(None, "permission error")
     last_err: dict | None = None
+    last_actor: str | None = None
+    last_token: str | None = None
     session = get_vk_session()
     fallback_next = False
     for idx, (kind, token) in enumerate(tokens):
         call_params = orig_params.copy()
         call_params["access_token"] = token
         call_params["v"] = "5.131"
+        redacted_token = redact_token(token)
         actor_msg = f"vk.actor={kind}"
         if kind == "user" and fallback_next:
             actor_msg += " (fallback)"
         logging.info("%s method=%s", actor_msg, method)
         logging.info(
-            "calling VK API %s using %s token %s", method, kind, redact_token(token)
+            "calling VK API %s using %s token %s", method, kind, redacted_token
         )
         async def _call():
             resp = await http_call(
@@ -1731,11 +1758,13 @@ async def _vk_api(
                 return data
             err = data["error"]
             logging.error(
-                "VK API error: method=%s code=%s msg=%s params=%s",
+                "VK API error: method=%s code=%s msg=%s params=%s actor=%s token=%s",
                 method,
                 err.get("error_code"),
                 err.get("error_msg"),
                 redact_params(call_params),
+                kind,
+                redacted_token,
             )
             msg = err.get("error_msg", "")
             code = err.get("error_code")
@@ -1754,7 +1783,15 @@ async def _vk_api(
                 if db and bot:
                     await notify_vk_captcha(db, bot, _vk_captcha_img)
                 # surface captcha details to caller
-                raise VKAPIError(code, msg, _vk_captcha_sid, _vk_captcha_img, method)
+                raise VKAPIError(
+                    code,
+                    msg,
+                    _vk_captcha_sid,
+                    _vk_captcha_img,
+                    method,
+                    actor=kind,
+                    token=redacted_token,
+                )
             if kind == "user" and code in {5, 27}:
                 global _vk_user_token_bad
                 if _vk_user_token_bad != token:
@@ -1789,6 +1826,8 @@ async def _vk_api(
                     datetime.fromtimestamp(expires, timezone.utc).isoformat(),
                 )
                 last_err = err
+                last_actor = kind
+                last_token = redacted_token
                 fallback_next = True
                 break
             if attempt == len(BACKOFF_DELAYS):
@@ -1810,6 +1849,8 @@ async def _vk_api(
                 err.get("captcha_sid"),
                 err.get("captcha_img"),
                 method,
+                actor=kind,
+                token=redacted_token,
             )
         break
     if last_err:
@@ -1819,6 +1860,8 @@ async def _vk_api(
             last_err.get("captcha_sid"),
             last_err.get("captcha_img"),
             method,
+            actor=last_actor,
+            token=last_token,
         )
     raise VKAPIError(None, "VK token missing", method=method)
 
@@ -1914,6 +1957,13 @@ async def upload_vk_photo(
                     mem_info("VK upload after")
                 return f"photo{info['owner_id']}_{info['id']}"
             except VKAPIError as e:
+                logging.warning(
+                    "vk.upload error actor=%s token=%s code=%s msg=%s",
+                    e.actor,
+                    e.token,
+                    e.code,
+                    e.message,
+                )
                 msg_l = (e.message or "").lower()
                 perm = (
                     e.code in VK_FALLBACK_CODES
@@ -2352,7 +2402,14 @@ async def handle_vk_captcha_refresh(callback: types.CallbackQuery, db: Database,
             global _vk_captcha_needed
             _vk_captcha_needed = False
             await _vk_api(_vk_captcha_method, _vk_captcha_params, db, bot)
-        except VKAPIError:
+        except VKAPIError as e:
+            logging.info(
+                "vk_captcha refresh failed actor=%s token=%s code=%s msg=%s",
+                e.actor,
+                e.token,
+                e.code,
+                e.message,
+            )
             if _vk_captcha_scheduler and _vk_captcha_key:
                 vk_captcha_paused(_vk_captcha_scheduler, _vk_captcha_key)
 
@@ -5591,9 +5648,15 @@ async def handle_vk_captcha(message: types.Message, db: Database, bot: Bot):
                 logline("VK", eid, "resumed after captcha")
         await bot.send_message(message.chat.id, "VK ✅")
         logging.info("vk_captcha ok")
-    except VKAPIError:
+    except VKAPIError as e:
         await bot.send_message(message.chat.id, "код не подошёл", reply_markup=invalid_markup)
-        logging.info("vk_captcha invalid/expired")
+        logging.info(
+            "vk_captcha invalid/expired actor=%s token=%s code=%s msg=%s",
+            e.actor,
+            e.token,
+            e.code,
+            e.message,
+        )
 
 
 async def handle_askloc(callback: types.CallbackQuery, db: Database, bot: Bot):
@@ -11741,10 +11804,12 @@ async def sync_festival_vk_post(
                 return True
             except VKAPIError as e:
                 logging.warning(
-                    "Ошибка VK при редактировании (попытка %d из 3, код %s): %s",
+                    "Ошибка VK при редактировании (попытка %d из 3, код %s): %s actor=%s token=%s",
                     attempt,
                     e.code,
                     e.message,
+                    e.actor,
+                    e.token,
                 )
                 if e.code in {213, 214} or "edit time expired" in e.message.lower():
                     return False
@@ -11761,10 +11826,12 @@ async def sync_festival_vk_post(
                     return url
             except VKAPIError as e:
                 logging.warning(
-                    "Ошибка VK при публикации (попытка %d из 3, код %s): %s",
+                    "Ошибка VK при публикации (попытка %d из 3, код %s): %s actor=%s token=%s",
                     attempt,
                     e.code,
                     e.message,
+                    e.actor,
+                    e.token,
                 )
             if attempt == 3:
                 return None
@@ -12353,6 +12420,13 @@ async def post_to_vk(
             )
             return None
         except VKAPIError as e:
+            logging.warning(
+                "post_to_vk error code=%s msg=%s actor=%s token=%s",
+                e.code,
+                e.message,
+                e.actor,
+                e.token,
+            )
             msg_l = (e.message or "").lower()
             perm = (
                 e.code in VK_FALLBACK_CODES
@@ -15687,6 +15761,17 @@ async def _vkrev_queue_size(db: Database) -> int:
 async def _vkrev_fetch_photos(group_id: int, post_id: int, db: Database, bot: Bot) -> list[str]:
     try:
         response = await vk_api("wall.getById", posts=f"-{group_id}_{post_id}")
+    except VKAPIError as e:  # pragma: no cover
+        logging.error(
+            "wall.getById failed gid=%s post=%s actor=%s token=%s code=%s msg=%s",
+            group_id,
+            post_id,
+            e.actor,
+            e.token,
+            e.code,
+            e.message,
+        )
+        return []
     except Exception as e:  # pragma: no cover
         logging.error("wall.getById failed gid=%s post=%s: %s", group_id, post_id, e)
         return []
@@ -16272,6 +16357,13 @@ async def _vkrev_handle_repost(callback: types.CallbackQuery, event_id: int, db:
         await vk_review.save_repost_url(db, event_id, url)
         await bot.send_message(callback.message.chat.id, url)
     except VKAPIError as e:
+        logging.error(
+            "vk.repost_failed actor=%s token=%s code=%s msg=%s",
+            e.actor,
+            e.token,
+            e.code,
+            e.message,
+        )
         await bot.send_message(
             callback.message.chat.id,
             f"❌ Репост не удался: {e.message}",
@@ -16499,7 +16591,13 @@ async def _vkrev_publish_shortpost(
         await bot.send_message(actor_chat_id, msg)
         if operator_chat and operator_chat != actor_chat_id:
             await bot.send_message(operator_chat, msg)
-        logging.warning("shortpost_publish_failed", extra={"eid": event_id, "code": e.code})
+        logging.warning(
+            "shortpost_publish_failed code=%s actor=%s token=%s",
+            e.code,
+            e.actor,
+            e.token,
+            extra={"eid": event_id},
+        )
     except Exception as e:  # pragma: no cover
         msg = f"❌ Не удалось: {getattr(e, 'message', str(e))}"
         await bot.send_message(actor_chat_id, msg)
