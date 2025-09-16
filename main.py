@@ -315,6 +315,30 @@ SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "events-ics")
 VK_TOKEN = os.getenv("VK_TOKEN")
 VK_TOKEN_AFISHA = os.getenv("VK_TOKEN_AFISHA")  # NEW
 VK_USER_TOKEN = os.getenv("VK_USER_TOKEN")
+VK_SERVICE_TOKEN = os.getenv("VK_SERVICE_TOKEN")
+VK_READ_VIA_SERVICE = os.getenv("VK_READ_VIA_SERVICE", "true").lower() == "true"
+VK_MIN_INTERVAL_MS = int(os.getenv("VK_MIN_INTERVAL_MS", "350"))
+_last_vk_call = 0.0
+
+
+async def _vk_throttle() -> None:
+    global _last_vk_call
+    now = _time.monotonic()
+    wait = (_last_vk_call + VK_MIN_INTERVAL_MS / 1000) - now
+    if wait > 0:
+        await asyncio.sleep(wait)
+    _last_vk_call = _time.monotonic()
+
+
+VK_SERVICE_READ_METHODS = {
+    "utils.resolveScreenName",
+    "groups.getById",
+    "wall.get",
+    "wall.getById",
+    "photos.getById",
+}
+VK_SERVICE_READ_PREFIXES = ("video.get",)
+
 VK_MAIN_GROUP_ID = os.getenv("VK_MAIN_GROUP_ID")
 VK_AFISHA_GROUP_ID = os.getenv("VK_AFISHA_GROUP_ID")
 VK_API_VERSION = os.getenv("VK_API_VERSION", "5.199")
@@ -360,12 +384,13 @@ VK_CAPTCHA_QUIET = os.getenv("VK_CAPTCHA_QUIET", "")
 VK_CRAWL_JITTER_SEC = int(os.getenv("VK_CRAWL_JITTER_SEC", "600"))
 
 logging.info(
-    "vk.config groups: main=-%s, afisha=-%s; user_token=%s, token_main=%s, token_afisha=%s",
+    "vk.config groups: main=-%s, afisha=-%s; user_token=%s, token_main=%s, token_afisha=%s, service_token=%s",
     VK_MAIN_GROUP_ID,
     VK_AFISHA_GROUP_ID,
     "present" if VK_USER_TOKEN else "missing",
     "present" if VK_TOKEN else "missing",
     "present" if VK_TOKEN_AFISHA else "missing",
+    "present" if VK_SERVICE_TOKEN else "missing",
 )
 
 
@@ -1453,13 +1478,22 @@ def _vk_user_token() -> str | None:
 
 async def vk_api(method: str, **params: Any) -> Any:
     """Simple VK API GET request with token and version."""
-    token = VK_USER_TOKEN or VK_TOKEN or VK_TOKEN_AFISHA
+    service_allowed = method in VK_SERVICE_READ_METHODS or any(
+        method.startswith(prefix) for prefix in VK_SERVICE_READ_PREFIXES
+    )
+    if VK_READ_VIA_SERVICE and VK_SERVICE_TOKEN and service_allowed:
+        token = VK_SERVICE_TOKEN
+        actor = "service"
+    else:
+        token = VK_USER_TOKEN or VK_TOKEN or VK_TOKEN_AFISHA
+        actor = "user/group"
     if not token:
         raise RuntimeError("VK token not set")
     call_params = params.copy()
     call_params["access_token"] = token
     call_params["v"] = VK_API_VERSION
     async with VK_SEMAPHORE:
+        await _vk_throttle()
         resp = await http_call(
             f"vk.{method}",
             "GET",
@@ -1467,6 +1501,7 @@ async def vk_api(method: str, **params: Any) -> Any:
             timeout=HTTP_TIMEOUT,
             params=call_params,
         )
+    logging.info("vk.actor=%s method=%s", actor, method)
     data = resp.json()
     if "error" in data:
         err = data["error"]
@@ -1682,6 +1717,7 @@ async def _vk_api(
         last_msg: str | None = None
         for attempt, delay in enumerate(BACKOFF_DELAYS, start=1):
             async with VK_SEMAPHORE:
+                await _vk_throttle()
                 async with span("vk-send"):
                     data = await asyncio.wait_for(_call(), HTTP_TIMEOUT)
             if "error" not in data:
@@ -15633,23 +15669,8 @@ async def _vkrev_queue_size(db: Database) -> int:
 
 
 async def _vkrev_fetch_photos(group_id: int, post_id: int, db: Database, bot: Bot) -> list[str]:
-    user_token = _vk_user_token()
-    if not user_token:
-        logging.error(
-            "VK_USER_TOKEN missing, cannot fetch photos gid=%s post=%s",
-            group_id,
-            post_id,
-        )
-        return []
     try:
-        data = await _vk_api(
-            "wall.getById",
-            {"posts": f"-{group_id}_{post_id}"},
-            db,
-            bot,
-            token=user_token,
-            token_kind="user",
-        )
+        response = await vk_api("wall.getById", posts=f"-{group_id}_{post_id}")
     except Exception as e:  # pragma: no cover
         logging.error("wall.getById failed gid=%s post=%s: %s", group_id, post_id, e)
         return []
@@ -15659,7 +15680,10 @@ async def _vkrev_fetch_photos(group_id: int, post_id: int, db: Database, bot: Bo
         best = max(sizes, key=lambda s: s.get("width", 0) * s.get("height", 0))
         return best.get("url") or best.get("src", "")
 
-    items = data.get("response") or []
+    if isinstance(response, dict):
+        items = response.get("items") or []
+    else:
+        items = response or []
     photos: list[str] = []
     seen: set[str] = set()
 
