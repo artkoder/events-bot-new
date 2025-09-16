@@ -15936,6 +15936,30 @@ async def build_short_vk_text(
     return summary or _fallback_summary()
 
 
+def _vk_shortpost_event_type_tags(
+    event_type: str | None,
+) -> tuple[str | None, str | None]:
+    """Return normalized and hyphen-free hashtags for the event type."""
+
+    if not event_type:
+        return None, None
+    raw = event_type.strip()
+    if not raw:
+        return None, None
+
+    normalized = re.sub(r"[^0-9a-zа-яё]+", "_", raw.lower()).strip("_")
+    hyphen_free: str | None = None
+    if "-" in raw:
+        cleaned = raw.replace("-", "")
+        hyphen_free_candidate = (
+            re.sub(r"[^0-9a-zа-яё]+", "_", cleaned.lower()).strip("_")
+        )
+        if hyphen_free_candidate and hyphen_free_candidate != normalized:
+            hyphen_free = hyphen_free_candidate
+
+    return normalized or None, hyphen_free
+
+
 async def build_short_vk_tags(event: Event, summary: str) -> list[str]:
     """Generate 5-7 hashtags for the short VK post."""
     day = int(event.date.split("-")[2])
@@ -15966,12 +15990,13 @@ async def build_short_vk_tags(event: Event, summary: str) -> list[str]:
 
     add_tag(f"#{day}_{month_name}")
     add_tag(f"#{day}{month_name}")
-    if event.event_type:
-        normalized_event_type = re.sub(
-            r"[^0-9a-zа-яё]+", "_", event.event_type.lower()
-        ).strip("_")
-        if normalized_event_type:
-            add_tag(f"#{normalized_event_type}")
+    normalized_event_type, hyphen_free_event_type = _vk_shortpost_event_type_tags(
+        event.event_type
+    )
+    if normalized_event_type:
+        add_tag(f"#{normalized_event_type}")
+    if hyphen_free_event_type:
+        add_tag(f"#{hyphen_free_event_type}")
     needed = 7 - len(tags)
     if needed > 0:
         prompt = (
@@ -16409,8 +16434,14 @@ async def _vkrev_build_shortpost(
     lines = [
         ev.title.upper(),
         "",
-        f"🗓 {day} {month_name}{time_part}",
     ]
+    normalized_type_tag, hyphen_free_type_tag = _vk_shortpost_event_type_tags(
+        ev.event_type
+    )
+    display_type_tag = hyphen_free_type_tag or normalized_type_tag
+    if display_type_tag:
+        lines.append(f"#{display_type_tag}")
+    lines.append(f"🗓 {day} {month_name}{time_part}")
     if ev.ticket_link:
         lines.append(f"🎟 Билеты: {ev.ticket_link}")
     loc_parts = [ev.location_name]

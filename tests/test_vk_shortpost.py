@@ -28,7 +28,13 @@ async def test_vkrev_fetch_photos_uses_user_token(monkeypatch):
         calls.append((token, token_kind))
         return {"response": []}
 
+    async def fake_vk_api(method, **kwargs):
+        token = main._vk_user_token()
+        calls.append((token, "user" if token else None))
+        return {"response": []}
+
     monkeypatch.setattr(main, "_vk_api", fake_api)
+    monkeypatch.setattr(main, "vk_api", fake_vk_api)
     monkeypatch.setattr(main, "_vk_user_token", lambda: "user-token")
 
     photos = await main._vkrev_fetch_photos(1, 2, None, None)
@@ -42,7 +48,11 @@ async def test_vkrev_fetch_photos_no_user_token(monkeypatch):
     async def fake_api(*args, **kwargs):  # pragma: no cover
         raise AssertionError("_vk_api should not be called without user token")
 
+    async def fake_vk_api(method, **kwargs):
+        return {"response": []}
+
     monkeypatch.setattr(main, "_vk_api", fake_api)
+    monkeypatch.setattr(main, "vk_api", fake_vk_api)
     monkeypatch.setattr(main, "_vk_user_token", lambda: None)
 
     photos = await main._vkrev_fetch_photos(1, 2, None, None)
@@ -110,7 +120,21 @@ async def test_shortpost_wall_post(tmp_path, monkeypatch):
             assert 5 <= len(tags) <= 7
             return {"response": {"post_id": 42}}
         raise AssertionError
+    async def fake_vk_api(method, **kwargs):
+        if method == "wall.getById":
+            return {
+                "response": [
+                    {
+                        "attachments": [
+                            {"type": "photo", "photo": {"owner_id": 1, "id": 2}},
+                        ]
+                    }
+                ]
+            }
+        raise AssertionError
+
     monkeypatch.setattr(main, "_vk_api", fake_api)
+    monkeypatch.setattr(main, "vk_api", fake_vk_api)
     async def fake_build(event, src, max_sent):
         return "short"
     monkeypatch.setattr(main, "build_short_vk_text", fake_build)
@@ -177,6 +201,11 @@ async def test_shortpost_publish_without_photo(tmp_path, monkeypatch):
         raise AssertionError
 
     monkeypatch.setattr(main, "_vk_api", fake_api)
+
+    async def fake_vk_api(method, **kwargs):
+        return {"response": []}
+
+    monkeypatch.setattr(main, "vk_api", fake_vk_api)
 
     async def fake_build(event, src, max_sent):
         return "short"
@@ -254,7 +283,21 @@ async def test_shortpost_captcha(tmp_path, monkeypatch):
                 ]
             }
         raise main.VKAPIError(14, "captcha")
+    async def fake_vk_api(method, **kwargs):
+        if method == "wall.getById":
+            return {
+                "response": [
+                    {
+                        "attachments": [
+                            {"type": "photo", "photo": {"owner_id": 1, "id": 2}}
+                        ]
+                    }
+                ]
+            }
+        raise main.VKAPIError(14, "captcha")
+
     monkeypatch.setattr(main, "_vk_api", fake_api)
+    monkeypatch.setattr(main, "vk_api", fake_vk_api)
     async def fake_build(event, src, max_sent):
         return "short"
     monkeypatch.setattr(main, "build_short_vk_text", fake_build)
@@ -368,3 +411,40 @@ async def test_shortpost_preview_link(monkeypatch):
     )
     assert "[https://vk.com/wall-1_1|Источник]" not in msg
     assert "Источник\nhttps://vk.com/wall-1_1" in msg
+
+
+@pytest.mark.asyncio
+async def test_shortpost_masterclass_type_hashtags(monkeypatch):
+    async def fake_build_text(event, src, max_sent):
+        return "short summary"
+
+    async def fake_ask(prompt, **kwargs):
+        return "#extra"
+
+    monkeypatch.setattr(main, "build_short_vk_text", fake_build_text)
+    monkeypatch.setattr(main, "ask_4o", fake_ask)
+
+    ev = Event(
+        id=1,
+        title="Мастер-класс",
+        description="Описание",
+        date="2025-09-27",
+        time="19:00",
+        location_name="Place",
+        location_address="Addr",
+        city="Калининград",
+        source_text="src",
+        event_type="мастер-класс",
+    )
+
+    msg, _ = await main._vkrev_build_shortpost(ev, "https://vk.com/wall-1_1")
+
+    lines = msg.split("\n")
+    assert "#мастеркласс" in lines
+    type_idx = lines.index("#мастеркласс")
+    date_idx = next(i for i, line in enumerate(lines) if line.startswith("🗓"))
+    assert type_idx + 1 == date_idx
+
+    closing_tags = lines[-1].split()
+    assert "#мастер_класс" in closing_tags
+    assert "#мастеркласс" in closing_tags
