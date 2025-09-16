@@ -15874,12 +15874,14 @@ async def build_short_vk_tags(
     tags: list[str] = []
     seen: set[str] = set()
 
+    used_type_hashtag_normalized: str | None = None
     if used_type_hashtag:
         used_tag_clean = used_type_hashtag.strip()
         if used_tag_clean:
             if not used_tag_clean.startswith("#"):
                 used_tag_clean = "#" + used_tag_clean.lstrip("#")
-            seen.add(used_tag_clean.lower())
+            used_type_hashtag_normalized = used_tag_clean.lower()
+            seen.add(used_type_hashtag_normalized)
 
     def add_tag(tag: str) -> None:
         tag_clean = (tag or "").strip()
@@ -15921,7 +15923,12 @@ async def build_short_vk_tags(
                     r"[^0-9a-zа-яё]", "", event_type_lower
                 )
                 if hyphen_free_variant:
-                    add_tag(f"#{hyphen_free_variant}")
+                    hyphen_tag = f"#{hyphen_free_variant}"
+                    if not (
+                        used_type_hashtag_normalized
+                        and hyphen_tag.lower() == used_type_hashtag_normalized
+                    ):
+                        add_tag(hyphen_tag)
     needed = 7 - len(tags)
     if needed > 0:
         prompt = (
@@ -16416,12 +16423,12 @@ async def _vkrev_build_shortpost(
         if normalized_event_type:
             normalized_hashtag = f"#{normalized_event_type}"
             type_line = normalized_hashtag
+            type_line_used_tag = normalized_hashtag
             if re.search(r"[-–—]", raw_event_type):
                 hyphen_free = re.sub(r"[^0-9a-zа-яё]", "", event_type_lower)
                 if hyphen_free:
                     type_line = f"#{hyphen_free}"
-            else:
-                type_line_used_tag = normalized_hashtag
+                    type_line_used_tag = type_line
 
     tags = await build_short_vk_tags(ev, summary, used_type_hashtag=type_line_used_tag)
     lines = [
