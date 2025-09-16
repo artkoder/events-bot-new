@@ -72,6 +72,14 @@ async def test_vkrev_import_flow_persists_url_and_skips_vk_sync(tmp_path, monkey
         ev = await session.get(Event, captured["event_id"])
     assert ev.source_post_url == "https://vk.com/wall-1_2"
     assert JobTask.vk_sync not in tasks
+    assert bot.messages[-1].text == (
+        "Импортировано\n"
+        "Тип: —\n"
+        "Дата начала: 2025-09-02\n"
+        "Дата окончания: —\n"
+        "Время: 10:00\n"
+        "Бесплатное: нет"
+    )
 
 
 @pytest.mark.asyncio

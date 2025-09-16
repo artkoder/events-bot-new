@@ -265,6 +265,10 @@ class PersistResult:
     ics_supabase_url: str
     ics_tg_url: str
     event_date: str
+    event_end_date: str | None
+    event_time: str
+    event_type: str | None
+    is_free: bool
 
 
 async def build_event_payload_from_vk(
@@ -444,6 +448,10 @@ async def persist_event_and_pages(
         ics_supabase_url=saved.ics_url or "",
         ics_tg_url=saved.ics_post_url or "",
         event_date=saved.date,
+        event_end_date=saved.end_date,
+        event_time=saved.time,
+        event_type=saved.event_type,
+        is_free=bool(saved.is_free),
     )
 
 
