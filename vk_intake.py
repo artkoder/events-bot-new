@@ -106,6 +106,9 @@ DOW_RE = re.compile(
 )
 WEEKEND_RE = re.compile(r"в\s+эти\s+выходны", re.I)
 
+# Maximum age of a past date mention that should not be rolled over to the next year
+RECENT_PAST_THRESHOLD = timedelta(days=92)
+
 # cumulative processing time for VK event intake (seconds)
 processing_time_seconds_total: float = 0.0
 
@@ -198,16 +201,21 @@ def extract_event_ts_hint(text: str, default_time: str | None = None) -> int | N
             else:
                 return None
     else:
+        explicit_year = year is not None
         year = year or now.year
         try:
             dt = datetime(year, month, day, tzinfo=LOCAL_TZ)
         except ValueError:
             return None
         if dt < now:
-            try:
-                dt = datetime(year + 1, month, day, tzinfo=LOCAL_TZ)
-            except ValueError:
-                return None
+            skip_year_rollover = False
+            if not explicit_year and now - dt <= RECENT_PAST_THRESHOLD:
+                skip_year_rollover = True
+            if not skip_year_rollover:
+                try:
+                    dt = datetime(year + 1, month, day, tzinfo=LOCAL_TZ)
+                except ValueError:
+                    return None
 
     tm = TIME_RE.search(text_low)
     if tm:
