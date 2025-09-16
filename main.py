@@ -11723,6 +11723,18 @@ async def sync_festival_vk_post(
     async def _try_edit(message: str, attachments: list[str] | None) -> bool | None:
         if not fest.vk_post_url:
             return False
+        user_token = _vk_user_token()
+        if not user_token:
+            logging.error(
+                "VK_USER_TOKEN missing",
+                extra={
+                    "action": "error",
+                    "target": "vk",
+                    "url": fest.vk_post_url,
+                    "fest": name,
+                },
+            )
+            return None
         for attempt in range(1, 4):
             try:
                 await edit_vk_post(fest.vk_post_url, message, db, bot, attachments)
@@ -11774,29 +11786,24 @@ async def sync_festival_vk_post(
                 )
                 return
             owner_id, post_id = ids
-            user_token = _vk_user_token()
-            if not user_token:
-                logging.error(
-                    "VK_USER_TOKEN missing",
-                    extra={"action": "error", "target": "vk", "fest": name, "url": fest.vk_post_url},
-                )
-                return
             try:
-                data = await _vk_api(
-                    "wall.getById",
-                    {"posts": f"{owner_id}_{post_id}"},
-                    db,
-                    bot,
-                    token=user_token,
-                    token_kind="user",
+                response = await vk_api(
+                    "wall.getById", posts=f"{owner_id}_{post_id}"
                 )
-                text = data.get("response", [{}])[0].get("text", "")
-            except VKAPIError as e:
+                if isinstance(response, dict):
+                    items = response.get("response") or (
+                        response["response"] if "response" in response else response
+                    )
+                else:
+                    items = response or []
+                if not isinstance(items, list):
+                    items = [items] if items else []
+                text = items[0].get("text", "") if items else ""
+            except Exception as e:
                 logging.error(
-                    "Не удалось получить пост VK для %s: код %s %s",
+                    "Не удалось получить пост VK для %s: %s",
                     name,
-                    e.code,
-                    e.message,
+                    e,
                     extra={"action": "error", "target": "vk", "url": fest.vk_post_url, "fest": name},
                 )
                 return
@@ -12557,13 +12564,17 @@ async def sync_vk_source_post(
         try:
             ids = _vk_owner_and_post_id(event.source_vk_post_url)
             if ids:
-                data = await _vk_api(
-                    "wall.getById",
-                    {"posts": f"{ids[0]}_{ids[1]}"},
-                    db,
-                    bot,
+                response = await vk_api(
+                    "wall.getById", posts=f"{ids[0]}_{ids[1]}"
                 )
-                items = data.get("response") or []
+                if isinstance(response, dict):
+                    items = response.get("response") or (
+                        response["response"] if "response" in response else response
+                    )
+                else:
+                    items = response or []
+                if not isinstance(items, list):
+                    items = [items] if items else []
                 if items:
                     existing = items[0].get("text", "")
         except Exception as e:
@@ -12666,19 +12677,16 @@ async def edit_vk_post(
     current: list[str] = []
     post_text = ""
     old_attachments: list[str] = []
-    user_token = _vk_user_token()
-    if not user_token:
-        raise VKAPIError(None, "VK_USER_TOKEN missing", method="wall.getById")
     try:
-        data = await _vk_api(
-            "wall.getById",
-            {"posts": f"{owner_id}_{post_id}"},
-            db,
-            bot,
-            token=user_token,
-            token_kind="user",
-        )
-        items = data.get("response") or []
+        response = await vk_api("wall.getById", posts=f"{owner_id}_{post_id}")
+        if isinstance(response, dict):
+            items = response.get("response") or (
+                response["response"] if "response" in response else response
+            )
+        else:
+            items = response or []
+        if not isinstance(items, list):
+            items = [items] if items else []
         if items:
             post = items[0]
             post_text = post.get("text") or ""
@@ -12703,6 +12711,9 @@ async def edit_vk_post(
         params["attachments"] = ",".join(current) if current else ""
     elif current:
         params["attachments"] = ",".join(current)
+    user_token = _vk_user_token()
+    if not user_token:
+        raise VKAPIError(None, "VK_USER_TOKEN missing", method="wall.edit")
     await _vk_api("wall.edit", params, db, bot, token=user_token, token_kind="user")
     logging.info("edit_vk_post done: %s", post_url)
     return True
@@ -14682,10 +14693,15 @@ async def fetch_vk_post_stats(
     views: int | None = None
     reach: int | None = None
     try:
-        data = await _vk_api(
-            "wall.getById", {"posts": f"{owner_id}_{post_id}"}, db, bot
-        )
-        items = data.get("response") or []
+        response = await vk_api("wall.getById", posts=f"{owner_id}_{post_id}")
+        if isinstance(response, dict):
+            items = response.get("response") or (
+                response["response"] if "response" in response else response
+            )
+        else:
+            items = response or []
+        if not isinstance(items, list):
+            items = [items] if items else []
         if items:
             views = (items[0].get("views") or {}).get("count")
     except Exception as e:
@@ -16217,16 +16233,18 @@ async def _vkrev_handle_repost(callback: types.CallbackQuery, event_id: int, db:
         return
 
     try:
-        data = await _vk_api(
-            "wall.getById",
-            {"posts": f"-{group_id}_{post_id}"},
-            db,
-            bot,
-            token=VK_TOKEN_AFISHA,
-        )
+        response = await vk_api("wall.getById", posts=f"-{group_id}_{post_id}")
     except Exception:
-        data = {"response": []}
-    items = data.get("response") or []
+        items: list[dict[str, Any]] = []
+    else:
+        if isinstance(response, dict):
+            items = response.get("response") or (
+                response["response"] if "response" in response else response
+            )
+        else:
+            items = response or []
+        if not isinstance(items, list):
+            items = [items] if items else []
     photos = _vkrev_collect_photo_ids(items, VK_SHORTPOST_MAX_PHOTOS)
     attachments = ",".join(photos) if photos else vk_url
     message = f"Репост: {ev.title}\n\n[{vk_url}|Источник]"
@@ -16391,12 +16409,7 @@ async def _vkrev_publish_shortpost(
 
     photo_attachments: list[str] = []
     try:
-        data = await _vk_api(
-            "wall.getById",
-            {"posts": f"-{group_id}_{post_id}"},
-            db,
-            bot,
-        )
+        response = await vk_api("wall.getById", posts=f"-{group_id}_{post_id}")
     except Exception as exc:  # pragma: no cover - logging only
         logging.error(
             "shortpost_fetch_photos_failed gid=%s post=%s: %s",
@@ -16405,7 +16418,14 @@ async def _vkrev_publish_shortpost(
             exc,
         )
     else:
-        items = data.get("response") or []
+        if isinstance(response, dict):
+            items = response.get("response") or (
+                response["response"] if "response" in response else response
+            )
+        else:
+            items = response or []
+        if not isinstance(items, list):
+            items = [items] if items else []
         photo_attachments.extend(
             _vkrev_collect_photo_ids(items, VK_SHORTPOST_MAX_PHOTOS)
         )

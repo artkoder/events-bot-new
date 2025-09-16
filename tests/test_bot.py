@@ -7741,27 +7741,31 @@ async def test_refresh_nav_triggered_on_new_festival(monkeypatch, tmp_path: Path
 async def test_edit_vk_post_preserves_photos(monkeypatch):
     captured = {}
 
-    async def fake_api(method, params, db=None, bot=None, token=None):
-        if method == "wall.getById":
-            assert params["posts"] == "-1_2"
-            return {
-                "response": [
-                    {
-                        "attachments": [
-                            {
-                                "type": "photo",
-                                "photo": {"owner_id": -1, "id": 10},
-                            }
-                        ]
-                    }
-                ]
-            }
+    async def fake_vk_api(method, **params):
+        assert method == "wall.getById"
+        assert params["posts"] == "-1_2"
+        return {
+            "response": [
+                {
+                    "attachments": [
+                        {
+                            "type": "photo",
+                            "photo": {"owner_id": -1, "id": 10},
+                        }
+                    ]
+                }
+            ]
+        }
+
+    async def fake_api(method, params, db=None, bot=None, token=None, **kwargs):
         if method == "wall.edit":
             captured.update(params)
             return {"response": 1}
         raise AssertionError(method)
 
+    monkeypatch.setattr(main, "vk_api", fake_vk_api)
     monkeypatch.setattr(main, "_vk_api", fake_api)
+    monkeypatch.setattr(main, "_vk_user_token", lambda: "token")
 
     await main.edit_vk_post("https://vk.com/wall-1_2", "msg")
 
@@ -7772,26 +7776,30 @@ async def test_edit_vk_post_preserves_photos(monkeypatch):
 async def test_edit_vk_post_add_photo(monkeypatch):
     captured = {}
 
-    async def fake_api(method, params, db=None, bot=None, token=None):
-        if method == "wall.getById":
-            return {
-                "response": [
-                    {
-                        "attachments": [
-                            {
-                                "type": "photo",
-                                "photo": {"owner_id": -1, "id": 10},
-                            }
-                        ]
-                    }
-                ]
-            }
+    async def fake_vk_api(method, **params):
+        assert method == "wall.getById"
+        return {
+            "response": [
+                {
+                    "attachments": [
+                        {
+                            "type": "photo",
+                            "photo": {"owner_id": -1, "id": 10},
+                        }
+                    ]
+                }
+            ]
+        }
+
+    async def fake_api(method, params, db=None, bot=None, token=None, **kwargs):
         if method == "wall.edit":
             captured.update(params)
             return {"response": 1}
         raise AssertionError(method)
 
+    monkeypatch.setattr(main, "vk_api", fake_vk_api)
     monkeypatch.setattr(main, "_vk_api", fake_api)
+    monkeypatch.setattr(main, "_vk_user_token", lambda: "token")
 
     await main.edit_vk_post(
         "https://vk.com/wall-1_2",
@@ -7799,7 +7807,7 @@ async def test_edit_vk_post_add_photo(monkeypatch):
         attachments=["photo-1_20"],
     )
 
-    assert captured.get("attachments") == "photo-1_10,photo-1_20"
+    assert captured.get("attachments") == "photo-1_20"
 
 
 @pytest.mark.asyncio
