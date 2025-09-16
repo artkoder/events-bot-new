@@ -82,6 +82,42 @@ def sanitize_for_vk(text_or_html: str) -> str:
     s = re.sub(r"<\s*/?(?:p|ul|ol)\s*>", "", s, flags=re.I)
     s = re.sub(r"</?[^>]+>", "", s)
     s = re.sub(r"[ \t]{2,}", " ", s)
+
+    lines = s.splitlines()
+    cleaned: list[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+        norm = stripped.casefold()
+        has_folder_icon = "📂" in stripped
+        has_addlist = "addlist" in norm
+        if "полюбить 39" in norm:
+            if not has_addlist:
+                j = i + 1
+                while j < len(lines):
+                    next_stripped = lines[j].strip()
+                    if not next_stripped:
+                        j += 1
+                        continue
+                    if "t.me/addlist" in next_stripped.casefold():
+                        has_addlist = True
+                    break
+            if has_folder_icon or has_addlist:
+                i += 1
+                while i < len(lines):
+                    next_stripped = lines[i].strip()
+                    if not next_stripped:
+                        i += 1
+                        continue
+                    if "t.me/addlist" in next_stripped.casefold():
+                        i += 1
+                    break
+                continue
+        cleaned.append(line)
+        i += 1
+
+    s = "\n".join(cleaned)
     s = re.sub(r"\n{3,}", "\n\n", s).strip()
     return s
 
