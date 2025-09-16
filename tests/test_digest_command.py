@@ -120,5 +120,63 @@ async def test_handle_digest_sends_preview(tmp_path, monkeypatch):
     assert panel.reply_markup.inline_keyboard[0][0].callback_data.startswith("dg:t:")
 
 
+@pytest.mark.asyncio
+async def test_handle_digest_sends_masterclasses_preview(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    async with db.get_session() as session:
+        session.add(User(user_id=1, is_superadmin=True))
+        dt = datetime.utcnow() + timedelta(days=1)
+        ev = Event(
+            title="M1",
+            description="d",
+            date=dt.strftime("%Y-%m-%d"),
+            time="12:00",
+            location_name="loc",
+            source_text="s",
+            event_type="мастер-класс",
+            telegraph_url="https://telegra.ph/test2",
+        )
+        session.add(ev)
+        await session.commit()
+    msg = types.Message.model_validate({
+        "message_id": 1,
+        "date": 0,
+        "chat": {"id": 1, "type": "private"},
+        "from": {"id": 1, "is_bot": False, "first_name": "U"},
+        "text": "/digest",
+    })
+    bot = DummyBot()
+
+    async def fake_ask(prompt, max_tokens=0):
+        return "Интро"
+
+    async def fake_extract(url, **kw):
+        return ["https://example.com/img2.jpg"]
+
+    monkeypatch.setattr(main, "ask_4o", fake_ask)
+    monkeypatch.setattr(main, "extract_catbox_covers_from_telegraph", fake_extract)
+
+    await main.show_digest_menu(msg, db, bot)
+    menu_msg = bot.messages[0]
+    digest_id = menu_msg.reply_markup.inline_keyboard[0][1].callback_data.split(":")[-1]
+
+    async def answer(**kw):
+        return None
+
+    cb = SimpleNamespace(
+        id="1",
+        from_user=SimpleNamespace(id=1),
+        message=menu_msg,
+        data=f"digest:select:masterclasses:{digest_id}",
+        answer=answer,
+    )
+    await main.handle_digest_select_masterclasses(cb, db, bot)
+    assert bot.media_groups
+    panel = bot.messages[-1]
+    assert panel.text.startswith("Управление дайджестом мастер-классов")
+    assert main.digest_preview_sessions[digest_id]["items_noun"] == "мастер-классов"
+
+
 def test_help_contains_digest():
     assert any(cmd["usage"].startswith("/digest") for cmd in main.HELP_COMMANDS)
