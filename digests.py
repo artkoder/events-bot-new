@@ -338,6 +338,65 @@ async def compose_digest_intro_via_4o(
     return text
 
 
+async def compose_masterclasses_intro_via_4o(
+    n: int, horizon_days: int, masterclasses: List[dict[str, str]]
+) -> str:
+    """Generate intro phrase for master-class digest via model 4o."""
+
+    from main import ask_4o  # local import to avoid cycle
+    import json
+    import uuid
+
+    run_id = uuid.uuid4().hex
+    horizon_word = "неделю" if horizon_days == 7 else "две недели"
+    data_json = json.dumps(masterclasses[:9], ensure_ascii=False)
+    prompt = (
+        "Ты помогаешь телеграм-дайджесту мероприятий."  # context
+        f" Сохрани каркас «{n} мастер-классов на ближайшую {horizon_word} — …»"
+        " и общий тон лекционного дайджеста без приветствий."
+        " Текст сделай динамичным и коротким: 1–2 предложения до ~200 символов,"
+        " помни, что слишком длинный ответ нежелателен."
+        " Используй подходящие эмодзи."
+        " После тире перечисли две контрастные активности из описаний (например,"
+        " «от рисования пейзажей до работы с голосом»)."
+        " Опирайся только на реальные активности из аннотаций ниже, не выдумывай фактов."
+        " Если в описании явно указан возраст или формат группы, упомяни это."
+        " Данные о мастер-классах в JSON (title — нормализованное название,"
+        f" description — полная аннотация): {data_json}"
+    )
+
+    logging.info(
+        "digest.intro.llm.request run_id=%s kind=masterclass n=%s horizon=%s items_count=%s prompt_len=%s",
+        run_id,
+        n,
+        horizon_days,
+        len(masterclasses),
+        len(prompt),
+    )
+
+    start = time.monotonic()
+    try:
+        text = await ask_4o(prompt, max_tokens=160)
+    except Exception:
+        took_ms = int((time.monotonic() - start) * 1000)
+        logging.info(
+            "digest.intro.llm.response run_id=%s kind=masterclass ok=error text_len=0 took_ms=%s",
+            run_id,
+            took_ms,
+        )
+        raise
+
+    took_ms = int((time.monotonic() - start) * 1000)
+    text = text.strip()
+    logging.info(
+        "digest.intro.llm.response run_id=%s kind=masterclass ok=ok text_len=%s took_ms=%s",
+        run_id,
+        len(text),
+        took_ms,
+    )
+    return text
+
+
 async def normalize_titles_via_4o(
     titles: List[str], *, event_kind: str = "lecture"
 ) -> List[dict[str, str]]:
@@ -700,13 +759,26 @@ async def _build_digest_preview(
     if not events:
         return "", [], horizon, [], []
 
-    intro = await compose_digest_intro_via_4o(
-        len(events), horizon, [e.title for e in events], event_noun=event_noun
-    )
+    titles = [e.title for e in events]
+    normalized = await normalize_titles_via_4o(titles, event_kind=event_kind)
 
-    normalized = await normalize_titles_via_4o(
-        [e.title for e in events], event_kind=event_kind
-    )
+    if event_kind == "masterclass":
+        masterclasses_payload: List[dict[str, str]] = []
+        for ev, norm in zip(events, normalized):
+            title_clean = norm.get("title_clean") or ev.title
+            masterclasses_payload.append(
+                {
+                    "title": title_clean,
+                    "description": (ev.description or "").strip(),
+                }
+            )
+        intro = await compose_masterclasses_intro_via_4o(
+            len(events), horizon, masterclasses_payload
+        )
+    else:
+        intro = await compose_digest_intro_via_4o(
+            len(events), horizon, titles, event_noun=event_noun
+        )
     lines: List[str] = []
     norm_titles: List[str] = []
     for ev, norm in zip(events, normalized):
