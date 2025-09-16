@@ -6677,6 +6677,10 @@ async def add_events_from_text(
 
         addr = data.get("location_address")
         city = data.get("city")
+        event_type_raw = data.get("event_type")
+        event_type_name = (
+            event_type_raw.casefold() if isinstance(event_type_raw, str) else ""
+        )
         title = (data.get("title") or "").strip()
         time_str = (data.get("time") or "").strip()
         location_name = (data.get("location_name") or "").strip()
@@ -6688,6 +6692,9 @@ async def add_events_from_text(
         if not city:
             city = "Калининград"
         addr = strip_city_from_address(addr, city)
+        allow_missing_date = bool(end_date and event_type_name == "выставка")
+        if allow_missing_date and not date_str:
+            date_str = datetime.now(LOCAL_TZ).date().isoformat()
         missing = missing_fields(
             {
                 "title": title,
