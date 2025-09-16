@@ -368,3 +368,28 @@ async def test_shortpost_preview_link(monkeypatch):
     )
     assert "[https://vk.com/wall-1_1|Источник]" not in msg
     assert "Источник\nhttps://vk.com/wall-1_1" in msg
+
+
+@pytest.mark.asyncio
+async def test_build_short_vk_tags_adds_city_hashtag(monkeypatch):
+    async def fake_ask(prompt, **kwargs):
+        return "#доптег1 #доптег2"
+
+    monkeypatch.setattr(main, "ask_4o", fake_ask)
+
+    ev = Event(
+        id=1,
+        title="T",
+        description="d",
+        date="2025-09-27",
+        time="19:00",
+        location_name="Place",
+        city="Санкт-Петербург",
+        event_type="Лекция",
+        source_text="src",
+    )
+
+    tags = await main.build_short_vk_tags(ev, "summary")
+
+    assert "#санктпетербург" in tags
+    assert tags.index("#санктпетербург") <= 2
