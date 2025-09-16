@@ -15863,7 +15863,9 @@ async def build_short_vk_text(
     return summary or _fallback_summary()
 
 
-async def build_short_vk_tags(event: Event, summary: str) -> list[str]:
+async def build_short_vk_tags(
+    event: Event, summary: str, used_type_hashtag: str | None = None
+) -> list[str]:
     """Generate 5-7 hashtags for the short VK post."""
     day = int(event.date.split("-")[2])
     month = int(event.date.split("-")[1])
@@ -15871,6 +15873,13 @@ async def build_short_vk_tags(event: Event, summary: str) -> list[str]:
     current_year = date.today().year
     tags: list[str] = []
     seen: set[str] = set()
+
+    if used_type_hashtag:
+        used_tag_clean = used_type_hashtag.strip()
+        if used_tag_clean:
+            if not used_tag_clean.startswith("#"):
+                used_tag_clean = "#" + used_tag_clean.lstrip("#")
+            seen.add(used_tag_clean.lower())
 
     def add_tag(tag: str) -> None:
         tag_clean = (tag or "").strip()
@@ -16397,6 +16406,7 @@ async def _vkrev_build_shortpost(
         date_line = f"🗓 {default_date_str}{time_part}"
 
     type_line: str | None = None
+    type_line_used_tag: str | None = None
     raw_event_type = (ev.event_type or "").strip()
     if raw_event_type:
         event_type_lower = raw_event_type.casefold()
@@ -16404,14 +16414,16 @@ async def _vkrev_build_shortpost(
             r"[^0-9a-zа-яё]+", "_", event_type_lower
         ).strip("_")
         if normalized_event_type:
-            type_hashtag = normalized_event_type
+            normalized_hashtag = f"#{normalized_event_type}"
+            type_line = normalized_hashtag
             if re.search(r"[-–—]", raw_event_type):
                 hyphen_free = re.sub(r"[^0-9a-zа-яё]", "", event_type_lower)
                 if hyphen_free:
-                    type_hashtag = hyphen_free
-            type_line = f"#{type_hashtag}"
+                    type_line = f"#{hyphen_free}"
+            else:
+                type_line_used_tag = normalized_hashtag
 
-    tags = await build_short_vk_tags(ev, summary)
+    tags = await build_short_vk_tags(ev, summary, used_type_hashtag=type_line_used_tag)
     lines = [
         ev.title.upper(),
         "",

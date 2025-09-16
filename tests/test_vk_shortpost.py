@@ -300,7 +300,7 @@ async def test_shortpost_no_time(monkeypatch):
     async def fake_build_text(event, src, max_sent):
         return "short summary"
 
-    async def fake_tags(event, summary):
+    async def fake_tags(event, summary, used_type_hashtag=None):
         return ["#a", "#b", "#c", "#d", "#e"]
 
     monkeypatch.setattr(main, "build_short_vk_text", fake_build_text)
@@ -326,7 +326,7 @@ async def test_shortpost_midnight_time_hidden(monkeypatch):
     async def fake_build_text(event, src, max_sent):
         return "short summary"
 
-    async def fake_tags(event, summary):
+    async def fake_tags(event, summary, used_type_hashtag=None):
         return ["#a", "#b", "#c", "#d", "#e"]
 
     monkeypatch.setattr(main, "build_short_vk_text", fake_build_text)
@@ -351,7 +351,7 @@ async def test_shortpost_city_not_duplicated(monkeypatch):
     async def fake_build_text(event, src, max_sent):
         return "short summary"
 
-    async def fake_tags(event, summary):
+    async def fake_tags(event, summary, used_type_hashtag=None):
         return ["#a", "#b", "#c", "#d", "#e"]
 
     monkeypatch.setattr(main, "build_short_vk_text", fake_build_text)
@@ -412,11 +412,44 @@ async def test_shortpost_type_line_for_hyphenated_type(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_shortpost_plain_type_hashtag_not_repeated(monkeypatch):
+    async def fake_build_text(event, src, max_sent):
+        return "короткое описание"
+
+    async def fake_ask(prompt, **kwargs):
+        return "#доптег1 #доптег2"
+
+    monkeypatch.setattr(main, "build_short_vk_text", fake_build_text)
+    monkeypatch.setattr(main, "ask_4o", fake_ask)
+
+    ev = Event(
+        id=1,
+        title="Экспозиция",
+        description="d",
+        date="2025-09-27",
+        time="18:00",
+        location_name="Place",
+        city="Калининград",
+        source_text="src",
+        event_type="выставка",
+    )
+
+    msg, _ = await main._vkrev_build_shortpost(ev, "https://vk.com/wall-1_1")
+
+    lines = msg.splitlines()
+    date_idx = next(i for i, line in enumerate(lines) if line.startswith("🗓"))
+    assert lines[date_idx - 1] == "#выставка"
+
+    hashtags_line = lines[-1]
+    assert "#выставка" not in hashtags_line.split()
+
+
+@pytest.mark.asyncio
 async def test_shortpost_ongoing_exhibition(monkeypatch):
     async def fake_build_text(event, src, max_sent):
         return "short summary"
 
-    async def fake_tags(event, summary):
+    async def fake_tags(event, summary, used_type_hashtag=None):
         return ["#a", "#b", "#c", "#d", "#e"]
 
     monkeypatch.setattr(main, "build_short_vk_text", fake_build_text)
@@ -451,7 +484,7 @@ async def test_shortpost_preview_link(monkeypatch):
     async def fake_build_text(event, src, max_sent):
         return "short summary"
 
-    async def fake_tags(event, summary):
+    async def fake_tags(event, summary, used_type_hashtag=None):
         return ["#a", "#b", "#c", "#d", "#e"]
 
     monkeypatch.setattr(main, "build_short_vk_text", fake_build_text)
