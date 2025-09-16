@@ -16413,12 +16413,22 @@ async def _vkrev_build_shortpost(
     ]
     if ev.ticket_link:
         lines.append(f"🎟 Билеты: {ev.ticket_link}")
-    loc_parts = [ev.location_name]
-    if ev.location_address:
-        loc_parts.append(ev.location_address)
-    if ev.city:
-        loc_parts.append(ev.city)
-    lines.append("📍 Локация: " + ", ".join(filter(None, loc_parts)))
+    loc_parts: list[str] = []
+    seen_parts: set[str] = set()
+
+    def add_loc_part(part: str | None) -> None:
+        if not part:
+            return
+        normalized = re.sub(r"[\W_]+", " ", part).strip().lower()
+        if not normalized or normalized in seen_parts:
+            return
+        seen_parts.add(normalized)
+        loc_parts.append(part)
+
+    add_loc_part(ev.location_name)
+    add_loc_part(ev.location_address)
+    add_loc_part(ev.city)
+    lines.append("📍 Локация: " + ", ".join(loc_parts))
     lines.append("")
     lines.append(summary)
     summary_idx = len(lines) - 1

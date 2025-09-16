@@ -343,6 +343,37 @@ async def test_shortpost_midnight_time_hidden(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_shortpost_city_not_duplicated(monkeypatch):
+    async def fake_build_text(event, src, max_sent):
+        return "short summary"
+
+    async def fake_tags(event, summary):
+        return ["#a", "#b", "#c", "#d", "#e"]
+
+    monkeypatch.setattr(main, "build_short_vk_text", fake_build_text)
+    monkeypatch.setattr(main, "build_short_vk_tags", fake_tags)
+
+    ev = Event(
+        id=1,
+        title="T",
+        description="d",
+        date="2025-09-27",
+        time="",
+        location_name="Place",
+        location_address="Москва",
+        city="Москва",
+        source_text="src",
+    )
+
+    msg, _ = await main._vkrev_build_shortpost(ev, "https://vk.com/wall-1_1")
+    location_line = next(
+        line for line in msg.splitlines() if line.startswith("📍 Локация:")
+    )
+    assert location_line == "📍 Локация: Place, Москва"
+    assert "Москва, Москва" not in location_line
+
+
+@pytest.mark.asyncio
 async def test_shortpost_preview_link(monkeypatch):
     async def fake_build_text(event, src, max_sent):
         return "short summary"
