@@ -16396,6 +16396,15 @@ async def _vkrev_handle_repost(callback: types.CallbackQuery, event_id: int, db:
 async def _vkrev_build_shortpost(
     ev: Event, vk_url: str, *, for_preview: bool = False
 ) -> tuple[str, str | None]:
+    def _normalize_loc_part(part: str | None) -> str:
+        if not part:
+            return ""
+        normalized = unicodedata.normalize("NFKC", part)
+        normalized = normalized.replace("\xa0", " ")
+        normalized = re.sub(r"[^\w\s]", " ", normalized)
+        normalized = re.sub(r"\s+", " ", normalized).strip()
+        return normalized.casefold()
+
     text_len = len(ev.source_text or "")
     if text_len < 200:
         max_sent = 1
@@ -16459,11 +16468,20 @@ async def _vkrev_build_shortpost(
     ]
     if ev.ticket_link:
         lines.append(f"🎟 Билеты: {ev.ticket_link}")
-    loc_parts = [ev.location_name]
-    if ev.location_address:
-        loc_parts.append(ev.location_address)
+    loc_parts: list[str] = []
+    existing_normalized: set[str] = set()
+    for part in (ev.location_name, ev.location_address):
+        if part:
+            loc_parts.append(part)
+            normalized = _normalize_loc_part(part)
+            if normalized:
+                existing_normalized.add(normalized)
     if ev.city:
-        loc_parts.append(ev.city)
+        city_normalized = _normalize_loc_part(ev.city)
+        if not city_normalized or city_normalized not in existing_normalized:
+            loc_parts.append(ev.city)
+            if city_normalized:
+                existing_normalized.add(city_normalized)
     lines.append("📍 Локация: " + ", ".join(filter(None, loc_parts)))
     lines.append("")
     lines.append(summary)
