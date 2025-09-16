@@ -9,7 +9,9 @@ import logging
 from digests import (
     build_lectures_digest_candidates,
     build_masterclasses_digest_candidates,
+    build_masterclasses_digest_preview,
     compose_digest_intro_via_4o,
+    compose_masterclasses_intro_via_4o,
     aggregate_digest_topics,
     format_event_line_html,
     pick_display_link,
@@ -148,15 +150,79 @@ async def test_compose_intro_via_4o(monkeypatch, caplog):
 
 @pytest.mark.asyncio
 async def test_compose_intro_via_4o_masterclass(monkeypatch):
+    captured_prompt: dict[str, str] = {}
+
     async def fake_ask(prompt, max_tokens=0):
-        assert "мастер-классов" in prompt
+        captured_prompt["value"] = prompt
         return "интро"
 
     monkeypatch.setattr("main.ask_4o", fake_ask)
-    text = await compose_digest_intro_via_4o(
-        3, 14, ["a", "b", "c"], event_noun="мастер-классов"
-    )
+
+    payload = [
+        {"title": "Акварель", "description": "Рисуем пейзажи акварелью. 12+"},
+        {"title": "Голос", "description": "Работа с голосом и дыханием."},
+    ]
+
+    text = await compose_masterclasses_intro_via_4o(2, 7, payload)
     assert text == "интро"
+
+    prompt = captured_prompt["value"]
+    assert "Рисуем пейзажи акварелью. 12+" in prompt
+    assert "Работа с голосом" in prompt
+    assert "реальные активности" in prompt
+    assert "не выдумывай фактов" in prompt
+    assert "эмодзи" in prompt
+    assert "200 символов" in prompt
+    assert "формат группы" in prompt
+    assert "12+" in prompt
+
+    event = SimpleNamespace(
+        id=1,
+        title="🎨 Мастер-класс «Акварель»",
+        description="Рисуем пейзажи акварелью. 12+",
+        date="2025-05-02",
+        time="15:00",
+        location_name="Студия",
+        source_post_url="https://example.com/post",
+        telegraph_url=None,
+        telegraph_path=None,
+    )
+
+    captured_payload: dict[str, list] = {}
+
+    async def fake_compose_masterclasses_intro(n, horizon_days, masterclasses):
+        captured_payload["value"] = masterclasses
+        return "готовое интро"
+
+    async def fake_normalize(titles, *, event_kind="lecture"):
+        return [{"emoji": "🎨", "title_clean": "Акварель"} for _ in titles]
+
+    async def fake_candidates(db, now, digest_id=None):
+        return [event], 7
+
+    monkeypatch.setattr(
+        "digests.compose_masterclasses_intro_via_4o",
+        fake_compose_masterclasses_intro,
+    )
+    monkeypatch.setattr("digests.normalize_titles_via_4o", fake_normalize)
+    monkeypatch.setattr(
+        "digests.build_masterclasses_digest_candidates", fake_candidates
+    )
+    monkeypatch.setattr("digests.pick_display_link", lambda ev: event.source_post_url)
+
+    now = datetime(2025, 5, 1, 12, 0)
+    intro, lines, horizon, events, norm_titles = await build_masterclasses_digest_preview(
+        "digest-test", None, now
+    )
+
+    assert intro == "готовое интро"
+    assert captured_payload["value"] == [
+        {"title": "Акварель", "description": "Рисуем пейзажи акварелью. 12+"}
+    ]
+    assert horizon == 7
+    assert norm_titles == ["Акварель"]
+    assert len(lines) == 1
+    assert events == [event]
 
 
 def test_visible_len_anchors():
