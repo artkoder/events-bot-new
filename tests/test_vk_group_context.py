@@ -9,6 +9,7 @@ async def test_vk_build_event_uses_group_title(monkeypatch):
 
     async def fake_parse(text, **kwargs):
         captured['channel_title'] = kwargs.get('channel_title')
+        captured['festival_names'] = kwargs.get('festival_names')
         return [{
             'title': 'T',
             'date': '2099-01-01',
@@ -21,4 +22,6 @@ async def test_vk_build_event_uses_group_title(monkeypatch):
     draft = await vk_intake.build_event_payload_from_vk('text', source_name='Group')
 
     assert captured['channel_title'] == 'Group'
+    assert 'festival_names' in captured
+    assert captured['festival_names'] is None
     assert draft.venue == 'Venue'

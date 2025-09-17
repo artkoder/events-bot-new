@@ -89,6 +89,7 @@ async def test_build_event_payload_includes_default_time(monkeypatch):
 
     async def fake_parse(text, **kwargs):
         captured["text"] = text
+        captured["festival_names"] = kwargs.get("festival_names")
         return [{"title": "T", "date": "2099-01-01"}]
 
     monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
@@ -96,4 +97,5 @@ async def test_build_event_payload_includes_default_time(monkeypatch):
     draft = await vk_intake.build_event_payload_from_vk("text", default_time="19:00")
 
     assert "19:00" in captured["text"]
+    assert captured["festival_names"] is None
     assert draft.time == "19:00"
