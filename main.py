@@ -111,6 +111,7 @@ import hashlib
 import unicodedata
 import vk_intake
 import vk_review
+import poster_ocr
 from poster_media import (
     PosterMedia,
     build_poster_summary,
@@ -6653,6 +6654,20 @@ def missing_fields(event: dict | Event) -> list[str]:
     return [field for field, value in data.items() if not value]
 
 
+class AddEventsResult(list):
+    """Container for parsed events along with poster OCR usage stats."""
+
+    def __init__(
+        self,
+        entries: list[tuple[Event | Festival | None, bool, list[str], str]],
+        tokens_spent: int,
+        tokens_remaining: int | None,
+    ) -> None:
+        super().__init__(entries)
+        self.ocr_tokens_spent = tokens_spent
+        self.ocr_tokens_remaining = tokens_remaining
+
+
 async def add_events_from_text(
     db: Database,
     text: str,
@@ -6672,18 +6687,48 @@ async def add_events_from_text(
 
     bot: Bot | None = None,
 
-) -> list[tuple[Event | None, bool, list[str], str]]:
+) -> AddEventsResult:
     logging.info(
         "add_events_from_text start: len=%d source=%s", len(text), source_link
     )
     poster_items: list[PosterMedia] = []
+    ocr_tokens_spent = 0
+    ocr_tokens_remaining: int | None = None
+    normalized_media: list[tuple[bytes, str]] = []
+    if media:
+        normalized_media = [media] if isinstance(media, tuple) else list(media)
     if poster_media:
         poster_items = list(poster_media)
-    elif media:
-        media_list = [media] if isinstance(media, tuple) else list(media)
+    elif normalized_media:
         poster_items, _ = await process_media(
-            media_list, need_catbox=True, need_ocr=True
+            normalized_media, need_catbox=True, need_ocr=False
         )
+    ocr_results: list[poster_ocr.PosterOcrCache] = []
+    if normalized_media:
+        ocr_results, ocr_tokens_spent, ocr_tokens_remaining = await poster_ocr.recognize_posters(
+            db, normalized_media
+        )
+    elif poster_items:
+        _, _, ocr_tokens_remaining = await poster_ocr.recognize_posters(db, [])
+        ocr_tokens_spent = sum(item.total_tokens or 0 for item in poster_items)
+    else:
+        _, _, ocr_tokens_remaining = await poster_ocr.recognize_posters(db, [])
+
+    if poster_items and ocr_results:
+        for poster, cache in zip(poster_items, ocr_results):
+            poster.ocr_text = cache.text
+            poster.prompt_tokens = cache.prompt_tokens
+            poster.completion_tokens = cache.completion_tokens
+            poster.total_tokens = cache.total_tokens
+    elif not poster_items and ocr_results:
+        for cache in ocr_results:
+            media_entry = PosterMedia(data=b"", name=cache.hash)
+            media_entry.ocr_text = cache.text
+            media_entry.prompt_tokens = cache.prompt_tokens
+            media_entry.completion_tokens = cache.completion_tokens
+            media_entry.total_tokens = cache.total_tokens
+            poster_items.append(media_entry)
+
     catbox_urls = [item.catbox_url for item in poster_items if item.catbox_url]
     poster_texts = collect_poster_texts(poster_items)
     poster_summary = build_poster_summary(poster_items)
@@ -7059,7 +7104,7 @@ async def add_events_from_text(
     logging.info("add_events_from_text finished with %d results", len(results))
     del parsed
     gc.collect()
-    return results
+    return AddEventsResult(results, ocr_tokens_spent, ocr_tokens_remaining)
 
 
 def _event_lines(ev: Event) -> list[str]:
@@ -7129,7 +7174,7 @@ async def handle_add_event(
         poster_items = list(poster_media)
     elif normalized_media:
         poster_items, catbox_msg_local = await process_media(
-            normalized_media, need_catbox=True, need_ocr=True
+            normalized_media, need_catbox=True, need_ocr=False
         )
     global LAST_CATBOX_MSG
     LAST_CATBOX_MSG = catbox_msg_local
@@ -7171,6 +7216,12 @@ async def handle_add_event(
         )
         return
     logging.info("handle_add_event parsed %d results", len(results))
+    ocr_line = None
+    if normalized_media and results.ocr_tokens_remaining is not None:
+        ocr_line = (
+            f"OCR: потрачено {results.ocr_tokens_spent}, осталось "
+            f"{results.ocr_tokens_remaining}"
+        )
     grouped: dict[int, tuple[Event, bool]] = {}
     fest_msgs: list[tuple[Festival, bool, list[str]]] = []
     for saved, added, lines, status in results:
@@ -7197,11 +7248,11 @@ async def handle_add_event(
                     callback_data=f"festdays:{fest.id}")]]
             )
         status = "added" if added else "updated"
-        await bot.send_message(
-            message.chat.id,
-            f"Festival {status}\n" + "\n".join(lines),
-            reply_markup=markup,
-        )
+        text_out = f"Festival {status}\n" + "\n".join(lines)
+        if ocr_line:
+            text_out = f"{text_out}\n{ocr_line}"
+            ocr_line = None
+        await bot.send_message(message.chat.id, text_out, reply_markup=markup)
 
     for saved, added in grouped.values():
         status = "added" if added else "updated"
@@ -7234,11 +7285,11 @@ async def handle_add_event(
         markup = types.InlineKeyboardMarkup(
             inline_keyboard=[buttons_first, buttons_second]
         )
-        await bot.send_message(
-            message.chat.id,
-            f"Event {status}\n" + "\n".join(lines),
-            reply_markup=markup,
-        )
+        text_out = f"Event {status}\n" + "\n".join(lines)
+        if ocr_line:
+            text_out = f"{text_out}\n{ocr_line}"
+            ocr_line = None
+        await bot.send_message(message.chat.id, text_out, reply_markup=markup)
         await notify_event_added(db, bot, user, saved, added)
         await publish_event_progress(saved, db, bot, message.chat.id)
     logging.info("handle_add_event finished for user %s", message.from_user.id)
@@ -16261,6 +16312,7 @@ async def _vkrev_import_flow(
         default_time=source[2] if source else None,
         operator_extra=operator_extra,
         festival_names=festival_names,
+        db=db,
     )
     source_post_url = f"https://vk.com/wall-{group_id}_{post_id}"
     res = await vk_intake.persist_event_and_pages(
@@ -16304,6 +16356,10 @@ async def _vkrev_import_flow(
         f"Время: {_display(res.event_time)}",
         f"Бесплатное: {'да' if res.is_free else 'нет'}",
     ]
+    if draft.poster_media and draft.ocr_tokens_remaining is not None:
+        info_lines.append(
+            f"OCR: потрачено {draft.ocr_tokens_spent}, осталось {draft.ocr_tokens_remaining}"
+        )
 
     await bot.send_message(chat_id, "\n".join(info_lines), reply_markup=markup)
 
@@ -17036,7 +17092,7 @@ async def finalize_album(gid: str, db: Database, bot: Bot) -> None:
     logging.info("html_mode=%s", state.html_mode)
     media = [(im.data, im.name) for im in used_images]
     poster_items, catbox_msg = await process_media(
-        media, need_catbox=True, need_ocr=True
+        media, need_catbox=True, need_ocr=False
     )
     global LAST_CATBOX_MSG, LAST_HTML_MODE
     LAST_CATBOX_MSG = catbox_msg
@@ -17174,7 +17230,7 @@ async def _process_forwarded(
         poster_items = list(poster_media)
     elif normalized_media:
         poster_items, local_catbox_msg = await process_media(
-            normalized_media, need_catbox=True, need_ocr=True
+            normalized_media, need_catbox=True, need_ocr=False
         )
     global LAST_CATBOX_MSG
     LAST_CATBOX_MSG = local_catbox_msg
@@ -17210,6 +17266,12 @@ async def _process_forwarded(
         await notify_superadmin(db, bot, msg)
         return
     logging.info("forward parsed %d events", len(results))
+    ocr_line = None
+    if normalized_media and results.ocr_tokens_remaining is not None:
+        ocr_line = (
+            f"OCR: потрачено {results.ocr_tokens_spent}, осталось "
+            f"{results.ocr_tokens_remaining}"
+        )
     if not results:
         logging.info("no events parsed from forwarded text")
         return
@@ -17263,11 +17325,11 @@ async def _process_forwarded(
                     ]
                 ]
             )
-            await bot.send_message(
-                message.chat.id,
-                "Festival added\n" + "\n".join(lines),
-                reply_markup=markup,
-            )
+            text_out = "Festival added\n" + "\n".join(lines)
+            if ocr_line:
+                text_out = f"{text_out}\n{ocr_line}"
+                ocr_line = None
+            await bot.send_message(message.chat.id, text_out, reply_markup=markup)
             continue
         buttons = []
         if not saved.city:
@@ -17297,6 +17359,9 @@ async def _process_forwarded(
             types.InlineKeyboardMarkup(inline_keyboard=[buttons]) if buttons else None
         )
         text_out = f"Event {status}\n" + "\n".join(lines)
+        if ocr_line:
+            text_out = f"{text_out}\n{ocr_line}"
+            ocr_line = None
         logging.info("sending response for event %s", saved.id)
         try:
             await bot.send_message(

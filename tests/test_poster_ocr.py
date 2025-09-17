@@ -32,12 +32,16 @@ async def test_recognize_posters_uses_cache(tmp_path, monkeypatch):
     monkeypatch.setattr(poster_ocr, "run_ocr", fake_run_ocr)
 
     items = [DummyPoster(b"data")]
-    result1 = await poster_ocr.recognize_posters(db, items)
-    result2 = await poster_ocr.recognize_posters(db, items)
+    result1, spent1, remaining1 = await poster_ocr.recognize_posters(db, items)
+    result2, spent2, remaining2 = await poster_ocr.recognize_posters(db, items)
 
     assert call_count == 1
     assert result1[0].text == "hello"
     assert result2[0].text == "hello"
+    assert spent1 == 3
+    assert spent2 == 0
+    assert remaining1 <= poster_ocr.DAILY_TOKEN_LIMIT
+    assert remaining2 == remaining1
 
 
 @pytest.mark.asyncio
@@ -54,10 +58,10 @@ async def test_recognize_posters_usage_resets_by_date(tmp_path, monkeypatch):
     monkeypatch.setattr(poster_ocr, "run_ocr", fake_run_ocr)
     monkeypatch.setattr(poster_ocr, "_today_key", lambda: "2024-06-01")
 
-    await poster_ocr.recognize_posters(db, [DummyPoster(b"one")])
+    _, spent1, remaining1 = await poster_ocr.recognize_posters(db, [DummyPoster(b"one")])
 
     monkeypatch.setattr(poster_ocr, "_today_key", lambda: "2024-06-02")
-    await poster_ocr.recognize_posters(db, [DummyPoster(b"two")])
+    _, spent2, remaining2 = await poster_ocr.recognize_posters(db, [DummyPoster(b"two")])
 
     async with db.get_session() as session:
         usage_first = await session.get(OcrUsage, "2024-06-01")
@@ -67,6 +71,10 @@ async def test_recognize_posters_usage_resets_by_date(tmp_path, monkeypatch):
     assert usage_second is not None
     assert usage_first.spent_tokens == 100
     assert usage_second.spent_tokens == 100
+    assert spent1 == 100
+    assert spent2 == 100
+    assert remaining1 == poster_ocr.DAILY_TOKEN_LIMIT - 100
+    assert remaining2 == poster_ocr.DAILY_TOKEN_LIMIT - 100
 
 
 @pytest.mark.asyncio

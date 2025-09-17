@@ -37,14 +37,20 @@ async def recognize_posters(
     detail: str = "auto",
     *,
     count_usage: bool = True,
-) -> list[PosterOcrCache]:
+) -> tuple[list[PosterOcrCache], int, int]:
     payloads: list[tuple[bytes, str]] = []
     for item in items:
         data = _ensure_bytes(item)
         digest = hashlib.sha256(data).hexdigest()
         payloads.append((data, digest))
+
     if not payloads:
-        return []
+        async with db.get_session() as session:
+            today = _today_key()
+            usage_row = await session.get(OcrUsageModel, today)
+        remaining = DAILY_TOKEN_LIMIT - (usage_row.spent_tokens if usage_row else 0)
+        remaining = max(0, remaining)
+        return [], 0, remaining
 
     model = os.getenv("POSTER_OCR_MODEL", "gpt-4o-mini")
     async with db.get_session() as session:
@@ -60,6 +66,9 @@ async def recognize_posters(
         results: list[PosterOcrCache] = []
         pending: list[PosterOcrCache] = []
         total_new_tokens = 0
+        today = _today_key()
+        usage_row = await session.get(OcrUsageModel, today)
+        spent_after = usage_row.spent_tokens if usage_row else 0
 
         for data, digest in payloads:
             cached = cache_map.get(digest)
@@ -86,8 +95,6 @@ async def recognize_posters(
 
         if pending:
             if count_usage and total_new_tokens:
-                today = _today_key()
-                usage_row = await session.get(OcrUsageModel, today)
                 if usage_row is None:
                     usage_row = OcrUsageModel(date=today, spent_tokens=0)
                 new_total = usage_row.spent_tokens + total_new_tokens
@@ -96,10 +103,19 @@ async def recognize_posters(
                     raise RuntimeError("poster OCR daily token limit exceeded")
                 usage_row.spent_tokens = new_total
                 session.add(usage_row)
+                spent_after = new_total
             for entry in pending:
                 session.add(entry)
             await session.commit()
+            if usage_row is not None:
+                await session.refresh(usage_row)
+                spent_after = usage_row.spent_tokens
             for entry in pending:
                 await session.refresh(entry)
+        else:
+            spent_after = usage_row.spent_tokens if usage_row else spent_after
 
-        return results
+        remaining = DAILY_TOKEN_LIMIT - spent_after
+        remaining = max(0, remaining)
+        spent_tokens = total_new_tokens if count_usage else 0
+        return results, spent_tokens, remaining
