@@ -1,3 +1,4 @@
+import hashlib
 import os
 import sys
 
@@ -5,6 +6,8 @@ import pytest
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 import main
+import poster_ocr
+from models import PosterOcrCache
 
 
 @pytest.fixture(autouse=True)
@@ -39,3 +42,34 @@ def _mock_telegraph(monkeypatch, request):
         return None
     monkeypatch.setattr(main, "update_telegraph_event_page", fake_update)
     monkeypatch.setattr(main, "update_source_post_keyboard", lambda *a, **k: None)
+
+
+@pytest.fixture(autouse=True)
+def _mock_poster_ocr(monkeypatch, request):
+    if "test_poster_ocr" in str(getattr(request.node, "fspath", "")):
+        return
+
+    async def fake_recognize(db, items, detail="auto", *, count_usage=True):
+        results = []
+        for item in items:
+            if isinstance(item, tuple) and item:
+                data = item[0]
+            elif isinstance(item, (bytes, bytearray, memoryview)):
+                data = bytes(item)
+            else:
+                data = getattr(item, "data", b"")
+            digest = hashlib.sha256(bytes(data)).hexdigest()
+            results.append(
+                PosterOcrCache(
+                    hash=digest,
+                    detail=detail,
+                    model="mock",
+                    text="",
+                    prompt_tokens=0,
+                    completion_tokens=0,
+                    total_tokens=0,
+                )
+            )
+        return results, 0, poster_ocr.DAILY_TOKEN_LIMIT
+
+    monkeypatch.setattr(poster_ocr, "recognize_posters", fake_recognize)

@@ -17,6 +17,7 @@ from poster_media import (
     collect_poster_texts,
     process_media,
 )
+import poster_ocr
 
 from sections import MONTHS_RU
 
@@ -272,6 +273,8 @@ class EventDraft:
     source_text: str | None = None
     poster_media: list[PosterMedia] = field(default_factory=list)
     poster_summary: str | None = None
+    ocr_tokens_spent: int = 0
+    ocr_tokens_remaining: int | None = None
 
 
 @dataclass
@@ -333,6 +336,8 @@ async def build_event_payload_from_vk(
     operator_extra: str | None = None,
     festival_names: list[str] | None = None,
     poster_media: Sequence[PosterMedia] | None = None,
+    ocr_tokens_spent: int = 0,
+    ocr_tokens_remaining: int | None = None,
 ) -> EventDraft:
     """Return a normalised event draft extracted from a VK post.
 
@@ -453,6 +458,8 @@ async def build_event_payload_from_vk(
         source_text=combined_text,
         poster_media=poster_items,
         poster_summary=poster_summary,
+        ocr_tokens_spent=ocr_tokens_spent,
+        ocr_tokens_remaining=ocr_tokens_remaining,
     )
 
 
@@ -465,18 +472,31 @@ async def build_event_draft(
     default_time: str | None = None,
     operator_extra: str | None = None,
     festival_names: list[str] | None = None,
+    db: Database,
 ) -> EventDraft:
     photo_bytes = await _download_photo_media(photos or [])
     poster_items: list[PosterMedia] = []
+    ocr_tokens_spent = 0
+    ocr_tokens_remaining: int | None = None
     if photo_bytes:
         poster_items, catbox_msg = await process_media(
-            photo_bytes, need_catbox=True, need_ocr=True
+            photo_bytes, need_catbox=True, need_ocr=False
         )
+        ocr_results, ocr_tokens_spent, ocr_tokens_remaining = await poster_ocr.recognize_posters(
+            db, photo_bytes
+        )
+        for poster, cache in zip(poster_items, ocr_results):
+            poster.ocr_text = cache.text
+            poster.prompt_tokens = cache.prompt_tokens
+            poster.completion_tokens = cache.completion_tokens
+            poster.total_tokens = cache.total_tokens
         logging.info(
             "vk.build_event_draft posters=%d catbox=%s",
             len(poster_items),
             catbox_msg or "",
         )
+    else:
+        _, _, ocr_tokens_remaining = await poster_ocr.recognize_posters(db, [])
     draft = await build_event_payload_from_vk(
         text,
         source_name=source_name,
@@ -485,6 +505,8 @@ async def build_event_draft(
         operator_extra=operator_extra,
         festival_names=festival_names,
         poster_media=poster_items,
+        ocr_tokens_spent=ocr_tokens_spent,
+        ocr_tokens_remaining=ocr_tokens_remaining,
     )
     return draft
 
@@ -586,6 +608,7 @@ async def process_event(
         default_time=default_time,
         operator_extra=operator_extra,
         festival_names=festival_names,
+        db=db,
     )
     result = await persist_event_and_pages(draft, photos or [], db)
     duration = time.perf_counter() - start
