@@ -10,6 +10,8 @@ sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
 import main
 import vision_test
+import vision_test.ocr as vision_ocr
+from vision_test import OcrResult
 from vision_test import session as vision_session
 from main import Database, User
 
@@ -176,13 +178,21 @@ async def test_handle_photo_uses_both_models(tmp_path, monkeypatch):
     async def fake_run_ocr(image: bytes, *, model: str, detail: str):
         calls.append((model, detail))
         if model == "gpt-4o-mini":
-            return (
-                "строка одна\nобщая",
-                {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+            return OcrResult(
+                text="строка одна\nобщая",
+                usage=vision_ocr.OcrUsage(
+                    prompt_tokens=10,
+                    completion_tokens=5,
+                    total_tokens=15,
+                ),
             )
-        return (
-            "строка одна\nдругая",
-            {"prompt_tokens": 20, "completion_tokens": 7, "total_tokens": 27},
+        return OcrResult(
+            text="строка одна\nдругая",
+            usage=vision_ocr.OcrUsage(
+                prompt_tokens=20,
+                completion_tokens=7,
+                total_tokens=27,
+            ),
         )
 
     monkeypatch.setattr(vision_test, "run_ocr", fake_run_ocr)
@@ -248,17 +258,17 @@ async def test_run_ocr_payload_structure(monkeypatch):
     semaphore = asyncio.Semaphore(1)
     monkeypatch.setenv("FOUR_O_TOKEN", "token")
     monkeypatch.setenv("FOUR_O_URL", "https://example.test/v1/chat/completions")
-    vision_test._HTTP_SESSION = session
-    vision_test._HTTP_SEMAPHORE = semaphore
+    vision_ocr.configure_http(session=session, semaphore=semaphore)
 
     try:
-        text, tokens = await vision_test.run_ocr(b"binarydata", model="gpt-4o", detail="auto")
+        result = await vision_test.run_ocr(b"binarydata", model="gpt-4o", detail="auto")
     finally:
-        vision_test._HTTP_SESSION = None
-        vision_test._HTTP_SEMAPHORE = None
+        vision_ocr.clear_http()
 
-    assert text == "распознанный текст"
-    assert tokens == {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3}
+    assert result.text == "распознанный текст"
+    assert result.usage.prompt_tokens == 1
+    assert result.usage.completion_tokens == 2
+    assert result.usage.total_tokens == 3
     assert len(session.calls) == 1
     url, payload, headers = session.calls[0]
     assert url == "https://example.test/v1/chat/completions"
