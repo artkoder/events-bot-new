@@ -1,3 +1,4 @@
+import asyncio
 import os
 import sys
 from types import SimpleNamespace
@@ -210,3 +211,61 @@ async def test_handle_photo_uses_both_models(tmp_path, monkeypatch):
     assert session is not None
     assert session.last_texts.get("gpt-4o")
     assert session.waiting_for_photo
+
+
+@pytest.mark.asyncio
+async def test_run_ocr_payload_structure(monkeypatch):
+    class CapturingResponse:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def raise_for_status(self):
+            return None
+
+        async def json(self):
+            return {
+                "choices": [{"message": {"content": "распознанный текст"}}],
+                "usage": {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 2,
+                    "total_tokens": 3,
+                },
+            }
+
+    class CapturingSession:
+        def __init__(self):
+            self.calls = []
+
+        def post(self, url, *, json, headers):
+            self.calls.append((url, json, headers))
+            return CapturingResponse()
+
+    session = CapturingSession()
+    semaphore = asyncio.Semaphore(1)
+    monkeypatch.setenv("FOUR_O_TOKEN", "token")
+    monkeypatch.setenv("FOUR_O_URL", "https://example.test/v1/chat/completions")
+    vision_test._HTTP_SESSION = session
+    vision_test._HTTP_SEMAPHORE = semaphore
+
+    try:
+        text, tokens = await vision_test.run_ocr(b"binarydata", model="gpt-4o", detail="auto")
+    finally:
+        vision_test._HTTP_SESSION = None
+        vision_test._HTTP_SEMAPHORE = None
+
+    assert text == "распознанный текст"
+    assert tokens == {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3}
+    assert len(session.calls) == 1
+    url, payload, headers = session.calls[0]
+    assert url == "https://example.test/v1/chat/completions"
+    assert headers["Authorization"] == "Bearer token"
+    content = payload["messages"][1]["content"]
+    assert isinstance(content, list)
+    assert content[0] == {
+        "type": "text",
+        "text": "Распознай текст на изображении.",
+    }
+    assert all(item.get("type") != "input_text" for item in content)
