@@ -5,27 +5,15 @@ import base64
 import html
 import logging
 import os
-from dataclasses import dataclass, field
 from difflib import SequenceMatcher, ndiff
-from typing import Literal
 
 from aiohttp import ClientError, ClientSession
 from aiogram import Bot, types
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-from cachetools import TTLCache
 
+from . import session as session_store
+from .session import DetailLevel
 
-DetailLevel = Literal["auto", "low", "high"]
-
-
-@dataclass
-class VisionSession:
-    detail: DetailLevel = "auto"
-    waiting_for_photo: bool = True
-    last_texts: dict[str, str] = field(default_factory=dict)
-
-
-_SESSIONS: TTLCache[int, VisionSession] = TTLCache(maxsize=128, ttl=30 * 60)
 _HTTP_SESSION: ClientSession | None = None
 _HTTP_SEMAPHORE: asyncio.Semaphore | None = None
 
@@ -37,14 +25,6 @@ DETAIL_LABELS = {
 
 DETAIL_ORDER: tuple[DetailLevel, ...] = ("auto", "low", "high")
 FOUR_O_TIMEOUT = float(os.getenv("FOUR_O_TIMEOUT", "60"))
-
-
-def _ensure_session(user_id: int) -> VisionSession | None:
-    session = _SESSIONS.get(user_id)
-    if session:
-        _SESSIONS[user_id] = session  # refresh TTL
-    return session
-
 
 def _main_keyboard(detail: DetailLevel) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -87,15 +67,12 @@ async def start(
     _HTTP_SESSION = http_session
     _HTTP_SEMAPHORE = http_semaphore
 
-    session = _ensure_session(message.from_user.id)
-    if not session:
-        session = VisionSession()
-        _SESSIONS[message.from_user.id] = session
+    session = session_store.start_session(message.from_user.id)
     session.waiting_for_photo = True
     session.last_texts.clear()
 
     text = (
-        "Отправьте афишу или фото для распознавания.\n"
+        "Отправьте изображение (афишу или фото) для распознавания.\n"
         f"Текущая детализация: {DETAIL_LABELS.get(session.detail, session.detail)}."
     )
     await bot.send_message(
@@ -108,7 +85,7 @@ async def start(
 async def select_detail(callback: types.CallbackQuery, bot: Bot) -> None:
     """Handle detail selection callbacks."""
 
-    session = _ensure_session(callback.from_user.id)
+    session = session_store.get_session(callback.from_user.id)
     if not session:
         await callback.answer("Сессия не найдена", show_alert=True)
         return
@@ -136,8 +113,7 @@ async def select_detail(callback: types.CallbackQuery, bot: Bot) -> None:
         return
 
     if value in DETAIL_ORDER:
-        session.detail = value  # type: ignore[assignment]
-        session.waiting_for_photo = True
+        session = session_store.set_detail(callback.from_user.id, value)  # type: ignore[arg-type]
         await callback.message.edit_reply_markup(_main_keyboard(session.detail))
         await callback.answer(f"Детализация: {DETAIL_LABELS.get(value, value)}")
         return
@@ -148,13 +124,11 @@ async def select_detail(callback: types.CallbackQuery, bot: Bot) -> None:
 def cancel(user_id: int) -> None:
     """Stop OCR session for the user."""
 
-    if user_id in _SESSIONS:
-        del _SESSIONS[user_id]
+    session_store.finish_session(user_id)
 
 
 def is_waiting(user_id: int) -> bool:
-    session = _ensure_session(user_id)
-    return bool(session and session.waiting_for_photo)
+    return session_store.is_waiting(user_id)
 
 
 async def run_ocr(image: bytes, *, model: str, detail: str) -> tuple[str, dict[str, int]]:
@@ -233,7 +207,7 @@ async def handle_photo(
 ) -> None:
     """Process incoming photo for OCR comparison."""
 
-    session = _ensure_session(message.from_user.id)
+    session = session_store.get_session(message.from_user.id)
     if not session:
         await bot.send_message(message.chat.id, "Сессия не найдена")
         return

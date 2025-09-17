@@ -10,6 +10,7 @@ sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
 import main
 import vision_test
+from vision_test import session as vision_session
 from main import Database, User
 
 
@@ -57,7 +58,7 @@ class DummyCallback:
 
 @pytest.mark.asyncio
 async def test_ocrtest_start_superadmin(tmp_path, monkeypatch):
-    vision_test._SESSIONS.clear()
+    vision_session.reset_sessions()
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
     async with db.get_session() as session:
@@ -88,7 +89,7 @@ async def test_ocrtest_start_superadmin(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_ocrtest_denies_non_admin(tmp_path, monkeypatch):
-    vision_test._SESSIONS.clear()
+    vision_session.reset_sessions()
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
     async with db.get_session() as session:
@@ -115,7 +116,7 @@ async def test_ocrtest_denies_non_admin(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_select_detail_updates_state(tmp_path, monkeypatch):
-    vision_test._SESSIONS.clear()
+    vision_session.reset_sessions()
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
     async with db.get_session() as session:
@@ -140,7 +141,7 @@ async def test_select_detail_updates_state(tmp_path, monkeypatch):
     callback = DummyCallback(3, "ocr:detail:low", dummy_message)
     await vision_test.select_detail(callback, bot)
 
-    session = vision_test._SESSIONS.get(3)
+    session = vision_session.get_session(3)
     assert session is not None
     assert session.detail == "low"
     assert callback.answers
@@ -149,7 +150,7 @@ async def test_select_detail_updates_state(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_handle_photo_uses_both_models(tmp_path, monkeypatch):
-    vision_test._SESSIONS.clear()
+    vision_session.reset_sessions()
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
     async with db.get_session() as session:
@@ -207,7 +208,7 @@ async def test_handle_photo_uses_both_models(tmp_path, monkeypatch):
     assert "prompt" in text
     assert "Схожесть:" in text
     assert "Различия" in text
-    session = vision_test._SESSIONS.get(4)
+    session = vision_session.get_session(4)
     assert session is not None
     assert session.last_texts.get("gpt-4o")
     assert session.waiting_for_photo
