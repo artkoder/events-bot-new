@@ -559,3 +559,29 @@ async def test_build_short_vk_tags_adds_city_hashtag(monkeypatch):
 
     assert "#санктпетербург" in tags
     assert tags.index("#санктпетербург") <= 2
+
+
+@pytest.mark.asyncio
+async def test_build_short_vk_tags_location_abbreviations(monkeypatch):
+    async def fake_ask(prompt, **kwargs):
+        return "#доп1 #доп2 #доп3"
+
+    monkeypatch.setattr(main, "ask_4o", fake_ask)
+
+    ev = Event(
+        id=2,
+        title="T",
+        description="d",
+        date="2025-09-27",
+        time="19:00",
+        location_name="ИЦАЭ (в КГТУ)",
+        city="Калининград",
+        event_type="Лекция",
+        source_text="src",
+    )
+
+    tags = await main.build_short_vk_tags(ev, "summary")
+
+    assert "#ИЦАЭ" in tags
+    assert "#КГТУ" in tags
+    assert len(tags) <= 7
