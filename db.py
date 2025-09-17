@@ -345,6 +345,30 @@ class Database:
             )
 
             await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS posterocrcache(
+                    hash TEXT PRIMARY KEY,
+                    detail TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    text TEXT NOT NULL,
+                    prompt_tokens INTEGER NOT NULL DEFAULT 0,
+                    completion_tokens INTEGER NOT NULL DEFAULT 0,
+                    total_tokens INTEGER NOT NULL DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ocrusage(
+                    date TEXT PRIMARY KEY,
+                    spent_tokens INTEGER NOT NULL DEFAULT 0
+                )
+                """
+            )
+
+            await conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_festival_name ON festival(name)"
             )
             await conn.execute(

@@ -198,7 +198,22 @@ class JobOutbox(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=datetime.utcnow)
     next_run_at: datetime = Field(default_factory=datetime.utcnow)
     coalesce_key: Optional[str] = None
-    depends_on: Optional[str] = None
+
+
+class PosterOcrCache(SQLModel, table=True):
+    hash: str = Field(primary_key=True)
+    detail: str
+    model: str
+    text: str
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class OcrUsage(SQLModel, table=True):
+    date: str = Field(primary_key=True)
+    spent_tokens: int = 0
 
 
 def create_all(engine) -> None:
