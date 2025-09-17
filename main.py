@@ -15893,6 +15893,13 @@ async def build_short_vk_text(
     return summary or _fallback_summary()
 
 
+VK_LOCATION_TAG_OVERRIDES: dict[str, str] = {
+    "ицаэ": "#ИЦАЭ",
+    "кгту": "#КГТУ",
+    "коихм": "#КОИХМ",
+}
+
+
 async def build_short_vk_tags(
     event: Event, summary: str, used_type_hashtag: str | None = None
 ) -> list[str]:
@@ -15939,6 +15946,17 @@ async def build_short_vk_tags(
         normalized_city = re.sub(r"[^0-9a-zа-яё]+", "", city.lower())
         if normalized_city:
             add_tag(f"#{normalized_city}")
+    seen_location_tokens: set[str] = set()
+    for source in (event.location_name or "", event.location_address or ""):
+        if not source:
+            continue
+        for token in re.findall(r"[А-ЯЁ]{2,}", source):
+            normalized_token = token.lower()
+            if normalized_token in seen_location_tokens:
+                continue
+            seen_location_tokens.add(normalized_token)
+            tag = VK_LOCATION_TAG_OVERRIDES.get(normalized_token, f"#{token}")
+            add_tag(tag)
     if event.event_type:
         raw_event_type = event.event_type.strip()
         if raw_event_type:
