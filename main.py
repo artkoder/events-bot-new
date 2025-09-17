@@ -131,6 +131,7 @@ from io import BytesIO
 import aiosqlite
 import gc
 import atexit
+import vision_test
 from markup import (
     simple_md_to_html,
     telegraph_br,
@@ -1131,6 +1132,11 @@ HELP_COMMANDS = [
     {
         "usage": "/ask4o <text>",
         "desc": "Send query to model 4o",
+        "roles": {"superadmin"},
+    },
+    {
+        "usage": "/ocrtest",
+        "desc": "Compare OCR results across gpt-4o-mini and gpt-4o",
         "roles": {"superadmin"},
     },
     {
@@ -4723,6 +4729,22 @@ async def handle_help(message: types.Message, db: Database, bot: Bot) -> None:
         if role in item["roles"]
     ]
     await bot.send_message(message.chat.id, "\n".join(lines) or "No commands available")
+
+
+async def handle_ocrtest(message: types.Message, db: Database, bot: Bot) -> None:
+    async with db.get_session() as session:
+        user = await session.get(User, message.from_user.id)
+        if not user or not user.is_superadmin:
+            await bot.send_message(message.chat.id, "Not authorized")
+            return
+
+    session = get_http_session()
+    await vision_test.start(
+        message,
+        bot,
+        http_session=session,
+        http_semaphore=HTTP_SEMAPHORE,
+    )
 
 
 async def handle_events_menu(message: types.Message, db: Database, bot: Bot):
@@ -17797,6 +17819,16 @@ def create_app() -> web.Application:
     async def help_wrapper(message: types.Message):
         await handle_help(message, db, bot)
 
+    async def ocrtest_wrapper(message: types.Message):
+        await handle_ocrtest(message, db, bot)
+
+    async def ocr_detail_wrapper(callback: types.CallbackQuery):
+        await vision_test.select_detail(callback, bot)
+
+    async def ocr_photo_wrapper(message: types.Message):
+        images = await extract_images(message, bot)
+        await vision_test.handle_photo(message, bot, images)
+
     async def requests_wrapper(message: types.Message):
         await handle_requests(message, db, bot)
 
@@ -18051,6 +18083,7 @@ def create_app() -> web.Application:
         await handle_ics_fix_nav(message, db, bot)
 
     dp.message.register(help_wrapper, Command("help"))
+    dp.message.register(ocrtest_wrapper, Command("ocrtest"))
     dp.message.register(start_wrapper, Command("start"))
     dp.message.register(register_wrapper, Command("register"))
     dp.message.register(requests_wrapper, Command("requests"))
@@ -18096,6 +18129,10 @@ def create_app() -> web.Application:
         or c.data.startswith("requeue:")
     ,
     )
+    dp.callback_query.register(
+        ocr_detail_wrapper,
+        lambda c: c.data and c.data.startswith("ocr:detail:"),
+    )
     dp.callback_query.register(askloc_wrapper, lambda c: c.data == "askloc")
     dp.callback_query.register(askcity_wrapper, lambda c: c.data == "askcity")
     dp.callback_query.register(
@@ -18107,6 +18144,9 @@ def create_app() -> web.Application:
     dp.message.register(tz_wrapper, Command("tz"))
     dp.message.register(
         add_event_session_wrapper, lambda m: m.from_user.id in add_event_sessions
+    )
+    dp.message.register(
+        ocr_photo_wrapper, lambda m: vision_test.is_waiting(m.from_user.id)
     )
     dp.message.register(add_event_wrapper, Command("addevent"))
     dp.message.register(add_event_raw_wrapper, Command("addevent_raw"))

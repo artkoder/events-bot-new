@@ -1,5 +1,8 @@
 # Changelog
 
+## Unreleased
+- Added `/ocrtest` diagnostic command to compare OCR output from `gpt-4o-mini` and `gpt-4o` with token usage details.
+
 ## v0.1.0 – Deploy + US-02 + /tz
 - Initial Fly.io deployment config.
 - Moderator registration queue with approve/reject.
