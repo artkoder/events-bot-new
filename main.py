@@ -59,7 +59,7 @@ def logline(tag: str, eid: int | None, msg: str, **kw) -> None:
 
 from datetime import date, datetime, timedelta, timezone, time
 from zoneinfo import ZoneInfo
-from typing import Optional, Tuple, Iterable, Any, Callable, Awaitable, List, Literal
+from typing import Optional, Tuple, Iterable, Any, Callable, Awaitable, List, Literal, Collection
 from urllib.parse import urlparse, parse_qs
 import uuid
 import textwrap
@@ -9921,6 +9921,7 @@ def format_event_daily(
     highlight: bool = False,
     weekend_url: str | None = None,
     festival: Festival | None = None,
+    partner_creator_ids: Collection[int] | None = None,
 ) -> str:
     """Return HTML-formatted text for a daily announcement item."""
     prefix = ""
@@ -9932,9 +9933,18 @@ def format_event_daily(
     if e.emoji and not e.title.strip().startswith(e.emoji):
         emoji_part = f"{e.emoji} "
 
+    partner_creator_ids = partner_creator_ids or ()
+    is_partner_creator = e.creator_id in partner_creator_ids if e.creator_id is not None else False
     title = html.escape(e.title)
-    if e.source_post_url:
-        title = f'<a href="{html.escape(e.source_post_url)}">{title}</a>'
+    link_href: str | None = None
+    if is_partner_creator and is_vk_wall_url(e.source_post_url):
+        link_href = e.source_post_url
+    elif is_vk_wall_url(e.source_vk_post_url):
+        link_href = e.telegraph_url or e.source_vk_post_url
+    elif e.source_post_url:
+        link_href = e.source_post_url
+    if link_href:
+        title = f'<a href="{html.escape(link_href)}">{title}</a>'
     title = f"<b>{prefix}{emoji_part}{title}</b>".strip()
 
     desc = e.description.strip()
@@ -12016,6 +12026,7 @@ async def build_daily_posts(
     today = now.date()
     yesterday_utc = recent_cutoff(tz, now)
     fest_map: dict[str, Festival] = {}
+    partner_creator_ids: set[int] = set()
     async with db.get_session() as session:
         res_today = await session.execute(
             select(Event)
@@ -12054,6 +12065,20 @@ async def build_daily_posts(
 
         res_fests = await session.execute(select(Festival))
         fest_map = {f.name: f for f in res_fests.scalars().all()}
+
+        creator_ids = {
+            e.creator_id
+            for e in (*events_today, *events_new, *new_events)
+            if e.creator_id is not None
+        }
+        if creator_ids:
+            res_partners = await session.execute(
+                select(User.user_id).where(
+                    User.user_id.in_(creator_ids),
+                    User.is_partner.is_(True),
+                )
+            )
+            partner_creator_ids = set(res_partners.scalars().all())
 
         weekend_count = 0
         if wpage:
@@ -12113,6 +12138,7 @@ async def build_daily_posts(
                 highlight=True,
                 weekend_url=w_url,
                 festival=fest_map.get((e.festival or "").casefold()),
+                partner_creator_ids=partner_creator_ids,
             )
         )
     lines1.append("")
@@ -12135,6 +12161,7 @@ async def build_daily_posts(
                 e,
                 weekend_url=w_url,
                 festival=fest_map.get((e.festival or "").casefold()),
+                partner_creator_ids=partner_creator_ids,
             )
         )
     section2 = "\n".join(lines2)
