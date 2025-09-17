@@ -322,6 +322,34 @@ async def test_shortpost_no_time(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_shortpost_free_event_ticket_line(monkeypatch):
+    async def fake_build_text(event, src, max_sent):
+        return "short summary"
+
+    async def fake_tags(event, summary, used_type_hashtag=None):
+        return ["#a", "#b", "#c", "#d", "#e"]
+
+    monkeypatch.setattr(main, "build_short_vk_text", fake_build_text)
+    monkeypatch.setattr(main, "build_short_vk_tags", fake_tags)
+
+    ev = Event(
+        id=1,
+        title="T",
+        description="d",
+        date="2025-09-27",
+        time="",
+        location_name="Place",
+        source_text="src",
+        ticket_link="https://tickets",
+        is_free=True,
+    )
+
+    msg, _ = await main._vkrev_build_shortpost(ev, "https://vk.com/wall-1_1")
+    assert "🆓 Бесплатно, по регистрации https://tickets" in msg
+    assert "🎟 Билеты:" not in msg
+
+
+@pytest.mark.asyncio
 async def test_shortpost_midnight_time_hidden(monkeypatch):
     async def fake_build_text(event, src, max_sent):
         return "short summary"
