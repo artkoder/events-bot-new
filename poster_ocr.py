@@ -3,12 +3,14 @@ from __future__ import annotations
 import hashlib
 import os
 from datetime import datetime, timezone
+from importlib import import_module
 from typing import Any, Iterable
 
 from sqlmodel import select
 
 from db import Database
 from models import OcrUsage as OcrUsageModel, PosterOcrCache
+import vision_test.ocr
 from vision_test.ocr import run_ocr
 
 DAILY_TOKEN_LIMIT = 10_000_000
@@ -16,6 +18,20 @@ DAILY_TOKEN_LIMIT = 10_000_000
 
 def _today_key() -> str:
     return datetime.now(timezone.utc).date().isoformat()
+
+
+_HTTP_CONFIGURED = False
+
+
+def _ensure_http() -> None:
+    global _HTTP_CONFIGURED
+    if _HTTP_CONFIGURED:
+        return
+    main_mod = import_module("main")
+    session = main_mod.get_http_session()
+    semaphore = main_mod.HTTP_SEMAPHORE
+    vision_test.ocr.configure_http(session=session, semaphore=semaphore)
+    _HTTP_CONFIGURED = True
 
 
 def _ensure_bytes(item: Any) -> bytes:
@@ -43,6 +59,8 @@ async def recognize_posters(
         data = _ensure_bytes(item)
         digest = hashlib.sha256(data).hexdigest()
         payloads.append((data, digest))
+
+    _ensure_http()
 
     if not payloads:
         async with db.get_session() as session:

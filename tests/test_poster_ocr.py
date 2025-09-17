@@ -6,6 +6,7 @@ import pytest
 from db import Database
 from models import OcrUsage, PosterOcrCache
 import poster_ocr
+import vision_test.ocr
 from vision_test.ocr import OcrResult, OcrUsage as OcrUsageStats
 
 
@@ -108,3 +109,28 @@ async def test_recognize_posters_limit_exceeded(tmp_path, monkeypatch):
     assert usage_row is not None
     assert usage_row.spent_tokens == poster_ocr.DAILY_TOKEN_LIMIT - 50
     assert cached is None
+
+
+@pytest.mark.asyncio
+async def test_recognize_posters_configures_http(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    vision_test.ocr.clear_http()
+    monkeypatch.setattr(poster_ocr, "_HTTP_CONFIGURED", False)
+
+    async def fake_run_ocr(data, *, model, detail):
+        return OcrResult(
+            text="configured",
+            usage=OcrUsageStats(prompt_tokens=0, completion_tokens=0, total_tokens=0),
+        )
+
+    monkeypatch.setattr(poster_ocr, "run_ocr", fake_run_ocr)
+
+    result, spent, remaining = await poster_ocr.recognize_posters(
+        db, [DummyPoster(b"payload")]
+    )
+
+    assert result[0].text == "configured"
+    assert spent == 0
+    assert remaining == poster_ocr.DAILY_TOKEN_LIMIT
