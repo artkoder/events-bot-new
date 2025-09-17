@@ -174,6 +174,7 @@ async def test_compose_intro_via_4o_masterclass(monkeypatch):
     assert "эмодзи" in prompt
     assert "200 символов" in prompt
     assert "формат группы" in prompt
+    assert "перечисли основные активности" in prompt.lower()
     assert "12+" in prompt
 
     event = SimpleNamespace(
