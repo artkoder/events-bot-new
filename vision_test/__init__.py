@@ -1,21 +1,17 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import html
 import logging
-import os
 from difflib import SequenceMatcher, ndiff
 
-from aiohttp import ClientError, ClientSession
+from aiohttp import ClientSession
 from aiogram import Bot, types
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from . import session as session_store
 from .session import DetailLevel
-
-_HTTP_SESSION: ClientSession | None = None
-_HTTP_SEMAPHORE: asyncio.Semaphore | None = None
+from .ocr import OcrResult, configure_http, run_ocr
 
 DETAIL_LABELS = {
     "auto": "Авто",
@@ -24,7 +20,6 @@ DETAIL_LABELS = {
 }
 
 DETAIL_ORDER: tuple[DetailLevel, ...] = ("auto", "low", "high")
-FOUR_O_TIMEOUT = float(os.getenv("FOUR_O_TIMEOUT", "60"))
 
 def _main_keyboard(detail: DetailLevel) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -63,9 +58,7 @@ async def start(
 ) -> None:
     """Start OCR comparison session for the user."""
 
-    global _HTTP_SESSION, _HTTP_SEMAPHORE
-    _HTTP_SESSION = http_session
-    _HTTP_SEMAPHORE = http_semaphore
+    configure_http(session=http_session, semaphore=http_semaphore)
 
     session = session_store.start_session(message.from_user.id)
     session.waiting_for_photo = True
@@ -131,73 +124,6 @@ def is_waiting(user_id: int) -> bool:
     return session_store.is_waiting(user_id)
 
 
-async def run_ocr(image: bytes, *, model: str, detail: str) -> tuple[str, dict[str, int]]:
-    """Send OCR request to OpenAI vision model."""
-
-    if _HTTP_SESSION is None or _HTTP_SEMAPHORE is None:
-        raise RuntimeError("HTTP resources are not configured for OCR")
-
-    token = os.getenv("FOUR_O_TOKEN")
-    if not token:
-        raise RuntimeError("FOUR_O_TOKEN is missing")
-
-    url = os.getenv("FOUR_O_URL", "https://api.openai.com/v1/chat/completions")
-    encoded = base64.b64encode(image).decode("ascii")
-    payload = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": "верни только распознанный текст"},
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "Распознай текст на изображении."},
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/jpeg;base64,{encoded}",
-                            "detail": detail,
-                        },
-                    },
-                ],
-            },
-        ],
-        "temperature": 0,
-    }
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-    }
-
-    async def _call() -> dict:
-        async with _HTTP_SEMAPHORE:
-            async with _HTTP_SESSION.post(url, json=payload, headers=headers) as resp:
-                resp.raise_for_status()
-                return await resp.json()
-
-    try:
-        data = await asyncio.wait_for(_call(), FOUR_O_TIMEOUT)
-    except (asyncio.TimeoutError, ClientError) as e:  # pragma: no cover - network errors
-        logging.error("OCR request failed: model=%s detail=%s error=%s", model, detail, e)
-        raise RuntimeError(f"OCR request failed: {e}") from e
-
-    try:
-        choice = data.get("choices", [{}])[0]
-        message = choice.get("message", {})
-        text = (message.get("content") or "").strip()
-        usage = data.get("usage", {}) or {}
-    except (AttributeError, IndexError, TypeError) as e:  # pragma: no cover - unexpected
-        logging.error("Invalid OCR response: data=%s", data)
-        raise RuntimeError("Incomplete OCR response") from e
-
-    if not text:
-        raise RuntimeError("Empty OCR response")
-
-    tokens = {
-        "prompt_tokens": int(usage.get("prompt_tokens", 0) or 0),
-        "completion_tokens": int(usage.get("completion_tokens", 0) or 0),
-        "total_tokens": int(usage.get("total_tokens", 0) or 0),
-    }
-    return text, tokens
 
 
 async def handle_photo(
@@ -223,60 +149,60 @@ async def handle_photo(
     session.waiting_for_photo = False
     image_bytes, name = images[0]
     models = ("gpt-4o-mini", "gpt-4o")
-    results: list[dict[str, object]] = []
+    results: list[tuple[str, OcrResult | None, str | None]] = []
     for model in models:
         try:
-            text, tokens = await run_ocr(image_bytes, model=model, detail=session.detail)
-            session.last_texts[model] = text
-            results.append({"model": model, "text": text, "tokens": tokens, "error": None})
+            ocr_result = await run_ocr(image_bytes, model=model, detail=session.detail)
+            session.last_texts[model] = ocr_result.text
+            results.append((model, ocr_result, None))
         except Exception as exc:  # pragma: no cover - depends on network
             logging.warning("OCR model failed: model=%s error=%s", model, exc)
-            results.append({"model": model, "text": "", "tokens": {}, "error": str(exc)})
+            results.append((model, None, str(exc)))
 
-    lines = [f"Файл: {name}", f"Детализация: {DETAIL_LABELS.get(session.detail, session.detail)}"]
-    for item in results:
-        model = item["model"]
-        text = html.escape(str(item["text"] or ""))
-        error = item.get("error")
+    detail_label = DETAIL_LABELS.get(session.detail, session.detail)
+    lines = [f"Файл: {name}", f"Детализация: {detail_label}"]
+    for model, result, error in results:
         lines.append("")
         lines.append(f"<b>{model}</b>:")
         if error:
             lines.append(f"<i>Ошибка: {html.escape(str(error))}</i>")
+        elif result:
+            lines.append(f"<pre>{html.escape(result.text)}</pre>")
         else:
-            lines.append(f"<pre>{text}</pre>")
+            lines.append("<i>Нет данных</i>")
 
     lines.append("")
     lines.append("<b>Токены</b>:")
     header = f"{'Модель':<12} {'prompt':>7} {'completion':>10} {'total':>7}"
     lines.append(f"<pre>{html.escape(header)}")
-    for item in results:
-        tokens = item.get("tokens") or {}
-        if tokens:
+    for model, result, _ in results:
+        if result:
+            usage = result.usage
             row = (
-                f"{item['model']:<12} "
-                f"{tokens.get('prompt_tokens', 0):>7} "
-                f"{tokens.get('completion_tokens', 0):>10} "
-                f"{tokens.get('total_tokens', 0):>7}"
+                f"{model:<12} "
+                f"{usage.prompt_tokens:>7} "
+                f"{usage.completion_tokens:>10} "
+                f"{usage.total_tokens:>7}"
             )
         else:
-            row = f"{item['model']:<12} {'-':>7} {'-':>10} {'-':>7}"
+            row = f"{model:<12} {'-':>7} {'-':>10} {'-':>7}"
         lines.append(html.escape(row))
     lines.append("</pre>")
 
-    success = [item for item in results if not item.get("error")]
+    success = [result for _, result, error in results if result and not error]
     if len(success) == 2:
-        text_a = success[0]["text"] or ""
-        text_b = success[1]["text"] or ""
+        text_a = success[0].text
+        text_b = success[1].text
         ratio = SequenceMatcher(None, text_a, text_b).ratio()
         lines.append("")
         lines.append(f"Схожесть: {ratio:.3f}")
-        diff_lines = [line for line in ndiff(str(text_a).splitlines(), str(text_b).splitlines()) if line[:1] in {"-", "+"}]
+        diff_lines = [line for line in ndiff(text_a.splitlines(), text_b.splitlines()) if line[:1] in {"-", "+"}]
         if diff_lines:
             lines.append("Различия (первые 10 строк):")
             for line in diff_lines[:10]:
                 lines.append(html.escape(line))
     else:
-        errors = ", ".join(str(item.get("error")) for item in results if item.get("error"))
+        errors = ", ".join(str(error) for _, _, error in results if error)
         lines.append("")
         lines.append(f"Сравнение недоступно: {html.escape(errors)}")
 
@@ -297,4 +223,5 @@ __all__ = [
     "is_waiting",
     "handle_photo",
     "run_ocr",
+    "OcrResult",
 ]
