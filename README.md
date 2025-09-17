@@ -3,7 +3,7 @@
 Telegram bot for publishing event announcements. Daily announcements can also be posted to a VK group.
 Use `/regdailychannels` and `/daily` to manage both Telegram channels and the VK group including posting times.
 
-Superadmins can use `/vk` to manage VK Intake: add or list sources, check or review events, and open the queue summary.
+Superadmins can use `/vk` to manage VK Intake: add or list sources, check or review events, and open the queue summary. The `/ocrtest` command compares OCR quality between `gpt-4o-mini` and `gpt-4o` on uploaded posters.
 
 ## VK Intake & Review v1.1
 
