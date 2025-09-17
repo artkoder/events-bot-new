@@ -6662,10 +6662,13 @@ class AddEventsResult(list):
         entries: list[tuple[Event | Festival | None, bool, list[str], str]],
         tokens_spent: int,
         tokens_remaining: int | None,
+        *,
+        limit_notice: str | None = None,
     ) -> None:
         super().__init__(entries)
         self.ocr_tokens_spent = tokens_spent
         self.ocr_tokens_remaining = tokens_remaining
+        self.ocr_limit_notice = limit_notice
 
 
 async def add_events_from_text(
@@ -6694,6 +6697,7 @@ async def add_events_from_text(
     poster_items: list[PosterMedia] = []
     ocr_tokens_spent = 0
     ocr_tokens_remaining: int | None = None
+    ocr_limit_notice: str | None = None
     normalized_media: list[tuple[bytes, str]] = []
     if media:
         normalized_media = [media] if isinstance(media, tuple) else list(media)
@@ -6704,15 +6708,26 @@ async def add_events_from_text(
             normalized_media, need_catbox=True, need_ocr=False
         )
     ocr_results: list[poster_ocr.PosterOcrCache] = []
-    if normalized_media:
-        ocr_results, ocr_tokens_spent, ocr_tokens_remaining = await poster_ocr.recognize_posters(
-            db, normalized_media
+    try:
+        if normalized_media:
+            (
+                ocr_results,
+                ocr_tokens_spent,
+                ocr_tokens_remaining,
+            ) = await poster_ocr.recognize_posters(db, normalized_media)
+        elif poster_items:
+            _, _, ocr_tokens_remaining = await poster_ocr.recognize_posters(db, [])
+            ocr_tokens_spent = sum(item.total_tokens or 0 for item in poster_items)
+        else:
+            _, _, ocr_tokens_remaining = await poster_ocr.recognize_posters(db, [])
+    except poster_ocr.PosterOcrLimitExceededError as exc:
+        logging.warning("poster OCR skipped: %s", exc)
+        ocr_results = []
+        ocr_tokens_spent = exc.spent_tokens
+        ocr_tokens_remaining = exc.remaining
+        ocr_limit_notice = (
+            "OCR недоступен: дневной лимит токенов исчерпан, распознавание пропущено."
         )
-    elif poster_items:
-        _, _, ocr_tokens_remaining = await poster_ocr.recognize_posters(db, [])
-        ocr_tokens_spent = sum(item.total_tokens or 0 for item in poster_items)
-    else:
-        _, _, ocr_tokens_remaining = await poster_ocr.recognize_posters(db, [])
 
     if poster_items and ocr_results:
         for poster, cache in zip(poster_items, ocr_results):
@@ -7104,7 +7119,12 @@ async def add_events_from_text(
     logging.info("add_events_from_text finished with %d results", len(results))
     del parsed
     gc.collect()
-    return AddEventsResult(results, ocr_tokens_spent, ocr_tokens_remaining)
+    return AddEventsResult(
+        results,
+        ocr_tokens_spent,
+        ocr_tokens_remaining,
+        limit_notice=ocr_limit_notice,
+    )
 
 
 def _event_lines(ev: Event) -> list[str]:
@@ -7218,10 +7238,14 @@ async def handle_add_event(
     logging.info("handle_add_event parsed %d results", len(results))
     ocr_line = None
     if normalized_media and results.ocr_tokens_remaining is not None:
-        ocr_line = (
+        base_line = (
             f"OCR: потрачено {results.ocr_tokens_spent}, осталось "
             f"{results.ocr_tokens_remaining}"
         )
+        if results.ocr_limit_notice:
+            ocr_line = f"{results.ocr_limit_notice}\n{base_line}"
+        else:
+            ocr_line = base_line
     grouped: dict[int, tuple[Event, bool]] = {}
     fest_msgs: list[tuple[Festival, bool, list[str]]] = []
     for saved, added, lines, status in results:
@@ -16357,6 +16381,8 @@ async def _vkrev_import_flow(
         f"Бесплатное: {'да' if res.is_free else 'нет'}",
     ]
     if draft.poster_media and draft.ocr_tokens_remaining is not None:
+        if getattr(draft, "ocr_limit_notice", None):
+            info_lines.append(draft.ocr_limit_notice)
         info_lines.append(
             f"OCR: потрачено {draft.ocr_tokens_spent}, осталось {draft.ocr_tokens_remaining}"
         )
@@ -17268,10 +17294,14 @@ async def _process_forwarded(
     logging.info("forward parsed %d events", len(results))
     ocr_line = None
     if normalized_media and results.ocr_tokens_remaining is not None:
-        ocr_line = (
+        base_line = (
             f"OCR: потрачено {results.ocr_tokens_spent}, осталось "
             f"{results.ocr_tokens_remaining}"
         )
+        if results.ocr_limit_notice:
+            ocr_line = f"{results.ocr_limit_notice}\n{base_line}"
+        else:
+            ocr_line = base_line
     if not results:
         logging.info("no events parsed from forwarded text")
         return

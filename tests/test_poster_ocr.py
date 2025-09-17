@@ -79,36 +79,81 @@ async def test_recognize_posters_usage_resets_by_date(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_recognize_posters_limit_exceeded(tmp_path, monkeypatch):
+async def test_recognize_posters_limit_exhausted(tmp_path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
 
-    async def fake_run_ocr(data, *, model, detail):
-        return OcrResult(
-            text="limit",
-            usage=OcrUsageStats(prompt_tokens=0, completion_tokens=0, total_tokens=100),
-        )
+    call_count = 0
+
+    async def fake_run_ocr(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        raise AssertionError("run_ocr should not be called when limit is exhausted")
 
     monkeypatch.setattr(poster_ocr, "run_ocr", fake_run_ocr)
     monkeypatch.setattr(poster_ocr, "_today_key", lambda: "2024-06-03")
 
     async with db.get_session() as session:
-        session.add(OcrUsage(date="2024-06-03", spent_tokens=poster_ocr.DAILY_TOKEN_LIMIT - 50))
+        session.add(OcrUsage(date="2024-06-03", spent_tokens=poster_ocr.DAILY_TOKEN_LIMIT))
         await session.commit()
 
     item = DummyPoster(b"exceed")
-    digest = hashlib.sha256(item.data).hexdigest()
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(poster_ocr.PosterOcrLimitExceededError) as excinfo:
         await poster_ocr.recognize_posters(db, [item])
+
+    assert excinfo.value.spent_tokens == 0
+    assert excinfo.value.remaining == 0
+    assert call_count == 0
 
     async with db.get_session() as session:
         usage_row = await session.get(OcrUsage, "2024-06-03")
-        cached = await session.get(PosterOcrCache, digest)
 
     assert usage_row is not None
-    assert usage_row.spent_tokens == poster_ocr.DAILY_TOKEN_LIMIT - 50
-    assert cached is None
+    assert usage_row.spent_tokens == poster_ocr.DAILY_TOKEN_LIMIT
+
+
+@pytest.mark.asyncio
+async def test_recognize_posters_stops_after_reaching_limit(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    call_count = 0
+
+    async def fake_run_ocr(data, *, model, detail):
+        nonlocal call_count
+        call_count += 1
+        return OcrResult(
+            text=f"text{call_count}",
+            usage=OcrUsageStats(prompt_tokens=0, completion_tokens=0, total_tokens=80),
+        )
+
+    monkeypatch.setattr(poster_ocr, "run_ocr", fake_run_ocr)
+    monkeypatch.setattr(poster_ocr, "_today_key", lambda: "2024-06-04")
+
+    async with db.get_session() as session:
+        session.add(OcrUsage(date="2024-06-04", spent_tokens=poster_ocr.DAILY_TOKEN_LIMIT - 50))
+        await session.commit()
+
+    items = [DummyPoster(b"one"), DummyPoster(b"two")]
+    digests = [hashlib.sha256(item.data).hexdigest() for item in items]
+
+    results, spent_tokens, remaining = await poster_ocr.recognize_posters(db, items)
+
+    assert call_count == 1
+    assert len(results) == 1
+    assert spent_tokens == 50
+    assert remaining == 0
+
+    async with db.get_session() as session:
+        usage_row = await session.get(OcrUsage, "2024-06-04")
+        cached_first = await session.get(PosterOcrCache, digests[0])
+        cached_second = await session.get(PosterOcrCache, digests[1])
+
+    assert usage_row is not None
+    assert usage_row.spent_tokens == poster_ocr.DAILY_TOKEN_LIMIT
+    assert cached_first is not None
+    assert cached_second is None
 
 
 @pytest.mark.asyncio
