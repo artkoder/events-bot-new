@@ -28,7 +28,7 @@ async def test_vk_intake_processing_time_metric(tmp_path, monkeypatch):
             is_free=False,
         )
 
-    monkeypatch.setattr(vk_intake, "build_event_payload_from_vk", fake_build)
+    monkeypatch.setattr(vk_intake, "build_event_draft", fake_build)
     monkeypatch.setattr(vk_intake, "persist_event_and_pages", fake_persist)
 
     times = iter([1.0, 2.0])

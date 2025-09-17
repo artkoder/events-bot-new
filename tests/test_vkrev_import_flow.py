@@ -46,6 +46,8 @@ async def test_vkrev_import_flow_persists_url_and_skips_vk_sync(tmp_path, monkey
 
     async def fake_build(
         text,
+        *,
+        photos=None,
         source_name=None,
         location_hint=None,
         default_time=None,
@@ -73,7 +75,7 @@ async def test_vkrev_import_flow_persists_url_and_skips_vk_sync(tmp_path, monkey
         await session.commit()
 
     monkeypatch.setattr(main, "_vkrev_fetch_photos", fake_fetch)
-    monkeypatch.setattr(vk_intake, "build_event_payload_from_vk", fake_build)
+    monkeypatch.setattr(vk_intake, "build_event_draft", fake_build)
     monkeypatch.setattr(vk_review, "mark_imported", fake_mark_imported)
     monkeypatch.setattr(main, "enqueue_job", fake_enqueue_job)
 
