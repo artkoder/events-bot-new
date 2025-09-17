@@ -18146,7 +18146,9 @@ def create_app() -> web.Application:
         add_event_session_wrapper, lambda m: m.from_user.id in add_event_sessions
     )
     dp.message.register(
-        ocr_photo_wrapper, lambda m: vision_test.is_waiting(m.from_user.id)
+        ocr_photo_wrapper,
+        lambda m: vision_test.is_waiting(m.from_user.id),
+        F.photo | F.document,
     )
     dp.message.register(add_event_wrapper, Command("addevent"))
     dp.message.register(add_event_raw_wrapper, Command("addevent_raw"))
