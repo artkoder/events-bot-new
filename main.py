@@ -15717,7 +15717,11 @@ async def _vkrev_queue_size(db: Database) -> int:
 
 
 async def _vkrev_fetch_photos(group_id: int, post_id: int, db: Database, bot: Bot) -> list[str]:
-    token = _vk_user_token()
+    token: str | None = VK_SERVICE_TOKEN
+    token_kind = "service"
+    if not token:
+        token = _vk_user_token()
+        token_kind = "user"
     if not token:
         return []
     try:
@@ -15727,7 +15731,8 @@ async def _vkrev_fetch_photos(group_id: int, post_id: int, db: Database, bot: Bo
             db,
             bot,
             token=token,
-            token_kind="user",
+            token_kind=token_kind,
+            skip_captcha=True,
         )
     except VKAPIError as e:  # pragma: no cover
         logging.error(
