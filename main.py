@@ -16473,7 +16473,10 @@ async def _vkrev_build_shortpost(
         lines.append(type_line)
     lines.append(date_line)
     if ev.ticket_link:
-        lines.append(f"🎟 Билеты: {ev.ticket_link}")
+        if getattr(ev, "is_free", False):
+            lines.append(f"🆓 Бесплатно, по регистрации {ev.ticket_link}")
+        else:
+            lines.append(f"🎟 Билеты: {ev.ticket_link}")
     loc_parts: list[str] = []
     existing_normalized: set[str] = set()
     for part in (ev.location_name, ev.location_address):
