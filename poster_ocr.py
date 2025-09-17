@@ -16,6 +16,15 @@ from vision_test.ocr import run_ocr
 DAILY_TOKEN_LIMIT = 10_000_000
 
 
+class PosterOcrLimitExceededError(RuntimeError):
+    """Raised when the daily OCR token limit has been exhausted."""
+
+    def __init__(self, message: str, *, spent_tokens: int, remaining: int) -> None:
+        super().__init__(message)
+        self.spent_tokens = spent_tokens
+        self.remaining = remaining
+
+
 def _today_key() -> str:
     return datetime.now(timezone.utc).date().isoformat()
 
@@ -86,7 +95,19 @@ async def recognize_posters(
         total_new_tokens = 0
         today = _today_key()
         usage_row = await session.get(OcrUsageModel, today)
-        spent_after = usage_row.spent_tokens if usage_row else 0
+        spent_before = usage_row.spent_tokens if usage_row else 0
+        limit_remaining = DAILY_TOKEN_LIMIT - spent_before
+        needs_new_requests = any(
+            not (cache_map.get(digest) and cache_map[digest].detail == detail)
+            for _, digest in payloads
+        )
+        if count_usage and payloads and needs_new_requests:
+            if limit_remaining <= 0:
+                raise PosterOcrLimitExceededError(
+                    "poster OCR daily token limit exhausted",
+                    spent_tokens=0,
+                    remaining=0,
+                )
 
         for data, digest in payloads:
             cached = cache_map.get(digest)
@@ -110,18 +131,21 @@ async def recognize_posters(
             cache_map[digest] = entry
             if count_usage:
                 total_new_tokens += entry.total_tokens
+                limit_remaining = DAILY_TOKEN_LIMIT - (spent_before + total_new_tokens)
+                if limit_remaining <= 0:
+                    break
 
+        spent_after = spent_before
         if pending:
             if count_usage and total_new_tokens:
+                charged_total = spent_before + total_new_tokens
+                if charged_total > DAILY_TOKEN_LIMIT:
+                    charged_total = DAILY_TOKEN_LIMIT
                 if usage_row is None:
                     usage_row = OcrUsageModel(date=today, spent_tokens=0)
-                new_total = usage_row.spent_tokens + total_new_tokens
-                if new_total > DAILY_TOKEN_LIMIT:
-                    await session.rollback()
-                    raise RuntimeError("poster OCR daily token limit exceeded")
-                usage_row.spent_tokens = new_total
+                usage_row.spent_tokens = charged_total
                 session.add(usage_row)
-                spent_after = new_total
+                spent_after = charged_total
             for entry in pending:
                 session.add(entry)
             await session.commit()
@@ -135,5 +159,9 @@ async def recognize_posters(
 
         remaining = DAILY_TOKEN_LIMIT - spent_after
         remaining = max(0, remaining)
-        spent_tokens = total_new_tokens if count_usage else 0
+        if count_usage:
+            charged_spent = spent_after - spent_before
+            spent_tokens = max(0, charged_spent)
+        else:
+            spent_tokens = 0
         return results, spent_tokens, remaining

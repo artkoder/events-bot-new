@@ -275,6 +275,7 @@ class EventDraft:
     poster_summary: str | None = None
     ocr_tokens_spent: int = 0
     ocr_tokens_remaining: int | None = None
+    ocr_limit_notice: str | None = None
 
 
 @dataclass
@@ -478,18 +479,31 @@ async def build_event_draft(
     poster_items: list[PosterMedia] = []
     ocr_tokens_spent = 0
     ocr_tokens_remaining: int | None = None
+    ocr_limit_notice: str | None = None
     if photo_bytes:
         poster_items, catbox_msg = await process_media(
             photo_bytes, need_catbox=True, need_ocr=False
         )
-        ocr_results, ocr_tokens_spent, ocr_tokens_remaining = await poster_ocr.recognize_posters(
-            db, photo_bytes
-        )
-        for poster, cache in zip(poster_items, ocr_results):
-            poster.ocr_text = cache.text
-            poster.prompt_tokens = cache.prompt_tokens
-            poster.completion_tokens = cache.completion_tokens
-            poster.total_tokens = cache.total_tokens
+        try:
+            (
+                ocr_results,
+                ocr_tokens_spent,
+                ocr_tokens_remaining,
+            ) = await poster_ocr.recognize_posters(db, photo_bytes)
+        except poster_ocr.PosterOcrLimitExceededError as exc:
+            logging.warning("vk.build_event_draft OCR skipped: %s", exc)
+            ocr_results = []
+            ocr_tokens_spent = exc.spent_tokens
+            ocr_tokens_remaining = exc.remaining
+            ocr_limit_notice = (
+                "OCR недоступен: дневной лимит токенов исчерпан, распознавание пропущено."
+            )
+        else:
+            for poster, cache in zip(poster_items, ocr_results):
+                poster.ocr_text = cache.text
+                poster.prompt_tokens = cache.prompt_tokens
+                poster.completion_tokens = cache.completion_tokens
+                poster.total_tokens = cache.total_tokens
         logging.info(
             "vk.build_event_draft posters=%d catbox=%s",
             len(poster_items),
@@ -508,6 +522,7 @@ async def build_event_draft(
         ocr_tokens_spent=ocr_tokens_spent,
         ocr_tokens_remaining=ocr_tokens_remaining,
     )
+    draft.ocr_limit_notice = ocr_limit_notice
     return draft
 
 

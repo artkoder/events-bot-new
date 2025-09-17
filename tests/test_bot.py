@@ -1501,6 +1501,66 @@ async def test_add_event_without_images_skips_ocr_line(tmp_path: Path, monkeypat
 
 
 @pytest.mark.asyncio
+async def test_handle_add_event_reports_ocr_limit(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async def fake_parse(text: str, source_channel: str | None = None, **kwargs) -> list[dict]:
+        return [
+            {
+                "title": "Party",
+                "short_description": "desc",
+                "date": FUTURE_DATE,
+                "time": "18:00",
+                "location_name": "Club",
+            }
+        ]
+
+    async def fake_ocr(db_obj, items, detail="auto", *, count_usage=True):
+        raise poster_ocr.PosterOcrLimitExceededError(
+            "limit",
+            spent_tokens=0,
+            remaining=0,
+        )
+
+    async def _noop_async(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
+    monkeypatch.setattr(poster_ocr, "recognize_posters", fake_ocr)
+    monkeypatch.setattr(main, "create_source_page", lambda *a, **k: ("u", "p", "", 0))
+    monkeypatch.setattr(main, "notify_event_added", _noop_async)
+    monkeypatch.setattr(main, "publish_event_progress", _noop_async)
+    monkeypatch.setattr(main, "schedule_event_update_tasks", _noop_async)
+
+    poster_media = [PosterMedia(data=b"", name="p1")]
+
+    msg = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "/addevent Party | 01.01 | Club",
+        }
+    )
+
+    await handle_add_event(
+        msg,
+        db,
+        bot,
+        media=[(b"img1", "poster1.jpg")],
+        poster_media=poster_media,
+    )
+
+    texts = [m[1] for m in bot.messages]
+    assert any("Event" in text for text in texts)
+    assert any("OCR недоступен" in text for text in texts)
+    assert any("OCR: потрачено 0, осталось 0" in text for text in texts)
+
+
+@pytest.mark.asyncio
 async def test_addevent_session_strip_cmd(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()

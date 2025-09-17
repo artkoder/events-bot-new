@@ -5,6 +5,7 @@ import pytest
 from types import SimpleNamespace
 
 import main
+import poster_ocr
 import vk_intake
 import vk_review
 from main import Database
@@ -161,6 +162,59 @@ async def test_vkrev_import_flow_reports_ocr_usage(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_vkrev_import_flow_reports_ocr_limit(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.raw_conn() as conn:
+        await conn.execute(
+            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time) VALUES(?,?,?,?,?)",
+            (1, "club1", "Test Community", "", None),
+        )
+        await conn.execute(
+            "INSERT INTO vk_inbox(id, group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status) VALUES(?,?,?,?,?,?,?,?,?)",
+            (1, 1, 2, 0, "text", None, 1, 0, "pending"),
+        )
+        await conn.commit()
+
+    async def fake_fetch(*args, **kwargs):
+        return []
+
+    poster_media = [PosterMedia(data=b"", name="p1")]
+    draft = vk_intake.EventDraft(
+        title="T",
+        date="2025-09-02",
+        time="10:00",
+        source_text="T",
+        poster_media=poster_media,
+        ocr_tokens_spent=0,
+        ocr_tokens_remaining=0,
+        ocr_limit_notice="OCR недоступен: лимит",
+    )
+
+    async def fake_build(*args, **kwargs):
+        return draft
+
+    async def fake_mark_imported(*args, **kwargs):
+        pass
+
+    async def fake_enqueue_job(*args, **kwargs):
+        return "job"
+
+    monkeypatch.setattr(main, "_vkrev_fetch_photos", fake_fetch)
+    monkeypatch.setattr(vk_intake, "build_event_draft", fake_build)
+    monkeypatch.setattr(vk_review, "mark_imported", fake_mark_imported)
+    monkeypatch.setattr(main, "enqueue_job", fake_enqueue_job)
+
+    bot = DummyBot()
+    await main._vkrev_import_flow(1, 1, 1, "batch1", db, bot)
+
+    info_text = bot.messages[-1].text
+    assert "OCR недоступен" in info_text
+    assert "OCR: потрачено 0, осталось 0" in info_text
+
+
+@pytest.mark.asyncio
 async def test_build_event_payload_includes_operator_extra(monkeypatch):
     async def fake_parse(text, *args, **kwargs):
         lower = text.lower()
@@ -206,3 +260,45 @@ async def test_build_event_payload_uses_extra_when_text_missing(monkeypatch):
     )
 
     assert draft.source_text == "Only extra"
+
+
+@pytest.mark.asyncio
+async def test_build_event_draft_handles_ocr_limit(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async def fake_download(urls):
+        return [(b"img", "poster.jpg")]
+
+    async def fake_process(media, need_catbox=True, need_ocr=False):
+        return [PosterMedia(data=b"", name="poster", catbox_url="cat")], "ok"
+
+    async def fake_parse(text, *args, **kwargs):
+        return [
+            {
+                "title": "T",
+                "date": "2025-09-02",
+                "time": "10:00",
+                "location_name": "Hall",
+            }
+        ]
+
+    async def fake_recognize(db_obj, items, detail="auto", *, count_usage=True):
+        raise poster_ocr.PosterOcrLimitExceededError(
+            "limit",
+            spent_tokens=0,
+            remaining=0,
+        )
+
+    monkeypatch.setattr(vk_intake, "_download_photo_media", fake_download)
+    monkeypatch.setattr(vk_intake, "process_media", fake_process)
+    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
+    monkeypatch.setattr(poster_ocr, "recognize_posters", fake_recognize)
+
+    draft = await vk_intake.build_event_draft("text", photos=["url"], db=db)
+
+    assert draft.poster_media
+    assert draft.ocr_tokens_spent == 0
+    assert draft.ocr_tokens_remaining == 0
+    assert draft.ocr_limit_notice is not None
+    assert "лимит" in draft.ocr_limit_notice.lower()
