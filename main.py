@@ -1136,7 +1136,7 @@ HELP_COMMANDS = [
     },
     {
         "usage": "/ocrtest",
-        "desc": "Compare OCR results across gpt-4o-mini and gpt-4o",
+        "desc": "сравнить распознавание афиш",
         "roles": {"superadmin"},
     },
     {
@@ -4724,7 +4724,7 @@ async def handle_help(message: types.Message, db: Database, bot: Bot) -> None:
     if user and not user.blocked:
         role = "superadmin" if user.is_superadmin else "user"
     lines = [
-        f"{item['usage']} - {item['desc']}"
+        f"{item['usage']} — {item['desc']}"
         for item in HELP_COMMANDS
         if role in item["roles"]
     ]
