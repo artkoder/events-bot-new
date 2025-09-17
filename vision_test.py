@@ -176,7 +176,7 @@ async def run_ocr(image: bytes, *, model: str, detail: str) -> tuple[str, dict[s
             {
                 "role": "user",
                 "content": [
-                    {"type": "input_text", "text": "Распознай текст на изображении."},
+                    {"type": "text", "text": "Распознай текст на изображении."},
                     {
                         "type": "image_url",
                         "image_url": {
