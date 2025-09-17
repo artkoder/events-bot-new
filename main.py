@@ -59,7 +59,18 @@ def logline(tag: str, eid: int | None, msg: str, **kw) -> None:
 
 from datetime import date, datetime, timedelta, timezone, time
 from zoneinfo import ZoneInfo
-from typing import Optional, Tuple, Iterable, Any, Callable, Awaitable, List, Literal, Collection
+from typing import (
+    Optional,
+    Tuple,
+    Iterable,
+    Any,
+    Callable,
+    Awaitable,
+    List,
+    Literal,
+    Collection,
+    Sequence,
+)
 from urllib.parse import urlparse, parse_qs
 import uuid
 import textwrap
@@ -100,6 +111,12 @@ import hashlib
 import unicodedata
 import vk_intake
 import vk_review
+from poster_media import (
+    PosterMedia,
+    build_poster_summary,
+    collect_poster_texts,
+    process_media,
+)
 import argparse
 import shlex
 
@@ -4455,6 +4472,8 @@ async def parse_event_via_4o(
     source_channel: str | None = None,
     *,
     festival_names: list[str] | None = None,
+    poster_texts: Sequence[str] | None = None,
+    poster_summary: str | None = None,
     **extra: str | None,
 ) -> list[dict]:
     token = os.getenv("FOUR_O_TOKEN")
@@ -4462,6 +4481,8 @@ async def parse_event_via_4o(
         raise RuntimeError("FOUR_O_TOKEN is missing")
     url = os.getenv("FOUR_O_URL", "https://api.openai.com/v1/chat/completions")
     prompt = _build_prompt(festival_names)
+    if poster_summary:
+        prompt = f"{prompt}\nPoster summary:\n{poster_summary.strip()}"
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
@@ -4469,9 +4490,18 @@ async def parse_event_via_4o(
     if not source_channel:
         source_channel = extra.get("channel_title")
     today = datetime.now(LOCAL_TZ).date().isoformat()
-    user_msg = f"Today is {today}. "
+    user_msg_parts = [f"Today is {today}. "]
     if source_channel:
-        user_msg += f"Channel: {source_channel}. "
+        user_msg_parts.append(f"Channel: {source_channel}. ")
+    user_msg = "".join(user_msg_parts)
+    poster_lines: list[str] = []
+    if poster_texts:
+        poster_lines.append("Poster OCR:")
+        for idx, block in enumerate(poster_texts, start=1):
+            poster_lines.append(f"[{idx}] {block.strip()}")
+        poster_lines.append("")
+    if poster_lines:
+        user_msg += "\n" + "\n".join(poster_lines)
     user_msg += text
     payload = {
         "model": "gpt-4o",
@@ -6629,6 +6659,7 @@ async def add_events_from_text(
     source_link: str | None,
     html_text: str | None = None,
     media: list[tuple[bytes, str]] | tuple[bytes, str] | None = None,
+    poster_media: Sequence[PosterMedia] | None = None,
     *,
     raise_exc: bool = False,
     source_chat_id: int | None = None,
@@ -6645,6 +6676,18 @@ async def add_events_from_text(
     logging.info(
         "add_events_from_text start: len=%d source=%s", len(text), source_link
     )
+    poster_items: list[PosterMedia] = []
+    if poster_media:
+        poster_items = list(poster_media)
+    elif media:
+        media_list = [media] if isinstance(media, tuple) else list(media)
+        poster_items, _ = await process_media(
+            media_list, need_catbox=True, need_ocr=True
+        )
+    catbox_urls = [item.catbox_url for item in poster_items if item.catbox_url]
+    poster_texts = collect_poster_texts(poster_items)
+    poster_summary = build_poster_summary(poster_items)
+
     try:
         # Free any lingering objects before heavy LLM call to reduce peak memory
         gc.collect()
@@ -6657,18 +6700,30 @@ async def add_events_from_text(
         async with db.get_session() as session:
             res_f = await session.execute(select(Festival.name))
             fest_names = [r[0] for r in res_f.fetchall()]
+        parse_kwargs: dict[str, Any] = {}
+        if poster_texts:
+            parse_kwargs["poster_texts"] = poster_texts
+        if poster_summary:
+            parse_kwargs["poster_summary"] = poster_summary
         try:
             if source_channel:
                 parsed = await parse_event_via_4o(
-                    llm_text, source_channel, festival_names=fest_names
+                    llm_text,
+                    source_channel,
+                    festival_names=fest_names,
+                    **parse_kwargs,
                 )
             else:
-                parsed = await parse_event_via_4o(llm_text, festival_names=fest_names)
+                parsed = await parse_event_via_4o(
+                    llm_text, festival_names=fest_names, **parse_kwargs
+                )
         except TypeError:
             if source_channel:
-                parsed = await parse_event_via_4o(llm_text, source_channel)
+                parsed = await parse_event_via_4o(
+                    llm_text, source_channel, **parse_kwargs
+                )
             else:
-                parsed = await parse_event_via_4o(llm_text)
+                parsed = await parse_event_via_4o(llm_text, **parse_kwargs)
 
         if DEBUG:
             mem_info("LLM after")
@@ -6684,10 +6739,6 @@ async def add_events_from_text(
 
     results: list[tuple[Event | Festival | None, bool, list[str], str]] = []
     first = True
-    images: list[tuple[bytes, str]] = []
-    if media:
-        images = [media] if isinstance(media, tuple) else list(media)
-    catbox_urls, catbox_msg_global = await upload_images(images)
     links_iter = iter(extract_links_from_html(html_text) if html_text else [])
     source_text_clean = html_text or text
     program_url: str | None = None
@@ -7044,6 +7095,8 @@ async def handle_add_event(
     *,
     using_session: bool = False,
     media: list[tuple[bytes, str]] | None = None,
+    poster_media: Sequence[PosterMedia] | None = None,
+    catbox_msg: str | None = None,
 ):
     text_raw = message.text or message.caption or ""
     logging.info(
@@ -7067,6 +7120,19 @@ async def handle_add_event(
     if media is None:
         images = await extract_images(message, bot)
         media = images if images else None
+    normalized_media = []
+    if media:
+        normalized_media = [media] if isinstance(media, tuple) else list(media)
+    poster_items: list[PosterMedia] = []
+    catbox_msg_local = catbox_msg or ""
+    if poster_media is not None:
+        poster_items = list(poster_media)
+    elif normalized_media:
+        poster_items, catbox_msg_local = await process_media(
+            normalized_media, need_catbox=True, need_ocr=True
+        )
+    global LAST_CATBOX_MSG
+    LAST_CATBOX_MSG = catbox_msg_local
     html_text, _mode = ensure_html_text(message)
     if html_text:
         html_text = strip_leading_cmd(html_text)
@@ -7085,7 +7151,8 @@ async def handle_add_event(
             text_content,
             source_link,
             html_text,
-            media,
+            normalized_media,
+            poster_media=poster_items,
             raise_exc=True,
             creator_id=creator_id,
             display_source=False if source_link else True,
@@ -16186,8 +16253,9 @@ async def _vkrev_import_flow(
     async with db.get_session() as session:
         res_f = await session.execute(select(Festival.name))
         festival_names = [row[0] for row in res_f.fetchall()]
-    draft = await vk_intake.build_event_payload_from_vk(
+    draft = await vk_intake.build_event_draft(
         text,
+        photos=photos,
         source_name=source[0] if source else None,
         location_hint=source[1] if source else None,
         default_time=source[2] if source else None,
@@ -16967,8 +17035,11 @@ async def finalize_album(gid: str, db: Database, bot: Bot) -> None:
     )
     logging.info("html_mode=%s", state.html_mode)
     media = [(im.data, im.name) for im in used_images]
+    poster_items, catbox_msg = await process_media(
+        media, need_catbox=True, need_ocr=True
+    )
     global LAST_CATBOX_MSG, LAST_HTML_MODE
-    LAST_CATBOX_MSG = ""
+    LAST_CATBOX_MSG = catbox_msg
     LAST_HTML_MODE = state.html_mode
     msg = state.message
     if msg.forward_date or msg.forward_from_chat or getattr(msg, "forward_origin", None):
@@ -16979,6 +17050,8 @@ async def finalize_album(gid: str, db: Database, bot: Bot) -> None:
             state.text,
             state.html,
             media,
+            poster_media=poster_items,
+            catbox_msg=catbox_msg,
         )
     else:
         await handle_add_event(
@@ -16987,6 +17060,8 @@ async def finalize_album(gid: str, db: Database, bot: Bot) -> None:
             bot,
             using_session=True,
             media=media,
+            poster_media=poster_items,
+            catbox_msg=catbox_msg,
         )
         add_event_sessions.pop(msg.from_user.id, None)
     took = int((_time.monotonic() - start) * 1000)
@@ -17007,6 +17082,8 @@ async def _process_forwarded(
     text: str,
     html: str | None,
     media: list[tuple[bytes, str]] | None,
+    poster_media: Sequence[PosterMedia] | None = None,
+    catbox_msg: str | None = None,
 ) -> None:
     async with db.get_session() as session:
         user = await session.get(User, message.from_user.id)
@@ -17085,10 +17162,27 @@ async def _process_forwarded(
         channel_name,
         allowed,
     )
+    if media is None:
+        normalized_media: list[tuple[bytes, str]] = []
+    elif isinstance(media, tuple):
+        normalized_media = [media]
+    else:
+        normalized_media = list(media)
+    poster_items: list[PosterMedia] = []
+    local_catbox_msg = catbox_msg or ""
+    if poster_media is not None:
+        poster_items = list(poster_media)
+    elif normalized_media:
+        poster_items, local_catbox_msg = await process_media(
+            normalized_media, need_catbox=True, need_ocr=True
+        )
+    global LAST_CATBOX_MSG
+    LAST_CATBOX_MSG = local_catbox_msg
     logging.info(
-        "FWD summary text_len=%d media_len=%d",
+        "FWD summary text_len=%d media_len=%d posters=%d",
         len(text or ""),
-        len(media or []),
+        len(normalized_media),
+        len(poster_items),
     )
     logging.info("parsing forwarded text via LLM")
     try:
@@ -17097,7 +17191,8 @@ async def _process_forwarded(
             text,
             link,
             html,
-            media,
+            normalized_media,
+            poster_media=poster_items,
             source_chat_id=target_chat_id,
             source_message_id=target_message_id,
             creator_id=user.user_id,

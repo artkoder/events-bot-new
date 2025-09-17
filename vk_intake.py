@@ -6,11 +6,17 @@ import os
 import random
 import re
 import time
-from dataclasses import dataclass
-from typing import List, Any
+from dataclasses import dataclass, field
+from typing import Any, List, Sequence
 from datetime import datetime, timedelta
 
 from db import Database
+from poster_media import (
+    PosterMedia,
+    build_poster_summary,
+    collect_poster_texts,
+    process_media,
+)
 
 from sections import MONTHS_RU
 
@@ -264,6 +270,8 @@ class EventDraft:
     pushkin_card: bool = False
     links: List[str] | None = None
     source_text: str | None = None
+    poster_media: list[PosterMedia] = field(default_factory=list)
+    poster_summary: str | None = None
 
 
 @dataclass
@@ -279,6 +287,43 @@ class PersistResult:
     is_free: bool
 
 
+async def _download_photo_media(urls: Sequence[str]) -> list[tuple[bytes, str]]:
+    if not urls:
+        return []
+    import sys
+
+    main_mod = sys.modules.get("main") or sys.modules.get("__main__")
+    if main_mod is None:  # pragma: no cover - defensive
+        raise RuntimeError("main module not found")
+    session = main_mod.get_http_session()
+    semaphore = main_mod.HTTP_SEMAPHORE
+    timeout = main_mod.HTTP_TIMEOUT
+    max_size = main_mod.MAX_DOWNLOAD_SIZE
+    ensure_jpeg = main_mod.ensure_jpeg
+    limit = getattr(main_mod, "MAX_ALBUM_IMAGES", 3)
+    results: list[tuple[bytes, str]] = []
+
+    for idx, url in enumerate(urls[:limit]):
+
+        async def _fetch() -> bytes:
+            async with semaphore:
+                async with session.get(url) as resp:
+                    resp.raise_for_status()
+                    data = await resp.content.read(max_size + 1)
+                    if len(data) > max_size:
+                        raise ValueError("file too large")
+                    return data
+
+        try:
+            data = await asyncio.wait_for(_fetch(), timeout)
+        except Exception as exc:  # pragma: no cover - network dependent
+            logging.warning("vk.download_photo_failed url=%s error=%s", url, exc)
+            continue
+        data, name = ensure_jpeg(data, f"vk_poster_{idx + 1}.jpg")
+        results.append((data, name))
+    return results
+
+
 async def build_event_payload_from_vk(
     text: str,
     *,
@@ -287,6 +332,7 @@ async def build_event_payload_from_vk(
     default_time: str | None = None,
     operator_extra: str | None = None,
     festival_names: list[str] | None = None,
+    poster_media: Sequence[PosterMedia] | None = None,
 ) -> EventDraft:
     """Return a normalised event draft extracted from a VK post.
 
@@ -310,13 +356,23 @@ async def build_event_payload_from_vk(
     if default_time:
         llm_text = f"{llm_text}\nЕсли время не указано, предположи начало в {default_time}."
 
+    poster_items = list(poster_media or [])
+    poster_texts = collect_poster_texts(poster_items)
+    poster_summary = build_poster_summary(poster_items)
+
     extra: dict[str, str] = {}
     if source_name:
         # ``parse_event_via_4o`` accepts ``channel_title`` for context
         extra["channel_title"] = source_name
 
+    parse_kwargs: dict[str, Any] = {}
+    if poster_texts:
+        parse_kwargs["poster_texts"] = poster_texts
+    if poster_summary:
+        parse_kwargs["poster_summary"] = poster_summary
+
     parsed = await parse_event_via_4o(
-        llm_text, festival_names=festival_names, **extra
+        llm_text, festival_names=festival_names, **extra, **parse_kwargs
     )
     if not parsed:
         raise RuntimeError("LLM returned no event")
@@ -395,7 +451,42 @@ async def build_event_payload_from_vk(
         pushkin_card=clean_bool(data.get("pushkin_card")),
         links=links,
         source_text=combined_text,
+        poster_media=poster_items,
+        poster_summary=poster_summary,
     )
+
+
+async def build_event_draft(
+    text: str,
+    *,
+    photos: Sequence[str] | None = None,
+    source_name: str | None = None,
+    location_hint: str | None = None,
+    default_time: str | None = None,
+    operator_extra: str | None = None,
+    festival_names: list[str] | None = None,
+) -> EventDraft:
+    photo_bytes = await _download_photo_media(photos or [])
+    poster_items: list[PosterMedia] = []
+    if photo_bytes:
+        poster_items, catbox_msg = await process_media(
+            photo_bytes, need_catbox=True, need_ocr=True
+        )
+        logging.info(
+            "vk.build_event_draft posters=%d catbox=%s",
+            len(poster_items),
+            catbox_msg or "",
+        )
+    draft = await build_event_payload_from_vk(
+        text,
+        source_name=source_name,
+        location_hint=location_hint,
+        default_time=default_time,
+        operator_extra=operator_extra,
+        festival_names=festival_names,
+        poster_media=poster_items,
+    )
+    return draft
 
 
 async def persist_event_and_pages(
@@ -418,6 +509,9 @@ async def persist_event_and_pages(
     upsert_event = main_mod.upsert_event
     schedule_event_update_tasks = main_mod.schedule_event_update_tasks
 
+    poster_urls = [m.catbox_url for m in draft.poster_media if m.catbox_url]
+    photo_urls = poster_urls or list(photos or [])
+
     event = Event(
         title=draft.title,
         description=(draft.description or ""),
@@ -436,8 +530,8 @@ async def persist_event_and_pages(
         is_free=bool(draft.is_free),
         pushkin_card=bool(draft.pushkin_card),
         source_text=draft.source_text or draft.title,
-        photo_urls=photos,
-        photo_count=len(photos),
+        photo_urls=photo_urls,
+        photo_count=len(photo_urls),
         source_post_url=source_post_url,
     )
 
@@ -484,8 +578,9 @@ async def process_event(
     async with db.get_session() as session:
         res_f = await session.execute(select(Festival.name))
         festival_names = [row[0] for row in res_f.fetchall()]
-    draft = await build_event_payload_from_vk(
+    draft = await build_event_draft(
         text,
+        photos=photos or [],
         source_name=source_name,
         location_hint=location_hint,
         default_time=default_time,
