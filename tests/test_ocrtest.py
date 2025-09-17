@@ -16,6 +16,13 @@ from vision_test import session as vision_session
 from main import Database, User
 
 
+@pytest.fixture(autouse=True)
+def reset_vision_sessions():
+    vision_session.reset_sessions()
+    yield
+    vision_session.reset_sessions()
+
+
 class DummyBot:
     def __init__(self):
         self.messages: list[SimpleNamespace] = []
@@ -60,7 +67,6 @@ class DummyCallback:
 
 @pytest.mark.asyncio
 async def test_ocrtest_start_superadmin(tmp_path, monkeypatch):
-    vision_session.reset_sessions()
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
     async with db.get_session() as session:
@@ -91,7 +97,6 @@ async def test_ocrtest_start_superadmin(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_ocrtest_denies_non_admin(tmp_path, monkeypatch):
-    vision_session.reset_sessions()
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
     async with db.get_session() as session:
@@ -118,7 +123,6 @@ async def test_ocrtest_denies_non_admin(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_select_detail_updates_state(tmp_path, monkeypatch):
-    vision_session.reset_sessions()
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
     async with db.get_session() as session:
@@ -152,7 +156,6 @@ async def test_select_detail_updates_state(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_handle_photo_uses_both_models(tmp_path, monkeypatch):
-    vision_session.reset_sessions()
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
     async with db.get_session() as session:
@@ -216,6 +219,8 @@ async def test_handle_photo_uses_both_models(tmp_path, monkeypatch):
     text = bot.messages[-1].text
     assert "gpt-4o-mini" in text
     assert "prompt" in text
+    assert "15" in text
+    assert "27" in text
     assert "Схожесть:" in text
     assert "Различия" in text
     session = vision_session.get_session(4)
