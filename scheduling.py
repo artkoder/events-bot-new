@@ -513,7 +513,7 @@ def startup(db, bot) -> AsyncIOScheduler:
         "SCHED registered job id=%s next_run=%s", job.id, _job_next_run(job)
     )
 
-    times_raw = os.getenv("VK_CRAWL_TIMES_LOCAL", "09:15,13:15,17:15,21:15")
+    times_raw = os.getenv("VK_CRAWL_TIMES_LOCAL", "05:15,09:15,13:15,17:15,21:15")
     tz_name = os.getenv("VK_CRAWL_TZ", "Europe/Kaliningrad")
     tz = ZoneInfo(tz_name)
     for idx, t in enumerate(times_raw.split(",")):
