@@ -1,3 +1,4 @@
+import logging
 import os, sys
 import pytest
 import os, sys
@@ -228,6 +229,73 @@ async def test_shortpost_publish_without_photo(tmp_path, monkeypatch):
     async with db.get_session() as session:
         ev = await session.get(Event, 77)
         assert ev.vk_repost_url == "https://vk.com/wall-5_43"
+
+
+@pytest.mark.asyncio
+async def test_shortpost_publish_skips_group_only_photo_upload(tmp_path, monkeypatch, caplog):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    async with db.raw_conn() as conn:
+        await conn.execute(
+            "INSERT INTO vk_inbox(id, group_id, post_id, date, text, matched_kw, has_date, status, imported_event_id, review_batch) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (1, 1, 2, 0, "text", None, 1, "imported", 77, "batch"),
+        )
+        await conn.execute(
+            "INSERT INTO event(id, title, description, date, time, location_name, city, source_text, telegraph_url) VALUES(?,?,?,?,?,?,?,?,?)",
+            (77, "Test", "d", "2025-09-27", "19:00", "Place", "City", "source", "https://t"),
+        )
+        await conn.commit()
+
+    async with db.get_session() as session:
+        ev = await session.get(Event, 77)
+        ev.photo_urls = ["http://img1"]
+        await session.commit()
+
+    monkeypatch.setattr(main, "VK_AFISHA_GROUP_ID", "-5")
+    monkeypatch.setattr(main, "VK_PHOTOS_ENABLED", True)
+    monkeypatch.setattr(main, "VK_USER_TOKEN", None)
+    monkeypatch.setattr(main, "VK_TOKEN_AFISHA", "group-token")
+    monkeypatch.setattr(main, "VK_TOKEN", None)
+
+    caplog.set_level(logging.INFO)
+
+    calls: list[str] = []
+
+    async def fake__vk_api(method, params, db=None, bot=None, token=None, **kwargs):
+        calls.append(method)
+        if method == "wall.post":
+            return {"response": {"post_id": 99}}
+        raise AssertionError(f"unexpected _vk_api call {method}")
+
+    async def fake_vk_api(method, **params):
+        if method == "wall.getById":
+            return {"response": []}
+        raise AssertionError(f"unexpected vk_api call {method}")
+
+    async def fake_save_repost(db_obj, event_id, url):
+        return None
+
+    async def fake_show_next(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(main, "_vk_api", fake__vk_api)
+    monkeypatch.setattr(main, "vk_api", fake_vk_api)
+    monkeypatch.setattr(main.vk_review, "save_repost_url", fake_save_repost)
+    monkeypatch.setattr(main, "_vkrev_show_next", fake_show_next)
+
+    bot = DummyBot()
+
+    await main._vkrev_publish_shortpost(
+        77,
+        db,
+        bot,
+        actor_chat_id=1,
+        operator_id=2,
+        text="text",
+    )
+
+    assert calls == ["wall.post"]
+    assert not any("photos.getWallUploadServer" in rec.getMessage() for rec in caplog.records)
 
 
 @pytest.mark.asyncio

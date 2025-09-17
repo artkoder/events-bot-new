@@ -1887,6 +1887,12 @@ async def upload_vk_photo(
             actors = choose_vk_actor(owner_id, "photos.getWallUploadServer")
         if not actors:
             raise VKAPIError(None, "VK token missing", method="photos.getWallUploadServer")
+        if all(actor.kind == "group" for actor in actors):
+            logging.info(
+                "vk.upload skipped owner_id=%s reason=user_token_required",
+                owner_id,
+            )
+            return None
         for idx, actor in enumerate(actors, start=1):
             logging.info(
                 "vk.call method=photos.getWallUploadServer owner_id=%s try=%d/%d actor=%s",
@@ -12656,6 +12662,12 @@ async def sync_vk_source_post(
                 )
                 if photo_id:
                     ids.append(photo_id)
+                elif not VK_USER_TOKEN:
+                    logging.info(
+                        "VK photo upload skipped: user token required",
+                        extra={"eid": event.id},
+                    )
+                    break
             if ids:
                 attachments = ids
         else:
@@ -16640,6 +16652,13 @@ async def _vkrev_publish_shortpost(
                 )
                 if photo_id:
                     uploaded.append(photo_id)
+                elif not VK_USER_TOKEN:
+                    logging.info(
+                        "shortpost_photo_upload_skipped gid=%s post=%s reason=user_token_required",
+                        group_id,
+                        post_id,
+                    )
+                    break
             photo_attachments.extend(uploaded)
         else:
             logging.info(

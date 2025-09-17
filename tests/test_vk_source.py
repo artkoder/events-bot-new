@@ -1,5 +1,6 @@
 import pytest
 from pathlib import Path
+import logging
 import main
 
 
@@ -97,6 +98,46 @@ async def test_sync_vk_source_post_attaches_photos(monkeypatch):
     assert url == "https://vk.com/wall-1_2"
     assert uploaded == [("http://img1", "ga")]
     assert attachments["vals"] == ["ph1"]
+
+
+@pytest.mark.asyncio
+async def test_sync_vk_source_post_skips_group_only_photo_upload(monkeypatch, caplog):
+    monkeypatch.setattr(main, "VK_AFISHA_GROUP_ID", "1")
+    monkeypatch.setattr(main, "VK_PHOTOS_ENABLED", True)
+    monkeypatch.setattr(main, "VK_TOKEN_AFISHA", "ga")
+    monkeypatch.setattr(main, "VK_TOKEN", None)
+    monkeypatch.setattr(main, "VK_USER_TOKEN", None)
+
+    event = main.Event(
+        title="Title",
+        description="",
+        date="2024-01-01",
+        time="00:00",
+        location_name="Place",
+        photo_urls=["http://img1"],
+    )
+
+    posted: dict[str, list[str] | None] = {}
+    caplog.set_level(logging.INFO)
+    calls: list[str] = []
+
+    async def fake_post(group_id, message, db=None, bot=None, attachments=None):
+        posted["attachments"] = attachments
+        return "https://vk.com/wall-1_2"
+
+    async def fake_vk_api(method, params, db=None, bot=None, token=None, **kwargs):
+        calls.append(method)
+        return {"response": {}}
+
+    monkeypatch.setattr(main, "post_to_vk", fake_post)
+    monkeypatch.setattr(main, "_vk_api", fake_vk_api)
+
+    url = await main.sync_vk_source_post(event, "Text", None, None)
+
+    assert url == "https://vk.com/wall-1_2"
+    assert posted["attachments"] is None
+    assert "photos.getWallUploadServer" not in calls
+    assert not any("photos.getWallUploadServer" in rec.getMessage() for rec in caplog.records)
 
 
 @pytest.mark.asyncio
