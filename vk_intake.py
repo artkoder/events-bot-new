@@ -286,6 +286,7 @@ async def build_event_payload_from_vk(
     location_hint: str | None = None,
     default_time: str | None = None,
     operator_extra: str | None = None,
+    festival_names: list[str] | None = None,
 ) -> EventDraft:
     """Return a normalised event draft extracted from a VK post.
 
@@ -314,7 +315,9 @@ async def build_event_payload_from_vk(
         # ``parse_event_via_4o`` accepts ``channel_title`` for context
         extra["channel_title"] = source_name
 
-    parsed = await parse_event_via_4o(llm_text, **extra)
+    parsed = await parse_event_via_4o(
+        llm_text, festival_names=festival_names, **extra
+    )
     if not parsed:
         raise RuntimeError("LLM returned no event")
     data = parsed[0]
@@ -475,12 +478,19 @@ async def process_event(
 ) -> PersistResult:
     """Process VK post text into an event and track processing time."""
     start = time.perf_counter()
+    from sqlalchemy import select
+    from models import Festival
+
+    async with db.get_session() as session:
+        res_f = await session.execute(select(Festival.name))
+        festival_names = [row[0] for row in res_f.fetchall()]
     draft = await build_event_payload_from_vk(
         text,
         source_name=source_name,
         location_hint=location_hint,
         default_time=default_time,
         operator_extra=operator_extra,
+        festival_names=festival_names,
     )
     result = await persist_event_and_pages(draft, photos or [], db)
     duration = time.perf_counter() - start

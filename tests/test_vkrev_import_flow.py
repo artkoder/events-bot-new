@@ -8,7 +8,7 @@ import main
 import vk_intake
 import vk_review
 from main import Database
-from models import Event, JobTask
+from models import Event, JobTask, Festival
 
 
 class DummyBot:
@@ -44,7 +44,15 @@ async def test_vkrev_import_flow_persists_url_and_skips_vk_sync(tmp_path, monkey
 
     draft = vk_intake.EventDraft(title="T", date="2025-09-02", time="10:00", source_text="T")
 
-    async def fake_build(text, source_name=None, location_hint=None, default_time=None, operator_extra=None):
+    async def fake_build(
+        text,
+        source_name=None,
+        location_hint=None,
+        default_time=None,
+        operator_extra=None,
+        festival_names=None,
+    ):
+        captured["festival_names"] = festival_names
         return draft
 
     captured = {}
@@ -60,6 +68,10 @@ async def test_vkrev_import_flow_persists_url_and_skips_vk_sync(tmp_path, monkey
         tasks.append(task)
         return "job"
 
+    async with db.get_session() as session:
+        session.add(Festival(name="Fest One"))
+        await session.commit()
+
     monkeypatch.setattr(main, "_vkrev_fetch_photos", fake_fetch)
     monkeypatch.setattr(vk_intake, "build_event_payload_from_vk", fake_build)
     monkeypatch.setattr(vk_review, "mark_imported", fake_mark_imported)
@@ -71,6 +83,7 @@ async def test_vkrev_import_flow_persists_url_and_skips_vk_sync(tmp_path, monkey
     async with db.get_session() as session:
         ev = await session.get(Event, captured["event_id"])
     assert ev.source_post_url == "https://vk.com/wall-1_2"
+    assert captured["festival_names"] == ["Fest One"]
     assert JobTask.vk_sync not in tasks
     assert bot.messages[-1].text == (
         "Импортировано\n"
@@ -88,6 +101,7 @@ async def test_build_event_payload_includes_operator_extra(monkeypatch):
         lower = text.lower()
         assert "original" in lower
         assert "extra" in lower
+        assert kwargs.get("festival_names") is None
         return [
             {
                 "title": "T",
@@ -110,6 +124,7 @@ async def test_build_event_payload_includes_operator_extra(monkeypatch):
 async def test_build_event_payload_uses_extra_when_text_missing(monkeypatch):
     async def fake_parse(text, *args, **kwargs):
         assert text.strip() == "Only extra"
+        assert kwargs.get("festival_names") is None
         return [
             {
                 "title": "T",

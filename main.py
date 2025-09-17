@@ -16099,12 +16099,16 @@ async def _vkrev_import_flow(
         )
         source = await cur.fetchone()
     photos = await _vkrev_fetch_photos(group_id, post_id, db, bot)
+    async with db.get_session() as session:
+        res_f = await session.execute(select(Festival.name))
+        festival_names = [row[0] for row in res_f.fetchall()]
     draft = await vk_intake.build_event_payload_from_vk(
         text,
         source_name=source[0] if source else None,
         location_hint=source[1] if source else None,
         default_time=source[2] if source else None,
         operator_extra=operator_extra,
+        festival_names=festival_names,
     )
     source_post_url = f"https://vk.com/wall-{group_id}_{post_id}"
     res = await vk_intake.persist_event_and_pages(
