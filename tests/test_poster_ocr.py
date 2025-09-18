@@ -8,16 +8,29 @@ import aiosqlite
 import pytest
 
 from db import Database
-from models import OcrUsage, PosterOcrCache
+from models import Event, EventPoster, OcrUsage, PosterOcrCache
 import poster_ocr
 import vision_test.ocr
 from vision_test.ocr import OcrResult, OcrUsage as OcrUsageStats
 from poster_media import PosterMedia, apply_ocr_results_to_media
+from sqlalchemy.exc import IntegrityError
 
 
 @dataclass
 class DummyPoster:
     data: bytes
+
+
+def test_poster_media_preserves_digest_after_clear():
+    media = PosterMedia(data=b"hello", name="poster")
+    digest_before = media.digest
+
+    assert digest_before == hashlib.sha256(b"hello").hexdigest()
+
+    media.clear_payload()
+
+    assert media.data == b""
+    assert media.digest == digest_before
 
 
 @pytest.mark.asyncio
@@ -100,6 +113,64 @@ async def test_poster_ocr_cache_migrates_to_composite_pk(tmp_path, monkeypatch):
     assert migrated is not None
     assert migrated.text == "old text"
     assert str(migrated.created_at).startswith("2024-01-01 00:00:00")
+
+
+@pytest.mark.asyncio
+async def test_database_initializes_eventposter_table(tmp_path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.raw_conn() as conn:
+        cursor = await conn.execute("PRAGMA table_info('eventposter')")
+        columns = {row[1] for row in await cursor.fetchall()}
+        await cursor.close()
+
+    assert {
+        "id",
+        "event_id",
+        "poster_hash",
+        "ocr_text",
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+        "updated_at",
+    }.issubset(columns)
+
+    async with db.get_session() as session:
+        event = Event(
+            title="T",
+            description="d",
+            festival=None,
+            date="2025-01-01",
+            time="10:00",
+            location_name="Hall",
+            source_text="src",
+        )
+        session.add(event)
+        await session.commit()
+        await session.refresh(event)
+
+        session.add(
+            EventPoster(
+                event_id=event.id,
+                poster_hash="hash-1",
+                ocr_text="line",
+                prompt_tokens=1,
+                completion_tokens=2,
+                total_tokens=3,
+            )
+        )
+        await session.commit()
+
+        session.add(
+            EventPoster(
+                event_id=event.id,
+                poster_hash="hash-1",
+            )
+        )
+        with pytest.raises(IntegrityError):
+            await session.commit()
+        await session.rollback()
 
 
 @pytest.mark.asyncio

@@ -564,6 +564,7 @@ async def persist_event_and_pages(
     if main_mod is None:  # pragma: no cover - defensive
         raise RuntimeError("main module not found")
     upsert_event = main_mod.upsert_event
+    upsert_event_posters = main_mod.upsert_event_posters
     assign_event_topics = main_mod.assign_event_topics
     schedule_event_update_tasks = main_mod.schedule_event_update_tasks
 
@@ -597,6 +598,7 @@ async def persist_event_and_pages(
 
     async with db.get_session() as session:
         saved, _ = await upsert_event(session, event)
+        await upsert_event_posters(session, saved.id, draft.poster_media)
     if manual_flag:
         logging.info(
             "event_topics_classify eid=%s text_len=%d topics=%s manual=True",

@@ -177,6 +177,7 @@ from sections import (
 from db import Database
 from scheduling import startup as scheduler_startup, cleanup as scheduler_cleanup
 from sqlalchemy import select, update, delete, text, func, or_
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from models import (
     TOPIC_LABELS,
@@ -192,6 +193,7 @@ from models import (
     WeekendPage,
     WeekPage,
     Festival,
+    EventPoster,
     JobOutbox,
     JobTask,
     JobStatus,
@@ -6291,6 +6293,67 @@ def _copy_fields(dst: Event, src: Event) -> None:
         dst.topics_manual = bool(dst.topics_manual or src.topics_manual)
 
 
+async def upsert_event_posters(
+    session: AsyncSession,
+    event_id: int,
+    poster_items: Sequence[PosterMedia] | None,
+) -> None:
+    if not poster_items:
+        return
+
+    existing = (
+        await session.execute(
+            select(EventPoster).where(EventPoster.event_id == event_id)
+        )
+    ).scalars()
+    existing_map = {row.poster_hash: row for row in existing}
+    seen: set[str] = set()
+    now = datetime.utcnow()
+
+    for item in poster_items:
+        digest = item.digest
+        if not digest and item.data:
+            digest = hashlib.sha256(item.data).hexdigest()
+        if not digest or digest in seen:
+            continue
+        seen.add(digest)
+        row = existing_map.get(digest)
+        prompt_tokens = item.prompt_tokens
+        completion_tokens = item.completion_tokens
+        total_tokens = item.total_tokens
+        if row:
+            if item.catbox_url:
+                row.catbox_url = item.catbox_url
+            if item.ocr_text is not None:
+                row.ocr_text = item.ocr_text
+            if prompt_tokens is not None:
+                row.prompt_tokens = int(prompt_tokens)
+            if completion_tokens is not None:
+                row.completion_tokens = int(completion_tokens)
+            if total_tokens is not None:
+                row.total_tokens = int(total_tokens)
+            row.updated_at = now
+        else:
+            session.add(
+                EventPoster(
+                    event_id=event_id,
+                    catbox_url=item.catbox_url,
+                    poster_hash=digest,
+                    ocr_text=item.ocr_text,
+                    prompt_tokens=int(prompt_tokens or 0),
+                    completion_tokens=int(completion_tokens or 0),
+                    total_tokens=int(total_tokens or 0),
+                    updated_at=now,
+                )
+            )
+
+    stale_entries = [row for key, row in existing_map.items() if key not in seen]
+    for entry in stale_entries:
+        await session.delete(entry)
+
+    await session.commit()
+
+
 async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
     """Insert or update an event if a similar one exists.
 
@@ -7292,6 +7355,7 @@ async def add_events_from_text(
 
             async with db.get_session() as session:
                 saved, added = await upsert_event(session, event)
+                await upsert_event_posters(session, saved.id, poster_items)
                 if rejected_links:
                     for url in rejected_links:
                         pattern = (
@@ -14005,12 +14069,66 @@ async def build_exhibitions_message(db: Database, tz: timezone):
     return text, markup
 
 
-async def show_edit_menu(user_id: int, event: Event, bot: Bot):
+async def show_edit_menu(
+    user_id: int,
+    event: Event,
+    bot: Bot,
+    db_obj: Database | None = None,
+):
     data: dict[str, Any]
     try:
         data = event.model_dump()  # type: ignore[attr-defined]
     except AttributeError:  # pragma: no cover - pydantic v1 fallback
         data = event.dict()
+
+    database = db_obj or globals().get("db")
+    poster_lines: list[str] = []
+    if database and event.id:
+        async with database.get_session() as session:
+            posters = (
+                await session.execute(
+                    select(EventPoster)
+                    .where(EventPoster.event_id == event.id)
+                    .order_by(EventPoster.updated_at.desc(), EventPoster.id.desc())
+                )
+            ).scalars().all()
+        if posters:
+            poster_lines.append("Poster OCR:")
+
+            def _clean_lines(text: str) -> list[str]:
+                max_lines = 3
+                max_len = 120
+                result: list[str] = []
+                for raw in text.splitlines():
+                    cleaned = raw.strip()
+                    if not cleaned:
+                        continue
+                    if len(cleaned) > max_len:
+                        cleaned = cleaned[: max_len - 1] + "…"
+                    result.append(cleaned)
+                    if len(result) >= max_lines:
+                        break
+                return result or ["<пусто>"]
+
+            for idx, poster in enumerate(posters[:3], 1):
+                token_parts: list[str] = []
+                if poster.prompt_tokens:
+                    token_parts.append(f"prompt={poster.prompt_tokens}")
+                if poster.completion_tokens:
+                    token_parts.append(f"completion={poster.completion_tokens}")
+                if poster.total_tokens:
+                    token_parts.append(f"total={poster.total_tokens}")
+                token_info = f" ({', '.join(token_parts)})" if token_parts else ""
+                hash_display = poster.poster_hash[:10]
+                poster_lines.append(f"{idx}. hash={hash_display}{token_info}")
+                for text_line in _clean_lines(poster.ocr_text or ""):
+                    poster_lines.append(f"    {text_line}")
+                if poster.catbox_url:
+                    url = poster.catbox_url
+                    if len(url) > 120:
+                        url = url[:117] + "..."
+                    poster_lines.append(f"    {url}")
+            poster_lines.append("---")
 
     lines = []
     topics_manual_flag = bool(data.get("topics_manual"))
@@ -14085,7 +14203,8 @@ async def show_edit_menu(user_id: int, event: Event, bot: Bot):
         [types.InlineKeyboardButton(text="Done", callback_data=f"editdone:{event.id}")]
     )
     markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard)
-    await bot.send_message(user_id, "\n".join(lines), reply_markup=markup)
+    message_lines = poster_lines + lines if poster_lines else lines
+    await bot.send_message(user_id, "\n".join(message_lines), reply_markup=markup)
 
 
 async def show_festival_edit_menu(user_id: int, fest: Festival, bot: Bot):

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import asyncio
+import hashlib
 import logging
 import os
 from collections import deque
@@ -26,10 +26,15 @@ class PosterMedia:
     data: bytes = field(repr=False)
     name: str
     catbox_url: str | None = None
+    digest: str | None = None
     ocr_text: str | None = None
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
     total_tokens: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.digest is None:
+            self.digest = hashlib.sha256(self.data).hexdigest()
 
     def clear_payload(self) -> None:
         """Release in-memory payload after processing."""
@@ -172,6 +177,8 @@ def apply_ocr_results_to_media(
 
         poster = poster_media[idx]
         used_indices.add(idx)
+        if cache_hash:
+            poster.digest = cache_hash
         poster.ocr_text = getattr(cache, "text", None)
         poster.prompt_tokens = getattr(cache, "prompt_tokens", None)
         poster.completion_tokens = getattr(cache, "completion_tokens", None)
