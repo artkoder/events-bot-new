@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import os
 from dataclasses import dataclass
@@ -345,3 +346,44 @@ async def test_recognize_posters_detail_changes(tmp_path, monkeypatch):
     assert cached_auto is not None
     assert cached_high is not None
     assert cached_high.text == "high-text"
+
+
+@pytest.mark.asyncio
+async def test_recognize_posters_concurrent_usage_upsert(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    items = [DummyPoster(b"first"), DummyPoster(b"second")]
+    token_map = {items[0].data: 5, items[1].data: 7}
+
+    async def fake_run_ocr(data, *, model, detail):
+        await asyncio.sleep(0)
+        spent = token_map[data]
+        return OcrResult(
+            text=f"text-{data.decode()}",
+            usage=OcrUsageStats(
+                prompt_tokens=0,
+                completion_tokens=0,
+                total_tokens=spent,
+            ),
+        )
+
+    monkeypatch.setattr(poster_ocr, "run_ocr", fake_run_ocr)
+    monkeypatch.setattr(poster_ocr, "_today_key", lambda: "2024-06-07")
+
+    async def recognize(item: DummyPoster):
+        return await poster_ocr.recognize_posters(db, [item])
+
+    results = await asyncio.gather(*[recognize(item) for item in items])
+
+    for (result_items, _, _), item in zip(results, items):
+        assert result_items[0].text == f"text-{item.data.decode()}"
+
+    total_spent = sum(spent for _, spent, _ in results)
+    assert total_spent == sum(token_map.values())
+
+    async with db.get_session() as session:
+        usage_row = await session.get(OcrUsage, "2024-06-07")
+
+    assert usage_row is not None
+    assert usage_row.spent_tokens == sum(token_map.values())

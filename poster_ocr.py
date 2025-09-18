@@ -6,6 +6,9 @@ from datetime import datetime, timezone
 from importlib import import_module
 from typing import Any, Iterable
 
+from sqlalchemy import func
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
 from sqlmodel import select
 
 from db import Database
@@ -159,21 +162,33 @@ async def recognize_posters(
                     block_new_requests = True
 
         spent_after = spent_before
+        charged_amount = 0
         if new_entries or updated_entries:
             if count_usage and total_new_tokens:
-                charged_total = spent_before + total_new_tokens
-                if charged_total > DAILY_TOKEN_LIMIT:
-                    charged_total = DAILY_TOKEN_LIMIT
-                if usage_row is None:
-                    usage_row = OcrUsageModel(date=today, spent_tokens=0)
-                usage_row.spent_tokens = charged_total
-                session.add(usage_row)
-                spent_after = charged_total
+                allowed_remaining = max(0, DAILY_TOKEN_LIMIT - spent_before)
+                charged_amount = min(total_new_tokens, allowed_remaining)
+                if charged_amount:
+                    usage_table = OcrUsageModel.__table__
+                    usage_insert = sqlite_insert(usage_table).values(
+                        date=today, spent_tokens=charged_amount
+                    )
+                    usage_stmt = usage_insert.on_conflict_do_update(
+                        index_elements=[usage_table.c.date],
+                        set_={
+                            "spent_tokens": func.min(
+                                DAILY_TOKEN_LIMIT,
+                                usage_table.c.spent_tokens
+                                + usage_insert.excluded.spent_tokens,
+                            )
+                        },
+                    )
+                    await session.execute(usage_stmt)
             for entry in new_entries:
                 session.add(entry)
             await session.commit()
+            session.expire_all()
+            usage_row = await session.get(OcrUsageModel, today)
             if usage_row is not None:
-                await session.refresh(usage_row)
                 spent_after = usage_row.spent_tokens
             for entry in new_entries:
                 await session.refresh(entry)
@@ -183,8 +198,7 @@ async def recognize_posters(
         remaining = DAILY_TOKEN_LIMIT - spent_after
         remaining = max(0, remaining)
         if count_usage:
-            charged_spent = spent_after - spent_before
-            spent_tokens = max(0, charged_spent)
+            spent_tokens = charged_amount
         else:
             spent_tokens = 0
         if count_usage and encountered_uncached_after_limit:
