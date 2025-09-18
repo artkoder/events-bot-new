@@ -49,6 +49,27 @@ async def test_process_media_uses_active_main(monkeypatch, caplog):
         assert all(p.catbox_url for p in posters)
         assert catbox_msg == "ok"
         assert "CATBOX disabled" not in caplog.text
+        start_log = next(
+            record
+            for record in caplog.records
+            if "poster_media upload start" in record.getMessage()
+        )
+        assert start_log.levelno == logging.INFO
+        message = start_log.getMessage()
+        assert "need_catbox=True" in message
+        assert "catbox_enabled=True" in message
+        assert "raw_count=1" in message
+        assert "preprocessed=False" in message
+
+        complete_log = next(
+            record
+            for record in caplog.records
+            if "poster_media upload complete" in record.getMessage()
+        )
+        assert complete_log.levelno == logging.INFO
+        complete_message = complete_log.getMessage()
+        assert "url_count=1" in complete_message
+        assert "catbox_msg=ok" in complete_message
     finally:
         if original_main is not None:
             sys.modules["main"] = original_main

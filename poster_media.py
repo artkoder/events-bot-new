@@ -103,8 +103,22 @@ async def process_media(
 
     if need_catbox:
         main_mod = _get_main_module()
+        catbox_enabled = getattr(main_mod, "CATBOX_ENABLED", None)
+        preprocessed_provided = any(p.catbox_url for p in posters)
+        logging.info(
+            "poster_media upload start: need_catbox=%s catbox_enabled=%s raw_count=%d preprocessed=%s",
+            need_catbox,
+            catbox_enabled,
+            len(raw),
+            preprocessed_provided,
+        )
         upload_images = main_mod.upload_images
         catbox_urls, catbox_msg = await upload_images(raw)
+        logging.info(
+            "poster_media upload complete: url_count=%d catbox_msg=%s",
+            len(catbox_urls),
+            catbox_msg,
+        )
         for poster, url in zip(posters, catbox_urls):
             poster.catbox_url = url
 
