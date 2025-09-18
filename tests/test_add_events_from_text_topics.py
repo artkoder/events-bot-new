@@ -34,7 +34,7 @@ async def test_add_events_from_text_assigns_topics(tmp_path: Path, monkeypatch):
         return "https://t.me/test", "path", "", 0
 
     async def fake_classify(event: Event):
-        return ["CONCERTS", "PARTIES"]
+        return ["CONCERTS", "FAMILY"]
 
     monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
     monkeypatch.setattr(main, "schedule_event_update_tasks", fake_schedule_event_update_tasks)
@@ -48,7 +48,7 @@ async def test_add_events_from_text_assigns_topics(tmp_path: Path, monkeypatch):
     async with db.get_session() as session:
         stored = await session.get(Event, saved_events[0].id)
 
-    assert stored.topics == ["CONCERTS", "PARTIES"]
+    assert stored.topics == ["CONCERTS", "FAMILY"]
     assert stored.topics_manual is False
 
 

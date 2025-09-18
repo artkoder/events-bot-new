@@ -8,6 +8,7 @@ import pytest
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
 import main
+import models
 
 
 def test_event_topic_prompt_mentions_topics():
@@ -83,6 +84,19 @@ async def test_classify_event_topics_handles_invalid_json(monkeypatch):
     result = await main.classify_event_topics(event)
 
     assert result == []
+
+
+def test_normalize_topic_identifier_legacy_aliases():
+    cases = {
+        "handmade": "HANDMADE",
+        "Нетворкинг": "NETWORKING",
+        "спорт": "ACTIVE",
+        "Personalities": "PERSONALITIES",
+        "дети": "KIDS_SCHOOL",
+        "семейные": "FAMILY",
+    }
+    for raw, expected in cases.items():
+        assert models.normalize_topic_identifier(raw) == expected
 
 
 @pytest.mark.asyncio

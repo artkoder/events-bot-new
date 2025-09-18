@@ -1,4 +1,5 @@
 import pytest
+
 import main
 import vk_intake
 from main import Database
@@ -87,7 +88,7 @@ async def test_persist_event_and_pages_classifies_topics(tmp_path, monkeypatch):
 
     async def fake_classify(event: Event):
         calls["topics"] += 1
-        return ["CONCERTS"]
+        return ["HANDMADE"]
 
     monkeypatch.setattr(main, "schedule_event_update_tasks", fake_schedule_event_update_tasks)
     monkeypatch.setattr(main, "classify_event_topics", fake_classify)
@@ -106,7 +107,7 @@ async def test_persist_event_and_pages_classifies_topics(tmp_path, monkeypatch):
         saved = await session.get(Event, res.event_id)
 
     assert calls["topics"] == 1
-    assert saved.topics == ["CONCERTS"]
+    assert saved.topics == ["HANDMADE"]
     assert saved.topics_manual is False
 
 
