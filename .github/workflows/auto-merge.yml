@@ -1,19 +1,27 @@
-name: Enable Auto-merge
+name: Enable Auto-merge (Codex branches)
+
 on:
   pull_request:
+    # включаем авто-мердж при создании/обновлении PR
     types: [opened, reopened, ready_for_review, synchronize]
 
 jobs:
   enable:
+    # только PR в main + не draft + ИМЯ ВЕТКИ начинается с "codex/"
     if: >
       github.event.pull_request.base.ref == 'main' &&
-      github.event.pull_request.draft == false
+      github.event.pull_request.draft == false &&
+      startsWith(github.event.pull_request.head.ref, 'codex/')
     runs-on: ubuntu-latest
+
+    # нужны права на изменение PR
     permissions:
       pull-requests: write
       contents: write
+
     steps:
+      # включаем auto-merge для текущего PR методом squash
       - uses: peter-evans/enable-pull-request-automerge@v3
         with:
-          merge-method: squash
+          merge-method: squash           # можно MERGE или REBASE
           pull-request-number: ${{ github.event.pull_request.number }}
