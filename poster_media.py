@@ -50,11 +50,26 @@ _MAIN_MODULE: ModuleType | None = None
 
 
 def _get_main_module() -> ModuleType:
+    """Return the active main module, preferring the live ``__main__`` module.
+
+    The running script is registered as ``__main__`` which carries feature
+    toggles like ``CATBOX_ENABLED``. Importing ``main`` directly can return a
+    fresh module that does not reflect runtime state, so we only fall back to it
+    when the live module is unavailable.
+    """
     global _MAIN_MODULE
     if _MAIN_MODULE is not None:
         return _MAIN_MODULE
 
-    module = sys.modules.get("main") or sys.modules.get("__main__")
+    module = None
+
+    live_module = sys.modules.get("__main__")
+    if live_module is not None and hasattr(live_module, "CATBOX_ENABLED"):
+        module = live_module
+
+    if module is None:
+        module = sys.modules.get("main")
+
     if module is None:
         module = import_module("main")
 
