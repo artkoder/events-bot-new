@@ -8577,58 +8577,92 @@ async def test_refresh_nav_triggered_on_new_festival(monkeypatch, tmp_path: Path
 @pytest.mark.asyncio
 async def test_edit_vk_post_preserves_photos(monkeypatch):
     captured = {}
+    fetch_calls = []
 
-    async def fake_vk_api(method, **params):
-        assert method == "wall.getById"
-        assert params["posts"] == "-1_2"
-        return {
-            "response": [
-                {
-                    "attachments": [
-                        {
-                            "type": "photo",
-                            "photo": {"owner_id": -1, "id": 10},
-                        }
-                    ]
-                }
-            ]
-        }
+    async def fake_vk_api(*args, **kwargs):  # pragma: no cover - should not be used
+        raise AssertionError("vk_api must not be called for own group posts")
 
-    async def fake_api(method, params, db=None, bot=None, token=None, **kwargs):
+    async def fake_api(
+        method,
+        params,
+        db=None,
+        bot=None,
+        token=None,
+        token_kind=None,
+        skip_captcha=False,
+        **kwargs,
+    ):
+        if method == "wall.getById":
+            fetch_calls.append((params, token, token_kind, skip_captcha))
+            assert params["posts"] == "-1_2"
+            assert token == "group-token"
+            assert token_kind == "group"
+            assert skip_captcha is True
+            return {
+                "response": [
+                    {
+                        "attachments": [
+                            {
+                                "type": "photo",
+                                "photo": {"owner_id": -1, "id": 10},
+                            }
+                        ]
+                    }
+                ]
+            }
         if method == "wall.edit":
             captured.update(params)
+            assert token == "user-token"
+            assert token_kind == "user"
             return {"response": 1}
         raise AssertionError(method)
 
     monkeypatch.setattr(main, "vk_api", fake_vk_api)
     monkeypatch.setattr(main, "_vk_api", fake_api)
-    monkeypatch.setattr(main, "_vk_user_token", lambda: "token")
+    monkeypatch.setattr(main, "VK_MAIN_GROUP_ID", "-1")
+    monkeypatch.setattr(main, "VK_AFISHA_GROUP_ID", "")
+    monkeypatch.setattr(main, "VK_TOKEN", "group-token")
+    monkeypatch.setattr(main, "VK_TOKEN_AFISHA", "")
+    monkeypatch.setattr(main, "_vk_user_token", lambda: "user-token")
 
     await main.edit_vk_post("https://vk.com/wall-1_2", "msg")
 
     assert captured.get("attachments") == "photo-1_10"
+    assert fetch_calls
 
 
 @pytest.mark.asyncio
 async def test_edit_vk_post_add_photo(monkeypatch):
     captured = {}
+    fetch_calls = []
 
-    async def fake_vk_api(method, **params):
-        assert method == "wall.getById"
-        return {
-            "response": [
-                {
-                    "attachments": [
-                        {
-                            "type": "photo",
-                            "photo": {"owner_id": -1, "id": 10},
-                        }
-                    ]
-                }
-            ]
-        }
+    async def fake_vk_api(*args, **kwargs):  # pragma: no cover - should not be used
+        raise AssertionError("vk_api must not be called for own group posts")
 
-    async def fake_api(method, params, db=None, bot=None, token=None, **kwargs):
+    async def fake_api(
+        method,
+        params,
+        db=None,
+        bot=None,
+        token=None,
+        token_kind=None,
+        skip_captcha=False,
+        **kwargs,
+    ):
+        if method == "wall.getById":
+            fetch_calls.append((params, token, token_kind, skip_captcha))
+            return {
+                "response": [
+                    {
+                        "attachments": [
+                            {
+                                "type": "photo",
+                                "photo": {"owner_id": -1, "id": 10},
+                            }
+                        ]
+                    }
+                ]
+            }
         if method == "wall.edit":
             captured.update(params)
             return {"response": 1}
@@ -8636,7 +8670,11 @@ async def test_edit_vk_post_add_photo(monkeypatch):
 
     monkeypatch.setattr(main, "vk_api", fake_vk_api)
     monkeypatch.setattr(main, "_vk_api", fake_api)
-    monkeypatch.setattr(main, "_vk_user_token", lambda: "token")
+    monkeypatch.setattr(main, "VK_MAIN_GROUP_ID", "-1")
+    monkeypatch.setattr(main, "VK_AFISHA_GROUP_ID", "")
+    monkeypatch.setattr(main, "VK_TOKEN", "group-token")
+    monkeypatch.setattr(main, "VK_TOKEN_AFISHA", "")
+    monkeypatch.setattr(main, "_vk_user_token", lambda: "user-token")
 
     await main.edit_vk_post(
         "https://vk.com/wall-1_2",
@@ -8645,34 +8683,91 @@ async def test_edit_vk_post_add_photo(monkeypatch):
     )
 
     assert captured.get("attachments") == "photo-1_20"
+    assert fetch_calls
 
 
 @pytest.mark.asyncio
 async def test_edit_vk_post_edit_window_expired(monkeypatch, caplog):
-    async def fake_vk_api(method, **params):
-        assert method == "wall.getById"
-        return {
-            "response": [
-                {
-                    "text": "old",
-                    "can_edit": 0,
-                    "date": int(_time.time()) - 20 * 24 * 3600,
-                    "attachments": [],
-                }
-            ]
-        }
+    async def fake_vk_api(*args, **kwargs):  # pragma: no cover - should not be used
+        raise AssertionError("vk_api must not be called for own group posts")
 
-    async def fake_api(*args, **kwargs):  # pragma: no cover - should not be called
+    async def fake_api(
+        method,
+        params,
+        db=None,
+        bot=None,
+        token=None,
+        token_kind=None,
+        skip_captcha=False,
+        **kwargs,
+    ):
+        if method == "wall.getById":
+            return {
+                "response": [
+                    {
+                        "text": "old",
+                        "can_edit": 0,
+                        "date": int(_time.time()) - 20 * 24 * 3600,
+                        "attachments": [],
+                    }
+                ]
+            }
         raise AssertionError("wall.edit must not be called when edit window expired")
 
     monkeypatch.setattr(main, "vk_api", fake_vk_api)
     monkeypatch.setattr(main, "_vk_api", fake_api)
+    monkeypatch.setattr(main, "VK_MAIN_GROUP_ID", "-1")
+    monkeypatch.setattr(main, "VK_AFISHA_GROUP_ID", "")
+    monkeypatch.setattr(main, "VK_TOKEN", "group-token")
+    monkeypatch.setattr(main, "VK_TOKEN_AFISHA", "")
+    monkeypatch.setattr(main, "_vk_user_token", lambda: "user-token")
 
     with caplog.at_level(logging.WARNING):
         updated = await main.edit_vk_post("https://vk.com/wall-1_2", "msg")
 
     assert updated is False
     assert any("edit unavailable" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_edit_vk_post_foreign_group_uses_service_token(monkeypatch):
+    captured = {}
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def fake_vk_api(method, **params):
+        calls.append((method, params))
+        assert method == "wall.getById"
+        return {
+            "response": [
+                {
+                    "attachments": [
+                        {
+                            "type": "photo",
+                            "photo": {"owner_id": -99, "id": 10},
+                        }
+                    ]
+                }
+            ]
+        }
+
+    async def fake_api(method, params, db=None, bot=None, token=None, **kwargs):
+        if method == "wall.edit":
+            captured.update(params)
+            return {"response": 1}
+        raise AssertionError("_vk_api must not fetch foreign group posts")
+
+    monkeypatch.setattr(main, "vk_api", fake_vk_api)
+    monkeypatch.setattr(main, "_vk_api", fake_api)
+    monkeypatch.setattr(main, "VK_MAIN_GROUP_ID", "-1")
+    monkeypatch.setattr(main, "VK_AFISHA_GROUP_ID", "")
+    monkeypatch.setattr(main, "VK_TOKEN", "group-token")
+    monkeypatch.setattr(main, "VK_TOKEN_AFISHA", "")
+    monkeypatch.setattr(main, "_vk_user_token", lambda: "user-token")
+
+    await main.edit_vk_post("https://vk.com/wall-99_2", "msg")
+
+    assert calls == [("wall.getById", {"posts": "-99_2"})]
+    assert captured.get("attachments") == "photo-99_10"
 
 
 @pytest.mark.asyncio
