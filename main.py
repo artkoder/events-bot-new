@@ -7,6 +7,7 @@ Debugging:
 from __future__ import annotations
 
 import asyncio
+from weakref import WeakKeyDictionary
 import logging
 import os
 import time as unixtime
@@ -8037,7 +8038,20 @@ async def reconcile_job_outbox(db: Database) -> None:
         await session.commit()
 
 
-_run_due_jobs_lock = asyncio.Lock()
+_run_due_jobs_locks: WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock] = WeakKeyDictionary()
+
+
+def _get_run_due_jobs_lock() -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    lock = _run_due_jobs_locks.get(loop)
+    if lock is None:
+        lock = asyncio.Lock()
+        _run_due_jobs_locks[loop] = lock
+    return lock
+
+
+def _reset_run_due_jobs_locks() -> None:
+    _run_due_jobs_locks.clear()
 
 
 async def _run_due_jobs_once(
@@ -8050,7 +8064,7 @@ async def _run_due_jobs_once(
     allowed_tasks: set[JobTask] | None = None,
     force_notify: bool = False,
 ) -> int:
-    async with _run_due_jobs_lock:
+    async with _get_run_due_jobs_lock():
         return await _run_due_jobs_once_locked(
             db,
             bot,

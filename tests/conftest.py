@@ -11,6 +11,11 @@ from models import PosterOcrCache
 
 
 @pytest.fixture(autouse=True)
+def _reset_run_due_jobs_lock():
+    main._reset_run_due_jobs_locks()
+
+
+@pytest.fixture(autouse=True)
 def _mock_telegraph(monkeypatch, request):
     if "get_telegraph_token" not in request.node.nodeid:
         monkeypatch.setattr(main, "get_telegraph_token", lambda: "t")
