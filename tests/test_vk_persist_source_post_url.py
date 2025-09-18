@@ -87,7 +87,7 @@ async def test_persist_event_and_pages_classifies_topics(tmp_path, monkeypatch):
 
     async def fake_classify(event: Event):
         calls["topics"] += 1
-        return ["музыка"]
+        return ["MUSIC"]
 
     monkeypatch.setattr(main, "schedule_event_update_tasks", fake_schedule_event_update_tasks)
     monkeypatch.setattr(main, "classify_event_topics", fake_classify)
@@ -106,7 +106,7 @@ async def test_persist_event_and_pages_classifies_topics(tmp_path, monkeypatch):
         saved = await session.get(Event, res.event_id)
 
     assert calls["topics"] == 1
-    assert saved.topics == ["музыка"]
+    assert saved.topics == ["MUSIC"]
     assert saved.topics_manual is False
 
 
@@ -168,7 +168,7 @@ async def test_upsert_event_preserves_manual_topics(tmp_path):
             location_address="Addr",
             city="City",
             source_text="Manual",
-            topics=["искусство"],
+        topics=["ART"],
             topics_manual=True,
         )
         session.add(existing)
@@ -186,7 +186,7 @@ async def test_upsert_event_preserves_manual_topics(tmp_path):
             location_address="Addr",
             city="City",
             source_text="Manual",
-            topics=["музыка"],
+            topics=["MUSIC"],
             topics_manual=False,
         )
         saved, created = await main.upsert_event(session, new)
@@ -196,7 +196,7 @@ async def test_upsert_event_preserves_manual_topics(tmp_path):
     async with db.get_session() as session:
         refreshed = await session.get(Event, event_id)
         assert refreshed is not None
-        assert refreshed.topics == ["искусство"]
+        assert refreshed.topics == ["ART"]
         assert refreshed.topics_manual is True
 
 
@@ -234,7 +234,7 @@ async def test_upsert_event_updates_topics_when_not_manual(tmp_path):
             location_address="Addr",
             city="City",
             source_text="Auto",
-            topics=["музыка"],
+            topics=["MUSIC"],
             topics_manual=True,
         )
         saved, created = await main.upsert_event(session, new)
@@ -244,5 +244,5 @@ async def test_upsert_event_updates_topics_when_not_manual(tmp_path):
     async with db.get_session() as session:
         refreshed = await session.get(Event, event_id)
         assert refreshed is not None
-        assert refreshed.topics == ["музыка"]
+        assert refreshed.topics == ["MUSIC"]
         assert refreshed.topics_manual is True

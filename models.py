@@ -8,16 +8,56 @@ from sqlalchemy.types import Enum as SAEnum
 
 
 TOPIC_LABELS: dict[str, str] = {
-    "искусство": "Искусство",
-    "история россии": "История России",
-    "технологии": "Технологии",
-    "психология": "Психология",
-    "урбанистика": "Урбанистика",
-    "литература": "Литература",
-    "кино": "Кино",
-    "музыка": "Музыка",
-    "бизнес": "Бизнес",
+    "ART": "Искусство",
+    "HISTORY_RU": "История России",
+    "TECH": "Технологии",
+    "PSYCHOLOGY": "Психология",
+    "URBANISM": "Урбанистика",
+    "LITERATURE": "Литература",
+    "CINEMA": "Кино",
+    "MUSIC": "Музыка",
+    "BUSINESS": "Бизнес",
+    "PARTY": "Вечеринки",
+    "STANDUP": "Стендапы/комедия",
 }
+
+TOPIC_IDENTIFIERS: set[str] = set(TOPIC_LABELS.keys())
+
+_TOPIC_LEGACY_ALIASES: dict[str, str] = {
+    "искусство": "ART",
+    "история россии": "HISTORY_RU",
+    "технологии": "TECH",
+    "психология": "PSYCHOLOGY",
+    "урбанистика": "URBANISM",
+    "литература": "LITERATURE",
+    "кино": "CINEMA",
+    "музыка": "MUSIC",
+    "бизнес": "BUSINESS",
+    "вечеринка": "PARTY",
+    "вечер": "PARTY",
+    "вечеринки": "PARTY",
+    "стендап": "STANDUP",
+    "стендапы": "STANDUP",
+    "комедия": "STANDUP",
+}
+
+TOPIC_IDENTIFIERS_BY_CASEFOLD: dict[str, str] = {
+    key.casefold(): key for key in TOPIC_IDENTIFIERS
+}
+TOPIC_IDENTIFIERS_BY_CASEFOLD.update(
+    {alias.casefold(): canonical for alias, canonical in _TOPIC_LEGACY_ALIASES.items()}
+)
+
+
+def normalize_topic_identifier(value: str | None) -> str | None:
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip()
+    if not candidate:
+        return None
+    if candidate in TOPIC_IDENTIFIERS:
+        return candidate
+    return TOPIC_IDENTIFIERS_BY_CASEFOLD.get(candidate.casefold())
 
 
 class User(SQLModel, table=True):
