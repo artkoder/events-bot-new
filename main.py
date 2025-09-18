@@ -398,6 +398,9 @@ try:
 except ValueError:
     VK_SHORTPOST_MAX_PHOTOS = 4
 
+# VK allows editing community posts for 14 days.
+VK_POST_MAX_EDIT_AGE = timedelta(days=14)
+
 # which actor token to use for VK API calls
 VK_ACTOR_MODE = os.getenv("VK_ACTOR_MODE", "auto")
 
@@ -13405,6 +13408,8 @@ async def edit_vk_post(
     current: list[str] = []
     post_text = ""
     old_attachments: list[str] = []
+    edit_allowed = True
+    edit_block_reason: str | None = None
     try:
         response = await vk_api("wall.getById", posts=f"{owner_id}_{post_id}")
         if isinstance(response, dict):
@@ -13418,6 +13423,21 @@ async def edit_vk_post(
         if items:
             post = items[0]
             post_text = post.get("text") or ""
+            can_edit_flag = post.get("can_edit")
+            if can_edit_flag is not None and not bool(can_edit_flag):
+                edit_allowed = False
+                edit_block_reason = "can_edit=0"
+            else:
+                ts = post.get("date")
+                if ts is not None:
+                    try:
+                        post_dt = datetime.fromtimestamp(int(ts), tz=timezone.utc)
+                    except (ValueError, OSError, OverflowError):
+                        pass
+                    else:
+                        if datetime.now(timezone.utc) - post_dt > VK_POST_MAX_EDIT_AGE:
+                            edit_allowed = False
+                            edit_block_reason = "post too old"
             for att in post.get("attachments", []):
                 if att.get("type") == "photo":
                     p = att.get("photo") or {}
@@ -13432,6 +13452,22 @@ async def edit_vk_post(
         current = attachments[:]
     else:
         current = old_attachments.copy()
+    if not edit_allowed:
+        logging.warning(
+            "edit_vk_post: skipping %s, edit unavailable (%s)",
+            post_url,
+            edit_block_reason or "unknown reason",
+        )
+        if db is not None and bot is not None:
+            try:
+                await notify_superadmin(
+                    db,
+                    bot,
+                    f"Не удалось отредактировать пост {post_url}: окно редактирования истекло",
+                )
+            except Exception:  # pragma: no cover - best effort
+                logging.exception("edit_vk_post notify_superadmin failed")
+        return False
     if post_text == message and current == old_attachments:
         logging.info("edit_vk_post: no changes for %s", post_url)
         return False

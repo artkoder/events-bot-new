@@ -13,6 +13,7 @@ from sqlmodel import select
 from datetime import date, timedelta, timezone, datetime, time
 from typing import Any
 import asyncio
+import time as _time
 import main
 from telegraph.api import json_dumps
 from telegraph import TelegraphException
@@ -8556,6 +8557,34 @@ async def test_edit_vk_post_add_photo(monkeypatch):
     )
 
     assert captured.get("attachments") == "photo-1_20"
+
+
+@pytest.mark.asyncio
+async def test_edit_vk_post_edit_window_expired(monkeypatch, caplog):
+    async def fake_vk_api(method, **params):
+        assert method == "wall.getById"
+        return {
+            "response": [
+                {
+                    "text": "old",
+                    "can_edit": 0,
+                    "date": int(_time.time()) - 20 * 24 * 3600,
+                    "attachments": [],
+                }
+            ]
+        }
+
+    async def fake_api(*args, **kwargs):  # pragma: no cover - should not be called
+        raise AssertionError("wall.edit must not be called when edit window expired")
+
+    monkeypatch.setattr(main, "vk_api", fake_vk_api)
+    monkeypatch.setattr(main, "_vk_api", fake_api)
+
+    with caplog.at_level(logging.WARNING):
+        updated = await main.edit_vk_post("https://vk.com/wall-1_2", "msg")
+
+    assert updated is False
+    assert any("edit unavailable" in r.getMessage() for r in caplog.records)
 
 
 @pytest.mark.asyncio
