@@ -4191,6 +4191,22 @@ def test_pushkin_card_formatting():
     assert any("Билеты" in l or "регистра" in l for l in lines[lines.index("\u2705 Пушкинская карта") + 1:])
 
 
+def test_format_event_md_handles_timezone_aware_added_at():
+    e = Event(
+        title="T",
+        description="d",
+        source_text="s",
+        date="2025-07-10",
+        time="18:00",
+        location_name="Hall",
+        added_at=datetime(2024, 1, 2, 12, tzinfo=timezone.utc),
+    )
+
+    md = main.format_event_md(e)
+
+    assert isinstance(md, str)
+
+
 @pytest.mark.asyncio
 async def test_date_range_parsing(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
