@@ -14149,22 +14149,6 @@ async def show_edit_menu(
             ).scalars().all()
         if posters:
             poster_lines.append("Poster OCR:")
-
-            def _clean_lines(text: str) -> list[str]:
-                max_lines = 3
-                max_len = 120
-                result: list[str] = []
-                for raw in text.splitlines():
-                    cleaned = raw.strip()
-                    if not cleaned:
-                        continue
-                    if len(cleaned) > max_len:
-                        cleaned = cleaned[: max_len - 1] + "…"
-                    result.append(cleaned)
-                    if len(result) >= max_lines:
-                        break
-                return result or ["<пусто>"]
-
             for idx, poster in enumerate(posters[:3], 1):
                 token_parts: list[str] = []
                 if poster.prompt_tokens:
@@ -14176,7 +14160,11 @@ async def show_edit_menu(
                 token_info = f" ({', '.join(token_parts)})" if token_parts else ""
                 hash_display = poster.poster_hash[:10]
                 poster_lines.append(f"{idx}. hash={hash_display}{token_info}")
-                for text_line in _clean_lines(poster.ocr_text or ""):
+                raw_lines = (poster.ocr_text or "").splitlines()
+                cleaned_lines = [line.strip() for line in raw_lines if line.strip()]
+                if not cleaned_lines:
+                    cleaned_lines = ["<пусто>"]
+                for text_line in cleaned_lines:
                     poster_lines.append(f"    {text_line}")
                 if poster.catbox_url:
                     url = poster.catbox_url
