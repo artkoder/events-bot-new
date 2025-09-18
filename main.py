@@ -13717,6 +13717,38 @@ async def init_db_and_scheduler(
     logging.info("BOOT_OK pid=%s", os.getpid())
 
 
+def _topic_labels_for_display(topics: Sequence[str] | None) -> list[str]:
+    labels: list[str] = []
+    if not topics:
+        return labels
+
+    seen: set[str] = set()
+    for topic in topics:
+        if not topic:
+            continue
+        key = topic.casefold()
+        label = TOPIC_LABELS.get(key, topic)
+        if key in seen:
+            continue
+        seen.add(key)
+        labels.append(label)
+    return labels
+
+
+def _format_topics_line(topics: Sequence[str] | None, manual: bool) -> str:
+    labels = _topic_labels_for_display(topics)
+    content = ", ".join(labels) if labels else "—"
+    suffix = " (ручной режим)" if manual else ""
+    return f"Темы: {content}{suffix}"
+
+
+def _format_topic_badges(topics: Sequence[str] | None) -> str | None:
+    labels = _topic_labels_for_display(topics)
+    if not labels:
+        return None
+    return " ".join(f"[{label}]" for label in labels)
+
+
 async def build_events_message(db: Database, target_date: date, tz: timezone, creator_id: int | None = None):
     async with db.get_session() as session:
         stmt = select(Event).where(
@@ -13741,6 +13773,9 @@ async def build_events_message(db: Database, target_date: date, tz: timezone, cr
             prefix = "(Закрытие) "
         title = f"{e.emoji} {e.title}" if e.emoji else e.title
         lines.append(f"{e.id}. {prefix}{title}")
+        badges = _format_topic_badges(getattr(e, "topics", None))
+        if badges:
+            lines.append(badges)
         loc = f"{e.time} {e.location_name}"
         if e.city:
             loc += f", #{e.city}"
@@ -13833,6 +13868,9 @@ async def build_exhibitions_message(db: Database, tz: timezone):
             lines.append(f"{e.id}. {title} ({period})")
         else:
             lines.append(f"{e.id}. {title}")
+        badges = _format_topic_badges(getattr(e, "topics", None))
+        if badges:
+            lines.append(badges)
         loc = f"{e.time} {e.location_name}"
         if e.city:
             loc += f", #{e.city}"
@@ -13881,7 +13919,14 @@ async def show_edit_menu(user_id: int, event: Event, bot: Bot):
         data = event.dict()
 
     lines = []
+    topics_manual_flag = bool(data.get("topics_manual"))
     for key, value in data.items():
+        if key == "topics":
+            topics_value: Sequence[str] | None = None
+            if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+                topics_value = [str(item) for item in value]
+            lines.append(_format_topics_line(topics_value, topics_manual_flag))
+            continue
         if value is None:
             val = ""
         elif isinstance(value, str):
