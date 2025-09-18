@@ -1,5 +1,5 @@
 import pytest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from sqlmodel import select
 
 import main
@@ -20,8 +20,8 @@ async def test_job_expired(tmp_path, monkeypatch):
                 event_id=ev.id,
                 task=JobTask.month_pages,
                 status=JobStatus.pending,
-                updated_at=datetime.utcnow() - timedelta(minutes=15),
-                next_run_at=datetime.utcnow() - timedelta(minutes=15),
+                updated_at=datetime.now(timezone.utc) - timedelta(minutes=15),
+                next_run_at=datetime.now(timezone.utc) - timedelta(minutes=15),
                 coalesce_key="month_pages:2025-09",
             )
         )
@@ -51,7 +51,7 @@ async def test_job_superseded(tmp_path, monkeypatch):
         await session.commit()
         await session.refresh(ev1)
         await session.refresh(ev2)
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         session.add_all([
             JobOutbox(
                 event_id=ev1.id,

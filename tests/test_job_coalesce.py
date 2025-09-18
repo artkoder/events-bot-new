@@ -1,5 +1,5 @@
 import pytest
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy import select
 
 import main
@@ -23,8 +23,8 @@ async def test_coalesce_requeue(tmp_path):
                 task=JobTask.month_pages,
                 status=JobStatus.done,
                 coalesce_key="month_pages:2025-09",
-                updated_at=datetime.utcnow(),
-                next_run_at=datetime.utcnow(),
+                updated_at=datetime.now(timezone.utc),
+                next_run_at=datetime.now(timezone.utc),
             )
         )
         await session.commit()

@@ -2,7 +2,7 @@ import os
 import sys
 
 import pytest
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from sqlmodel import select
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
@@ -98,7 +98,7 @@ async def test_progress_notifications(tmp_path, monkeypatch):
         res = await session.execute(select(JobOutbox))
         for job in res.scalars():
             job.status = JobStatus.pending
-            job.next_run_at = datetime.utcnow()
+            job.next_run_at = datetime.now(timezone.utc)
             session.add(job)
         await session.commit()
 
@@ -348,7 +348,7 @@ async def test_publish_event_progress_waits_for_pending(tmp_path, monkeypatch):
                 JobOutbox(
                     event_id=ev.id,
                     task=JobTask.week_pages,
-                    next_run_at=datetime.utcnow() + timedelta(milliseconds=100),
+                    next_run_at=datetime.now(timezone.utc) + timedelta(milliseconds=100),
                 ),
             ]
         )
@@ -456,7 +456,7 @@ async def test_publish_event_progress_captcha_flag(tmp_path, monkeypatch):
             JobOutbox(
                 event_id=ev.id,
                 task=JobTask.vk_sync,
-                next_run_at=datetime.utcnow() + timedelta(hours=1),
+                next_run_at=datetime.now(timezone.utc) + timedelta(hours=1),
             )
         )
         await session.commit()

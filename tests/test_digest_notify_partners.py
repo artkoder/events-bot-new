@@ -1,5 +1,5 @@
 import pytest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from aiogram import types
 
@@ -15,7 +15,7 @@ async def test_notify_partners(tmp_path, monkeypatch):
     async with db.get_session() as session:
         session.add(User(user_id=1, is_superadmin=True))
         session.add(User(user_id=2, username="p1", is_partner=True))
-        dt = datetime.utcnow() + timedelta(days=1)
+        dt = datetime.now(timezone.utc) + timedelta(days=1)
         ev = Event(
             title="L1",
             description="d",
