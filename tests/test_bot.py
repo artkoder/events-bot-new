@@ -2008,6 +2008,23 @@ async def test_forward_add_event(tmp_path: Path, monkeypatch):
     monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
     monkeypatch.setattr("main.create_source_page", fake_create)
 
+    original_schedule_event_update_tasks = main.schedule_event_update_tasks
+
+    async def fake_schedule_event_update_tasks(db_obj, event_obj, drain_nav=True):
+        return await original_schedule_event_update_tasks(
+            db_obj, event_obj, drain_nav=False
+        )
+
+    monkeypatch.setattr(
+        main, "schedule_event_update_tasks", fake_schedule_event_update_tasks
+    )
+
+    async def _noop_async(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(main, "notify_event_added", _noop_async)
+    monkeypatch.setattr(main, "publish_event_progress", _noop_async)
+
     start_msg = types.Message.model_validate(
         {
             "message_id": 1,
@@ -2029,7 +2046,7 @@ async def test_forward_add_event(tmp_path: Path, monkeypatch):
 
     async with db.raw_conn() as conn:
         await conn.execute(
-            "INSERT INTO user(user_id, username, is_superadmin, is_partner, organization, location, blocked) VALUES(?,?,?,?,?,?,?)",
+            "INSERT OR REPLACE INTO user(user_id, username, is_superadmin, is_partner, organization, location, blocked) VALUES(?,?,?,?,?,?,?)",
             (1, None, 0, 0, None, None, 0),
         )
         await conn.commit()
@@ -2085,6 +2102,15 @@ async def test_forward_add_event(tmp_path: Path, monkeypatch):
         ev = (await session.execute(select(Event))).scalars().first()
 
     assert ev.source_post_url == "https://t.me/chan/10"
+    assert bot.messages
+    last_kwargs = bot.messages[-1][2]
+    markup = last_kwargs.get("reply_markup")
+    assert isinstance(markup, types.InlineKeyboardMarkup)
+    assert any(
+        button.callback_data == f"edit:{ev.id}"
+        for row in markup.inline_keyboard
+        for button in row
+    )
 
 
 @pytest.mark.asyncio

@@ -54,7 +54,15 @@ def _mock_poster_ocr(monkeypatch, request):
     if "test_poster_ocr" in str(getattr(request.node, "fspath", "")):
         return
 
-    async def fake_recognize(db, items, detail="auto", *, count_usage=True):
+    async def fake_recognize(
+        db,
+        items,
+        detail="auto",
+        *,
+        count_usage=True,
+        log_context=None,
+        **kwargs,
+    ):
         results = []
         for item in items:
             if isinstance(item, tuple) and item:
