@@ -19237,8 +19237,7 @@ def create_app() -> web.Application:
     app.router.add_get("/metrics", metrics_handler)
 
     async def on_startup(app: web.Application):
-        loop = asyncio.get_running_loop()
-        loop.create_task(init_db_and_scheduler(app, db, bot, webhook))
+        await init_db_and_scheduler(app, db, bot, webhook)
 
     async def on_shutdown(app: web.Application):
         await bot.session.close()
