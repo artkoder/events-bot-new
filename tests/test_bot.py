@@ -899,7 +899,7 @@ async def test_show_edit_menu_formats_topics():
 
     assert bot.messages
     message_text = bot.messages[-1][1]
-    assert "Темы: Искусство, Музыка (ручной режим)" in message_text
+    assert "Темы: Выставки и арт, Концерты (ручной режим)" in message_text
 
 
 @pytest.mark.asyncio
@@ -947,7 +947,7 @@ async def test_show_edit_menu_displays_poster_ocr_preview(tmp_path: Path):
     assert "Строка один" in message_text
     assert "Строка два" in message_text
     assert "Строка три" in message_text
-    assert "Строка четыре" not in message_text
+    assert "Строка четыре" in message_text
     assert "https://cat.box/a" in message_text
 
 
