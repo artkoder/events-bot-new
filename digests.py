@@ -16,17 +16,28 @@ from models import Event, normalize_topic_identifier
 
 # Mapping of canonical topic -> set of synonyms (in lowercase)
 TOPIC_SYNONYMS: dict[str, set[str]] = {
-    "ART": {"art", "искусство", "культура"},
-    "HISTORY_RU": {"history_ru", "история россии", "российская история"},
-    "TECH": {"tech", "технологии", "ит", "тех"},
-    "PSYCHOLOGY": {"psychology", "психология", "mental health"},
-    "URBANISM": {"urbanism", "урбанистика", "город"},
-    "LITERATURE": {"literature", "литература", "книги"},
-    "CINEMA": {"cinema", "кино", "фильм", "кинематограф"},
-    "MUSIC": {"music", "музыка", "саунд", "sound"},
-    "BUSINESS": {"business", "бизнес", "предпринимательство"},
-    "PARTY": {"party", "вечеринка", "вечеринки"},
+    "EXHIBITIONS": {"art", "искусство", "выставка", "выставки", "галерея"},
+    "THEATRE": {"theatre", "театр", "спектакль", "performance"},
+    "CONCERTS": {"concert", "music", "музыка", "концерт", "sound"},
+    "MOVIES": {"cinema", "movie", "film", "кино", "фильм"},
+    "LECTURES": {
+        "lecture",
+        "lectures",
+        "лекция",
+        "лекции",
+        "история",
+        "история россии",
+        "урбанистика",
+        "книги",
+        "business",
+        "встреча",
+    },
+    "MASTERCLASS": {"masterclass", "мастер-класс", "воркшоп"},
+    "PARTIES": {"party", "вечеринка", "вечеринки"},
     "STANDUP": {"standup", "стендап", "стендапы", "комедия"},
+    "QUIZ_GAMES": {"quiz", "квиз", "квизы", "игра", "настолки"},
+    "OPEN_AIR": {"open-air", "open air", "фестиваль", "фестивали", "openair"},
+    "SCIENCE_POP": {"science", "science_pop", "научпоп", "технологии", "психология"},
 }
 
 # Reverse lookup for quick normalization

@@ -4661,7 +4661,7 @@ EVENT_TOPIC_RESPONSE_FORMAT = {
                     "type": "array",
                     "items": {
                         "type": "string",
-                        "enum": sorted(TOPIC_LABELS.keys()),
+                        "enum": list(TOPIC_LABELS.keys()),
                     },
                     "maxItems": 3,
                     "uniqueItems": True,
@@ -4712,13 +4712,13 @@ async def classify_event_topics(event: Event) -> list[str]:
     location_text = ", ".join(part for part in location_parts if part)
     sections: list[str] = []
     if title:
-        sections.append(f"Title: {title}")
+        sections.append(f"Название: {title}")
     if description_text:
-        sections.append(f"Description:\n{description_text}")
+        sections.append(f"Описание:\n{description_text}")
     if hashtags:
-        sections.append("Available hashtags: " + ", ".join(hashtags))
+        sections.append("Хэштеги: " + ", ".join(hashtags))
     if location_text:
-        sections.append(f"Location: {location_text}")
+        sections.append(f"Локация: {location_text}")
     prompt_text = "\n\n".join(sections).strip()
     logger.info(
         "Classify topics prompt lengths: title=%s desc=%s hashtags=%s location=%s total=%s",

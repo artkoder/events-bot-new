@@ -74,8 +74,8 @@ async def test_backfill_topics_command_updates_events(tmp_path, monkeypatch):
 
     captured_titles: list[str] = []
     topic_map = {
-        "Event A": ["ART"],
-        "Event B": ["MUSIC"],
+        "Event A": ["EXHIBITIONS"],
+        "Event B": ["CONCERTS"],
     }
 
     async def fake_classify(event):
@@ -122,9 +122,9 @@ async def test_backfill_topics_command_updates_events(tmp_path, monkeypatch):
         event_c = stored_c.scalars().first()
         event_d = stored_d.scalars().first()
 
-    assert event_a.topics == ["ART"]
+    assert event_a.topics == ["EXHIBITIONS"]
     assert event_a.topics_manual is False
-    assert event_b.topics == ["MUSIC"]
+    assert event_b.topics == ["CONCERTS"]
     assert event_b.topics_manual is False
     assert event_c.topics == ["manual"]
     assert event_c.topics_manual is True
