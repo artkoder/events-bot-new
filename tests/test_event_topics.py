@@ -10,6 +10,15 @@ sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 import main
 
 
+def test_event_topic_prompt_mentions_topics():
+    prompt = main.EVENT_TOPIC_SYSTEM_PROMPT
+    for key, label in main.TOPIC_LABELS.items():
+        assert key in prompt
+        assert label in prompt
+    assert "Бесплатно" in prompt
+    assert "Фестивали" in prompt
+
+
 @pytest.mark.asyncio
 async def test_classify_event_topics_filters_and_limits(monkeypatch):
     monkeypatch.setenv("FOUR_O_MINI", "1")
