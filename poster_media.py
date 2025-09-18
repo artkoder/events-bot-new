@@ -3,9 +3,11 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import sys
 from collections import deque
 from dataclasses import dataclass, field
 from importlib import import_module
+from types import ModuleType
 from typing import Iterable, Mapping, Sequence
 
 from vision_test.ocr import OcrResult, configure_http as _configure_ocr_http, run_ocr
@@ -44,13 +46,27 @@ class PosterMedia:
 
 
 _OCR_CONFIGURED = False
+_MAIN_MODULE: ModuleType | None = None
+
+
+def _get_main_module() -> ModuleType:
+    global _MAIN_MODULE
+    if _MAIN_MODULE is not None:
+        return _MAIN_MODULE
+
+    module = sys.modules.get("main") or sys.modules.get("__main__")
+    if module is None:
+        module = import_module("main")
+
+    _MAIN_MODULE = module
+    return module
 
 
 def _ensure_ocr_http() -> None:
     global _OCR_CONFIGURED
     if _OCR_CONFIGURED:
         return
-    main_mod = import_module("main")
+    main_mod = _get_main_module()
     session = main_mod.get_http_session()
     semaphore = main_mod.HTTP_SEMAPHORE
     _configure_ocr_http(session=session, semaphore=semaphore)
@@ -86,7 +102,7 @@ async def process_media(
     catbox_msg = ""
 
     if need_catbox:
-        main_mod = import_module("main")
+        main_mod = _get_main_module()
         upload_images = main_mod.upload_images
         catbox_urls, catbox_msg = await upload_images(raw)
         for poster, url in zip(posters, catbox_urls):
