@@ -180,6 +180,8 @@ from sqlalchemy import select, update, delete, text, func, or_
 
 from models import (
     TOPIC_LABELS,
+    TOPIC_IDENTIFIERS,
+    normalize_topic_identifier,
     User,
     PendingUser,
     RejectedUser,
@@ -4638,10 +4640,11 @@ _EVENT_TOPIC_LISTING = "\n".join(
 EVENT_TOPIC_SYSTEM_PROMPT = textwrap.dedent(
     f"""
     Ты — ассистент, который классифицирует культурные события по темам.
-    Верни JSON с массивом `topics`, где указаны подходящие идентификаторы тем.
-    Используй ровно англоязычные идентификаторы из списка ниже и не добавляй ничего вне его.
-    Не используй темы «Бесплатно» и «Фестивали».
-    Каждый идентификатор должен быть записан ровно так, как указан ниже:
+    Верни JSON с массивом `topics`: выбери от 0 до 3 подходящих идентификаторов тем.
+    Используй только идентификаторы из списка ниже, записывай их ровно так, как показано, и не добавляй другие значения.
+    Не отмечай темы про скидки, «Бесплатно» или бесплатное участие и игнорируй «Фестивали», сетевые программы и серии мероприятий.
+    Не повторяй одинаковые идентификаторы.
+    Допустимые темы:
     {_EVENT_TOPIC_LISTING}
     Если ни одна тема не подходит, верни пустой массив.
     """
@@ -4650,7 +4653,7 @@ EVENT_TOPIC_SYSTEM_PROMPT = textwrap.dedent(
 EVENT_TOPIC_RESPONSE_FORMAT = {
     "type": "json_schema",
     "json_schema": {
-        "name": "event_topics",
+        "name": "EventTopics",
         "schema": {
             "type": "object",
             "properties": {
@@ -4660,6 +4663,8 @@ EVENT_TOPIC_RESPONSE_FORMAT = {
                         "type": "string",
                         "enum": sorted(TOPIC_LABELS.keys()),
                     },
+                    "maxItems": 3,
+                    "uniqueItems": True,
                 }
             },
             "required": ["topics"],
@@ -4686,7 +4691,7 @@ def _extract_available_hashtags(event: Event) -> list[str]:
 
 
 async def classify_event_topics(event: Event) -> list[str]:
-    allowed_topics = set(TOPIC_LABELS.keys())
+    allowed_topics = TOPIC_IDENTIFIERS
     title = (getattr(event, "title", "") or "").strip()
     descriptions: list[str] = []
     for attr in ("description", "source_text"):
@@ -4751,15 +4756,15 @@ async def classify_event_topics(event: Event) -> list[str]:
         logging.warning("Topic classification response missing list: %s", raw)
         return []
     result: list[str] = []
+    seen: set[str] = set()
     for topic in topics:
-        if not isinstance(topic, str):
+        canonical = normalize_topic_identifier(topic)
+        if canonical is None or canonical not in allowed_topics:
             continue
-        normalized = topic.strip().lower()
-        if not normalized or normalized not in allowed_topics:
+        if canonical in seen:
             continue
-        if normalized in result:
-            continue
-        result.append(normalized)
+        seen.add(canonical)
+        result.append(canonical)
         if len(result) >= 3:
             break
     return result
@@ -13733,14 +13738,23 @@ def _topic_labels_for_display(topics: Sequence[str] | None) -> list[str]:
 
     seen: set[str] = set()
     for topic in topics:
-        if not topic:
+        if not isinstance(topic, str):
             continue
-        key = topic.casefold()
-        label = TOPIC_LABELS.get(key, topic)
-        if key in seen:
+        raw = topic.strip()
+        if not raw:
             continue
-        seen.add(key)
-        labels.append(label)
+        canonical = normalize_topic_identifier(raw)
+        if canonical:
+            if canonical in seen:
+                continue
+            seen.add(canonical)
+            labels.append(TOPIC_LABELS.get(canonical, canonical))
+        else:
+            dedup_key = raw.casefold()
+            if dedup_key in seen:
+                continue
+            seen.add(dedup_key)
+            labels.append(raw)
     return labels
 
 
@@ -15401,16 +15415,14 @@ async def handle_backfill_topics(
                 )
                 continue
 
-            seen: dict[str, None] = {}
+            seen: set[str] = set()
             normalized_topics: list[str] = []
             for topic in new_topics_raw:
-                if not isinstance(topic, str):
+                canonical = normalize_topic_identifier(topic)
+                if canonical is None or canonical in seen:
                     continue
-                normalized = topic.strip()
-                if not normalized or normalized in seen:
-                    continue
-                seen[normalized] = None
-                normalized_topics.append(normalized)
+                seen.add(canonical)
+                normalized_topics.append(canonical)
 
             event.topics = normalized_topics
             event.topics_manual = False

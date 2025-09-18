@@ -12,24 +12,26 @@ import httpx
 from sqlalchemy import select
 
 from db import Database
-from models import Event
+from models import Event, normalize_topic_identifier
 
 # Mapping of canonical topic -> set of synonyms (in lowercase)
 TOPIC_SYNONYMS: dict[str, set[str]] = {
-    "искусство": {"искусство", "культура"},
-    "история россии": {"история россии", "российская история"},
-    "технологии": {"технологии", "ит", "тех"},
-    "психология": {"психология", "mental health"},
-    "урбанистика": {"урбанистика", "город"},
-    "литература": {"литература", "книги"},
-    "кино": {"кино", "фильм", "кинематограф"},
-    "музыка": {"музыка", "саунд", "sound"},
-    "бизнес": {"бизнес", "предпринимательство"},
+    "ART": {"art", "искусство", "культура"},
+    "HISTORY_RU": {"history_ru", "история россии", "российская история"},
+    "TECH": {"tech", "технологии", "ит", "тех"},
+    "PSYCHOLOGY": {"psychology", "психология", "mental health"},
+    "URBANISM": {"urbanism", "урбанистика", "город"},
+    "LITERATURE": {"literature", "литература", "книги"},
+    "CINEMA": {"cinema", "кино", "фильм", "кинематограф"},
+    "MUSIC": {"music", "музыка", "саунд", "sound"},
+    "BUSINESS": {"business", "бизнес", "предпринимательство"},
+    "PARTY": {"party", "вечеринка", "вечеринки"},
+    "STANDUP": {"standup", "стендап", "стендапы", "комедия"},
 }
 
 # Reverse lookup for quick normalization
 _REVERSE_SYNONYMS = {
-    syn: canon
+    syn.casefold(): canon
     for canon, syns in TOPIC_SYNONYMS.items()
     for syn in syns
 }
@@ -177,7 +179,22 @@ def normalize_topics(topics: Iterable[str]) -> List[str]:
     canonical form, removes duplicates and returns a sorted list.
     """
 
-    normalized = [_REVERSE_SYNONYMS.get(t.strip().lower(), t.strip().lower()) for t in topics]
+    normalized: list[str] = []
+    for topic in topics:
+        canonical = normalize_topic_identifier(topic)
+        if canonical:
+            normalized.append(canonical)
+            continue
+        if not isinstance(topic, str):
+            continue
+        cleaned = topic.strip()
+        if not cleaned:
+            continue
+        mapped = _REVERSE_SYNONYMS.get(cleaned.casefold())
+        if mapped:
+            normalized.append(mapped)
+        else:
+            normalized.append(cleaned)
     return sorted(set(normalized))
 
 

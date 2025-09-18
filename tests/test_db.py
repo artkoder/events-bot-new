@@ -84,7 +84,7 @@ async def test_event_topics_roundtrip(tmp_path):
             time="10:00",
             location_name="Loc",
             source_text="Src",
-            topics=["искусство"],
+            topics=["ART"],
             topics_manual=True,
         )
         session.add(ev)
@@ -96,12 +96,12 @@ async def test_event_topics_roundtrip(tmp_path):
             "SELECT topics, topics_manual FROM event WHERE id=?", (event_id,)
         )
         row = await cursor.fetchone()
-    assert json.loads(row[0]) == ["искусство"]
+    assert json.loads(row[0]) == ["ART"]
     assert row[1] in (1, True)
 
     async with db.get_session() as session:
         stored = await session.get(Event, event_id)
         assert stored is not None
-        assert stored.topics == ["искусство"]
+        assert stored.topics == ["ART"]
         assert stored.topics_manual is True
 

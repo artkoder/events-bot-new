@@ -890,7 +890,7 @@ async def test_show_edit_menu_formats_topics():
         date=FUTURE_DATE,
         time="18:00",
         location_name="Hall",
-        topics=["искусство", "музыка"],
+        topics=["ART", "MUSIC"],
         topics_manual=True,
     )
 
@@ -4726,7 +4726,7 @@ async def test_build_events_message_includes_topic_badges(tmp_path: Path):
                 date=target.isoformat(),
                 time="10:00",
                 location_name="Hall",
-                topics=["искусство", "музыка"],
+                topics=["ART", "MUSIC"],
             )
         )
         await session.commit()

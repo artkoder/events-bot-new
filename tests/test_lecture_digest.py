@@ -334,16 +334,16 @@ def test_format_event_line_and_link_priority():
 
 def test_aggregate_topics():
     events = [
-        SimpleNamespace(topics=["искусство", "культура"]),
-        SimpleNamespace(topics=["история россии", "российская история"]),
-        SimpleNamespace(topics=["ит", "тех"]),
-        SimpleNamespace(topics=["музыка"]),
+        SimpleNamespace(topics=["ART", "культура"]),
+        SimpleNamespace(topics=["HISTORY_RU", "российская история"]),
+        SimpleNamespace(topics=["TECH", "тех"]),
+        SimpleNamespace(topics=["MUSIC"]),
         SimpleNamespace(topics=["культура"]),
     ]
     assert aggregate_digest_topics(events) == [
-        "искусство",
-        "история россии",
-        "музыка",
+        "ART",
+        "HISTORY_RU",
+        "MUSIC",
     ]
 
 

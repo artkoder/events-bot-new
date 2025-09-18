@@ -30,12 +30,12 @@ async def test_classify_event_topics_filters_and_limits(monkeypatch):
         return json.dumps(
             {
                 "topics": [
-                    "Музыка",
+                    "MUSIC",
                     "неизвестная",
-                    "искусство",
-                    "кино",
-                    "музыка",
-                    "урбанистика",
+                    "art",
+                    "CINEMA",
+                    "MUSIC",
+                    "URBANISM",
                 ]
             }
         )
@@ -53,7 +53,7 @@ async def test_classify_event_topics_filters_and_limits(monkeypatch):
 
     result = await main.classify_event_topics(event)
 
-    assert result == ["музыка", "искусство", "кино"]
+    assert result == ["MUSIC", "ART", "CINEMA"]
     assert "#музыка" in captured["text"]
     kwargs = captured["kwargs"]
     assert kwargs["model"] == "gpt-4o-mini"
