@@ -878,6 +878,28 @@ async def test_events_list(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_show_edit_menu_formats_topics():
+    bot = DummyBot("123:abc")
+    event = Event(
+        id=1,
+        title="T",
+        description="d",
+        source_text="s",
+        date=FUTURE_DATE,
+        time="18:00",
+        location_name="Hall",
+        topics=["искусство", "музыка"],
+        topics_manual=True,
+    )
+
+    await main.show_edit_menu(1, event, bot)
+
+    assert bot.messages
+    message_text = bot.messages[-1][1]
+    assert "Темы: Искусство, Музыка (ручной режим)" in message_text
+
+
+@pytest.mark.asyncio
 async def test_events_russian_date_current_year(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
@@ -4603,6 +4625,32 @@ async def test_nav_future_has_prev(tmp_path: Path, monkeypatch):
     assert len(row) == 2
     assert row[0].text == "\u25c0"
     assert row[1].text == "\u25b6"
+
+
+@pytest.mark.asyncio
+async def test_build_events_message_includes_topic_badges(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    target = date.fromisoformat(FUTURE_DATE)
+    async with db.get_session() as session:
+        session.add(
+            Event(
+                title="T",
+                description="d",
+                source_text="t",
+                date=target.isoformat(),
+                time="10:00",
+                location_name="Hall",
+                topics=["искусство", "музыка"],
+            )
+        )
+        await session.commit()
+
+    text, _ = await main.build_events_message(db, target, timezone.utc)
+
+    assert "[Искусство]" in text
+    assert "[Музыка]" in text
 
 
 @pytest.mark.asyncio
