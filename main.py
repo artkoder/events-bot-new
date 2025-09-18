@@ -6,6 +6,7 @@ Debugging:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time as unixtime
@@ -8017,7 +8018,33 @@ async def reconcile_job_outbox(db: Database) -> None:
         await session.commit()
 
 
+_run_due_jobs_lock = asyncio.Lock()
+
+
 async def _run_due_jobs_once(
+    db: Database,
+    bot: Bot,
+    notify: Callable[[JobTask, int, JobStatus, bool, str | None, str | None], Awaitable[None]] | None = None,
+    only_event: int | None = None,
+    ics_progress: dict[int, Any] | Any | None = None,
+    fest_progress: dict[int, Any] | Any | None = None,
+    allowed_tasks: set[JobTask] | None = None,
+    force_notify: bool = False,
+) -> int:
+    async with _run_due_jobs_lock:
+        return await _run_due_jobs_once_locked(
+            db,
+            bot,
+            notify=notify,
+            only_event=only_event,
+            ics_progress=ics_progress,
+            fest_progress=fest_progress,
+            allowed_tasks=allowed_tasks,
+            force_notify=force_notify,
+        )
+
+
+async def _run_due_jobs_once_locked(
     db: Database,
     bot: Bot,
     notify: Callable[[JobTask, int, JobStatus, bool, str | None, str | None], Awaitable[None]] | None = None,
