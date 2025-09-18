@@ -37,3 +37,29 @@
 
 Use `/addevent` to let model 4o extract fields. `/addevent_raw` lets you
 input simple data separated by `|` pipes.
+
+## Event topics
+
+The classifier assigns up to three topic identifiers to each event. The same labels
+appear in the `/events` listing so moderators instantly see the context. Current
+labels:
+
+- `STANDUP` — «Стендап и комедия»
+- `QUIZ_GAMES` — «Квизы и игры»
+- `OPEN_AIR` — «Фестивали и open-air»
+- `PARTIES` — «Вечеринки»
+- `CONCERTS` — «Концерты»
+- `MOVIES` — «Кино»
+- `EXHIBITIONS` — «Выставки и арт»
+- `THEATRE` — «Театр»
+- `LECTURES` — «Лекции и встречи»
+- `MASTERCLASS` — «Мастер-классы»
+- `SCIENCE_POP` — «Научпоп»
+- `HANDMADE` — «Хендмейд/маркеты/ярмарки/МК» (сюда попадают ярмарки и pop-up маркеты)
+- `NETWORKING` — «Нетворкинг и карьера»
+- `ACTIVE` — «Активный отдых и спорт»
+- `PERSONALITIES` — «Личности и встречи»
+- `KIDS_SCHOOL` — «Дети и школа»
+- `FAMILY` — «Семейные события»
+
+Редактируя события, ориентируйтесь на эти подписи: их видят админы и читатели.

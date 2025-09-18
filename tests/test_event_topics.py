@@ -18,6 +18,7 @@ def test_event_topic_prompt_mentions_topics():
         assert label in prompt
     assert "Бесплатно" in prompt
     assert "Фестивали" in prompt
+    assert "ярмарк" in prompt.casefold()
 
 
 @pytest.mark.asyncio
