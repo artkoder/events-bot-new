@@ -82,23 +82,28 @@ async def recognize_posters(
     model = os.getenv("POSTER_OCR_MODEL", "gpt-4o-mini")
     async with db.get_session() as session:
         hashes = [digest for _, digest in payloads]
-        cache_map: dict[str, PosterOcrCache] = {}
+        cache_map: dict[tuple[str, str, str], PosterOcrCache] = {}
         if hashes:
             result = await session.execute(
-                select(PosterOcrCache).where(PosterOcrCache.hash.in_(hashes))
+                select(PosterOcrCache).where(
+                    PosterOcrCache.hash.in_(hashes),
+                    PosterOcrCache.detail == detail,
+                    PosterOcrCache.model == model,
+                )
             )
             for row in result.scalars():
-                cache_map[row.hash] = row
+                cache_map[(row.hash, row.detail, row.model)] = row
 
         results: list[PosterOcrCache] = []
-        pending: list[PosterOcrCache] = []
+        new_entries: list[PosterOcrCache] = []
+        updated_entries: list[PosterOcrCache] = []
         total_new_tokens = 0
         today = _today_key()
         usage_row = await session.get(OcrUsageModel, today)
         spent_before = usage_row.spent_tokens if usage_row else 0
         limit_remaining = DAILY_TOKEN_LIMIT - spent_before
         needs_new_requests = any(
-            not (cache_map.get(digest) and cache_map[digest].detail == detail)
+            (digest, detail, model) not in cache_map
             for _, digest in payloads
         )
         if count_usage and payloads and needs_new_requests:
@@ -110,25 +115,40 @@ async def recognize_posters(
                 )
 
         for data, digest in payloads:
-            cached = cache_map.get(digest)
-            if cached and cached.detail == detail:
+            cache_key = (digest, detail, model)
+            cached = cache_map.get(cache_key)
+            if cached:
                 results.append(cached)
                 continue
 
             ocr_result = await run_ocr(data, model=model, detail=detail)
             usage = ocr_result.usage
-            entry = PosterOcrCache(
-                hash=digest,
-                detail=detail,
-                model=model,
-                text=ocr_result.text,
-                prompt_tokens=int(getattr(usage, "prompt_tokens", 0) or 0),
-                completion_tokens=int(getattr(usage, "completion_tokens", 0) or 0),
-                total_tokens=int(getattr(usage, "total_tokens", 0) or 0),
-            )
-            pending.append(entry)
+            entry = cache_map.get(cache_key)
+            if entry is None:
+                entry = await session.get(PosterOcrCache, cache_key)
+            token_counts = {
+                "prompt_tokens": int(getattr(usage, "prompt_tokens", 0) or 0),
+                "completion_tokens": int(getattr(usage, "completion_tokens", 0) or 0),
+                "total_tokens": int(getattr(usage, "total_tokens", 0) or 0),
+            }
+            if entry is None:
+                entry = PosterOcrCache(
+                    hash=digest,
+                    detail=detail,
+                    model=model,
+                    text=ocr_result.text,
+                    **token_counts,
+                )
+                new_entries.append(entry)
+            else:
+                entry.text = ocr_result.text
+                entry.prompt_tokens = token_counts["prompt_tokens"]
+                entry.completion_tokens = token_counts["completion_tokens"]
+                entry.total_tokens = token_counts["total_tokens"]
+                entry.created_at = datetime.utcnow()
+                updated_entries.append(entry)
             results.append(entry)
-            cache_map[digest] = entry
+            cache_map[cache_key] = entry
             if count_usage:
                 total_new_tokens += entry.total_tokens
                 limit_remaining = DAILY_TOKEN_LIMIT - (spent_before + total_new_tokens)
@@ -136,7 +156,7 @@ async def recognize_posters(
                     break
 
         spent_after = spent_before
-        if pending:
+        if new_entries or updated_entries:
             if count_usage and total_new_tokens:
                 charged_total = spent_before + total_new_tokens
                 if charged_total > DAILY_TOKEN_LIMIT:
@@ -146,13 +166,13 @@ async def recognize_posters(
                 usage_row.spent_tokens = charged_total
                 session.add(usage_row)
                 spent_after = charged_total
-            for entry in pending:
+            for entry in new_entries:
                 session.add(entry)
             await session.commit()
             if usage_row is not None:
                 await session.refresh(usage_row)
                 spent_after = usage_row.spent_tokens
-            for entry in pending:
+            for entry in new_entries:
                 await session.refresh(entry)
         else:
             spent_after = usage_row.spent_tokens if usage_row else spent_after
