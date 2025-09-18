@@ -7523,6 +7523,12 @@ async def handle_add_event(
                 switch_inline_query_current_chat=f"/vklink {saved.id} ",
             )
         ]
+        buttons_second.append(
+            types.InlineKeyboardButton(
+                text="Редактировать",
+                callback_data=f"edit:{saved.id}",
+            )
+        )
         markup = types.InlineKeyboardMarkup(
             inline_keyboard=[buttons_first, buttons_second]
         )
@@ -7611,6 +7617,12 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
             switch_inline_query_current_chat=f"/vklink {event.id} ",
         )
     ]
+    buttons_second.append(
+        types.InlineKeyboardButton(
+            text="Редактировать",
+            callback_data=f"edit:{event.id}",
+        )
+    )
     markup = types.InlineKeyboardMarkup(
         inline_keyboard=[buttons_first, buttons_second]
     )

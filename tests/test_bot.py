@@ -2987,6 +2987,66 @@ async def test_mark_free(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_add_event_raw_has_edit_button(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async def fake_create(title, text, source, html_text=None, media=None, ics_url=None, db=None, **kwargs):
+        return "https://telegra.ph/test", "path", "", 0
+
+    monkeypatch.setattr("main.create_source_page", fake_create)
+
+    async def fake_schedule(db_obj, ev, *, drain_nav=True):
+        return {}
+
+    monkeypatch.setattr("main.schedule_event_update_tasks", fake_schedule)
+
+    class StopProcessing(Exception):
+        pass
+
+    original_send_message = DummyBot.send_message
+
+    async def send_message_hook(self, chat_id, text, **kwargs):
+        message = await original_send_message(self, chat_id, text, **kwargs)
+        if text.startswith("Event"):
+            raise StopProcessing
+        return message
+
+    monkeypatch.setattr(DummyBot, "send_message", send_message_hook)
+
+    msg = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "M"},
+            "text": "/addevent_raw Party|2025-07-16|18:00|Club",
+        }
+    )
+    with pytest.raises(StopProcessing):
+        await handle_add_event_raw(msg, db, bot)
+
+    async with db.get_session() as session:
+        event = (await session.execute(select(Event))).scalars().first()
+
+    assert event is not None
+
+    event_message = next(
+        (m for m in bot.messages if m[1].startswith("Event")),
+        None,
+    )
+    assert event_message is not None
+    markup = event_message[2]["reply_markup"]
+    assert markup is not None
+    second_row = markup.inline_keyboard[1]
+    texts = [button.text for button in second_row]
+    callbacks = [button.callback_data for button in second_row]
+    assert "Редактировать" in texts
+    assert f"edit:{event.id}" in callbacks
+
+
+@pytest.mark.asyncio
 async def test_toggle_silent(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
