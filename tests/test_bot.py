@@ -4753,10 +4753,27 @@ async def test_update_event_description_from_telegraph(tmp_path: Path, monkeypat
     )
     async with db.get_session() as session:
         session.add(event)
+        await session.flush()
+        session.add(
+            EventPoster(
+                event_id=event.id,
+                poster_hash="hash1",
+                ocr_text="Poster text one",
+                prompt_tokens=1,
+                completion_tokens=2,
+                total_tokens=3,
+            )
+        )
         await session.commit()
 
-    async def fake_parse(text: str, source_channel: str | None = None) -> list[dict]:
+    captured: dict[str, Any] = {}
+
+    async def fake_parse(
+        text: str, source_channel: str | None = None, **kwargs
+    ) -> list[dict]:
         assert "first" in text and "second" in text
+        captured["poster_texts"] = kwargs.get("poster_texts")
+        captured["poster_summary"] = kwargs.get("poster_summary")
         return [
             {
                 "title": "T",
@@ -4775,6 +4792,11 @@ async def test_update_event_description_from_telegraph(tmp_path: Path, monkeypat
         updated = await session.get(Event, event.id)
 
     assert updated.description == "combined"
+    assert captured["poster_texts"] == ["Poster text one"]
+    assert (
+        captured["poster_summary"]
+        == "Posters processed: 1. Tokens — prompt: 1, completion: 2, total: 3."
+    )
 
 
 @pytest.mark.asyncio

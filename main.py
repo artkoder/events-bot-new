@@ -6354,6 +6354,61 @@ async def upsert_event_posters(
     await session.commit()
 
 
+async def _fetch_event_posters(
+    event_id: int | None, db_obj: Database | None
+) -> list[EventPoster]:
+    """Return saved poster rows for the given event ordered by recency."""
+
+    if not event_id or db_obj is None:
+        return []
+
+    async with db_obj.get_session() as session:
+        result = await session.execute(
+            select(EventPoster)
+            .where(EventPoster.event_id == event_id)
+            .order_by(EventPoster.updated_at.desc(), EventPoster.id.desc())
+        )
+        return list(result.scalars().all())
+
+
+async def get_event_poster_texts(
+    event_id: int | None,
+    db_obj: Database | None,
+    *,
+    posters: Sequence[EventPoster] | None = None,
+) -> list[str]:
+    """Load stored OCR blocks for an event and return non-empty texts."""
+
+    if posters is None:
+        posters = await _fetch_event_posters(event_id, db_obj)
+
+    texts: list[str] = []
+    for poster in posters:
+        raw = (poster.ocr_text or "").strip()
+        if raw:
+            texts.append(raw)
+    return texts
+
+
+def _summarize_event_posters(posters: Sequence[EventPoster]) -> str | None:
+    """Build a short summary describing stored OCR usage."""
+
+    if not posters:
+        return None
+
+    prompt_tokens = sum(p.prompt_tokens or 0 for p in posters)
+    completion_tokens = sum(p.completion_tokens or 0 for p in posters)
+    total_tokens = sum(p.total_tokens or 0 for p in posters)
+
+    if prompt_tokens == completion_tokens == total_tokens == 0:
+        return f"Posters processed: {len(posters)}."
+
+    return (
+        f"Posters processed: {len(posters)}. "
+        f"Tokens — prompt: {prompt_tokens}, completion: {completion_tokens}, total: {total_tokens}."
+    )
+
+
 async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
     """Insert or update an event if a similar one exists.
 
@@ -16601,7 +16656,11 @@ def _vkrev_collect_photo_ids(items: list[dict], max_photos: int) -> list[str]:
 
 
 async def build_short_vk_text(
-    event: Event, source_text: str, max_sentences: int = 4
+    event: Event,
+    source_text: str,
+    max_sentences: int = 4,
+    *,
+    poster_texts: Sequence[str] | None = None,
 ) -> str:
     text = (source_text or "").strip()
     fallback_from_title = False
@@ -16623,12 +16682,18 @@ async def build_short_vk_text(
         fallback = " ".join(sentences[: min(max_sentences, 2)]).strip()
         return fallback or text
 
+    extra_blocks = [block.strip() for block in poster_texts or [] if block.strip()]
+    prompt_text = text
+    if extra_blocks:
+        joined = "\n\n".join(extra_blocks)
+        prompt_text = f"{prompt_text}\n\nДополнительный текст с афиш:\n{joined}"
+
     prompt = (
         "Сократи описание ниже без выдумок, сохраняя все важные детали "
         "и перечисленных ключевых участников, максимум до "
         f"{max_sentences} предложений. Разрешены эмодзи. "
         "Пиши дружелюбно и не добавляй прямых рекламных призывов (например, про покупку билетов). "
-        f"Разбивай текст на абзацы для удобства чтения.\n\n{text}"
+        f"Разбивай текст на абзацы для удобства чтения.\n\n{prompt_text}"
     )
     try:
         raw = await ask_4o(
@@ -17168,7 +17233,11 @@ async def _vkrev_handle_repost(callback: types.CallbackQuery, event_id: int, db:
 
 
 async def _vkrev_build_shortpost(
-    ev: Event, vk_url: str, *, for_preview: bool = False
+    ev: Event,
+    vk_url: str,
+    *,
+    for_preview: bool = False,
+    poster_texts: Sequence[str] | None = None,
 ) -> tuple[str, str | None]:
     def _normalize_loc_part(part: str | None) -> str:
         if not part:
@@ -17188,7 +17257,12 @@ async def _vkrev_build_shortpost(
         max_sent = 3
     else:
         max_sent = 4
-    summary = await build_short_vk_text(ev, ev.source_text or "", max_sent)
+    summary = await build_short_vk_text(
+        ev,
+        ev.source_text or "",
+        max_sent,
+        poster_texts=poster_texts,
+    )
 
     start_date: date | None = None
     try:
@@ -17318,7 +17392,14 @@ async def _vkrev_handle_shortpost(callback: types.CallbackQuery, event_id: int, 
         await bot.send_message(callback.message.chat.id, "❌ Не удалось: нет события")
         return
 
-    message, _ = await _vkrev_build_shortpost(ev, vk_url, for_preview=True)
+    poster_texts = await get_event_poster_texts(event_id, db)
+
+    message, _ = await _vkrev_build_shortpost(
+        ev,
+        vk_url,
+        for_preview=True,
+        poster_texts=poster_texts,
+    )
     markup = types.InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -17366,8 +17447,13 @@ async def _vkrev_publish_shortpost(
     if not ev:
         await bot.send_message(actor_chat_id, "❌ Не удалось: нет события")
         return
+    poster_texts = await get_event_poster_texts(event_id, db)
     if text is None:
-        message, link_attachment = await _vkrev_build_shortpost(ev, vk_url)
+        message, link_attachment = await _vkrev_build_shortpost(
+            ev,
+            vk_url,
+            poster_texts=poster_texts,
+        )
     else:
         message = text
         link_attachment = ev.telegraph_url or vk_url
@@ -18356,8 +18442,16 @@ async def update_event_description(event: Event, db: Database) -> None:
     if not text:
         logging.info("no source text for event %s", event.id)
         return
+    posters = await _fetch_event_posters(event.id, db)
+    poster_texts = await get_event_poster_texts(event.id, db, posters=posters)
+    poster_summary = _summarize_event_posters(posters)
     try:
-        parsed = await parse_event_via_4o(text)
+        parse_kwargs: dict[str, Any] = {}
+        if poster_texts:
+            parse_kwargs["poster_texts"] = poster_texts
+        if poster_summary:
+            parse_kwargs["poster_summary"] = poster_summary
+        parsed = await parse_event_via_4o(text, **parse_kwargs)
     except Exception as e:
         logging.error("Failed to parse source text for description: %s", e)
         return

@@ -2,6 +2,7 @@ import os, sys
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
 import hashlib
+from datetime import datetime
 
 import pytest
 from types import SimpleNamespace
@@ -353,6 +354,58 @@ async def test_build_event_draft_uses_cached_text_when_limit(monkeypatch, tmp_pa
     assert draft.ocr_tokens_spent == 0
     assert draft.ocr_tokens_remaining == 0
 
+
+@pytest.mark.asyncio
+async def test_get_event_poster_texts_returns_saved(tmp_path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    event = Event(
+        title="T",
+        description="",
+        source_text="src",
+        date="2025-09-02",
+        time="18:00",
+        location_name="Hall",
+    )
+
+    async with db.get_session() as session:
+        session.add(event)
+        await session.flush()
+        session.add_all(
+            [
+                EventPoster(
+                    event_id=event.id,
+                    poster_hash="hash-new",
+                    ocr_text="New text",
+                    prompt_tokens=3,
+                    completion_tokens=4,
+                    total_tokens=7,
+                    updated_at=datetime(2025, 2, 1),
+                ),
+                EventPoster(
+                    event_id=event.id,
+                    poster_hash="hash-old",
+                    ocr_text="Old text",
+                    prompt_tokens=1,
+                    completion_tokens=1,
+                    total_tokens=2,
+                    updated_at=datetime(2025, 1, 1),
+                ),
+                EventPoster(
+                    event_id=event.id,
+                    poster_hash="hash-empty",
+                    ocr_text="   ",
+                    updated_at=datetime(2025, 3, 1),
+                ),
+            ]
+        )
+        await session.commit()
+
+    texts = await main.get_event_poster_texts(event.id, db)
+
+    assert texts == ["New text", "Old text"]
+    assert await main.get_event_poster_texts(None, db) == []
 
 @pytest.mark.asyncio
 async def test_build_event_payload_includes_operator_extra(monkeypatch):
