@@ -43,3 +43,29 @@ async def test_init_starts_job_outbox_worker(tmp_path, monkeypatch):
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
+
+
+@pytest.mark.asyncio
+async def test_create_app_startup_waits_for_init(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:abc")
+    monkeypatch.setenv("WEBHOOK_URL", "https://example.com/webhook")
+
+    called = False
+
+    async def fake_init(app, db, bot, webhook):
+        nonlocal called
+        called = True
+        assert webhook == "https://example.com/webhook"
+
+    monkeypatch.setattr(main, "init_db_and_scheduler", fake_init)
+    monkeypatch.setattr(main, "_startup_handler_registered", False)
+
+    prev_db = getattr(main, "db", None)
+    app = main.create_app()
+    try:
+        assert app.on_startup
+        await app.on_startup[-1](app)
+    finally:
+        main.db = prev_db
+
+    assert called

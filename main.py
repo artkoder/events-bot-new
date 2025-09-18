@@ -1357,6 +1357,7 @@ async def set_catbox_enabled(db: Database, value: bool):
         await conn.commit()
     global CATBOX_ENABLED
     CATBOX_ENABLED = value
+    logging.info("CATBOX_ENABLED set to %s", CATBOX_ENABLED)
 
 
 async def get_vk_photos_enabled(db: Database) -> bool:
@@ -13997,6 +13998,7 @@ async def init_db_and_scheduler(
     await get_tz_offset(db)
     global CATBOX_ENABLED
     CATBOX_ENABLED = await get_catbox_enabled(db)
+    logging.info("CATBOX_ENABLED resolved to %s", CATBOX_ENABLED)
     global VK_PHOTOS_ENABLED
     VK_PHOTOS_ENABLED = await get_vk_photos_enabled(db)
     hook = webhook.rstrip("/") + "/webhook"
@@ -19256,8 +19258,7 @@ def create_app() -> web.Application:
     app.router.add_get("/metrics", metrics_handler)
 
     async def on_startup(app: web.Application):
-        loop = asyncio.get_running_loop()
-        loop.create_task(init_db_and_scheduler(app, db, bot, webhook))
+        await init_db_and_scheduler(app, db, bot, webhook)
 
     async def on_shutdown(app: web.Application):
         await bot.session.close()
