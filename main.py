@@ -4754,6 +4754,36 @@ async def classify_event_topics(event: Event) -> list[str]:
     return result
 
 
+def _event_topic_text_length(event: Event) -> int:
+    parts = [
+        getattr(event, "title", "") or "",
+        getattr(event, "description", "") or "",
+        getattr(event, "source_text", "") or "",
+    ]
+    return sum(len(part) for part in parts)
+
+
+async def assign_event_topics(event: Event) -> tuple[list[str], int, str | None, bool]:
+    """Populate ``event.topics`` using automatic classification."""
+
+    text_length = _event_topic_text_length(event)
+    if getattr(event, "topics_manual", False):
+        current = list(getattr(event, "topics", []) or [])
+        return current, text_length, None, True
+
+    try:
+        topics = await classify_event_topics(event)
+        error_text: str | None = None
+    except Exception as exc:  # pragma: no cover - defensive
+        logging.exception("Topic classification raised an exception: %s", exc)
+        topics = []
+        error_text = str(exc)
+
+    event.topics = topics
+    event.topics_manual = False
+    return topics, text_length, error_text, False
+
+
 async def check_duplicate_via_4o(ev: Event, new: Event) -> Tuple[bool, str, str]:
     """Ask the LLM whether two events are duplicates."""
     prompt = (
@@ -7127,6 +7157,9 @@ async def add_events_from_text(
             base_event.date = start_dt.isoformat()
             base_event.end_date = date(start_dt.year, 12, 31).isoformat()
 
+        topics_meta_map: dict[int, tuple[list[str], int, str | None, bool]] = {}
+        topics_meta_map[id(base_event)] = await assign_event_topics(base_event)
+
         events_to_add = [base_event]
         if (
             base_event.event_type != "выставка"
@@ -7149,6 +7182,9 @@ async def add_events_from_text(
                     )
                     copy_e.date = day.isoformat()
                     copy_e.end_date = None
+                    copy_e.topics = list(base_event.topics or [])
+                    copy_e.topics_manual = base_event.topics_manual
+                    topics_meta_map[id(copy_e)] = topics_meta_map[id(base_event)]
                     events_to_add.append(copy_e)
         for event in events_to_add:
             rejected_links: list[str] = []
@@ -7171,6 +7207,16 @@ async def add_events_from_text(
 
             # skip events that have already finished - disabled for consistency in tests
 
+            _meta_topics, meta_text_len, meta_error, meta_manual = topics_meta_map.get(
+                id(event),
+                (
+                    list(event.topics or []),
+                    _event_topic_text_length(event),
+                    None,
+                    bool(event.topics_manual),
+                ),
+            )
+
             async with db.get_session() as session:
                 saved, added = await upsert_event(session, event)
                 if rejected_links:
@@ -7184,6 +7230,28 @@ async def add_events_from_text(
                             url,
                             saved.id,
                         )
+            if meta_manual:
+                logging.info(
+                    "event_topics_classify eid=%s text_len=%d topics=%s manual=True",
+                    saved.id,
+                    meta_text_len,
+                    list(saved.topics or []),
+                )
+            elif meta_error:
+                logging.info(
+                    "event_topics_classify eid=%s text_len=%d topics=%s error=%s",
+                    saved.id,
+                    meta_text_len,
+                    list(saved.topics or []),
+                    meta_error,
+                )
+            else:
+                logging.info(
+                    "event_topics_classify eid=%s text_len=%d topics=%s",
+                    saved.id,
+                    meta_text_len,
+                    list(saved.topics or []),
+                )
             logline("FLOW", saved.id, "start add_event", user=creator_id)
             logline(
                 "FLOW",
@@ -15492,6 +15560,7 @@ async def handle_edit_message(message: types.Message, db: Database, bot: Bot):
         old_date = event.date.split("..", 1)[0]
         old_month = old_date[:7]
         old_fest = event.festival
+        topics_meta: tuple[list[str], int, str | None, bool] | None = None
         if field in {"ticket_price_min", "ticket_price_max"}:
             try:
                 setattr(event, field, int(value))
@@ -15518,7 +15587,33 @@ async def handle_edit_message(message: types.Message, db: Database, bot: Bot):
                     setattr(event, field, value)
             else:
                 setattr(event, field, value)
+        if field in {"title", "description", "source_text"} and not event.topics_manual:
+            topics_meta = await assign_event_topics(event)
         await session.commit()
+        if topics_meta:
+            topics_list, text_len, error_text, manual_flag = topics_meta
+            if manual_flag:
+                logging.info(
+                    "event_topics_classify eid=%s text_len=%d topics=%s manual=True",
+                    event.id,
+                    text_len,
+                    topics_list,
+                )
+            elif error_text:
+                logging.info(
+                    "event_topics_classify eid=%s text_len=%d topics=%s error=%s",
+                    event.id,
+                    text_len,
+                    topics_list,
+                    error_text,
+                )
+            else:
+                logging.info(
+                    "event_topics_classify eid=%s text_len=%d topics=%s",
+                    event.id,
+                    text_len,
+                    topics_list,
+                )
         new_date = event.date.split("..", 1)[0]
         new_month = new_date[:7]
         new_fest = event.festival
