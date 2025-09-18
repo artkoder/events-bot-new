@@ -3,7 +3,7 @@ import pytest
 import main
 from main import Database, JobTask, JobOutbox, JobStatus
 from sqlalchemy import select
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 
 @pytest.mark.asyncio
@@ -39,8 +39,8 @@ async def test_enqueue_job_requeue_and_skip(tmp_path, caplog):
                 status=JobStatus.done,
                 attempts=1,
                 last_error="err",
-                updated_at=datetime.utcnow() - timedelta(days=1),
-                next_run_at=datetime.utcnow() - timedelta(days=1),
+                updated_at=datetime.now(timezone.utc) - timedelta(days=1),
+                next_run_at=datetime.now(timezone.utc) - timedelta(days=1),
             )
         )
         session.add(

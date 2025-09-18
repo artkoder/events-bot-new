@@ -1,5 +1,5 @@
 import pytest
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy import select
 
 import main
@@ -23,8 +23,8 @@ async def test_drain_coalesced_month_task(tmp_path, monkeypatch):
                 task=JobTask.month_pages,
                 status=JobStatus.pending,
                 coalesce_key="month_pages:2025-09",
-                updated_at=datetime.utcnow(),
-                next_run_at=datetime.utcnow(),
+                updated_at=datetime.now(timezone.utc),
+                next_run_at=datetime.now(timezone.utc),
             )
         )
         await session.commit()
@@ -67,8 +67,8 @@ async def test_drain_coalesced_weekend_task(tmp_path, monkeypatch):
                 task=JobTask.weekend_pages,
                 status=JobStatus.pending,
                 coalesce_key="weekend_pages:2025-09-06",
-                updated_at=datetime.utcnow(),
-                next_run_at=datetime.utcnow(),
+                updated_at=datetime.now(timezone.utc),
+                next_run_at=datetime.now(timezone.utc),
             )
         )
         await session.commit()

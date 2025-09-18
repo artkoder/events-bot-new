@@ -169,7 +169,7 @@ async def recognize_posters(
                 "completion_tokens": int(getattr(usage, "completion_tokens", 0) or 0),
                 "total_tokens": int(getattr(usage, "total_tokens", 0) or 0),
             }
-            created_at = datetime.utcnow()
+            created_at = datetime.now(timezone.utc)
             if entry is None:
                 entry = PosterOcrCache(
                     hash=digest,

@@ -9,7 +9,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, List, Sequence
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from db import Database
 from poster_media import (
@@ -575,7 +575,7 @@ async def persist_event_and_pages(
         title=draft.title,
         description=(draft.description or ""),
         festival=(draft.festival or None),
-        date=draft.date or datetime.utcnow().date().isoformat(),
+        date=draft.date or datetime.now(timezone.utc).date().isoformat(),
         time=draft.time or "00:00",
         location_name=draft.venue or "",
         location_address=draft.location_address or None,

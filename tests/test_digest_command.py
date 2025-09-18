@@ -1,6 +1,6 @@
 import os, sys
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import pytest
 from aiogram import types
 from types import SimpleNamespace
@@ -68,7 +68,7 @@ async def test_handle_digest_sends_preview(tmp_path, monkeypatch):
     await db.init()
     async with db.get_session() as session:
         session.add(User(user_id=1, is_superadmin=True))
-        dt = datetime.utcnow() + timedelta(days=1)
+        dt = datetime.now(timezone.utc) + timedelta(days=1)
         ev = Event(
             title="L1",
             description="d",
@@ -126,7 +126,7 @@ async def test_handle_digest_sends_masterclasses_preview(tmp_path, monkeypatch):
     await db.init()
     async with db.get_session() as session:
         session.add(User(user_id=1, is_superadmin=True))
-        dt = datetime.utcnow() + timedelta(days=1)
+        dt = datetime.now(timezone.utc) + timedelta(days=1)
         ev = Event(
             title="M1",
             description="d",

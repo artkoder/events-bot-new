@@ -6176,7 +6176,7 @@ async def test_build_daily_posts(tmp_path: Path, monkeypatch):
                 date=start.isoformat(),
                 time="12:00",
                 location_name="Hall",
-                added_at=datetime.utcnow(),
+                added_at=datetime.now(timezone.utc),
             )
         )
         session.add(MonthPage(month=today.strftime("%Y-%m"), url="m1", path="p1"))
@@ -6253,7 +6253,7 @@ async def test_daily_weekend_date_link(tmp_path: Path):
                 date=saturday.isoformat(),
                 time="12:00",
                 location_name="Hall",
-                added_at=datetime.utcnow(),
+                added_at=datetime.now(timezone.utc),
             )
         )
         session.add(WeekendPage(start=saturday.isoformat(), url="w", path="wp"))
@@ -6386,7 +6386,7 @@ def test_format_event_vk_with_vk_link():
         location_name="Hall",
         source_post_url="https://vk.com/wall-1_1",
         telegraph_url="https://t.me/page",
-        added_at=datetime.utcnow() - timedelta(days=2),
+        added_at=datetime.now(timezone.utc) - timedelta(days=2),
     )
     text = main.format_event_vk(e)
     lines = text.splitlines()
@@ -6438,7 +6438,7 @@ def test_format_event_vk_falls_back_to_source_vk_post_url():
         source_post_url="https://example.com/page",
         source_vk_post_url="https://vk.com/wall-1_1",
         telegraph_url="https://t.me/page",
-        added_at=datetime.utcnow() - timedelta(days=2),
+        added_at=datetime.now(timezone.utc) - timedelta(days=2),
     )
     text = main.format_event_vk(e)
     lines = text.splitlines()
@@ -6458,7 +6458,7 @@ def test_format_event_vk_prefers_source_post_url():
         source_post_url="https://vk.com/wall-1_2",
         source_vk_post_url="https://vk.com/wall-1_1",
         telegraph_url="https://t.me/page",
-        added_at=datetime.utcnow() - timedelta(days=2),
+        added_at=datetime.now(timezone.utc) - timedelta(days=2),
     )
     text = main.format_event_vk(e)
     lines = text.splitlines()
@@ -8613,7 +8613,7 @@ async def test_partner_reminder_weekly(tmp_path: Path):
 
     async with db.get_session() as session:
         user = await session.get(User, 1)
-        user.last_partner_reminder = datetime.utcnow() - timedelta(days=8)
+        user.last_partner_reminder = datetime.now(timezone.utc) - timedelta(days=8)
         await session.commit()
 
     notified = await notify_inactive_partners(db, bot, tz)
