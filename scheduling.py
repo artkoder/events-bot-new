@@ -21,6 +21,7 @@ from apscheduler.executors.asyncio import AsyncIOExecutor
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from db import optimize, wal_checkpoint_truncate, vacuum
+from runtime import get_running_main
 
 
 @dataclass
@@ -416,7 +417,18 @@ def _on_event(event):
     )
 
 
-def startup(db, bot) -> AsyncIOScheduler:
+def startup(
+    db,
+    bot,
+    *,
+    vk_scheduler=None,
+    vk_poll_scheduler=None,
+    vk_crawl_cron=None,
+    cleanup_scheduler=None,
+    partner_notification_scheduler=None,
+    nightly_page_sync=None,
+    rebuild_fest_nav_if_changed=None,
+) -> AsyncIOScheduler:
     global _scheduler
     if _scheduler is None:
         executor = AsyncIOExecutor()
@@ -429,14 +441,39 @@ def startup(db, bot) -> AsyncIOScheduler:
             }
         )
 
-    from main import (
-        vk_scheduler,
-        vk_poll_scheduler,
-        vk_crawl_cron,
-        cleanup_scheduler,
-        partner_notification_scheduler,
-        nightly_page_sync,
-        rebuild_fest_nav_if_changed,
+    main_module = None
+
+    def resolve(name: str, value):
+        nonlocal main_module
+        if value is not None:
+            return value
+        if main_module is None:
+            main_module = get_running_main()
+        if main_module is None:
+            raise RuntimeError(
+                f"{name} not provided and main module is not loaded"
+            )
+        try:
+            return getattr(main_module, name)
+        except AttributeError as exc:  # pragma: no cover - defensive
+            raise RuntimeError(
+                f"running main module does not define {name!r}"
+            ) from exc
+
+    vk_scheduler = resolve("vk_scheduler", vk_scheduler)
+    vk_poll_scheduler = resolve("vk_poll_scheduler", vk_poll_scheduler)
+    vk_crawl_cron = resolve("vk_crawl_cron", vk_crawl_cron)
+    cleanup_scheduler = resolve("cleanup_scheduler", cleanup_scheduler)
+    partner_notification_scheduler = resolve(
+        "partner_notification_scheduler", partner_notification_scheduler
+    )
+    rebuild_fest_nav_if_changed = resolve(
+        "rebuild_fest_nav_if_changed", rebuild_fest_nav_if_changed
+    )
+    nightly_page_sync = (
+        resolve("nightly_page_sync", nightly_page_sync)
+        if os.getenv("ENABLE_NIGHTLY_PAGE_SYNC") == "1"
+        else nightly_page_sync
     )
 
     job = _scheduler.add_job(
