@@ -6923,6 +6923,21 @@ async def add_events_from_text(
         poster_items, _ = await process_media(
             normalized_media, need_catbox=True, need_ocr=False
         )
+    source_marker = (
+        source_link
+        or (f"channel:{source_channel}" if source_channel else None)
+        or (
+            f"chat:{source_chat_id}/{source_message_id}"
+            if source_chat_id and source_message_id
+            else None
+        )
+        or (f"chat:{source_chat_id}" if source_chat_id else None)
+        or (f"message:{source_message_id}" if source_message_id else None)
+        or (f"creator:{creator_id}" if creator_id else None)
+        or (f"channel_title:{channel_title}" if channel_title else None)
+        or "add_events_from_text"
+    )
+    ocr_log_context = {"event_id": None, "source": source_marker}
     hash_to_indices: dict[str, list[int]] | None = None
     if normalized_media:
         hash_to_indices = {}
@@ -6936,14 +6951,20 @@ async def add_events_from_text(
                 ocr_results,
                 ocr_tokens_spent,
                 ocr_tokens_remaining,
-            ) = await poster_ocr.recognize_posters(db, normalized_media)
+            ) = await poster_ocr.recognize_posters(
+                db, normalized_media, log_context=ocr_log_context
+            )
         elif poster_items:
-            _, _, ocr_tokens_remaining = await poster_ocr.recognize_posters(db, [])
+            _, _, ocr_tokens_remaining = await poster_ocr.recognize_posters(
+                db, [], log_context=ocr_log_context
+            )
             ocr_tokens_spent = sum(item.total_tokens or 0 for item in poster_items)
         else:
-            _, _, ocr_tokens_remaining = await poster_ocr.recognize_posters(db, [])
+            _, _, ocr_tokens_remaining = await poster_ocr.recognize_posters(
+                db, [], log_context=ocr_log_context
+            )
     except poster_ocr.PosterOcrLimitExceededError as exc:
-        logging.warning("poster OCR skipped: %s", exc)
+        logging.warning("poster OCR skipped: %s", exc, extra=ocr_log_context)
         ocr_results = list(exc.results or [])
         ocr_tokens_spent = exc.spent_tokens
         ocr_tokens_remaining = exc.remaining

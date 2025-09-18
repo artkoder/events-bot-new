@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 from datetime import datetime, timezone
 from importlib import import_module
@@ -17,6 +18,9 @@ import vision_test.ocr
 from vision_test.ocr import run_ocr
 
 DAILY_TOKEN_LIMIT = 10_000_000
+
+
+logger = logging.getLogger(__name__)
 
 
 class PosterOcrLimitExceededError(RuntimeError):
@@ -73,7 +77,9 @@ async def recognize_posters(
     detail: str = "auto",
     *,
     count_usage: bool = True,
+    log_context: dict[str, Any] | None = None,
 ) -> tuple[list[PosterOcrCache], int, int]:
+    log_extra = dict(log_context) if log_context else None
     payloads: list[tuple[bytes, str]] = []
     for item in items:
         data = _ensure_bytes(item)
@@ -82,15 +88,36 @@ async def recognize_posters(
 
     _ensure_http()
 
+    model = os.getenv("POSTER_OCR_MODEL", "gpt-4o-mini")
+    total_items = len(payloads)
+    logger.info(
+        "poster_ocr.start items=%d detail=%s model=%s count_usage=%s",
+        total_items,
+        detail,
+        model,
+        count_usage,
+        extra=log_extra,
+    )
+
     if not payloads:
         async with db.get_session() as session:
             today = _today_key()
             usage_row = await session.get(OcrUsageModel, today)
         remaining = DAILY_TOKEN_LIMIT - (usage_row.spent_tokens if usage_row else 0)
         remaining = max(0, remaining)
+        logger.info(
+            "poster_ocr.stats cache_hits=%d new_entries=%d blocked_uncached=%d spent_tokens=%d charged_tokens=%d total_new_tokens=%d remaining=%d",
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            remaining,
+            extra=log_extra,
+        )
         return [], 0, remaining
 
-    model = os.getenv("POSTER_OCR_MODEL", "gpt-4o-mini")
     async with db.get_session() as session:
         hashes = [digest for _, digest in payloads]
         cache_map: dict[tuple[str, str, str], PosterOcrCache] = {}
@@ -108,6 +135,8 @@ async def recognize_posters(
         results: list[PosterOcrCache] = []
         result_keys: list[tuple[str, str, str]] = []
         total_new_tokens = 0
+        cache_hits = 0
+        blocked_uncached_count = 0
         entries_to_upsert: list[dict[str, Any]] = []
         today = _today_key()
         usage_row = await session.get(OcrUsageModel, today)
@@ -122,10 +151,12 @@ async def recognize_posters(
             if cached:
                 results.append(cached)
                 result_keys.append(cache_key)
+                cache_hits += 1
                 continue
 
             if block_new_requests:
                 encountered_uncached_after_limit = True
+                blocked_uncached_count += 1
                 continue
 
             ocr_result = await run_ocr(data, model=model, detail=detail)
@@ -243,7 +274,25 @@ async def recognize_posters(
             spent_tokens = charged_amount
         else:
             spent_tokens = 0
+
+        logger.info(
+            "poster_ocr.stats cache_hits=%d new_entries=%d blocked_uncached=%d spent_tokens=%d charged_tokens=%d total_new_tokens=%d remaining=%d",
+            cache_hits,
+            len(entries_to_upsert),
+            blocked_uncached_count,
+            spent_tokens,
+            charged_amount,
+            total_new_tokens,
+            remaining,
+            extra=log_extra,
+        )
         if count_usage and encountered_uncached_after_limit:
+            logger.warning(
+                "poster_ocr.limit_exceeded blocked_uncached=%d remaining=%d",
+                blocked_uncached_count,
+                remaining,
+                extra=log_extra,
+            )
             raise PosterOcrLimitExceededError(
                 "poster OCR daily token limit exhausted",
                 spent_tokens=spent_tokens,

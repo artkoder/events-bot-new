@@ -491,15 +491,23 @@ async def build_event_draft(
         poster_items, catbox_msg = await process_media(
             photo_bytes, need_catbox=True, need_ocr=False
         )
+        ocr_source = source_name or "vk"
+        ocr_log_context = {"event_id": None, "source": ocr_source}
         ocr_results: list[poster_ocr.PosterOcrCache] = []
         try:
             (
                 ocr_results,
                 ocr_tokens_spent,
                 ocr_tokens_remaining,
-            ) = await poster_ocr.recognize_posters(db, photo_bytes)
+            ) = await poster_ocr.recognize_posters(
+                db, photo_bytes, log_context=ocr_log_context
+            )
         except poster_ocr.PosterOcrLimitExceededError as exc:
-            logging.warning("vk.build_event_draft OCR skipped: %s", exc)
+            logging.warning(
+                "vk.build_event_draft OCR skipped: %s",
+                exc,
+                extra=ocr_log_context,
+            )
             ocr_results = list(exc.results or [])
             ocr_tokens_spent = exc.spent_tokens
             ocr_tokens_remaining = exc.remaining
@@ -518,7 +526,11 @@ async def build_event_draft(
             catbox_msg or "",
         )
     else:
-        _, _, ocr_tokens_remaining = await poster_ocr.recognize_posters(db, [])
+        ocr_source = source_name or "vk"
+        ocr_log_context = {"event_id": None, "source": ocr_source}
+        _, _, ocr_tokens_remaining = await poster_ocr.recognize_posters(
+            db, [], log_context=ocr_log_context
+        )
     draft = await build_event_payload_from_vk(
         text,
         source_name=source_name,

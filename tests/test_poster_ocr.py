@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import logging
 import os
 from dataclasses import dataclass
 
@@ -277,7 +278,54 @@ async def test_recognize_posters_returns_detached_cache_objects(tmp_path, monkey
 
 
 @pytest.mark.asyncio
-async def test_recognize_posters_limit_exhausted(tmp_path, monkeypatch):
+async def test_recognize_posters_logs_stats(tmp_path, monkeypatch, caplog):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async def fake_run_ocr(data, *, model, detail):
+        return OcrResult(
+            text="text",
+            usage=OcrUsageStats(prompt_tokens=2, completion_tokens=3, total_tokens=5),
+        )
+
+    monkeypatch.setattr(poster_ocr, "run_ocr", fake_run_ocr)
+    monkeypatch.setattr(poster_ocr, "_today_key", lambda: "2024-06-05")
+    caplog.set_level(logging.INFO, logger=poster_ocr.__name__)
+
+    log_context = {"event_id": 777, "source": "unit-test"}
+
+    result, spent_tokens, remaining_tokens = await poster_ocr.recognize_posters(
+        db, [DummyPoster(b"one")], log_context=log_context
+    )
+
+    assert len(result) == 1
+    assert spent_tokens == 5
+    assert remaining_tokens == poster_ocr.DAILY_TOKEN_LIMIT - 5
+
+    start_records = [
+        rec
+        for rec in caplog.records
+        if rec.message.startswith("poster_ocr.start")
+    ]
+    assert start_records
+    assert start_records[0].event_id == log_context["event_id"]
+    assert start_records[0].source == log_context["source"]
+
+    stats_records = [
+        rec
+        for rec in caplog.records
+        if rec.message.startswith("poster_ocr.stats")
+    ]
+    assert stats_records
+    stats_record = stats_records[-1]
+    assert stats_record.event_id == log_context["event_id"]
+    assert stats_record.source == log_context["source"]
+    assert "cache_hits=0" in stats_record.message
+    assert "spent_tokens=5" in stats_record.message
+
+
+@pytest.mark.asyncio
+async def test_recognize_posters_limit_exhausted(tmp_path, monkeypatch, caplog):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
 
@@ -297,12 +345,25 @@ async def test_recognize_posters_limit_exhausted(tmp_path, monkeypatch):
 
     item = DummyPoster(b"exceed")
 
+    caplog.set_level(logging.INFO, logger=poster_ocr.__name__)
+    log_context = {"event_id": 99, "source": "limit-exhausted-test"}
+
     with pytest.raises(poster_ocr.PosterOcrLimitExceededError) as excinfo:
-        await poster_ocr.recognize_posters(db, [item])
+        await poster_ocr.recognize_posters(db, [item], log_context=log_context)
 
     assert excinfo.value.spent_tokens == 0
     assert excinfo.value.remaining == 0
     assert call_count == 0
+
+    warning_records = [
+        rec
+        for rec in caplog.records
+        if rec.levelno == logging.WARNING
+        and rec.message.startswith("poster_ocr.limit_exceeded")
+    ]
+    assert warning_records
+    assert warning_records[0].event_id == log_context["event_id"]
+    assert warning_records[0].source == log_context["source"]
 
     async with db.get_session() as session:
         usage_row = await session.get(OcrUsage, "2024-06-03")
