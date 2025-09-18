@@ -34,7 +34,7 @@ async def test_add_events_from_text_assigns_topics(tmp_path: Path, monkeypatch):
         return "https://t.me/test", "path", "", 0
 
     async def fake_classify(event: Event):
-        return ["MUSIC", "PARTY"]
+        return ["CONCERTS", "PARTIES"]
 
     monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
     monkeypatch.setattr(main, "schedule_event_update_tasks", fake_schedule_event_update_tasks)
@@ -48,7 +48,7 @@ async def test_add_events_from_text_assigns_topics(tmp_path: Path, monkeypatch):
     async with db.get_session() as session:
         stored = await session.get(Event, saved_events[0].id)
 
-    assert stored.topics == ["MUSIC", "PARTY"]
+    assert stored.topics == ["CONCERTS", "PARTIES"]
     assert stored.topics_manual is False
 
 
@@ -77,7 +77,7 @@ async def test_add_events_from_text_multiday_inherits_topics(tmp_path: Path, mon
 
     async def fake_classify(event: Event):
         calls["classify"] += 1
-        return ["PARTY"]
+        return ["PARTIES"]
 
     async def fake_schedule_event_update_tasks(db_obj, event_obj, drain_nav=True):
         return {}
@@ -105,5 +105,5 @@ async def test_add_events_from_text_multiday_inherits_topics(tmp_path: Path, mon
         (start_day + timedelta(days=1)).isoformat(),
     ]
     for ev in stored_events:
-        assert ev.topics == ["PARTY"]
+        assert ev.topics == ["PARTIES"]
         assert ev.topics_manual is False

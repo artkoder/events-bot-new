@@ -53,7 +53,7 @@ async def test_classify_event_topics_filters_and_limits(monkeypatch):
 
     result = await main.classify_event_topics(event)
 
-    assert result == ["MUSIC", "ART", "CINEMA"]
+    assert result == ["CONCERTS", "EXHIBITIONS", "MOVIES"]
     assert "#музыка" in captured["text"]
     kwargs = captured["kwargs"]
     assert kwargs["model"] == "gpt-4o-mini"
@@ -61,7 +61,7 @@ async def test_classify_event_topics_filters_and_limits(monkeypatch):
     enum_values = kwargs["response_format"]["json_schema"]["schema"]["properties"]["topics"]["items"][
         "enum"
     ]
-    assert sorted(enum_values) == sorted(main.TOPIC_LABELS.keys())
+    assert enum_values == list(main.TOPIC_LABELS.keys())
 
 
 @pytest.mark.asyncio
