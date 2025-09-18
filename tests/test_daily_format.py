@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime, timezone
 
 import main
 
@@ -36,3 +36,13 @@ def test_format_event_daily_prefers_telegraph_for_vk_queue() -> None:
     rendered = main.format_event_daily(event)
 
     assert '<a href="https://telegra.ph/test">' in rendered
+
+
+def test_format_event_daily_handles_timezone_aware_added_at() -> None:
+    event = make_event(
+        added_at=datetime(2024, 1, 2, 12, tzinfo=timezone.utc),
+    )
+
+    rendered = main.format_event_daily(event)
+
+    assert isinstance(rendered, str)

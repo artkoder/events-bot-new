@@ -10311,22 +10311,24 @@ def is_vk_wall_url(url: str | None) -> bool:
 def recent_cutoff(tz: timezone, now: datetime | None = None) -> datetime:
     """Return UTC datetime for the start of the previous day in the given tz."""
     if now is None:
-        now = datetime.now(tz)
+        now_local = datetime.now(tz)
+    else:
+        now_local = _ensure_utc(now).astimezone(tz)
     start_local = datetime.combine(
-        now.date() - timedelta(days=1),
+        now_local.date() - timedelta(days=1),
         time(0, 0),
         tz,
     )
-    return start_local.astimezone(timezone.utc).replace(tzinfo=None)
+    return start_local.astimezone(timezone.utc)
 
 
 def week_cutoff(tz: timezone, now: datetime | None = None) -> datetime:
     """Return UTC datetime for 7 days ago."""
     if now is None:
-        now = datetime.now(tz)
-    return (
-        now.astimezone(timezone.utc).replace(tzinfo=None) - timedelta(days=7)
-    )
+        now_utc = datetime.now(tz).astimezone(timezone.utc)
+    else:
+        now_utc = _ensure_utc(now)
+    return now_utc - timedelta(days=7)
 
 
 def split_text(text: str, limit: int = 4096) -> list[str]:
@@ -10349,7 +10351,8 @@ def is_recent(e: Event, tz: timezone | None = None, now: datetime | None = None)
     if tz is None:
         tz = LOCAL_TZ
     start = recent_cutoff(tz, now)
-    return e.added_at >= start
+    added_at = _ensure_utc(e.added_at)
+    return added_at >= start
 
 
 def format_event_md(e: Event, festival: Festival | None = None) -> str:
