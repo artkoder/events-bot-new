@@ -58,7 +58,7 @@ from main import (
     send_festival_poll,
     notify_inactive_partners,
 )
-from poster_media import PosterMedia
+from poster_media import PosterMedia, process_media
 from models import PosterOcrCache
 import poster_ocr
 
@@ -1381,6 +1381,48 @@ async def test_create_source_page_normalizes_hashtags(monkeypatch):
 
     res = await main.create_source_page("Title", "#1_августа text", None)
     assert res == ("https://telegra.ph/test", "test", "", 0)
+
+
+@pytest.mark.asyncio
+async def test_process_media_normalizes_catbox_setting(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.raw_conn() as conn:
+        await conn.execute(
+            "INSERT OR REPLACE INTO setting(key, value) VALUES('catbox_enabled', ?)",
+            ("true",),
+        )
+        await conn.commit()
+
+    main.CATBOX_ENABLED = False
+    enabled = await main.get_catbox_enabled(db)
+    assert enabled is True
+
+    async with db.raw_conn() as conn:
+        cursor = await conn.execute(
+            "SELECT value FROM setting WHERE key='catbox_enabled'"
+        )
+        row = await cursor.fetchone()
+        assert row is not None and row[0] == "1"
+
+    captured: dict[str, Any] = {}
+
+    async def fake_upload_images(images, limit=main.MAX_ALBUM_IMAGES, *, force=False):
+        captured["called"] = True
+        captured["images"] = images
+        return ["https://files.catbox.moe/poster.jpg"], "ok"
+
+    monkeypatch.setattr(main, "upload_images", fake_upload_images)
+    main.CATBOX_ENABLED = enabled
+
+    posters, catbox_msg = await process_media(
+        [(b"fake-bytes", "poster.jpg")], need_catbox=True, need_ocr=False
+    )
+
+    assert captured.get("called") is True
+    assert posters and posters[0].catbox_url == "https://files.catbox.moe/poster.jpg"
+    assert catbox_msg == "ok"
 
 
 def test_get_telegraph_token_creates(tmp_path, monkeypatch):
