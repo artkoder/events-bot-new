@@ -18079,6 +18079,16 @@ async def _process_forwarded(
                 buttons.append(
                     [types.InlineKeyboardButton(text="Добавить город", callback_data="askcity")]
                 )
+            saved_id = getattr(saved, "id", None)
+            if saved_id is not None:
+                buttons.append(
+                    [
+                        types.InlineKeyboardButton(
+                            text="Редактировать",
+                            callback_data=f"edit:{saved_id}",
+                        )
+                    ]
+                )
             keyboard = types.InlineKeyboardMarkup(inline_keyboard=buttons)
             await bot.send_message(
                 message.chat.id,
@@ -18117,7 +18127,7 @@ async def _process_forwarded(
                 ocr_line = None
             await bot.send_message(message.chat.id, text_out, reply_markup=markup)
             continue
-        buttons = []
+        buttons: list[types.InlineKeyboardButton] = []
         if not saved.city:
             buttons.append(
                 types.InlineKeyboardButton(
@@ -18141,9 +18151,18 @@ async def _process_forwarded(
                 callback_data=f"togglesilent:{saved.id}",
             )
         )
-        markup = (
-            types.InlineKeyboardMarkup(inline_keyboard=[buttons]) if buttons else None
+        buttons.append(
+            types.InlineKeyboardButton(
+                text="Редактировать",
+                callback_data=f"edit:{saved.id}",
+            )
         )
+        inline_keyboard: list[list[types.InlineKeyboardButton]]
+        if len(buttons) > 1:
+            inline_keyboard = [buttons[:-1], [buttons[-1]]]
+        else:
+            inline_keyboard = [[buttons[0]]]
+        markup = types.InlineKeyboardMarkup(inline_keyboard=inline_keyboard)
         text_out = f"Event {status}\n" + "\n".join(lines)
         if ocr_line:
             text_out = f"{text_out}\n{ocr_line}"
