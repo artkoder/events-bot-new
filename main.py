@@ -13423,20 +13423,70 @@ async def edit_vk_post(
     if not ids:
         logging.error("invalid VK post url %s", post_url)
         return
-    owner_id, post_id = ids
+    owner_id_str, post_id = ids
+    try:
+        owner_id = int(owner_id_str)
+    except ValueError:
+        logging.error("invalid VK owner id %s", owner_id_str)
+        return
+
     params = {
         "owner_id": owner_id,
         "post_id": post_id,
         "message": message,
         "from_group": 1,
     }
+    posts_arg = f"{owner_id}_{post_id}"
+    user_token = _vk_user_token()
+    chosen_token: str | None = None
+    chosen_token_kind = "group"
+
+    def _normalize_group_id(raw: str | int | None) -> int | None:
+        if raw is None:
+            return None
+        try:
+            return int(str(raw).lstrip("-"))
+        except (TypeError, ValueError):
+            return None
+
+    owner_group_id = _normalize_group_id(owner_id)
+    afisha_group_id = _normalize_group_id(VK_AFISHA_GROUP_ID)
+    main_group_id = _normalize_group_id(VK_MAIN_GROUP_ID)
+    is_our_group = False
+
+    if owner_group_id and afisha_group_id and owner_group_id == afisha_group_id:
+        is_our_group = True
+        if VK_TOKEN_AFISHA:
+            chosen_token = VK_TOKEN_AFISHA
+            chosen_token_kind = "group"
+        elif user_token:
+            chosen_token = user_token
+            chosen_token_kind = "user"
+    elif owner_group_id and main_group_id and owner_group_id == main_group_id:
+        is_our_group = True
+        if VK_TOKEN:
+            chosen_token = VK_TOKEN
+            chosen_token_kind = "group"
+        elif user_token:
+            chosen_token = user_token
+            chosen_token_kind = "user"
+
     current: list[str] = []
     post_text = ""
     old_attachments: list[str] = []
     edit_allowed = True
     edit_block_reason: str | None = None
     try:
-        response = await vk_api("wall.getById", posts=f"{owner_id}_{post_id}")
+        if is_our_group and chosen_token:
+            response = await _vk_api(
+                "wall.getById",
+                {"posts": posts_arg},
+                token=chosen_token,
+                token_kind=chosen_token_kind,
+                skip_captcha=True,
+            )
+        else:
+            response = await vk_api("wall.getById", posts=posts_arg)
         if isinstance(response, dict):
             items = response.get("response") or (
                 response["response"] if "response" in response else response
@@ -13500,7 +13550,6 @@ async def edit_vk_post(
         params["attachments"] = ",".join(current) if current else ""
     elif current:
         params["attachments"] = ",".join(current)
-    user_token = _vk_user_token()
     if not user_token:
         raise VKAPIError(None, "VK_USER_TOKEN missing", method="wall.edit")
     await _vk_api("wall.edit", params, db, bot, token=user_token, token_kind="user")
