@@ -76,6 +76,41 @@ async def test_persist_event_and_pages_persists_extended_fields(tmp_path, monkey
 
 
 @pytest.mark.asyncio
+async def test_persist_event_and_pages_classifies_topics(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async def fake_schedule_event_update_tasks(db_obj, event_obj, drain_nav=True):
+        return {}
+
+    calls = {"topics": 0}
+
+    async def fake_classify(event: Event):
+        calls["topics"] += 1
+        return ["музыка"]
+
+    monkeypatch.setattr(main, "schedule_event_update_tasks", fake_schedule_event_update_tasks)
+    monkeypatch.setattr(main, "classify_event_topics", fake_classify)
+
+    draft = vk_intake.EventDraft(
+        title="T",
+        date="2025-09-01",
+        time="10:00",
+        venue="Club",
+        source_text="Music",
+    )
+
+    res = await vk_intake.persist_event_and_pages(draft, [], db)
+
+    async with db.get_session() as session:
+        saved = await session.get(Event, res.event_id)
+
+    assert calls["topics"] == 1
+    assert saved.topics == ["музыка"]
+    assert saved.topics_manual is False
+
+
+@pytest.mark.asyncio
 async def test_schedule_event_update_tasks_enqueues_and_runs_vk_sync(tmp_path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()

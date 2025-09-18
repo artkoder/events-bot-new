@@ -522,6 +522,66 @@ async def test_edit_event(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_edit_event_reclassifies_topics(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async def fake_schedule_event_update_tasks(db_obj, event_obj, drain_nav=True):
+        return {}
+
+    async def fake_publish_event_progress(*args, **kwargs):
+        return None
+
+    calls = {"topics": 0}
+
+    async def fake_classify(event: Event):
+        calls["topics"] += 1
+        return ["театр"]
+
+    monkeypatch.setattr(main, "schedule_event_update_tasks", fake_schedule_event_update_tasks)
+    monkeypatch.setattr(main, "publish_event_progress", fake_publish_event_progress)
+    monkeypatch.setattr(main, "classify_event_topics", fake_classify)
+
+    async with db.get_session() as session:
+        event = Event(
+            title="Title",
+            description="Desc",
+            festival=None,
+            date=FUTURE_DATE,
+            time="18:00",
+            location_name="Club",
+            location_address=None,
+            city="Калининград",
+            source_text="Source",
+        )
+        session.add(event)
+        await session.commit()
+        await session.refresh(event)
+
+    editing_sessions[1] = (event.id, "description")
+    edit_msg = types.Message.model_validate(
+        {
+            "message_id": 2,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "M"},
+            "text": "Updated description",
+        }
+    )
+
+    await handle_edit_message(edit_msg, db, bot)
+
+    async with db.get_session() as session:
+        refreshed = await session.get(Event, event.id)
+
+    assert calls["topics"] == 1
+    assert refreshed.description == "Updated description"
+    assert refreshed.topics == ["театр"]
+    assert refreshed.topics_manual is False
+
+
+@pytest.mark.asyncio
 async def test_edit_remove_ticket_link(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
