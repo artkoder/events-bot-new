@@ -4501,6 +4501,9 @@ async def parse_event_via_4o(
     user_msg = "".join(user_msg_parts)
     poster_lines: list[str] = []
     if poster_texts:
+        poster_lines.append(
+            "Poster OCR may contain recognition mistakes; cross-check with the main text."
+        )
         poster_lines.append("Poster OCR:")
         for idx, block in enumerate(poster_texts, start=1):
             poster_lines.append(f"[{idx}] {block.strip()}")

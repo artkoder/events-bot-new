@@ -3,6 +3,8 @@
 ## Unreleased
 - Added `/ocrtest` diagnostic command, чтобы сравнить распознавание афиш между `gpt-4o-mini` и `gpt-4o` с показом использования токенов.
 
+- Clarified the 4o parsing prompt to warn about possible OCR mistakes in poster snippets.
+
 ## v0.1.0 – Deploy + US-02 + /tz
 - Initial Fly.io deployment config.
 - Moderator registration queue with approve/reject.

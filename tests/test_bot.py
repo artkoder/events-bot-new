@@ -1131,6 +1131,42 @@ async def test_parse_event_includes_date(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_parse_event_includes_poster_hint(monkeypatch):
+    called = {}
+
+    class DummySession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            pass
+
+        async def post(self, url, json=None, headers=None):
+            called["payload"] = json
+
+            class Resp:
+                def raise_for_status(self):
+                    pass
+
+                async def json(self):
+                    return {"choices": [{"message": {"content": "{}"}}]}
+
+            return Resp()
+
+    monkeypatch.setenv("FOUR_O_TOKEN", "x")
+    monkeypatch.setattr("main.ClientSession", DummySession)
+
+    await parse_event_via_4o("text", poster_texts=["Poster line"])
+
+    user_content = called["payload"]["messages"][1]["content"]
+    assert (
+        "Poster OCR may contain recognition mistakes; cross-check with the main text."
+        in user_content
+    )
+    assert "Poster OCR:\n[1] Poster line" in user_content
+
+
+@pytest.mark.asyncio
 async def test_add_events_from_text_channel_title(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()

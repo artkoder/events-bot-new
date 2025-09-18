@@ -36,6 +36,10 @@ The bot adds these markers automatically on the opening and closing dates.
 Lines from `docs/LOCATIONS.md` are appended to the system prompt so the model
 can normalise venue names. Please keep that file up to date.
 
+When the user message contains a `Poster OCR` block, remember that OCR can
+introduce errors or spurious data. Compare those snippets with the main event
+description and reject details that obviously contradict the primary text.
+
 The user message will start with the current date, e.g. "Today is
 2025-07-05." Use this information to resolve missing years. **Ignore and do not
 include any event whose date is earlier than today.**
