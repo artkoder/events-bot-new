@@ -22,6 +22,7 @@ from poster_media import (
 import poster_ocr
 
 from sections import MONTHS_RU
+from runtime import require_main_attr
 
 # Crawl tuning parameters
 VK_CRAWL_PAGE_SIZE = int(os.getenv("VK_CRAWL_PAGE_SIZE", "30"))
@@ -142,11 +143,16 @@ def detect_date(text: str) -> bool:
     return any(p.search(text) for p in COMPILED_DATE_PATTERNS)
 
 
-def extract_event_ts_hint(text: str, default_time: str | None = None) -> int | None:
+def extract_event_ts_hint(
+    text: str,
+    default_time: str | None = None,
+    *,
+    tz: timezone | None = None,
+) -> int | None:
     """Return Unix timestamp for the nearest future datetime mentioned in text."""
-    from main import LOCAL_TZ
+    tzinfo = tz or require_main_attr("LOCAL_TZ")
 
-    now = datetime.now(LOCAL_TZ)
+    now = datetime.now(tzinfo)
     text_low = text.lower()
 
     day = month = year = None
@@ -213,7 +219,7 @@ def extract_event_ts_hint(text: str, default_time: str | None = None) -> int | N
         explicit_year = year is not None
         year = year or now.year
         try:
-            dt = datetime(year, month, day, tzinfo=LOCAL_TZ)
+            dt = datetime(year, month, day, tzinfo=tzinfo)
         except ValueError:
             return None
         if dt < now:
@@ -222,7 +228,7 @@ def extract_event_ts_hint(text: str, default_time: str | None = None) -> int | N
                 skip_year_rollover = True
             if not skip_year_rollover:
                 try:
-                    dt = datetime(year + 1, month, day, tzinfo=LOCAL_TZ)
+                    dt = datetime(year + 1, month, day, tzinfo=tzinfo)
                 except ValueError:
                     return None
 
@@ -356,7 +362,7 @@ async def build_event_payload_from_vk(
     as title, schedule, venue, ticket details and other metadata needed by the
     import pipeline.
     """
-    from main import parse_event_via_4o
+    parse_event_via_4o = require_main_attr("parse_event_via_4o")
 
     llm_text = text
     if operator_extra:
@@ -704,7 +710,9 @@ async def crawl_once(db, *, broadcast: bool = False, bot: Any | None = None) -> 
     to the admin chat specified by ``ADMIN_CHAT_ID`` environment variable.
     """
 
-    from main import vk_wall_since  # imported lazily to avoid circular import
+    vk_wall_since = require_main_attr(
+        "vk_wall_since"
+    )  # imported lazily to avoid circular import
 
     start = time.perf_counter()
     stats = {
