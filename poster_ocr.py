@@ -106,9 +106,9 @@ async def recognize_posters(
                 cache_map[(row.hash, row.detail, row.model)] = row
 
         results: list[PosterOcrCache] = []
+        result_keys: list[tuple[str, str, str]] = []
         total_new_tokens = 0
         entries_to_upsert: list[dict[str, Any]] = []
-        pending_result_indexes: dict[tuple[str, str, str], list[int]] = {}
         today = _today_key()
         usage_row = await session.get(OcrUsageModel, today)
         spent_before = usage_row.spent_tokens if usage_row else 0
@@ -121,8 +121,7 @@ async def recognize_posters(
             cached = cache_map.get(cache_key)
             if cached:
                 results.append(cached)
-                if cache_key in pending_result_indexes:
-                    pending_result_indexes[cache_key].append(len(results) - 1)
+                result_keys.append(cache_key)
                 continue
 
             if block_new_requests:
@@ -174,7 +173,7 @@ async def recognize_posters(
             )
             cache_map[cache_key] = entry
             results.append(entry)
-            pending_result_indexes.setdefault(cache_key, []).append(len(results) - 1)
+            result_keys.append(cache_key)
             if count_usage:
                 total_new_tokens += entry.total_tokens
                 limit_remaining = DAILY_TOKEN_LIMIT - (spent_before + total_new_tokens)
@@ -221,19 +220,22 @@ async def recognize_posters(
             )
             await session.execute(upsert_stmt)
             await session.commit()
-            session.expire_all()
             usage_row = await session.get(OcrUsageModel, today)
             if usage_row is not None:
+                await session.refresh(usage_row)
                 spent_after = usage_row.spent_tokens
-            for cache_key, indexes in pending_result_indexes.items():
-                fresh = await session.get(PosterOcrCache, cache_key)
-                if fresh is None:
-                    continue
-                cache_map[cache_key] = fresh
-                for idx in indexes:
-                    results[idx] = fresh
         else:
             spent_after = usage_row.spent_tokens if usage_row else spent_after
+
+        hydrated_results: list[PosterOcrCache] = []
+        for idx, cache_key in enumerate(result_keys):
+            fresh = await session.get(PosterOcrCache, cache_key)
+            if fresh is None:
+                cached_entry = cache_map.get(cache_key) or results[idx]
+            else:
+                cached_entry = fresh
+            hydrated_results.append(PosterOcrCache(**cached_entry.model_dump()))
+        results = hydrated_results
 
         remaining = DAILY_TOKEN_LIMIT - spent_after
         remaining = max(0, remaining)
