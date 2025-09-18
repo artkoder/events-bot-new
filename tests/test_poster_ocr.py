@@ -165,6 +165,56 @@ async def test_recognize_posters_stops_after_reaching_limit(tmp_path, monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_recognize_posters_returns_cached_when_first_blocked(
+    tmp_path, monkeypatch
+):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    digest_cached = hashlib.sha256(b"cached").hexdigest()
+    model = os.getenv("POSTER_OCR_MODEL", "gpt-4o-mini")
+
+    async with db.get_session() as session:
+        session.add(
+            PosterOcrCache(
+                hash=digest_cached,
+                detail="auto",
+                model=model,
+                text="cached-text",
+                prompt_tokens=1,
+                completion_tokens=1,
+                total_tokens=2,
+            )
+        )
+        session.add(
+            OcrUsage(date="2024-06-06", spent_tokens=poster_ocr.DAILY_TOKEN_LIMIT)
+        )
+        await session.commit()
+
+    call_count = 0
+
+    async def fake_run_ocr(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        raise AssertionError("run_ocr should not be called when limit is reached")
+
+    monkeypatch.setattr(poster_ocr, "run_ocr", fake_run_ocr)
+    monkeypatch.setattr(poster_ocr, "_today_key", lambda: "2024-06-06")
+
+    items = [DummyPoster(b"new"), DummyPoster(b"cached")]
+
+    with pytest.raises(poster_ocr.PosterOcrLimitExceededError) as excinfo:
+        await poster_ocr.recognize_posters(db, items)
+
+    assert call_count == 0
+    assert len(excinfo.value.results) == 1
+    assert excinfo.value.results[0].hash == digest_cached
+    assert excinfo.value.results[0].text == "cached-text"
+    assert excinfo.value.spent_tokens == 0
+    assert excinfo.value.remaining == 0
+
+
+@pytest.mark.asyncio
 async def test_recognize_posters_uses_cache_when_limit_zero(tmp_path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()

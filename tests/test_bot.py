@@ -4,6 +4,8 @@ import sys
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from pathlib import Path
 
+import hashlib
+
 import pytest
 from aiogram import Bot, types
 from aiohttp import ClientOSError
@@ -1640,6 +1642,88 @@ async def test_handle_add_event_reports_ocr_limit(tmp_path: Path, monkeypatch):
     assert any("Event" in text for text in texts)
     assert any("OCR недоступен" in text for text in texts)
     assert any("OCR: потрачено 0, осталось 0" in text for text in texts)
+
+
+@pytest.mark.asyncio
+async def test_handle_add_event_uses_cached_text_when_limit_hits(
+    tmp_path: Path, monkeypatch
+):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    captured: dict[str, Any] = {}
+
+    async def fake_parse(text: str, source_channel: str | None = None, **kwargs) -> list[dict]:
+        poster_texts = kwargs.get("poster_texts") or []
+        captured["poster_texts"] = poster_texts
+        return [
+            {
+                "title": "Party",
+                "short_description": poster_texts[0] if poster_texts else "",
+                "date": FUTURE_DATE,
+                "time": "18:00",
+                "location_name": "Club",
+            }
+        ]
+
+    async def fake_process_media(images, *, need_catbox, need_ocr):
+        posters = [
+            PosterMedia(data=b"", name="poster1"),
+            PosterMedia(data=b"", name="poster2"),
+        ]
+        return posters, ""
+
+    digest_first = hashlib.sha256(b"img1").hexdigest()
+    cached_result = PosterOcrCache(
+        hash=digest_first,
+        detail="auto",
+        model="gpt-4o-mini",
+        text="Poster text one",
+        prompt_tokens=1,
+        completion_tokens=2,
+        total_tokens=3,
+    )
+
+    async def fake_ocr(db_obj, items, detail="auto", *, count_usage=True):
+        raise poster_ocr.PosterOcrLimitExceededError(
+            "limit",
+            spent_tokens=0,
+            remaining=0,
+            results=[cached_result],
+        )
+
+    async def _noop_async(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(main, "process_media", fake_process_media)
+    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
+    monkeypatch.setattr(poster_ocr, "recognize_posters", fake_ocr)
+    monkeypatch.setattr(main, "create_source_page", lambda *a, **k: ("u", "p", "", 0))
+    monkeypatch.setattr(main, "notify_event_added", _noop_async)
+    monkeypatch.setattr(main, "publish_event_progress", _noop_async)
+    monkeypatch.setattr(main, "schedule_event_update_tasks", _noop_async)
+
+    msg = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "/addevent Party | 01.01 | Club",
+        }
+    )
+
+    await handle_add_event(
+        msg,
+        db,
+        bot,
+        media=[(b"img1", "poster1.jpg"), (b"img2", "poster2.jpg")],
+    )
+
+    assert captured["poster_texts"] == ["Poster text one"]
+    texts = [m[1] for m in bot.messages]
+    assert any("Poster text one" in text for text in texts)
 
 
 @pytest.mark.asyncio

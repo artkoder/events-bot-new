@@ -1,6 +1,8 @@
 import os, sys
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
+import hashlib
+
 import pytest
 from types import SimpleNamespace
 
@@ -9,7 +11,7 @@ import poster_ocr
 import vk_intake
 import vk_review
 from main import Database
-from models import Event, JobTask, Festival
+from models import Event, JobTask, Festival, PosterOcrCache
 from poster_media import PosterMedia
 
 
@@ -212,6 +214,74 @@ async def test_vkrev_import_flow_reports_ocr_limit(tmp_path, monkeypatch):
     info_text = bot.messages[-1].text
     assert "OCR недоступен" in info_text
     assert "OCR: потрачено 0, осталось 0" in info_text
+
+
+@pytest.mark.asyncio
+async def test_build_event_draft_uses_cached_text_when_limit(monkeypatch, tmp_path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    captured: dict[str, list[str] | None] = {}
+
+    async def fake_parse(text, *args, **kwargs):
+        poster_texts = kwargs.get("poster_texts")
+        captured["poster_texts"] = poster_texts
+        return [
+            {
+                "title": "T",
+                "date": "2025-09-02",
+                "time": "10:00",
+                "location_name": "Hall",
+                "short_description": poster_texts[0] if poster_texts else "",
+            }
+        ]
+
+    async def fake_process_media(images, *, need_catbox, need_ocr):
+        posters = [
+            PosterMedia(data=b"", name="poster1"),
+            PosterMedia(data=b"", name="poster2"),
+        ]
+        return posters, ""
+
+    digest_first = hashlib.sha256(b"img1").hexdigest()
+    cached_result = PosterOcrCache(
+        hash=digest_first,
+        detail="auto",
+        model="gpt-4o-mini",
+        text="Poster text one",
+        prompt_tokens=1,
+        completion_tokens=2,
+        total_tokens=3,
+    )
+
+    async def fake_ocr(db_obj, items, detail="auto", *, count_usage=True):
+        raise poster_ocr.PosterOcrLimitExceededError(
+            "limit",
+            spent_tokens=0,
+            remaining=0,
+            results=[cached_result],
+        )
+
+    async def fake_download(urls):
+        return [(b"img1", "poster1.jpg"), (b"img2", "poster2.jpg")]
+
+    monkeypatch.setattr(vk_intake, "process_media", fake_process_media)
+    monkeypatch.setattr(poster_ocr, "recognize_posters", fake_ocr)
+    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
+    monkeypatch.setattr(vk_intake, "_download_photo_media", fake_download)
+
+    draft = await vk_intake.build_event_draft(
+        "text",
+        photos=["one", "two"],
+        source_name="Test",
+        db=db,
+    )
+
+    assert captured["poster_texts"] == ["Poster text one"]
+    assert draft.poster_media[0].ocr_text == "Poster text one"
+    assert draft.poster_media[1].ocr_text is None
+    assert draft.ocr_tokens_spent == 0
+    assert draft.ocr_tokens_remaining == 0
 
 
 @pytest.mark.asyncio
