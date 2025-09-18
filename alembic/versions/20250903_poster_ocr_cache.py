@@ -15,8 +15,8 @@ def upgrade() -> None:
     op.create_table(
         "posterocrcache",
         sa.Column("hash", sa.String(), primary_key=True),
-        sa.Column("detail", sa.String(), nullable=False),
-        sa.Column("model", sa.String(), nullable=False),
+        sa.Column("detail", sa.String(), primary_key=True),
+        sa.Column("model", sa.String(), primary_key=True),
         sa.Column("text", sa.Text(), nullable=False),
         sa.Column("prompt_tokens", sa.Integer(), nullable=False, server_default="0"),
         sa.Column("completion_tokens", sa.Integer(), nullable=False, server_default="0"),

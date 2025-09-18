@@ -217,8 +217,8 @@ class JobOutbox(SQLModel, table=True):
 
 class PosterOcrCache(SQLModel, table=True):
     hash: str = Field(primary_key=True)
-    detail: str
-    model: str
+    detail: str = Field(primary_key=True)
+    model: str = Field(primary_key=True)
     text: str
     prompt_tokens: int = 0
     completion_tokens: int = 0

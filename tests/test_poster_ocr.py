@@ -1,4 +1,5 @@
 import hashlib
+import os
 from dataclasses import dataclass
 
 import pytest
@@ -147,8 +148,13 @@ async def test_recognize_posters_stops_after_reaching_limit(tmp_path, monkeypatc
 
     async with db.get_session() as session:
         usage_row = await session.get(OcrUsage, "2024-06-04")
-        cached_first = await session.get(PosterOcrCache, digests[0])
-        cached_second = await session.get(PosterOcrCache, digests[1])
+        model = os.getenv("POSTER_OCR_MODEL", "gpt-4o-mini")
+        cached_first = await session.get(
+            PosterOcrCache, (digests[0], "auto", model)
+        )
+        cached_second = await session.get(
+            PosterOcrCache, (digests[1], "auto", model)
+        )
 
     assert usage_row is not None
     assert usage_row.spent_tokens == poster_ocr.DAILY_TOKEN_LIMIT
@@ -179,3 +185,51 @@ async def test_recognize_posters_configures_http(tmp_path, monkeypatch):
     assert result[0].text == "configured"
     assert spent == 0
     assert remaining == poster_ocr.DAILY_TOKEN_LIMIT
+
+
+@pytest.mark.asyncio
+async def test_recognize_posters_detail_changes(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    call_details: list[str] = []
+
+    async def fake_run_ocr(data, *, model, detail):
+        call_details.append(detail)
+        return OcrResult(
+            text=f"{detail}-text",
+            usage=OcrUsageStats(prompt_tokens=0, completion_tokens=0, total_tokens=5),
+        )
+
+    monkeypatch.setattr(poster_ocr, "run_ocr", fake_run_ocr)
+
+    item = DummyPoster(b"payload")
+    digest = hashlib.sha256(item.data).hexdigest()
+    model = os.getenv("POSTER_OCR_MODEL", "gpt-4o-mini")
+
+    result_auto, spent_auto, remaining_auto = await poster_ocr.recognize_posters(
+        db, [item], detail="auto"
+    )
+    result_high, spent_high, remaining_high = await poster_ocr.recognize_posters(
+        db, [item], detail="high"
+    )
+    result_high_cached, spent_high_cached, remaining_high_cached = (
+        await poster_ocr.recognize_posters(db, [item], detail="high")
+    )
+
+    assert call_details == ["auto", "high"]
+    assert result_auto[0].text == "auto-text"
+    assert result_high[0].text == "high-text"
+    assert result_high_cached[0].text == "high-text"
+    assert spent_auto == 5
+    assert spent_high == 5
+    assert spent_high_cached == 0
+    assert remaining_high_cached == remaining_high
+
+    async with db.get_session() as session:
+        cached_auto = await session.get(PosterOcrCache, (digest, "auto", model))
+        cached_high = await session.get(PosterOcrCache, (digest, "high", model))
+
+    assert cached_auto is not None
+    assert cached_high is not None
+    assert cached_high.text == "high-text"
