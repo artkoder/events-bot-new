@@ -1287,7 +1287,42 @@ async def get_catbox_enabled(db: Database) -> bool:
             "SELECT value FROM setting WHERE key='catbox_enabled'"
         )
         row = await cursor.fetchone()
-    return bool(row and row[0] == "1")
+
+        truthy_aliases = {"1", "true", "t", "on", "yes"}
+        falsy_aliases = {"0", "false", "f", "off", "no"}
+
+        desired_value: str | None = None
+        should_update = False
+        enabled = False
+
+        if not row:
+            desired_value = "1"
+            enabled = True
+            should_update = True
+        else:
+            raw_value = row[0]
+            normalized = (raw_value or "").strip()
+            lowered = normalized.lower()
+
+            if not normalized or lowered in truthy_aliases:
+                desired_value = "1"
+                enabled = True
+                should_update = normalized != desired_value
+            elif lowered in falsy_aliases:
+                desired_value = "0"
+                enabled = False
+                should_update = normalized != desired_value
+            else:
+                enabled = lowered in truthy_aliases
+
+        if desired_value is not None and should_update:
+            await conn.execute(
+                "INSERT OR REPLACE INTO setting(key, value) VALUES('catbox_enabled', ?)",
+                (desired_value,),
+            )
+            await conn.commit()
+
+    return enabled
 
 
 async def set_catbox_enabled(db: Database, value: bool):
