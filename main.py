@@ -15329,6 +15329,104 @@ async def handle_debug(message: types.Message, db: Database, bot: Bot):
     await bot.send_message(message.chat.id, "\n".join(lines))
 
 
+async def handle_backfill_topics(
+    message: types.Message, db: Database, bot: Bot
+) -> None:
+    async with db.get_session() as session:
+        user = await session.get(User, message.from_user.id)
+        if not user or not user.is_superadmin:
+            await bot.send_message(message.chat.id, "Not authorized")
+            return
+
+    parts = (message.text or "").split()
+    days = 90
+    if len(parts) > 1:
+        try:
+            days = int(parts[1])
+        except Exception:
+            await bot.send_message(message.chat.id, "Usage: /backfill_topics [days]")
+            return
+        if days < 0:
+            await bot.send_message(message.chat.id, "Usage: /backfill_topics [days]")
+            return
+
+    today = date.today()
+    end_date = today + timedelta(days=days)
+    start_iso = today.isoformat()
+    end_iso = end_date.isoformat()
+
+    logging.info(
+        "backfill_topics.start user_id=%s days=%s start=%s end=%s",
+        message.from_user.id,
+        days,
+        start_iso,
+        end_iso,
+    )
+
+    processed = 0
+    updated = 0
+    skipped = 0
+    total = 0
+    async with db.get_session() as session:
+        stmt = (
+            select(Event)
+            .where(Event.date >= start_iso)
+            .where(Event.date <= end_iso)
+            .order_by(Event.date, Event.time, Event.id)
+        )
+        events = (await session.execute(stmt)).scalars().all()
+        total = len(events)
+        for event in events:
+            if getattr(event, "topics_manual", False):
+                skipped += 1
+                continue
+
+            processed += 1
+            previous_topics = list(getattr(event, "topics", []) or [])
+            original_manual = bool(getattr(event, "topics_manual", False))
+            try:
+                new_topics_raw = await classify_event_topics(event)
+            except Exception:
+                logging.exception(
+                    "backfill_topics.classify_failed event_id=%s", getattr(event, "id", None)
+                )
+                continue
+
+            seen: dict[str, None] = {}
+            normalized_topics: list[str] = []
+            for topic in new_topics_raw:
+                if not isinstance(topic, str):
+                    continue
+                normalized = topic.strip()
+                if not normalized or normalized in seen:
+                    continue
+                seen[normalized] = None
+                normalized_topics.append(normalized)
+
+            event.topics = normalized_topics
+            event.topics_manual = False
+
+            if normalized_topics != previous_topics or original_manual:
+                updated += 1
+                session.add(event)
+
+        if updated:
+            await session.commit()
+
+    logging.info(
+        "backfill_topics.summary total=%s processed=%s updated=%s skipped=%s",
+        total,
+        processed,
+        updated,
+        skipped,
+    )
+    summary = (
+        f"Backfilled topics {start_iso}..{end_iso} (days={days}): "
+        f"processed={processed}, updated={updated}, skipped={skipped}"
+    )
+    await bot.send_message(message.chat.id, summary)
+
+
 async def handle_queue_reap(message: types.Message, db: Database, bot: Bot) -> None:
     async with db.get_session() as session:
         user = await session.get(User, message.from_user.id)
@@ -18538,6 +18636,9 @@ def create_app() -> web.Application:
     async def mem_wrapper(message: types.Message):
         await handle_mem(message, db, bot)
 
+    async def backfill_topics_wrapper(message: types.Message):
+        await handle_backfill_topics(message, db, bot)
+
     async def festivals_fix_nav_wrapper(message: types.Message):
         await handle_festivals_fix_nav(message, db, bot)
 
@@ -18692,6 +18793,7 @@ def create_app() -> web.Application:
     dp.message.register(debug_wrapper, Command("debug"))
     dp.message.register(queue_reap_wrapper, Command("queue_reap"))
     dp.message.register(mem_wrapper, Command("mem"))
+    dp.message.register(backfill_topics_wrapper, Command("backfill_topics"))
     dp.message.register(festivals_fix_nav_wrapper, Command("festivals_fix_nav"))
     dp.message.register(festivals_fix_nav_wrapper, Command("festivals_nav_dedup"))
     dp.message.register(ics_fix_nav_wrapper, Command("ics_fix_nav"))
