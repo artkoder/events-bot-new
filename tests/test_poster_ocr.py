@@ -3,6 +3,7 @@ import hashlib
 import os
 from dataclasses import dataclass
 
+import aiosqlite
 import pytest
 
 from db import Database
@@ -15,6 +16,88 @@ from vision_test.ocr import OcrResult, OcrUsage as OcrUsageStats
 @dataclass
 class DummyPoster:
     data: bytes
+
+
+@pytest.mark.asyncio
+async def test_poster_ocr_cache_migrates_to_composite_pk(tmp_path, monkeypatch):
+    db_path = tmp_path / "db.sqlite"
+    async with aiosqlite.connect(db_path) as conn:
+        await conn.execute(
+            """
+            CREATE TABLE posterocrcache(
+                hash TEXT PRIMARY KEY,
+                text TEXT NOT NULL,
+                prompt_tokens INTEGER NOT NULL DEFAULT 0,
+                completion_tokens INTEGER NOT NULL DEFAULT 0,
+                total_tokens INTEGER NOT NULL DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        await conn.execute(
+            """
+            INSERT INTO posterocrcache (
+                hash, text, prompt_tokens, completion_tokens, total_tokens, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            ("digest-old", "old text", 1, 2, 3, "2024-01-01 00:00:00"),
+        )
+        await conn.commit()
+
+    db = Database(str(db_path))
+    await db.init()
+
+    async with db.raw_conn() as conn:
+        cursor = await conn.execute("PRAGMA table_info('posterocrcache')")
+        columns = await cursor.fetchall()
+        await cursor.close()
+    column_names = {col[1] for col in columns}
+    pk_columns = [col[1] for col in sorted(columns, key=lambda col: col[5]) if col[5]]
+
+    assert {"hash", "detail", "model", "created_at"}.issubset(column_names)
+    assert pk_columns == ["hash", "detail", "model"]
+
+    call_count = 0
+
+    async def fake_run_ocr(data, *, model, detail):
+        nonlocal call_count
+        call_count += 1
+        return OcrResult(
+            text=f"{detail}-{model}-{call_count}",
+            usage=OcrUsageStats(prompt_tokens=0, completion_tokens=0, total_tokens=0),
+        )
+
+    monkeypatch.setattr(poster_ocr, "run_ocr", fake_run_ocr)
+
+    poster = DummyPoster(b"poster-bytes")
+    result_auto, spent_auto, remaining_auto = await poster_ocr.recognize_posters(
+        db, [poster], detail="auto"
+    )
+    result_high, spent_high, remaining_high = await poster_ocr.recognize_posters(
+        db, [poster], detail="high"
+    )
+
+    assert call_count == 2
+    assert result_auto[0].text.startswith("auto-")
+    assert result_high[0].text.startswith("high-")
+    assert spent_auto == 0
+    assert spent_high == 0
+    assert remaining_auto == remaining_high
+
+    async with db.get_session() as session:
+        model = os.getenv("POSTER_OCR_MODEL", "gpt-4o-mini")
+        digest = hashlib.sha256(poster.data).hexdigest()
+        cached_auto = await session.get(PosterOcrCache, (digest, "auto", model))
+        cached_high = await session.get(PosterOcrCache, (digest, "high", model))
+        migrated = await session.get(PosterOcrCache, ("digest-old", "auto", model))
+
+    assert cached_auto is not None
+    assert cached_high is not None
+    assert cached_auto.text.startswith("auto-")
+    assert cached_high.text.startswith("high-")
+    assert migrated is not None
+    assert migrated.text == "old text"
+    assert str(migrated.created_at).startswith("2024-01-01 00:00:00")
 
 
 @pytest.mark.asyncio
