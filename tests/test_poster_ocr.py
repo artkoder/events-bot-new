@@ -164,6 +164,52 @@ async def test_recognize_posters_usage_resets_by_date(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_recognize_posters_concurrent_upsert(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    call_count = 0
+
+    async def fake_run_ocr(data, *, model, detail):
+        nonlocal call_count
+        call_count += 1
+        await asyncio.sleep(0)
+        return OcrResult(
+            text=f"text-{call_count}",
+            usage=OcrUsageStats(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+        )
+
+    monkeypatch.setattr(poster_ocr, "run_ocr", fake_run_ocr)
+
+    item = DummyPoster(b"same-bytes")
+
+    first_call, second_call = await asyncio.gather(
+        poster_ocr.recognize_posters(db, [item]),
+        poster_ocr.recognize_posters(db, [item]),
+    )
+
+    (first_results, first_spent, first_remaining) = first_call
+    (second_results, second_spent, second_remaining) = second_call
+
+    assert call_count == 2
+    assert first_results[0].text in {"text-1", "text-2"}
+    assert second_results[0].text in {"text-1", "text-2"}
+    assert first_results[0].hash == second_results[0].hash
+    assert first_spent == 2
+    assert second_spent == 2
+    assert 0 <= first_remaining <= poster_ocr.DAILY_TOKEN_LIMIT
+    assert 0 <= second_remaining <= poster_ocr.DAILY_TOKEN_LIMIT
+
+    async with db.get_session() as session:
+        model = os.getenv("POSTER_OCR_MODEL", "gpt-4o-mini")
+        digest = hashlib.sha256(item.data).hexdigest()
+        cached = await session.get(PosterOcrCache, (digest, "auto", model))
+
+    assert cached is not None
+    assert cached.text in {first_results[0].text, second_results[0].text}
+
+
+@pytest.mark.asyncio
 async def test_recognize_posters_limit_exhausted(tmp_path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()

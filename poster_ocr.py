@@ -106,9 +106,9 @@ async def recognize_posters(
                 cache_map[(row.hash, row.detail, row.model)] = row
 
         results: list[PosterOcrCache] = []
-        new_entries: list[PosterOcrCache] = []
-        updated_entries: list[PosterOcrCache] = []
         total_new_tokens = 0
+        entries_to_upsert: list[dict[str, Any]] = []
+        pending_result_indexes: dict[tuple[str, str, str], list[int]] = {}
         today = _today_key()
         usage_row = await session.get(OcrUsageModel, today)
         spent_before = usage_row.spent_tokens if usage_row else 0
@@ -121,6 +121,8 @@ async def recognize_posters(
             cached = cache_map.get(cache_key)
             if cached:
                 results.append(cached)
+                if cache_key in pending_result_indexes:
+                    pending_result_indexes[cache_key].append(len(results) - 1)
                 continue
 
             if block_new_requests:
@@ -137,24 +139,42 @@ async def recognize_posters(
                 "completion_tokens": int(getattr(usage, "completion_tokens", 0) or 0),
                 "total_tokens": int(getattr(usage, "total_tokens", 0) or 0),
             }
+            created_at = datetime.utcnow()
             if entry is None:
                 entry = PosterOcrCache(
                     hash=digest,
                     detail=detail,
                     model=model,
                     text=ocr_result.text,
+                    created_at=created_at,
                     **token_counts,
                 )
-                new_entries.append(entry)
             else:
-                entry.text = ocr_result.text
-                entry.prompt_tokens = token_counts["prompt_tokens"]
-                entry.completion_tokens = token_counts["completion_tokens"]
-                entry.total_tokens = token_counts["total_tokens"]
-                entry.created_at = datetime.utcnow()
-                updated_entries.append(entry)
-            results.append(entry)
+                entry = PosterOcrCache(
+                    hash=entry.hash,
+                    detail=entry.detail,
+                    model=entry.model,
+                    text=ocr_result.text,
+                    prompt_tokens=token_counts["prompt_tokens"],
+                    completion_tokens=token_counts["completion_tokens"],
+                    total_tokens=token_counts["total_tokens"],
+                    created_at=created_at,
+                )
+            entries_to_upsert.append(
+                {
+                    "hash": entry.hash,
+                    "detail": entry.detail,
+                    "model": entry.model,
+                    "text": entry.text,
+                    "prompt_tokens": entry.prompt_tokens,
+                    "completion_tokens": entry.completion_tokens,
+                    "total_tokens": entry.total_tokens,
+                    "created_at": entry.created_at,
+                }
+            )
             cache_map[cache_key] = entry
+            results.append(entry)
+            pending_result_indexes.setdefault(cache_key, []).append(len(results) - 1)
             if count_usage:
                 total_new_tokens += entry.total_tokens
                 limit_remaining = DAILY_TOKEN_LIMIT - (spent_before + total_new_tokens)
@@ -163,7 +183,7 @@ async def recognize_posters(
 
         spent_after = spent_before
         charged_amount = 0
-        if new_entries or updated_entries:
+        if entries_to_upsert:
             if count_usage and total_new_tokens:
                 allowed_remaining = max(0, DAILY_TOKEN_LIMIT - spent_before)
                 charged_amount = min(total_new_tokens, allowed_remaining)
@@ -183,15 +203,35 @@ async def recognize_posters(
                         },
                     )
                     await session.execute(usage_stmt)
-            for entry in new_entries:
-                session.add(entry)
+            cache_table = PosterOcrCache.__table__
+            insert_stmt = sqlite_insert(cache_table).values(entries_to_upsert)
+            upsert_stmt = insert_stmt.on_conflict_do_update(
+                index_elements=[
+                    cache_table.c.hash,
+                    cache_table.c.detail,
+                    cache_table.c.model,
+                ],
+                set_={
+                    "text": insert_stmt.excluded.text,
+                    "prompt_tokens": insert_stmt.excluded.prompt_tokens,
+                    "completion_tokens": insert_stmt.excluded.completion_tokens,
+                    "total_tokens": insert_stmt.excluded.total_tokens,
+                    "created_at": insert_stmt.excluded.created_at,
+                },
+            )
+            await session.execute(upsert_stmt)
             await session.commit()
             session.expire_all()
             usage_row = await session.get(OcrUsageModel, today)
             if usage_row is not None:
                 spent_after = usage_row.spent_tokens
-            for entry in new_entries:
-                await session.refresh(entry)
+            for cache_key, indexes in pending_result_indexes.items():
+                fresh = await session.get(PosterOcrCache, cache_key)
+                if fresh is None:
+                    continue
+                cache_map[cache_key] = fresh
+                for idx in indexes:
+                    results[idx] = fresh
         else:
             spent_after = usage_row.spent_tokens if usage_row else spent_after
 
