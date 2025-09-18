@@ -1,19 +1,14 @@
-name: Enable Auto-merge
+name: CI
 on:
   pull_request:
-    types: [opened, reopened, ready_for_review, synchronize]
-
+    branches: [ main ]
 jobs:
-  enable:
-    if: >
-      github.event.pull_request.base.ref == 'main' &&
-      github.event.pull_request.draft == false
+  python-ci:
     runs-on: ubuntu-latest
-    permissions:
-      pull-requests: write
-      contents: write
     steps:
-      - uses: peter-evans/enable-pull-request-automerge@v3
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
-          merge-method: squash
-          pull-request-number: ${{ github.event.pull_request.number }}
+          python-version: '3.11'
+      - name: Syntax check
+        run: python -m compileall -q .
