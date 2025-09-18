@@ -3,7 +3,7 @@ from enum import Enum
 from typing import Optional
 
 from sqlmodel import Field, SQLModel
-from sqlalchemy import Column, Index, JSON, text
+from sqlalchemy import Column, Index, JSON, UniqueConstraint, text
 from sqlalchemy.types import Enum as SAEnum
 
 
@@ -289,6 +289,23 @@ class Event(SQLModel, table=True):
     topics_manual: bool = False
     added_at: datetime = Field(default_factory=datetime.utcnow)
     content_hash: Optional[str] = None
+
+
+class EventPoster(SQLModel, table=True):
+    __table_args__ = (
+        Index("ix_eventposter_event", "event_id"),
+        UniqueConstraint("event_id", "poster_hash", name="ux_eventposter_event_hash"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    event_id: int = Field(foreign_key="event.id")
+    catbox_url: Optional[str] = None
+    poster_hash: str
+    ocr_text: Optional[str] = None
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
 
 
 class MonthPage(SQLModel, table=True):

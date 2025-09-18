@@ -11,8 +11,9 @@ import poster_ocr
 import vk_intake
 import vk_review
 from main import Database
-from models import Event, JobTask, Festival, PosterOcrCache
+from models import Event, EventPoster, JobTask, Festival, PosterOcrCache
 from poster_media import PosterMedia
+from sqlmodel import select
 
 
 class DummyBot:
@@ -217,6 +218,73 @@ async def test_vkrev_import_flow_reports_ocr_limit(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_vk_persist_event_updates_ocr_records(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async def fake_assign_event_topics(event_obj):
+        return [], len(event_obj.description or ""), None, False
+
+    async def fake_schedule_event_update_tasks(db_obj, event_obj, drain_nav=True):
+        return {}
+
+    monkeypatch.setattr(main, "assign_event_topics", fake_assign_event_topics)
+    monkeypatch.setattr(main, "schedule_event_update_tasks", fake_schedule_event_update_tasks)
+
+    def _make_draft(catbox_url: str, text: str, prompt: int, completion: int, total: int):
+        poster = PosterMedia(data=b"image-bytes", name="poster", catbox_url=catbox_url)
+        poster.ocr_text = text
+        poster.prompt_tokens = prompt
+        poster.completion_tokens = completion
+        poster.total_tokens = total
+        return vk_intake.EventDraft(
+            title="T",
+            date="2025-09-02",
+            time="10:00",
+            source_text="T",
+            poster_media=[poster],
+            ocr_tokens_spent=total,
+            ocr_tokens_remaining=10_000,
+        )
+
+    first = _make_draft("https://cat.box/a", "Первый текст", 2, 3, 5)
+    result_first = await vk_intake.persist_event_and_pages(first, [], db)
+
+    async with db.get_session() as session:
+        posters = (
+            await session.execute(
+                select(EventPoster).where(EventPoster.event_id == result_first.event_id)
+            )
+        ).scalars().all()
+        assert len(posters) == 1
+        stored = posters[0]
+        first_hash = stored.poster_hash
+        assert stored.ocr_text == "Первый текст"
+        assert stored.total_tokens == 5
+
+    second = _make_draft("https://cat.box/b", "Обновлённый текст", 7, 8, 15)
+    result_second = await vk_intake.persist_event_and_pages(second, [], db)
+
+    assert result_second.event_id == result_first.event_id
+
+    async with db.get_session() as session:
+        posters = (
+            await session.execute(
+                select(EventPoster).where(EventPoster.event_id == result_first.event_id)
+            )
+        ).scalars().all()
+
+    assert len(posters) == 1
+    updated = posters[0]
+    assert updated.poster_hash == first_hash
+    assert updated.ocr_text == "Обновлённый текст"
+    assert updated.catbox_url == "https://cat.box/b"
+    assert updated.prompt_tokens == 7
+    assert updated.completion_tokens == 8
+    assert updated.total_tokens == 15
+
+
+@pytest.mark.asyncio
 async def test_build_event_draft_uses_cached_text_when_limit(monkeypatch, tmp_path):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
@@ -254,7 +322,9 @@ async def test_build_event_draft_uses_cached_text_when_limit(monkeypatch, tmp_pa
         total_tokens=3,
     )
 
-    async def fake_ocr(db_obj, items, detail="auto", *, count_usage=True):
+    async def fake_ocr(
+        db_obj, items, detail="auto", *, count_usage=True, log_context=None
+    ):
         raise poster_ocr.PosterOcrLimitExceededError(
             "limit",
             spent_tokens=0,
@@ -353,7 +423,9 @@ async def test_build_event_draft_handles_ocr_limit(tmp_path, monkeypatch):
             }
         ]
 
-    async def fake_recognize(db_obj, items, detail="auto", *, count_usage=True):
+    async def fake_recognize(
+        db_obj, items, detail="auto", *, count_usage=True, log_context=None
+    ):
         raise poster_ocr.PosterOcrLimitExceededError(
             "limit",
             spent_tokens=0,

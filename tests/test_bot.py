@@ -59,7 +59,7 @@ from main import (
     notify_inactive_partners,
 )
 from poster_media import PosterMedia, process_media
-from models import PosterOcrCache
+from models import EventPoster, PosterOcrCache
 import poster_ocr
 
 REAL_SYNC_WEEKEND_PAGE = main.sync_weekend_page
@@ -902,6 +902,55 @@ async def test_show_edit_menu_formats_topics():
 
 
 @pytest.mark.asyncio
+async def test_show_edit_menu_displays_poster_ocr_preview(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    event = Event(
+        title="T",
+        description="d",
+        source_text="src",
+        date=FUTURE_DATE,
+        time="18:00",
+        location_name="Hall",
+    )
+
+    async with db.get_session() as session:
+        session.add(event)
+        await session.commit()
+        await session.refresh(event)
+        session.add(
+            EventPoster(
+                event_id=event.id,
+                poster_hash="1234567890abcdef",
+                ocr_text="Строка один\nСтрока два\nСтрока три\nСтрока четыре",
+                catbox_url="https://cat.box/a",
+                prompt_tokens=2,
+                completion_tokens=3,
+                total_tokens=5,
+            )
+        )
+        await session.commit()
+
+    bot.messages.clear()
+    await main.show_edit_menu(1, event, bot, db)
+
+    assert bot.messages
+    message_text = bot.messages[-1][1]
+    assert "Poster OCR:" in message_text
+    assert "hash=1234567890" in message_text
+    assert "prompt=2" in message_text
+    assert "completion=3" in message_text
+    assert "total=5" in message_text
+    assert "Строка один" in message_text
+    assert "Строка два" in message_text
+    assert "Строка три" in message_text
+    assert "Строка четыре" not in message_text
+    assert "https://cat.box/a" in message_text
+
+
+@pytest.mark.asyncio
 async def test_events_russian_date_current_year(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
@@ -1574,7 +1623,7 @@ async def test_add_event_reports_ocr_usage(tmp_path: Path, monkeypatch):
         total_tokens=7,
     )
 
-    async def fake_ocr(db_obj, items, detail="auto", *, count_usage=True):
+    async def fake_ocr(db_obj, items, detail="auto", *, count_usage=True, log_context=None):
         return [cache1, cache2], cache1.total_tokens + cache2.total_tokens, 123
 
     monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
@@ -1632,7 +1681,7 @@ async def test_add_event_without_images_skips_ocr_line(tmp_path: Path, monkeypat
             }
         ]
 
-    async def fake_ocr(db_obj, items, detail="auto", *, count_usage=True):
+    async def fake_ocr(db_obj, items, detail="auto", *, count_usage=True, log_context=None):
         return [], 0, 500
 
     monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
@@ -1679,7 +1728,7 @@ async def test_handle_add_event_reports_ocr_limit(tmp_path: Path, monkeypatch):
             }
         ]
 
-    async def fake_ocr(db_obj, items, detail="auto", *, count_usage=True):
+    async def fake_ocr(db_obj, items, detail="auto", *, count_usage=True, log_context=None):
         raise poster_ocr.PosterOcrLimitExceededError(
             "limit",
             spent_tokens=0,
@@ -1763,7 +1812,7 @@ async def test_handle_add_event_uses_cached_text_when_limit_hits(
         total_tokens=3,
     )
 
-    async def fake_ocr(db_obj, items, detail="auto", *, count_usage=True):
+    async def fake_ocr(db_obj, items, detail="auto", *, count_usage=True, log_context=None):
         raise poster_ocr.PosterOcrLimitExceededError(
             "limit",
             spent_tokens=0,
@@ -2328,7 +2377,7 @@ async def test_forward_reports_ocr_usage(tmp_path: Path, monkeypatch):
         total_tokens=8,
     )
 
-    async def fake_ocr(db_obj, items, detail="auto", *, count_usage=True):
+    async def fake_ocr(db_obj, items, detail="auto", *, count_usage=True, log_context=None):
         return [cache1, cache2], cache1.total_tokens + cache2.total_tokens, 321
 
     monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)

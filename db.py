@@ -223,6 +223,27 @@ class Database:
 
             await conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS eventposter(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_id INTEGER NOT NULL,
+                    catbox_url TEXT,
+                    poster_hash TEXT NOT NULL,
+                    ocr_text TEXT,
+                    prompt_tokens INTEGER NOT NULL DEFAULT 0,
+                    completion_tokens INTEGER NOT NULL DEFAULT 0,
+                    total_tokens INTEGER NOT NULL DEFAULT 0,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(event_id) REFERENCES event(id) ON DELETE CASCADE,
+                    UNIQUE(event_id, poster_hash)
+                )
+                """
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_eventposter_event ON eventposter(event_id)"
+            )
+
+            await conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS monthpage(
                     month TEXT PRIMARY KEY,
                     url TEXT NOT NULL,
