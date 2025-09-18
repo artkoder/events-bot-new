@@ -18247,7 +18247,8 @@ async def build_source_page_content(
         for k, v in CUSTOM_EMOJI_MAP.items():
             html_text = html_text.replace(k, v)
         html_text = linkify_for_telegraph(html_text)
-        html_content += f"<p>{html_text.replace('\n', '<br/>')}</p>"
+        _html_text_paragraph = html_text.replace("\n", "<br/>")
+        html_content += f"<p>{_html_text_paragraph}</p>"
     else:
         clean_text = strip_title(text)
         clean_text = normalize_hashtag_dates(clean_text)
