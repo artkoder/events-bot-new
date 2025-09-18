@@ -1,5 +1,5 @@
 import pytest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from aiogram import types
 
@@ -13,7 +13,7 @@ async def test_digest_toggle_refresh_publish(tmp_path, monkeypatch):
     await db.init()
     async with db.get_session() as session:
         session.add(User(user_id=1, is_superadmin=True))
-        dt = datetime.utcnow() + timedelta(days=1)
+        dt = datetime.now(timezone.utc) + timedelta(days=1)
         ev1 = Event(
             title="L1",
             description="d",

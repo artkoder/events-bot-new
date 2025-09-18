@@ -1,10 +1,14 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
 
 from sqlmodel import Field, SQLModel
-from sqlalchemy import Column, Index, JSON, UniqueConstraint, text
+from sqlalchemy import Column, DateTime, Index, JSON, UniqueConstraint, text
 from sqlalchemy.types import Enum as SAEnum
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 TOPIC_LABELS: dict[str, str] = {
@@ -208,13 +212,17 @@ class User(SQLModel, table=True):
 class PendingUser(SQLModel, table=True):
     user_id: int = Field(primary_key=True)
     username: Optional[str] = None
-    requested_at: datetime = Field(default_factory=datetime.utcnow)
+    requested_at: datetime = Field(
+        default_factory=utc_now, sa_column=Column(DateTime(timezone=True))
+    )
 
 
 class RejectedUser(SQLModel, table=True):
     user_id: int = Field(primary_key=True)
     username: Optional[str] = None
-    rejected_at: datetime = Field(default_factory=datetime.utcnow)
+    rejected_at: datetime = Field(
+        default_factory=utc_now, sa_column=Column(DateTime(timezone=True))
+    )
 
 
 class Channel(SQLModel, table=True):
@@ -287,7 +295,9 @@ class Event(SQLModel, table=True):
     photo_count: int = 0
     topics: list[str] = Field(default_factory=list, sa_column=Column(JSON))
     topics_manual: bool = False
-    added_at: datetime = Field(default_factory=datetime.utcnow)
+    added_at: datetime = Field(
+        default_factory=utc_now, sa_column=Column(DateTime(timezone=True))
+    )
     content_hash: Optional[str] = None
 
 
@@ -305,7 +315,9 @@ class EventPoster(SQLModel, table=True):
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(
+        default_factory=utc_now, sa_column=Column(DateTime(timezone=True))
+    )
 
 
 class MonthPage(SQLModel, table=True):
@@ -401,8 +413,12 @@ class JobOutbox(SQLModel, table=True):
     attempts: int = 0
     last_error: Optional[str] = None
     last_result: Optional[str] = None
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
-    next_run_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(
+        default_factory=utc_now, sa_column=Column(DateTime(timezone=True))
+    )
+    next_run_at: datetime = Field(
+        default_factory=utc_now, sa_column=Column(DateTime(timezone=True))
+    )
     coalesce_key: Optional[str] = None
     depends_on: Optional[str] = None
 
@@ -415,7 +431,9 @@ class PosterOcrCache(SQLModel, table=True):
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(
+        default_factory=utc_now, sa_column=Column(DateTime(timezone=True))
+    )
 
 
 class OcrUsage(SQLModel, table=True):

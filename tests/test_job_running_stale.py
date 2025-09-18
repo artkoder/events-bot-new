@@ -1,5 +1,5 @@
 import pytest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 
 import main
@@ -23,8 +23,8 @@ async def test_running_stale_marked_and_replaced(tmp_path):
                 task=JobTask.month_pages,
                 status=JobStatus.running,
                 coalesce_key="month_pages:2025-09",
-                updated_at=datetime.utcnow() - timedelta(minutes=15),
-                next_run_at=datetime.utcnow() - timedelta(minutes=15),
+                updated_at=datetime.now(timezone.utc) - timedelta(minutes=15),
+                next_run_at=datetime.now(timezone.utc) - timedelta(minutes=15),
             )
         )
         await session.commit()

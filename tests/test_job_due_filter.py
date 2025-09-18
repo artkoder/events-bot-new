@@ -1,5 +1,5 @@
 import pytest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from sqlmodel import select
 
 import main
@@ -23,7 +23,7 @@ async def test_future_job_does_not_block_month_pages(tmp_path, monkeypatch):
         session.add(ev)
         await session.commit()
         await session.refresh(ev)
-        future = datetime.utcnow() + timedelta(hours=1)
+        future = datetime.now(timezone.utc) + timedelta(hours=1)
         session.add(
             JobOutbox(
                 event_id=ev.id,
@@ -37,7 +37,7 @@ async def test_future_job_does_not_block_month_pages(tmp_path, monkeypatch):
                 event_id=ev.id,
                 task=JobTask.month_pages,
                 status=JobStatus.pending,
-                next_run_at=datetime.utcnow(),
+                next_run_at=datetime.now(timezone.utc),
             )
         )
         await session.commit()

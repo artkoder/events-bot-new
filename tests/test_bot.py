@@ -13,6 +13,7 @@ from sqlmodel import select
 from datetime import date, timedelta, timezone, datetime, time
 from typing import Any
 import asyncio
+import time as _time
 import main
 from telegraph.api import json_dumps
 from telegraph import TelegraphException
@@ -6176,7 +6177,7 @@ async def test_build_daily_posts(tmp_path: Path, monkeypatch):
                 date=start.isoformat(),
                 time="12:00",
                 location_name="Hall",
-                added_at=datetime.utcnow(),
+                added_at=datetime.now(timezone.utc),
             )
         )
         session.add(MonthPage(month=today.strftime("%Y-%m"), url="m1", path="p1"))
@@ -6253,7 +6254,7 @@ async def test_daily_weekend_date_link(tmp_path: Path):
                 date=saturday.isoformat(),
                 time="12:00",
                 location_name="Hall",
-                added_at=datetime.utcnow(),
+                added_at=datetime.now(timezone.utc),
             )
         )
         session.add(WeekendPage(start=saturday.isoformat(), url="w", path="wp"))
@@ -6386,7 +6387,7 @@ def test_format_event_vk_with_vk_link():
         location_name="Hall",
         source_post_url="https://vk.com/wall-1_1",
         telegraph_url="https://t.me/page",
-        added_at=datetime.utcnow() - timedelta(days=2),
+        added_at=datetime.now(timezone.utc) - timedelta(days=2),
     )
     text = main.format_event_vk(e)
     lines = text.splitlines()
@@ -6438,7 +6439,7 @@ def test_format_event_vk_falls_back_to_source_vk_post_url():
         source_post_url="https://example.com/page",
         source_vk_post_url="https://vk.com/wall-1_1",
         telegraph_url="https://t.me/page",
-        added_at=datetime.utcnow() - timedelta(days=2),
+        added_at=datetime.now(timezone.utc) - timedelta(days=2),
     )
     text = main.format_event_vk(e)
     lines = text.splitlines()
@@ -6458,7 +6459,7 @@ def test_format_event_vk_prefers_source_post_url():
         source_post_url="https://vk.com/wall-1_2",
         source_vk_post_url="https://vk.com/wall-1_1",
         telegraph_url="https://t.me/page",
-        added_at=datetime.utcnow() - timedelta(days=2),
+        added_at=datetime.now(timezone.utc) - timedelta(days=2),
     )
     text = main.format_event_vk(e)
     lines = text.splitlines()
@@ -8559,6 +8560,34 @@ async def test_edit_vk_post_add_photo(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_edit_vk_post_edit_window_expired(monkeypatch, caplog):
+    async def fake_vk_api(method, **params):
+        assert method == "wall.getById"
+        return {
+            "response": [
+                {
+                    "text": "old",
+                    "can_edit": 0,
+                    "date": int(_time.time()) - 20 * 24 * 3600,
+                    "attachments": [],
+                }
+            ]
+        }
+
+    async def fake_api(*args, **kwargs):  # pragma: no cover - should not be called
+        raise AssertionError("wall.edit must not be called when edit window expired")
+
+    monkeypatch.setattr(main, "vk_api", fake_vk_api)
+    monkeypatch.setattr(main, "_vk_api", fake_api)
+
+    with caplog.at_level(logging.WARNING):
+        updated = await main.edit_vk_post("https://vk.com/wall-1_2", "msg")
+
+    assert updated is False
+    assert any("edit unavailable" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
 async def test_partner_notification_scheduler(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
@@ -8613,7 +8642,7 @@ async def test_partner_reminder_weekly(tmp_path: Path):
 
     async with db.get_session() as session:
         user = await session.get(User, 1)
-        user.last_partner_reminder = datetime.utcnow() - timedelta(days=8)
+        user.last_partner_reminder = datetime.now(timezone.utc) - timedelta(days=8)
         await session.commit()
 
     notified = await notify_inactive_partners(db, bot, tz)

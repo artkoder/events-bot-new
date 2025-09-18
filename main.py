@@ -6,6 +6,7 @@ Debugging:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time as unixtime
@@ -235,6 +236,22 @@ JOB_HISTORY: deque[dict[str, Any]] = deque(maxlen=20)
 LAST_RUN_ID: str | None = None
 
 
+def _ensure_utc(dt: datetime | None) -> datetime | None:
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _normalize_job(job: "JobOutbox" | None) -> "JobOutbox" | None:
+    if job is None:
+        return None
+    job.updated_at = _ensure_utc(job.updated_at)
+    job.next_run_at = _ensure_utc(job.next_run_at)
+    return job
+
+
 class MemoryLogHandler(logging.Handler):
     """Store recent log records in memory for diagnostics."""
 
@@ -244,7 +261,7 @@ class MemoryLogHandler(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:  # pragma: no cover - simple
         msg = record.getMessage()
-        ts = datetime.utcnow()
+        ts = datetime.now(timezone.utc)
         LOG_BUFFER.append((ts, record.levelname, msg))
         if record.levelno >= logging.ERROR:
             err_type = record.exc_info[0].__name__ if record.exc_info else record.levelname
@@ -380,6 +397,9 @@ try:
     VK_SHORTPOST_MAX_PHOTOS = int(os.getenv("VK_SHORTPOST_MAX_PHOTOS", "4"))
 except ValueError:
     VK_SHORTPOST_MAX_PHOTOS = 4
+
+# VK allows editing community posts for 14 days.
+VK_POST_MAX_EDIT_AGE = timedelta(days=14)
 
 # which actor token to use for VK API calls
 VK_ACTOR_MODE = os.getenv("VK_ACTOR_MODE", "auto")
@@ -2526,7 +2546,7 @@ def vk_captcha_paused(scheduler, key: str) -> None:
 async def vk_captcha_pause_outbox(db: Database) -> None:
     """Pause all VK jobs and register resume callback."""
     global _vk_captcha_resume
-    far = datetime.utcnow() + timedelta(days=3650)
+    far = datetime.now(timezone.utc) + timedelta(days=3650)
     async with db.get_session() as session:
         await session.execute(
             update(JobOutbox)
@@ -2548,7 +2568,7 @@ async def vk_captcha_pause_outbox(db: Database) -> None:
                     JobOutbox.task.in_(VK_JOB_TASKS),
                     JobOutbox.status == JobStatus.paused,
                 )
-                .values(status=JobStatus.pending, next_run_at=datetime.utcnow())
+                .values(status=JobStatus.pending, next_run_at=datetime.now(timezone.utc))
             )
             await session.commit()
 
@@ -2577,7 +2597,7 @@ async def notify_inactive_partners(
 ) -> list[User]:
     """Send reminders to partners without events in the last week."""
     cutoff = week_cutoff(tz)
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     notified: list[User] = []
     async with db.get_session() as session:
         stream = await session.stream_scalars(
@@ -3545,7 +3565,7 @@ async def rebuild_festivals_index_if_needed(
         await set_setting_value(db, "festivals_index_path", path)
         await set_setting_value(db, "fest_index_path", path)
     await set_setting_value(db, "festivals_index_hash", new_hash)
-    await set_setting_value(db, "festivals_index_built_at", datetime.utcnow().isoformat())
+    await set_setting_value(db, "festivals_index_built_at", datetime.now(timezone.utc).isoformat())
 
     dur = (_time.perf_counter() - start_t) * 1000
     logging.info(
@@ -4392,7 +4412,7 @@ async def ics_publish(event_id: int, db: Database, bot: Bot, progress=None) -> b
             ev = await session.get(Event, event_id)
             if ev:
                 ev.ics_hash = ics_hash
-                ev.ics_updated_at = datetime.utcnow()
+                ev.ics_updated_at = datetime.now(timezone.utc)
                 if supabase_url is not None:
                     ev.ics_url = supabase_url
                 await session.commit()
@@ -5084,7 +5104,7 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
     data = callback.data
     if data.startswith("requeue:"):
         eid = int(data.split(":", 1)[1])
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         async with db.get_session() as session:
             res = await session.execute(
                 select(JobOutbox).where(
@@ -6308,7 +6328,7 @@ async def upsert_event_posters(
     ).scalars()
     existing_map = {row.poster_hash: row for row in existing}
     seen: set[str] = set()
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
 
     for item in poster_items:
         digest = item.digest
@@ -6531,7 +6551,7 @@ async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
                 await session.commit()
                 logging.info("upsert_event: updated event id=%s", ev.id)
                 return ev, False
-    new.added_at = datetime.utcnow()
+    new.added_at = datetime.now(timezone.utc)
     session.add(new)
     await session.commit()
     logging.info("upsert_event: inserted new event id=%s", new.id)
@@ -6548,7 +6568,7 @@ async def enqueue_job(
     depends_on: list[str] | None = None,
 ) -> str:
     async with db.get_session() as session:
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         ev = None
         if coalesce_key is None or depends_on is None:
             ev = await session.get(Event, event_id)
@@ -6602,7 +6622,7 @@ async def enqueue_job(
                 .limit(1)
             )
         res = await session.execute(stmt)
-        job = res.scalar_one_or_none()
+        job = _normalize_job(res.scalar_one_or_none())
         dep_str = ",".join(depends_on) if depends_on else None
         if job:
             if job.status == JobStatus.done and task == JobTask.vk_sync:
@@ -6629,7 +6649,7 @@ async def enqueue_job(
                     cur = set(filter(None, (job.depends_on or "").split(",")))
                     cur.update(depends_on)
                     job.depends_on = ",".join(sorted(cur))
-                now = datetime.utcnow()
+                now = datetime.now(timezone.utc)
                 job.next_run_at = now
                 job.updated_at = now
                 job.attempts = 0
@@ -8007,7 +8027,7 @@ async def _job_result_link(task: JobTask, event_id: int, db: Database) -> str | 
 
 
 async def reconcile_job_outbox(db: Database) -> None:
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     async with db.get_session() as session:
         await session.execute(
             update(JobOutbox)
@@ -8015,6 +8035,9 @@ async def reconcile_job_outbox(db: Database) -> None:
             .values(status=JobStatus.error, next_run_at=now, updated_at=now)
         )
         await session.commit()
+
+
+_run_due_jobs_lock = asyncio.Lock()
 
 
 async def _run_due_jobs_once(
@@ -8027,12 +8050,35 @@ async def _run_due_jobs_once(
     allowed_tasks: set[JobTask] | None = None,
     force_notify: bool = False,
 ) -> int:
-    now = datetime.utcnow()
+    async with _run_due_jobs_lock:
+        return await _run_due_jobs_once_locked(
+            db,
+            bot,
+            notify=notify,
+            only_event=only_event,
+            ics_progress=ics_progress,
+            fest_progress=fest_progress,
+            allowed_tasks=allowed_tasks,
+            force_notify=force_notify,
+        )
+
+
+async def _run_due_jobs_once_locked(
+    db: Database,
+    bot: Bot,
+    notify: Callable[[JobTask, int, JobStatus, bool, str | None, str | None], Awaitable[None]] | None = None,
+    only_event: int | None = None,
+    ics_progress: dict[int, Any] | Any | None = None,
+    fest_progress: dict[int, Any] | Any | None = None,
+    allowed_tasks: set[JobTask] | None = None,
+    force_notify: bool = False,
+) -> int:
+    now = datetime.now(timezone.utc)
     async with db.get_session() as session:
         running_rows = await session.execute(
             select(JobOutbox).where(JobOutbox.status == JobStatus.running)
         )
-        running_jobs = running_rows.scalars().all()
+        running_jobs = [_normalize_job(job) for job in running_rows.scalars().all()]
         stale: list[str] = []
         for rjob in running_jobs:
             limit = JOB_MAX_RUNTIME.get(rjob.task, DEFAULT_JOB_MAX_RUNTIME)
@@ -8061,7 +8107,9 @@ async def _run_due_jobs_once(
             stmt = stmt.where(JobOutbox.event_id == only_event)
         if allowed_tasks:
             stmt = stmt.where(JobOutbox.task.in_(allowed_tasks))
-        jobs = (await session.execute(stmt)).scalars().all()
+        jobs = [
+            _normalize_job(job) for job in (await session.execute(stmt)).scalars().all()
+        ]
     priority = {
         JobTask.telegraph_build: 0,
         JobTask.ics_publish: 0,
@@ -8076,7 +8124,7 @@ async def _run_due_jobs_once(
     processed = 0
     for job in jobs:
         async with db.get_session() as session:
-            obj = await session.get(JobOutbox, job.id)
+            obj = _normalize_job(await session.get(JobOutbox, job.id))
             if not obj or obj.status not in (JobStatus.pending, JobStatus.error):
                 continue
             ttl = JOB_TTL.get(obj.task, DEFAULT_JOB_TTL)
@@ -8175,7 +8223,7 @@ async def _run_due_jobs_once(
                 )
                 continue
             obj.status = JobStatus.running
-            obj.updated_at = datetime.utcnow()
+            obj.updated_at = datetime.now(timezone.utc)
             session.add(obj)
             await session.commit()
         run_id = uuid.uuid4().hex
@@ -8307,22 +8355,22 @@ async def _run_due_jobs_once(
                 prev = obj.last_result
                 obj.status = status
                 obj.last_error = err
-                obj.updated_at = datetime.utcnow()
+                obj.updated_at = datetime.now(timezone.utc)
                 if status == JobStatus.done:
                     cur_res = link if link else ("ok" if changed else "nochange")
                     if cur_res == prev and not force_notify:
                         send = False
                     obj.last_result = cur_res
-                    obj.next_run_at = datetime.utcnow()
+                    obj.next_run_at = datetime.now(timezone.utc)
                 else:
                     if retry:
                         obj.attempts += 1
                         delay = BACKOFF_SCHEDULE[
                             min(obj.attempts - 1, len(BACKOFF_SCHEDULE) - 1)
                         ]
-                        obj.next_run_at = datetime.utcnow() + timedelta(seconds=delay)
+                        obj.next_run_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
                     else:
-                        obj.next_run_at = datetime.utcnow() + timedelta(days=3650)
+                        obj.next_run_at = datetime.now(timezone.utc) + timedelta(days=3650)
                 session.add(obj)
                 await session.commit()
             if notify and send:
@@ -8346,7 +8394,7 @@ async def _run_due_jobs_once(
 
 
 async def _log_job_outbox_stats(db: Database) -> None:
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     async with db.get_session() as session:
         cnt_rows = await session.execute(
             select(JobOutbox.status, func.count()).group_by(JobOutbox.status)
@@ -8365,7 +8413,7 @@ async def _log_job_outbox_stats(db: Database) -> None:
                 JobOutbox.status == JobStatus.pending
             )
         )
-        next_run = lag_res.scalar()
+        next_run = _ensure_utc(lag_res.scalar())
     lag = (now - next_run).total_seconds() if next_run else 0
     if lag < 0:
         lag = 0
@@ -8383,7 +8431,7 @@ _nav_watchdog_warned: set[str] = set()
 
 
 async def _watch_nav_jobs(db: Database, bot: Bot) -> None:
-    now = datetime.utcnow() - timedelta(seconds=60)
+    now = datetime.now(timezone.utc) - timedelta(seconds=60)
     async with db.get_session() as session:
         rows = await session.execute(
             select(JobOutbox)
@@ -8395,7 +8443,7 @@ async def _watch_nav_jobs(db: Database, bot: Bot) -> None:
                 JobOutbox.updated_at < now,
             )
         )
-        jobs = rows.scalars().all()
+        jobs = [_normalize_job(job) for job in rows.scalars().all()]
     for job in jobs:
         if not job.coalesce_key or job.coalesce_key in _nav_watchdog_warned:
             continue
@@ -9650,9 +9698,10 @@ async def publish_event_progress(
                     )
                 )
             ).scalar()
+        next_run = _ensure_utc(next_run)
         if not next_run:
             break
-        wait = (next_run - datetime.utcnow()).total_seconds()
+        wait = (next_run - datetime.now(timezone.utc)).total_seconds()
         if wait <= 0:
             continue
         if _time.monotonic() + wait > deadline:
@@ -13359,6 +13408,8 @@ async def edit_vk_post(
     current: list[str] = []
     post_text = ""
     old_attachments: list[str] = []
+    edit_allowed = True
+    edit_block_reason: str | None = None
     try:
         response = await vk_api("wall.getById", posts=f"{owner_id}_{post_id}")
         if isinstance(response, dict):
@@ -13372,6 +13423,21 @@ async def edit_vk_post(
         if items:
             post = items[0]
             post_text = post.get("text") or ""
+            can_edit_flag = post.get("can_edit")
+            if can_edit_flag is not None and not bool(can_edit_flag):
+                edit_allowed = False
+                edit_block_reason = "can_edit=0"
+            else:
+                ts = post.get("date")
+                if ts is not None:
+                    try:
+                        post_dt = datetime.fromtimestamp(int(ts), tz=timezone.utc)
+                    except (ValueError, OSError, OverflowError):
+                        pass
+                    else:
+                        if datetime.now(timezone.utc) - post_dt > VK_POST_MAX_EDIT_AGE:
+                            edit_allowed = False
+                            edit_block_reason = "post too old"
             for att in post.get("attachments", []):
                 if att.get("type") == "photo":
                     p = att.get("photo") or {}
@@ -13386,6 +13452,22 @@ async def edit_vk_post(
         current = attachments[:]
     else:
         current = old_attachments.copy()
+    if not edit_allowed:
+        logging.warning(
+            "edit_vk_post: skipping %s, edit unavailable (%s)",
+            post_url,
+            edit_block_reason or "unknown reason",
+        )
+        if db is not None and bot is not None:
+            try:
+                await notify_superadmin(
+                    db,
+                    bot,
+                    f"Не удалось отредактировать пост {post_url}: окно редактирования истекло",
+                )
+            except Exception:  # pragma: no cover - best effort
+                logging.exception("edit_vk_post notify_superadmin failed")
+        return False
     if post_text == message and current == old_attachments:
         logging.info("edit_vk_post: no changes for %s", post_url)
         return False
@@ -13584,7 +13666,7 @@ async def vk_crawl_cron(db: Database, bot: Bot, run_id: str | None = None) -> No
 
 async def cleanup_old_events(db: Database, now_utc: datetime | None = None) -> int:
     """Delete events that finished more than a week ago."""
-    cutoff = (now_utc or datetime.utcnow()) - timedelta(days=7)
+    cutoff = (now_utc or datetime.now(timezone.utc)) - timedelta(days=7)
     cutoff_str = cutoff.date().isoformat()
     async with db.get_session() as session:
         async with session.begin():
@@ -15717,7 +15799,7 @@ async def handle_queue_reap(message: types.Message, db: Database, bot: Bot) -> N
             mult = 86400
         value = int(s[:-1]) if s[-1] in "mhd" else int(s)
         older_sec = value * mult
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     async with db.get_session() as session:
         stmt = select(JobOutbox).where(JobOutbox.status == JobStatus(opts.status))
         if key_prefix:
