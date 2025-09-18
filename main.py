@@ -178,6 +178,7 @@ from scheduling import startup as scheduler_startup, cleanup as scheduler_cleanu
 from sqlalchemy import select, update, delete, text, func, or_
 
 from models import (
+    TOPIC_LABELS,
     User,
     PendingUser,
     RejectedUser,
@@ -4580,6 +4581,7 @@ async def ask_4o(
     system_prompt: str | None = None,
     response_format: dict | None = None,
     max_tokens: int = 1000,
+    model: str | None = None,
 ) -> str:
     token = os.getenv("FOUR_O_TOKEN")
     if not token:
@@ -4596,7 +4598,7 @@ async def ask_4o(
         messages.append({"role": "system", "content": system_prompt})
     messages.append({"role": "user", "content": text})
     payload: dict[str, Any] = {
-        "model": "gpt-4o",
+        "model": model or "gpt-4o",
         "messages": messages,
         "temperature": 0,
         "max_tokens": max_tokens,
@@ -4626,6 +4628,130 @@ async def ask_4o(
     del data
     gc.collect()
     return content
+
+
+EVENT_TOPIC_SYSTEM_PROMPT = (
+    "You are an assistant that classifies cultural events into topics. "
+    "Respond with JSON containing the `topics` array of applicable topic identifiers. "
+    "Use only the allowed topics and prefer the most relevant ones. Return an empty array if no topics apply."
+)
+
+EVENT_TOPIC_RESPONSE_FORMAT = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "event_topics",
+        "schema": {
+            "type": "object",
+            "properties": {
+                "topics": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": sorted(TOPIC_LABELS.keys()),
+                    },
+                }
+            },
+            "required": ["topics"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
+def _extract_available_hashtags(event: Event) -> list[str]:
+    text_sources = [
+        getattr(event, "description", "") or "",
+        getattr(event, "source_text", "") or "",
+    ]
+    seen: dict[str, None] = {}
+    for chunk in text_sources:
+        if not chunk:
+            continue
+        for match in re.findall(r"#[\w\d_]+", chunk, flags=re.UNICODE):
+            normalized = match.strip()
+            if normalized and normalized not in seen:
+                seen[normalized] = None
+    return list(seen.keys())
+
+
+async def classify_event_topics(event: Event) -> list[str]:
+    allowed_topics = set(TOPIC_LABELS.keys())
+    title = (getattr(event, "title", "") or "").strip()
+    descriptions: list[str] = []
+    for attr in ("description", "source_text"):
+        value = getattr(event, attr, "") or ""
+        value = value.strip()
+        if not value:
+            continue
+        descriptions.append(value)
+    description_text = "\n\n".join(descriptions)
+    if len(description_text) > FOUR_O_PROMPT_LIMIT:
+        description_text = description_text[:FOUR_O_PROMPT_LIMIT]
+    hashtags = _extract_available_hashtags(event)
+    location_parts = [
+        (getattr(event, "city", "") or "").strip(),
+        (getattr(event, "location_name", "") or "").strip(),
+        (getattr(event, "location_address", "") or "").strip(),
+    ]
+    location_text = ", ".join(part for part in location_parts if part)
+    sections: list[str] = []
+    if title:
+        sections.append(f"Title: {title}")
+    if description_text:
+        sections.append(f"Description:\n{description_text}")
+    if hashtags:
+        sections.append("Available hashtags: " + ", ".join(hashtags))
+    if location_text:
+        sections.append(f"Location: {location_text}")
+    prompt_text = "\n\n".join(sections).strip()
+    logger.info(
+        "Classify topics prompt lengths: title=%s desc=%s hashtags=%s location=%s total=%s",
+        len(title),
+        len(description_text),
+        len(", ".join(hashtags)) if hashtags else 0,
+        len(location_text),
+        len(prompt_text),
+    )
+    model_name = "gpt-4o-mini" if os.getenv("FOUR_O_MINI") == "1" else None
+    try:
+        raw = await ask_4o(
+            prompt_text,
+            system_prompt=EVENT_TOPIC_SYSTEM_PROMPT,
+            response_format=EVENT_TOPIC_RESPONSE_FORMAT,
+            max_tokens=FOUR_O_RESPONSE_LIMIT,
+            model=model_name,
+        )
+    except Exception as exc:
+        logging.warning("Topic classification request failed: %s", exc)
+        return []
+    raw = (raw or "").strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"^```[a-zA-Z]*\n", "", raw)
+        if raw.endswith("```"):
+            raw = raw[:-3]
+        raw = raw.strip()
+    try:
+        data = json.loads(raw)
+    except Exception as exc:
+        logging.warning("Topic classification JSON parse failed: %s", exc)
+        return []
+    topics = data.get("topics") if isinstance(data, dict) else None
+    if not isinstance(topics, list):
+        logging.warning("Topic classification response missing list: %s", raw)
+        return []
+    result: list[str] = []
+    for topic in topics:
+        if not isinstance(topic, str):
+            continue
+        normalized = topic.strip().lower()
+        if not normalized or normalized not in allowed_topics:
+            continue
+        if normalized in result:
+            continue
+        result.append(normalized)
+        if len(result) >= 3:
+            break
+    return result
 
 
 async def check_duplicate_via_4o(ev: Event, new: Event) -> Tuple[bool, str, str]:
