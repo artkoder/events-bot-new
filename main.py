@@ -4630,11 +4630,21 @@ async def ask_4o(
     return content
 
 
-EVENT_TOPIC_SYSTEM_PROMPT = (
-    "You are an assistant that classifies cultural events into topics. "
-    "Respond with JSON containing the `topics` array of applicable topic identifiers. "
-    "Use only the allowed topics and prefer the most relevant ones. Return an empty array if no topics apply."
+_EVENT_TOPIC_LISTING = "\n".join(
+    f"- {topic} — «{label}»" for topic, label in TOPIC_LABELS.items()
 )
+
+EVENT_TOPIC_SYSTEM_PROMPT = textwrap.dedent(
+    f"""
+    Ты — ассистент, который классифицирует культурные события по темам.
+    Верни JSON с массивом `topics`, где указаны подходящие идентификаторы тем.
+    Используй ровно англоязычные идентификаторы из списка ниже и не добавляй ничего вне его.
+    Не используй темы «Бесплатно» и «Фестивали».
+    Каждый идентификатор должен быть записан ровно так, как указан ниже:
+    {_EVENT_TOPIC_LISTING}
+    Если ни одна тема не подходит, верни пустой массив.
+    """
+).strip()
 
 EVENT_TOPIC_RESPONSE_FORMAT = {
     "type": "json_schema",
