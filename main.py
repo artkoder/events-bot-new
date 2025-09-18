@@ -114,6 +114,7 @@ import vk_review
 import poster_ocr
 from poster_media import (
     PosterMedia,
+    apply_ocr_results_to_media,
     build_poster_summary,
     collect_poster_texts,
     process_media,
@@ -6869,6 +6870,12 @@ async def add_events_from_text(
         poster_items, _ = await process_media(
             normalized_media, need_catbox=True, need_ocr=False
         )
+    hash_to_indices: dict[str, list[int]] | None = None
+    if normalized_media:
+        hash_to_indices = {}
+        for idx, (payload, _name) in enumerate(normalized_media):
+            digest = hashlib.sha256(payload).hexdigest()
+            hash_to_indices.setdefault(digest, []).append(idx)
     ocr_results: list[poster_ocr.PosterOcrCache] = []
     try:
         if normalized_media:
@@ -6884,27 +6891,19 @@ async def add_events_from_text(
             _, _, ocr_tokens_remaining = await poster_ocr.recognize_posters(db, [])
     except poster_ocr.PosterOcrLimitExceededError as exc:
         logging.warning("poster OCR skipped: %s", exc)
-        ocr_results = []
+        ocr_results = list(exc.results or [])
         ocr_tokens_spent = exc.spent_tokens
         ocr_tokens_remaining = exc.remaining
         ocr_limit_notice = (
             "OCR недоступен: дневной лимит токенов исчерпан, распознавание пропущено."
         )
 
-    if poster_items and ocr_results:
-        for poster, cache in zip(poster_items, ocr_results):
-            poster.ocr_text = cache.text
-            poster.prompt_tokens = cache.prompt_tokens
-            poster.completion_tokens = cache.completion_tokens
-            poster.total_tokens = cache.total_tokens
-    elif not poster_items and ocr_results:
-        for cache in ocr_results:
-            media_entry = PosterMedia(data=b"", name=cache.hash)
-            media_entry.ocr_text = cache.text
-            media_entry.prompt_tokens = cache.prompt_tokens
-            media_entry.completion_tokens = cache.completion_tokens
-            media_entry.total_tokens = cache.total_tokens
-            poster_items.append(media_entry)
+    if ocr_results:
+        apply_ocr_results_to_media(
+            poster_items,
+            ocr_results,
+            hash_to_indices=hash_to_indices if hash_to_indices else None,
+        )
 
     catbox_urls = [item.catbox_url for item in poster_items if item.catbox_url]
     poster_texts = collect_poster_texts(poster_items)

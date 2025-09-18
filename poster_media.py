@@ -3,9 +3,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from collections import deque
 from dataclasses import dataclass, field
 from importlib import import_module
-from typing import Iterable, Sequence
+from typing import Iterable, Mapping, Sequence
 
 from vision_test.ocr import OcrResult, configure_http as _configure_ocr_http, run_ocr
 
@@ -14,6 +15,7 @@ __all__ = [
     "process_media",
     "collect_poster_texts",
     "build_poster_summary",
+    "apply_ocr_results_to_media",
 ]
 
 
@@ -127,3 +129,50 @@ def build_poster_summary(poster_media: Sequence[PosterMedia]) -> str | None:
         f"Posters processed: {len(poster_media)}. "
         f"Tokens — prompt: {prompt}, completion: {completion}, total: {total}."
     )
+
+
+def apply_ocr_results_to_media(
+    poster_media: list[PosterMedia],
+    ocr_results: Sequence[object],
+    *,
+    hash_to_indices: Mapping[str, list[int]] | None = None,
+) -> None:
+    """Populate poster metadata with OCR cache entries."""
+
+    if not ocr_results:
+        return
+
+    index_map = {
+        key: deque(indices)
+        for key, indices in (hash_to_indices or {}).items()
+    }
+    used_indices: set[int] = set()
+
+    for cache in ocr_results:
+        idx: int | None = None
+        cache_hash = getattr(cache, "hash", None)
+        if cache_hash is not None:
+            queue = index_map.get(cache_hash)
+            while queue:
+                candidate = queue.popleft()
+                if 0 <= candidate < len(poster_media) and candidate not in used_indices:
+                    idx = candidate
+                    break
+
+        if idx is None:
+            for candidate in range(len(poster_media)):
+                if candidate not in used_indices:
+                    idx = candidate
+                    break
+
+        if idx is None:
+            poster = PosterMedia(data=b"", name=str(cache_hash or ""))
+            poster_media.append(poster)
+            idx = len(poster_media) - 1
+
+        poster = poster_media[idx]
+        used_indices.add(idx)
+        poster.ocr_text = getattr(cache, "text", None)
+        poster.prompt_tokens = getattr(cache, "prompt_tokens", None)
+        poster.completion_tokens = getattr(cache, "completion_tokens", None)
+        poster.total_tokens = getattr(cache, "total_tokens", None)

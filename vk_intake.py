@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 import random
@@ -13,6 +14,7 @@ from datetime import datetime, timedelta
 from db import Database
 from poster_media import (
     PosterMedia,
+    apply_ocr_results_to_media,
     build_poster_summary,
     collect_poster_texts,
     process_media,
@@ -480,10 +482,16 @@ async def build_event_draft(
     ocr_tokens_spent = 0
     ocr_tokens_remaining: int | None = None
     ocr_limit_notice: str | None = None
+    hash_to_indices: dict[str, list[int]] | None = None
     if photo_bytes:
+        hash_to_indices = {}
+        for idx, (payload, _name) in enumerate(photo_bytes):
+            digest = hashlib.sha256(payload).hexdigest()
+            hash_to_indices.setdefault(digest, []).append(idx)
         poster_items, catbox_msg = await process_media(
             photo_bytes, need_catbox=True, need_ocr=False
         )
+        ocr_results: list[poster_ocr.PosterOcrCache] = []
         try:
             (
                 ocr_results,
@@ -492,18 +500,18 @@ async def build_event_draft(
             ) = await poster_ocr.recognize_posters(db, photo_bytes)
         except poster_ocr.PosterOcrLimitExceededError as exc:
             logging.warning("vk.build_event_draft OCR skipped: %s", exc)
-            ocr_results = []
+            ocr_results = list(exc.results or [])
             ocr_tokens_spent = exc.spent_tokens
             ocr_tokens_remaining = exc.remaining
             ocr_limit_notice = (
                 "OCR недоступен: дневной лимит токенов исчерпан, распознавание пропущено."
             )
-        else:
-            for poster, cache in zip(poster_items, ocr_results):
-                poster.ocr_text = cache.text
-                poster.prompt_tokens = cache.prompt_tokens
-                poster.completion_tokens = cache.completion_tokens
-                poster.total_tokens = cache.total_tokens
+        if ocr_results:
+            apply_ocr_results_to_media(
+                poster_items,
+                ocr_results,
+                hash_to_indices=hash_to_indices if hash_to_indices else None,
+            )
         logging.info(
             "vk.build_event_draft posters=%d catbox=%s",
             len(poster_items),
