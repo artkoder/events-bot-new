@@ -1434,7 +1434,9 @@ async def test_create_source_page_normalizes_hashtags(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_process_media_normalizes_catbox_setting(tmp_path: Path, monkeypatch):
+async def test_process_media_normalizes_catbox_setting(
+    tmp_path: Path, monkeypatch, caplog
+):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
 
@@ -1448,6 +1450,13 @@ async def test_process_media_normalizes_catbox_setting(tmp_path: Path, monkeypat
     main.CATBOX_ENABLED = False
     enabled = await main.get_catbox_enabled(db)
     assert enabled is True
+
+    caplog.set_level(logging.INFO)
+    caplog.clear()
+    await main.set_catbox_enabled(db, enabled)
+    assert any(
+        "CATBOX_ENABLED set to True" in message for message in caplog.messages
+    )
 
     async with db.raw_conn() as conn:
         cursor = await conn.execute(
@@ -1473,6 +1482,43 @@ async def test_process_media_normalizes_catbox_setting(tmp_path: Path, monkeypat
     assert captured.get("called") is True
     assert posters and posters[0].catbox_url == "https://files.catbox.moe/poster.jpg"
     assert catbox_msg == "ok"
+
+
+@pytest.mark.asyncio
+async def test_init_db_logs_catbox_state(tmp_path: Path, monkeypatch, caplog):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.raw_conn() as conn:
+        await conn.execute(
+            "INSERT OR REPLACE INTO setting(key, value) VALUES('catbox_enabled', ?)",
+            ("0",),
+        )
+        await conn.commit()
+
+    class DummyBot:
+        async def set_webhook(self, *args, **kwargs):
+            return None
+
+    async def noop(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(main, "scheduler_startup", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(main, "daily_scheduler", noop)
+    monkeypatch.setattr(main, "add_event_queue_worker", noop)
+    monkeypatch.setattr(main, "_watch_add_event_worker", noop)
+    monkeypatch.setattr(main, "job_outbox_worker", noop)
+
+    caplog.set_level(logging.INFO)
+    caplog.clear()
+
+    app: dict[str, object] = {}
+    bot = DummyBot()
+    await main.init_db_and_scheduler(app, db, bot, "https://example.com")
+
+    assert any(
+        "CATBOX_ENABLED resolved to False" in message for message in caplog.messages
+    )
 
 
 def test_get_telegraph_token_creates(tmp_path, monkeypatch):
