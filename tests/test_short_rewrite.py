@@ -23,9 +23,15 @@ async def test_build_short_vk_text_uses_description_when_source_missing(monkeypa
         title="Название события",
     )
 
-    result = await main.build_short_vk_text(event, "", max_sentences=2)
+    result = await main.build_short_vk_text(
+        event,
+        "",
+        max_sentences=2,
+        poster_texts=["OCR блок"],
+    )
 
     assert "Длинное описание события" in calls["prompt"]
+    assert "OCR блок" in calls["prompt"]
     assert result == "Сжатый текст. Второе предложение."
 
 

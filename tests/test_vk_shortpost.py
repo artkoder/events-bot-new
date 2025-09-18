@@ -158,7 +158,7 @@ async def test_shortpost_wall_post(tmp_path, monkeypatch):
 
     monkeypatch.setattr(main, "_vk_api", fake_api)
     monkeypatch.setattr(main, "vk_api", fake_vk_api)
-    async def fake_build(event, src, max_sent):
+    async def fake_build(event, src, max_sent, **kwargs):
         return "short"
     monkeypatch.setattr(main, "build_short_vk_text", fake_build)
     async def fake_ask(prompt, **kwargs):
@@ -225,7 +225,7 @@ async def test_shortpost_publish_without_photo(tmp_path, monkeypatch):
 
     monkeypatch.setattr(main, "_vk_api", fake_api)
 
-    async def fake_build(event, src, max_sent):
+    async def fake_build(event, src, max_sent, **kwargs):
         return "short"
 
     monkeypatch.setattr(main, "build_short_vk_text", fake_build)
@@ -369,7 +369,7 @@ async def test_shortpost_captcha(tmp_path, monkeypatch):
             }
         raise main.VKAPIError(14, "captcha")
     monkeypatch.setattr(main, "_vk_api", fake_api)
-    async def fake_build(event, src, max_sent):
+    async def fake_build(event, src, max_sent, **kwargs):
         return "short"
     monkeypatch.setattr(main, "build_short_vk_text", fake_build)
     async def fake_ask(prompt, **kwargs):
@@ -407,7 +407,7 @@ async def test_shortpost_captcha(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_shortpost_no_time(monkeypatch):
-    async def fake_build_text(event, src, max_sent):
+    async def fake_build_text(event, src, max_sent, **kwargs):
         return "short summary"
 
     async def fake_tags(event, summary, used_type_hashtag=None):
@@ -433,7 +433,7 @@ async def test_shortpost_no_time(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_shortpost_free_event_ticket_line(monkeypatch):
-    async def fake_build_text(event, src, max_sent):
+    async def fake_build_text(event, src, max_sent, **kwargs):
         return "short summary"
 
     async def fake_tags(event, summary, used_type_hashtag=None):
@@ -461,7 +461,7 @@ async def test_shortpost_free_event_ticket_line(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_shortpost_midnight_time_hidden(monkeypatch):
-    async def fake_build_text(event, src, max_sent):
+    async def fake_build_text(event, src, max_sent, **kwargs):
         return "short summary"
 
     async def fake_tags(event, summary, used_type_hashtag=None):
@@ -486,7 +486,7 @@ async def test_shortpost_midnight_time_hidden(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_shortpost_city_not_duplicated(monkeypatch):
-    async def fake_build_text(event, src, max_sent):
+    async def fake_build_text(event, src, max_sent, **kwargs):
         return "short summary"
 
     async def fake_tags(event, summary, used_type_hashtag=None):
@@ -517,7 +517,7 @@ async def test_shortpost_city_not_duplicated(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_shortpost_type_line_for_hyphenated_type(monkeypatch):
-    async def fake_build_text(event, src, max_sent):
+    async def fake_build_text(event, src, max_sent, **kwargs):
         return "короткое описание"
 
     async def fake_ask(prompt, **kwargs):
@@ -552,7 +552,7 @@ async def test_shortpost_type_line_for_hyphenated_type(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_shortpost_plain_type_hashtag_not_repeated(monkeypatch):
-    async def fake_build_text(event, src, max_sent):
+    async def fake_build_text(event, src, max_sent, **kwargs):
         return "короткое описание"
 
     async def fake_ask(prompt, **kwargs):
@@ -585,7 +585,7 @@ async def test_shortpost_plain_type_hashtag_not_repeated(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_shortpost_ongoing_exhibition(monkeypatch):
-    async def fake_build_text(event, src, max_sent):
+    async def fake_build_text(event, src, max_sent, **kwargs):
         return "short summary"
 
     async def fake_tags(event, summary, used_type_hashtag=None):
@@ -620,7 +620,7 @@ async def test_shortpost_ongoing_exhibition(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_shortpost_preview_link(monkeypatch):
-    async def fake_build_text(event, src, max_sent):
+    async def fake_build_text(event, src, max_sent, **kwargs):
         return "short summary"
 
     async def fake_tags(event, summary, used_type_hashtag=None):
