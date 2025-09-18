@@ -115,3 +115,99 @@ async def test_schedule_event_update_tasks_enqueues_and_runs_vk_sync(tmp_path, m
     async with db.get_session() as session:
         updated = await session.get(Event, saved.id)
     assert updated.source_vk_post_url == "https://vk.com/wall-1_1"
+
+
+@pytest.mark.asyncio
+async def test_upsert_event_preserves_manual_topics(tmp_path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.get_session() as session:
+        existing = Event(
+            title="T",
+            description="D",
+            festival=None,
+            date="2025-09-02",
+            time="10:00",
+            location_name="Loc",
+            location_address="Addr",
+            city="City",
+            source_text="Manual",
+            topics=["искусство"],
+            topics_manual=True,
+        )
+        session.add(existing)
+        await session.commit()
+        event_id = existing.id
+
+    async with db.get_session() as session:
+        new = Event(
+            title="T",
+            description="D",
+            festival=None,
+            date="2025-09-02",
+            time="10:00",
+            location_name="Loc",
+            location_address="Addr",
+            city="City",
+            source_text="Manual",
+            topics=["музыка"],
+            topics_manual=False,
+        )
+        saved, created = await main.upsert_event(session, new)
+        assert created is False
+        assert saved.id == event_id
+
+    async with db.get_session() as session:
+        refreshed = await session.get(Event, event_id)
+        assert refreshed is not None
+        assert refreshed.topics == ["искусство"]
+        assert refreshed.topics_manual is True
+
+
+@pytest.mark.asyncio
+async def test_upsert_event_updates_topics_when_not_manual(tmp_path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.get_session() as session:
+        existing = Event(
+            title="T",
+            description="D",
+            festival=None,
+            date="2025-09-03",
+            time="11:00",
+            location_name="Loc",
+            location_address="Addr",
+            city="City",
+            source_text="Auto",
+            topics=[],
+            topics_manual=False,
+        )
+        session.add(existing)
+        await session.commit()
+        event_id = existing.id
+
+    async with db.get_session() as session:
+        new = Event(
+            title="T",
+            description="D",
+            festival=None,
+            date="2025-09-03",
+            time="11:00",
+            location_name="Loc",
+            location_address="Addr",
+            city="City",
+            source_text="Auto",
+            topics=["музыка"],
+            topics_manual=True,
+        )
+        saved, created = await main.upsert_event(session, new)
+        assert created is False
+        assert saved.id == event_id
+
+    async with db.get_session() as session:
+        refreshed = await session.get(Event, event_id)
+        assert refreshed is not None
+        assert refreshed.topics == ["музыка"]
+        assert refreshed.topics_manual is True

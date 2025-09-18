@@ -7,6 +7,19 @@ from sqlalchemy import Column, Index, JSON, text
 from sqlalchemy.types import Enum as SAEnum
 
 
+TOPIC_LABELS: dict[str, str] = {
+    "искусство": "Искусство",
+    "история россии": "История России",
+    "технологии": "Технологии",
+    "психология": "Психология",
+    "урбанистика": "Урбанистика",
+    "литература": "Литература",
+    "кино": "Кино",
+    "музыка": "Музыка",
+    "бизнес": "Бизнес",
+}
+
+
 class User(SQLModel, table=True):
     user_id: int = Field(primary_key=True)
     username: Optional[str] = None
@@ -98,6 +111,8 @@ class Event(SQLModel, table=True):
     creator_id: Optional[int] = None
     photo_urls: list[str] = Field(default_factory=list, sa_column=Column(JSON))
     photo_count: int = 0
+    topics: list[str] = Field(default_factory=list, sa_column=Column(JSON))
+    topics_manual: bool = False
     added_at: datetime = Field(default_factory=datetime.utcnow)
     content_hash: Optional[str] = None
 
