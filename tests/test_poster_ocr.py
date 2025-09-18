@@ -11,6 +11,7 @@ from models import OcrUsage, PosterOcrCache
 import poster_ocr
 import vision_test.ocr
 from vision_test.ocr import OcrResult, OcrUsage as OcrUsageStats
+from poster_media import PosterMedia, apply_ocr_results_to_media
 
 
 @dataclass
@@ -207,6 +208,72 @@ async def test_recognize_posters_concurrent_upsert(tmp_path, monkeypatch):
 
     assert cached is not None
     assert cached.text in {first_results[0].text, second_results[0].text}
+
+
+@pytest.mark.asyncio
+async def test_recognize_posters_returns_detached_cache_objects(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    cached_bytes = b"cached"
+    fresh_bytes = b"fresh"
+    cached_digest = hashlib.sha256(cached_bytes).hexdigest()
+    fresh_digest = hashlib.sha256(fresh_bytes).hexdigest()
+    model = os.getenv("POSTER_OCR_MODEL", "gpt-4o-mini")
+
+    async with db.get_session() as session:
+        session.add(
+            PosterOcrCache(
+                hash=cached_digest,
+                detail="auto",
+                model=model,
+                text="cached text",
+                prompt_tokens=2,
+                completion_tokens=3,
+                total_tokens=5,
+            )
+        )
+        await session.commit()
+
+    async def fake_run_ocr(data, *, model, detail):
+        assert data == fresh_bytes
+        return OcrResult(
+            text="fresh text",
+            usage=OcrUsageStats(prompt_tokens=7, completion_tokens=11, total_tokens=13),
+        )
+
+    monkeypatch.setattr(poster_ocr, "run_ocr", fake_run_ocr)
+
+    posters = [DummyPoster(cached_bytes), DummyPoster(fresh_bytes)]
+    results, spent_tokens, remaining_tokens = await poster_ocr.recognize_posters(
+        db, posters
+    )
+
+    assert len(results) == 2
+    assert spent_tokens == 13
+    assert remaining_tokens == poster_ocr.DAILY_TOKEN_LIMIT - 13
+
+    poster_media_items = [
+        PosterMedia(data=cached_bytes, name="cached"),
+        PosterMedia(data=fresh_bytes, name="fresh"),
+    ]
+    hash_to_indices = {cached_digest: [0], fresh_digest: [1]}
+
+    apply_ocr_results_to_media(
+        poster_media_items,
+        results,
+        hash_to_indices=hash_to_indices,
+    )
+
+    assert poster_media_items[0].ocr_text == "cached text"
+    assert poster_media_items[0].prompt_tokens == 2
+    assert poster_media_items[0].completion_tokens == 3
+    assert poster_media_items[0].total_tokens == 5
+
+    assert poster_media_items[1].ocr_text == "fresh text"
+    assert poster_media_items[1].prompt_tokens == 7
+    assert poster_media_items[1].completion_tokens == 11
+    assert poster_media_items[1].total_tokens == 13
 
 
 @pytest.mark.asyncio
