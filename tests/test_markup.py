@@ -46,6 +46,22 @@ def test_linkify_vk_internal_link():
         == '<a href="https://vk.com/club9118984">Калининградском музее</a>'
     )
 
+
+def test_linkify_telegram_mention():
+    assert (
+        linkify_for_telegraph("@ruin_keepers_admin")
+        == '<a href="https://t.me/ruin_keepers_admin">@ruin_keepers_admin</a>'
+    )
+
+
+def test_linkify_telegram_mention_inside_anchor_untouched():
+    html = '<a href="https://example.com">@ruin_keepers_admin</a>'
+    assert linkify_for_telegraph(html) == html
+
+
+def test_linkify_telegram_mention_not_email():
+    assert linkify_for_telegraph("info@example.com") == "info@example.com"
+
 def test_expose_links_from_html():
     assert expose_links_for_vk('see <a href="https://example.com">site</a>') == 'see site (https://example.com)'
 
