@@ -19,7 +19,7 @@ TOPIC_LABELS: dict[str, str] = {
     "LECTURES": "Лекции и встречи",
     "MASTERCLASS": "Мастер-классы",
     "SCIENCE_POP": "Научпоп",
-    "HANDMADE": "Маркет и хендмейд",
+    "HANDMADE": "Хендмейд/маркеты/ярмарки/МК",
     "NETWORKING": "Нетворкинг и карьера",
     "ACTIVE": "Активный отдых и спорт",
     "PERSONALITIES": "Личности и встречи",
