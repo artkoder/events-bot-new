@@ -3,8 +3,23 @@ name: CI
 on:
   pull_request:
     branches: [ main ]
+
 jobs:
   python-ci:
     runs-on: ubuntu-latest
     steps:
-      - run: echo "OK"
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pip install ruff pytest
+      - name: Syntax check
+        run: python -m compileall -q .
+      - name: Lint
+        run: ruff check .
+      # - name: Tests
+      #   run: pytest -q
