@@ -88,6 +88,32 @@ async def test_vk_actor_auto_no_fallback(monkeypatch, caplog):
     )
 
 
+@pytest.mark.asyncio
+async def test_vk_actor_no_retry_edit_time_expired(monkeypatch):
+    monkeypatch.setattr(main, "_vk_captcha_needed", False)
+    monkeypatch.setattr(main, "VK_ACTOR_MODE", "group")
+    monkeypatch.setattr(main, "VK_TOKEN", "g")
+    monkeypatch.setattr(main, "_vk_user_token", lambda: None)
+    monkeypatch.setattr(main, "BACKOFF_DELAYS", [0, 0, 0])
+
+    attempts = 0
+
+    async def fake_http_call(name, method, url, timeout, data, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        return DummyResp(
+            {"error": {"error_code": 15, "error_msg": "Edit time expired"}}
+        )
+
+    monkeypatch.setattr(main, "http_call", fake_http_call)
+
+    with pytest.raises(main.VKAPIError) as exc:
+        await main._vk_api("wall.edit", {}, db=None, bot=None)
+
+    assert exc.value.code == 15
+    assert attempts == 1
+
+
 def test_choose_vk_actor(monkeypatch):
     monkeypatch.setattr(main, "VK_MAIN_GROUP_ID", "1")
     monkeypatch.setattr(main, "VK_AFISHA_GROUP_ID", "2")
