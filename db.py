@@ -34,6 +34,79 @@ class Database:
             await conn.execute("PRAGMA busy_timeout=5000")
             await conn.execute("PRAGMA mmap_size=134217728")
 
+            pragma_cursor = await conn.execute("PRAGMA table_info('posterocrcache')")
+            poster_ocr_columns = await pragma_cursor.fetchall()
+            await pragma_cursor.close()
+
+            detail_exists = any(col[1] == "detail" for col in poster_ocr_columns)
+            model_exists = any(col[1] == "model" for col in poster_ocr_columns)
+            created_at_exists = any(col[1] == "created_at" for col in poster_ocr_columns)
+            pk_columns: list[str] = []
+            if poster_ocr_columns:
+                pk_info = sorted(
+                    ((col[5], col[1]) for col in poster_ocr_columns if col[5]),
+                    key=lambda item: item[0],
+                )
+                pk_columns = [name for _, name in pk_info]
+
+            expected_pk = ["hash", "detail", "model"]
+            needs_posterocr_migration = False
+            if poster_ocr_columns:
+                if not detail_exists or not model_exists:
+                    needs_posterocr_migration = True
+                elif pk_columns != expected_pk:
+                    needs_posterocr_migration = True
+
+            if needs_posterocr_migration:
+                await conn.execute("DROP TABLE IF EXISTS posterocrcache_new")
+                await conn.execute(
+                    """
+                    CREATE TABLE posterocrcache_new(
+                        hash TEXT NOT NULL,
+                        detail TEXT NOT NULL,
+                        model TEXT NOT NULL,
+                        text TEXT NOT NULL,
+                        prompt_tokens INTEGER NOT NULL DEFAULT 0,
+                        completion_tokens INTEGER NOT NULL DEFAULT 0,
+                        total_tokens INTEGER NOT NULL DEFAULT 0,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        PRIMARY KEY (hash, detail, model)
+                    )
+                    """
+                )
+
+                detail_default = "auto"
+                model_default = os.getenv("POSTER_OCR_MODEL", "gpt-4o-mini")
+
+                detail_expr = "COALESCE(detail, ?)" if detail_exists else "?"
+                model_expr = "COALESCE(model, ?)" if model_exists else "?"
+                created_at_expr = "created_at" if created_at_exists else "CURRENT_TIMESTAMP"
+
+                insert_sql = f"""
+                    INSERT INTO posterocrcache_new (
+                        hash, detail, model, text,
+                        prompt_tokens, completion_tokens, total_tokens, created_at
+                    )
+                    SELECT
+                        hash,
+                        {detail_expr},
+                        {model_expr},
+                        text,
+                        prompt_tokens,
+                        completion_tokens,
+                        total_tokens,
+                        {created_at_expr}
+                    FROM posterocrcache
+                """
+
+                params: list[str] = []
+                params.append(detail_default)
+                params.append(model_default)
+
+                await conn.execute(insert_sql, params)
+                await conn.execute("DROP TABLE posterocrcache")
+                await conn.execute("ALTER TABLE posterocrcache_new RENAME TO posterocrcache")
+
             await conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS user(
