@@ -2727,6 +2727,7 @@ async def upload_images(
     limit: int = MAX_ALBUM_IMAGES,
     *,
     force: bool = False,
+    event_hint: str | None = None,
 ) -> tuple[list[str], str]:
     """Upload images to Catbox with retries."""
     catbox_urls: list[str] = []
@@ -2735,7 +2736,13 @@ async def upload_images(
         return [], ""
     logging.info("CATBOX start images=%d limit=%d", len(images or []), limit)
     if not CATBOX_ENABLED and not force:
-        logging.info("CATBOX disabled")
+        logging.info(
+            "CATBOX disabled catbox_enabled=%s force=%s images=%d event_hint=%s",
+            CATBOX_ENABLED,
+            force,
+            len(images or []),
+            event_hint,
+        )
         return [], "disabled"
 
     session = get_http_session()
