@@ -10,6 +10,7 @@ MD_HEADER = re.compile(r'^(#{1,6})\s+(.+)$', re.M)
 _BARE_LINK_RE = re.compile(r'(?<!href=["\'])(https?://[^\s<>)]+)')
 _TEXT_LINK_RE = re.compile(r'([^<\[]+?)\s*\((https?://[^)]+)\)')
 _VK_LINK_RE = re.compile(r'\[([^|\]]+)\|([^\]]+)\]')
+_TG_MENTION_RE = re.compile(r'(?<![\w/@])@([a-zA-Z0-9_]{4,32})')
 
 def simple_md_to_html(text: str) -> str:
     """Конвертирует небольшой подмножество markdown → HTML для Telegraph."""
@@ -38,9 +39,18 @@ def linkify_for_telegraph(text_or_html: str) -> str:
         href = target if target.startswith(("http://", "https://")) else f"https://vk.com/{target}"
         return f'<a href="{href}">{label}</a>'
 
+    def repl_mention(m: re.Match[str]) -> str:
+        username = m.group(1)
+        return f'<a href="https://t.me/{username}">@{username}</a>'
+
     text = _VK_LINK_RE.sub(repl_vk, text_or_html)
     text = MD_LINK.sub(lambda m: f'<a href="{m[2]}">{m[1]}</a>', text)
     text = _TEXT_LINK_RE.sub(repl_text, text)
+    if "@" in text:
+        parts = re.split(r'(<a\b[^>]*>.*?</a>)', text, flags=re.IGNORECASE | re.DOTALL)
+        for idx in range(0, len(parts), 2):
+            parts[idx] = _TG_MENTION_RE.sub(repl_mention, parts[idx])
+        text = "".join(parts)
     text = _BARE_LINK_RE.sub(repl_bare, text)
     return text
 
