@@ -1,4 +1,5 @@
 import asyncio
+import logging
 
 import pytest
 
@@ -24,7 +25,7 @@ class DummySession:
     def __init__(self, responses):
         self._responses = iter(responses)
 
-    async def post(self, url, data):
+    def post(self, url, data):
         return next(self._responses)
 
 
@@ -51,4 +52,18 @@ async def test_upload_images_fail(monkeypatch):
     urls, msg = await main.upload_images([(b"1", "a.png")])
     assert urls == []
     assert "failed" in msg
+
+
+@pytest.mark.asyncio
+async def test_upload_images_catbox_disabled(monkeypatch, caplog):
+    main.CATBOX_ENABLED = False
+    caplog.set_level(logging.INFO)
+    urls, msg = await main.upload_images([(b"1", "a.png")], event_hint="test")
+    assert urls == []
+    assert msg == "disabled"
+    assert any(
+        "CATBOX disabled catbox_enabled=False force=False images=1 event_hint=test"
+        in record.message
+        for record in caplog.records
+    )
 
