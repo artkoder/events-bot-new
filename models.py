@@ -387,6 +387,7 @@ class JobOutbox(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=datetime.utcnow)
     next_run_at: datetime = Field(default_factory=datetime.utcnow)
     coalesce_key: Optional[str] = None
+    depends_on: Optional[str] = None
 
 
 class PosterOcrCache(SQLModel, table=True):
