@@ -131,6 +131,8 @@ class Database:
                     creator_id INTEGER,
                     photo_urls JSON,
                     photo_count INTEGER DEFAULT 0,
+                    topics TEXT DEFAULT '[]',
+                    topics_manual BOOLEAN DEFAULT 0,
                     added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     content_hash TEXT
                 )
@@ -143,6 +145,8 @@ class Database:
             await _add_column(conn, "event", "ics_post_url TEXT")
             await _add_column(conn, "event", "ics_post_id INTEGER")
             await _add_column(conn, "event", "vk_repost_url TEXT")
+            await _add_column(conn, "event", "topics TEXT DEFAULT '[]'")
+            await _add_column(conn, "event", "topics_manual BOOLEAN DEFAULT 0")
 
             await conn.execute(
                 """

@@ -6074,6 +6074,12 @@ def _copy_fields(dst: Event, src: Event) -> None:
         if val is not None:
             setattr(dst, f, val)
 
+    if not dst.topics_manual:
+        dst.topics = list(src.topics or [])
+        dst.topics_manual = src.topics_manual
+    else:
+        dst.topics_manual = bool(dst.topics_manual or src.topics_manual)
+
 
 async def upsert_event(session: AsyncSession, new: Event) -> Tuple[Event, bool]:
     """Insert or update an event if a similar one exists.
