@@ -1854,7 +1854,10 @@ async def _vk_api(
                 kind,
                 redacted_token,
             )
-            msg = err.get("error_msg", "")
+            msg = err.get("error_msg")
+            if not isinstance(msg, str):
+                msg = "" if msg is None else str(msg)
+            msg_l = msg.lower()
             code = err.get("error_code")
             if code == 14:
                 _vk_captcha_needed = True
@@ -1880,6 +1883,9 @@ async def _vk_api(
                     actor=kind,
                     token=redacted_token,
                 )
+            if code == 15 and "edit time expired" in msg_l:
+                logging.info("vk no-retry error code=15: %s", msg)
+                break
             if kind == "user" and code in {5, 27}:
                 global _vk_user_token_bad
                 if _vk_user_token_bad != token:
@@ -1887,11 +1893,10 @@ async def _vk_api(
                     if db and bot:
                         await notify_superadmin(db, bot, "VK_USER_TOKEN expired")
                 break
-            if any(x in msg.lower() for x in ("already deleted", "already exists")):
+            if any(x in msg_l for x in ("already deleted", "already exists")):
                 logging.info("vk no-retry error: %s", msg)
                 return data
             last_msg = msg
-            msg_l = msg.lower()
             perm_error = (
                 idx == 0
                 and len(tokens) > 1
