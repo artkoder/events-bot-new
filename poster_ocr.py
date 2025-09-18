@@ -19,10 +19,18 @@ DAILY_TOKEN_LIMIT = 10_000_000
 class PosterOcrLimitExceededError(RuntimeError):
     """Raised when the daily OCR token limit has been exhausted."""
 
-    def __init__(self, message: str, *, spent_tokens: int, remaining: int) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        spent_tokens: int,
+        remaining: int,
+        results: Iterable[PosterOcrCache] | None = None,
+    ) -> None:
         super().__init__(message)
         self.spent_tokens = spent_tokens
         self.remaining = remaining
+        self.results = list(results) if results is not None else []
 
 
 def _today_key() -> str:
@@ -102,23 +110,18 @@ async def recognize_posters(
         usage_row = await session.get(OcrUsageModel, today)
         spent_before = usage_row.spent_tokens if usage_row else 0
         limit_remaining = DAILY_TOKEN_LIMIT - spent_before
-        needs_new_requests = any(
-            (digest, detail, model) not in cache_map
-            for _, digest in payloads
-        )
-        if count_usage and payloads and needs_new_requests:
-            if limit_remaining <= 0:
-                raise PosterOcrLimitExceededError(
-                    "poster OCR daily token limit exhausted",
-                    spent_tokens=0,
-                    remaining=0,
-                )
+        block_new_requests = count_usage and limit_remaining <= 0
+        encountered_uncached_after_limit = False
 
         for data, digest in payloads:
             cache_key = (digest, detail, model)
             cached = cache_map.get(cache_key)
             if cached:
                 results.append(cached)
+                continue
+
+            if block_new_requests:
+                encountered_uncached_after_limit = True
                 continue
 
             ocr_result = await run_ocr(data, model=model, detail=detail)
@@ -153,7 +156,7 @@ async def recognize_posters(
                 total_new_tokens += entry.total_tokens
                 limit_remaining = DAILY_TOKEN_LIMIT - (spent_before + total_new_tokens)
                 if limit_remaining <= 0:
-                    break
+                    block_new_requests = True
 
         spent_after = spent_before
         if new_entries or updated_entries:
@@ -184,4 +187,11 @@ async def recognize_posters(
             spent_tokens = max(0, charged_spent)
         else:
             spent_tokens = 0
+        if count_usage and encountered_uncached_after_limit:
+            raise PosterOcrLimitExceededError(
+                "poster OCR daily token limit exhausted",
+                spent_tokens=spent_tokens,
+                remaining=remaining,
+                results=results,
+            )
         return results, spent_tokens, remaining
