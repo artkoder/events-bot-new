@@ -1,7 +1,9 @@
 import os, sys
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
+import asyncio
 import hashlib
+import logging
 from datetime import datetime
 
 import pytest
@@ -27,6 +29,84 @@ class DummyBot:
 
     async def send_media_group(self, chat_id, media):
         pass
+
+
+@pytest.mark.asyncio
+async def test_download_photo_media_logs_mime(monkeypatch, caplog):
+    urls = [
+        "https://example.com/a.png",
+        "https://example.com/b.jpg",
+    ]
+    payloads = {
+        urls[0]: b"\x89PNG\r\n\x1a\nbinary",
+        urls[1]: b"\xff\xd8\xffbinary",
+    }
+
+    class FakeContent:
+        def __init__(self, data: bytes) -> None:
+            self._data = data
+
+        async def read(self, n: int = -1) -> bytes:
+            return self._data
+
+    class FakeResponse:
+        def __init__(self, data: bytes) -> None:
+            self.content = FakeContent(data)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def raise_for_status(self) -> None:
+            return None
+
+    class FakeSession:
+        def __init__(self, mapping: dict[str, bytes]) -> None:
+            self._mapping = mapping
+
+        def get(self, url: str) -> FakeResponse:
+            return FakeResponse(self._mapping[url])
+
+    monkeypatch.setattr(main, "get_http_session", lambda: FakeSession(payloads))
+    monkeypatch.setattr(main, "HTTP_SEMAPHORE", asyncio.Semaphore(5))
+    monkeypatch.setattr(main, "HTTP_TIMEOUT", 1)
+    monkeypatch.setattr(main, "MAX_DOWNLOAD_SIZE", 1024)
+    monkeypatch.setattr(main, "MAX_ALBUM_IMAGES", 5)
+
+    def fake_ensure_jpeg(data: bytes, name: str) -> tuple[bytes, str]:
+        if data.startswith(b"\x89PNG"):
+            return b"\xff\xd8\xffconverted", "converted.jpg"
+        return data, name
+
+    def fake_detect_image_type(data: bytes) -> str | None:
+        if data.startswith(b"\xff\xd8\xff"):
+            return "jpeg"
+        if data.startswith(b"\x89PNG"):
+            return "png"
+        return None
+
+    monkeypatch.setattr(main, "ensure_jpeg", fake_ensure_jpeg)
+    monkeypatch.setattr(main, "detect_image_type", fake_detect_image_type)
+
+    caplog.set_level(logging.INFO)
+    results = await vk_intake._download_photo_media(urls)
+
+    assert results == [
+        (b"\xff\xd8\xffconverted", "converted.jpg"),
+        (b"\xff\xd8\xffbinary", "vk_poster_2.jpg"),
+    ]
+
+    messages = [record.message for record in caplog.records if record.levelno == logging.INFO]
+    assert (
+        f"vk.photo_media processed idx=0 url={urls[0]} subtype=jpeg filename=converted.jpg"
+        in messages
+    )
+    assert (
+        f"vk.photo_media processed idx=1 url={urls[1]} subtype=jpeg filename=vk_poster_2.jpg"
+        in messages
+    )
 
 
 @pytest.mark.asyncio

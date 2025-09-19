@@ -312,6 +312,9 @@ async def _download_photo_media(urls: Sequence[str]) -> list[tuple[bytes, str]]:
     timeout = main_mod.HTTP_TIMEOUT
     max_size = main_mod.MAX_DOWNLOAD_SIZE
     ensure_jpeg = main_mod.ensure_jpeg
+    detect_image_type = getattr(main_mod, "detect_image_type", None)
+    if detect_image_type is None:  # pragma: no cover - defensive
+        raise RuntimeError("detect_image_type not found")
     limit = getattr(main_mod, "MAX_ALBUM_IMAGES", 3)
     results: list[tuple[bytes, str]] = []
 
@@ -332,6 +335,14 @@ async def _download_photo_media(urls: Sequence[str]) -> list[tuple[bytes, str]]:
             logging.warning("vk.download_photo_failed url=%s error=%s", url, exc)
             continue
         data, name = ensure_jpeg(data, f"vk_poster_{idx + 1}.jpg")
+        subtype = detect_image_type(data)
+        logging.info(
+            "vk.photo_media processed idx=%s url=%s subtype=%s filename=%s",
+            idx,
+            url,
+            subtype or "unknown",
+            name,
+        )
         results.append((data, name))
     return results
 
