@@ -7,6 +7,7 @@ import logging
 import time as _time
 
 from db import Database
+from vk_intake import extract_event_ts_hint
 
 
 LOCK_TIMEOUT_SECONDS = 10 * 60
@@ -71,7 +72,6 @@ async def pick_next(db: Database, operator_id: int, batch_id: str) -> Optional[I
     ``None`` is returned when the queue is empty.
     """
 
-    cutoff = int(_time.time()) + 2 * 3600
     async with db.raw_conn() as conn:
         await _unlock_stale(conn)
 
@@ -105,42 +105,67 @@ async def pick_next(db: Database, operator_id: int, batch_id: str) -> Optional[I
             )
             return post
 
-        await conn.execute(
-            "UPDATE vk_inbox SET status='rejected', locked_by=NULL, locked_at=NULL WHERE status IN ('pending','skipped') AND event_ts_hint IS NOT NULL AND event_ts_hint < ?",
-            (cutoff,),
-        )
-        cur = await conn.execute(
-            "SELECT 1 FROM vk_inbox WHERE status='pending' AND (event_ts_hint IS NULL OR event_ts_hint >= ?) LIMIT 1",
-            (cutoff,),
-        )
-        has_pending = await cur.fetchone() is not None
-        if not has_pending:
+        selected_row = None
+        while True:
+            cutoff = int(_time.time()) + 2 * 3600
             await conn.execute(
-                "UPDATE vk_inbox SET status='pending' WHERE status='skipped' AND (event_ts_hint IS NULL OR event_ts_hint >= ?)",
+                "UPDATE vk_inbox SET status='rejected', locked_by=NULL, locked_at=NULL WHERE status IN ('pending','skipped') AND event_ts_hint IS NOT NULL AND event_ts_hint < ?",
                 (cutoff,),
             )
-
-        cursor = await conn.execute(
-            """
-            WITH next AS (
-                SELECT id FROM vk_inbox
-                WHERE status='pending' AND (event_ts_hint IS NULL OR event_ts_hint >= ?)
-                ORDER BY CASE WHEN event_ts_hint IS NULL THEN 1 ELSE 0 END,
-                         event_ts_hint ASC, date DESC, id DESC
-                LIMIT 1
+            cur = await conn.execute(
+                "SELECT 1 FROM vk_inbox WHERE status='pending' AND (event_ts_hint IS NULL OR event_ts_hint >= ?) LIMIT 1",
+                (cutoff,),
             )
-            UPDATE vk_inbox
-            SET status='locked', locked_by=?, locked_at=CURRENT_TIMESTAMP, review_batch=?
-            WHERE id = (SELECT id FROM next)
-            RETURNING id, group_id, post_id, date, text, matched_kw, has_date, status, review_batch
-            """,
-            (cutoff, operator_id, batch_id),
-        )
-        row = await cursor.fetchone()
-        await conn.commit()
-        if not row:
-            return None
-    post = InboxPost(*row)
+            has_pending = await cur.fetchone() is not None
+            if not has_pending:
+                await conn.execute(
+                    "UPDATE vk_inbox SET status='pending' WHERE status='skipped' AND (event_ts_hint IS NULL OR event_ts_hint >= ?)",
+                    (cutoff,),
+                )
+
+            cursor = await conn.execute(
+                """
+                WITH next AS (
+                    SELECT id FROM vk_inbox
+                    WHERE status='pending' AND (event_ts_hint IS NULL OR event_ts_hint >= ?)
+                    ORDER BY CASE WHEN event_ts_hint IS NULL THEN 1 ELSE 0 END,
+                             event_ts_hint ASC, date DESC, id DESC
+                    LIMIT 1
+                )
+                UPDATE vk_inbox
+                SET status='locked', locked_by=?, locked_at=CURRENT_TIMESTAMP, review_batch=?
+                WHERE id = (SELECT id FROM next)
+                RETURNING id, group_id, post_id, date, text, matched_kw, has_date, status, review_batch
+                """,
+                (cutoff, operator_id, batch_id),
+            )
+            row = await cursor.fetchone()
+            if not row:
+                await conn.commit()
+                return None
+
+            inbox_id = row[0]
+            text = row[4]
+            ts_hint = extract_event_ts_hint(text)
+            if ts_hint is None or ts_hint < cutoff:
+                await conn.execute(
+                    "UPDATE vk_inbox SET status='rejected', locked_by=NULL, locked_at=NULL, review_batch=NULL WHERE id=?",
+                    (inbox_id,),
+                )
+                await conn.commit()
+                logging.info(
+                    "vk_review reject_due_to_hint id=%s operator=%s batch=%s", inbox_id, operator_id, batch_id
+                )
+                continue
+
+            await conn.execute(
+                "UPDATE vk_inbox SET event_ts_hint=? WHERE id=?",
+                (ts_hint, inbox_id),
+            )
+            await conn.commit()
+            selected_row = row
+            break
+    post = InboxPost(*selected_row)
     logging.info(
         "vk_review pick_next id=%s group=%s post=%s kw=%s has_date=%s",
         post.id,
