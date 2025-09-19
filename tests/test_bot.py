@@ -7194,6 +7194,143 @@ async def test_fest_list_pagination(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_fest_pagination_callback_updates_pages(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async with db.get_session() as session:
+        session.add(User(user_id=1))
+        for idx in range(12):
+            session.add(main.Festival(name=f"Fest {idx+1}"))
+        archive_fest = main.Festival(name="Archive Fest")
+        session.add(archive_fest)
+        await session.commit()
+
+        past_day = date.today() - timedelta(days=30)
+        session.add(
+            Event(
+                title="Past Event",
+                description="Past",
+                festival=archive_fest.name,
+                date=past_day.isoformat(),
+                time="18:00",
+                location_name="Venue",
+                city="City",
+                source_text="Past",
+            )
+        )
+        await session.commit()
+
+    msg = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "/fest",
+        }
+    )
+    await main.handle_fest(msg, db, bot)
+
+    first_text = bot.messages[-1][1]
+    first_markup = bot.messages[-1][2]["reply_markup"]
+
+    cb_page2 = types.CallbackQuery.model_validate(
+        {
+            "id": "cb1",
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "chat_instance": "1",
+            "data": "festpage:2:active",
+            "message": {
+                "message_id": 10,
+                "date": 0,
+                "chat": {"id": 1, "type": "private"},
+                "from": {"id": 1, "is_bot": False, "first_name": "A"},
+                "text": first_text,
+                "reply_markup": first_markup.model_dump(),
+            },
+        }
+    ).as_(bot)
+
+    async def dummy_answer(text=None, **kwargs):
+        return None
+
+    async def fake_edit_text_page2(text, **kwargs):
+        bot.text_edits.append(
+            (
+                cb_page2.message.chat.id,
+                cb_page2.message.message_id,
+                text,
+                kwargs,
+            )
+        )
+        return None
+
+    object.__setattr__(cb_page2, "answer", dummy_answer)
+    object.__setattr__(cb_page2.message, "edit_text", fake_edit_text_page2)
+
+    await process_request(cb_page2, db, bot)
+
+    assert bot.text_edits
+    chat_id, message_id, page2_text, page2_kwargs = bot.text_edits[-1]
+    assert chat_id == 1
+    assert "стр. 2/2" in page2_text
+    assert "\n8 Fest 8" in page2_text
+    assert "\n9 Fest 9" in page2_text
+    assert "Fest 2" not in page2_text
+    page2_markup = page2_kwargs["reply_markup"]
+    assert any(
+        btn.callback_data == "festpage:1:active"
+        for row in page2_markup.inline_keyboard
+        for btn in row
+    )
+
+    cb_archive = types.CallbackQuery.model_validate(
+        {
+            "id": "cb2",
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "chat_instance": "1",
+            "data": "festpage:1:archive",
+            "message": {
+                "message_id": message_id,
+                "date": 0,
+                "chat": {"id": 1, "type": "private"},
+                "from": {"id": 1, "is_bot": False, "first_name": "A"},
+                "text": page2_text,
+                "reply_markup": page2_markup.model_dump(),
+            },
+        }
+    ).as_(bot)
+
+    async def fake_edit_text_archive(text, **kwargs):
+        bot.text_edits.append(
+            (
+                cb_archive.message.chat.id,
+                cb_archive.message.message_id,
+                text,
+                kwargs,
+            )
+        )
+        return None
+
+    object.__setattr__(cb_archive, "answer", dummy_answer)
+    object.__setattr__(cb_archive.message, "edit_text", fake_edit_text_archive)
+
+    await process_request(cb_archive, db, bot)
+
+    _, _, archive_text, archive_kwargs = bot.text_edits[-1]
+    assert "архив" in archive_text
+    assert "Archive Fest" in archive_text
+    archive_markup = archive_kwargs["reply_markup"]
+    assert any(
+        btn.callback_data == "festpage:1:active"
+        for row in archive_markup.inline_keyboard
+        for btn in row
+    )
+
+
+@pytest.mark.asyncio
 async def test_fest_list_filters_future_events(tmp_path: Path):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
