@@ -1,11 +1,12 @@
 from types import SimpleNamespace
-from datetime import date
+from datetime import date, timedelta
+import re
 
 import pytest
 
 import main
 from db import Database
-from models import Event
+from models import Event, MonthPage
 
 
 @pytest.mark.asyncio
@@ -205,4 +206,87 @@ async def test_pages_rebuild_ignores_invalid_dates(tmp_path, monkeypatch):
     await main.handle_pages_rebuild(message, db, Bot())
     months = [row[0].text for row in sent["markup"].inline_keyboard[:-1]]
     assert months == ["2025-10"]
+
+
+@pytest.mark.asyncio
+async def test_pages_rebuild_split_keeps_day_boundaries(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    month = "2025-10"
+    base_day = date(2025, 10, 1)
+    long_text = "Лонгтекст " * 200
+
+    async with db.get_session() as session:
+        for day_offset in range(3):
+            day = base_day + timedelta(days=day_offset)
+            for idx in range(3):
+                session.add(
+                    Event(
+                        title=f"Event {day_offset}-{idx}",
+                        description=long_text,
+                        date=day.isoformat(),
+                        time=f"{10 + idx:02d}:00",
+                        location_name="loc",
+                        source_text="src",
+                    )
+                )
+        await session.commit()
+
+    monkeypatch.setattr(main, "TELEGRAPH_LIMIT", 500)
+    monkeypatch.setattr(main, "get_telegraph_token", lambda: "token")
+
+    class DummyTelegraph:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    monkeypatch.setattr(main, "Telegraph", DummyTelegraph)
+
+    html_by_path: dict[str, str] = {}
+
+    async def fake_create_page(tg, *, title, html_content, caller="event_pipeline", **kwargs):
+        path = f"path{len(html_by_path) + 1}"
+        html_by_path[path] = html_content
+        return {"url": f"https://telegra.ph/{path}", "path": path}
+
+    async def fake_edit_page(
+        tg, path, *, title, html_content, caller="event_pipeline", **kwargs
+    ):
+        html_by_path[path] = html_content
+        return {"url": f"https://telegra.ph/{path}", "path": path}
+
+    async def fake_check_month_page_markers(tg, path):
+        return None
+
+    monkeypatch.setattr(main, "telegraph_create_page", fake_create_page)
+    monkeypatch.setattr(main, "telegraph_edit_page", fake_edit_page)
+    monkeypatch.setattr(main, "check_month_page_markers", fake_check_month_page_markers)
+
+    message = SimpleNamespace(chat=SimpleNamespace(id=1), text=f"/pages_rebuild {month}")
+
+    class Bot:
+        async def send_message(self, chat_id, text, reply_markup=None):
+            pass
+
+    await main.handle_pages_rebuild(message, db, Bot())
+
+    async with db.get_session() as session:
+        page = await session.get(MonthPage, month)
+
+    assert page is not None
+    assert page.path and page.path2
+    assert page.path in html_by_path
+    assert page.path2 in html_by_path
+
+    def days_from_html(html: str) -> set[str]:
+        return set(re.findall(r"<!--DAY:(\d{4}-\d{2}-\d{2}) START-->", html))
+
+    days1 = days_from_html(html_by_path[page.path])
+    days2 = days_from_html(html_by_path[page.path2])
+
+    expected_days = {(base_day + timedelta(days=i)).isoformat() for i in range(3)}
+
+    assert days1
+    assert days2
+    assert days1.isdisjoint(days2)
+    assert days1 | days2 == expected_days
 

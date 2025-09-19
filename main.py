@@ -140,6 +140,7 @@ from digests import (
 
 from functools import partial, lru_cache
 from collections import defaultdict, deque
+from bisect import bisect_left
 from cachetools import TTLCache
 import asyncio
 import contextlib
@@ -8808,12 +8809,71 @@ async def split_month_until_ok(
 ) -> None:
     from telegraph.utils import nodes_to_html
 
+    if len(events) < 2:
+        raise RuntimeError(
+            f"split_month_until_ok: cannot split {month} without at least two events"
+        )
+
+    def event_day_key(ev: Event) -> str | None:
+        parsed = parse_iso_date(ev.date)
+        if parsed:
+            return parsed.isoformat()
+        raw = (ev.date or "").split("..", 1)[0].strip()
+        return raw or None
+
+    day_boundaries: list[int] = []
+    prev_key = event_day_key(events[0])
+    for idx, ev in enumerate(events[1:], start=1):
+        key = event_day_key(ev)
+        if key is None:
+            continue
+        if prev_key is None:
+            prev_key = key
+            continue
+        if key != prev_key:
+            day_boundaries.append(idx)
+        prev_key = key
+
+    if not day_boundaries:
+        raise RuntimeError(
+            f"split_month_until_ok: no valid day boundary found for {month}"
+        )
+
+    def snap_index(idx: int, *, direction: int | None = None) -> int:
+        if not day_boundaries:
+            raise RuntimeError(
+                f"split_month_until_ok: no valid day boundary found for {month}"
+            )
+        idx = max(1, min(len(events) - 1, idx))
+        if direction is None:
+            pos = bisect_left(day_boundaries, idx)
+            candidates: list[int] = []
+            if pos < len(day_boundaries):
+                candidates.append(day_boundaries[pos])
+            if pos > 0:
+                candidates.append(day_boundaries[pos - 1])
+            if not candidates:
+                return day_boundaries[0]
+            return min(candidates, key=lambda b: (abs(b - idx), b))
+        if direction < 0:
+            pos = bisect_left(day_boundaries, idx)
+            if pos < len(day_boundaries) and day_boundaries[pos] == idx:
+                return day_boundaries[pos]
+            if pos > 0:
+                return day_boundaries[pos - 1]
+            return day_boundaries[0]
+        pos = bisect_left(day_boundaries, idx)
+        if pos < len(day_boundaries):
+            return day_boundaries[pos]
+        return day_boundaries[-1]
+
     title, content, _ = await build_month_page_content(db, month, events, exhibitions)
     html_full = unescape_html_comments(nodes_to_html(content))
     html_full = ensure_footer_nav_with_hr(html_full, nav_block, month=month, page=1)
     total_size = len(html_full.encode())
     avg = total_size / len(events) if events else total_size
-    split_idx = min(len(events), max(1, int(TELEGRAPH_LIMIT // avg))) if events else 0
+    base_idx = max(1, min(len(events) - 1, int(TELEGRAPH_LIMIT // avg)))
+    split_idx = snap_index(base_idx)
     logging.info(
         "month_split start month=%s events=%d total_bytes=%d nav_bytes=%d split_idx=%d",
         month,
@@ -8847,7 +8907,7 @@ async def split_month_until_ok(
             logging.info("month_split forcing attempt idx=%d", split_idx)
         elif rough1 > TELEGRAPH_LIMIT:
             delta = max(1, split_idx // 6)
-            new_idx = max(1, split_idx - delta)
+            new_idx = snap_index(split_idx - delta, direction=-1)
             if new_idx != split_idx:
                 split_idx = new_idx
                 logging.info(
@@ -8856,7 +8916,7 @@ async def split_month_until_ok(
                 continue
         elif rough2 > TELEGRAPH_LIMIT:
             delta = max(1, (len(events) - split_idx) // 6)
-            new_idx = min(len(events) - 1, split_idx + delta)
+            new_idx = snap_index(split_idx + delta, direction=1)
             if new_idx != split_idx:
                 split_idx = new_idx
                 logging.info(
@@ -8893,12 +8953,14 @@ async def split_month_until_ok(
             msg = str(e).lower()
             if "content" in msg and "too" in msg and "big" in msg:
                 delta = max(1, (len(events) - split_idx) // 6)
-                split_idx = min(len(events) - 1, split_idx + delta)
-                logging.info(
-                    "month_split adjust idx=%d reason=telegraph_too_big target=second",
-                    split_idx,
-                )
-                continue
+                new_idx = snap_index(split_idx + delta, direction=1)
+                if new_idx != split_idx:
+                    split_idx = new_idx
+                    logging.info(
+                        "month_split adjust idx=%d reason=telegraph_too_big target=second",
+                        split_idx,
+                    )
+                    continue
             raise
         page.content_hash2 = hash2
         await asyncio.sleep(0)
@@ -8935,12 +8997,14 @@ async def split_month_until_ok(
             msg = str(e).lower()
             if "content" in msg and "too" in msg and "big" in msg:
                 delta = max(1, split_idx // 6)
-                split_idx = max(1, split_idx - delta)
-                logging.info(
-                    "month_split adjust idx=%d reason=telegraph_too_big target=first",
-                    split_idx,
-                )
-                continue
+                new_idx = snap_index(split_idx - delta, direction=-1)
+                if new_idx != split_idx:
+                    split_idx = new_idx
+                    logging.info(
+                        "month_split adjust idx=%d reason=telegraph_too_big target=first",
+                        split_idx,
+                    )
+                    continue
             raise
         page.content_hash = hash1
         async with db.get_session() as session:
