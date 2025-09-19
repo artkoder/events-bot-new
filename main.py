@@ -6171,7 +6171,7 @@ async def send_festivals_list(
     archive: bool = False,
 ):
     PAGE_SIZE = 10
-    today = date.today().isoformat()
+    today = datetime.now(LOCAL_TZ).date().isoformat()
     mode = "archive" if archive else "active"
 
     resolved_user_id = user_id

@@ -7234,6 +7234,71 @@ async def test_festival_without_events_uses_end_date_for_archive(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+async def test_festival_list_respects_local_timezone(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    local_tz = timezone(timedelta(hours=5, minutes=30))
+    fixed_local_now = datetime(2024, 1, 2, 0, 30, tzinfo=local_tz)
+
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            if tz is None:
+                return fixed_local_now.replace(tzinfo=None)
+            return fixed_local_now.astimezone(tz)
+
+        @classmethod
+        def utcnow(cls):
+            return fixed_local_now.astimezone(timezone.utc).replace(tzinfo=None)
+
+    original_tz = main.LOCAL_TZ
+    original_datetime = main.datetime
+
+    try:
+        main.LOCAL_TZ = local_tz
+        main.datetime = FixedDatetime
+
+        past_local_day = (fixed_local_now.date() - timedelta(days=1)).isoformat()
+
+        async with db.get_session() as session:
+            session.add(User(user_id=1))
+            session.add(main.Festival(name="LocalFest", end_date=past_local_day))
+            await session.commit()
+
+        msg_active = types.Message.model_validate(
+            {
+                "message_id": 1,
+                "date": 0,
+                "chat": {"id": 1, "type": "private"},
+                "from": {"id": 1, "is_bot": False, "first_name": "A"},
+                "text": "/fest",
+            }
+        )
+        await main.handle_fest(msg_active, db, bot)
+        active_text = bot.messages[-1][1]
+        assert "LocalFest" not in active_text
+        assert "Нет фестивалей" in active_text
+
+        msg_archive = types.Message.model_validate(
+            {
+                "message_id": 2,
+                "date": 0,
+                "chat": {"id": 1, "type": "private"},
+                "from": {"id": 1, "is_bot": False, "first_name": "A"},
+                "text": "/fest archive",
+            }
+        )
+        await main.handle_fest(msg_archive, db, bot)
+        archive_text = bot.messages[-1][1]
+        assert "LocalFest" in archive_text
+    finally:
+        main.datetime = original_datetime
+        main.LOCAL_TZ = original_tz
+
+
+@pytest.mark.asyncio
 async def test_festival_future_end_date_keeps_active(tmp_path: Path):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
