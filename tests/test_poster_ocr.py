@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import hashlib
 import logging
 import os
@@ -19,6 +20,60 @@ from sqlalchemy.exc import IntegrityError
 @dataclass
 class DummyPoster:
     data: bytes
+
+
+@pytest.mark.asyncio
+async def test_run_ocr_detects_png_mime(monkeypatch):
+    class CapturingResponse:
+        status = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        @property
+        def headers(self):
+            return {}
+
+        async def json(self):
+            return {
+                "choices": [{"message": {"content": "распознанный текст"}}],
+                "usage": {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 2,
+                    "total_tokens": 3,
+                },
+            }
+
+    class CapturingSession:
+        def __init__(self):
+            self.calls = []
+
+        def post(self, url, *, json, headers):
+            self.calls.append((url, json, headers))
+            return CapturingResponse()
+
+    session = CapturingSession()
+    semaphore = asyncio.Semaphore(1)
+    monkeypatch.setenv("FOUR_O_TOKEN", "token")
+    monkeypatch.setenv("FOUR_O_URL", "https://example.test/v1/chat/completions")
+    vision_test.ocr.configure_http(session=session, semaphore=semaphore)
+
+    png_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00\x01\x02"
+
+    try:
+        await vision_test.ocr.run_ocr(png_bytes, model="gpt-4o", detail="auto")
+    finally:
+        vision_test.ocr.clear_http()
+
+    assert len(session.calls) == 1
+    _, payload, _ = session.calls[0]
+    image_entry = payload["messages"][1]["content"][1]["image_url"]["url"]
+    prefix = "data:image/png;base64,"
+    assert image_entry.startswith(prefix)
+    assert image_entry[len(prefix) :] == base64.b64encode(png_bytes).decode("ascii")
 
 
 def test_poster_media_preserves_digest_after_clear():
