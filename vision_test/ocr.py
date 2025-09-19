@@ -8,7 +8,14 @@ from dataclasses import dataclass
 
 from aiohttp import ClientError, ClientSession
 
-__all__ = ["OcrUsage", "OcrResult", "configure_http", "clear_http", "run_ocr"]
+__all__ = [
+    "OcrUsage",
+    "OcrResult",
+    "configure_http",
+    "clear_http",
+    "run_ocr",
+    "detect_image_type",
+]
 
 
 _HTTP_SESSION: ClientSession | None = None
@@ -57,6 +64,7 @@ async def run_ocr(image_bytes: bytes, *, model: str, detail: str) -> OcrResult:
 
     url = os.getenv("FOUR_O_URL", "https://api.openai.com/v1/chat/completions")
     encoded = base64.b64encode(image_bytes).decode("ascii")
+    mime = _detect_image_mime(image_bytes)
     payload = {
         "model": model,
         "messages": [
@@ -68,7 +76,7 @@ async def run_ocr(image_bytes: bytes, *, model: str, detail: str) -> OcrResult:
                     {
                         "type": "image_url",
                         "image_url": {
-                            "url": f"data:image/jpeg;base64,{encoded}",
+                            "url": f"data:{mime};base64,{encoded}",
                             "detail": detail,
                         },
                     },
@@ -147,3 +155,30 @@ async def run_ocr(image_bytes: bytes, *, model: str, detail: str) -> OcrResult:
         total_tokens=int(usage_data.get("total_tokens", 0) or 0),
     )
     return OcrResult(text=text, usage=usage)
+
+
+def _detect_image_mime(data: bytes) -> str:
+    """Detect image mime type based on magic numbers."""
+
+    subtype = detect_image_type(data)
+    if subtype:
+        return f"image/{subtype}"
+    return "image/jpeg"
+
+
+def detect_image_type(data: bytes) -> str | None:
+    """Return image subtype based on magic numbers."""
+
+    if data.startswith(b"\xff\xd8\xff"):
+        return "jpeg"
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "png"
+    if data.startswith(b"GIF87a") or data.startswith(b"GIF89a"):
+        return "gif"
+    if data.startswith(b"BM"):
+        return "bmp"
+    if data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+        return "webp"
+    if data[4:12] == b"ftypavif":
+        return "avif"
+    return None
