@@ -318,38 +318,79 @@ async def _download_photo_media(urls: Sequence[str]) -> list[tuple[bytes, str]]:
     limit = getattr(main_mod, "MAX_ALBUM_IMAGES", 3)
     results: list[tuple[bytes, str]] = []
 
+    request_headers = getattr(main_mod, "VK_PHOTO_FETCH_HEADERS", None)
+    if request_headers is None:
+        request_headers = {
+            "User-Agent": getattr(
+                main_mod,
+                "VK_BROWSER_USER_AGENT",
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 "
+                "Safari/537.36",
+            ),
+            "Accept": getattr(
+                main_mod,
+                "VK_BROWSER_ACCEPT",
+                "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+            ),
+            "Referer": getattr(main_mod, "VK_BROWSER_REFERER", "https://vk.com/"),
+            "Sec-Fetch-Dest": getattr(
+                main_mod, "VK_BROWSER_SEC_FETCH_DEST", "image"
+            ),
+            "Sec-Fetch-Mode": getattr(
+                main_mod, "VK_BROWSER_SEC_FETCH_MODE", "no-cors"
+            ),
+            "Sec-Fetch-Site": getattr(
+                main_mod, "VK_BROWSER_SEC_FETCH_SITE", "same-origin"
+            ),
+        }
+    else:
+        request_headers = dict(request_headers)
+
     for idx, url in enumerate(urls[:limit]):
 
-        async def _fetch() -> bytes:
+        async def _fetch() -> tuple[bytes, str | None, str | None]:
             async with semaphore:
-                async with session.get(url) as resp:
+                async with session.get(url, headers=request_headers) as resp:
                     resp.raise_for_status()
+                    content_type = resp.headers.get("Content-Type")
+                    content_length = resp.headers.get("Content-Length")
                     data = await resp.content.read(max_size + 1)
-                    if len(data) > max_size:
-                        raise ValueError("file too large")
-                    return data
+                    return data, content_type, content_length
 
         size = None
+        content_type: str | None = None
+        content_length: str | None = None
         try:
-            data = await asyncio.wait_for(_fetch(), timeout)
+            data, content_type, content_length = await asyncio.wait_for(
+                _fetch(), timeout
+            )
             size = len(data)
+            if size > max_size:
+                raise ValueError("file too large")
             data, name = ensure_jpeg(data, f"vk_poster_{idx + 1}.jpg")
             subtype = detect_image_type(data)
         except Exception as exc:  # pragma: no cover - network dependent
             logging.warning(
-                "vk.download_photo_failed url=%s size=%s error=%s",
+                "vk.download_photo_failed url=%s size=%s content_type=%s "
+                "content_length=%s error=%s",
                 url,
                 size if size is not None else "unknown",
+                content_type or "unknown",
+                content_length or "unknown",
                 exc,
             )
             continue
         logging.info(
-            "vk.photo_media processed idx=%s url=%s size=%d subtype=%s filename=%s",
+            "vk.photo_media processed idx=%s url=%s size=%d subtype=%s "
+            "filename=%s content_type=%s content_length=%s",
             idx,
             url,
             size if size is not None else 0,
             subtype or "unknown",
             name,
+            content_type or "unknown",
+            content_length or "unknown",
         )
         results.append((data, name))
     return results
