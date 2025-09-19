@@ -204,6 +204,8 @@ async def pick_next(db: Database, operator_id: int, batch_id: str) -> Optional[I
                 (reject_cutoff, urgent_cutoff, operator_id, batch_id),
             )
             row = await cursor.fetchone()
+            if row:
+                bucket_name_for_history = "URGENT"
             if not row:
                 soon_max_days = max(_float_from_env("VK_REVIEW_SOON_MAX_D", 14), 0.0)
                 long_max_days = max(
@@ -341,6 +343,7 @@ async def pick_next(db: Database, operator_id: int, batch_id: str) -> Optional[I
                     if not row:
                         await conn.commit()
                         return None
+                    bucket_name_for_history = "FALLBACK"
 
             inbox_id = row[0]
             text = row[4]
