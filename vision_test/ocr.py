@@ -78,14 +78,14 @@ async def run_ocr(image_bytes: bytes, *, model: str, detail: str) -> OcrResult:
         )
         raise RuntimeError("Invalid image bytes for OCR") from exc
 
-    logging.debug(
+    logging.info(
         "OCR image stats: size=%s sha256=%s head=%s", image_len, image_sha256, image_head
     )
 
     encoded = base64.b64encode(image_bytes).decode("ascii")
     mime = _detect_image_mime(image_bytes)
     data_url = f"data:{mime};base64,{encoded}"
-    logging.debug("OCR image data URI prefix: %s…", data_url[:40])
+    logging.info("OCR image data URI prefix: %s…", data_url[:40])
     payload = {
         "model": model,
         "messages": [
