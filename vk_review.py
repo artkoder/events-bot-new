@@ -160,10 +160,13 @@ async def pick_next(db: Database, operator_id: int, batch_id: str) -> Optional[I
         urgent_window_hours = max(urgent_window_hours, reject_window_hours)
 
         selected_row = None
-        picked_bucket_name: Optional[str] = None
+        final_bucket_name: Optional[str] = None
+        final_weight_config: dict[str, float] = {}
         far_gap_k = max(_int_from_env("VK_REVIEW_FAR_GAP_K", 0), 0)
         history = _get_far_history(operator_id, far_gap_k)
         while True:
+            bucket_name_for_history: Optional[str] = None
+            weight_config_for_log: dict[str, float] = {}
             now_ts = int(_time.time())
             reject_cutoff = now_ts + int(reject_window_hours * 3600)
             urgent_cutoff = now_ts + int(urgent_window_hours * 3600)
@@ -234,6 +237,9 @@ async def pick_next(db: Database, operator_id: int, batch_id: str) -> Optional[I
                 bucket_counts: dict[str, int] = {}
                 bucket_specs_by_name: dict[str, tuple[str, tuple[Any, ...]]] = {}
                 weighted_total = 0.0
+                weight_config_for_log = {
+                    name: weight for name, _, _, weight in bucket_specs
+                }
                 for name, where_clause, params, weight in bucket_specs:
                     count_cursor = await conn.execute(
                         f"SELECT COUNT(1) FROM vk_inbox WHERE {where_clause}",
@@ -312,7 +318,7 @@ async def pick_next(db: Database, operator_id: int, batch_id: str) -> Optional[I
                     )
                     row = await bucket_cursor.fetchone()
                     if row:
-                        picked_bucket_name = name
+                        bucket_name_for_history = name
 
                 if not row:
                     cursor = await conn.execute(
@@ -356,17 +362,21 @@ async def pick_next(db: Database, operator_id: int, batch_id: str) -> Optional[I
             )
             await conn.commit()
             selected_row = row
-            if picked_bucket_name and history is not None:
-                history.append(picked_bucket_name)
+            final_bucket_name = bucket_name_for_history
+            final_weight_config = weight_config_for_log
+            if final_bucket_name and history is not None:
+                history.append(final_bucket_name)
             break
     post = InboxPost(*selected_row)
     logging.info(
-        "vk_review pick_next id=%s group=%s post=%s kw=%s has_date=%s",
+        "vk_review pick_next id=%s group=%s post=%s kw=%s has_date=%s bucket=%s weights=%s",
         post.id,
         post.group_id,
         post.post_id,
         post.matched_kw,
         post.has_date,
+        final_bucket_name,
+        final_weight_config,
     )
     return post
 
