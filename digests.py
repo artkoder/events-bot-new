@@ -733,6 +733,25 @@ def format_event_line_html(
 
     dt = datetime.strptime(event.date, "%Y-%m-%d")
     date_part = dt.strftime("%d.%m")
+    if (event.event_type or "").lower() == "выставка":
+        end_raw = getattr(event, "end_date", None)
+        if end_raw:
+            try:
+                end_dt = datetime.strptime(end_raw, "%Y-%m-%d")
+            except ValueError:
+                logging.warning(
+                    "digest.end_date.format event_id=%s end_date_raw=%r",
+                    getattr(event, "id", None),
+                    end_raw,
+                )
+            else:
+                date_part = f"{date_part} по {end_dt.strftime('%d.%m')}"
+        else:
+            logging.warning(
+                "digest.end_date.missing event_id=%s event_type=%r",
+                getattr(event, "id", None),
+                event.event_type,
+            )
     time_part = ""
     parsed = parse_start_time(event.time or "")
     if parsed is not None:
