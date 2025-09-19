@@ -156,13 +156,13 @@ async def pick_next(db: Database, operator_id: int, batch_id: str) -> Optional[I
             return post
 
         reject_window_hours = _hours_from_env("VK_REVIEW_REJECT_H", 2)
-        urgent_window_hours = _hours_from_env("VK_REVIEW_URGENT_MAX_H", 24)
+        urgent_window_hours = _hours_from_env("VK_REVIEW_URGENT_MAX_H", 48)
         urgent_window_hours = max(urgent_window_hours, reject_window_hours)
 
         selected_row = None
         final_bucket_name: Optional[str] = None
         final_weight_config: dict[str, float] = {}
-        far_gap_k = max(_int_from_env("VK_REVIEW_FAR_GAP_K", 0), 0)
+        far_gap_k = max(_int_from_env("VK_REVIEW_FAR_GAP_K", 5), 0)
         history = _get_far_history(operator_id, far_gap_k)
         while True:
             bucket_name_for_history: Optional[str] = None
@@ -205,7 +205,7 @@ async def pick_next(db: Database, operator_id: int, batch_id: str) -> Optional[I
             )
             row = await cursor.fetchone()
             if not row:
-                soon_max_days = max(_float_from_env("VK_REVIEW_SOON_MAX_D", 7), 0.0)
+                soon_max_days = max(_float_from_env("VK_REVIEW_SOON_MAX_D", 14), 0.0)
                 long_max_days = max(
                     _float_from_env("VK_REVIEW_LONG_MAX_D", 30),
                     soon_max_days,
@@ -218,19 +218,19 @@ async def pick_next(db: Database, operator_id: int, batch_id: str) -> Optional[I
                         "SOON",
                         "status='pending' AND event_ts_hint IS NOT NULL AND event_ts_hint > ? AND event_ts_hint <= ?",
                         (urgent_cutoff, soon_cutoff),
-                        max(_float_from_env("VK_REVIEW_W_SOON", 1.0), 0.0),
+                        max(_float_from_env("VK_REVIEW_W_SOON", 3.0), 0.0),
                     ),
                     (
                         "LONG",
                         "status='pending' AND event_ts_hint IS NOT NULL AND event_ts_hint > ? AND event_ts_hint <= ?",
                         (soon_cutoff, long_cutoff),
-                        max(_float_from_env("VK_REVIEW_W_LONG", 1.0), 0.0),
+                        max(_float_from_env("VK_REVIEW_W_LONG", 2.0), 0.0),
                     ),
                     (
                         "FAR",
                         "status='pending' AND event_ts_hint IS NOT NULL AND event_ts_hint > ?",
                         (long_cutoff,),
-                        max(_float_from_env("VK_REVIEW_W_FAR", 1.0), 0.0),
+                        max(_float_from_env("VK_REVIEW_W_FAR", 6.0), 0.0),
                     ),
                 ]
 
