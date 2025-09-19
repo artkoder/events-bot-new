@@ -235,6 +235,45 @@ async def test_bucket_boundaries_use_weighted_selection(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_pick_next_weighted_bucket_without_sqlite_math(tmp_path, monkeypatch):
+    vk_review._FAR_BUCKET_HISTORY.clear()
+    monkeypatch.setenv("VK_REVIEW_W_SOON", "0")
+    monkeypatch.setenv("VK_REVIEW_W_LONG", "0")
+    monkeypatch.setenv("VK_REVIEW_W_FAR", "5")
+    monkeypatch.setenv("VK_REVIEW_FAR_GAP_K", "1")
+    fixed_now = 1_720_000_000
+    monkeypatch.setattr(vk_review._time, "time", lambda: fixed_now)
+    monkeypatch.setattr(vk_review.random, "random", lambda: 0.25)
+
+    far_hint = fixed_now + int(60 * 86400)
+
+    def fake_extract(text: str) -> int:
+        return int(text.split(":", 1)[1])
+
+    monkeypatch.setattr(vk_review, "extract_event_ts_hint", fake_extract)
+
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    async with db.raw_conn() as conn:
+        rows = [
+            (1, 101, 1_000, f"TS:{far_hint}", "k", 1, far_hint, "pending"),
+            (1, 102, 900, f"TS:{far_hint + 10}", "k", 1, far_hint + 10, "pending"),
+            (2, 201, 800, f"TS:{far_hint + 20}", "k", 1, far_hint + 20, "pending"),
+        ]
+        await conn.executemany(
+            "INSERT INTO vk_inbox(group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status) VALUES(?,?,?,?,?,?,?,?)",
+            rows,
+        )
+        await conn.commit()
+
+    post = await vk_review.pick_next(db, 99, "weighted")
+    assert post is not None
+    history = vk_review._FAR_BUCKET_HISTORY.get(99)
+    assert history is not None
+    assert list(history) == ["FAR"]
+
+
+@pytest.mark.asyncio
 async def test_history_tracks_fallback_bucket(tmp_path, monkeypatch):
     vk_review._FAR_BUCKET_HISTORY.clear()
     monkeypatch.setenv("VK_REVIEW_FAR_GAP_K", "2")
