@@ -1,6 +1,8 @@
 import os, sys
 import os, sys
 import os, sys
+from datetime import datetime as real_datetime, timezone
+
 import pytest
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
@@ -19,8 +21,8 @@ async def test_pick_next_and_skip(tmp_path):
     async with db.raw_conn() as conn:
         future_ts = int(_time.time()) + 10_000
         rows = [
-            (1, 1, 100, "t1", "k", 1, future_ts, "pending"),
-            (1, 2, 200, "t2", "k", 1, future_ts, "pending"),
+            (1, 1, 100, "Событие 25.12.2099", "k", 1, future_ts, "pending"),
+            (1, 2, 200, "Событие 26.12.2099", "k", 1, future_ts, "pending"),
         ]
         await conn.executemany(
             "INSERT INTO vk_inbox(group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status) VALUES(?,?,?,?,?,?,?,?)",
@@ -51,8 +53,8 @@ async def test_pick_next_rejects_outdated(tmp_path):
             # event starting in ~100s should be rejected
             (1, 1, 100, "old", "k", 1, now + 100, "pending"),
             # far future event should be shown first
-            (1, 2, 200, "future", "k", 1, now + 10_000, "pending"),
-            # event without timestamp should remain in queue
+            (1, 2, 200, "Концерт 05.02.2099 в 19:00", "k", 1, now + 10_000, "pending"),
+            # event without timestamp should now be rejected on recompute
             (1, 3, 300, "unknown", "k", 0, None, "pending"),
         ]
         await conn.executemany(
@@ -69,7 +71,47 @@ async def test_pick_next_rejects_outdated(tmp_path):
 
     await vk_review.mark_rejected(db, post.id)
     post2 = await vk_review.pick_next(db, 10, "batch1")
-    assert post2 and post2.post_id == 3
+    assert post2 is None
+    async with db.raw_conn() as conn:
+        cur = await conn.execute("SELECT status FROM vk_inbox WHERE post_id=3")
+        assert (await cur.fetchone())[0] == "rejected"
+
+
+@pytest.mark.asyncio
+async def test_pick_next_recomputes_hint_and_rejects_recent_past(tmp_path, monkeypatch):
+    class FixedDatetime(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            tzinfo = tz or timezone.utc
+            return real_datetime(2024, 10, 1, tzinfo=tzinfo)
+
+    monkeypatch.setattr("vk_intake.datetime", FixedDatetime)
+    fixed_epoch = int(real_datetime(2024, 10, 1, tzinfo=timezone.utc).timestamp())
+    monkeypatch.setattr(vk_review._time, "time", lambda: fixed_epoch)
+
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    async with db.raw_conn() as conn:
+        rows = [
+            # Stored hint is far in future but text describes a past event
+            (1, 1, 100, "7 сентября прошла лекция", "k", 1, fixed_epoch + 1_000_000, "pending"),
+            # Valid future event with even later hint so it becomes next candidate
+            (1, 2, 200, "7 января состоится концерт", "k", 1, fixed_epoch + 2_000_000, "pending"),
+        ]
+        await conn.executemany(
+            "INSERT INTO vk_inbox(group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status) VALUES(?,?,?,?,?,?,?,?)",
+            rows,
+        )
+        await conn.commit()
+
+    post = await vk_review.pick_next(db, 10, "batch1")
+    assert post and post.post_id == 2
+
+    async with db.raw_conn() as conn:
+        cur = await conn.execute("SELECT status FROM vk_inbox WHERE post_id=1")
+        assert (await cur.fetchone())[0] == "rejected"
+        cur = await conn.execute("SELECT status FROM vk_inbox WHERE post_id=2")
+        assert (await cur.fetchone())[0] == "locked"
 
 
 @pytest.mark.asyncio
@@ -84,7 +126,7 @@ async def test_mark_imported_accumulates_month(tmp_path):
         future_ts = int(_time.time()) + 10_000
         await conn.execute(
             "INSERT INTO vk_inbox(group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status) VALUES(?,?,?,?,?,?,?,?)",
-            (1, 1, 100, "t1", "k", 1, future_ts, "pending"),
+            (1, 1, 100, "Фестиваль 10.10.2099", "k", 1, future_ts, "pending"),
         )
         await conn.commit()
     post = await vk_review.pick_next(db, 10, "batch1")
@@ -106,7 +148,7 @@ async def test_mark_imported_creates_batch_when_missing(tmp_path):
         future_ts = int(_time.time()) + 10_000
         await conn.execute(
             "INSERT INTO vk_inbox(group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status) VALUES(?,?,?,?,?,?,?,?)",
-            (1, 5, 300, "t-new", "k", 1, future_ts, "pending"),
+            (1, 5, 300, "Бал 11.11.2099", "k", 1, future_ts, "pending"),
         )
         await conn.commit()
 
@@ -177,7 +219,7 @@ async def test_pick_next_resumes_locked_for_operator(tmp_path):
                 event_ts_hint, status, locked_by, locked_at, review_batch
             ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
             """,
-            (1, 1, 123, "locked", "k", 1, future_ts, "locked", 5, None, "oldbatch"),
+            (1, 1, 123, "Праздник 12.12.2099", "k", 1, future_ts, "locked", 5, None, "oldbatch"),
         )
         await conn.commit()
     post = await vk_review.pick_next(db, 5, "newbatch")
@@ -213,7 +255,7 @@ async def test_pick_next_unlocks_stale_rows(tmp_path):
                 1,
                 2,
                 456,
-                "stale",
+                "Пикник 13.12.2099",
                 "k",
                 1,
                 future_ts,
