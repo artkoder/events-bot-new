@@ -908,6 +908,12 @@ def ensure_jpeg(data: bytes, name: str) -> tuple[bytes, str]:
         name = re.sub(r"\.[^.]+$", "", name) + ".jpg"
     return data, name
 
+
+def validate_jpeg_markers(data: bytes) -> None:
+    """Ensure JPEG payload contains SOS and EOI markers."""
+    if b"\xff\xda" not in data or not data.endswith(b"\xff\xd9"):
+        raise ValueError("incomplete jpeg payload")
+
 # Timeout for OpenAI 4o requests (in seconds)
 FOUR_O_TIMEOUT = float(os.getenv("FOUR_O_TIMEOUT", "60"))
 
@@ -2014,15 +2020,31 @@ async def upload_vk_photo(
                     async with span("http"):
                         async with HTTP_SEMAPHORE:
                             async with session.get(url) as resp:
+                                resp.raise_for_status()
+                                header_length = resp.headers.get("Content-Length")
                                 if resp.content_length and resp.content_length > MAX_DOWNLOAD_SIZE:
                                     raise ValueError("file too large")
-                                data = await resp.content.read(MAX_DOWNLOAD_SIZE + 1)
-                                if len(data) > MAX_DOWNLOAD_SIZE:
-                                    raise ValueError("file too large")
+                                buf = bytearray()
+                                async for chunk in resp.content.iter_chunked(64 * 1024):
+                                    buf.extend(chunk)
+                                    if len(buf) > MAX_DOWNLOAD_SIZE:
+                                        raise ValueError("file too large")
+                                data = bytes(buf)
+                                if header_length:
+                                    try:
+                                        expected_size = int(header_length)
+                                    except ValueError as exc:
+                                        raise ValueError("invalid Content-Length header") from exc
+                                    if expected_size != len(data):
+                                        raise ValueError("content-length mismatch")
+                                if detect_image_type(data) == "jpeg":
+                                    validate_jpeg_markers(data)
                                 return data
 
                 img_bytes = await asyncio.wait_for(_download(), HTTP_TIMEOUT)
                 img_bytes, _ = ensure_jpeg(img_bytes, "image.jpg")
+                if detect_image_type(img_bytes) == "jpeg":
+                    validate_jpeg_markers(img_bytes)
                 form = FormData()
                 form.add_field(
                     "photo",
