@@ -608,6 +608,8 @@ telegraph_first_image: TTLCache[str, str] = TTLCache(maxsize=128, ttl=24 * 3600)
 add_event_sessions: TTLCache[int, bool] = TTLCache(maxsize=64, ttl=3600)
 # waiting for a date for events listing
 events_date_sessions: TTLCache[int, bool] = TTLCache(maxsize=64, ttl=3600)
+# chat_id -> list of (message_id, text) for /exhibitions chunks
+exhibitions_message_state: dict[int, list[tuple[int, str]]] = {}
 
 # digest_id -> session data for digest preview
 digest_preview_sessions: TTLCache[str, dict] = TTLCache(maxsize=64, ttl=30 * 60)
@@ -5226,14 +5228,64 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
             await delete_vk_post(vk_post, db, bot)
         offset = await get_tz_offset(db)
         tz = offset_to_timezone(offset)
+        handled = False
         if marker == "exh":
             chunks, markup = await build_exhibitions_message(db, tz)
-            text = chunks[0] if chunks else ""
+            if not chunks:
+                chunks = [""]
+            first_text = chunks[0]
+            chat = callback.message.chat if callback.message else None
+            chat_id = chat.id if chat else None
+            stored = (
+                exhibitions_message_state.get(chat_id, [])
+                if chat_id is not None
+                else []
+            )
+            first_id = callback.message.message_id if callback.message else None
+            prev_followups: list[tuple[int, str]] = []
+            if stored and first_id is not None:
+                for mid, prev_text in stored:
+                    if mid != first_id:
+                        prev_followups.append((mid, prev_text))
+            else:
+                prev_followups = stored
+
+            if callback.message:
+                with contextlib.suppress(TelegramBadRequest):
+                    await callback.message.edit_text(first_text, reply_markup=markup)
+
+            new_followups: list[tuple[int, str]] = []
+            if chat_id is not None:
+                for idx, chunk in enumerate(chunks[1:]):
+                    if idx < len(prev_followups):
+                        mid, prev_text = prev_followups[idx]
+                        if chunk != prev_text:
+                            with contextlib.suppress(TelegramBadRequest):
+                                await bot.edit_message_text(
+                                    chunk, chat_id=chat_id, message_id=mid
+                                )
+                        new_followups.append((mid, chunk))
+                    else:
+                        msg = await bot.send_message(chat_id, chunk)
+                        new_followups.append((msg.message_id, chunk))
+
+                for mid, _ in prev_followups[len(new_followups) :]:
+                    with contextlib.suppress(TelegramBadRequest):
+                        await bot.delete_message(chat_id, mid)
+
+                updated_state: list[tuple[int, str]] = []
+                if first_id is not None:
+                    updated_state.append((first_id, first_text))
+                updated_state.extend(new_followups)
+                exhibitions_message_state[chat_id] = updated_state
+
+            handled = True
         else:
             target = datetime.strptime(marker, "%Y-%m-%d").date()
             filter_id = user.user_id if user and user.is_partner else None
             text, markup = await build_events_message(db, target, tz, filter_id)
-        await callback.message.edit_text(text, reply_markup=markup)
+        if not handled and callback.message:
+            await callback.message.edit_text(text, reply_markup=markup)
         await callback.answer("Deleted")
     elif data.startswith("edit:"):
         eid = int(data.split(":")[1])
@@ -15495,9 +15547,13 @@ async def handle_exhibitions(message: types.Message, db: Database, bot: Bot):
     if not chunks:
         return
     first, *rest = chunks
-    await bot.send_message(message.chat.id, first, reply_markup=markup)
+    sent_messages: list[tuple[int, str]] = []
+    first_msg = await bot.send_message(message.chat.id, first, reply_markup=markup)
+    sent_messages.append((first_msg.message_id, first))
     for chunk in rest:
-        await bot.send_message(message.chat.id, chunk)
+        msg = await bot.send_message(message.chat.id, chunk)
+        sent_messages.append((msg.message_id, chunk))
+    exhibitions_message_state[message.chat.id] = sent_messages
 
 
 async def handle_pages(message: types.Message, db: Database, bot: Bot):
