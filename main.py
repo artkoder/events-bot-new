@@ -180,7 +180,7 @@ from sections import (
 )
 from db import Database
 from scheduling import startup as scheduler_startup, cleanup as scheduler_cleanup
-from sqlalchemy import select, update, delete, text, func, or_
+from sqlalchemy import select, update, delete, text, func, or_, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models import (
@@ -5482,8 +5482,38 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
             del festival_edit_sessions[callback.from_user.id]
         await callback.message.answer("Festival editing finished")
         await callback.answer()
+    elif data.startswith("festpage:"):
+        parts = data.split(":")
+        page = 1
+        mode = "active"
+        if len(parts) > 1:
+            try:
+                page = int(parts[1])
+            except ValueError:
+                page = 1
+        if len(parts) > 2 and parts[2] in {"active", "archive"}:
+            mode = parts[2]
+        await send_festivals_list(
+            callback.message,
+            db,
+            bot,
+            edit=True,
+            page=page,
+            archive=(mode == "archive"),
+        )
+        await callback.answer()
     elif data.startswith("festdel:"):
-        fid = int(data.split(":")[1])
+        parts = data.split(":")
+        fid = int(parts[1]) if len(parts) > 1 else 0
+        page = 1
+        mode = "active"
+        if len(parts) > 2:
+            try:
+                page = int(parts[2])
+            except ValueError:
+                page = 1
+        if len(parts) > 3 and parts[3] in {"active", "archive"}:
+            mode = parts[3]
         async with db.get_session() as session:
             if not await session.get(User, callback.from_user.id):
                 await callback.answer("Not authorized", show_alert=True)
@@ -5498,7 +5528,14 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
             await session.delete(fest)
             await session.commit()
             logging.info("festival %s deleted", fest.name)
-        await send_festivals_list(callback.message, db, bot, edit=True)
+        await send_festivals_list(
+            callback.message,
+            db,
+            bot,
+            edit=True,
+            page=page,
+            archive=(mode == "archive"),
+        )
         await callback.answer("Deleted")
 
     elif data.startswith("festcover:"):
@@ -5697,14 +5734,31 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
         await callback.message.answer("Festival editing finished")
         await callback.answer()
     elif data.startswith("festdel:"):
-        fid = int(data.split(":")[1])
+        parts = data.split(":")
+        fid = int(parts[1]) if len(parts) > 1 else 0
+        page = 1
+        mode = "active"
+        if len(parts) > 2:
+            try:
+                page = int(parts[2])
+            except ValueError:
+                page = 1
+        if len(parts) > 3 and parts[3] in {"active", "archive"}:
+            mode = parts[3]
         async with db.get_session() as session:
             fest = await session.get(Festival, fid)
             if fest:
                 await session.delete(fest)
                 await session.commit()
                 logging.info("festival %s deleted", fest.name)
-        await send_festivals_list(callback.message, db, bot, edit=True)
+        await send_festivals_list(
+            callback.message,
+            db,
+            bot,
+            edit=True,
+            page=page,
+            archive=(mode == "archive"),
+        )
         await callback.answer("Deleted")
     elif data.startswith("nav:"):
         _, day = data.split(":")
@@ -6103,44 +6157,150 @@ async def send_users_list(message: types.Message, db: Database, bot: Bot, edit: 
         await bot.send_message(message.chat.id, "\n".join(lines), reply_markup=markup)
 
 
-async def send_festivals_list(message: types.Message, db: Database, bot: Bot, edit: bool = False):
+async def send_festivals_list(
+    message: types.Message,
+    db: Database,
+    bot: Bot,
+    edit: bool = False,
+    page: int = 1,
+    archive: bool = False,
+):
+    PAGE_SIZE = 10
+    today = date.today().isoformat()
+    mode = "archive" if archive else "active"
+
     async with db.get_session() as session:
         if not await session.get(User, message.from_user.id):
             if not edit:
                 await bot.send_message(message.chat.id, "Not authorized")
             return
-        result = await session.execute(select(Festival))
-        fests = result.scalars().all()
-    lines = []
-    for f in fests:
-        parts = [f"{f.id} {f.name}"]
-        if f.telegraph_url:
-            parts.append(f.telegraph_url)
-        if f.website_url:
-            parts.append(f"site: {f.website_url}")
-        if f.program_url:
-            parts.append(f"program: {f.program_url}")
-        if f.vk_url:
-            parts.append(f"vk: {f.vk_url}")
-        if f.tg_url:
-            parts.append(f"tg: {f.tg_url}")
-        if f.ticket_url:
-            parts.append(f"ticket: {f.ticket_url}")
+
+        event_agg = (
+            select(
+                Event.festival.label("festival_name"),
+                func.min(Event.date).label("first_date"),
+                func.max(func.coalesce(Event.end_date, Event.date)).label("last_date"),
+                func.count()
+                .filter(func.coalesce(Event.end_date, Event.date) >= today)
+                .label("future_count"),
+            )
+            .where(Event.festival.is_not(None))
+            .group_by(Event.festival)
+            .subquery()
+        )
+
+        base_query = (
+            select(
+                Festival,
+                event_agg.c.first_date,
+                event_agg.c.last_date,
+                event_agg.c.future_count,
+            )
+            .outerjoin(event_agg, event_agg.c.festival_name == Festival.name)
+            .order_by(Festival.name)
+        )
+
+        if archive:
+            base_query = base_query.where(
+                and_(
+                    event_agg.c.last_date.is_not(None),
+                    event_agg.c.last_date < today,
+                    func.coalesce(event_agg.c.future_count, 0) == 0,
+                )
+            )
+        else:
+            base_query = base_query.where(
+                or_(
+                    event_agg.c.last_date.is_(None),
+                    event_agg.c.last_date >= today,
+                    func.coalesce(event_agg.c.future_count, 0) > 0,
+                )
+            )
+
+        result = await session.execute(base_query)
+        rows = result.all()
+
+    total_count = len(rows)
+    total_pages = max(1, (total_count + PAGE_SIZE - 1) // PAGE_SIZE)
+    page = max(1, min(page, total_pages))
+    start = (page - 1) * PAGE_SIZE
+    visible_rows = rows[start : start + PAGE_SIZE]
+
+    heading = f"Фестивали {'архив' if archive else 'активные'} (стр. {page}/{total_pages})"
+    lines: list[str] = [heading]
+    keyboard: list[list[types.InlineKeyboardButton]] = []
+
+    for fest, first_date, last_date, future_count in visible_rows:
+        parts = [f"{fest.id} {fest.name}"]
+        if first_date and last_date:
+            if first_date == last_date:
+                parts.append(first_date)
+            else:
+                parts.append(f"{first_date}..{last_date}")
+        elif first_date:
+            parts.append(first_date)
+        if future_count:
+            parts.append(f"актуальных: {future_count}")
+        if fest.telegraph_url:
+            parts.append(fest.telegraph_url)
+        if fest.website_url:
+            parts.append(f"site: {fest.website_url}")
+        if fest.program_url:
+            parts.append(f"program: {fest.program_url}")
+        if fest.vk_url:
+            parts.append(f"vk: {fest.vk_url}")
+        if fest.tg_url:
+            parts.append(f"tg: {fest.tg_url}")
+        if fest.ticket_url:
+            parts.append(f"ticket: {fest.ticket_url}")
         lines.append(" ".join(parts))
-    keyboard = [
+
+        keyboard.append(
+            [
+                types.InlineKeyboardButton(
+                    text=f"Edit {fest.id}", callback_data=f"festedit:{fest.id}"
+                ),
+                types.InlineKeyboardButton(
+                    text=f"Delete {fest.id}",
+                    callback_data=f"festdel:{fest.id}:{page}:{mode}",
+                ),
+            ]
+        )
+
+    if not visible_rows:
+        lines.append("Нет фестивалей")
+
+    nav_row: list[types.InlineKeyboardButton] = []
+    if total_pages > 1 and page > 1:
+        nav_row.append(
+            types.InlineKeyboardButton(
+                text="⬅️ Назад",
+                callback_data=f"festpage:{page-1}:{mode}",
+            )
+        )
+    if total_pages > 1 and page < total_pages:
+        nav_row.append(
+            types.InlineKeyboardButton(
+                text="Вперёд ➡️",
+                callback_data=f"festpage:{page+1}:{mode}",
+            )
+        )
+    if nav_row:
+        keyboard.append(nav_row)
+
+    toggle_mode = "archive" if not archive else "active"
+    toggle_text = "Показать архив" if not archive else "Показать активные"
+    keyboard.append(
         [
             types.InlineKeyboardButton(
-                text=f"Edit {f.id}", callback_data=f"festedit:{f.id}"
-            ),
-            types.InlineKeyboardButton(
-                text=f"Delete {f.id}", callback_data=f"festdel:{f.id}"
-            ),
+                text=toggle_text,
+                callback_data=f"festpage:1:{toggle_mode}",
+            )
         ]
-        for f in fests
-    ]
-    if not lines:
-        lines.append("No festivals")
-    markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard) if keyboard else None
+    )
+
+    markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard)
+
     if edit:
         await message.edit_text("\n".join(lines), reply_markup=markup)
     else:
@@ -14380,6 +14540,59 @@ async def build_exhibitions_message(db: Database, tz: timezone):
     return text, markup
 
 
+TELEGRAM_MESSAGE_LIMIT = 4096
+POSTER_TRUNCATION_INDICATOR = "… (обрезано)"
+POSTER_PREVIEW_UNAVAILABLE = "Poster OCR: превью недоступно — сообщение слишком длинное."
+
+
+def _truncate_with_indicator(
+    text: str, limit: int, indicator: str = POSTER_TRUNCATION_INDICATOR
+) -> str:
+    if limit <= 0:
+        return ""
+    if limit <= len(indicator):
+        return indicator[:limit]
+    return text[: limit - len(indicator)] + indicator
+
+
+def _fit_poster_preview_lines(
+    lines: Sequence[str], budget: int, indicator: str = POSTER_TRUNCATION_INDICATOR
+) -> list[str]:
+    if budget <= 0:
+        return []
+
+    fitted: list[str] = []
+    for line in lines:
+        candidate = fitted + [line]
+        if len("\n".join(candidate)) <= budget:
+            fitted.append(line)
+            continue
+
+        used_len = len("\n".join(fitted))
+        newline_cost = 1 if fitted else 0
+        remaining_for_content = budget - used_len - newline_cost
+        if remaining_for_content <= 0:
+            if not fitted:
+                truncated = _truncate_with_indicator("", budget, indicator)
+                return [truncated] if truncated else []
+
+            prefix = fitted[:-1]
+            last_line = fitted[-1]
+            prefix_len = len("\n".join(prefix))
+            if prefix:
+                prefix_len += 1
+            allowed_for_last = max(0, budget - prefix_len)
+            fitted[-1] = _truncate_with_indicator(last_line, allowed_for_last, indicator)
+            return fitted
+
+        truncated_line = _truncate_with_indicator(line, remaining_for_content, indicator)
+        if truncated_line:
+            fitted.append(truncated_line)
+        return fitted
+
+    return fitted
+
+
 async def show_edit_menu(
     user_id: int,
     event: Event,
@@ -14502,8 +14715,33 @@ async def show_edit_menu(
         [types.InlineKeyboardButton(text="Done", callback_data=f"editdone:{event.id}")]
     )
     markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard)
-    message_lines = poster_lines + lines if poster_lines else lines
-    await bot.send_message(user_id, "\n".join(message_lines), reply_markup=markup)
+
+    base_text = "\n".join(lines)
+    base_len = len(base_text)
+    poster_block: list[str] = []
+    if poster_lines:
+        newline_between_blocks = 1 if lines else 0
+        poster_budget = TELEGRAM_MESSAGE_LIMIT - base_len - newline_between_blocks
+        if poster_budget <= 0:
+            notice_budget = TELEGRAM_MESSAGE_LIMIT - base_len - newline_between_blocks
+            poster_block = _fit_poster_preview_lines(
+                [POSTER_PREVIEW_UNAVAILABLE], notice_budget
+            )
+        else:
+            poster_block = _fit_poster_preview_lines(poster_lines, poster_budget)
+            if not poster_block and poster_budget > 0:
+                poster_block = _fit_poster_preview_lines(
+                    [POSTER_PREVIEW_UNAVAILABLE], poster_budget
+                )
+
+    message_lines = poster_block + lines if poster_block else lines
+    message_text = "\n".join(message_lines)
+    if len(message_text) > TELEGRAM_MESSAGE_LIMIT:
+        message_text = _truncate_with_indicator(
+            message_text, TELEGRAM_MESSAGE_LIMIT, POSTER_TRUNCATION_INDICATOR
+        )
+
+    await bot.send_message(user_id, message_text, reply_markup=markup)
 
 
 async def show_festival_edit_menu(user_id: int, fest: Festival, bot: Bot):
@@ -15448,7 +15686,19 @@ async def handle_pages_rebuild_cb(
 
 
 async def handle_fest(message: types.Message, db: Database, bot: Bot):
-    await send_festivals_list(message, db, bot, edit=False)
+    archive = False
+    page = 1
+    text = message.text or ""
+    parts = text.split()
+    for part in parts[1:]:
+        if part.lower() == "archive":
+            archive = True
+        else:
+            try:
+                page = int(part)
+            except ValueError:
+                continue
+    await send_festivals_list(message, db, bot, edit=False, page=page, archive=archive)
 
 
 

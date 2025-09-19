@@ -952,6 +952,47 @@ async def test_show_edit_menu_displays_poster_ocr_preview(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_show_edit_menu_truncates_long_poster_preview(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    event = Event(
+        title="T",
+        description="d",
+        source_text="src",
+        date=FUTURE_DATE,
+        time="18:00",
+        location_name="Hall",
+    )
+
+    long_lines = [f"Строка {i} " + "x" * 200 for i in range(1, 200)]
+    ocr_text = "\n".join(long_lines)
+
+    async with db.get_session() as session:
+        session.add(event)
+        await session.commit()
+        await session.refresh(event)
+        session.add(
+            EventPoster(
+                event_id=event.id,
+                poster_hash="abcdef1234567890",
+                ocr_text=ocr_text,
+            )
+        )
+        await session.commit()
+
+    bot.messages.clear()
+    await main.show_edit_menu(1, event, bot, db)
+
+    assert bot.messages
+    message_text = bot.messages[-1][1]
+    assert len(message_text) <= 4096
+    assert "Poster OCR:" in message_text
+    assert "… (обрезано)" in message_text
+
+
+@pytest.mark.asyncio
 async def test_events_russian_date_current_year(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
@@ -6586,7 +6627,7 @@ async def test_daily_posts_festival_link(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_handle_fest_list(tmp_path: Path):
+async def test_handle_fest_list_buttons(tmp_path: Path):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
     bot = DummyBot("123:abc")
@@ -6617,7 +6658,8 @@ async def test_handle_fest_list(tmp_path: Path):
         for btn in row
     )
     assert any(
-        btn.text == f"Delete {fid}" and btn.callback_data == f"festdel:{fid}"
+        btn.text == f"Delete {fid}"
+        and btn.callback_data == f"festdel:{fid}:1:active"
         for row in markup.inline_keyboard
         for btn in row
     )
@@ -7060,7 +7102,7 @@ async def test_festdays_requires_dates(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_handle_fest_list(tmp_path: Path):
+async def test_handle_fest_list_heading(tmp_path: Path):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
     bot = DummyBot("123:abc")
@@ -7080,10 +7122,203 @@ async def test_handle_fest_list(tmp_path: Path):
         }
     )
     await main.handle_fest(msg, db, bot)
-    assert "Jazz" in bot.messages[-1][1]
+    text = bot.messages[-1][1]
+    assert text.startswith("Фестивали активные (стр. 1/1)")
+    assert "Jazz" in text
 
 
 @pytest.mark.asyncio
+async def test_fest_list_pagination(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async with db.get_session() as session:
+        session.add(User(user_id=1))
+        for idx in range(12):
+            session.add(main.Festival(name=f"Fest {idx+1}"))
+        await session.commit()
+
+    msg = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "/fest",
+        }
+    )
+    await main.handle_fest(msg, db, bot)
+    first_markup = bot.messages[-1][2]["reply_markup"]
+    per_fest_rows = [
+        row
+        for row in first_markup.inline_keyboard
+        if len(row) == 2 and row[0].text.startswith("Edit")
+    ]
+    assert len(per_fest_rows) == 10
+    assert any(
+        btn.callback_data == "festpage:2:active"
+        for row in first_markup.inline_keyboard
+        for btn in row
+    )
+    assert any(
+        btn.callback_data == "festpage:1:archive"
+        for row in first_markup.inline_keyboard
+        for btn in row
+    )
+
+    msg_page2 = types.Message.model_validate(
+        {
+            "message_id": 2,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "/fest 2",
+        }
+    )
+    await main.handle_fest(msg_page2, db, bot)
+    text_page2 = bot.messages[-1][1]
+    assert "стр. 2/2" in text_page2
+    markup_page2 = bot.messages[-1][2]["reply_markup"]
+    per_fest_rows_page2 = [
+        row
+        for row in markup_page2.inline_keyboard
+        if len(row) == 2 and row[0].text.startswith("Edit")
+    ]
+    assert len(per_fest_rows_page2) == 2
+    assert any(
+        btn.callback_data == "festpage:1:active"
+        for row in markup_page2.inline_keyboard
+        for btn in row
+    )
+
+
+@pytest.mark.asyncio
+async def test_fest_list_filters_future_events(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    past_day = date.today() - timedelta(days=3)
+    future_day = date.today() + timedelta(days=5)
+
+    async with db.get_session() as session:
+        session.add(User(user_id=1))
+        fest_past = main.Festival(name="Past")
+        fest_future = main.Festival(name="Future")
+        session.add(fest_past)
+        session.add(fest_future)
+        session.add(
+            Event(
+                title="Old",
+                description="d",
+                source_text="s",
+                date=past_day.isoformat(),
+                end_date=past_day.isoformat(),
+                time="18:00",
+                location_name="Hall",
+                festival="Past",
+            )
+        )
+        session.add(
+            Event(
+                title="New",
+                description="d",
+                source_text="s",
+                date=future_day.isoformat(),
+                time="18:00",
+                location_name="Hall",
+                festival="Future",
+            )
+        )
+        await session.commit()
+
+    msg = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "/fest",
+        }
+    )
+    await main.handle_fest(msg, db, bot)
+    text = bot.messages[-1][1]
+    assert "Future" in text
+    assert "Past" not in text
+    markup = bot.messages[-1][2]["reply_markup"]
+    assert any(
+        btn.callback_data == "festpage:1:archive"
+        for row in markup.inline_keyboard
+        for btn in row
+    )
+
+
+@pytest.mark.asyncio
+async def test_fest_list_archive_mode(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    past_day = date.today() - timedelta(days=3)
+
+    async with db.get_session() as session:
+        session.add(User(user_id=1))
+        fest_past = main.Festival(name="Past")
+        fest_future = main.Festival(name="Future")
+        session.add(fest_past)
+        session.add(fest_future)
+        session.add(
+            Event(
+                title="Old",
+                description="d",
+                source_text="s",
+                date=past_day.isoformat(),
+                end_date=past_day.isoformat(),
+                time="18:00",
+                location_name="Hall",
+                festival="Past",
+            )
+        )
+        session.add(
+            Event(
+                title="Upcoming",
+                description="d",
+                source_text="s",
+                date=(date.today() + timedelta(days=1)).isoformat(),
+                time="18:00",
+                location_name="Hall",
+                festival="Future",
+            )
+        )
+        await session.commit()
+        past_id = fest_past.id
+
+    msg = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "/fest archive",
+        }
+    )
+    await main.handle_fest(msg, db, bot)
+    text = bot.messages[-1][1]
+    assert text.startswith("Фестивали архив (стр. 1/1)")
+    assert "Past" in text
+    assert "Future" not in text
+    markup = bot.messages[-1][2]["reply_markup"]
+    assert any(
+        btn.callback_data == f"festdel:{past_id}:1:archive"
+        for row in markup.inline_keyboard
+        for btn in row
+    )
+    assert any(
+        btn.callback_data == "festpage:1:active"
+        for row in markup.inline_keyboard
+        for btn in row
+    )
 async def test_month_page_festival_link(tmp_path: Path):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
