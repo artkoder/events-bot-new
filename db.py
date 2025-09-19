@@ -117,7 +117,8 @@ class Database:
                     organization TEXT,
                     location TEXT,
                     blocked BOOLEAN DEFAULT 0,
-                    last_partner_reminder TIMESTAMP
+                    last_partner_reminder TIMESTAMP WITH TIME ZONE
+                        -- Existing deployments should backfill naive values as UTC.
                 )
                 """
             )

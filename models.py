@@ -206,7 +206,9 @@ class User(SQLModel, table=True):
     organization: Optional[str] = None
     location: Optional[str] = None
     blocked: bool = False
-    last_partner_reminder: Optional[datetime] = None
+    last_partner_reminder: Optional[datetime] = Field(
+        default=None, sa_column=Column(DateTime(timezone=True))
+    )
 
 
 class PendingUser(SQLModel, table=True):

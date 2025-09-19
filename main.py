@@ -2614,15 +2614,17 @@ async def notify_inactive_partners(
         )
         count = 0
         async for p in stream:
-            last = (
-                await session.execute(
-                    select(Event.added_at)
-                    .where(Event.creator_id == p.user_id)
-                    .order_by(Event.added_at.desc())
-                    .limit(1)
-                )
-            ).scalars().first()
-            last_reminder = p.last_partner_reminder
+            last = _ensure_utc(
+                (
+                    await session.execute(
+                        select(Event.added_at)
+                        .where(Event.creator_id == p.user_id)
+                        .order_by(Event.added_at.desc())
+                        .limit(1)
+                    )
+                ).scalars().first()
+            )
+            last_reminder = _ensure_utc(p.last_partner_reminder)
             if (not last or last < cutoff) and (
                 not last_reminder or last_reminder < cutoff
             ):
