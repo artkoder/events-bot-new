@@ -129,6 +129,7 @@ from net import http_call, VK_FALLBACK_CODES
 from digests import (
     build_lectures_digest_preview,
     build_masterclasses_digest_preview,
+    build_exhibitions_digest_preview,
     format_event_line_html,
     pick_display_link,
     extract_catbox_covers_from_telegraph,
@@ -14648,7 +14649,10 @@ async def show_digest_menu(message: types.Message, db: Database, bot: Bot) -> No
             types.InlineKeyboardButton(text="⏳ Популярное за неделю", callback_data="digest:disabled"),
         ],
         [
-            types.InlineKeyboardButton(text="⏳ Новые выставки", callback_data="digest:disabled"),
+            types.InlineKeyboardButton(
+                text="✅ Выставки",
+                callback_data=f"digest:select:exhibitions:{digest_id}",
+            ),
         ],
     ]
     markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard)
@@ -19009,6 +19013,9 @@ def create_app() -> web.Application:
     async def digest_select_masterclasses_wrapper(callback: types.CallbackQuery):
         await handle_digest_select_masterclasses(callback, db, bot)
 
+    async def digest_select_exhibitions_wrapper(callback: types.CallbackQuery):
+        await handle_digest_select_exhibitions(callback, db, bot)
+
     async def digest_disabled_wrapper(callback: types.CallbackQuery):
         await callback.answer("Ещё не реализовано", show_alert=False)
 
@@ -19325,6 +19332,10 @@ def create_app() -> web.Application:
         lambda c: c.data.startswith("digest:select:masterclasses:"),
     )
     dp.callback_query.register(
+        digest_select_exhibitions_wrapper,
+        lambda c: c.data.startswith("digest:select:exhibitions:"),
+    )
+    dp.callback_query.register(
         digest_disabled_wrapper, lambda c: c.data == "digest:disabled"
     )
     dp.callback_query.register(
@@ -19580,6 +19591,20 @@ async def handle_digest_select_masterclasses(
         preview_builder=build_masterclasses_digest_preview,
         items_noun="мастер-классов",
         panel_text="Управление дайджестом мастер-классов\nВыключите лишнее и нажмите «Обновить превью».",
+    )
+
+
+async def handle_digest_select_exhibitions(
+    callback: types.CallbackQuery, db: Database, bot: Bot
+) -> None:
+    await _handle_digest_select(
+        callback,
+        db,
+        bot,
+        digest_type="exhibitions",
+        preview_builder=build_exhibitions_digest_preview,
+        items_noun="выставок",
+        panel_text="Управление дайджестом выставок\nВыключите лишнее и нажмите «Обновить превью».",
     )
 
 
