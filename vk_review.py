@@ -6,6 +6,7 @@ from typing import Optional, Any, Awaitable, Callable
 import logging
 import os
 import time as _time
+import random
 
 from db import Database
 from vk_intake import extract_event_ts_hint
@@ -60,6 +61,17 @@ class InboxPost:
 
 
 def _hours_from_env(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        logging.warning("vk_review invalid env %s=%s, using default %s", name, value, default)
+        return default
+
+
+def _float_from_env(name: str, default: float) -> float:
     value = os.getenv(name)
     if value is None:
         return default
@@ -161,26 +173,104 @@ async def pick_next(db: Database, operator_id: int, batch_id: str) -> Optional[I
             )
             row = await cursor.fetchone()
             if not row:
-                cursor = await conn.execute(
-                    """
-                    WITH next AS (
-                        SELECT id FROM vk_inbox
-                        WHERE status='pending' AND (event_ts_hint IS NULL OR event_ts_hint >= ?)
-                        ORDER BY CASE WHEN event_ts_hint IS NULL THEN 1 ELSE 0 END,
-                                 event_ts_hint ASC, date DESC, id DESC
-                        LIMIT 1
-                    )
-                    UPDATE vk_inbox
-                    SET status='locked', locked_by=?, locked_at=CURRENT_TIMESTAMP, review_batch=?
-                    WHERE id = (SELECT id FROM next)
-                    RETURNING id, group_id, post_id, date, text, matched_kw, has_date, status, review_batch
-                    """,
-                    (reject_cutoff, operator_id, batch_id),
+                soon_max_days = max(_float_from_env("VK_REVIEW_SOON_MAX_D", 7), 0.0)
+                long_max_days = max(
+                    _float_from_env("VK_REVIEW_LONG_MAX_D", 30),
+                    soon_max_days,
                 )
-                row = await cursor.fetchone()
+                soon_cutoff = max(urgent_cutoff, now_ts + int(soon_max_days * 86400))
+                long_cutoff = max(soon_cutoff, now_ts + int(long_max_days * 86400))
+
+                bucket_specs = [
+                    (
+                        "SOON",
+                        "status='pending' AND event_ts_hint IS NOT NULL AND event_ts_hint > ? AND event_ts_hint <= ?",
+                        (urgent_cutoff, soon_cutoff),
+                        max(_float_from_env("VK_REVIEW_W_SOON", 1.0), 0.0),
+                    ),
+                    (
+                        "LONG",
+                        "status='pending' AND event_ts_hint IS NOT NULL AND event_ts_hint > ? AND event_ts_hint <= ?",
+                        (soon_cutoff, long_cutoff),
+                        max(_float_from_env("VK_REVIEW_W_LONG", 1.0), 0.0),
+                    ),
+                    (
+                        "FAR",
+                        "status='pending' AND event_ts_hint IS NOT NULL AND event_ts_hint > ?",
+                        (long_cutoff,),
+                        max(_float_from_env("VK_REVIEW_W_FAR", 1.0), 0.0),
+                    ),
+                ]
+
+                bucket_counts: dict[str, int] = {}
+                weighted_total = 0.0
+                for name, where_clause, params, weight in bucket_specs:
+                    count_cursor = await conn.execute(
+                        f"SELECT COUNT(1) FROM vk_inbox WHERE {where_clause}",
+                        params,
+                    )
+                    count_row = await count_cursor.fetchone()
+                    count = int(count_row[0]) if count_row else 0
+                    bucket_counts[name] = count
+                    weighted_total += weight * count
+
+                chosen_bucket = None
+                if weighted_total > 0:
+                    ticket = random.random() * weighted_total
+                    for name, where_clause, params, weight in bucket_specs:
+                        count = bucket_counts.get(name, 0)
+                        bucket_weight = weight * count
+                        if bucket_weight <= 0:
+                            continue
+                        if ticket < bucket_weight:
+                            chosen_bucket = (name, where_clause, params)
+                            break
+                        ticket -= bucket_weight
+
+                if chosen_bucket:
+                    name, where_clause, params = chosen_bucket
+                    logging.info(
+                        "vk_review bucket_pick name=%s counts=%s", name, bucket_counts
+                    )
+                    bucket_query = f"""
+                        WITH next AS (
+                            SELECT id FROM vk_inbox
+                            WHERE {where_clause}
+                            ORDER BY event_ts_hint ASC, date DESC, id DESC
+                            LIMIT 1
+                        )
+                        UPDATE vk_inbox
+                        SET status='locked', locked_by=?, locked_at=CURRENT_TIMESTAMP, review_batch=?
+                        WHERE id = (SELECT id FROM next)
+                        RETURNING id, group_id, post_id, date, text, matched_kw, has_date, status, review_batch
+                    """
+                    bucket_cursor = await conn.execute(
+                        bucket_query,
+                        (*params, operator_id, batch_id),
+                    )
+                    row = await bucket_cursor.fetchone()
+
                 if not row:
-                    await conn.commit()
-                    return None
+                    cursor = await conn.execute(
+                        """
+                        WITH next AS (
+                            SELECT id FROM vk_inbox
+                            WHERE status='pending' AND (event_ts_hint IS NULL OR event_ts_hint >= ?)
+                            ORDER BY CASE WHEN event_ts_hint IS NULL THEN 1 ELSE 0 END,
+                                     event_ts_hint ASC, date DESC, id DESC
+                            LIMIT 1
+                        )
+                        UPDATE vk_inbox
+                        SET status='locked', locked_by=?, locked_at=CURRENT_TIMESTAMP, review_batch=?
+                        WHERE id = (SELECT id FROM next)
+                        RETURNING id, group_id, post_id, date, text, matched_kw, has_date, status, review_batch
+                        """,
+                        (reject_cutoff, operator_id, batch_id),
+                    )
+                    row = await cursor.fetchone()
+                    if not row:
+                        await conn.commit()
+                        return None
 
             inbox_id = row[0]
             text = row[4]
