@@ -329,17 +329,25 @@ async def _download_photo_media(urls: Sequence[str]) -> list[tuple[bytes, str]]:
                         raise ValueError("file too large")
                     return data
 
+        size = None
         try:
             data = await asyncio.wait_for(_fetch(), timeout)
+            size = len(data)
+            data, name = ensure_jpeg(data, f"vk_poster_{idx + 1}.jpg")
+            subtype = detect_image_type(data)
         except Exception as exc:  # pragma: no cover - network dependent
-            logging.warning("vk.download_photo_failed url=%s error=%s", url, exc)
+            logging.warning(
+                "vk.download_photo_failed url=%s size=%s error=%s",
+                url,
+                size if size is not None else "unknown",
+                exc,
+            )
             continue
-        data, name = ensure_jpeg(data, f"vk_poster_{idx + 1}.jpg")
-        subtype = detect_image_type(data)
         logging.info(
-            "vk.photo_media processed idx=%s url=%s subtype=%s filename=%s",
+            "vk.photo_media processed idx=%s url=%s size=%d subtype=%s filename=%s",
             idx,
             url,
+            size if size is not None else 0,
             subtype or "unknown",
             name,
         )

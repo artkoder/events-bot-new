@@ -99,13 +99,15 @@ async def test_download_photo_media_logs_mime(monkeypatch, caplog):
     ]
 
     messages = [record.message for record in caplog.records if record.levelno == logging.INFO]
+    size_0 = len(payloads[urls[0]])
+    size_1 = len(payloads[urls[1]])
     assert (
-        f"vk.photo_media processed idx=0 url={urls[0]} subtype=jpeg filename=converted.jpg"
-        in messages
+        "vk.photo_media processed idx=0 url="
+        f"{urls[0]} size={size_0} subtype=jpeg filename=converted.jpg" in messages
     )
     assert (
-        f"vk.photo_media processed idx=1 url={urls[1]} subtype=jpeg filename=vk_poster_2.jpg"
-        in messages
+        "vk.photo_media processed idx=1 url="
+        f"{urls[1]} size={size_1} subtype=jpeg filename=vk_poster_2.jpg" in messages
     )
 
 
