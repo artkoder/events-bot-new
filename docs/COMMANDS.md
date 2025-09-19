@@ -25,7 +25,7 @@
 | `/exhibitions` | - | List active exhibitions similar to `/events`; each entry shows the period `c <start>` / `по <end>` and includes edit/delete buttons. |
 | `/digest` | - | Build lecture digest with images, toggles and quick send buttons (superadmin only). |
 | `/pages` | - | Show links to Telegraph month and weekend pages. |
-| `/fest` | - | List festivals with edit/delete options. Tap **Edit** to pick description or contact fields to update. |
+| `/fest [archive] [page]` | optional `archive` flag and page number | List festivals with edit/delete options. Ten rows are shown per page with navigation buttons. Use `archive` to view finished festivals that no longer have upcoming events; omit it to see active ones. |
 
 
 
