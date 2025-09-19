@@ -98,7 +98,7 @@ def _mock_page_sync(monkeypatch, request):
     async def fake_month(db_obj, month):
         return None
 
-    async def fake_weekend(db_obj, start):
+    async def fake_weekend(db_obj, start, **kwargs):
         return None
 
     monkeypatch.setattr(main, "sync_month_page", fake_month)
@@ -118,6 +118,7 @@ class DummyBot(Bot):
         self.messages = []
         self.edits = []
         self.text_edits = []
+        self.deletes = []
         self._msg_id = 0
 
     async def send_message(self, chat_id, text, **kwargs):
@@ -138,6 +139,9 @@ class DummyBot(Bot):
         **kwargs,
     ):
         self.text_edits.append((chat_id, message_id, text, kwargs))
+
+    async def delete_message(self, chat_id: int, message_id: int, **kwargs):
+        self.deletes.append((chat_id, message_id, kwargs))
 
     async def download(self, file_id, destination):
         destination.write(b"img")
@@ -6170,6 +6174,116 @@ async def test_handle_exhibitions_splits_long_messages(tmp_path: Path):
 
     combined = "\n".join(text for _, text, _ in bot.messages)
     assert "Expo 79" in combined
+
+
+@pytest.mark.asyncio
+async def test_delete_exhibition_refreshes_followups(tmp_path: Path, monkeypatch):
+    main.exhibitions_message_state.clear()
+    monkeypatch.setattr(main, "TELEGRAM_MESSAGE_LIMIT", 120)
+
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    delete_title = "Expo Drop"
+
+    async with db.get_session() as session:
+        session.add(User(user_id=1))
+        events = [
+            Event(
+                title=delete_title if idx == 0 else f"Expo Keep {idx}",
+                description="d",
+                source_text="s",
+                date=f"2025-02-{(idx % 28) + 1:02d}",
+                end_date="2999-12-31",
+                time="10:00",
+                location_name="Hall " + "X" * 40,
+                city="Калининград",
+                event_type="выставка",
+                is_free=bool(idx % 2),
+            )
+            for idx in range(8)
+        ]
+        session.add_all(events)
+        await session.commit()
+
+    message = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "/exhibitions",
+        }
+    )
+
+    await handle_exhibitions(message, db, bot)
+
+    state = main.exhibitions_message_state.get(1)
+    assert state is not None
+    assert len(state) > 1
+    first_message_id = state[0][0]
+
+    async with db.get_session() as session:
+        delete_event = (
+            await session.execute(select(Event).where(Event.title == delete_title))
+        ).scalars().one()
+
+    cb = types.CallbackQuery.model_validate(
+        {
+            "id": "cb1",
+            "data": f"del:{delete_event.id}:exh",
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "chat_instance": "1",
+            "message": {
+                "message_id": first_message_id,
+                "date": 0,
+                "chat": {"id": 1, "type": "private"},
+                "from": BOT_SENDER,
+                "text": state[0][1],
+            },
+        }
+    ).as_(bot)
+
+    object.__setattr__(cb.message, "_bot", bot)
+
+    edited_first: list[str] = []
+
+    async def fake_edit_text(text, **kwargs):
+        edited_first.append(text)
+        return None
+
+    object.__setattr__(cb.message, "edit_text", fake_edit_text)
+
+    async def fake_answer(*args, **kwargs):
+        return None
+
+    object.__setattr__(cb, "answer", fake_answer)
+
+    initial_messages = list(bot.messages)
+
+    await process_request(cb, db, bot)
+
+    new_state = main.exhibitions_message_state.get(1)
+    assert new_state is not None
+    assert new_state[0][0] == first_message_id
+
+    final_texts: dict[int, str] = {
+        idx + 1: text for idx, (_, text, _) in enumerate(initial_messages)
+    }
+    if edited_first:
+        final_texts[first_message_id] = edited_first[-1]
+    for chat_id, message_id, text, _ in bot.text_edits:
+        if message_id is not None:
+            final_texts[message_id] = text
+    for chat_id, message_id, _ in bot.deletes:
+        final_texts.pop(message_id, None)
+    for idx, (_, text, _) in enumerate(
+        bot.messages[len(initial_messages) :], start=len(initial_messages) + 1
+    ):
+        final_texts[idx] = text
+
+    assert all(delete_title not in text for text in final_texts.values())
 
 
 @pytest.mark.asyncio
