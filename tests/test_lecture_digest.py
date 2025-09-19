@@ -460,6 +460,66 @@ def test_format_event_line_and_link_priority():
     assert pick_display_link(e) == "https://telegra.ph/foo"
 
 
+def test_format_event_line_html_exhibition_end_date():
+    e = Event(
+        title="T",
+        description="d",
+        date="2025-05-10",
+        time="18:30",
+        location_name="L",
+        source_text="s",
+        event_type="выставка",
+        source_post_url="http://t.me/post",
+        end_date="2025-05-12",
+    )
+
+    line = format_event_line_html(e, None)
+
+    assert line == "10.05 по 12.05 18:30 | T"
+
+
+def test_format_event_line_html_exhibition_missing_end_date(caplog):
+    caplog.set_level(logging.WARNING)
+
+    e = Event(
+        title="T",
+        description="d",
+        date="2025-05-10",
+        time="18:30",
+        location_name="L",
+        source_text="s",
+        event_type="выставка",
+        source_post_url="http://t.me/post",
+        end_date=None,
+    )
+
+    line = format_event_line_html(e, None)
+
+    assert line == "10.05 18:30 | T"
+    assert any("digest.end_date.missing" in r.message for r in caplog.records)
+
+
+def test_format_event_line_html_exhibition_bad_end_date(caplog):
+    caplog.set_level(logging.WARNING)
+
+    e = Event(
+        title="T",
+        description="d",
+        date="2025-05-10",
+        time="18:30",
+        location_name="L",
+        source_text="s",
+        event_type="выставка",
+        source_post_url="http://t.me/post",
+        end_date="2025/05/12",
+    )
+
+    line = format_event_line_html(e, None)
+
+    assert line == "10.05 18:30 | T"
+    assert any("digest.end_date.format" in r.message for r in caplog.records)
+
+
 def test_aggregate_topics():
     events = [
         SimpleNamespace(topics=["ART", "культура"]),
