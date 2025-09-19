@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import logging
 import os
 from dataclasses import dataclass
+from io import BytesIO
 
 from aiohttp import ClientError, ClientSession
+from PIL import Image
 
 __all__ = [
     "OcrUsage",
@@ -63,8 +66,26 @@ async def run_ocr(image_bytes: bytes, *, model: str, detail: str) -> OcrResult:
         raise RuntimeError("FOUR_O_TOKEN is missing")
 
     url = os.getenv("FOUR_O_URL", "https://api.openai.com/v1/chat/completions")
+    image_len = len(image_bytes)
+    image_sha256 = hashlib.sha256(image_bytes).hexdigest()
+    image_head = image_bytes[:16].hex()
+
+    try:
+        Image.open(BytesIO(image_bytes)).verify()
+    except Exception as exc:  # pragma: no cover - depends on PIL internals
+        logging.exception(
+            "Invalid image for OCR: size=%s sha256=%s head=%s", image_len, image_sha256, image_head
+        )
+        raise RuntimeError("Invalid image bytes for OCR") from exc
+
+    logging.debug(
+        "OCR image stats: size=%s sha256=%s head=%s", image_len, image_sha256, image_head
+    )
+
     encoded = base64.b64encode(image_bytes).decode("ascii")
     mime = _detect_image_mime(image_bytes)
+    data_url = f"data:{mime};base64,{encoded}"
+    logging.debug("OCR image data URI prefix: %s…", data_url[:40])
     payload = {
         "model": model,
         "messages": [
@@ -76,7 +97,7 @@ async def run_ocr(image_bytes: bytes, *, model: str, detail: str) -> OcrResult:
                     {
                         "type": "image_url",
                         "image_url": {
-                            "url": f"data:{mime};base64,{encoded}",
+                            "url": data_url,
                             "detail": detail,
                         },
                     },
