@@ -156,6 +156,9 @@ class DummyMember:
         self.status = status
 
 
+BOT_SENDER = {"id": 999999, "is_bot": True, "first_name": "FestBot"}
+
+
 class DummyUpdate:
     def __init__(self, chat_id, title, status="administrator"):
         self.chat = DummyChat(chat_id, title)
@@ -3700,7 +3703,14 @@ async def test_stats_festivals(tmp_path: Path, monkeypatch):
             return {"response": [{"reach_total": 40}]}
         raise AssertionError(method)
 
+    async def fake_vk_api_views(method, **params):
+        if method == "wall.getById":
+            assert params.get("posts") == "-1_2"
+            return [{"views": {"count": 70}}]
+        raise AssertionError(method)
+
     monkeypatch.setattr(main, "_vk_api", fake_vk_api)
+    monkeypatch.setattr(main, "vk_api", fake_vk_api_views)
 
     start_msg = types.Message.model_validate(
         {
@@ -7004,6 +7014,7 @@ async def test_festdays_callback_creates_events(tmp_path: Path, monkeypatch):
                 "message_id": 1,
                 "date": 0,
                 "chat": {"id": 1, "type": "private"},
+                "from": BOT_SENDER,
                 "text": "stub",
             },
         }
@@ -7087,6 +7098,7 @@ async def test_festdays_single_day_copies_source(tmp_path: Path, monkeypatch):
                 "message_id": 1,
                 "date": 0,
                 "chat": {"id": 1, "type": "private"},
+                "from": BOT_SENDER,
                 "text": "stub",
             },
         }
@@ -7131,6 +7143,7 @@ async def test_festdays_requires_dates(tmp_path: Path, monkeypatch):
                 "message_id": 1,
                 "date": 0,
                 "chat": {"id": 1, "type": "private"},
+                "from": BOT_SENDER,
                 "text": "stub",
             },
         }
@@ -7339,7 +7352,7 @@ async def test_fest_pagination_callback_updates_pages(tmp_path: Path):
                 "message_id": 10,
                 "date": 0,
                 "chat": {"id": 1, "type": "private"},
-                "from": {"id": 1, "is_bot": False, "first_name": "A"},
+                "from": BOT_SENDER,
                 "text": first_text,
                 "reply_markup": first_markup.model_dump(),
             },
@@ -7389,7 +7402,7 @@ async def test_fest_pagination_callback_updates_pages(tmp_path: Path):
                 "message_id": message_id,
                 "date": 0,
                 "chat": {"id": 1, "type": "private"},
-                "from": {"id": 1, "is_bot": False, "first_name": "A"},
+                "from": BOT_SENDER,
                 "text": page2_text,
                 "reply_markup": page2_markup.model_dump(),
             },
