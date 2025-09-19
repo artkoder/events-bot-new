@@ -10,8 +10,11 @@ from digests import (
     build_lectures_digest_candidates,
     build_masterclasses_digest_candidates,
     build_masterclasses_digest_preview,
+    build_exhibitions_digest_candidates,
+    build_exhibitions_digest_preview,
     compose_digest_intro_via_4o,
     compose_masterclasses_intro_via_4o,
+    compose_exhibitions_intro_via_4o,
     aggregate_digest_topics,
     format_event_line_html,
     pick_display_link,
@@ -99,6 +102,40 @@ async def test_build_masterclasses_digest_candidates(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_build_exhibitions_digest_candidates(tmp_path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    now = datetime(2025, 5, 1, 12, 0)
+
+    async with db.get_session() as session:
+        def add(offset_days: int, time: str, title: str):
+            dt = now + timedelta(days=offset_days)
+            ev = Event(
+                title=title,
+                description="d",
+                date=dt.strftime("%Y-%m-%d"),
+                time=time,
+                location_name="x",
+                source_text="s",
+                event_type="выставка",
+                source_post_url="http://example.com/" + title,
+                end_date=(dt + timedelta(days=2)).strftime("%Y-%m-%d"),
+            )
+            session.add(ev)
+
+        add(0, "15:00", "e0")
+        add(5, "12:00", "e5")
+        add(9, "12:00", "e9")
+        await session.commit()
+
+    events, horizon = await build_exhibitions_digest_candidates(db, now)
+    titles = [e.title for e in events]
+
+    assert horizon == 14
+    assert titles == ["e0", "e5", "e9"]
+
+
+@pytest.mark.asyncio
 async def test_build_lectures_digest_candidates_limit(tmp_path):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
@@ -177,6 +214,41 @@ async def test_compose_intro_via_4o_masterclass(monkeypatch):
     assert "перечисли основные активности" in prompt.lower()
     assert "12+" in prompt
 
+
+@pytest.mark.asyncio
+async def test_compose_intro_via_4o_exhibition(monkeypatch):
+    captured_prompt: dict[str, str] = {}
+
+    async def fake_ask(prompt, max_tokens=0):
+        captured_prompt["value"] = prompt
+        return "интро"
+
+    monkeypatch.setattr("main.ask_4o", fake_ask)
+
+    payload = [
+        {
+            "title": "Импрессионисты",
+            "description": "Большая экспозиция французских художников.",
+            "date_range": {"start": "2025-05-01", "end": "2025-05-20"},
+        },
+        {
+            "title": "Графика",
+            "description": "Современная графика из частных коллекций.",
+            "date_range": {"start": "2025-05-05", "end": "2025-05-18"},
+        },
+    ]
+
+    text = await compose_exhibitions_intro_via_4o(2, 7, payload)
+    assert text == "интро"
+
+    prompt = captured_prompt["value"]
+    assert "Импрессионисты" in prompt
+    assert "2025-05-01" in prompt and "2025-05-20" in prompt
+    assert "выставок" in prompt
+    assert "эмодзи" in prompt
+    assert "не выдумывай детали" in prompt
+
+
     event = SimpleNamespace(
         id=1,
         title="🎨 Мастер-класс «Акварель»",
@@ -222,6 +294,62 @@ async def test_compose_intro_via_4o_masterclass(monkeypatch):
     ]
     assert horizon == 7
     assert norm_titles == ["Акварель"]
+    assert len(lines) == 1
+    assert events == [event]
+
+
+@pytest.mark.asyncio
+async def test_build_exhibitions_digest_preview(monkeypatch):
+    event = SimpleNamespace(
+        id=2,
+        title="🖼️ Выставка «Импрессионисты»",
+        description="Картины из музеев Европы.",
+        date="2025-05-02",
+        end_date="2025-05-20",
+        time="10:00",
+        location_name="Музей",
+        source_post_url="https://example.com/exhibit",
+        telegraph_url=None,
+        telegraph_path=None,
+    )
+
+    captured_payload: dict[str, list] = {}
+
+    async def fake_compose_exhibitions_intro(n, horizon_days, exhibitions):
+        captured_payload["value"] = exhibitions
+        return "интро про выставки"
+
+    async def fake_normalize(titles, *, event_kind="lecture"):
+        return [{"emoji": "🖼️", "title_clean": "Импрессионисты"} for _ in titles]
+
+    async def fake_candidates(db, now, digest_id=None):
+        return [event], 14
+
+    monkeypatch.setattr(
+        "digests.compose_exhibitions_intro_via_4o",
+        fake_compose_exhibitions_intro,
+    )
+    monkeypatch.setattr("digests.normalize_titles_via_4o", fake_normalize)
+    monkeypatch.setattr(
+        "digests.build_exhibitions_digest_candidates", fake_candidates
+    )
+    monkeypatch.setattr("digests.pick_display_link", lambda ev: ev.source_post_url)
+
+    now = datetime(2025, 5, 1, 12, 0)
+    intro, lines, horizon, events, norm_titles = await build_exhibitions_digest_preview(
+        "digest-exhibit", None, now
+    )
+
+    assert intro == "интро про выставки"
+    assert captured_payload["value"] == [
+        {
+            "title": "Импрессионисты",
+            "description": "Картины из музеев Европы.",
+            "date_range": {"start": "2025-05-02", "end": "2025-05-20"},
+        }
+    ]
+    assert horizon == 14
+    assert norm_titles == ["Импрессионисты"]
     assert len(lines) == 1
     assert events == [event]
 
@@ -341,9 +469,9 @@ def test_aggregate_topics():
         SimpleNamespace(topics=["культура"]),
     ]
     assert aggregate_digest_topics(events) == [
-        "ART",
-        "HISTORY_RU",
-        "MUSIC",
+        "EXHIBITIONS",
+        "CONCERTS",
+        "LECTURES",
     ]
 
 

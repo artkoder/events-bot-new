@@ -241,6 +241,14 @@ async def build_masterclasses_digest_candidates(
     return await _build_digest_candidates("мастер-класс", db, now, digest_id)
 
 
+async def build_exhibitions_digest_candidates(
+    db: Database, now: datetime, digest_id: str | None = None
+) -> Tuple[List[Event], int]:
+    """Select exhibition events for the digest."""
+
+    return await _build_digest_candidates("выставка", db, now, digest_id)
+
+
 def normalize_topics(topics: Iterable[str]) -> List[str]:
     """Normalize topics using the synonym map.
 
@@ -477,6 +485,66 @@ async def compose_masterclasses_intro_via_4o(
     text = text.strip()
     logging.info(
         "digest.intro.llm.response run_id=%s kind=masterclass ok=ok text_len=%s took_ms=%s",
+        run_id,
+        len(text),
+        took_ms,
+    )
+    return text
+
+
+async def compose_exhibitions_intro_via_4o(
+    n: int, horizon_days: int, exhibitions: List[dict[str, object]]
+) -> str:
+    """Generate intro phrase for exhibition digest via model 4o."""
+
+    from main import ask_4o  # local import to avoid cycle
+    import json
+    import uuid
+
+    run_id = uuid.uuid4().hex
+    horizon_word = "неделю" if horizon_days == 7 else "две недели"
+    data_json = json.dumps(exhibitions[:9], ensure_ascii=False)
+    prompt = (
+        "Ты помогаешь телеграм-дайджесту мероприятий."
+        f" Сохрани каркас «{n} выставок на ближайшую {horizon_word} — …»"
+        " и общий тон лекционного дайджеста без приветствий."
+        " Текст сделай динамичным и коротким: 1–2 предложения до ~200 символов,"
+        " помни, что слишком длинный ответ нежелателен."
+        " Используй подходящие эмодзи."
+        " После тире подчеркни ключевые темы, форматы или героев выставок по описанию."
+        " Обязательно опирайся на диапазоны дат и упоминай длительность, если она есть."
+        " Опирайся только на факты из данных, не выдумывай детали."
+        " Данные о выставках в JSON (title — нормализованное название,"
+        " description — полная аннотация, date_range — {\"start\": \"YYYY-MM-DD\","
+        " \"end\": \"YYYY-MM-DD\"}): "
+        f"{data_json}"
+    )
+
+    logging.info(
+        "digest.intro.llm.request run_id=%s kind=exhibition n=%s horizon=%s items_count=%s prompt_len=%s",
+        run_id,
+        n,
+        horizon_days,
+        len(exhibitions),
+        len(prompt),
+    )
+
+    start = time.monotonic()
+    try:
+        text = await ask_4o(prompt, max_tokens=160)
+    except Exception:
+        took_ms = int((time.monotonic() - start) * 1000)
+        logging.info(
+            "digest.intro.llm.response run_id=%s kind=exhibition ok=error text_len=0 took_ms=%s",
+            run_id,
+            took_ms,
+        )
+        raise
+
+    took_ms = int((time.monotonic() - start) * 1000)
+    text = text.strip()
+    logging.info(
+        "digest.intro.llm.response run_id=%s kind=exhibition ok=ok text_len=%s took_ms=%s",
         run_id,
         len(text),
         took_ms,
@@ -862,6 +930,23 @@ async def _build_digest_preview(
         intro = await compose_masterclasses_intro_via_4o(
             len(events), horizon, masterclasses_payload
         )
+    elif event_kind == "exhibition":
+        exhibitions_payload: List[dict[str, object]] = []
+        for ev, norm in zip(events, normalized):
+            title_clean = norm.get("title_clean") or ev.title
+            exhibitions_payload.append(
+                {
+                    "title": title_clean,
+                    "description": (ev.description or "").strip(),
+                    "date_range": {
+                        "start": ev.date,
+                        "end": ev.end_date or ev.date,
+                    },
+                }
+            )
+        intro = await compose_exhibitions_intro_via_4o(
+            len(events), horizon, exhibitions_payload
+        )
     else:
         intro = await compose_digest_intro_via_4o(
             len(events), horizon, titles, event_noun=event_noun
@@ -912,6 +997,22 @@ async def build_masterclasses_digest_preview(
         event_noun="мастер-классов",
         event_kind="masterclass",
         candidates_builder=build_masterclasses_digest_candidates,
+    )
+
+
+async def build_exhibitions_digest_preview(
+    digest_id: str, db: Database, now: datetime
+) -> tuple[str, List[str], int, List[Event], List[str]]:
+    """Build digest preview text for exhibitions."""
+
+    return await _build_digest_preview(
+        digest_id,
+        db,
+        now,
+        kind="exhibitions",
+        event_noun="выставок",
+        event_kind="exhibition",
+        candidates_builder=build_exhibitions_digest_candidates,
     )
 
 
