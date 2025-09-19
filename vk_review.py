@@ -233,15 +233,30 @@ async def pick_next(db: Database, operator_id: int, batch_id: str) -> Optional[I
                         "vk_review bucket_pick name=%s counts=%s", name, bucket_counts
                     )
                     bucket_query = f"""
-                        WITH next AS (
-                            SELECT id FROM vk_inbox
+                        WITH candidates AS (
+                            SELECT id, group_id, event_ts_hint, date
+                            FROM vk_inbox
                             WHERE {where_clause}
-                            ORDER BY event_ts_hint ASC, date DESC, id DESC
+                        ),
+                        group_counts AS (
+                            SELECT group_id, COUNT(*) AS cnt
+                            FROM candidates
+                            GROUP BY group_id
+                        ),
+                        ranked AS (
+                            SELECT c.id
+                            FROM candidates c
+                            LEFT JOIN group_counts gc ON c.group_id = gc.group_id
+                            ORDER BY c.event_ts_hint ASC,
+                                     (ABS(RANDOM()) / 9223372036854775808.0) * 0.001 *
+                                         SQRT(COALESCE(gc.cnt, 1)) ASC,
+                                     c.date DESC,
+                                     c.id DESC
                             LIMIT 1
                         )
                         UPDATE vk_inbox
                         SET status='locked', locked_by=?, locked_at=CURRENT_TIMESTAMP, review_batch=?
-                        WHERE id = (SELECT id FROM next)
+                        WHERE id = (SELECT id FROM ranked)
                         RETURNING id, group_id, post_id, date, text, matched_kw, has_date, status, review_batch
                     """
                     bucket_cursor = await conn.execute(
