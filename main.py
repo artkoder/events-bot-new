@@ -14466,13 +14466,13 @@ async def build_events_message(db: Database, target_date: date, tz: timezone, cr
 
 async def build_exhibitions_message(db: Database, tz: timezone):
     today = datetime.now(tz).date()
-    cutoff = (today - timedelta(days=30)).isoformat()
+    today_iso = today.isoformat()
     async with db.get_session() as session:
         result = await session.execute(
             select(Event)
             .where(
                 Event.end_date.is_not(None),
-                Event.end_date >= cutoff,
+                Event.end_date >= today_iso,
             )
             .order_by(Event.date)
         )
