@@ -218,13 +218,13 @@ async def pick_next(db: Database, operator_id: int, batch_id: str) -> Optional[I
                 bucket_specs = [
                     (
                         "SOON",
-                        "status='pending' AND event_ts_hint IS NOT NULL AND event_ts_hint > ? AND event_ts_hint < ?",
+                        "status='pending' AND event_ts_hint IS NOT NULL AND event_ts_hint >= ? AND event_ts_hint < ?",
                         (urgent_cutoff, soon_cutoff),
                         max(_float_from_env("VK_REVIEW_W_SOON", 3.0), 0.0),
                     ),
                     (
                         "LONG",
-                        "status='pending' AND event_ts_hint IS NOT NULL AND event_ts_hint > ? AND event_ts_hint < ?",
+                        "status='pending' AND event_ts_hint IS NOT NULL AND event_ts_hint >= ? AND event_ts_hint < ?",
                         (soon_cutoff, long_cutoff),
                         max(_float_from_env("VK_REVIEW_W_LONG", 2.0), 0.0),
                     ),
