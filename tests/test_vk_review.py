@@ -183,6 +183,58 @@ async def test_far_gap_override_triggers_after_k_non_far(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_bucket_boundaries_use_weighted_selection(tmp_path, monkeypatch):
+    vk_review._FAR_BUCKET_HISTORY.clear()
+    monkeypatch.setenv("VK_REVIEW_FAR_GAP_K", "2")
+    monkeypatch.setenv("VK_REVIEW_W_SOON", "1")
+    monkeypatch.setenv("VK_REVIEW_W_LONG", "1")
+    monkeypatch.setenv("VK_REVIEW_W_FAR", "0")
+    fixed_now = 1_750_000_000
+    monkeypatch.setattr(vk_review._time, "time", lambda: fixed_now)
+    monkeypatch.setattr(vk_review.random, "random", lambda: 0.0)
+
+    urgent_cutoff = fixed_now + int(48 * 3600)
+    soon_cutoff = fixed_now + int(14 * 86400)
+
+    def fake_extract(text):
+        return int(text.split(":", 1)[1])
+
+    monkeypatch.setattr(vk_review, "extract_event_ts_hint", fake_extract)
+
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    async with db.raw_conn() as conn:
+        rows = [
+            (1, 101, 100, f"TS:{urgent_cutoff}", "k", 1, urgent_cutoff, "pending"),
+            (1, 202, 200, f"TS:{soon_cutoff}", "k", 1, soon_cutoff, "pending"),
+        ]
+        await conn.executemany(
+            "INSERT INTO vk_inbox(group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status) VALUES(?,?,?,?,?,?,?,?)",
+            rows,
+        )
+        await conn.commit()
+
+    operator_id = 55
+    batch_id = "boundaries"
+
+    post = await vk_review.pick_next(db, operator_id, batch_id)
+    assert post is not None
+    assert post.post_id == 101
+    history = vk_review._FAR_BUCKET_HISTORY.get(operator_id)
+    assert history is not None
+    assert list(history) == ["SOON"]
+
+    await vk_review.mark_rejected(db, post.id)
+
+    post2 = await vk_review.pick_next(db, operator_id, batch_id)
+    assert post2 is not None
+    assert post2.post_id == 202
+    history = vk_review._FAR_BUCKET_HISTORY.get(operator_id)
+    assert history is not None
+    assert list(history) == ["SOON", "LONG"]
+
+
+@pytest.mark.asyncio
 async def test_history_tracks_fallback_bucket(tmp_path, monkeypatch):
     vk_review._FAR_BUCKET_HISTORY.clear()
     monkeypatch.setenv("VK_REVIEW_FAR_GAP_K", "2")
