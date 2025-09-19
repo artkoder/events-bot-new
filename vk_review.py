@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Optional, Any, Awaitable, Callable
 
 import logging
+import math
 import os
 import time as _time
 import random
@@ -287,24 +288,35 @@ async def pick_next(db: Database, operator_id: int, batch_id: str) -> Optional[I
                     logging.info(
                         "vk_review bucket_pick name=%s counts=%s", name, bucket_counts
                     )
+                    penalty_cursor = await conn.execute(
+                        f"SELECT group_id, COUNT(*) FROM vk_inbox WHERE {where_clause} GROUP BY group_id",
+                        params,
+                    )
+                    penalty_rows = await penalty_cursor.fetchall()
+                    await penalty_cursor.close()
+                    penalty_params: list[float | int] = []
+                    penalty_cte = ", group_penalties(group_id, penalty) AS (SELECT NULL, 1.0 LIMIT 0)"
+                    if penalty_rows:
+                        values_clause = ", ".join(["(?, ?)"] * len(penalty_rows))
+                        penalty_cte = (
+                            f", group_penalties(group_id, penalty) AS (VALUES {values_clause})"
+                        )
+                        for group_id, cnt in penalty_rows:
+                            penalty_params.extend([group_id, math.sqrt(cnt)])
+
                     bucket_query = f"""
                         WITH candidates AS (
                             SELECT id, group_id, event_ts_hint, date
                             FROM vk_inbox
                             WHERE {where_clause}
-                        ),
-                        group_counts AS (
-                            SELECT group_id, COUNT(*) AS cnt
-                            FROM candidates
-                            GROUP BY group_id
-                        ),
+                        ){penalty_cte},
                         ranked AS (
                             SELECT c.id
                             FROM candidates c
-                            LEFT JOIN group_counts gc ON c.group_id = gc.group_id
+                            LEFT JOIN group_penalties gp ON c.group_id = gp.group_id
                             ORDER BY c.event_ts_hint ASC,
                                      (ABS(RANDOM()) / 9223372036854775808.0) * 0.001 *
-                                         SQRT(COALESCE(gc.cnt, 1)) ASC,
+                                         COALESCE(gp.penalty, 1.0) ASC,
                                      c.date DESC,
                                      c.id DESC
                             LIMIT 1
@@ -316,7 +328,7 @@ async def pick_next(db: Database, operator_id: int, batch_id: str) -> Optional[I
                     """
                     bucket_cursor = await conn.execute(
                         bucket_query,
-                        (*params, operator_id, batch_id),
+                        (*params, *penalty_params, operator_id, batch_id),
                     )
                     row = await bucket_cursor.fetchone()
                     if row:
