@@ -115,6 +115,109 @@ async def test_pick_next_recomputes_hint_and_rejects_recent_past(tmp_path, monke
 
 
 @pytest.mark.asyncio
+async def test_far_gap_override_triggers_after_k_non_far(tmp_path, monkeypatch):
+    vk_review._FAR_BUCKET_HISTORY.clear()
+    monkeypatch.setenv("VK_REVIEW_FAR_GAP_K", "3")
+    monkeypatch.setenv("VK_REVIEW_W_SOON", "1")
+    monkeypatch.setenv("VK_REVIEW_W_LONG", "1")
+    monkeypatch.setenv("VK_REVIEW_W_FAR", "1")
+    fixed_now = 1_700_000_000
+    monkeypatch.setattr(vk_review._time, "time", lambda: fixed_now)
+    monkeypatch.setattr(vk_review.random, "random", lambda: 0.0)
+
+    def fake_extract(text):
+        assert text.startswith("TS:")
+        return int(text.split(":", 1)[1])
+
+    monkeypatch.setattr(vk_review, "extract_event_ts_hint", fake_extract)
+
+    urgent_cutoff = fixed_now + int(48 * 3600)
+    long_cutoff = fixed_now + int(30 * 86400)
+
+    soon_hints = [urgent_cutoff + 1000 + i for i in range(4)]
+    far_hint = long_cutoff + 1000
+
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    async with db.raw_conn() as conn:
+        rows = [
+            (
+                1,
+                idx + 1,
+                100 + idx,
+                f"TS:{hint}",
+                "k",
+                1,
+                hint,
+                "pending",
+            )
+            for idx, hint in enumerate(soon_hints)
+        ]
+        rows.append((1, 100, 500, f"TS:{far_hint}", "k", 1, far_hint, "pending"))
+        await conn.executemany(
+            "INSERT INTO vk_inbox(group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status) VALUES(?,?,?,?,?,?,?,?)",
+            rows,
+        )
+        await conn.commit()
+
+    operator_id = 77
+    batch_id = "batch"
+
+    for expected_history_length in (1, 2, 3):
+        post = await vk_review.pick_next(db, operator_id, batch_id)
+        assert post is not None
+        assert post.post_id != 100
+        await vk_review.mark_rejected(db, post.id)
+        history = vk_review._FAR_BUCKET_HISTORY.get(operator_id)
+        assert history is not None
+        assert len(history) == expected_history_length
+        assert all(bucket == "SOON" for bucket in history)
+
+    post = await vk_review.pick_next(db, operator_id, batch_id)
+    assert post is not None
+    assert post.post_id == 100
+    await vk_review.mark_rejected(db, post.id)
+    history = vk_review._FAR_BUCKET_HISTORY.get(operator_id)
+    assert history is not None
+    assert list(history) == ["SOON", "SOON", "FAR"]
+
+
+@pytest.mark.asyncio
+async def test_history_tracks_fallback_bucket(tmp_path, monkeypatch):
+    vk_review._FAR_BUCKET_HISTORY.clear()
+    monkeypatch.setenv("VK_REVIEW_FAR_GAP_K", "2")
+    monkeypatch.setenv("VK_REVIEW_W_SOON", "0")
+    monkeypatch.setenv("VK_REVIEW_W_LONG", "0")
+    monkeypatch.setenv("VK_REVIEW_W_FAR", "0")
+    fixed_now = 1_710_000_000
+    monkeypatch.setattr(vk_review._time, "time", lambda: fixed_now)
+    monkeypatch.setattr(vk_review.random, "random", lambda: 0.5)
+
+    fallback_hint = fixed_now + int(7 * 86400)
+
+    def fake_extract(_text):
+        return fallback_hint
+
+    monkeypatch.setattr(vk_review, "extract_event_ts_hint", fake_extract)
+
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    async with db.raw_conn() as conn:
+        await conn.execute(
+            "INSERT INTO vk_inbox(group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status) VALUES(?,?,?,?,?,?,?,?)",
+            (1, 500, 900, "fallback", "k", 0, None, "pending"),
+        )
+        await conn.commit()
+
+    operator_id = 88
+    post = await vk_review.pick_next(db, operator_id, "batch-fallback")
+    assert post is not None
+    history = vk_review._FAR_BUCKET_HISTORY.get(operator_id)
+    assert history is not None
+    assert list(history) == ["FALLBACK"]
+
+
+@pytest.mark.asyncio
 async def test_mark_imported_accumulates_month(tmp_path):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
