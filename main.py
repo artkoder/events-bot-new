@@ -5497,6 +5497,7 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
             callback.message,
             db,
             bot,
+            user_id=callback.from_user.id,
             edit=True,
             page=page,
             archive=(mode == "archive"),
@@ -5532,6 +5533,7 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
             callback.message,
             db,
             bot,
+            user_id=callback.from_user.id,
             edit=True,
             page=page,
             archive=(mode == "archive"),
@@ -5755,6 +5757,7 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
             callback.message,
             db,
             bot,
+            user_id=callback.from_user.id,
             edit=True,
             page=page,
             archive=(mode == "archive"),
@@ -6161,6 +6164,8 @@ async def send_festivals_list(
     message: types.Message,
     db: Database,
     bot: Bot,
+    *,
+    user_id: int | None = None,
     edit: bool = False,
     page: int = 1,
     archive: bool = False,
@@ -6169,8 +6174,21 @@ async def send_festivals_list(
     today = date.today().isoformat()
     mode = "archive" if archive else "active"
 
+    resolved_user_id = user_id
+    if resolved_user_id is None:
+        chat = getattr(message, "chat", None)
+        if chat and getattr(chat, "type", None) == "private":
+            resolved_user_id = chat.id
+        elif getattr(message, "from_user", None):
+            resolved_user_id = message.from_user.id
+
+    if resolved_user_id is None:
+        if not edit:
+            await bot.send_message(message.chat.id, "Not authorized")
+        return
+
     async with db.get_session() as session:
-        if not await session.get(User, message.from_user.id):
+        if not await session.get(User, resolved_user_id):
             if not edit:
                 await bot.send_message(message.chat.id, "Not authorized")
             return
@@ -15700,7 +15718,15 @@ async def handle_fest(message: types.Message, db: Database, bot: Bot):
                 page = int(part)
             except ValueError:
                 continue
-    await send_festivals_list(message, db, bot, edit=False, page=page, archive=archive)
+    await send_festivals_list(
+        message,
+        db,
+        bot,
+        user_id=message.from_user.id if message.from_user else None,
+        edit=False,
+        page=page,
+        archive=archive,
+    )
 
 
 
