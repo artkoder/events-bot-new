@@ -17435,9 +17435,42 @@ async def _vkrev_show_next(chat_id: int, batch_id: str, operator_id: int, db: Da
             ],
         ]
     )
+    post_text = post.text or ""
+    tail_lines = [group_name, "", url, "", status_line]
+    tail_str = "\n".join(tail_lines)
+    if post_text:
+        message_text = post_text + "\n" + tail_str
+    else:
+        message_text = tail_str
+
+    if len(message_text) > TELEGRAM_MESSAGE_LIMIT:
+        warning_line = (
+            f"⚠️ Текст поста был обрезан до {TELEGRAM_MESSAGE_LIMIT} символов"
+        )
+        tail_lines = [group_name, "", url, "", warning_line, status_line]
+        tail_str = "\n".join(tail_lines)
+        if post_text:
+            available = TELEGRAM_MESSAGE_LIMIT - len(tail_str) - 1
+        else:
+            available = TELEGRAM_MESSAGE_LIMIT - len(tail_str)
+        available = max(0, available)
+        if len(post_text) > available:
+            truncated_text = post_text[: max(available - 1, 0)]
+            if available > 0:
+                truncated_text = truncated_text.rstrip()
+                if truncated_text:
+                    truncated_text += "…"
+                else:
+                    truncated_text = "…"
+            post_text = truncated_text
+        if post_text:
+            message_text = post_text + "\n" + tail_str
+        else:
+            message_text = tail_str
+
     await bot.send_message(
         chat_id,
-        f"{post.text}\n{group_name}\n\n{url}\n\n{status_line}",
+        message_text,
         reply_markup=markup,
     )
 
