@@ -14380,6 +14380,59 @@ async def build_exhibitions_message(db: Database, tz: timezone):
     return text, markup
 
 
+TELEGRAM_MESSAGE_LIMIT = 4096
+POSTER_TRUNCATION_INDICATOR = "… (обрезано)"
+POSTER_PREVIEW_UNAVAILABLE = "Poster OCR: превью недоступно — сообщение слишком длинное."
+
+
+def _truncate_with_indicator(
+    text: str, limit: int, indicator: str = POSTER_TRUNCATION_INDICATOR
+) -> str:
+    if limit <= 0:
+        return ""
+    if limit <= len(indicator):
+        return indicator[:limit]
+    return text[: limit - len(indicator)] + indicator
+
+
+def _fit_poster_preview_lines(
+    lines: Sequence[str], budget: int, indicator: str = POSTER_TRUNCATION_INDICATOR
+) -> list[str]:
+    if budget <= 0:
+        return []
+
+    fitted: list[str] = []
+    for line in lines:
+        candidate = fitted + [line]
+        if len("\n".join(candidate)) <= budget:
+            fitted.append(line)
+            continue
+
+        used_len = len("\n".join(fitted))
+        newline_cost = 1 if fitted else 0
+        remaining_for_content = budget - used_len - newline_cost
+        if remaining_for_content <= 0:
+            if not fitted:
+                truncated = _truncate_with_indicator("", budget, indicator)
+                return [truncated] if truncated else []
+
+            prefix = fitted[:-1]
+            last_line = fitted[-1]
+            prefix_len = len("\n".join(prefix))
+            if prefix:
+                prefix_len += 1
+            allowed_for_last = max(0, budget - prefix_len)
+            fitted[-1] = _truncate_with_indicator(last_line, allowed_for_last, indicator)
+            return fitted
+
+        truncated_line = _truncate_with_indicator(line, remaining_for_content, indicator)
+        if truncated_line:
+            fitted.append(truncated_line)
+        return fitted
+
+    return fitted
+
+
 async def show_edit_menu(
     user_id: int,
     event: Event,
@@ -14502,8 +14555,33 @@ async def show_edit_menu(
         [types.InlineKeyboardButton(text="Done", callback_data=f"editdone:{event.id}")]
     )
     markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard)
-    message_lines = poster_lines + lines if poster_lines else lines
-    await bot.send_message(user_id, "\n".join(message_lines), reply_markup=markup)
+
+    base_text = "\n".join(lines)
+    base_len = len(base_text)
+    poster_block: list[str] = []
+    if poster_lines:
+        newline_between_blocks = 1 if lines else 0
+        poster_budget = TELEGRAM_MESSAGE_LIMIT - base_len - newline_between_blocks
+        if poster_budget <= 0:
+            notice_budget = TELEGRAM_MESSAGE_LIMIT - base_len - newline_between_blocks
+            poster_block = _fit_poster_preview_lines(
+                [POSTER_PREVIEW_UNAVAILABLE], notice_budget
+            )
+        else:
+            poster_block = _fit_poster_preview_lines(poster_lines, poster_budget)
+            if not poster_block and poster_budget > 0:
+                poster_block = _fit_poster_preview_lines(
+                    [POSTER_PREVIEW_UNAVAILABLE], poster_budget
+                )
+
+    message_lines = poster_block + lines if poster_block else lines
+    message_text = "\n".join(message_lines)
+    if len(message_text) > TELEGRAM_MESSAGE_LIMIT:
+        message_text = _truncate_with_indicator(
+            message_text, TELEGRAM_MESSAGE_LIMIT, POSTER_TRUNCATION_INDICATOR
+        )
+
+    await bot.send_message(user_id, message_text, reply_markup=markup)
 
 
 async def show_festival_edit_menu(user_id: int, fest: Festival, bot: Bot):
