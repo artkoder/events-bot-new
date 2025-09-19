@@ -315,6 +315,9 @@ async def _download_photo_media(urls: Sequence[str]) -> list[tuple[bytes, str]]:
     detect_image_type = getattr(main_mod, "detect_image_type", None)
     if detect_image_type is None:  # pragma: no cover - defensive
         raise RuntimeError("detect_image_type not found")
+    validate_jpeg_markers = getattr(main_mod, "validate_jpeg_markers", None)
+    if validate_jpeg_markers is None:  # pragma: no cover - defensive
+        raise RuntimeError("validate_jpeg_markers not found")
     limit = getattr(main_mod, "MAX_ALBUM_IMAGES", 3)
     results: list[tuple[bytes, str]] = []
 
@@ -355,8 +358,14 @@ async def _download_photo_media(urls: Sequence[str]) -> list[tuple[bytes, str]]:
                     resp.raise_for_status()
                     content_type = resp.headers.get("Content-Type")
                     content_length = resp.headers.get("Content-Length")
-                    data = await resp.content.read(max_size + 1)
-                    return data, content_type, content_length
+                    if resp.content_length and resp.content_length > max_size:
+                        raise ValueError("file too large")
+                    buf = bytearray()
+                    async for chunk in resp.content.iter_chunked(64 * 1024):
+                        buf.extend(chunk)
+                        if len(buf) > max_size:
+                            raise ValueError("file too large")
+                    return bytes(buf), content_type, content_length
 
         size = None
         content_type: str | None = None
@@ -368,8 +377,20 @@ async def _download_photo_media(urls: Sequence[str]) -> list[tuple[bytes, str]]:
             size = len(data)
             if size > max_size:
                 raise ValueError("file too large")
+            if content_length:
+                try:
+                    expected_size = int(content_length)
+                except ValueError as exc:
+                    raise ValueError("invalid Content-Length header") from exc
+                if expected_size != size:
+                    raise ValueError("content-length mismatch")
+            orig_subtype = detect_image_type(data)
+            if orig_subtype == "jpeg":
+                validate_jpeg_markers(data)
             data, name = ensure_jpeg(data, f"vk_poster_{idx + 1}.jpg")
             subtype = detect_image_type(data)
+            if subtype == "jpeg":
+                validate_jpeg_markers(data)
         except Exception as exc:  # pragma: no cover - network dependent
             logging.warning(
                 "vk.download_photo_failed url=%s size=%s content_type=%s "
