@@ -6189,11 +6189,13 @@ async def send_festivals_list(
             .subquery()
         )
 
+        last_date_expr = func.coalesce(event_agg.c.last_date, Festival.end_date)
+
         base_query = (
             select(
                 Festival,
                 event_agg.c.first_date,
-                event_agg.c.last_date,
+                last_date_expr.label("last_date"),
                 event_agg.c.future_count,
             )
             .outerjoin(event_agg, event_agg.c.festival_name == Festival.name)
@@ -6203,16 +6205,16 @@ async def send_festivals_list(
         if archive:
             base_query = base_query.where(
                 and_(
-                    event_agg.c.last_date.is_not(None),
-                    event_agg.c.last_date < today,
+                    last_date_expr.is_not(None),
+                    last_date_expr < today,
                     func.coalesce(event_agg.c.future_count, 0) == 0,
                 )
             )
         else:
             base_query = base_query.where(
                 or_(
-                    event_agg.c.last_date.is_(None),
-                    event_agg.c.last_date >= today,
+                    last_date_expr.is_(None),
+                    last_date_expr >= today,
                     func.coalesce(event_agg.c.future_count, 0) > 0,
                 )
             )
