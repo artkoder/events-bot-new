@@ -86,8 +86,42 @@ async def run_ocr(image_bytes: bytes, *, model: str, detail: str) -> OcrResult:
         assert _HTTP_SESSION is not None and _HTTP_SEMAPHORE is not None
         async with _HTTP_SEMAPHORE:
             async with _HTTP_SESSION.post(url, json=payload, headers=headers) as resp:
-                resp.raise_for_status()
-                return await resp.json()
+                status = resp.status
+                if 200 <= status < 300:
+                    return await resp.json()
+
+                try:
+                    body_text = await resp.text()
+                except Exception:  # pragma: no cover - defensive
+                    body_text = ""
+
+                snippet = body_text.strip()
+                max_len = 512
+                if len(snippet) > max_len:
+                    snippet = snippet[:max_len] + "..."
+
+                headers_to_log = {
+                    key: value
+                    for key in (
+                        "x-request-id",
+                        "openai-processing-ms",
+                        "openai-version",
+                        "openai-organization",
+                    )
+                    if (value := resp.headers.get(key))
+                }
+
+                logging.error(
+                    "OCR request failed: status=%s model=%s detail=%s headers=%s body=%s",
+                    status,
+                    model,
+                    detail,
+                    headers_to_log,
+                    snippet,
+                )
+                raise RuntimeError(
+                    f"OCR request failed with status {status}: {snippet or 'no body'}"
+                )
 
     try:
         data = await asyncio.wait_for(_call(), _FOUR_O_TIMEOUT)
