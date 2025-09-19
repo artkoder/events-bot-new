@@ -19542,6 +19542,7 @@ def create_app() -> web.Application:
         or c.data.startswith("festedit:")
         or c.data.startswith("festeditfield:")
         or c.data == "festeditdone"
+        or c.data.startswith("festpage:")
         or c.data.startswith("festdel:")
         or c.data.startswith("setfest:")
         or c.data.startswith("festdays:")

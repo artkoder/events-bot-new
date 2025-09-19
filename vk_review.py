@@ -192,7 +192,7 @@ async def pick_next(db: Database, operator_id: int, batch_id: str) -> Optional[I
                     WHERE status='pending'
                       AND event_ts_hint IS NOT NULL
                       AND event_ts_hint >= ?
-                      AND event_ts_hint <= ?
+                      AND event_ts_hint < ?
                     ORDER BY event_ts_hint ASC, date DESC, id DESC
                     LIMIT 1
                 )
@@ -204,6 +204,8 @@ async def pick_next(db: Database, operator_id: int, batch_id: str) -> Optional[I
                 (reject_cutoff, urgent_cutoff, operator_id, batch_id),
             )
             row = await cursor.fetchone()
+            if row:
+                bucket_name_for_history = "URGENT"
             if not row:
                 soon_max_days = max(_float_from_env("VK_REVIEW_SOON_MAX_D", 14), 0.0)
                 long_max_days = max(
@@ -216,19 +218,19 @@ async def pick_next(db: Database, operator_id: int, batch_id: str) -> Optional[I
                 bucket_specs = [
                     (
                         "SOON",
-                        "status='pending' AND event_ts_hint IS NOT NULL AND event_ts_hint > ? AND event_ts_hint <= ?",
+                        "status='pending' AND event_ts_hint IS NOT NULL AND event_ts_hint > ? AND event_ts_hint < ?",
                         (urgent_cutoff, soon_cutoff),
                         max(_float_from_env("VK_REVIEW_W_SOON", 3.0), 0.0),
                     ),
                     (
                         "LONG",
-                        "status='pending' AND event_ts_hint IS NOT NULL AND event_ts_hint > ? AND event_ts_hint <= ?",
+                        "status='pending' AND event_ts_hint IS NOT NULL AND event_ts_hint > ? AND event_ts_hint < ?",
                         (soon_cutoff, long_cutoff),
                         max(_float_from_env("VK_REVIEW_W_LONG", 2.0), 0.0),
                     ),
                     (
                         "FAR",
-                        "status='pending' AND event_ts_hint IS NOT NULL AND event_ts_hint > ?",
+                        "status='pending' AND (event_ts_hint IS NULL OR event_ts_hint >= ?)",
                         (long_cutoff,),
                         max(_float_from_env("VK_REVIEW_W_FAR", 6.0), 0.0),
                     ),
@@ -341,6 +343,7 @@ async def pick_next(db: Database, operator_id: int, batch_id: str) -> Optional[I
                     if not row:
                         await conn.commit()
                         return None
+                    bucket_name_for_history = "FALLBACK"
 
             inbox_id = row[0]
             text = row[4]
