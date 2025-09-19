@@ -6056,6 +6056,58 @@ async def test_past_exhibition_not_listed(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_build_exhibitions_message_filters_past_end(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    class FakeDate(date):
+        @classmethod
+        def today(cls):
+            return date(2025, 8, 16)
+
+    class FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2025, 8, 16, 12, 0, tzinfo=tz)
+
+    monkeypatch.setattr(main, "date", FakeDate)
+    monkeypatch.setattr(main, "datetime", FakeDatetime)
+
+    async with db.get_session() as session:
+        session.add_all(
+            [
+                Event(
+                    title="YesterdayExpo",
+                    description="d",
+                    source_text="s",
+                    date="2025-07-01",
+                    end_date="2025-08-15",
+                    time="10:00",
+                    location_name="Hall",
+                    event_type="выставка",
+                ),
+                Event(
+                    title="TodayExpo",
+                    description="d",
+                    source_text="s",
+                    date="2025-08-01",
+                    end_date="2025-08-16",
+                    time="10:00",
+                    location_name="Hall",
+                    event_type="выставка",
+                ),
+            ]
+        )
+        await session.commit()
+
+    text, markup = await main.build_exhibitions_message(db, timezone.utc)
+    assert "TodayExpo" in text
+    assert "YesterdayExpo" not in text
+    assert markup is not None
+    assert len(markup.inline_keyboard) == 1
+
+
+@pytest.mark.asyncio
 async def test_past_exhibition_not_listed_in_events(tmp_path: Path):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
