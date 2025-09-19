@@ -952,6 +952,47 @@ async def test_show_edit_menu_displays_poster_ocr_preview(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_show_edit_menu_truncates_long_poster_preview(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    event = Event(
+        title="T",
+        description="d",
+        source_text="src",
+        date=FUTURE_DATE,
+        time="18:00",
+        location_name="Hall",
+    )
+
+    long_lines = [f"Строка {i} " + "x" * 200 for i in range(1, 200)]
+    ocr_text = "\n".join(long_lines)
+
+    async with db.get_session() as session:
+        session.add(event)
+        await session.commit()
+        await session.refresh(event)
+        session.add(
+            EventPoster(
+                event_id=event.id,
+                poster_hash="abcdef1234567890",
+                ocr_text=ocr_text,
+            )
+        )
+        await session.commit()
+
+    bot.messages.clear()
+    await main.show_edit_menu(1, event, bot, db)
+
+    assert bot.messages
+    message_text = bot.messages[-1][1]
+    assert len(message_text) <= 4096
+    assert "Poster OCR:" in message_text
+    assert "… (обрезано)" in message_text
+
+
+@pytest.mark.asyncio
 async def test_events_russian_date_current_year(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
