@@ -180,7 +180,7 @@ from sections import (
 )
 from db import Database
 from scheduling import startup as scheduler_startup, cleanup as scheduler_cleanup
-from sqlalchemy import select, update, delete, text, func, or_, and_
+from sqlalchemy import select, update, delete, text, func, or_, and_, case
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models import (
@@ -6207,7 +6207,15 @@ async def send_festivals_list(
             .subquery()
         )
 
-        last_date_expr = func.coalesce(event_agg.c.last_date, Festival.end_date)
+        last_date_expr = case(
+            (Festival.end_date.is_(None), event_agg.c.last_date),
+            (event_agg.c.last_date.is_(None), Festival.end_date),
+            (
+                event_agg.c.last_date >= Festival.end_date,
+                event_agg.c.last_date,
+            ),
+            else_=Festival.end_date,
+        )
 
         base_query = (
             select(
@@ -6225,7 +6233,6 @@ async def send_festivals_list(
                 and_(
                     last_date_expr.is_not(None),
                     last_date_expr < today,
-                    func.coalesce(event_agg.c.future_count, 0) == 0,
                 )
             )
         else:
@@ -6233,7 +6240,6 @@ async def send_festivals_list(
                 or_(
                     last_date_expr.is_(None),
                     last_date_expr >= today,
-                    func.coalesce(event_agg.c.future_count, 0) > 0,
                 )
             )
 

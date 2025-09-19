@@ -7234,6 +7234,61 @@ async def test_festival_without_events_uses_end_date_for_archive(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+async def test_festival_future_end_date_keeps_active(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    future_end = (date.today() + timedelta(days=5)).isoformat()
+    past_day = (date.today() - timedelta(days=1)).isoformat()
+
+    async with db.get_session() as session:
+        session.add(User(user_id=1))
+        session.add(main.Festival(name="FutureFest", end_date=future_end))
+        session.add(
+            main.Event(
+                title="Past Event",
+                description="desc",
+                festival="FutureFest",
+                date=past_day,
+                time="12:00",
+                location_name="Venue",
+                source_text="src",
+                end_date=past_day,
+                source_chat_id=1,
+                source_message_id=1,
+            )
+        )
+        await session.commit()
+
+    msg_active = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "/fest",
+        }
+    )
+    await main.handle_fest(msg_active, db, bot)
+    active_text = bot.messages[-1][1]
+    assert "FutureFest" in active_text
+
+    msg_archive = types.Message.model_validate(
+        {
+            "message_id": 2,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "/fest archive",
+        }
+    )
+    await main.handle_fest(msg_archive, db, bot)
+    archive_text = bot.messages[-1][1]
+    assert "FutureFest" not in archive_text
+
+
+@pytest.mark.asyncio
 async def test_fest_list_pagination(tmp_path: Path):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
