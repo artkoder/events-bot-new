@@ -37,9 +37,23 @@ async def test_download_photo_media_logs_mime(monkeypatch, caplog):
         "https://example.com/a.png",
         "https://example.com/b.jpg",
     ]
+    png_payload = b"\x89PNG\r\n\x1a\nbinary"
+    jpeg_payload = b"\xff\xd8\xffbinary"
     payloads = {
-        urls[0]: b"\x89PNG\r\n\x1a\nbinary",
-        urls[1]: b"\xff\xd8\xffbinary",
+        urls[0]: (
+            png_payload,
+            {
+                "Content-Type": "image/png",
+                "Content-Length": str(len(png_payload)),
+            },
+        ),
+        urls[1]: (
+            jpeg_payload,
+            {
+                "Content-Type": "image/jpeg",
+                "Content-Length": str(len(jpeg_payload)),
+            },
+        ),
     }
 
     class FakeContent:
@@ -50,8 +64,9 @@ async def test_download_photo_media_logs_mime(monkeypatch, caplog):
             return self._data
 
     class FakeResponse:
-        def __init__(self, data: bytes) -> None:
+        def __init__(self, data: bytes, headers: dict[str, str]) -> None:
             self.content = FakeContent(data)
+            self.headers = headers
 
         async def __aenter__(self):
             return self
@@ -63,17 +78,31 @@ async def test_download_photo_media_logs_mime(monkeypatch, caplog):
             return None
 
     class FakeSession:
-        def __init__(self, mapping: dict[str, bytes]) -> None:
+        def __init__(self, mapping: dict[str, tuple[bytes, dict[str, str]]]) -> None:
             self._mapping = mapping
+            self.requests: list[tuple[str, dict[str, str] | None]] = []
 
-        def get(self, url: str) -> FakeResponse:
-            return FakeResponse(self._mapping[url])
+        def get(self, url: str, **kwargs) -> FakeResponse:
+            self.requests.append((url, kwargs.get("headers")))
+            data, headers = self._mapping[url]
+            return FakeResponse(data, headers)
 
-    monkeypatch.setattr(main, "get_http_session", lambda: FakeSession(payloads))
+    session = FakeSession(payloads)
+    monkeypatch.setattr(main, "get_http_session", lambda: session)
     monkeypatch.setattr(main, "HTTP_SEMAPHORE", asyncio.Semaphore(5))
     monkeypatch.setattr(main, "HTTP_TIMEOUT", 1)
     monkeypatch.setattr(main, "MAX_DOWNLOAD_SIZE", 1024)
     monkeypatch.setattr(main, "MAX_ALBUM_IMAGES", 5)
+
+    request_headers = {
+        "User-Agent": "UnitTest UA",
+        "Accept": "image/*",
+        "Referer": "https://vk.com/test",
+        "Sec-Fetch-Dest": "image",
+        "Sec-Fetch-Mode": "no-cors",
+        "Sec-Fetch-Site": "same-origin",
+    }
+    monkeypatch.setattr(main, "VK_PHOTO_FETCH_HEADERS", request_headers, raising=False)
 
     def fake_ensure_jpeg(data: bytes, name: str) -> tuple[bytes, str]:
         if data.startswith(b"\x89PNG"):
@@ -99,16 +128,22 @@ async def test_download_photo_media_logs_mime(monkeypatch, caplog):
     ]
 
     messages = [record.message for record in caplog.records if record.levelno == logging.INFO]
-    size_0 = len(payloads[urls[0]])
-    size_1 = len(payloads[urls[1]])
+    size_0 = len(payloads[urls[0]][0])
+    size_1 = len(payloads[urls[1]][0])
     assert (
         "vk.photo_media processed idx=0 url="
-        f"{urls[0]} size={size_0} subtype=jpeg filename=converted.jpg" in messages
+        f"{urls[0]} size={size_0} subtype=jpeg filename=converted.jpg "
+        f"content_type=image/png content_length={len(png_payload)}" in messages
     )
     assert (
         "vk.photo_media processed idx=1 url="
-        f"{urls[1]} size={size_1} subtype=jpeg filename=vk_poster_2.jpg" in messages
+        f"{urls[1]} size={size_1} subtype=jpeg filename=vk_poster_2.jpg "
+        f"content_type=image/jpeg content_length={len(jpeg_payload)}" in messages
     )
+
+    assert [req[0] for req in session.requests] == urls
+    for _, headers in session.requests:
+        assert headers == request_headers
 
 
 @pytest.mark.asyncio
