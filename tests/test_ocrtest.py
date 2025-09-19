@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 import sys
 from types import SimpleNamespace
@@ -230,8 +231,61 @@ async def test_handle_photo_uses_both_models(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_run_ocr_logs_body_snippet(monkeypatch, caplog):
+    class FakeResponse:
+        def __init__(self, *, status: int, body: str, headers: dict[str, str] | None = None):
+            self.status = status
+            self._body = body
+            self.headers = headers or {}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def text(self):
+            return self._body
+
+        async def json(self):  # pragma: no cover - not used in error path
+            return {}
+
+    class FakeSession:
+        def __init__(self, response: FakeResponse):
+            self._response = response
+
+        def post(self, *args, **kwargs):
+            return self._response
+
+    monkeypatch.setenv("FOUR_O_TOKEN", "token")
+    monkeypatch.setenv("FOUR_O_URL", "https://example.test")
+
+    response = FakeResponse(
+        status=400,
+        body="{\"error\":\"synthetic failure\"}",
+        headers={"x-request-id": "req-123"},
+    )
+    session = FakeSession(response)
+    semaphore = asyncio.Semaphore(1)
+
+    vision_ocr.configure_http(session=session, semaphore=semaphore)
+
+    try:
+        with caplog.at_level(logging.ERROR):
+            with pytest.raises(RuntimeError) as excinfo:
+                await vision_ocr.run_ocr(b"image-bytes", model="test-model", detail="high")
+
+        assert "synthetic failure" in str(excinfo.value)
+        assert any("synthetic failure" in record.getMessage() for record in caplog.records)
+    finally:
+        vision_ocr.clear_http()
+
+
+@pytest.mark.asyncio
 async def test_run_ocr_payload_structure(monkeypatch):
     class CapturingResponse:
+        status = 200
+
         async def __aenter__(self):
             return self
 
@@ -240,6 +294,10 @@ async def test_run_ocr_payload_structure(monkeypatch):
 
         def raise_for_status(self):
             return None
+
+        @property
+        def headers(self):
+            return {}
 
         async def json(self):
             return {
