@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 from typing import Optional, Any, Awaitable, Callable
 
@@ -47,6 +48,9 @@ async def release_stale_locks(db: Database) -> int:
     return count
 
 
+_FAR_BUCKET_HISTORY: dict[int, deque[str]] = {}
+
+
 @dataclass
 class InboxPost:
     id: int
@@ -80,6 +84,28 @@ def _float_from_env(name: str, default: float) -> float:
     except ValueError:
         logging.warning("vk_review invalid env %s=%s, using default %s", name, value, default)
         return default
+
+
+def _int_from_env(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        logging.warning("vk_review invalid env %s=%s, using default %s", name, value, default)
+        return default
+
+
+def _get_far_history(operator_id: int, limit: int) -> Optional[deque[str]]:
+    if limit <= 0:
+        _FAR_BUCKET_HISTORY.pop(operator_id, None)
+        return None
+    history = _FAR_BUCKET_HISTORY.get(operator_id)
+    if history is None or history.maxlen != limit:
+        history = deque(maxlen=limit)
+        _FAR_BUCKET_HISTORY[operator_id] = history
+    return history
 
 
 async def pick_next(db: Database, operator_id: int, batch_id: str) -> Optional[InboxPost]:
@@ -134,6 +160,9 @@ async def pick_next(db: Database, operator_id: int, batch_id: str) -> Optional[I
         urgent_window_hours = max(urgent_window_hours, reject_window_hours)
 
         selected_row = None
+        picked_bucket_name: Optional[str] = None
+        far_gap_k = max(_int_from_env("VK_REVIEW_FAR_GAP_K", 0), 0)
+        history = _get_far_history(operator_id, far_gap_k)
         while True:
             now_ts = int(_time.time())
             reject_cutoff = now_ts + int(reject_window_hours * 3600)
@@ -203,6 +232,7 @@ async def pick_next(db: Database, operator_id: int, batch_id: str) -> Optional[I
                 ]
 
                 bucket_counts: dict[str, int] = {}
+                bucket_specs_by_name: dict[str, tuple[str, tuple[Any, ...]]] = {}
                 weighted_total = 0.0
                 for name, where_clause, params, weight in bucket_specs:
                     count_cursor = await conn.execute(
@@ -212,10 +242,27 @@ async def pick_next(db: Database, operator_id: int, batch_id: str) -> Optional[I
                     count_row = await count_cursor.fetchone()
                     count = int(count_row[0]) if count_row else 0
                     bucket_counts[name] = count
+                    bucket_specs_by_name[name] = (where_clause, params)
                     weighted_total += weight * count
 
                 chosen_bucket = None
-                if weighted_total > 0:
+                if (
+                    history is not None
+                    and history.maxlen
+                    and len(history) == history.maxlen
+                    and all(bucket != "FAR" for bucket in history)
+                    and bucket_counts.get("FAR", 0) > 0
+                    and "FAR" in bucket_specs_by_name
+                ):
+                    where_clause, params = bucket_specs_by_name["FAR"]
+                    chosen_bucket = ("FAR", where_clause, params)
+                    logging.info(
+                        "vk_review far_gap_override operator=%s history=%s counts=%s",
+                        operator_id,
+                        list(history),
+                        bucket_counts,
+                    )
+                elif weighted_total > 0:
                     ticket = random.random() * weighted_total
                     for name, where_clause, params, weight in bucket_specs:
                         count = bucket_counts.get(name, 0)
@@ -264,6 +311,8 @@ async def pick_next(db: Database, operator_id: int, batch_id: str) -> Optional[I
                         (*params, operator_id, batch_id),
                     )
                     row = await bucket_cursor.fetchone()
+                    if row:
+                        picked_bucket_name = name
 
                 if not row:
                     cursor = await conn.execute(
@@ -307,6 +356,8 @@ async def pick_next(db: Database, operator_id: int, batch_id: str) -> Optional[I
             )
             await conn.commit()
             selected_row = row
+            if picked_bucket_name and history is not None:
+                history.append(picked_bucket_name)
             break
     post = InboxPost(*selected_row)
     logging.info(
