@@ -5227,7 +5227,8 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
         offset = await get_tz_offset(db)
         tz = offset_to_timezone(offset)
         if marker == "exh":
-            text, markup = await build_exhibitions_message(db, tz)
+            chunks, markup = await build_exhibitions_message(db, tz)
+            text = chunks[0] if chunks else ""
         else:
             target = datetime.strptime(marker, "%Y-%m-%d").date()
             filter_id = user.user_id if user and user.is_partner else None
@@ -14488,7 +14489,9 @@ async def build_events_message(db: Database, target_date: date, tz: timezone, cr
     return text, markup
 
 
-async def build_exhibitions_message(db: Database, tz: timezone):
+async def build_exhibitions_message(
+    db: Database, tz: timezone
+) -> tuple[list[str], types.InlineKeyboardMarkup | None]:
     today = datetime.now(tz).date()
     today_iso = today.isoformat()
     async with db.get_session() as session:
@@ -14550,6 +14553,9 @@ async def build_exhibitions_message(db: Database, tz: timezone):
     if not lines:
         lines.append("No exhibitions")
 
+    while lines and lines[-1] == "":
+        lines.pop()
+
     keyboard = [
         [
             types.InlineKeyboardButton(
@@ -14562,8 +14568,45 @@ async def build_exhibitions_message(db: Database, tz: timezone):
         for e in events
     ]
     markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard) if events else None
-    text = "Exhibitions\n" + "\n".join(lines)
-    return text, markup
+    chunks: list[str] = []
+    current_lines: list[str] = []
+    current_len = 0
+
+    def flush_current() -> None:
+        nonlocal current_lines, current_len
+        if current_lines:
+            chunks.append("\n".join(current_lines))
+            current_lines = []
+            current_len = 0
+
+    def add_line(line: str) -> None:
+        nonlocal current_len
+        while True:
+            newline_cost = 1 if current_lines else 0
+            projected = current_len + newline_cost + len(line)
+            if projected <= TELEGRAM_MESSAGE_LIMIT:
+                if newline_cost:
+                    current_len += 1
+                current_lines.append(line)
+                current_len += len(line)
+                return
+            if current_lines:
+                flush_current()
+                continue
+            truncated = _truncate_with_indicator(line, TELEGRAM_MESSAGE_LIMIT)
+            if truncated:
+                chunks.append(truncated)
+            return
+
+    for line in ["Exhibitions", *lines]:
+        add_line(line)
+
+    flush_current()
+
+    if not chunks:
+        chunks.append("")
+
+    return chunks, markup
 
 
 TELEGRAM_MESSAGE_LIMIT = 4096
@@ -15448,8 +15491,13 @@ async def handle_exhibitions(message: types.Message, db: Database, bot: Bot):
             await bot.send_message(message.chat.id, "Not authorized")
             return
 
-    text, markup = await build_exhibitions_message(db, tz)
-    await bot.send_message(message.chat.id, text, reply_markup=markup)
+    chunks, markup = await build_exhibitions_message(db, tz)
+    if not chunks:
+        return
+    first, *rest = chunks
+    await bot.send_message(message.chat.id, first, reply_markup=markup)
+    for chunk in rest:
+        await bot.send_message(message.chat.id, chunk)
 
 
 async def handle_pages(message: types.Message, db: Database, bot: Bot):

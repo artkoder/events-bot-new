@@ -3403,7 +3403,9 @@ async def test_exhibition_listing(tmp_path: Path, monkeypatch):
     await handle_exhibitions(exh_msg, db, bot)
     start_txt = main.format_day_pretty(date.fromisoformat(start))
     end_txt = main.format_day_pretty(date.fromisoformat(end))
-    assert f"c {start_txt} по {end_txt}" in bot.messages[-1][1]
+    assert any(
+        f"c {start_txt} по {end_txt}" in text for _, text, _ in bot.messages
+    )
 
 
 @pytest.mark.asyncio
@@ -6110,11 +6112,64 @@ async def test_build_exhibitions_message_filters_past_end(tmp_path: Path, monkey
         )
         await session.commit()
 
-    text, markup = await main.build_exhibitions_message(db, timezone.utc)
-    assert "TodayExpo" in text
-    assert "YesterdayExpo" not in text
+    chunks, markup = await main.build_exhibitions_message(db, timezone.utc)
+    combined = "\n".join(chunks)
+    assert "TodayExpo" in combined
+    assert "YesterdayExpo" not in combined
     assert markup is not None
     assert len(markup.inline_keyboard) == 1
+
+
+@pytest.mark.asyncio
+async def test_handle_exhibitions_splits_long_messages(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async with db.get_session() as session:
+        session.add(User(user_id=1))
+        session.add_all(
+            [
+                Event(
+                    title=f"Expo {idx}",
+                    description="d",
+                    source_text="s",
+                    date="2025-01-{:02d}".format((idx % 28) + 1),
+                    end_date="2999-12-31",
+                    time="10:00",
+                    location_name="Hall",
+                    city="Калининград",
+                    event_type="выставка",
+                    is_free=True,
+                )
+                for idx in range(80)
+            ]
+        )
+        await session.commit()
+
+    message = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "/exhibitions",
+        }
+    )
+
+    await handle_exhibitions(message, db, bot)
+
+    assert len(bot.messages) > 1
+    for _, text, _ in bot.messages:
+        assert len(text) <= main.TELEGRAM_MESSAGE_LIMIT
+
+    first_kwargs = bot.messages[0][2]
+    assert first_kwargs.get("reply_markup") is not None
+    for _, _, kwargs in bot.messages[1:]:
+        assert kwargs.get("reply_markup") is None
+
+    combined = "\n".join(text for _, text, _ in bot.messages)
+    assert "Expo 79" in combined
 
 
 @pytest.mark.asyncio
