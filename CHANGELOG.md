@@ -6,6 +6,9 @@
 - Added `/ocrtest` diagnostic command, чтобы сравнить распознавание афиш между `gpt-4o-mini` и `gpt-4o` с показом использования токенов.
 - Clarified the 4o parsing prompt to warn about possible OCR mistakes in poster snippets.
 
+- Fixed VK review queue issue where `vk_review.pick_next` recalculates `event_ts_hint` and auto-rejects posts whose event date
+  disappeared or fell into the past (e.g., a 7 September announcement shown on 19 September).
+
 ## v0.1.0 – Deploy + US-02 + /tz
 - Initial Fly.io deployment config.
 - Moderator registration queue with approve/reject.
