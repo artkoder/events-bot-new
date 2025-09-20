@@ -584,7 +584,18 @@ vk_group_sessions: set[int] = set()
 # user_id -> section (today/added) for VK time update
 vk_time_sessions: TTLCache[int, str] = TTLCache(maxsize=64, ttl=3600)
 # user_id -> vk_source_id for default time update
-vk_default_time_sessions: TTLCache[int, int] = TTLCache(maxsize=64, ttl=3600)
+
+
+@dataclass
+class VkDefaultTimeSession:
+    source_id: int
+    page: int = 1
+    message: types.Message | None = None
+
+
+vk_default_time_sessions: TTLCache[int, VkDefaultTimeSession] = TTLCache(
+    maxsize=64, ttl=3600
+)
 # waiting for VK source add input
 vk_add_source_sessions: set[int] = set()
 
@@ -17367,16 +17378,85 @@ async def handle_vk_add_message(message: types.Message, db: Database, bot: Bot) 
     )
 
 
-async def _fetch_vk_sources(db: Database) -> list[tuple[int, int, str, str, str | None, str | None]]:
+VK_SOURCES_PAGE_SIZE = 10
+VK_STATUS_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("Pending", "pending"),
+    ("Locked", "locked"),
+    ("Skipped", "skipped"),
+    ("Imported", "imported"),
+    ("Rejected", "rejected"),
+)
+
+
+async def _fetch_vk_sources(db: Database) -> list[dict[str, Any]]:
     async with db.raw_conn() as conn:
         cursor = await conn.execute(
-            "SELECT id, group_id, screen_name, name, location, default_time FROM vk_source ORDER BY id"
+            """
+            SELECT
+                vs.id,
+                vs.group_id,
+                vs.screen_name,
+                vs.name,
+                vs.location,
+                vs.default_time,
+                COALESCE(SUM(CASE WHEN vi.status='pending' THEN 1 ELSE 0 END), 0) AS pending,
+                COALESCE(SUM(CASE WHEN vi.status='locked' THEN 1 ELSE 0 END), 0) AS locked,
+                COALESCE(SUM(CASE WHEN vi.status='skipped' THEN 1 ELSE 0 END), 0) AS skipped,
+                COALESCE(SUM(CASE WHEN vi.status='imported' THEN 1 ELSE 0 END), 0) AS imported,
+                COALESCE(SUM(CASE WHEN vi.status='rejected' THEN 1 ELSE 0 END), 0) AS rejected
+            FROM vk_source AS vs
+            LEFT JOIN vk_inbox AS vi ON vi.group_id = vs.group_id
+            GROUP BY
+                vs.id,
+                vs.group_id,
+                vs.screen_name,
+                vs.name,
+                vs.location,
+                vs.default_time
+            ORDER BY vs.id
+            """
         )
         rows = await cursor.fetchall()
-    return rows
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        (
+            rid,
+            gid,
+            screen,
+            name,
+            loc,
+            dtime,
+            pending,
+            locked,
+            skipped,
+            imported,
+            rejected,
+        ) = row
+        result.append(
+            {
+                "id": rid,
+                "group_id": gid,
+                "screen_name": screen,
+                "name": name,
+                "location": loc,
+                "default_time": dtime,
+                "pending": pending,
+                "locked": locked,
+                "skipped": skipped,
+                "imported": imported,
+                "rejected": rejected,
+            }
+        )
+    return result
 
 
-async def handle_vk_list(message: types.Message, db: Database, bot: Bot, edit: types.Message | None = None) -> None:
+async def handle_vk_list(
+    message: types.Message,
+    db: Database,
+    bot: Bot,
+    edit: types.Message | None = None,
+    page: int = 1,
+) -> None:
     rows = await _fetch_vk_sources(db)
     if not rows:
         if edit:
@@ -17384,23 +17464,61 @@ async def handle_vk_list(message: types.Message, db: Database, bot: Bot, edit: t
         else:
             await bot.send_message(message.chat.id, "Список пуст")
         return
+    total = len(rows)
+    page_size = VK_SOURCES_PAGE_SIZE
+    if page < 1:
+        page = 1
+    max_page = max(1, (total + page_size - 1) // page_size)
+    if page > max_page:
+        page = max_page
+    start = (page - 1) * page_size
+    page_rows = rows[start : start + page_size]
+    col_widths: dict[str, int] = {label: len(label) for label, _ in VK_STATUS_COLUMNS}
+    for row in rows:
+        for label, field in VK_STATUS_COLUMNS:
+            value = str(row.get(field, 0))
+            if len(value) > col_widths[label]:
+                col_widths[label] = len(value)
+    header_line = " | ".join(f"{label:<{col_widths[label]}}" for label, _ in VK_STATUS_COLUMNS)
     lines: list[str] = []
+    if max_page > 1:
+        lines.append(f"Страница {page}/{max_page}")
     buttons: list[list[types.InlineKeyboardButton]] = []
-    for idx, row in enumerate(rows, start=1):
-        rid, gid, screen, name, loc, dtime = row
-        info_parts = [f"id={gid}"]
-        if loc:
-            info_parts.append(loc)
+    for offset, row in enumerate(page_rows, start=start):
+        idx = offset + 1
+        info_parts = [f"id={row['group_id']}"]
+        if row.get("location"):
+            info_parts.append(row["location"])
         info = ", ".join(info_parts)
         lines.append(
-            f"{idx}. {name} (vk.com/{screen}) — {info}, типовое время: {dtime or '-'}"
+            f"{idx}. {row['name']} (vk.com/{row['screen_name']}) — {info}, типовое время: {row['default_time'] or '-'}"
         )
+        lines.append(header_line)
+        count_line = " | ".join(
+            f"{row.get(field, 0):>{col_widths[label]}}" for label, field in VK_STATUS_COLUMNS
+        )
+        lines.append(count_line)
         buttons.append(
             [
-                types.InlineKeyboardButton(text=f"❌ {idx}", callback_data=f"vkdel:{rid}"),
-                types.InlineKeyboardButton(text=f"🕒 {idx}", callback_data=f"vkdt:{rid}"),
+                types.InlineKeyboardButton(
+                    text=f"❌ {idx}", callback_data=f"vkdel:{page}:{row['id']}"
+                ),
+                types.InlineKeyboardButton(
+                    text=f"🕒 {idx}", callback_data=f"vkdt:{page}:{row['id']}"
+                ),
             ]
         )
+    nav_buttons: list[types.InlineKeyboardButton] = []
+    if page > 1:
+        nav_buttons.append(
+            types.InlineKeyboardButton(text="⬅️", callback_data=f"vksrcpage:{page - 1}")
+        )
+    if page < max_page:
+        nav_buttons.append(
+            types.InlineKeyboardButton(text="➡️", callback_data=f"vksrcpage:{page + 1}")
+        )
+    if nav_buttons:
+        buttons.append(nav_buttons)
     text = "\n".join(lines)
     markup = types.InlineKeyboardMarkup(inline_keyboard=buttons)
     if edit:
@@ -17409,26 +17527,53 @@ async def handle_vk_list(message: types.Message, db: Database, bot: Bot, edit: t
         await bot.send_message(message.chat.id, text, reply_markup=markup)
 
 
-async def handle_vk_delete_callback(callback: types.CallbackQuery, db: Database, bot: Bot) -> None:
+async def handle_vk_list_page_callback(
+    callback: types.CallbackQuery, db: Database, bot: Bot
+) -> None:
     try:
-        vid = int(callback.data.split(":", 1)[1])
+        _, page_str = callback.data.split(":", 1)
+        page = int(page_str)
     except Exception:
         await callback.answer()
         return
+    if page < 1:
+        page = 1
+    if callback.message:
+        await handle_vk_list(callback.message, db, bot, edit=callback.message, page=page)
+    await callback.answer()
+
+
+async def handle_vk_delete_callback(callback: types.CallbackQuery, db: Database, bot: Bot) -> None:
+    try:
+        _, page_str, vid_str = callback.data.split(":", 2)
+        page = int(page_str)
+        vid = int(vid_str)
+    except Exception:
+        await callback.answer()
+        return
+    if page < 1:
+        page = 1
     async with db.raw_conn() as conn:
         await conn.execute("DELETE FROM vk_source WHERE id=?", (vid,))
         await conn.commit()
     await callback.answer("Удалено")
-    await handle_vk_list(callback.message, db, bot, edit=callback.message)
+    if callback.message:
+        await handle_vk_list(callback.message, db, bot, edit=callback.message, page=page)
 
 
 async def handle_vk_dtime_callback(callback: types.CallbackQuery, db: Database, bot: Bot) -> None:
     try:
-        vid = int(callback.data.split(":", 1)[1])
+        _, page_str, vid_str = callback.data.split(":", 2)
+        page = int(page_str)
+        vid = int(vid_str)
     except Exception:
         await callback.answer()
         return
-    vk_default_time_sessions[callback.from_user.id] = vid
+    if page < 1:
+        page = 1
+    vk_default_time_sessions[callback.from_user.id] = VkDefaultTimeSession(
+        source_id=vid, page=page, message=callback.message
+    )
     async with db.raw_conn() as conn:
         cur = await conn.execute(
             "SELECT name, default_time FROM vk_source WHERE id=?", (vid,)
@@ -17445,9 +17590,10 @@ async def handle_vk_dtime_callback(callback: types.CallbackQuery, db: Database, 
 
 
 async def handle_vk_dtime_message(message: types.Message, db: Database, bot: Bot) -> None:
-    vid = vk_default_time_sessions.pop(message.from_user.id, None)
-    if not vid:
+    session = vk_default_time_sessions.pop(message.from_user.id, None)
+    if not session:
         return
+    vid = session.source_id
     text = (message.text or "").strip()
     if text in {"", "-"}:
         new_time: str | None = None
@@ -17472,6 +17618,14 @@ async def handle_vk_dtime_message(message: types.Message, db: Database, bot: Bot
     else:
         msg = f"Типовое время для {name} удалено"
     await bot.send_message(message.chat.id, msg)
+    if session.message:
+        await handle_vk_list(
+            session.message,
+            db,
+            bot,
+            edit=session.message,
+            page=session.page,
+        )
 
 
 async def send_vk_tmp_post(chat_id: int, batch: str, idx: int, total: int, db: Database, bot: Bot) -> None:
@@ -20073,6 +20227,9 @@ def create_app() -> web.Application:
     async def vk_list_wrapper(message: types.Message):
         await handle_vk_list(message, db, bot)
 
+    async def vk_list_page_wrapper(callback: types.CallbackQuery):
+        await handle_vk_list_page_callback(callback, db, bot)
+
     async def vk_check_wrapper(message: types.Message):
         await handle_vk_check(message, db, bot)
 
@@ -20313,6 +20470,7 @@ def create_app() -> web.Application:
     )
     dp.callback_query.register(vk_delete_wrapper, lambda c: c.data.startswith("vkdel:"))
     dp.callback_query.register(vk_dtime_cb_wrapper, lambda c: c.data.startswith("vkdt:"))
+    dp.callback_query.register(vk_list_page_wrapper, lambda c: c.data.startswith("vksrcpage:"))
     dp.callback_query.register(vk_next_wrapper, lambda c: c.data.startswith("vknext:"))
     dp.callback_query.register(vk_review_cb_wrapper, lambda c: c.data and c.data.startswith("vkrev:"))
     dp.message.register(
