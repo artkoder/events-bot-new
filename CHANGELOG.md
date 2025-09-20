@@ -10,6 +10,8 @@
 - Список сообществ ВК показывает статусы `Pending | Skipped | Imported | Rejected` и поддерживает пагинацию.
 
 - Introduced automatic topic classification with a closed topic list, editor display, and `/backfill_topics` command.
+- Classifier/digest topic list now includes the `PSYCHOLOGY`, `THEATRE_CLASSIC`, and `THEATRE_MODERN` categories.
+- Refreshed related documentation and tests so deploy notes match the current feature set.
 
 - Fixed VK review queue issue where `vk_review.pick_next` recalculates `event_ts_hint` and auto-rejects posts whose event date
   disappeared or fell into the past (e.g., a 7 September announcement shown on 19 September).
