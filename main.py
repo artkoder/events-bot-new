@@ -620,6 +620,140 @@ telegraph_first_image: TTLCache[str, str] = TTLCache(maxsize=128, ttl=24 * 3600)
 add_event_sessions: TTLCache[int, bool] = TTLCache(maxsize=64, ttl=3600)
 # waiting for a date for events listing
 events_date_sessions: TTLCache[int, bool] = TTLCache(maxsize=64, ttl=3600)
+
+async def _build_makefest_session_state(
+    event: Event, known_fests: Sequence[Festival]
+) -> dict[str, Any]:
+    fest_result = await infer_festival_for_event_via_4o(event, known_fests)
+
+    telegraph_images: list[str] = []
+    telegraph_source = event.telegraph_url or event.telegraph_path
+    if telegraph_source:
+        telegraph_images = await extract_telegraph_image_urls(telegraph_source)
+
+    photo_candidates: list[str] = []
+    for url in telegraph_images + (event.photo_urls or []):
+        if url and url not in photo_candidates:
+            photo_candidates.append(url)
+
+    fest_data = fest_result["festival"]
+    event_start: str | None = None
+    event_end: str | None = None
+    raw_date = getattr(event, "date", None)
+    if isinstance(raw_date, str) and raw_date.strip():
+        if ".." in raw_date:
+            start_part, end_part = raw_date.split("..", 1)
+            event_start = start_part.strip() or None
+            event_end = end_part.strip() or None
+        else:
+            event_start = raw_date.strip()
+    explicit_end = getattr(event, "end_date", None)
+    if isinstance(explicit_end, str) and explicit_end.strip():
+        event_end = explicit_end.strip()
+    if event_start and not event_end:
+        event_end = event_start
+    if event_start and not fest_data.get("start_date"):
+        fest_data["start_date"] = event_start
+    if event_end and not fest_data.get("end_date"):
+        fest_data["end_date"] = event_end
+
+    duplicate_info_raw = fest_result.get("duplicate")
+    duplicate_info: dict[str, Any] = {
+        "match": False,
+        "name": None,
+        "normalized_name": None,
+        "confidence": None,
+        "dup_fid": None,
+    }
+    if isinstance(duplicate_info_raw, dict):
+        match_flag = bool(duplicate_info_raw.get("match"))
+        name = clean_optional_str(duplicate_info_raw.get("name"))
+        normalized_name_raw = clean_optional_str(duplicate_info_raw.get("normalized_name"))
+        confidence_raw = duplicate_info_raw.get("confidence")
+        confidence_val: float | None = None
+        if isinstance(confidence_raw, (int, float)):
+            confidence_val = float(confidence_raw)
+        elif isinstance(confidence_raw, str):
+            try:
+                confidence_val = float(confidence_raw.strip())
+            except (TypeError, ValueError):
+                confidence_val = None
+        dup_fid_raw = duplicate_info_raw.get("dup_fid")
+        dup_fid: int | None = None
+        if dup_fid_raw not in (None, ""):
+            try:
+                dup_fid = int(dup_fid_raw)
+            except (TypeError, ValueError):
+                dup_fid = None
+        duplicate_info = {
+            "match": match_flag,
+            "name": name,
+            "normalized_name": normalized_name_raw or normalize_duplicate_name(name),
+            "confidence": confidence_val,
+            "dup_fid": dup_fid,
+        }
+    elif duplicate_info_raw is not None:
+        logging.debug(
+            "infer_festival_for_event_via_4o returned non-dict duplicate: %s",
+            duplicate_info_raw,
+        )
+
+    if duplicate_info.get("dup_fid") is None and duplicate_info.get("normalized_name"):
+        normalized_target = duplicate_info["normalized_name"]
+        for fest in known_fests:
+            if not getattr(fest, "id", None) or not getattr(fest, "name", None):
+                continue
+            if normalize_duplicate_name(fest.name) == normalized_target:
+                duplicate_info["dup_fid"] = fest.id
+                if not duplicate_info.get("name"):
+                    duplicate_info["name"] = fest.name
+                break
+
+    existing_names: set[str] = set()
+    if fest_data.get("name"):
+        existing_names.add(fest_data["name"].lower())
+    for name in fest_data.get("existing_candidates", []):
+        if isinstance(name, str) and name.strip():
+            existing_names.add(name.strip().lower())
+
+    duplicate_fest: Festival | None = None
+    if duplicate_info.get("dup_fid"):
+        dup_id = duplicate_info["dup_fid"]
+        duplicate_fest = next((fest for fest in known_fests if fest.id == dup_id), None)
+        if duplicate_fest and not duplicate_info.get("name"):
+            duplicate_info["name"] = duplicate_fest.name
+        if duplicate_fest and not duplicate_info.get("normalized_name"):
+            duplicate_info["normalized_name"] = normalize_duplicate_name(duplicate_fest.name)
+
+    matched_fests: list[Festival] = []
+    for fest in known_fests:
+        if not fest.id:
+            continue
+        if fest.name and fest.name.lower() in existing_names:
+            matched_fests.append(fest)
+
+    seen_ids: set[int] = set()
+    ordered_matches: list[Festival] = []
+    if duplicate_fest and duplicate_fest.id:
+        ordered_matches.append(duplicate_fest)
+        seen_ids.add(duplicate_fest.id)
+    for fest in matched_fests:
+        if fest.id in seen_ids:
+            continue
+        ordered_matches.append(fest)
+        seen_ids.add(fest.id)
+    ordered_matches = ordered_matches[:5]
+
+    return {
+        "festival": fest_data,
+        "photos": photo_candidates,
+        "matches": [
+            {"id": fest.id, "name": fest.name} for fest in ordered_matches if fest.id
+        ],
+        "duplicate": duplicate_info,
+    }
+
+
 # chat_id -> list of (message_id, text) for /exhibitions chunks
 exhibitions_message_state: dict[int, list[tuple[int, str]]] = {}
 
@@ -5816,7 +5950,7 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
             await callback.answer("Not authorized", show_alert=True)
             return
         try:
-            fest_result = await infer_festival_for_event_via_4o(event, known_fests)
+            state_payload = await _build_makefest_session_state(event, known_fests)
         except Exception as exc:  # pragma: no cover - network / LLM failures
             logging.exception("makefest inference failed for %s: %s", eid, exc)
             await callback.message.answer(
@@ -5824,128 +5958,16 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
             )
             await callback.answer()
             return
-        telegraph_images: list[str] = []
-        telegraph_source = event.telegraph_url or event.telegraph_path
-        if telegraph_source:
-            telegraph_images = await extract_telegraph_image_urls(telegraph_source)
-        photo_candidates: list[str] = []
-        for url in telegraph_images + (event.photo_urls or []):
-            if url and url not in photo_candidates:
-                photo_candidates.append(url)
-        fest_data = fest_result["festival"]
-        event_start: str | None = None
-        event_end: str | None = None
-        raw_date = getattr(event, "date", None)
-        if isinstance(raw_date, str) and raw_date.strip():
-            if ".." in raw_date:
-                start_part, end_part = raw_date.split("..", 1)
-                event_start = start_part.strip() or None
-                event_end = end_part.strip() or None
-            else:
-                event_start = raw_date.strip()
-        explicit_end = getattr(event, "end_date", None)
-        if isinstance(explicit_end, str) and explicit_end.strip():
-            event_end = explicit_end.strip()
-        if event_start and not event_end:
-            event_end = event_start
-        if event_start and not fest_data.get("start_date"):
-            fest_data["start_date"] = event_start
-        if event_end and not fest_data.get("end_date"):
-            fest_data["end_date"] = event_end
-        duplicate_info_raw = fest_result.get("duplicate")
-        duplicate_info: dict[str, Any] = {
-            "match": False,
-            "name": None,
-            "normalized_name": None,
-            "confidence": None,
-            "dup_fid": None,
-        }
-        if isinstance(duplicate_info_raw, dict):
-            match_flag = bool(duplicate_info_raw.get("match"))
-            name = clean_optional_str(duplicate_info_raw.get("name"))
-            normalized_name_raw = clean_optional_str(duplicate_info_raw.get("normalized_name"))
-            confidence_raw = duplicate_info_raw.get("confidence")
-            confidence_val: float | None = None
-            if isinstance(confidence_raw, (int, float)):
-                confidence_val = float(confidence_raw)
-            elif isinstance(confidence_raw, str):
-                try:
-                    confidence_val = float(confidence_raw.strip())
-                except (TypeError, ValueError):
-                    confidence_val = None
-            dup_fid_raw = duplicate_info_raw.get("dup_fid")
-            dup_fid: int | None = None
-            if dup_fid_raw not in (None, ""):
-                try:
-                    dup_fid = int(dup_fid_raw)
-                except (TypeError, ValueError):
-                    dup_fid = None
-            duplicate_info = {
-                "match": match_flag,
-                "name": name,
-                "normalized_name": normalized_name_raw
-                or normalize_duplicate_name(name),
-                "confidence": confidence_val,
-                "dup_fid": dup_fid,
-            }
-        elif duplicate_info_raw is not None:
-            logging.debug("infer_festival_for_event_via_4o returned non-dict duplicate: %s", duplicate_info_raw)
-
-        if duplicate_info.get("dup_fid") is None and duplicate_info.get("normalized_name"):
-            normalized_target = duplicate_info["normalized_name"]
-            for fest in known_fests:
-                if not getattr(fest, "id", None) or not getattr(fest, "name", None):
-                    continue
-                if normalize_duplicate_name(fest.name) == normalized_target:
-                    duplicate_info["dup_fid"] = fest.id
-                    if not duplicate_info.get("name"):
-                        duplicate_info["name"] = fest.name
-                    break
-
-        existing_names: set[str] = set()
-        if fest_data.get("name"):
-            existing_names.add(fest_data["name"].lower())
-        for name in fest_data.get("existing_candidates", []):
-            if isinstance(name, str) and name.strip():
-                existing_names.add(name.strip().lower())
-
-        duplicate_fest: Festival | None = None
-        if duplicate_info.get("dup_fid"):
-            dup_id = duplicate_info["dup_fid"]
-            duplicate_fest = next((fest for fest in known_fests if fest.id == dup_id), None)
-            if duplicate_fest and not duplicate_info.get("name"):
-                duplicate_info["name"] = duplicate_fest.name
-            if duplicate_fest and not duplicate_info.get("normalized_name"):
-                duplicate_info["normalized_name"] = normalize_duplicate_name(duplicate_fest.name)
-
-        matched_fests: list[Festival] = []
-        for fest in known_fests:
-            if not fest.id:
-                continue
-            if fest.name and fest.name.lower() in existing_names:
-                matched_fests.append(fest)
-
-        seen_ids: set[int] = set()
-        ordered_matches: list[Festival] = []
-        if duplicate_fest and duplicate_fest.id:
-            ordered_matches.append(duplicate_fest)
-            seen_ids.add(duplicate_fest.id)
-        for fest in matched_fests:
-            if fest.id in seen_ids:
-                continue
-            ordered_matches.append(fest)
-            seen_ids.add(fest.id)
-        ordered_matches = ordered_matches[:5]
 
         makefest_sessions[callback.from_user.id] = {
             "event_id": eid,
-            "festival": fest_data,
-            "photos": photo_candidates,
-            "matches": [
-                {"id": fest.id, "name": fest.name} for fest in ordered_matches if fest.id
-            ],
-            "duplicate": duplicate_info,
+            **state_payload,
         }
+
+        fest_data = state_payload["festival"]
+        duplicate_info = state_payload["duplicate"]
+        photo_candidates = state_payload.get("photos", [])
+        matches = state_payload.get("matches", [])
 
         def _short(text: str | None, limit: int = 400) -> str:
             if not text:
@@ -5994,10 +6016,12 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
             lines.append(dup_line)
         if photo_candidates:
             lines.append(f"Фото для альбома: {len(photo_candidates)} шт.")
-        if ordered_matches:
+        if matches:
             lines.append("Возможные совпадения:")
-            for fest in ordered_matches:
-                lines.append(f" • {fest.name}")
+            for match in matches:
+                name = match.get("name")
+                if name:
+                    lines.append(f" • {name}")
         lines.append("\nВыберите действие ниже.")
         buttons = [
             [
@@ -6020,7 +6044,7 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                     )
                 ]
             )
-        if ordered_matches:
+        if matches:
             buttons.append(
                 [
                     types.InlineKeyboardButton(
@@ -6042,18 +6066,28 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
             return
         eid = int(parts[1])
         state = makefest_sessions.get(callback.from_user.id)
-        if not state or state.get("event_id") != eid:
-            await callback.answer("Предпросмотр не найден", show_alert=True)
-            return
         async with db.get_session() as session:
             user = await session.get(User, callback.from_user.id)
             event = await session.get(Event, eid)
+            known_fests = (await session.execute(select(Festival))).scalars().all()
             if not event or (
                 user
                 and (user.blocked or (user.is_partner and event.creator_id != user.user_id))
             ):
                 await callback.answer("Not authorized", show_alert=True)
                 return
+        if not state or state.get("event_id") != eid:
+            try:
+                state_payload = await _build_makefest_session_state(event, known_fests)
+            except Exception as exc:  # pragma: no cover - network / LLM failures
+                logging.exception("makefest inference failed for %s: %s", eid, exc)
+                await callback.message.answer(
+                    "Не удалось получить подсказку от модели. Попробуйте позже."
+                )
+                await callback.answer()
+                return
+            state = {"event_id": eid, **state_payload}
+            makefest_sessions[callback.from_user.id] = state
         fest_data = state["festival"]
         photos: list[str] = state.get("photos", [])
 
