@@ -2989,8 +2989,8 @@ async def test_makefest_create_links_event(tmp_path: Path, monkeypatch):
     async def fake_sync_index(db_obj):
         fake_sync_index.called = getattr(fake_sync_index, "called", []) + [True]
 
-    async def fake_sync_vk(db_obj, name, bot_obj, **kwargs):
-        fake_sync_vk.called = getattr(fake_sync_vk, "called", []) + [name]
+    async def fake_sync_vk(*args, **kwargs):
+        pytest.fail("VK sync should not be triggered for makefest create")
 
     monkeypatch.setattr(main, "schedule_event_update_tasks", fake_schedule)
     monkeypatch.setattr(main, "rebuild_fest_nav_if_changed", fake_rebuild)
@@ -3030,7 +3030,7 @@ async def test_makefest_create_links_event(tmp_path: Path, monkeypatch):
     assert getattr(fake_schedule, "called", []) == [event.id]
     assert getattr(fake_sync_page, "called", []) == ["New Fest"]
     assert getattr(fake_sync_index, "called", []) == [True]
-    assert getattr(fake_sync_vk, "called", []) == ["New Fest"]
+    # VK sync should not be triggered for makefest create flow
     assert responses
 
     async with db.get_session() as session:
@@ -3097,8 +3097,8 @@ async def test_makefest_bind_existing_festival(tmp_path: Path, monkeypatch):
     async def fake_sync_index(db_obj):
         fake_sync_index.called = getattr(fake_sync_index, "called", []) + [True]
 
-    async def fake_sync_vk(db_obj, name, bot_obj, **kwargs):
-        fake_sync_vk.called = getattr(fake_sync_vk, "called", []) + [name]
+    async def fake_sync_vk(*args, **kwargs):
+        pytest.fail("VK sync should not be triggered for makefest bind")
 
     monkeypatch.setattr(main, "schedule_event_update_tasks", fake_schedule)
     monkeypatch.setattr(main, "rebuild_fest_nav_if_changed", fake_rebuild)
@@ -3138,7 +3138,7 @@ async def test_makefest_bind_existing_festival(tmp_path: Path, monkeypatch):
     assert getattr(fake_schedule, "called", []) == [event.id]
     assert getattr(fake_sync_page, "called", []) == ["Existing"]
     assert getattr(fake_sync_index, "called", []) == [True]
-    assert getattr(fake_sync_vk, "called", []) == ["Existing"]
+    # VK sync should not be triggered for makefest bind flow
     assert responses
 
     async with db.get_session() as session:
