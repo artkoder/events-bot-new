@@ -14,13 +14,13 @@ def test_build_prompt_includes_aliases():
         "Fest B",
         "Fest A",
     ], [
-        ("alias", "Fest A"),
+        ("alias", 0),
     ])
     assert "Use the JSON below" in prompt
     data = _extract_prompt_json(prompt)
     assert data == {
         "festival_names": ["Fest A", "Fest B"],
-        "festival_alias_pairs": [["alias", "Fest A"]],
+        "festival_alias_pairs": [["alias", 0]],
     }
 
 

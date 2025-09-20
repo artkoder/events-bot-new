@@ -37,9 +37,12 @@ Lines from `docs/LOCATIONS.md` are appended to the system prompt so the model
 can normalise venue names. Please keep that file up to date.
 
 When the database exposes festival metadata, the prompt also appends a compact
-JSON block with `{"festival_names": [...], "festival_alias_pairs": [["alias","canonical"], ...]}`.
-The model uses these pairs to map alternative spellings to the canonical
-festival name while parsing announcements.
+JSON block with `{"festival_names": [...], "festival_alias_pairs": [["alias_norm", index], ...]}`.
+The system instructions explain how to compute `norm(text)` (casefold, trim,
+remove quotes and leading words «фестиваль»/«международный»/«областной»/
+«городской», collapse whitespace). Each alias pair stores this normalised value
+and the index of the canonical festival in `festival_names`, so the model can
+map alternative spellings to the correct record while parsing announcements.
 
 When the user message contains a `Poster OCR` block, remember that OCR can
 introduce errors or spurious data. Compare those snippets with the main event
