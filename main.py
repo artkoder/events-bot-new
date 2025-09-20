@@ -4765,32 +4765,51 @@ FESTIVAL_INFERENCE_RESPONSE_FORMAT = {
         "schema": {
             "type": "object",
             "properties": {
-                "name": {"type": "string"},
-                "full_name": {"type": ["string", "null"]},
-                "summary": {"type": ["string", "null"]},
-                "reason": {"type": ["string", "null"]},
-                "start_date": {"type": ["string", "null"]},
-                "end_date": {"type": ["string", "null"]},
-                "city": {"type": ["string", "null"]},
-                "location_name": {"type": ["string", "null"]},
-                "location_address": {"type": ["string", "null"]},
-                "website_url": {"type": ["string", "null"]},
-                "program_url": {"type": ["string", "null"]},
-                "ticket_url": {"type": ["string", "null"]},
-                "existing_candidates": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "maxItems": 5,
+                "festival": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "full_name": {"type": ["string", "null"]},
+                        "summary": {"type": ["string", "null"]},
+                        "reason": {"type": ["string", "null"]},
+                        "start_date": {"type": ["string", "null"]},
+                        "end_date": {"type": ["string", "null"]},
+                        "city": {"type": ["string", "null"]},
+                        "location_name": {"type": ["string", "null"]},
+                        "location_address": {"type": ["string", "null"]},
+                        "website_url": {"type": ["string", "null"]},
+                        "program_url": {"type": ["string", "null"]},
+                        "ticket_url": {"type": ["string", "null"]},
+                        "existing_candidates": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "maxItems": 5,
+                        },
+                    },
+                    "required": ["name"],
+                    "additionalProperties": False,
+                },
+                "duplicate": {
+                    "type": ["object", "null"],
+                    "properties": {
+                        "festival_id": {"type": ["integer", "string", "null"]},
+                        "name": {"type": ["string", "null"]},
+                        "reason": {"type": ["string", "null"]},
+                    },
+                    "required": ["festival_id", "name"],
+                    "additionalProperties": False,
                 },
             },
-            "required": ["name"],
+            "required": ["festival"],
             "additionalProperties": False,
         },
     },
 }
 
 
-async def infer_festival_for_event_via_4o(event: Event) -> dict[str, Any]:
+async def infer_festival_for_event_via_4o(
+    event: Event, known_fests: Sequence[Festival]
+) -> dict[str, Any]:
     """Ask 4o to infer festival metadata for *event*."""
 
     def _clip(text: str | None, limit: int = 2500) -> str:
@@ -4805,14 +4824,10 @@ async def infer_festival_for_event_via_4o(event: Event) -> dict[str, Any]:
         """
         Ты помогаешь редактору определить фестиваль, к которому относится событие.
         Ответь JSON-объектом с полями:
-        - name: краткое название фестиваля (обязательное поле).
-        - full_name: полное официальное название выпуска или null.
-        - summary: короткое описание фестиваля (1-2 предложения) или null.
-        - reason: объяснение, почему событие связано с фестивалем, или null.
-        - start_date и end_date: даты фестиваля в формате YYYY-MM-DD или null.
-        - city, location_name, location_address: значения или null.
-        - website_url, program_url, ticket_url: ссылки или null.
-        - existing_candidates: массив до пяти альтернативных названий фестиваля, если есть.
+        - festival: объект с ключами name (обязательное поле), full_name, summary, reason, start_date, end_date, city,
+          location_name, location_address, website_url, program_url, ticket_url и existing_candidates (массив до пяти строк).
+        - duplicate: объект или null. Укажи festival_id — идентификатор фестиваля из списка известных фестивалей,
+          name — его название, reason — краткое пояснение. Если подходящих фестивалей нет, верни null.
         Используй null, если данных нет. Не добавляй других полей.
         """
     ).strip()
@@ -4839,6 +4854,22 @@ async def infer_festival_for_event_via_4o(event: Event) -> dict[str, Any]:
     source = _clip(getattr(event, "source_text", ""), limit=4000)
     if source and source != description:
         parts.append("Original message:\n" + source)
+    known_payload = [
+        {
+            "id": fest.id,
+            "name": fest.name,
+            "full_name": fest.full_name,
+            "start_date": fest.start_date,
+            "end_date": fest.end_date,
+            "city": fest.city,
+        }
+        for fest in known_fests
+        if getattr(fest, "id", None)
+    ]
+    if known_payload:
+        catalog = json.dumps(known_payload, ensure_ascii=False)
+        parts.append("Известные фестивали (JSON):\n" + catalog)
+
     payload = "\n\n".join(parts)
 
     response = await ask_4o(
@@ -4854,12 +4885,27 @@ async def infer_festival_for_event_via_4o(event: Event) -> dict[str, Any]:
         raise
     if not isinstance(data, dict):
         raise ValueError("Unexpected response format from festival inference")
-    existing = data.get("existing_candidates")
+
+    festival = data.get("festival")
+    if not isinstance(festival, dict):
+        raise ValueError("Festival block missing in inference result")
+
+    def _clean(value: Any) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            text = value.strip()
+        else:
+            text = str(value).strip()
+        return text or None
+
+    existing = festival.get("existing_candidates")
     if not isinstance(existing, list):
         existing = []
     else:
         existing = [str(item).strip() for item in existing if str(item).strip()]
-    data["existing_candidates"] = existing
+    festival["existing_candidates"] = existing
+
     for field in (
         "name",
         "full_name",
@@ -4874,17 +4920,67 @@ async def infer_festival_for_event_via_4o(event: Event) -> dict[str, Any]:
         "program_url",
         "ticket_url",
     ):
-        value = data.get(field)
-        if isinstance(value, str):
-            cleaned = value.strip()
-            data[field] = cleaned or None
-        elif value is None:
-            data[field] = None
-        else:
-            data[field] = str(value).strip() or None
-    if not data.get("name"):
+        festival[field] = _clean(festival.get(field))
+
+    if not festival.get("name"):
         raise ValueError("Festival name missing in inference result")
-    return data
+
+    def _safe_date(text: str | None) -> str | None:
+        if not text:
+            return None
+        txt = text.strip()
+        if not txt:
+            return None
+        return txt
+
+    event_start: str | None = None
+    event_end: str | None = None
+    raw_date = getattr(event, "date", None) or ""
+    if isinstance(raw_date, str) and raw_date.strip():
+        if ".." in raw_date:
+            start_part, end_part = raw_date.split("..", 1)
+            event_start = _safe_date(start_part)
+            event_end = _safe_date(end_part) or event_start
+        else:
+            event_start = _safe_date(raw_date)
+    explicit_end = getattr(event, "end_date", None)
+    if explicit_end:
+        event_end = _safe_date(str(explicit_end)) or event_end
+    if event_start and not event_end:
+        event_end = event_start
+
+    if not festival.get("start_date") and event_start:
+        festival["start_date"] = event_start
+    if not festival.get("end_date") and event_end:
+        festival["end_date"] = event_end
+
+    duplicate_raw = data.get("duplicate")
+    duplicate: dict[str, Any] = {"fid": None, "name": None, "reason": None}
+    if isinstance(duplicate_raw, dict):
+        raw_id = duplicate_raw.get("festival_id")
+        if raw_id is None:
+            raw_id = duplicate_raw.get("id")
+        if raw_id is None:
+            raw_id = duplicate_raw.get("fid")
+        dup_fid: int | None = None
+        if raw_id not in (None, ""):
+            try:
+                dup_fid = int(str(raw_id).strip())
+            except (TypeError, ValueError):
+                dup_fid = None
+        if dup_fid is not None:
+            valid_ids = {fest.id for fest in known_fests if getattr(fest, "id", None)}
+            if dup_fid not in valid_ids:
+                dup_fid = None
+        duplicate = {
+            "fid": dup_fid,
+            "name": _clean(duplicate_raw.get("name")),
+            "reason": _clean(duplicate_raw.get("reason")),
+        }
+    elif duplicate_raw is not None:
+        logging.debug("infer_festival_for_event_via_4o unexpected duplicate block: %s", duplicate_raw)
+
+    return {"festival": festival, "duplicate": duplicate}
 
 
 def clean_optional_str(value: Any) -> str | None:
@@ -5578,6 +5674,7 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
         async with db.get_session() as session:
             user = await session.get(User, callback.from_user.id)
             event = await session.get(Event, eid)
+            known_fests = (await session.execute(select(Festival))).scalars().all()
         if not event:
             await callback.answer("Событие не найдено", show_alert=True)
             return
@@ -5588,7 +5685,7 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
             await callback.answer("Not authorized", show_alert=True)
             return
         try:
-            fest_data = await infer_festival_for_event_via_4o(event)
+            fest_result = await infer_festival_for_event_via_4o(event, known_fests)
         except Exception as exc:  # pragma: no cover - network / LLM failures
             logging.exception("makefest inference failed for %s: %s", eid, exc)
             await callback.message.answer(
@@ -5604,32 +5701,71 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
         for url in telegraph_images + (event.photo_urls or []):
             if url and url not in photo_candidates:
                 photo_candidates.append(url)
-        existing_names = {fest_data["name"].lower()}
-        existing_names.update(
-            name.lower()
-            for name in fest_data.get("existing_candidates", [])
-            if isinstance(name, str)
-        )
-        matches: list[tuple[Festival, float]] = []
-        async with db.get_session() as session:
-            res = await session.execute(select(Festival))
-            all_fests = res.scalars().all()
-        base = fest_data["name"].lower()
-        for fest in all_fests:
-            ratio = 0.0
-            if base:
-                ratio = SequenceMatcher(None, base, fest.name.lower()).ratio()
-            if fest.name.lower() in existing_names or ratio >= 0.6:
-                matches.append((fest, ratio))
-        matches.sort(key=lambda item: item[1], reverse=True)
-        top_matches = [m[0] for m in matches[:5]]
+        fest_data = fest_result["festival"]
+        event_start: str | None = None
+        event_end: str | None = None
+        raw_date = getattr(event, "date", None)
+        if isinstance(raw_date, str) and raw_date.strip():
+            if ".." in raw_date:
+                start_part, end_part = raw_date.split("..", 1)
+                event_start = start_part.strip() or None
+                event_end = end_part.strip() or None
+            else:
+                event_start = raw_date.strip()
+        explicit_end = getattr(event, "end_date", None)
+        if isinstance(explicit_end, str) and explicit_end.strip():
+            event_end = explicit_end.strip()
+        if event_start and not event_end:
+            event_end = event_start
+        if event_start and not fest_data.get("start_date"):
+            fest_data["start_date"] = event_start
+        if event_end and not fest_data.get("end_date"):
+            fest_data["end_date"] = event_end
+        duplicate_info = fest_result.get("duplicate") or {"fid": None, "name": None, "reason": None}
+        if not isinstance(duplicate_info, dict):
+            duplicate_info = {"fid": None, "name": None, "reason": None}
+
+        existing_names: set[str] = set()
+        if fest_data.get("name"):
+            existing_names.add(fest_data["name"].lower())
+        for name in fest_data.get("existing_candidates", []):
+            if isinstance(name, str) and name.strip():
+                existing_names.add(name.strip().lower())
+
+        duplicate_fest: Festival | None = None
+        if duplicate_info.get("fid"):
+            dup_id = duplicate_info["fid"]
+            duplicate_fest = next((fest for fest in known_fests if fest.id == dup_id), None)
+            if duplicate_fest and not duplicate_info.get("name"):
+                duplicate_info["name"] = duplicate_fest.name
+
+        matched_fests: list[Festival] = []
+        for fest in known_fests:
+            if not fest.id:
+                continue
+            if fest.name and fest.name.lower() in existing_names:
+                matched_fests.append(fest)
+
+        seen_ids: set[int] = set()
+        ordered_matches: list[Festival] = []
+        if duplicate_fest and duplicate_fest.id:
+            ordered_matches.append(duplicate_fest)
+            seen_ids.add(duplicate_fest.id)
+        for fest in matched_fests:
+            if fest.id in seen_ids:
+                continue
+            ordered_matches.append(fest)
+            seen_ids.add(fest.id)
+        ordered_matches = ordered_matches[:5]
+
         makefest_sessions[callback.from_user.id] = {
             "event_id": eid,
             "festival": fest_data,
             "photos": photo_candidates,
             "matches": [
-                {"id": fest.id, "name": fest.name} for fest in top_matches if fest.id
+                {"id": fest.id, "name": fest.name} for fest in ordered_matches if fest.id
             ],
+            "duplicate": duplicate_info,
         }
 
         def _short(text: str | None, limit: int = 400) -> str:
@@ -5664,11 +5800,16 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
             lines.append(f"Локация: {place_text}")
         if fest_data.get("reason"):
             lines.append("Почему: " + _short(fest_data.get("reason")))
+        if duplicate_info.get("name"):
+            dup_line = f"Похоже на: {duplicate_info['name']}"
+            if duplicate_info.get("reason"):
+                dup_line += f" ({_short(duplicate_info['reason'])})"
+            lines.append(dup_line)
         if photo_candidates:
             lines.append(f"Фото для альбома: {len(photo_candidates)} шт.")
-        if top_matches:
+        if ordered_matches:
             lines.append("Возможные совпадения:")
-            for fest in top_matches:
+            for fest in ordered_matches:
                 lines.append(f" • {fest.name}")
         lines.append("\nВыберите действие ниже.")
         buttons = [
@@ -5678,11 +5819,21 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                 )
             ]
         ]
-        if top_matches:
+        if duplicate_info.get("fid"):
+            label = duplicate_info.get("name") or "найденному фестивалю"
             buttons.append(
                 [
                     types.InlineKeyboardButton(
-                        text="Привязать к существующему",
+                        text=f"Привязать к {label}",
+                        callback_data=f"makefest_bind:{eid}:{duplicate_info['fid']}",
+                    )
+                ]
+            )
+        if ordered_matches:
+            buttons.append(
+                [
+                    types.InlineKeyboardButton(
+                        text="Выбрать другой фестиваль",
                         callback_data=f"makefest_bind:{eid}",
                     )
                 ]
