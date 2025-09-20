@@ -539,7 +539,9 @@ async def test_edit_event_reclassifies_topics(tmp_path: Path, monkeypatch):
     await db.init()
     bot = DummyBot("123:abc")
 
-    async def fake_schedule_event_update_tasks(db_obj, event_obj, drain_nav=True):
+    async def fake_schedule_event_update_tasks(
+        db_obj, event_obj, drain_nav=True, skip_vk_sync=False
+    ):
         return {}
 
     async def fake_publish_event_progress(*args, **kwargs):
@@ -2106,7 +2108,9 @@ async def test_forward_add_event(tmp_path: Path, monkeypatch):
 
     original_schedule_event_update_tasks = main.schedule_event_update_tasks
 
-    async def fake_schedule_event_update_tasks(db_obj, event_obj, drain_nav=True):
+    async def fake_schedule_event_update_tasks(
+        db_obj, event_obj, drain_nav=True, skip_vk_sync=False
+    ):
         return await original_schedule_event_update_tasks(
             db_obj, event_obj, drain_nav=False
         )
@@ -3088,8 +3092,10 @@ async def test_makefest_create_links_event(tmp_path: Path, monkeypatch):
         },
     }
 
-    async def fake_schedule(db_obj, event_obj, drain_nav=True):
-        fake_schedule.called = getattr(fake_schedule, "called", []) + [event_obj.id]
+    async def fake_schedule(db_obj, event_obj, drain_nav=True, skip_vk_sync=False):
+        fake_schedule.called = getattr(fake_schedule, "called", []) + [
+            (event_obj.id, skip_vk_sync)
+        ]
 
     async def fake_rebuild(*args, **kwargs):
         return False
@@ -3138,7 +3144,7 @@ async def test_makefest_create_links_event(tmp_path: Path, monkeypatch):
     await process_request(cb, db, bot)
     await asyncio.sleep(0)
 
-    assert getattr(fake_schedule, "called", []) == [event.id]
+    assert getattr(fake_schedule, "called", []) == [(event.id, True)]
     assert getattr(fake_sync_page, "called", []) == ["New Fest"]
     assert getattr(fake_sync_index, "called", []) == [True]
     # VK sync should not be triggered for makefest create flow
@@ -3226,8 +3232,10 @@ async def test_makefest_bind_existing_festival(tmp_path: Path, monkeypatch):
         },
     }
 
-    async def fake_schedule(db_obj, event_obj, drain_nav=True):
-        fake_schedule.called = getattr(fake_schedule, "called", []) + [event_obj.id]
+    async def fake_schedule(db_obj, event_obj, drain_nav=True, skip_vk_sync=False):
+        fake_schedule.called = getattr(fake_schedule, "called", []) + [
+            (event_obj.id, skip_vk_sync)
+        ]
 
     async def fake_rebuild(*args, **kwargs):
         return False
@@ -3276,7 +3284,7 @@ async def test_makefest_bind_existing_festival(tmp_path: Path, monkeypatch):
     await process_request(cb, db, bot)
     await asyncio.sleep(0)
 
-    assert getattr(fake_schedule, "called", []) == [event.id]
+    assert getattr(fake_schedule, "called", []) == [(event.id, True)]
     assert getattr(fake_sync_page, "called", []) == ["Existing"]
     assert getattr(fake_sync_index, "called", []) == [True]
     # VK sync should not be triggered for makefest bind flow
@@ -3675,7 +3683,7 @@ async def test_add_event_raw_has_edit_button(tmp_path: Path, monkeypatch):
 
     monkeypatch.setattr("main.create_source_page", fake_create)
 
-    async def fake_schedule(db_obj, ev, *, drain_nav=True):
+    async def fake_schedule(db_obj, ev, *, drain_nav=True, skip_vk_sync=False):
         return {}
 
     monkeypatch.setattr("main.schedule_event_update_tasks", fake_schedule)
