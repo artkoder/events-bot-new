@@ -11,7 +11,7 @@ import time as _time
 import random
 
 from db import Database
-from vk_intake import extract_event_ts_hint
+from vk_intake import OCR_PENDING_SENTINEL, extract_event_ts_hint
 
 
 LOCK_TIMEOUT_SECONDS = 10 * 60
@@ -151,8 +151,11 @@ async def pick_next(db: Database, operator_id: int, batch_id: str) -> Optional[I
 
             inbox_id = row[0]
             text = row[4]
-            ts_hint = extract_event_ts_hint(text)
-            if ts_hint is None or ts_hint < reject_cutoff:
+            matched_kw = row[5]
+            has_date = row[6]
+            skip_hint_recalc = matched_kw == OCR_PENDING_SENTINEL and has_date == 0
+            ts_hint = None if skip_hint_recalc else extract_event_ts_hint(text)
+            if not skip_hint_recalc and (ts_hint is None or ts_hint < reject_cutoff):
                 await conn.execute(
                     "UPDATE vk_inbox SET status='rejected', locked_by=NULL, locked_at=NULL, review_batch=NULL WHERE id=?",
                     (inbox_id,),
@@ -169,10 +172,16 @@ async def pick_next(db: Database, operator_id: int, batch_id: str) -> Optional[I
                 reject_cutoff = now_ts + int(reject_window_hours * 3600)
                 continue
 
-            await conn.execute(
-                "UPDATE vk_inbox SET event_ts_hint=?, review_batch=?, locked_at=CURRENT_TIMESTAMP WHERE id=?",
-                (ts_hint, batch_id, inbox_id),
-            )
+            if not skip_hint_recalc and ts_hint is not None:
+                await conn.execute(
+                    "UPDATE vk_inbox SET event_ts_hint=?, review_batch=?, locked_at=CURRENT_TIMESTAMP WHERE id=?",
+                    (ts_hint, batch_id, inbox_id),
+                )
+            else:
+                await conn.execute(
+                    "UPDATE vk_inbox SET review_batch=?, locked_at=CURRENT_TIMESTAMP WHERE id=?",
+                    (batch_id, inbox_id),
+                )
             await conn.commit()
             row = list(row)
             row[8] = batch_id
@@ -384,8 +393,11 @@ async def pick_next(db: Database, operator_id: int, batch_id: str) -> Optional[I
 
             inbox_id = row[0]
             text = row[4]
-            ts_hint = extract_event_ts_hint(text)
-            if ts_hint is None or ts_hint < reject_cutoff:
+            matched_kw = row[5]
+            has_date = row[6]
+            skip_hint_recalc = matched_kw == OCR_PENDING_SENTINEL and has_date == 0
+            ts_hint = None if skip_hint_recalc else extract_event_ts_hint(text)
+            if not skip_hint_recalc and (ts_hint is None or ts_hint < reject_cutoff):
                 await conn.execute(
                     "UPDATE vk_inbox SET status='rejected', locked_by=NULL, locked_at=NULL, review_batch=NULL WHERE id=?",
                     (inbox_id,),
@@ -396,10 +408,11 @@ async def pick_next(db: Database, operator_id: int, batch_id: str) -> Optional[I
                 )
                 continue
 
-            await conn.execute(
-                "UPDATE vk_inbox SET event_ts_hint=? WHERE id=?",
-                (ts_hint, inbox_id),
-            )
+            if not skip_hint_recalc and ts_hint is not None:
+                await conn.execute(
+                    "UPDATE vk_inbox SET event_ts_hint=? WHERE id=?",
+                    (ts_hint, inbox_id),
+                )
             await conn.commit()
             selected_row = row
             final_bucket_name = bucket_name_for_history
