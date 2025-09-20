@@ -16,6 +16,7 @@ from digests import (
     compose_masterclasses_intro_via_4o,
     compose_exhibitions_intro_via_4o,
     aggregate_digest_topics,
+    normalize_topics,
     format_event_line_html,
     pick_display_link,
     normalize_titles_via_4o,
@@ -169,6 +170,21 @@ async def test_build_lectures_digest_candidates_limit(tmp_path):
     assert horizon == 7
     assert len(events) == 9
     assert events[0].title == "e1"
+
+
+def test_normalize_topics_distinguishes_theatre_subtypes():
+    topics = [
+        "театр",
+        "классический спектакль",
+        "Драма",
+        "современный театр",
+        "модерн",
+        "experimental theatre",
+    ]
+
+    normalized = normalize_topics(topics)
+
+    assert normalized == ["THEATRE", "THEATRE_CLASSIC", "THEATRE_MODERN"]
 
 
 @pytest.mark.asyncio
