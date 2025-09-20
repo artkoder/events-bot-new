@@ -6,6 +6,7 @@
 - Added `/ocrtest` diagnostic command, чтобы сравнить распознавание афиш между `gpt-4o-mini` и `gpt-4o` с показом использования токенов.
 - Clarified the 4o parsing prompt to warn about possible OCR mistakes in poster snippets.
 - VK Intake помещает посты с одной фотографией и пустым текстом в очередь и отмечает их статусом «Ожидает OCR».
+- Уточнены приоритет URGENT (48 ч), взвешенное смешивание SOON/LONG/FAR (веса 3/2/6), стрик-брейкер FAR (30 д) и джиттер по источникам (14 д, K=5).
 
 - Introduced automatic topic classification with a closed topic list, editor display, and `/backfill_topics` command.
 
