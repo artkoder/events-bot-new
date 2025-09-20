@@ -14,6 +14,13 @@
 - Fixed VK review queue issue where `vk_review.pick_next` recalculates `event_ts_hint` and auto-rejects posts whose event date
   disappeared or fell into the past (e.g., a 7 September announcement shown on 19 September).
 
+- Reworked the `/vk` review queue: URGENT cards (events happening within
+  `VK_REVIEW_URGENT_MAX_H=48` hours) always jump to the front, while the remaining
+  SOON/LONG/FAR buckets are mixed by a weighted lottery using the default
+  `VK_REVIEW_W_SOON=3`, `VK_REVIEW_W_LONG=2`, and `VK_REVIEW_W_FAR=6` factors with a
+  FAR streak breaker after `VK_REVIEW_FAR_GAP_K=5` non-FAR picks. Within the winning
+  bucket, cards keep chronological order but add a per-source jitter so big
+  communities cannot monopolise reviews.
 ## v0.1.0 – Deploy + US-02 + /tz
 - Initial Fly.io deployment config.
 - Moderator registration queue with approve/reject.
