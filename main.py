@@ -2465,18 +2465,19 @@ def _festival_telegraph_url(fest: Festival) -> str | None:
 
 
 async def _build_makefest_response(
-    db: Database, fest: Festival, *, status: str
+    db: Database, fest: Festival, *, status: str, photo_count: int
 ) -> tuple[str, types.InlineKeyboardMarkup | None]:
     telegraph_url = _festival_telegraph_url(fest)
     lines = [
-        f"Статус: {status}",
+        f"✅ Фестиваль {status} и привязан",
+        "",
         f"ID: {fest.id if fest.id is not None else '—'}",
         f"Название: {fest.name}",
         f"Полное название: {fest.full_name or '—'}",
         f"Период: {_festival_period_text(fest)}",
         f"Город: {(fest.city or '—').strip() or '—'}",
         f"Локация: {_festival_location_text(fest)}",
-        f"Фото: {_festival_photo_count(fest)}",
+        f"Фото добавлено: {photo_count}",
         f"Telegraph: {telegraph_url or '—'}",
         "",
         "Событие привязано к фестивалю.",
@@ -6123,7 +6124,9 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
         asyncio.create_task(sync_festival_page(db, fest_obj.name))
         asyncio.create_task(sync_festivals_index_page(db))
         status = "создан" if created else "обновлён"
-        text, markup = await _build_makefest_response(db, fest_obj, status=status)
+        text, markup = await _build_makefest_response(
+            db, fest_obj, status=status, photo_count=len(photos)
+        )
         await callback.message.answer(text, reply_markup=markup)
         await show_edit_menu(callback.from_user.id, event, bot)
         await callback.answer("Готово")
@@ -6206,7 +6209,10 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
         asyncio.create_task(sync_festival_page(db, fest.name))
         asyncio.create_task(sync_festivals_index_page(db))
         text, markup = await _build_makefest_response(
-            db, fest_obj, status="привязан к существующему"
+            db,
+            fest_obj,
+            status="привязан к существующему",
+            photo_count=len(photos),
         )
         await callback.message.answer(text, reply_markup=markup)
         await show_edit_menu(callback.from_user.id, event, bot)
