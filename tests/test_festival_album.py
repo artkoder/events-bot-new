@@ -64,6 +64,56 @@ async def test_ensure_festival_does_not_overwrite_photo_url(tmp_path: Path, monk
 
 
 @pytest.mark.asyncio
+async def test_ensure_festival_updates_urls(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async def nop(*a, **k):
+        return None
+
+    monkeypatch.setattr(main, "sync_festival_page", nop)
+    monkeypatch.setattr(main, "sync_festival_vk_post", nop)
+    monkeypatch.setattr(main, "sync_festivals_index_page", nop)
+    monkeypatch.setattr(main, "notify_superadmin", nop)
+    monkeypatch.setattr(main, "rebuild_fest_nav_if_changed", nop)
+
+    fest, created, updated = await main.ensure_festival(
+        db,
+        "Fest",
+        website_url=" https://site ",
+        program_url="https://prog",
+        ticket_url="https://tickets",
+    )
+
+    assert created and updated
+    assert fest.website_url == "https://site"
+    assert fest.program_url == "https://prog"
+    assert fest.ticket_url == "https://tickets"
+
+    fest2, created2, updated2 = await main.ensure_festival(
+        db,
+        "Fest",
+        website_url="https://site",
+        program_url="https://prog2",
+        ticket_url="https://tickets2",
+    )
+
+    assert not created2 and updated2
+    assert fest2.website_url == "https://site"
+    assert fest2.program_url == "https://prog2"
+    assert fest2.ticket_url == "https://tickets2"
+
+    fest3, created3, updated3 = await main.ensure_festival(
+        db,
+        "Fest",
+        program_url="https://prog2",
+    )
+
+    assert not created3 and not updated3
+    assert fest3.program_url == "https://prog2"
+
+
+@pytest.mark.asyncio
 async def test_build_festival_page_content_shows_album(tmp_path: Path):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
