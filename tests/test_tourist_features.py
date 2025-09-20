@@ -153,6 +153,17 @@ async def test_tourist_yes_callback_updates_event(tmp_path, monkeypatch):
         if btn.callback_data
     ]
     assert f"tourist:fxdone:{event_id}" in reason_callbacks
+    factor_buttons = [
+        btn
+        for row in last_call["reply_markup"].inline_keyboard
+        for btn in row
+        if btn.callback_data and btn.callback_data.startswith("tourist:fx:")
+    ]
+    expected_callbacks = {
+        f"tourist:fx:{factor.code}:{event_id}" for factor in main.TOURIST_FACTORS
+    }
+    assert expected_callbacks <= {btn.callback_data for btn in factor_buttons}
+    assert any(btn.text.startswith("➕ 🏛️ История и культура") for btn in factor_buttons)
 
 
 @pytest.mark.asyncio
@@ -194,11 +205,11 @@ async def test_tourist_factor_flow(tmp_path, monkeypatch):
     cb_menu = make_callback(f"tourist:fx:menu:{event_id}", message)
     await main.process_request(cb_menu, db, bot)
     assert main.tourist_reason_sessions
-    cb_toggle = make_callback(f"tourist:fx:history:{event_id}", message)
+    cb_toggle = make_callback(f"tourist:fx:culture:{event_id}", message)
     await main.process_request(cb_toggle, db, bot)
     async with db.get_session() as session:
         updated = await session.get(Event, event_id)
-        assert updated.tourist_factors == ["history"]
+        assert updated.tourist_factors == ["culture"]
     cb_done = make_callback(f"tourist:fxdone:{event_id}", message)
     await main.process_request(cb_done, db, bot)
     assert not main.tourist_reason_sessions
