@@ -97,6 +97,38 @@ def test_tourist_block_appended(base_rows, source):
     assert "✍️ Комментарий" in texts
 
 
+def test_build_event_card_message_without_factors():
+    event = Event(
+        id=1,
+        title="T",
+        description="",
+        date="2025-09-01",
+        time="10:00",
+        location_name="L",
+        source_text="S",
+        tourist_factors=[],
+        tourist_label=1,
+    )
+    text = build_event_card_message("Event added", event, ["title: Title"])
+    assert "🧩" not in text
+
+
+def test_build_event_card_message_with_factors():
+    event = Event(
+        id=1,
+        title="T",
+        description="",
+        date="2025-09-01",
+        time="10:00",
+        location_name="L",
+        source_text="S",
+        tourist_factors=["culture", "food"],
+        tourist_label=1,
+    )
+    text = build_event_card_message("Event added", event, ["title: Title"])
+    assert "🧩 2 причин" in text
+
+
 @pytest.mark.asyncio
 async def test_tourist_yes_callback_updates_event(tmp_path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
@@ -145,6 +177,7 @@ async def test_tourist_yes_callback_updates_event(tmp_path, monkeypatch):
     assert bot.edited_text_calls
     last_call = bot.edited_text_calls[-1]
     assert "🌍 Туристам: Да" in last_call["text"]
+    assert "🧩" not in last_call["text"]
     markup = last_call["reply_markup"]
     reason_callbacks = [
         btn.callback_data
@@ -214,6 +247,9 @@ async def test_tourist_factor_flow(tmp_path, monkeypatch):
     await main.process_request(cb_done, db, bot)
     assert not main.tourist_reason_sessions
     assert any(call["text"] == "Причины сохранены" for call in answers)
+    assert bot.edited_text_calls
+    last_text = bot.edited_text_calls[-1]["text"]
+    assert "🧩 1 причин" in last_text
 
 
 @pytest.mark.asyncio
