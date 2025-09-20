@@ -584,7 +584,16 @@ vk_group_sessions: set[int] = set()
 # user_id -> section (today/added) for VK time update
 vk_time_sessions: TTLCache[int, str] = TTLCache(maxsize=64, ttl=3600)
 # user_id -> vk_source_id for default time update
-vk_default_time_sessions: TTLCache[int, int] = TTLCache(maxsize=64, ttl=3600)
+@dataclass
+class VkDefaultTimeSession:
+    source_id: int
+    page: int
+    message: types.Message | None = None
+
+
+vk_default_time_sessions: TTLCache[int, VkDefaultTimeSession] = TTLCache(
+    maxsize=64, ttl=3600
+)
 # waiting for VK source add input
 vk_add_source_sessions: set[int] = set()
 
@@ -17627,7 +17636,43 @@ async def _fetch_vk_sources(db: Database) -> list[tuple[int, int, str, str, str 
     return rows
 
 
-async def handle_vk_list(message: types.Message, db: Database, bot: Bot, edit: types.Message | None = None) -> None:
+VK_SOURCES_PER_PAGE = 10
+VK_STATUS_LABELS: Sequence[tuple[str, str]] = (
+    ("pending", "Pending"),
+    ("skipped", "Skipped"),
+    ("imported", "Imported"),
+    ("rejected", "Rejected"),
+)
+
+
+def _zero_vk_status_counts() -> dict[str, int]:
+    return {key: 0 for key, _ in VK_STATUS_LABELS}
+
+
+async def _fetch_vk_inbox_counts(db: Database) -> dict[int, dict[str, int]]:
+    async with db.raw_conn() as conn:
+        cursor = await conn.execute(
+            "SELECT group_id, status, COUNT(*) FROM vk_inbox GROUP BY group_id, status"
+        )
+        rows = await cursor.fetchall()
+    counts: dict[int, dict[str, int]] = {}
+    for gid, status, amount in rows:
+        bucket = counts.get(gid)
+        if bucket is None:
+            bucket = _zero_vk_status_counts()
+            counts[gid] = bucket
+        if status in bucket:
+            bucket[status] = amount
+    return counts
+
+
+async def handle_vk_list(
+    message: types.Message,
+    db: Database,
+    bot: Bot,
+    edit: types.Message | None = None,
+    page: int = 1,
+) -> None:
     rows = await _fetch_vk_sources(db)
     if not rows:
         if edit:
@@ -17635,24 +17680,78 @@ async def handle_vk_list(message: types.Message, db: Database, bot: Bot, edit: t
         else:
             await bot.send_message(message.chat.id, "Список пуст")
         return
+    total_pages = max(1, (len(rows) + VK_SOURCES_PER_PAGE - 1) // VK_SOURCES_PER_PAGE)
+    page = max(1, min(page, total_pages))
+    start = (page - 1) * VK_SOURCES_PER_PAGE
+    end = start + VK_SOURCES_PER_PAGE
+    page_rows = rows[start:end]
+    inbox_counts = await _fetch_vk_inbox_counts(db)
+    page_items: list[tuple[int, tuple[int, int, str, str, str | None, str | None], dict[str, int]]] = []
+    for offset, row in enumerate(page_rows, start=start + 1):
+        rid, gid, screen, name, loc, dtime = row
+        counts = inbox_counts.get(gid)
+        if counts is None:
+            counts = _zero_vk_status_counts()
+        else:
+            counts = dict(counts)
+        page_items.append((offset, row, counts))
+
+    if page_items:
+        count_widths = {
+            key: max(1, max(len(str(item[2][key])) for item in page_items))
+            for key, _ in VK_STATUS_LABELS
+        }
+    else:
+        count_widths = {key: 1 for key, _ in VK_STATUS_LABELS}
+
     lines: list[str] = []
     buttons: list[list[types.InlineKeyboardButton]] = []
-    for idx, row in enumerate(rows, start=1):
+    for offset, row, counts in page_items:
         rid, gid, screen, name, loc, dtime = row
         info_parts = [f"id={gid}"]
         if loc:
             info_parts.append(loc)
         info = ", ".join(info_parts)
         lines.append(
-            f"{idx}. {name} (vk.com/{screen}) — {info}, типовое время: {dtime or '-'}"
+            f"{offset}. {name} (vk.com/{screen}) — {info}, типовое время: {dtime or '-'}"
         )
+        status_parts = []
+        for key, label in VK_STATUS_LABELS:
+            status_parts.append(
+                f"{label:<8} {counts[key]:>{count_widths[key]}}"
+            )
+        lines.append("    " + " | ".join(status_parts))
         buttons.append(
             [
-                types.InlineKeyboardButton(text=f"❌ {idx}", callback_data=f"vkdel:{rid}"),
-                types.InlineKeyboardButton(text=f"🕒 {idx}", callback_data=f"vkdt:{rid}"),
+                types.InlineKeyboardButton(
+                    text=f"❌ {offset}", callback_data=f"vkdel:{rid}:{page}"
+                ),
+                types.InlineKeyboardButton(
+                    text=f"🕒 {offset}", callback_data=f"vkdt:{rid}:{page}"
+                ),
             ]
         )
     text = "\n".join(lines)
+    if total_pages > 1:
+        nav_row: list[types.InlineKeyboardButton] = []
+        if page > 1:
+            nav_row.append(
+                types.InlineKeyboardButton(
+                    text="◀️", callback_data=f"vksrcpage:{page - 1}"
+                )
+            )
+        nav_row.append(
+            types.InlineKeyboardButton(
+                text=f"{page}/{total_pages}", callback_data=f"vksrcpage:{page}"
+            )
+        )
+        if page < total_pages:
+            nav_row.append(
+                types.InlineKeyboardButton(
+                    text="▶️", callback_data=f"vksrcpage:{page + 1}"
+                )
+            )
+        buttons.append(nav_row)
     markup = types.InlineKeyboardMarkup(inline_keyboard=buttons)
     if edit:
         await edit.edit_text(text, reply_markup=markup)
@@ -17660,9 +17759,26 @@ async def handle_vk_list(message: types.Message, db: Database, bot: Bot, edit: t
         await bot.send_message(message.chat.id, text, reply_markup=markup)
 
 
-async def handle_vk_delete_callback(callback: types.CallbackQuery, db: Database, bot: Bot) -> None:
+async def handle_vk_list_page_callback(
+    callback: types.CallbackQuery, db: Database, bot: Bot
+) -> None:
     try:
-        vid = int(callback.data.split(":", 1)[1])
+        page = int(callback.data.split(":", 1)[1])
+    except Exception:
+        await callback.answer()
+        return
+    await handle_vk_list(callback.message, db, bot, edit=callback.message, page=page)
+    await callback.answer()
+
+
+async def handle_vk_delete_callback(callback: types.CallbackQuery, db: Database, bot: Bot) -> None:
+    page = 1
+    try:
+        _, payload = callback.data.split(":", 1)
+        parts = payload.split(":", 1)
+        vid = int(parts[0])
+        if len(parts) > 1:
+            page = int(parts[1])
     except Exception:
         await callback.answer()
         return
@@ -17670,16 +17786,25 @@ async def handle_vk_delete_callback(callback: types.CallbackQuery, db: Database,
         await conn.execute("DELETE FROM vk_source WHERE id=?", (vid,))
         await conn.commit()
     await callback.answer("Удалено")
-    await handle_vk_list(callback.message, db, bot, edit=callback.message)
+    await handle_vk_list(callback.message, db, bot, edit=callback.message, page=page)
 
 
 async def handle_vk_dtime_callback(callback: types.CallbackQuery, db: Database, bot: Bot) -> None:
+    page = 1
     try:
-        vid = int(callback.data.split(":", 1)[1])
+        _, payload = callback.data.split(":", 1)
+        parts = payload.split(":", 1)
+        vid = int(parts[0])
+        if len(parts) > 1:
+            page = int(parts[1])
     except Exception:
         await callback.answer()
         return
-    vk_default_time_sessions[callback.from_user.id] = vid
+    vk_default_time_sessions[callback.from_user.id] = VkDefaultTimeSession(
+        source_id=vid,
+        page=page,
+        message=callback.message,
+    )
     async with db.raw_conn() as conn:
         cur = await conn.execute(
             "SELECT name, default_time FROM vk_source WHERE id=?", (vid,)
@@ -17696,9 +17821,10 @@ async def handle_vk_dtime_callback(callback: types.CallbackQuery, db: Database, 
 
 
 async def handle_vk_dtime_message(message: types.Message, db: Database, bot: Bot) -> None:
-    vid = vk_default_time_sessions.pop(message.from_user.id, None)
-    if not vid:
+    session = vk_default_time_sessions.pop(message.from_user.id, None)
+    if not session:
         return
+    vid = session.source_id
     text = (message.text or "").strip()
     if text in {"", "-"}:
         new_time: str | None = None
@@ -17723,6 +17849,14 @@ async def handle_vk_dtime_message(message: types.Message, db: Database, bot: Bot
     else:
         msg = f"Типовое время для {name} удалено"
     await bot.send_message(message.chat.id, msg)
+    if session.message:
+        await handle_vk_list(
+            session.message,
+            db,
+            bot,
+            edit=session.message,
+            page=session.page,
+        )
 
 
 async def send_vk_tmp_post(chat_id: int, batch: str, idx: int, total: int, db: Database, bot: Bot) -> None:
@@ -20338,6 +20472,9 @@ def create_app() -> web.Application:
     async def vk_delete_wrapper(callback: types.CallbackQuery):
         await handle_vk_delete_callback(callback, db, bot)
 
+    async def vk_list_page_wrapper(callback: types.CallbackQuery):
+        await handle_vk_list_page_callback(callback, db, bot)
+
     async def vk_dtime_cb_wrapper(callback: types.CallbackQuery):
         await handle_vk_dtime_callback(callback, db, bot)
 
@@ -20569,6 +20706,9 @@ def create_app() -> web.Application:
     )
     dp.message.register(
         vk_dtime_msg_wrapper, lambda m: m.from_user.id in vk_default_time_sessions
+    )
+    dp.callback_query.register(
+        vk_list_page_wrapper, lambda c: c.data.startswith("vksrcpage:")
     )
     dp.callback_query.register(vk_delete_wrapper, lambda c: c.data.startswith("vkdel:"))
     dp.callback_query.register(vk_dtime_cb_wrapper, lambda c: c.data.startswith("vkdt:"))
