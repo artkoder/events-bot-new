@@ -398,6 +398,65 @@ async def test_tourist_note_flow(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_tourist_note_trim_long_text(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    async with db.get_session() as session:
+        session.add(User(user_id=1))
+        event = Event(
+            title="Title",
+            description="",
+            date="2025-09-01",
+            time="10:00",
+            location_name="Loc",
+            source_text="Src",
+        )
+        session.add(event)
+        await session.commit()
+        await session.refresh(event)
+        event_id = event.id
+    async with db.get_session() as session:
+        event = await session.get(Event, event_id)
+        markup = types.InlineKeyboardMarkup(
+            inline_keyboard=append_tourist_block([[types.InlineKeyboardButton(text="Edit", callback_data="edit")]], event, "tg")
+        )
+        text = build_event_card_message("Event added", event, ["title: Title"])
+    message = types.Message.model_validate(
+        {
+            "message_id": 450,
+            "date": 0,
+            "chat": {"id": 45, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": text,
+            "reply_markup": markup.model_dump(),
+        }
+    )
+    cb = make_callback(f"tourist:note:start:{event_id}", message)
+    patch_answer(monkeypatch)
+    bot = DummyBot()
+    await main.process_request(cb, db, bot)
+    long_note = "A" * 600
+    note_message = types.Message.model_validate(
+        {
+            "message_id": 455,
+            "date": 0,
+            "chat": {"id": 45, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": long_note,
+        }
+    )
+    await main.handle_tourist_note_message(note_message, db, bot)
+    async with db.get_session() as session:
+        updated = await session.get(Event, event_id)
+        assert updated.tourist_note == long_note[:500]
+    assert bot.sent_messages
+    assert (
+        bot.sent_messages[-1]["text"]
+        == "Комментарий сохранён (обрезан до 500 символов)."
+    )
+
+
+@pytest.mark.asyncio
 async def test_tourist_note_timeout(tmp_path):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()

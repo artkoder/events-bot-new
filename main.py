@@ -20119,6 +20119,10 @@ async def handle_tourist_note_message(message: types.Message, db: Database, bot:
             await bot.send_message(message.chat.id, "Not authorized")
             return
         note_text = (message.text or "").strip()
+        is_trimmed = False
+        if len(note_text) > 500:
+            note_text = note_text[:500]
+            is_trimmed = True
         event.tourist_note = note_text or None
         event.tourist_label_by = message.from_user.id
         event.tourist_label_at = datetime.now(timezone.utc)
@@ -20134,7 +20138,12 @@ async def handle_tourist_note_message(message: types.Message, db: Database, bot:
             "has_note": bool(event.tourist_note),
         },
     )
-    await bot.send_message(message.chat.id, "Комментарий сохранён.")
+    confirmation_text = (
+        "Комментарий сохранён (обрезан до 500 символов)."
+        if is_trimmed
+        else "Комментарий сохранён."
+    )
+    await bot.send_message(message.chat.id, confirmation_text)
     base_markup = session_state.markup
     new_markup = replace_tourist_block(base_markup, event, session_state.source)
     original_text = session_state.message_text
