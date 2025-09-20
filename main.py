@@ -61,6 +61,33 @@ def logline(tag: str, eid: int | None, msg: str, **kw) -> None:
         (f" | {kv}" if kv else ""),
     )
 
+
+_QUOTE_CHARS = "'\"«»“”„‹›‚‘’`"
+_START_WORDS = ("фестиваль", "международный", "областной", "городской")
+
+
+def normalize_alias(value: str | None) -> str:
+    if not value:
+        return ""
+    normalized = value.casefold().strip()
+    if not normalized:
+        return ""
+    normalized = normalized.translate(str.maketrans("", "", _QUOTE_CHARS))
+    while True:
+        for word in _START_WORDS:
+            if normalized.startswith(word + " "):
+                normalized = normalized[len(word) :].lstrip()
+                break
+            if normalized == word:
+                normalized = ""
+                break
+        else:
+            break
+        if not normalized:
+            break
+    normalized = re.sub(r"\s+", " ", normalized)
+    return normalized.strip()
+
 from datetime import date, datetime, timedelta, timezone, time
 from zoneinfo import ZoneInfo
 from typing import (
@@ -14023,17 +14050,31 @@ async def merge_festivals(
         ):
             _fill(field)
 
-        alias_set: set[str] = set()
-        for alias in list(dst.aliases or []) + list(src.aliases or []):
-            if alias:
-                alias_set.add(alias)
-        alias_set.add(src_name)
-        if src.full_name:
-            alias_set.add(src.full_name)
-        alias_set.discard(dst_name)
+        skip_keys = {normalize_alias(dst_name)}
         if dst.full_name:
-            alias_set.discard(dst.full_name)
-        dst.aliases = sorted(alias_set)
+            dst_full_norm = normalize_alias(dst.full_name)
+            if dst_full_norm:
+                skip_keys.add(dst_full_norm)
+
+        seen_aliases: set[str] = set()
+        merged_aliases: list[str] = []
+
+        def add_alias(raw: str | None) -> None:
+            normalized = normalize_alias(raw)
+            if not normalized or normalized in skip_keys or normalized in seen_aliases:
+                return
+            if len(merged_aliases) >= 8:
+                return
+            seen_aliases.add(normalized)
+            merged_aliases.append(normalized)
+
+        for alias in list(dst.aliases or []) + list(src.aliases or []):
+            add_alias(alias)
+
+        add_alias(src_name)
+        add_alias(src.full_name)
+
+        dst.aliases = merged_aliases
 
         events_res = await session.execute(
             select(Event).where(Event.festival == dst_name)
