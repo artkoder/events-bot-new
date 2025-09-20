@@ -259,6 +259,7 @@ async def test_compose_intro_via_4o_exhibition(monkeypatch):
         source_post_url="https://example.com/post",
         telegraph_url=None,
         telegraph_path=None,
+        event_type="мастер-класс",
     )
 
     captured_payload: dict[str, list] = {}
@@ -311,6 +312,7 @@ async def test_build_exhibitions_digest_preview(monkeypatch):
         source_post_url="https://example.com/exhibit",
         telegraph_url=None,
         telegraph_path=None,
+        event_type="выставка",
     )
 
     captured_payload: dict[str, list] = {}
@@ -527,11 +529,13 @@ def test_aggregate_topics():
         SimpleNamespace(topics=["TECH", "тех"]),
         SimpleNamespace(topics=["MUSIC"]),
         SimpleNamespace(topics=["культура"]),
+        SimpleNamespace(topics=["психология"]),
+        SimpleNamespace(topics=["mental health"]),
     ]
     assert aggregate_digest_topics(events) == [
         "EXHIBITIONS",
+        "PSYCHOLOGY",
         "CONCERTS",
-        "LECTURES",
     ]
 
 

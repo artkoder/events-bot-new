@@ -1,6 +1,6 @@
 # Автотемы для событий
 
-Система автоматически классифицирует события по 17 зафиксированным темам. Метки
+Система автоматически классифицирует события по 18 зафиксированным темам. Метки
 сохраняются в карточке события и выводятся администраторам в интерфейсе бота.
 
 ## Доступные темы
@@ -17,6 +17,7 @@
 | `THEATRE` | «Театр» |
 | `LECTURES` | «Лекции и встречи» |
 | `MASTERCLASS` | «Мастер-классы» |
+| `PSYCHOLOGY` | «Психология» |
 | `SCIENCE_POP` | «Научпоп» |
 | `HANDMADE` | «Хендмейд/маркеты/ярмарки/МК» |
 | `NETWORKING` | «Нетворкинг и карьера» |
@@ -47,6 +48,7 @@
 - THEATRE — «Театр»
 - LECTURES — «Лекции и встречи»
 - MASTERCLASS — «Мастер-классы»
+- PSYCHOLOGY — «Психология»
 - SCIENCE_POP — «Научпоп»
 - HANDMADE — «Хендмейд/маркеты/ярмарки/МК»
 - NETWORKING — «Нетворкинг и карьера»
@@ -72,7 +74,7 @@
         "enum": [
           "STANDUP", "QUIZ_GAMES", "OPEN_AIR", "PARTIES", "CONCERTS",
           "MOVIES", "EXHIBITIONS", "THEATRE", "LECTURES", "MASTERCLASS",
-          "SCIENCE_POP", "HANDMADE", "NETWORKING", "ACTIVE",
+          "PSYCHOLOGY", "SCIENCE_POP", "HANDMADE", "NETWORKING", "ACTIVE",
           "PERSONALITIES", "KIDS_SCHOOL", "FAMILY"
         ]
       },
