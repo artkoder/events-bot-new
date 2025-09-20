@@ -2890,9 +2890,9 @@ async def test_makefest_preview_flow_stores_state(tmp_path: Path, monkeypatch):
                 "existing_candidates": ["Existing"],
             },
             "duplicate": {
-                "fid": existing_id,
-                "name": "Existing",
-                "reason": "Название совпадает",
+                "match": True,
+                "name": "Фестиваль «Existing»",
+                "confidence": 0.87,
             },
         }
 
@@ -2938,21 +2938,25 @@ async def test_makefest_preview_flow_stores_state(tmp_path: Path, monkeypatch):
     assert state["photos"] == ["https://telegra.ph/img.jpg", "https://example.com/photo.jpg"]
     assert state["matches"] == [{"id": existing_id, "name": "Existing"}]
     assert state["duplicate"] == {
-        "fid": existing_id,
-        "name": "Existing",
-        "reason": "Название совпадает",
+        "match": True,
+        "name": "Фестиваль «Existing»",
+        "normalized_name": "existing",
+        "confidence": pytest.approx(0.87),
+        "dup_fid": existing_id,
     }
 
     assert previews
     text, markup = previews[-1]
     assert "Предпросмотр фестиваля" in text
     assert "Возможные совпадения" in text
+    assert "уверенность 87%" in text
     assert markup is not None
     buttons = [btn for row in markup.inline_keyboard for btn in row]
     assert any(btn.callback_data == f"makefest_create:{event.id}" for btn in buttons)
-    assert any(
-        btn.callback_data == f"makefest_bind:{event.id}:{existing_id}" for btn in buttons
+    bind_button = next(
+        btn for btn in buttons if btn.callback_data == f"makefest_bind:{event.id}:{existing_id}"
     )
+    assert "87%" in bind_button.text
     assert any(btn.callback_data == f"makefest_bind:{event.id}" for btn in buttons)
 
 
@@ -2994,7 +2998,7 @@ async def test_makefest_preview_uses_telegraph_path(tmp_path: Path, monkeypatch)
                 "city": "Town",
                 "existing_candidates": [],
             },
-            "duplicate": {"fid": None, "name": None, "reason": None},
+            "duplicate": {"match": False, "name": "", "confidence": 0.0},
         }
 
     async def fake_extract(value):
@@ -3075,7 +3079,13 @@ async def test_makefest_create_links_event(tmp_path: Path, monkeypatch):
         },
         "photos": ["https://example.com/photo.jpg"],
         "matches": [],
-        "duplicate": {"fid": None, "name": None, "reason": None},
+        "duplicate": {
+            "match": False,
+            "name": None,
+            "normalized_name": None,
+            "confidence": None,
+            "dup_fid": None,
+        },
     }
 
     async def fake_schedule(db_obj, event_obj, drain_nav=True):
@@ -3207,7 +3217,13 @@ async def test_makefest_bind_existing_festival(tmp_path: Path, monkeypatch):
         },
         "photos": ["https://example.com/photo.jpg"],
         "matches": [{"id": fest.id, "name": fest.name}],
-        "duplicate": {"fid": fest.id, "name": fest.name, "reason": None},
+        "duplicate": {
+            "match": True,
+            "name": fest.name,
+            "normalized_name": main.normalize_duplicate_name(fest.name),
+            "confidence": 0.9,
+            "dup_fid": fest.id,
+        },
     }
 
     async def fake_schedule(db_obj, event_obj, drain_nav=True):

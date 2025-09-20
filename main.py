@@ -4888,11 +4888,11 @@ FESTIVAL_INFERENCE_RESPONSE_FORMAT = {
                 "duplicate": {
                     "type": ["object", "null"],
                     "properties": {
-                        "festival_id": {"type": ["integer", "string", "null"]},
-                        "name": {"type": ["string", "null"]},
-                        "reason": {"type": ["string", "null"]},
+                        "match": {"type": "boolean"},
+                        "name": {"type": "string"},
+                        "confidence": {"type": "number"},
                     },
-                    "required": ["festival_id", "name"],
+                    "required": ["match", "name", "confidence"],
                     "additionalProperties": False,
                 },
             },
@@ -4901,6 +4901,24 @@ FESTIVAL_INFERENCE_RESPONSE_FORMAT = {
         },
     },
 }
+
+
+def normalize_duplicate_name(value: str | None) -> str | None:
+    """Normalize festival name returned by LLM for duplicate matching."""
+
+    if not value:
+        return None
+    text = value.strip().lower()
+    if not text:
+        return None
+    text = text.replace("\u00ab", " ").replace("\u00bb", " ")
+    text = text.replace("\u201c", " ").replace("\u201d", " ")
+    text = text.replace("\u201e", " ").replace("\u2019", " ")
+    text = text.replace('"', " ").replace("'", " ").replace("`", " ")
+    text = re.sub(r"\bфестиваль\b", " ", text)
+    text = re.sub(r"\bfestival\b", " ", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip() or None
 
 
 async def infer_festival_for_event_via_4o(
@@ -4922,8 +4940,8 @@ async def infer_festival_for_event_via_4o(
         Ответь JSON-объектом с полями:
         - festival: объект с ключами name (обязательное поле), full_name, summary, reason, start_date, end_date, city,
           location_name, location_address, website_url, program_url, ticket_url и existing_candidates (массив до пяти строк).
-        - duplicate: объект или null. Укажи festival_id — идентификатор фестиваля из списка известных фестивалей,
-          name — его название, reason — краткое пояснение. Если подходящих фестивалей нет, верни null.
+        - duplicate: объект или null. Укажи match (bool), name (строка) и confidence (доля от 0 до 1, float), если событие
+          относится к одному из известных фестивалей. Если подходящих фестивалей нет, верни null.
         Используй null, если данных нет. Не добавляй других полей.
         """
     ).strip()
@@ -4950,6 +4968,7 @@ async def infer_festival_for_event_via_4o(
     source = _clip(getattr(event, "source_text", ""), limit=4000)
     if source and source != description:
         parts.append("Original message:\n" + source)
+    normalized_fest_lookup: dict[str, Festival] = {}
     known_payload = [
         {
             "id": fest.id,
@@ -4962,6 +4981,12 @@ async def infer_festival_for_event_via_4o(
         for fest in known_fests
         if getattr(fest, "id", None)
     ]
+    for fest in known_fests:
+        if not getattr(fest, "id", None) or not getattr(fest, "name", None):
+            continue
+        normalized_name = normalize_duplicate_name(fest.name)
+        if normalized_name and normalized_name not in normalized_fest_lookup:
+            normalized_fest_lookup[normalized_name] = fest
     if known_payload:
         catalog = json.dumps(known_payload, ensure_ascii=False)
         parts.append("Известные фестивали (JSON):\n" + catalog)
@@ -5051,27 +5076,37 @@ async def infer_festival_for_event_via_4o(
         festival["end_date"] = event_end
 
     duplicate_raw = data.get("duplicate")
-    duplicate: dict[str, Any] = {"fid": None, "name": None, "reason": None}
+    duplicate: dict[str, Any] = {
+        "match": False,
+        "name": None,
+        "normalized_name": None,
+        "confidence": None,
+        "dup_fid": None,
+    }
     if isinstance(duplicate_raw, dict):
-        raw_id = duplicate_raw.get("festival_id")
-        if raw_id is None:
-            raw_id = duplicate_raw.get("id")
-        if raw_id is None:
-            raw_id = duplicate_raw.get("fid")
-        dup_fid: int | None = None
-        if raw_id not in (None, ""):
+        match_flag = bool(duplicate_raw.get("match"))
+        name = _clean(duplicate_raw.get("name"))
+        confidence_value: float | None = None
+        confidence_raw = duplicate_raw.get("confidence")
+        if isinstance(confidence_raw, (int, float)):
+            confidence_value = float(confidence_raw)
+        elif isinstance(confidence_raw, str):
             try:
-                dup_fid = int(str(raw_id).strip())
+                confidence_value = float(confidence_raw.strip())
             except (TypeError, ValueError):
-                dup_fid = None
-        if dup_fid is not None:
-            valid_ids = {fest.id for fest in known_fests if getattr(fest, "id", None)}
-            if dup_fid not in valid_ids:
-                dup_fid = None
+                confidence_value = None
+        normalized_name = normalize_duplicate_name(name)
+        dup_fid: int | None = None
+        if match_flag and normalized_name:
+            fest_obj = normalized_fest_lookup.get(normalized_name)
+            if fest_obj and getattr(fest_obj, "id", None):
+                dup_fid = fest_obj.id
         duplicate = {
-            "fid": dup_fid,
-            "name": _clean(duplicate_raw.get("name")),
-            "reason": _clean(duplicate_raw.get("reason")),
+            "match": match_flag,
+            "name": name,
+            "normalized_name": normalized_name,
+            "confidence": confidence_value,
+            "dup_fid": dup_fid,
         }
     elif duplicate_raw is not None:
         logging.debug("infer_festival_for_event_via_4o unexpected duplicate block: %s", duplicate_raw)
@@ -5817,9 +5852,55 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
             fest_data["start_date"] = event_start
         if event_end and not fest_data.get("end_date"):
             fest_data["end_date"] = event_end
-        duplicate_info = fest_result.get("duplicate") or {"fid": None, "name": None, "reason": None}
-        if not isinstance(duplicate_info, dict):
-            duplicate_info = {"fid": None, "name": None, "reason": None}
+        duplicate_info_raw = fest_result.get("duplicate")
+        duplicate_info: dict[str, Any] = {
+            "match": False,
+            "name": None,
+            "normalized_name": None,
+            "confidence": None,
+            "dup_fid": None,
+        }
+        if isinstance(duplicate_info_raw, dict):
+            match_flag = bool(duplicate_info_raw.get("match"))
+            name = clean_optional_str(duplicate_info_raw.get("name"))
+            normalized_name_raw = clean_optional_str(duplicate_info_raw.get("normalized_name"))
+            confidence_raw = duplicate_info_raw.get("confidence")
+            confidence_val: float | None = None
+            if isinstance(confidence_raw, (int, float)):
+                confidence_val = float(confidence_raw)
+            elif isinstance(confidence_raw, str):
+                try:
+                    confidence_val = float(confidence_raw.strip())
+                except (TypeError, ValueError):
+                    confidence_val = None
+            dup_fid_raw = duplicate_info_raw.get("dup_fid")
+            dup_fid: int | None = None
+            if dup_fid_raw not in (None, ""):
+                try:
+                    dup_fid = int(dup_fid_raw)
+                except (TypeError, ValueError):
+                    dup_fid = None
+            duplicate_info = {
+                "match": match_flag,
+                "name": name,
+                "normalized_name": normalized_name_raw
+                or normalize_duplicate_name(name),
+                "confidence": confidence_val,
+                "dup_fid": dup_fid,
+            }
+        elif duplicate_info_raw is not None:
+            logging.debug("infer_festival_for_event_via_4o returned non-dict duplicate: %s", duplicate_info_raw)
+
+        if duplicate_info.get("dup_fid") is None and duplicate_info.get("normalized_name"):
+            normalized_target = duplicate_info["normalized_name"]
+            for fest in known_fests:
+                if not getattr(fest, "id", None) or not getattr(fest, "name", None):
+                    continue
+                if normalize_duplicate_name(fest.name) == normalized_target:
+                    duplicate_info["dup_fid"] = fest.id
+                    if not duplicate_info.get("name"):
+                        duplicate_info["name"] = fest.name
+                    break
 
         existing_names: set[str] = set()
         if fest_data.get("name"):
@@ -5829,11 +5910,13 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                 existing_names.add(name.strip().lower())
 
         duplicate_fest: Festival | None = None
-        if duplicate_info.get("fid"):
-            dup_id = duplicate_info["fid"]
+        if duplicate_info.get("dup_fid"):
+            dup_id = duplicate_info["dup_fid"]
             duplicate_fest = next((fest for fest in known_fests if fest.id == dup_id), None)
             if duplicate_fest and not duplicate_info.get("name"):
                 duplicate_info["name"] = duplicate_fest.name
+            if duplicate_fest and not duplicate_info.get("normalized_name"):
+                duplicate_info["normalized_name"] = normalize_duplicate_name(duplicate_fest.name)
 
         matched_fests: list[Festival] = []
         for fest in known_fests:
@@ -5896,10 +5979,18 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
             lines.append(f"Локация: {place_text}")
         if fest_data.get("reason"):
             lines.append("Почему: " + _short(fest_data.get("reason")))
+        def _format_confidence(value: float | None) -> str | None:
+            if value is None:
+                return None
+            if 0 <= value <= 1:
+                return f"{value * 100:.0f}%"
+            return f"{value:.2f}"
+
         if duplicate_info.get("name"):
             dup_line = f"Похоже на: {duplicate_info['name']}"
-            if duplicate_info.get("reason"):
-                dup_line += f" ({_short(duplicate_info['reason'])})"
+            conf_text = _format_confidence(duplicate_info.get("confidence"))
+            if conf_text:
+                dup_line += f" (уверенность {conf_text})"
             lines.append(dup_line)
         if photo_candidates:
             lines.append(f"Фото для альбома: {len(photo_candidates)} шт.")
@@ -5915,13 +6006,16 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                 )
             ]
         ]
-        if duplicate_info.get("fid"):
+        if duplicate_info.get("dup_fid"):
             label = duplicate_info.get("name") or "найденному фестивалю"
+            conf_text = _format_confidence(duplicate_info.get("confidence"))
+            if conf_text:
+                label += f" ({conf_text})"
             buttons.append(
                 [
                     types.InlineKeyboardButton(
                         text=f"Привязать к {label}",
-                        callback_data=f"makefest_bind:{eid}:{duplicate_info['fid']}",
+                        callback_data=f"makefest_bind:{eid}:{duplicate_info['dup_fid']}",
                     )
                 ]
             )
