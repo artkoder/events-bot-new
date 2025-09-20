@@ -92,8 +92,11 @@ Edit this file to tweak how requests are sent to 4o.
 - MOVIES — «Кино»
 - EXHIBITIONS — «Выставки и арт»
 - THEATRE — «Театр»
+- THEATRE_CLASSIC — «Классический театр и драма»
+- THEATRE_MODERN — «Современный и экспериментальный театр»
 - LECTURES — «Лекции и встречи»
 - MASTERCLASS — «Мастер-классы»
+- PSYCHOLOGY — «Психология»
 - SCIENCE_POP — «Научпоп»
 - HANDMADE — «Хендмейд/маркеты/ярмарки/МК»
 - NETWORKING — «Нетворкинг и карьера»
@@ -102,6 +105,7 @@ Edit this file to tweak how requests are sent to 4o.
 - KIDS_SCHOOL — «Дети и школа»
 - FAMILY — «Семейные события»
 Если ни одна тема не подходит, верни пустой массив.
+Для театральных событий выбирай между THEATRE, THEATRE_CLASSIC и THEATRE_MODERN в зависимости от формата описанного спектакля.
 ```
 
 Ответ должен соответствовать JSON-схеме с массивом `topics`, который содержит до
