@@ -2267,6 +2267,93 @@ async def ensure_festival(
         return fest, True, True
 
 
+def _festival_admin_url(fest_id: int | None) -> str | None:
+    """Return admin URL for the festival if environment is configured."""
+
+    if not fest_id:
+        return None
+    template = os.getenv("FEST_ADMIN_URL_TEMPLATE")
+    if template:
+        try:
+            return template.format(id=fest_id)
+        except Exception:
+            logging.exception("failed to format FEST_ADMIN_URL_TEMPLATE", extra={"id": fest_id})
+            return None
+    base = os.getenv("FEST_ADMIN_BASE_URL")
+    if base:
+        return f"{base.rstrip('/')}/{fest_id}"
+    return None
+
+
+def _festival_location_text(fest: Festival) -> str:
+    parts = []
+    if fest.location_name:
+        parts.append(fest.location_name)
+    if fest.location_address:
+        parts.append(fest.location_address)
+    return " — ".join(parts) if parts else "—"
+
+
+def _festival_period_text(fest: Festival) -> str:
+    start = (fest.start_date or "").strip() if fest.start_date else ""
+    end = (fest.end_date or "").strip() if fest.end_date else ""
+    if start and end:
+        if start == end:
+            return start
+        return f"{start} — {end}"
+    return start or end or "—"
+
+
+def _festival_photo_count(fest: Festival) -> int:
+    urls = [u for u in (fest.photo_urls or []) if u]
+    if not urls and fest.photo_url:
+        return 1
+    if fest.photo_url and fest.photo_url not in urls:
+        urls.append(fest.photo_url)
+    return len(urls)
+
+
+def _festival_telegraph_url(fest: Festival) -> str | None:
+    if fest.telegraph_url:
+        return normalize_telegraph_url(fest.telegraph_url)
+    if fest.telegraph_path:
+        return normalize_telegraph_url(f"https://telegra.ph/{fest.telegraph_path.lstrip('/')}")
+    return None
+
+
+async def _build_makefest_response(
+    db: Database, fest: Festival, *, status: str
+) -> tuple[str, types.InlineKeyboardMarkup | None]:
+    telegraph_url = _festival_telegraph_url(fest)
+    lines = [
+        f"Статус: {status}",
+        f"ID: {fest.id if fest.id is not None else '—'}",
+        f"Название: {fest.name}",
+        f"Полное название: {fest.full_name or '—'}",
+        f"Период: {_festival_period_text(fest)}",
+        f"Город: {(fest.city or '—').strip() or '—'}",
+        f"Локация: {_festival_location_text(fest)}",
+        f"Фото: {_festival_photo_count(fest)}",
+        f"Telegraph: {telegraph_url or '—'}",
+        "",
+        "Событие привязано к фестивалю.",
+    ]
+
+    buttons: list[types.InlineKeyboardButton] = []
+    admin_url = _festival_admin_url(fest.id)
+    if admin_url:
+        buttons.append(types.InlineKeyboardButton(text="Админка", url=admin_url))
+    landing_url = await get_setting_value(db, "festivals_index_url") or await get_setting_value(
+        db, "fest_index_url"
+    )
+    if landing_url:
+        buttons.append(types.InlineKeyboardButton(text="Лендинг", url=landing_url))
+    markup = (
+        types.InlineKeyboardMarkup(inline_keyboard=[buttons]) if buttons else None
+    )
+    return "\n".join(lines), markup
+
+
 async def extract_telegra_ph_cover_url(
     page_url: str, *, event_id: str | int | None = None
 ) -> str | None:
@@ -5897,11 +5984,9 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
         await schedule_event_update_tasks(db, event)
         asyncio.create_task(sync_festival_page(db, fest_obj.name))
         asyncio.create_task(sync_festivals_index_page(db))
-        summary_lines = [
-            f"Фестиваль {fest_obj.name} создан." if created else f"Фестиваль {fest_obj.name} обновлён.",
-            "Событие привязано к фестивалю.",
-        ]
-        await callback.message.answer("\n".join(summary_lines))
+        status = "создан" if created else "обновлён"
+        text, markup = await _build_makefest_response(db, fest_obj, status=status)
+        await callback.message.answer(text, reply_markup=markup)
         await show_edit_menu(callback.from_user.id, event, bot)
         await callback.answer("Готово")
     elif data.startswith("makefest_bind:"):
@@ -5950,7 +6035,7 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                 return
         fest_data = state["festival"]
         photos: list[str] = state.get("photos", [])
-        await ensure_festival(
+        fest_obj, _, _ = await ensure_festival(
             db,
             fest.name,
             full_name=clean_optional_str(fest_data.get("full_name")),
@@ -5982,9 +6067,10 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
         await schedule_event_update_tasks(db, event)
         asyncio.create_task(sync_festival_page(db, fest.name))
         asyncio.create_task(sync_festivals_index_page(db))
-        await callback.message.answer(
-            f"Событие привязано к фестивалю {fest.name}.",
+        text, markup = await _build_makefest_response(
+            db, fest_obj, status="привязан к существующему"
         )
+        await callback.message.answer(text, reply_markup=markup)
         await show_edit_menu(callback.from_user.id, event, bot)
         await callback.answer("Готово")
     elif data.startswith("togglefree:"):
