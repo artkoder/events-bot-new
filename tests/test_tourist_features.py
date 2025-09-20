@@ -91,6 +91,7 @@ def test_tourist_block_appended(base_rows, source):
     flat = [btn.callback_data for row in rows for btn in row]
     texts = [btn.text for row in rows for btn in row]
     assert f"tourist:yes:{event.id}" in flat
+    assert f"tourist:fxmenu:{event.id}" in flat
     assert f"tourist:note:start:{event.id}" in flat
     assert "Интересно туристам" in texts
     assert "Причины" in texts
@@ -182,7 +183,7 @@ async def test_tourist_yes_callback_updates_event(tmp_path, monkeypatch):
         assert updated.tourist_label_source == "operator"
     session_state = main.tourist_reason_sessions.get(1)
     assert session_state and session_state.event_id == event_id
-    assert any(call["text"] == "Выберите причины" for call in answers)
+    assert any(call["text"] == "Отмечено" for call in answers)
     assert bot.edited_text_calls
     last_call = bot.edited_text_calls[-1]
     assert "🌍 Туристам: Да" in last_call["text"]
@@ -246,9 +247,10 @@ async def test_tourist_factor_flow(tmp_path, monkeypatch):
     )
     answers = patch_answer(monkeypatch)
     bot = DummyBot()
-    cb_menu = make_callback(f"tourist:fx:menu:{event_id}", message)
+    cb_menu = make_callback(f"tourist:fxmenu:{event_id}", message)
     await main.process_request(cb_menu, db, bot)
     assert main.tourist_reason_sessions
+    assert any(call["text"] == "Выберите причины" for call in answers)
     cb_toggle = make_callback(
         f"tourist:fx:targeted_for_tourists:{event_id}", message
     )
@@ -301,7 +303,7 @@ async def test_tourist_factor_skip(tmp_path, monkeypatch):
     )
     answers = patch_answer(monkeypatch)
     bot = DummyBot()
-    cb_menu = make_callback(f"tourist:fx:menu:{event_id}", message)
+    cb_menu = make_callback(f"tourist:fxmenu:{event_id}", message)
     await main.process_request(cb_menu, db, bot)
     cb_skip = make_callback(f"tourist:fxskip:{event_id}", message)
     await main.process_request(cb_skip, db, bot)
