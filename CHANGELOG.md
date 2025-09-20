@@ -14,6 +14,16 @@
 - Fixed VK review queue issue where `vk_review.pick_next` recalculates `event_ts_hint` and auto-rejects posts whose event date
   disappeared or fell into the past (e.g., a 7 September announcement shown on 19 September).
 
+## [x.y.z] - 2025-09-20
+### Added
+- Добавлена документация по ручной туристической метке: user story и исследовательские заметки в `docs/tourist-label/`.
+
+### Changed
+- README и справочники обновлены описанием кнопок, TTL и команды `/tourist_export` для ручной туристической метки.
+
+### Security
+- Уточнено, что доступ к туристической метке и выгрузкам ограничен неблокированными модераторами и администраторами.
+
 ## v0.1.0 – Deploy + US-02 + /tz
 - Initial Fly.io deployment config.
 - Moderator registration queue with approve/reject.
