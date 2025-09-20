@@ -2874,18 +2874,26 @@ async def test_makefest_preview_flow_stores_state(tmp_path: Path, monkeypatch):
         await session.refresh(existing)
         existing_id = existing.id
 
-    async def fake_infer(ev):
+    async def fake_infer(ev, known):
+        assert any(f.id == existing_id for f in known)
         return {
-            "name": "Existing",
-            "full_name": "Existing Fest",
-            "summary": "A lovely fest",
-            "reason": "because",
-            "start_date": "2025-06-01",
-            "end_date": "2025-06-10",
-            "location_name": "Hall",
-            "location_address": "Street 1",
-            "city": "Town",
-            "existing_candidates": ["Existing"],
+            "festival": {
+                "name": "Existing",
+                "full_name": "Existing Fest",
+                "summary": "A lovely fest",
+                "reason": "because",
+                "start_date": None,
+                "end_date": None,
+                "location_name": "Hall",
+                "location_address": "Street 1",
+                "city": "Town",
+                "existing_candidates": ["Existing"],
+            },
+            "duplicate": {
+                "fid": existing_id,
+                "name": "Existing",
+                "reason": "Название совпадает",
+            },
         }
 
     async def fake_extract(url):
@@ -2925,8 +2933,15 @@ async def test_makefest_preview_flow_stores_state(tmp_path: Path, monkeypatch):
     state = makefest_sessions.get(1)
     assert state and state["event_id"] == event.id
     assert state["festival"]["name"] == "Existing"
+    assert state["festival"]["start_date"] == "2025-07-01"
+    assert state["festival"]["end_date"] == "2025-07-01"
     assert state["photos"] == ["https://telegra.ph/img.jpg", "https://example.com/photo.jpg"]
     assert state["matches"] == [{"id": existing_id, "name": "Existing"}]
+    assert state["duplicate"] == {
+        "fid": existing_id,
+        "name": "Existing",
+        "reason": "Название совпадает",
+    }
 
     assert previews
     text, markup = previews[-1]
@@ -2935,6 +2950,9 @@ async def test_makefest_preview_flow_stores_state(tmp_path: Path, monkeypatch):
     assert markup is not None
     buttons = [btn for row in markup.inline_keyboard for btn in row]
     assert any(btn.callback_data == f"makefest_create:{event.id}" for btn in buttons)
+    assert any(
+        btn.callback_data == f"makefest_bind:{event.id}:{existing_id}" for btn in buttons
+    )
     assert any(btn.callback_data == f"makefest_bind:{event.id}" for btn in buttons)
 
 
@@ -2961,18 +2979,22 @@ async def test_makefest_preview_uses_telegraph_path(tmp_path: Path, monkeypatch)
         await session.commit()
         await session.refresh(event)
 
-    async def fake_infer(ev):
+    async def fake_infer(ev, known):
+        assert known == []
         return {
-            "name": "Suggested",
-            "full_name": "Suggested Fest",
-            "summary": "A lovely fest",
-            "reason": "because",
-            "start_date": "2025-06-01",
-            "end_date": "2025-06-10",
-            "location_name": "Hall",
-            "location_address": "Street 1",
-            "city": "Town",
-            "existing_candidates": [],
+            "festival": {
+                "name": "Suggested",
+                "full_name": "Suggested Fest",
+                "summary": "A lovely fest",
+                "reason": "because",
+                "start_date": "2025-06-01",
+                "end_date": "2025-06-10",
+                "location_name": "Hall",
+                "location_address": "Street 1",
+                "city": "Town",
+                "existing_candidates": [],
+            },
+            "duplicate": {"fid": None, "name": None, "reason": None},
         }
 
     async def fake_extract(value):
@@ -3050,6 +3072,7 @@ async def test_makefest_create_links_event(tmp_path: Path, monkeypatch):
         },
         "photos": ["https://example.com/photo.jpg"],
         "matches": [],
+        "duplicate": {"fid": None, "name": None, "reason": None},
     }
 
     async def fake_schedule(db_obj, event_obj, drain_nav=True):
@@ -3158,6 +3181,7 @@ async def test_makefest_bind_existing_festival(tmp_path: Path, monkeypatch):
         },
         "photos": ["https://example.com/photo.jpg"],
         "matches": [{"id": fest.id, "name": fest.name}],
+        "duplicate": {"fid": fest.id, "name": fest.name, "reason": None},
     }
 
     async def fake_schedule(db_obj, event_obj, drain_nav=True):
