@@ -633,11 +633,11 @@ class TouristFactor:
 TOURIST_FACTORS: list[TouristFactor] = [
     TouristFactor("targeted_for_tourists", "🎯", "Нацелен на туристов"),
     TouristFactor("unique_to_region", "🧭", "Уникально для региона"),
-    TouristFactor("festival_major", "🎪", "Крупный фестиваль или событие"),
-    TouristFactor("nature_or_landmark", "🌊", "Природа или знаковое место"),
-    TouristFactor("photogenic_blogger", "📸", "Фотогенично, понравится блогерам"),
-    TouristFactor("local_flavor_crafts", "🍲", "Местный колорит и ремёсла"),
-    TouristFactor("easy_logistics", "🚆", "Простая логистика"),
+    TouristFactor("festival_major", "🎪", "Фестиваль / масштаб"),
+    TouristFactor("nature_or_landmark", "🌊", "Природа / море / лендмарк / замок"),
+    TouristFactor("photogenic_blogger", "📸", "Фотогенично / есть что постить"),
+    TouristFactor("local_flavor_crafts", "🍲", "Местный колорит / кухня / крафт"),
+    TouristFactor("easy_logistics", "🚆", "Просто добраться"),
 ]
 
 TOURIST_FACTOR_BY_CODE: dict[str, TouristFactor] = {
