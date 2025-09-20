@@ -122,11 +122,20 @@ def test_build_event_card_message_with_factors():
         time="10:00",
         location_name="L",
         source_text="S",
-        tourist_factors=["culture", "food"],
+        tourist_factors=["targeted_for_tourists", "local_cuisine"],
         tourist_label=1,
     )
     text = build_event_card_message("Event added", event, ["title: Title"])
     assert "🧩 2 причин" in text
+
+
+def test_normalize_tourist_factors_handles_legacy_codes():
+    normalized = main._normalize_tourist_factors(["culture", "food", "events"])
+    assert normalized == [
+        "targeted_for_tourists",
+        "unique_to_region",
+        "local_cuisine",
+    ]
 
 
 @pytest.mark.asyncio
@@ -196,7 +205,9 @@ async def test_tourist_yes_callback_updates_event(tmp_path, monkeypatch):
         f"tourist:fx:{factor.code}:{event_id}" for factor in main.TOURIST_FACTORS
     }
     assert expected_callbacks <= {btn.callback_data for btn in factor_buttons}
-    assert any(btn.text.startswith("➕ 🏛️ История и культура") for btn in factor_buttons)
+    assert any(
+        btn.text.startswith("➕ 🎯 Специально для туристов") for btn in factor_buttons
+    )
 
 
 @pytest.mark.asyncio
@@ -238,11 +249,13 @@ async def test_tourist_factor_flow(tmp_path, monkeypatch):
     cb_menu = make_callback(f"tourist:fx:menu:{event_id}", message)
     await main.process_request(cb_menu, db, bot)
     assert main.tourist_reason_sessions
-    cb_toggle = make_callback(f"tourist:fx:culture:{event_id}", message)
+    cb_toggle = make_callback(
+        f"tourist:fx:targeted_for_tourists:{event_id}", message
+    )
     await main.process_request(cb_toggle, db, bot)
     async with db.get_session() as session:
         updated = await session.get(Event, event_id)
-        assert updated.tourist_factors == ["culture"]
+        assert updated.tourist_factors == ["targeted_for_tourists"]
     cb_done = make_callback(f"tourist:fxdone:{event_id}", message)
     await main.process_request(cb_done, db, bot)
     assert not main.tourist_reason_sessions
@@ -330,7 +343,7 @@ async def test_tourist_factor_timeout(tmp_path, monkeypatch):
             "reply_markup": markup.model_dump(),
         }
     )
-    cb = make_callback(f"tourist:fx:history:{event_id}", message)
+    cb = make_callback(f"tourist:fx:targeted_for_tourists:{event_id}", message)
     bot = DummyBot()
 
     patch_answer(monkeypatch)
@@ -575,7 +588,9 @@ async def test_tourist_label_source_always_operator(tmp_path, monkeypatch):
     await main.process_request(cb_yes, db, bot)
     await _assert_source()
 
-    cb_factor = make_callback(f"tourist:fx:culture:{event_id}", message)
+    cb_factor = make_callback(
+        f"tourist:fx:targeted_for_tourists:{event_id}", message
+    )
     await main.process_request(cb_factor, db, bot)
     await _assert_source()
 
