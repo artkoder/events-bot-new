@@ -35,7 +35,7 @@ async def test_persist_event_and_pages_persists_extended_fields(tmp_path, monkey
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
 
-    async def fake_schedule_event_update_tasks(db_, ev, drain_nav=True):
+    async def fake_schedule_event_update_tasks(db_, ev, drain_nav=True, skip_vk_sync=False):
         return {}
 
     monkeypatch.setattr(main, "schedule_event_update_tasks", fake_schedule_event_update_tasks)
@@ -81,7 +81,9 @@ async def test_persist_event_and_pages_classifies_topics(tmp_path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
 
-    async def fake_schedule_event_update_tasks(db_obj, event_obj, drain_nav=True):
+    async def fake_schedule_event_update_tasks(
+        db_obj, event_obj, drain_nav=True, skip_vk_sync=False
+    ):
         return {}
 
     calls = {"topics": 0}
