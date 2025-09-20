@@ -601,6 +601,9 @@ partner_info_sessions: TTLCache[int, int] = TTLCache(maxsize=64, ttl=3600)
 # user_id -> (festival_id, field?) for festival editing
 festival_edit_sessions: TTLCache[int, tuple[int, str | None]] = TTLCache(maxsize=64, ttl=3600)
 
+# user_id -> cached festival inference for makefest flow
+makefest_sessions: TTLCache[int, dict[str, Any]] = TTLCache(maxsize=64, ttl=15 * 60)
+
 # cache for first image in Telegraph pages
 telegraph_first_image: TTLCache[str, str] = TTLCache(maxsize=128, ttl=24 * 3600)
 
@@ -1057,6 +1060,11 @@ HELP_COMMANDS = [
     {
         "usage": "/menu",
         "desc": "Show main menu",
+        "roles": {"user", "superadmin"},
+    },
+    {
+        "usage": "🎪 Сделать фестиваль",
+        "desc": "Кнопка в меню редактирования события предложит создать или привязать фестиваль",
         "roles": {"user", "superadmin"},
     },
     {
@@ -4750,6 +4758,204 @@ async def ask_4o(
     return content
 
 
+FESTIVAL_INFERENCE_RESPONSE_FORMAT = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "FestivalInference",
+        "schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "full_name": {"type": ["string", "null"]},
+                "summary": {"type": ["string", "null"]},
+                "reason": {"type": ["string", "null"]},
+                "start_date": {"type": ["string", "null"]},
+                "end_date": {"type": ["string", "null"]},
+                "city": {"type": ["string", "null"]},
+                "location_name": {"type": ["string", "null"]},
+                "location_address": {"type": ["string", "null"]},
+                "website_url": {"type": ["string", "null"]},
+                "program_url": {"type": ["string", "null"]},
+                "ticket_url": {"type": ["string", "null"]},
+                "existing_candidates": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "maxItems": 5,
+                },
+            },
+            "required": ["name"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
+async def infer_festival_for_event_via_4o(event: Event) -> dict[str, Any]:
+    """Ask 4o to infer festival metadata for *event*."""
+
+    def _clip(text: str | None, limit: int = 2500) -> str:
+        if not text:
+            return ""
+        txt = text.strip()
+        if len(txt) <= limit:
+            return txt
+        return txt[: limit - 3].rstrip() + "..."
+
+    system_prompt = textwrap.dedent(
+        """
+        Ты помогаешь редактору определить фестиваль, к которому относится событие.
+        Ответь JSON-объектом с полями:
+        - name: краткое название фестиваля (обязательное поле).
+        - full_name: полное официальное название выпуска или null.
+        - summary: короткое описание фестиваля (1-2 предложения) или null.
+        - reason: объяснение, почему событие связано с фестивалем, или null.
+        - start_date и end_date: даты фестиваля в формате YYYY-MM-DD или null.
+        - city, location_name, location_address: значения или null.
+        - website_url, program_url, ticket_url: ссылки или null.
+        - existing_candidates: массив до пяти альтернативных названий фестиваля, если есть.
+        Используй null, если данных нет. Не добавляй других полей.
+        """
+    ).strip()
+
+    parts: list[str] = [
+        f"Title: {event.title}",
+        f"Date: {event.date}",
+    ]
+    if getattr(event, "end_date", None):
+        parts.append(f"End date: {event.end_date}")
+    if getattr(event, "time", None):
+        parts.append(f"Time: {event.time}")
+    location_bits = [
+        getattr(event, "location_name", "") or "",
+        getattr(event, "location_address", "") or "",
+        getattr(event, "city", "") or "",
+    ]
+    location_text = ", ".join(bit for bit in location_bits if bit)
+    if location_text:
+        parts.append(f"Location: {location_text}")
+    description = _clip(getattr(event, "description", ""))
+    if description:
+        parts.append("Description:\n" + description)
+    source = _clip(getattr(event, "source_text", ""), limit=4000)
+    if source and source != description:
+        parts.append("Original message:\n" + source)
+    payload = "\n\n".join(parts)
+
+    response = await ask_4o(
+        payload,
+        system_prompt=system_prompt,
+        response_format=FESTIVAL_INFERENCE_RESPONSE_FORMAT,
+        max_tokens=600,
+    )
+    try:
+        data = json.loads(response or "{}")
+    except json.JSONDecodeError:
+        logging.error("infer_festival_for_event_via_4o invalid JSON: %s", response)
+        raise
+    if not isinstance(data, dict):
+        raise ValueError("Unexpected response format from festival inference")
+    existing = data.get("existing_candidates")
+    if not isinstance(existing, list):
+        existing = []
+    else:
+        existing = [str(item).strip() for item in existing if str(item).strip()]
+    data["existing_candidates"] = existing
+    for field in (
+        "name",
+        "full_name",
+        "summary",
+        "reason",
+        "start_date",
+        "end_date",
+        "city",
+        "location_name",
+        "location_address",
+        "website_url",
+        "program_url",
+        "ticket_url",
+    ):
+        value = data.get(field)
+        if isinstance(value, str):
+            cleaned = value.strip()
+            data[field] = cleaned or None
+        elif value is None:
+            data[field] = None
+        else:
+            data[field] = str(value).strip() or None
+    if not data.get("name"):
+        raise ValueError("Festival name missing in inference result")
+    return data
+
+
+def clean_optional_str(value: Any) -> str | None:
+    """Return stripped string or ``None`` for empty values."""
+
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+async def extract_telegraph_image_urls(page_url: str) -> list[str]:
+    """Return ordered list of image URLs found on a Telegraph page."""
+
+    def normalize(src: str | None) -> str | None:
+        if not src:
+            return None
+        val = src.split("#", 1)[0].split("?", 1)[0]
+        if val.startswith("/file/"):
+            return f"https://telegra.ph{val}"
+        parsed_src = urlparse(val)
+        if parsed_src.scheme != "https":
+            return None
+        lower = parsed_src.path.lower()
+        if any(lower.endswith(ext) for ext in [".jpg", ".jpeg", ".png", ".webp", ".gif"]):
+            return val
+        return None
+
+    url = page_url.split("#", 1)[0].split("?", 1)[0]
+    parsed = urlparse(url)
+    host = parsed.netloc.lower()
+    if host not in {"telegra.ph", "te.legra.ph"}:
+        return []
+    path = parsed.path.lstrip("/")
+    if not path:
+        return []
+    api_url = f"https://api.telegra.ph/getPage/{path}?return_content=true"
+    timeout = httpx.Timeout(HTTP_TIMEOUT)
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.get(api_url)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        logging.warning("telegraph image fetch failed: %s", exc)
+        return []
+    content = data.get("result", {}).get("content") or []
+    results: list[str] = []
+
+    async def dfs(nodes: list[Any]) -> None:
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            tag = node.get("tag")
+            attrs = node.get("attrs") or {}
+            if tag == "img":
+                normalized = normalize(attrs.get("src"))
+                if normalized and normalized not in results:
+                    results.append(normalized)
+            if tag == "a":
+                normalized = normalize(attrs.get("href"))
+                if normalized and normalized not in results:
+                    results.append(normalized)
+            children = node.get("children") or []
+            if children:
+                await dfs(children)
+
+    await dfs(content)
+    return results
+
+
 _EVENT_TOPIC_LISTING = "\n".join(
     f"- {topic} — «{label}»" for topic, label in TOPIC_LABELS.items()
 )
@@ -5348,6 +5554,274 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
             del editing_sessions[callback.from_user.id]
         await callback.message.answer("Editing finished")
         await callback.answer()
+    elif data.startswith("makefest:"):
+        parts = data.split(":")
+        if len(parts) < 2:
+            await callback.answer("Некорректный запрос", show_alert=True)
+            return
+        eid = int(parts[1])
+        async with db.get_session() as session:
+            user = await session.get(User, callback.from_user.id)
+            event = await session.get(Event, eid)
+        if not event:
+            await callback.answer("Событие не найдено", show_alert=True)
+            return
+        if event.festival:
+            await callback.answer("У события уже есть фестиваль", show_alert=True)
+            return
+        if user and (user.blocked or (user.is_partner and event.creator_id != user.user_id)):
+            await callback.answer("Not authorized", show_alert=True)
+            return
+        try:
+            fest_data = await infer_festival_for_event_via_4o(event)
+        except Exception as exc:  # pragma: no cover - network / LLM failures
+            logging.exception("makefest inference failed for %s: %s", eid, exc)
+            await callback.message.answer(
+                "Не удалось получить подсказку от модели. Попробуйте позже."
+            )
+            await callback.answer()
+            return
+        telegraph_images: list[str] = []
+        if event.telegraph_url:
+            telegraph_images = await extract_telegraph_image_urls(event.telegraph_url)
+        photo_candidates: list[str] = []
+        for url in telegraph_images + (event.photo_urls or []):
+            if url and url not in photo_candidates:
+                photo_candidates.append(url)
+        existing_names = {fest_data["name"].lower()}
+        existing_names.update(
+            name.lower()
+            for name in fest_data.get("existing_candidates", [])
+            if isinstance(name, str)
+        )
+        matches: list[tuple[Festival, float]] = []
+        async with db.get_session() as session:
+            res = await session.execute(select(Festival))
+            all_fests = res.scalars().all()
+        base = fest_data["name"].lower()
+        for fest in all_fests:
+            ratio = 0.0
+            if base:
+                ratio = SequenceMatcher(None, base, fest.name.lower()).ratio()
+            if fest.name.lower() in existing_names or ratio >= 0.6:
+                matches.append((fest, ratio))
+        matches.sort(key=lambda item: item[1], reverse=True)
+        top_matches = [m[0] for m in matches[:5]]
+        makefest_sessions[callback.from_user.id] = {
+            "event_id": eid,
+            "festival": fest_data,
+            "photos": photo_candidates,
+            "matches": [
+                {"id": fest.id, "name": fest.name} for fest in top_matches if fest.id
+            ],
+        }
+
+        def _short(text: str | None, limit: int = 400) -> str:
+            if not text:
+                return ""
+            txt = text.strip()
+            if len(txt) <= limit:
+                return txt
+            return txt[: limit - 3].rstrip() + "..."
+
+        lines = ["\U0001f3aa Предпросмотр фестиваля", f"Событие: {event.title}"]
+        if event.date:
+            lines.append(f"Дата события: {event.date}")
+        lines.append(f"Название: {fest_data['name']}")
+        if fest_data.get("full_name"):
+            lines.append(f"Полное название: {fest_data['full_name']}")
+        if fest_data.get("summary"):
+            lines.append(_short(fest_data.get("summary")))
+        period_bits = [bit for bit in [fest_data.get("start_date"), fest_data.get("end_date")] if bit]
+        if period_bits:
+            if len(period_bits) == 2 and period_bits[0] != period_bits[1]:
+                lines.append(f"Период: {period_bits[0]} — {period_bits[1]}")
+            else:
+                lines.append(f"Дата фестиваля: {period_bits[0]}")
+        place_bits = [
+            fest_data.get("location_name"),
+            fest_data.get("location_address"),
+            fest_data.get("city"),
+        ]
+        place_text = ", ".join(bit for bit in place_bits if bit)
+        if place_text:
+            lines.append(f"Локация: {place_text}")
+        if fest_data.get("reason"):
+            lines.append("Почему: " + _short(fest_data.get("reason")))
+        if photo_candidates:
+            lines.append(f"Фото для альбома: {len(photo_candidates)} шт.")
+        if top_matches:
+            lines.append("Возможные совпадения:")
+            for fest in top_matches:
+                lines.append(f" • {fest.name}")
+        lines.append("\nВыберите действие ниже.")
+        buttons = [
+            [
+                types.InlineKeyboardButton(
+                    text="Создать фестиваль", callback_data=f"makefest_create:{eid}"
+                )
+            ]
+        ]
+        if top_matches:
+            buttons.append(
+                [
+                    types.InlineKeyboardButton(
+                        text="Привязать к существующему",
+                        callback_data=f"makefest_bind:{eid}",
+                    )
+                ]
+            )
+        buttons.append(
+            [types.InlineKeyboardButton(text="Отмена", callback_data=f"edit:{eid}")]
+        )
+        markup = types.InlineKeyboardMarkup(inline_keyboard=buttons)
+        await callback.message.answer("\n".join(lines), reply_markup=markup)
+        await callback.answer()
+    elif data.startswith("makefest_create:"):
+        parts = data.split(":")
+        if len(parts) < 2:
+            await callback.answer("Некорректный запрос", show_alert=True)
+            return
+        eid = int(parts[1])
+        state = makefest_sessions.get(callback.from_user.id)
+        if not state or state.get("event_id") != eid:
+            await callback.answer("Предпросмотр не найден", show_alert=True)
+            return
+        async with db.get_session() as session:
+            user = await session.get(User, callback.from_user.id)
+            event = await session.get(Event, eid)
+            if not event or (
+                user
+                and (user.blocked or (user.is_partner and event.creator_id != user.user_id))
+            ):
+                await callback.answer("Not authorized", show_alert=True)
+                return
+        fest_data = state["festival"]
+        photos: list[str] = state.get("photos", [])
+
+        fest_obj, created, _ = await ensure_festival(
+            db,
+            fest_data["name"],
+            full_name=clean_optional_str(fest_data.get("full_name")),
+            photo_url=photos[0] if photos else None,
+            photo_urls=photos,
+            website_url=clean_optional_str(fest_data.get("website_url")),
+            program_url=clean_optional_str(fest_data.get("program_url")),
+            ticket_url=clean_optional_str(fest_data.get("ticket_url")),
+            start_date=clean_optional_str(fest_data.get("start_date")),
+            end_date=clean_optional_str(fest_data.get("end_date")),
+            location_name=clean_optional_str(fest_data.get("location_name")),
+            location_address=clean_optional_str(fest_data.get("location_address")),
+            city=clean_optional_str(fest_data.get("city")),
+            source_text=event.source_text,
+            source_post_url=event.source_post_url,
+            source_chat_id=event.source_chat_id,
+            source_message_id=event.source_message_id,
+        )
+        async with db.get_session() as session:
+            event = await session.get(Event, eid)
+            if not event:
+                await callback.answer("Событие не найдено", show_alert=True)
+                return
+            event.festival = fest_obj.name
+            session.add(event)
+            await session.commit()
+        makefest_sessions.pop(callback.from_user.id, None)
+        await schedule_event_update_tasks(db, event)
+        asyncio.create_task(sync_festival_page(db, fest_obj.name))
+        asyncio.create_task(sync_festivals_index_page(db))
+        asyncio.create_task(sync_festival_vk_post(db, fest_obj.name, bot))
+        summary_lines = [
+            f"Фестиваль {fest_obj.name} создан." if created else f"Фестиваль {fest_obj.name} обновлён.",
+            "Событие привязано к фестивалю.",
+        ]
+        await callback.message.answer("\n".join(summary_lines))
+        await show_edit_menu(callback.from_user.id, event, bot)
+        await callback.answer("Готово")
+    elif data.startswith("makefest_bind:"):
+        parts = data.split(":")
+        if len(parts) < 2:
+            await callback.answer("Некорректный запрос", show_alert=True)
+            return
+        eid = int(parts[1])
+        state = makefest_sessions.get(callback.from_user.id)
+        if not state or state.get("event_id") != eid:
+            await callback.answer("Предпросмотр не найден", show_alert=True)
+            return
+        if len(parts) == 2:
+            matches = state.get("matches", [])
+            if not matches:
+                await callback.answer("Подходящих фестивалей не нашли", show_alert=True)
+                return
+            keyboard = [
+                [
+                    types.InlineKeyboardButton(
+                        text=match["name"],
+                        callback_data=f"makefest_bind:{eid}:{match['id']}",
+                    )
+                ]
+                for match in matches
+            ]
+            keyboard.append(
+                [types.InlineKeyboardButton(text="Отмена", callback_data=f"edit:{eid}")]
+            )
+            await callback.message.answer(
+                "Выберите фестиваль для привязки",
+                reply_markup=types.InlineKeyboardMarkup(inline_keyboard=keyboard),
+            )
+            await callback.answer()
+            return
+        fest_id = int(parts[2])
+        async with db.get_session() as session:
+            user = await session.get(User, callback.from_user.id)
+            event = await session.get(Event, eid)
+            fest = await session.get(Festival, fest_id)
+            if not event or not fest or (
+                user
+                and (user.blocked or (user.is_partner and event.creator_id != user.user_id))
+            ):
+                await callback.answer("Not authorized", show_alert=True)
+                return
+        fest_data = state["festival"]
+        photos: list[str] = state.get("photos", [])
+        await ensure_festival(
+            db,
+            fest.name,
+            full_name=clean_optional_str(fest_data.get("full_name")),
+            photo_url=photos[0] if photos else None,
+            photo_urls=photos,
+            website_url=clean_optional_str(fest_data.get("website_url")),
+            program_url=clean_optional_str(fest_data.get("program_url")),
+            ticket_url=clean_optional_str(fest_data.get("ticket_url")),
+            start_date=clean_optional_str(fest_data.get("start_date")),
+            end_date=clean_optional_str(fest_data.get("end_date")),
+            location_name=clean_optional_str(fest_data.get("location_name")),
+            location_address=clean_optional_str(fest_data.get("location_address")),
+            city=clean_optional_str(fest_data.get("city")),
+            source_text=event.source_text,
+            source_post_url=event.source_post_url,
+            source_chat_id=event.source_chat_id,
+            source_message_id=event.source_message_id,
+        )
+        async with db.get_session() as session:
+            event = await session.get(Event, eid)
+            fest = await session.get(Festival, fest_id)
+            if not event or not fest:
+                await callback.answer("Not authorized", show_alert=True)
+                return
+            event.festival = fest.name
+            session.add(event)
+            await session.commit()
+        makefest_sessions.pop(callback.from_user.id, None)
+        await schedule_event_update_tasks(db, event)
+        asyncio.create_task(sync_festival_page(db, fest.name))
+        asyncio.create_task(sync_festivals_index_page(db))
+        asyncio.create_task(sync_festival_vk_post(db, fest.name, bot))
+        await callback.message.answer(
+            f"Событие привязано к фестивалю {fest.name}.",
+        )
+        await show_edit_menu(callback.from_user.id, event, bot)
+        await callback.answer("Готово")
     elif data.startswith("togglefree:"):
         eid = int(data.split(":")[1])
         async with db.get_session() as session:
@@ -14840,6 +15314,15 @@ async def show_edit_menu(
                 )
             ]
         )
+    if event.id and not event.festival:
+        keyboard.append(
+            [
+                types.InlineKeyboardButton(
+                    text="\U0001f3aa Сделать фестиваль",
+                    callback_data=f"makefest:{event.id}",
+                )
+            ]
+        )
     keyboard.append(
         [types.InlineKeyboardButton(text="Done", callback_data=f"editdone:{event.id}")]
     )
@@ -19663,6 +20146,9 @@ def create_app() -> web.Application:
         or c.data.startswith("edit:")
         or c.data.startswith("editfield:")
         or c.data.startswith("editdone:")
+        or c.data.startswith("makefest:")
+        or c.data.startswith("makefest_create:")
+        or c.data.startswith("makefest_bind:")
         or c.data.startswith("unset:")
         or c.data.startswith("assetunset:")
         or c.data.startswith("set:")

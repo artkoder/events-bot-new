@@ -54,10 +54,12 @@ from main import (
     telegraph_test,
     get_telegraph_token,
     editing_sessions,
+    makefest_sessions,
     festival_edit_sessions,
     festival_dates,
     send_festival_poll,
     notify_inactive_partners,
+    show_edit_menu,
 )
 from poster_media import PosterMedia, process_media
 from models import EventPoster, PosterOcrCache
@@ -2846,6 +2848,309 @@ async def test_forward_add_festival(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_makefest_preview_flow_stores_state(tmp_path: Path, monkeypatch):
+    makefest_sessions.clear()
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async with db.get_session() as session:
+        user = User(user_id=1, is_superadmin=True)
+        event = Event(
+            title="Concert",
+            description="",
+            festival=None,
+            date="2025-07-01",
+            time="19:00",
+            location_name="Hall",
+            source_text="text",
+        )
+        event.photo_urls = ["https://example.com/photo.jpg"]
+        event.telegraph_url = "https://telegra.ph/sample"
+        existing = Festival(name="Existing")
+        session.add_all([user, event, existing])
+        await session.commit()
+        await session.refresh(event)
+        await session.refresh(existing)
+        existing_id = existing.id
+
+    async def fake_infer(ev):
+        return {
+            "name": "Existing",
+            "full_name": "Existing Fest",
+            "summary": "A lovely fest",
+            "reason": "because",
+            "start_date": "2025-06-01",
+            "end_date": "2025-06-10",
+            "location_name": "Hall",
+            "location_address": "Street 1",
+            "city": "Town",
+            "existing_candidates": ["Existing"],
+        }
+
+    async def fake_extract(url):
+        return ["https://telegra.ph/img.jpg"]
+
+    monkeypatch.setattr(main, "infer_festival_for_event_via_4o", fake_infer)
+    monkeypatch.setattr(main, "extract_telegraph_image_urls", fake_extract)
+
+    cb = types.CallbackQuery.model_validate(
+        {
+            "id": "cf1",
+            "from": {"id": 1, "is_bot": False, "first_name": "S"},
+            "chat_instance": "1",
+            "data": f"makefest:{event.id}",
+            "message": {
+                "message_id": 10,
+                "date": 0,
+                "chat": {"id": 1, "type": "private"},
+            },
+        }
+    ).as_(bot)
+
+    previews: list[tuple[str, types.InlineKeyboardMarkup | None]] = []
+
+    async def cb_answer(text=None, **kwargs):
+        return None
+
+    async def msg_answer(text, reply_markup=None, **kwargs):
+        previews.append((text, reply_markup))
+        return DummyMessage(101)
+
+    object.__setattr__(cb, "answer", cb_answer)
+    object.__setattr__(cb.message, "answer", msg_answer)
+
+    await process_request(cb, db, bot)
+
+    state = makefest_sessions.get(1)
+    assert state and state["event_id"] == event.id
+    assert state["festival"]["name"] == "Existing"
+    assert state["photos"] == ["https://telegra.ph/img.jpg", "https://example.com/photo.jpg"]
+    assert state["matches"] == [{"id": existing_id, "name": "Existing"}]
+
+    assert previews
+    text, markup = previews[-1]
+    assert "Предпросмотр фестиваля" in text
+    assert "Возможные совпадения" in text
+    assert markup is not None
+    buttons = [btn for row in markup.inline_keyboard for btn in row]
+    assert any(btn.callback_data == f"makefest_create:{event.id}" for btn in buttons)
+    assert any(btn.callback_data == f"makefest_bind:{event.id}" for btn in buttons)
+
+
+@pytest.mark.asyncio
+async def test_makefest_create_links_event(tmp_path: Path, monkeypatch):
+    makefest_sessions.clear()
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async with db.get_session() as session:
+        user = User(user_id=1, is_superadmin=True)
+        event = Event(
+            title="Concert",
+            description="",
+            festival=None,
+            date="2025-07-01",
+            time="19:00",
+            location_name="Hall",
+            source_text="text",
+        )
+        session.add_all([user, event])
+        await session.commit()
+        await session.refresh(event)
+
+    makefest_sessions[1] = {
+        "event_id": event.id,
+        "festival": {
+            "name": "New Fest",
+            "full_name": "New Festival",
+            "summary": "",
+            "reason": "",
+            "start_date": "2025-06-01",
+            "end_date": "2025-06-10",
+            "location_name": "Hall",
+            "location_address": "Street 1",
+            "city": "Town",
+        },
+        "photos": ["https://example.com/photo.jpg"],
+        "matches": [],
+    }
+
+    async def fake_schedule(db_obj, event_obj, drain_nav=True):
+        fake_schedule.called = getattr(fake_schedule, "called", []) + [event_obj.id]
+
+    async def fake_rebuild(*args, **kwargs):
+        return False
+
+    async def fake_sync_page(db_obj, name, **kwargs):
+        fake_sync_page.called = getattr(fake_sync_page, "called", []) + [name]
+
+    async def fake_sync_index(db_obj):
+        fake_sync_index.called = getattr(fake_sync_index, "called", []) + [True]
+
+    async def fake_sync_vk(db_obj, name, bot_obj, **kwargs):
+        fake_sync_vk.called = getattr(fake_sync_vk, "called", []) + [name]
+
+    monkeypatch.setattr(main, "schedule_event_update_tasks", fake_schedule)
+    monkeypatch.setattr(main, "rebuild_fest_nav_if_changed", fake_rebuild)
+    monkeypatch.setattr(main, "sync_festival_page", fake_sync_page)
+    monkeypatch.setattr(main, "sync_festivals_index_page", fake_sync_index)
+    monkeypatch.setattr(main, "sync_festival_vk_post", fake_sync_vk)
+
+    cb = types.CallbackQuery.model_validate(
+        {
+            "id": "cf2",
+            "from": {"id": 1, "is_bot": False, "first_name": "S"},
+            "chat_instance": "1",
+            "data": f"makefest_create:{event.id}",
+            "message": {
+                "message_id": 11,
+                "date": 0,
+                "chat": {"id": 1, "type": "private"},
+            },
+        }
+    ).as_(bot)
+
+    responses: list[str] = []
+
+    async def cb_answer(text=None, **kwargs):
+        return None
+
+    async def msg_answer(text, **kwargs):
+        responses.append(text)
+        return DummyMessage(102)
+
+    object.__setattr__(cb, "answer", cb_answer)
+    object.__setattr__(cb.message, "answer", msg_answer)
+
+    await process_request(cb, db, bot)
+    await asyncio.sleep(0)
+
+    assert getattr(fake_schedule, "called", []) == [event.id]
+    assert getattr(fake_sync_page, "called", []) == ["New Fest"]
+    assert getattr(fake_sync_index, "called", []) == [True]
+    assert getattr(fake_sync_vk, "called", []) == ["New Fest"]
+    assert responses
+
+    async with db.get_session() as session:
+        fest = (
+            await session.execute(select(Festival).where(Festival.name == "New Fest"))
+        ).scalar_one()
+        updated_event = await session.get(Event, event.id)
+
+    assert updated_event and updated_event.festival == "New Fest"
+    assert fest.photo_url == "https://example.com/photo.jpg"
+    assert makefest_sessions.get(1) is None
+
+
+@pytest.mark.asyncio
+async def test_makefest_bind_existing_festival(tmp_path: Path, monkeypatch):
+    makefest_sessions.clear()
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async with db.get_session() as session:
+        user = User(user_id=1, is_superadmin=True)
+        fest = Festival(name="Existing", full_name="Old")
+        event = Event(
+            title="Concert",
+            description="",
+            festival=None,
+            date="2025-07-01",
+            time="19:00",
+            location_name="Hall",
+            source_text="text",
+        )
+        session.add_all([user, fest, event])
+        await session.commit()
+        await session.refresh(event)
+        await session.refresh(fest)
+
+    makefest_sessions[1] = {
+        "event_id": event.id,
+        "festival": {
+            "name": "Existing",
+            "full_name": "Existing Updated",
+            "summary": "",
+            "reason": "",
+            "start_date": "2025-06-01",
+            "end_date": "2025-06-10",
+            "location_name": "Hall",
+            "location_address": "Street 1",
+            "city": "Town",
+        },
+        "photos": ["https://example.com/photo.jpg"],
+        "matches": [{"id": fest.id, "name": fest.name}],
+    }
+
+    async def fake_schedule(db_obj, event_obj, drain_nav=True):
+        fake_schedule.called = getattr(fake_schedule, "called", []) + [event_obj.id]
+
+    async def fake_rebuild(*args, **kwargs):
+        return False
+
+    async def fake_sync_page(db_obj, name, **kwargs):
+        fake_sync_page.called = getattr(fake_sync_page, "called", []) + [name]
+
+    async def fake_sync_index(db_obj):
+        fake_sync_index.called = getattr(fake_sync_index, "called", []) + [True]
+
+    async def fake_sync_vk(db_obj, name, bot_obj, **kwargs):
+        fake_sync_vk.called = getattr(fake_sync_vk, "called", []) + [name]
+
+    monkeypatch.setattr(main, "schedule_event_update_tasks", fake_schedule)
+    monkeypatch.setattr(main, "rebuild_fest_nav_if_changed", fake_rebuild)
+    monkeypatch.setattr(main, "sync_festival_page", fake_sync_page)
+    monkeypatch.setattr(main, "sync_festivals_index_page", fake_sync_index)
+    monkeypatch.setattr(main, "sync_festival_vk_post", fake_sync_vk)
+
+    cb = types.CallbackQuery.model_validate(
+        {
+            "id": "cf3",
+            "from": {"id": 1, "is_bot": False, "first_name": "S"},
+            "chat_instance": "1",
+            "data": f"makefest_bind:{event.id}:{fest.id}",
+            "message": {
+                "message_id": 12,
+                "date": 0,
+                "chat": {"id": 1, "type": "private"},
+            },
+        }
+    ).as_(bot)
+
+    responses: list[str] = []
+
+    async def cb_answer(text=None, **kwargs):
+        return None
+
+    async def msg_answer(text, **kwargs):
+        responses.append(text)
+        return DummyMessage(103)
+
+    object.__setattr__(cb, "answer", cb_answer)
+    object.__setattr__(cb.message, "answer", msg_answer)
+
+    await process_request(cb, db, bot)
+    await asyncio.sleep(0)
+
+    assert getattr(fake_schedule, "called", []) == [event.id]
+    assert getattr(fake_sync_page, "called", []) == ["Existing"]
+    assert getattr(fake_sync_index, "called", []) == [True]
+    assert getattr(fake_sync_vk, "called", []) == ["Existing"]
+    assert responses
+
+    async with db.get_session() as session:
+        updated_event = await session.get(Event, event.id)
+        updated_fest = await session.get(Festival, fest.id)
+
+    assert updated_event and updated_event.festival == "Existing"
+    assert updated_fest and updated_fest.full_name == "Existing Updated"
+    assert makefest_sessions.get(1) is None
+
+
+@pytest.mark.asyncio
 async def test_forward_unregistered(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
@@ -3256,6 +3561,50 @@ async def test_add_event_raw_has_edit_button(tmp_path: Path, monkeypatch):
     callbacks = [button.callback_data for button in second_row]
     assert "Редактировать" in texts
     assert f"edit:{event.id}" in callbacks
+
+
+@pytest.mark.asyncio
+async def test_show_edit_menu_adds_makefest_button():
+    bot = DummyBot("123:abc")
+    event = Event(
+        id=42,
+        title="Show",
+        description="",
+        festival=None,
+        date="2025-05-01",
+        time="18:00",
+        location_name="Hall",
+        source_text="src",
+    )
+
+    await show_edit_menu(1, event, bot, db_obj=None)
+
+    assert bot.messages
+    markup = bot.messages[-1][2]["reply_markup"]
+    assert markup is not None
+    buttons = [btn for row in markup.inline_keyboard for btn in row]
+    assert any(btn.callback_data == "makefest:42" for btn in buttons)
+
+
+@pytest.mark.asyncio
+async def test_show_edit_menu_skips_makefest_for_linked_event():
+    bot = DummyBot("123:abc")
+    event = Event(
+        id=43,
+        title="Show",
+        description="",
+        festival="Jazz",
+        date="2025-05-01",
+        time="18:00",
+        location_name="Hall",
+        source_text="src",
+    )
+
+    await show_edit_menu(1, event, bot, db_obj=None)
+
+    markup = bot.messages[-1][2]["reply_markup"]
+    buttons = [btn for row in markup.inline_keyboard for btn in row]
+    assert all(btn.callback_data != "makefest:43" for btn in buttons)
 
 
 @pytest.mark.asyncio
