@@ -153,3 +153,123 @@ async def test_merge_festivals_limits_aliases(tmp_path, monkeypatch):
         assert len(normalized_aliases) == len(set(normalized_aliases)) <= 8
 
     await db.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_merge_festivals_updates_description_on_success(tmp_path, monkeypatch):
+    db_path = tmp_path / "db.sqlite"
+    db = Database(str(db_path))
+    await db.init()
+
+    generated_text = "Короткое описание. Второе предложение."
+
+    async def fake_ask(prompt):
+        return generated_text
+
+    async def noop(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(main, "ask_4o", fake_ask)
+    monkeypatch.setattr(main, "sync_festival_page", noop)
+    monkeypatch.setattr(main, "rebuild_fest_nav_if_changed", noop)
+    monkeypatch.setattr(main, "sync_festival_vk_post", noop)
+
+    async with db.get_session() as session:
+        dst = Festival(
+            name="MainFest",
+            description="Старое описание",
+            city="Казань",
+        )
+        src = Festival(name="SrcFest")
+        session.add_all([dst, src])
+        await session.flush()
+        dst_id = dst.id
+        src_id = src.id
+
+        session.add_all(
+            [
+                Event(
+                    title="Открытие",
+                    description="",
+                    festival=src.name,
+                    date="2025-07-01",
+                    time="10:00",
+                    location_name="Театр",
+                    city="Казань",
+                    source_text="",
+                ),
+                Event(
+                    title="Лекция",
+                    description="",
+                    festival=src.name,
+                    date="2025-07-02",
+                    time="12:00",
+                    location_name="Музей",
+                    city="Казань",
+                    source_text="",
+                ),
+            ]
+        )
+        await session.commit()
+
+    await merge_festivals(db, src_id, dst_id, bot=None)
+
+    async with db.get_session() as session:
+        dst_fest = await session.get(Festival, dst_id)
+        assert dst_fest is not None
+        assert dst_fest.description == generated_text
+
+    await db.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_merge_festivals_keeps_description_on_failure(tmp_path, monkeypatch):
+    db_path = tmp_path / "db.sqlite"
+    db = Database(str(db_path))
+    await db.init()
+
+    async def fake_ask(prompt):
+        return "Слишком длинный текст " * 40
+
+    async def noop(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(main, "ask_4o", fake_ask)
+    monkeypatch.setattr(main, "sync_festival_page", noop)
+    monkeypatch.setattr(main, "rebuild_fest_nav_if_changed", noop)
+    monkeypatch.setattr(main, "sync_festival_vk_post", noop)
+
+    async with db.get_session() as session:
+        dst = Festival(
+            name="MainFest",
+            description="Актуальное описание",
+            city="Казань",
+        )
+        src = Festival(name="SrcFest")
+        session.add_all([dst, src])
+        await session.flush()
+        dst_id = dst.id
+        src_id = src.id
+
+        session.add(
+            Event(
+                title="Открытие",
+                description="",
+                festival=src.name,
+                date="2025-07-01",
+                time="10:00",
+                location_name="Театр",
+                city="Казань",
+                source_text="",
+            )
+        )
+        await session.commit()
+
+    await merge_festivals(db, src_id, dst_id, bot=None)
+
+    async with db.get_session() as session:
+        dst_fest = await session.get(Festival, dst_id)
+        assert dst_fest is not None
+        assert dst_fest.description == "Актуальное описание"
+
+    await db.engine.dispose()

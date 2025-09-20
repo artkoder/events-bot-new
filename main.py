@@ -14,6 +14,7 @@ import time as unixtime
 import time as _time
 import tempfile
 import calendar
+from collections import Counter
 
 
 class DeduplicateFilter(logging.Filter):
@@ -13982,55 +13983,192 @@ async def sync_vk_week_post(db: Database, start: str, bot: Bot | None = None) ->
                 logging.info("sync_vk_week_post created %s", url)
 
 
-async def generate_festival_description(fest: Festival, events: list[Event]) -> str:
+MAX_FEST_DESCRIPTION_LENGTH = 350
+_EMOJI_RE = re.compile("[\U0001F300-\U0001FAFF\u2600-\u27BF]")
+
+
+def _russian_plural(value: int, forms: tuple[str, str, str]) -> str:
+    tail = value % 100
+    if 10 < tail < 20:
+        form = forms[2]
+    else:
+        tail = value % 10
+        if tail == 1:
+            form = forms[0]
+        elif 1 < tail < 5:
+            form = forms[1]
+        else:
+            form = forms[2]
+    return f"{value} {form}"
+
+
+async def generate_festival_description(
+    fest: Festival, events: list[Event]
+) -> str | None:
     """Use LLM to craft a short festival blurb."""
-    texts: list[str] = []
-    if fest.source_text:
-        texts.append(fest.source_text)
-    elif fest.description:
-        texts.append(fest.description)
-    texts.extend(e.source_text for e in events[:5])
-    if not texts:
-        return ""
-    prompt = (
-        f"Напиши краткое описание фестиваля {fest.name}. "
-        "Стиль профессионального журналиста в сфере мероприятий и культуры. "
-        "Не используй типовые штампы и не придумывай факты. "
-        "Описание должно состоять из трёх предложений, если сведений мало — из одного. "
-        "Используй только информацию из этих текстов:\n\n" + "\n\n".join(texts)
+
+    name = fest.full_name or fest.name
+
+    titles: list[str] = []
+    seen_titles: set[str] = set()
+    venues: list[str] = []
+    seen_venues: set[str] = set()
+    for event in events:
+        title = (event.title or "").strip()
+        if title:
+            key = title.casefold()
+            if key not in seen_titles and len(titles) < 10:
+                seen_titles.add(key)
+                titles.append(title)
+        venue = (event.location_name or "").strip()
+        if venue:
+            key = venue.casefold()
+            if key not in seen_venues and len(venues) < 5:
+                seen_venues.add(key)
+                venues.append(venue)
+
+    start, end = festival_date_range(events)
+    date_clause = ""
+    if start and end:
+        if start == end:
+            date_clause = format_day_pretty(start)
+        else:
+            date_clause = (
+                f"с {format_day_pretty(start)} по {format_day_pretty(end)}"
+            )
+    elif start:
+        date_clause = format_day_pretty(start)
+
+    city_values: list[str] = []
+    if fest.city:
+        city_values.append(fest.city)
+    for event in events:
+        if event.city:
+            city_values.append(event.city)
+    city_clause = ""
+    city_counter = Counter(c.strip() for c in city_values if c and c.strip())
+    if city_counter:
+        most_common_city, _ = city_counter.most_common(1)[0]
+        if most_common_city:
+            city_clause = most_common_city
+
+    duration_days = 0
+    if start and end:
+        duration_days = (end - start).days + 1
+
+    event_count = len(events)
+
+    fact_parts: list[str] = []
+    if date_clause:
+        fact_parts.append(f"период — {date_clause}")
+    if city_clause:
+        fact_parts.append(f"город — {city_clause}")
+    if duration_days > 1:
+        fact_parts.append(
+            f"продолжительность — {_russian_plural(duration_days, ('день', 'дня', 'дней'))}"
+        )
+    if event_count:
+        fact_parts.append(
+            f"в программе {_russian_plural(event_count, ('событие', 'события', 'событий'))}"
+        )
+    if titles:
+        fact_parts.append(f"сюжеты: {', '.join(titles)}")
+
+    if not fact_parts:
+        logging.warning(
+            "generate_festival_description: insufficient data for %s", fest.name
+        )
+        return None
+
+    context_sources: list[str] = []
+    for candidate in (fest.source_text, fest.description):
+        if candidate:
+            context_sources.append(candidate)
+    for event in events[:5]:
+        if event.source_text:
+            context_sources.append(event.source_text)
+
+    context_snippet = ""
+    for raw in context_sources:
+        snippet = " ".join(raw.split()).strip()
+        if snippet:
+            context_snippet = snippet[:200]
+            break
+
+    facts_sentence = f"Исходные факты: {', '.join(fact_parts)}."
+    third_segments: list[str] = []
+    if venues:
+        third_segments.append(f"площадки: {', '.join(venues)}")
+    if context_snippet:
+        third_segments.append(f"контекст: {context_snippet}")
+    third_segments.append(
+        "итоговый текст до 350 знаков, один абзац без списков и эмодзи"
     )
+    third_sentence = "; ".join(third_segments) + "."
+
+    prompt_sentences = [
+        (
+            "Ты — культурный журналист: напиши лаконичное описание фестиваля "
+            f"{name} без выдуманных фактов."
+        ),
+        facts_sentence,
+        third_sentence,
+    ]
+    prompt = " ".join(prompt_sentences)
+
     try:
         text = await ask_4o(prompt)
         logging.info("generated description for festival %s", fest.name)
-        return text.strip()
     except Exception as e:
         logging.error("failed to generate festival description %s: %s", fest.name, e)
-        return ""
+        return None
+
+    cleaned = " ".join(text.split()).strip()
+    if not cleaned:
+        return None
+    if len(cleaned) > MAX_FEST_DESCRIPTION_LENGTH:
+        logging.warning(
+            "festival description too long for %s: %d", fest.name, len(cleaned)
+        )
+        return None
+    if _EMOJI_RE.search(cleaned):
+        logging.warning(
+            "festival description contains emoji for %s", fest.name
+        )
+        return None
+    return cleaned
 
 
-async def regenerate_festival_description(db: Database, name: str) -> None:
-    """Regenerate and persist festival description using latest events."""
+async def regenerate_festival_description(
+    db: Database, fest_ref: Festival | int
+) -> str | None:
+    """Regenerate festival description using latest events."""
+
     async with db.get_session() as session:
-        result = await session.execute(select(Festival).where(Festival.name == name))
-        fest = result.scalar_one_or_none()
-        if not fest:
-            return
+        fest_obj: Festival | None = None
+        if isinstance(fest_ref, Festival):
+            if fest_ref.id is not None:
+                fest_obj = await session.get(Festival, fest_ref.id)
+            else:
+                result = await session.execute(
+                    select(Festival).where(Festival.name == fest_ref.name)
+                )
+                fest_obj = result.scalar_one_or_none()
+        else:
+            fest_obj = await session.get(Festival, fest_ref)
+
+        if not fest_obj:
+            return None
 
         events_query = (
             select(Event)
-            .where(Event.festival == fest.name)
+            .where(Event.festival == fest_obj.name)
             .order_by(Event.date, Event.time)
         )
         events_res = await session.execute(events_query)
         events = list(events_res.scalars().all())
 
-        description = (await generate_festival_description(fest, events)).strip()
-        if not description:
-            return
-
-        if description != (fest.description or ""):
-            fest.description = description
-            await session.commit()
+        return await generate_festival_description(fest_obj, events)
 
 
 async def merge_festivals(
@@ -14054,6 +14192,7 @@ async def merge_festivals(
 
         src_name = src.name
         dst_name = dst.name
+        dst_pk = dst.id
 
         await session.execute(
             update(Event).where(Event.festival == src_name).values(festival=dst_name)
@@ -14135,7 +14274,16 @@ async def merge_festivals(
         await session.delete(src)
         await session.commit()
 
-    await regenerate_festival_description(db, dst_name)
+        fest_ref: Festival | int
+        if dst_pk is not None:
+            fest_ref = dst_pk
+        else:
+            fest_ref = dst
+        new_description = await regenerate_festival_description(db, fest_ref)
+        if new_description and new_description != (dst.description or ""):
+            dst.description = new_description
+            await session.commit()
+
     await sync_festival_page(db, dst_name)
     await rebuild_fest_nav_if_changed(db)
     await sync_festival_vk_post(db, dst_name, bot)
