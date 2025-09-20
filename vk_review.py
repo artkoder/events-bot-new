@@ -126,23 +126,52 @@ async def pick_next(db: Database, operator_id: int, batch_id: str) -> Optional[I
     async with db.raw_conn() as conn:
         await _unlock_stale(conn)
 
-        # Continue reviewing rows that remain locked for this operator.
-        cur = await conn.execute(
-            """
-            SELECT id, group_id, post_id, date, text, matched_kw, has_date, status, review_batch
-            FROM vk_inbox
-            WHERE status='locked' AND locked_by=?
-            ORDER BY locked_at ASC, id ASC
-            LIMIT 1
-            """,
-            (operator_id,),
-        )
-        row = await cur.fetchone()
-        if row:
+        reject_window_hours = _hours_from_env("VK_REVIEW_REJECT_H", 2)
+        urgent_window_hours = _hours_from_env("VK_REVIEW_URGENT_MAX_H", 48)
+        urgent_window_hours = max(urgent_window_hours, reject_window_hours)
+
+        now_ts = int(_time.time())
+        reject_cutoff = now_ts + int(reject_window_hours * 3600)
+
+        while True:
+            # Continue reviewing rows that remain locked for this operator.
+            cur = await conn.execute(
+                """
+                SELECT id, group_id, post_id, date, text, matched_kw, has_date, status, review_batch
+                FROM vk_inbox
+                WHERE status='locked' AND locked_by=?
+                ORDER BY locked_at ASC, id ASC
+                LIMIT 1
+                """,
+                (operator_id,),
+            )
+            row = await cur.fetchone()
+            if not row:
+                break
+
             inbox_id = row[0]
+            text = row[4]
+            ts_hint = extract_event_ts_hint(text)
+            if ts_hint is None or ts_hint < reject_cutoff:
+                await conn.execute(
+                    "UPDATE vk_inbox SET status='rejected', locked_by=NULL, locked_at=NULL, review_batch=NULL WHERE id=?",
+                    (inbox_id,),
+                )
+                await conn.commit()
+                logging.info(
+                    "vk_review reject_locked_due_to_hint id=%s operator=%s hint=%s cutoff=%s",
+                    inbox_id,
+                    operator_id,
+                    ts_hint,
+                    reject_cutoff,
+                )
+                now_ts = int(_time.time())
+                reject_cutoff = now_ts + int(reject_window_hours * 3600)
+                continue
+
             await conn.execute(
-                "UPDATE vk_inbox SET review_batch=?, locked_at=CURRENT_TIMESTAMP WHERE id=?",
-                (batch_id, inbox_id),
+                "UPDATE vk_inbox SET event_ts_hint=?, review_batch=?, locked_at=CURRENT_TIMESTAMP WHERE id=?",
+                (ts_hint, batch_id, inbox_id),
             )
             await conn.commit()
             row = list(row)
@@ -155,10 +184,6 @@ async def pick_next(db: Database, operator_id: int, batch_id: str) -> Optional[I
                 batch_id,
             )
             return post
-
-        reject_window_hours = _hours_from_env("VK_REVIEW_REJECT_H", 2)
-        urgent_window_hours = _hours_from_env("VK_REVIEW_URGENT_MAX_H", 48)
-        urgent_window_hours = max(urgent_window_hours, reject_window_hours)
 
         selected_row = None
         final_bucket_name: Optional[str] = None
