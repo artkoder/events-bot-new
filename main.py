@@ -7018,7 +7018,7 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                 event.tourist_label = 1 if action == "yes" else 0
                 event.tourist_label_by = callback.from_user.id
                 event.tourist_label_at = datetime.now(timezone.utc)
-                event.tourist_label_source = source
+                event.tourist_label_source = "operator"
                 session.add(event)
                 await session.commit()
                 await session.refresh(event)
@@ -7112,7 +7112,7 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                 event.tourist_factors = ordered
                 event.tourist_label_by = callback.from_user.id
                 event.tourist_label_at = datetime.now(timezone.utc)
-                event.tourist_label_source = session_state.source
+                event.tourist_label_source = "operator"
                 session.add(event)
                 await session.commit()
                 await session.refresh(event)
@@ -7203,7 +7203,7 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                     event.tourist_note = None
                     event.tourist_label_by = callback.from_user.id
                     event.tourist_label_at = datetime.now(timezone.utc)
-                    event.tourist_label_source = source
+                    event.tourist_label_source = "operator"
                     session.add(event)
                     await session.commit()
                     await session.refresh(event)
@@ -20053,7 +20053,7 @@ async def handle_tourist_note_message(message: types.Message, db: Database, bot:
         event.tourist_note = note_text or None
         event.tourist_label_by = message.from_user.id
         event.tourist_label_at = datetime.now(timezone.utc)
-        event.tourist_label_source = session_state.source
+        event.tourist_label_source = "operator"
         session.add(event)
         await session.commit()
         await session.refresh(event)
