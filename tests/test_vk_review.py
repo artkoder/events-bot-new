@@ -117,6 +117,7 @@ async def test_pick_next_recomputes_hint_and_rejects_recent_past(tmp_path, monke
     monkeypatch.setattr("vk_intake.datetime", FixedDatetime)
     fixed_epoch = int(real_datetime(2024, 10, 1, tzinfo=timezone.utc).timestamp())
     monkeypatch.setattr(vk_review._time, "time", lambda: fixed_epoch)
+    monkeypatch.setattr(vk_review.random, "random", lambda: 0.0)
 
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
@@ -134,6 +135,58 @@ async def test_pick_next_recomputes_hint_and_rejects_recent_past(tmp_path, monke
         await conn.commit()
 
     post = await vk_review.pick_next(db, 10, "batch1")
+    assert post and post.post_id == 2
+
+    async with db.raw_conn() as conn:
+        cur = await conn.execute("SELECT status FROM vk_inbox WHERE post_id=1")
+        assert (await cur.fetchone())[0] == "rejected"
+        cur = await conn.execute("SELECT status FROM vk_inbox WHERE post_id=2")
+        assert (await cur.fetchone())[0] == "locked"
+
+
+@pytest.mark.asyncio
+async def test_pick_next_rejects_explicit_year_past(tmp_path, monkeypatch):
+    fixed_now = int(real_datetime(2026, 1, 1, tzinfo=timezone.utc).timestamp())
+    monkeypatch.setattr(vk_review._time, "time", lambda: fixed_now)
+    monkeypatch.setattr(vk_review.random, "random", lambda: 0.0)
+
+    def fake_extract(text: str):
+        return None if "2025" in text else fixed_now + 2_000_000
+
+    monkeypatch.setattr(vk_review, "extract_event_ts_hint", fake_extract)
+
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    async with db.raw_conn() as conn:
+        rows = [
+            (
+                1,
+                1,
+                100,
+                "Концерт состоялся 17 сентября 2025 года",
+                "k",
+                1,
+                fixed_now + 1_000_000,
+                "pending",
+            ),
+            (
+                1,
+                2,
+                200,
+                "Концерт состоится 17 сентября 2099 года",
+                "k",
+                1,
+                fixed_now + 3_000_000,
+                "pending",
+            ),
+        ]
+        await conn.executemany(
+            "INSERT INTO vk_inbox(group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status) VALUES(?,?,?,?,?,?,?,?)",
+            rows,
+        )
+        await conn.commit()
+
+    post = await vk_review.pick_next(db, 10, "batch-explicit")
     assert post and post.post_id == 2
 
     async with db.raw_conn() as conn:

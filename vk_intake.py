@@ -226,7 +226,7 @@ def extract_event_ts_hint(
         except ValueError:
             return None
         if dt < now:
-            skip_year_rollover = False
+            skip_year_rollover = explicit_year
             if not explicit_year and now - dt <= RECENT_PAST_THRESHOLD:
                 skip_year_rollover = True
             if not skip_year_rollover:

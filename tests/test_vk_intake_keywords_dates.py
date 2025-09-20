@@ -44,3 +44,16 @@ def test_extract_event_ts_hint_recent_past(monkeypatch):
     assert ts is not None
     future_dt = real_datetime.fromtimestamp(ts, tz=main.LOCAL_TZ)
     assert (future_dt.year, future_dt.month, future_dt.day) == (2025, 1, 7)
+
+
+def test_extract_event_ts_hint_explicit_year_past(monkeypatch):
+    class FixedDatetime(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            tzinfo = tz or timezone.utc
+            return real_datetime(2026, 1, 1, tzinfo=tzinfo)
+
+    monkeypatch.setattr("vk_intake.datetime", FixedDatetime)
+
+    text = "Концерт состоится 17 сентября 2025 года"
+    assert extract_event_ts_hint(text) is None

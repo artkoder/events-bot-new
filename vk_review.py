@@ -235,7 +235,7 @@ async def pick_next(db: Database, operator_id: int, batch_id: str) -> Optional[I
                 UPDATE vk_inbox
                 SET status='locked', locked_by=?, locked_at=CURRENT_TIMESTAMP, review_batch=?
                 WHERE id = (SELECT id FROM next)
-                RETURNING id, group_id, post_id, date, text, matched_kw, has_date, status, review_batch
+                RETURNING id, group_id, post_id, date, text, matched_kw, has_date, status, review_batch, imported_event_id
                 """,
                 (reject_cutoff, urgent_cutoff, operator_id, batch_id),
             )
@@ -382,7 +382,7 @@ async def pick_next(db: Database, operator_id: int, batch_id: str) -> Optional[I
                         UPDATE vk_inbox
                         SET status='locked', locked_by=?, locked_at=CURRENT_TIMESTAMP, review_batch=?
                         WHERE id = (SELECT id FROM next)
-                        RETURNING id, group_id, post_id, date, text, matched_kw, has_date, status, review_batch
+                        RETURNING id, group_id, post_id, date, text, matched_kw, has_date, status, review_batch, imported_event_id
                         """,
                         (reject_cutoff, operator_id, batch_id),
                     )
