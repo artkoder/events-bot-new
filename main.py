@@ -19565,6 +19565,10 @@ async def handle_vk_review_cb(callback: types.CallbackQuery, db: Database, bot: 
             row = await cur.fetchone()
         batch_id = row[0] if row else ""
         if action == "accept":
+            await bot.send_message(
+                callback.message.chat.id,
+                "⏳ Начинаю импорт события…",
+            )
             await _vkrev_import_flow(
                 callback.message.chat.id,
                 callback.from_user.id,
