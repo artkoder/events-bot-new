@@ -6002,7 +6002,7 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
         buttons = [
             [
                 types.InlineKeyboardButton(
-                    text="Создать фестиваль", callback_data=f"makefest_create:{eid}"
+                    text="✅ Создать и привязать", callback_data=f"makefest_create:{eid}"
                 )
             ]
         ]
@@ -6011,10 +6011,11 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
             conf_text = _format_confidence(duplicate_info.get("confidence"))
             if conf_text:
                 label += f" ({conf_text})"
+            label = f"… {label}" if label else "…"
             buttons.append(
                 [
                     types.InlineKeyboardButton(
-                        text=f"Привязать к {label}",
+                        text=f"🔗 Привязать к {label}",
                         callback_data=f"makefest_bind:{eid}:{duplicate_info['dup_fid']}",
                     )
                 ]
