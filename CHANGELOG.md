@@ -7,6 +7,8 @@
 - Clarified the 4o parsing prompt to warn about possible OCR mistakes in poster snippets.
 - VK Intake помещает посты с одной фотографией и пустым текстом в очередь и отмечает их статусом «Ожидает OCR».
 
+- Introduced automatic topic classification with a closed topic list, editor display, and `/backfill_topics` command.
+
 - Fixed VK review queue issue where `vk_review.pick_next` recalculates `event_ts_hint` and auto-rejects posts whose event date
   disappeared or fell into the past (e.g., a 7 September announcement shown on 19 September).
 
@@ -78,29 +80,23 @@
 - Daily announcements no longer append a "подробнее" link to the event's
   Telegraph page.
 
-## v0.3.10 - Festival stats filter
-
-- `/stats` now lists festival statistics only for upcoming festivals or those
-  that ended within the last week.
-
 ## v0.3.9 - VK daily announcements
 
 - Daily announcements can be posted to a VK group. Set the group with `/vkgroup` and adjust
   times via `/vktime`. Use the `VK_TOKEN` secret for API access.
 
-## v0.3.11 - VK monitoring MVP
+## v0.3.10 - Festival stats filter and daily management updates
 
-- Added `/vk` command for manual monitoring of VK communities: add/list/delete groups and review posts from the last three days.
-- New `VK_API_VERSION` environment variable to override VK API version.
-
-## v0.3.10 - Unified daily management
-
+- `/stats` now lists festival statistics only for upcoming festivals or those
+  that ended within the last week.
 - `/regdailychannels` and `/daily` now show the VK group alongside Telegram channels.
   VK posting times can be changed there and test posts sent.
 - Daily announcements include new hashtag lines for Telegram and VK posts.
 
-## v0.3.11 - VK formatting tweaks
+## v0.3.11 - VK monitoring MVP and formatting tweaks
 
+- Added `/vk` command for manual monitoring of VK communities: add/list/delete groups and review posts from the last three days.
+- New `VK_API_VERSION` environment variable to override VK API version.
 - VK daily posts show a calendar icon before "АНОНС" and include more spacing between events.
 - Date, time and location are italicized if supported.
 - Prices include `руб.` and ticket links move to the next line.
