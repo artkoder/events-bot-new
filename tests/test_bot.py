@@ -68,6 +68,10 @@ import poster_ocr
 REAL_SYNC_WEEKEND_PAGE = main.sync_weekend_page
 
 
+def test_makefest_sessions_ttl():
+    assert main.makefest_sessions.ttl == 3600
+
+
 @pytest.fixture(autouse=True)
 def _mock_sync_vk_source_post(monkeypatch):
     async def fake_sync(*args, **kwargs):
