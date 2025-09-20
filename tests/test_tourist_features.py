@@ -372,8 +372,16 @@ async def test_tourist_factor_timeout(tmp_path, monkeypatch):
     assert any(call["text"] == "Выберите причины" for call in answers)
     assert bot.edited_text_calls
     menu_markup = bot.edited_text_calls[-1]["reply_markup"]
+    message = types.Message.model_validate(
+        {**message.model_dump(), "reply_markup": menu_markup.model_dump()}
+    )
     assert any(
         btn.callback_data and btn.callback_data.startswith("tourist:fx:")
+        for row in menu_markup.inline_keyboard
+        for btn in row
+    )
+    assert any(
+        btn.callback_data == f"tourist:note:start:{event_id}"
         for row in menu_markup.inline_keyboard
         for btn in row
     )
@@ -436,9 +444,17 @@ async def test_tourist_note_flow(tmp_path, monkeypatch):
             "reply_markup": markup.model_dump(),
         }
     )
-    cb = make_callback(f"tourist:note:start:{event_id}", message)
     answers = patch_answer(monkeypatch)
     bot = DummyBot()
+    cb_menu = make_callback(f"tourist:fx:start:{event_id}", message)
+    await main.process_request(cb_menu, db, bot)
+    assert bot.edited_text_calls
+    menu_markup = bot.edited_text_calls[-1]["reply_markup"]
+    message = types.Message.model_validate(
+        {**message.model_dump(), "reply_markup": menu_markup.model_dump()}
+    )
+
+    cb = make_callback(f"tourist:note:start:{event_id}", message)
     await main.process_request(cb, db, bot)
     assert main.tourist_note_sessions
     note_message = types.Message.model_validate(
@@ -457,7 +473,7 @@ async def test_tourist_note_flow(tmp_path, monkeypatch):
     assert bot.sent_messages and "Комментарий сохранён" in bot.sent_messages[-1]["text"]
     assert bot.edited_text_calls
     assert "📝 есть комментарий" in bot.edited_text_calls[-1]["text"]
-    assert answers and answers[0]["text"] == "Ожидаю"
+    assert any(call["text"] == "Ожидаю" for call in answers)
 
 
 @pytest.mark.asyncio
@@ -494,9 +510,17 @@ async def test_tourist_note_trim_long_text(tmp_path, monkeypatch):
             "reply_markup": markup.model_dump(),
         }
     )
-    cb = make_callback(f"tourist:note:start:{event_id}", message)
     patch_answer(monkeypatch)
     bot = DummyBot()
+    cb_menu = make_callback(f"tourist:fx:start:{event_id}", message)
+    await main.process_request(cb_menu, db, bot)
+    assert bot.edited_text_calls
+    menu_markup = bot.edited_text_calls[-1]["reply_markup"]
+    message = types.Message.model_validate(
+        {**message.model_dump(), "reply_markup": menu_markup.model_dump()}
+    )
+
+    cb = make_callback(f"tourist:note:start:{event_id}", message)
     await main.process_request(cb, db, bot)
     long_note = "A" * 600
     note_message = types.Message.model_validate(
@@ -573,16 +597,30 @@ async def test_tourist_note_clear(tmp_path, monkeypatch):
             "reply_markup": markup.model_dump(),
         }
     )
-    cb = make_callback(f"tourist:note:clear:{event_id}", message)
     answers = patch_answer(monkeypatch)
     bot = DummyBot()
+    cb_menu = make_callback(f"tourist:fx:start:{event_id}", message)
+    await main.process_request(cb_menu, db, bot)
+    assert bot.edited_text_calls
+    menu_markup = bot.edited_text_calls[-1]["reply_markup"]
+    message = types.Message.model_validate(
+        {**message.model_dump(), "reply_markup": menu_markup.model_dump()}
+    )
+
+    cb = make_callback(f"tourist:note:clear:{event_id}", message)
     await main.process_request(cb, db, bot)
     async with db.get_session() as session:
         updated = await session.get(Event, event_id)
         assert updated.tourist_note is None
     assert any(call["text"] == "Отмечено" for call in answers)
     assert bot.edited_text_calls
+    latest_reply_markup = bot.edited_text_calls[-1]["reply_markup"]
     assert "📝" not in bot.edited_text_calls[-1]["text"]
+    assert any(
+        btn.callback_data == f"tourist:note:start:{event_id}"
+        for row in latest_reply_markup.inline_keyboard
+        for btn in row
+    )
 
 
 @pytest.mark.asyncio
