@@ -4913,12 +4913,27 @@ async def extract_telegraph_image_urls(page_url: str) -> list[str]:
             return val
         return None
 
-    url = page_url.split("#", 1)[0].split("?", 1)[0]
-    parsed = urlparse(url)
-    host = parsed.netloc.lower()
-    if host not in {"telegra.ph", "te.legra.ph"}:
+    raw = (page_url or "").strip()
+    if not raw:
         return []
-    path = parsed.path.lstrip("/")
+    cleaned = raw.split("#", 1)[0].split("?", 1)[0]
+    parsed = urlparse(cleaned)
+    path: str | None
+    if parsed.scheme:
+        host = parsed.netloc.lower()
+        if host not in {"telegra.ph", "te.legra.ph"}:
+            return []
+        path = parsed.path.lstrip("/")
+    else:
+        trimmed = cleaned.lstrip("/")
+        if trimmed.startswith("telegra.ph/"):
+            trimmed = trimmed.split("/", 1)[1] if "/" in trimmed else ""
+        elif trimmed.startswith("te.legra.ph/"):
+            trimmed = trimmed.split("/", 1)[1] if "/" in trimmed else ""
+        path = trimmed
+    if not path:
+        return []
+    path = path.lstrip("/")
     if not path:
         return []
     api_url = f"https://api.telegra.ph/getPage/{path}?return_content=true"
@@ -5582,8 +5597,9 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
             await callback.answer()
             return
         telegraph_images: list[str] = []
-        if event.telegraph_url:
-            telegraph_images = await extract_telegraph_image_urls(event.telegraph_url)
+        telegraph_source = event.telegraph_url or event.telegraph_path
+        if telegraph_source:
+            telegraph_images = await extract_telegraph_image_urls(telegraph_source)
         photo_candidates: list[str] = []
         for url in telegraph_images + (event.photo_urls or []):
             if url and url not in photo_candidates:
