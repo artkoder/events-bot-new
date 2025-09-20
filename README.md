@@ -3,7 +3,7 @@
 Telegram bot for publishing event announcements. Daily announcements can also be posted to a VK group.
 Use `/regdailychannels` and `/daily` to manage both Telegram channels and the VK group including posting times.
 
-Superadmins can use `/vk` to manage VK Intake: add or list sources, check or review events, and open the queue summary. Команда `/ocrtest` помогает сравнить распознавание афиш между `gpt-4o-mini` и `gpt-4o` на загруженных постерах.
+Superadmins can use `/vk` to manage VK Intake: add or list sources, check or review events, and open the queue summary. The review UI highlights the bucket (URGENT/SOON/LONG/FAR) that produced the current card so operators understand the selection. Команда `/ocrtest` помогает сравнить распознавание афиш между `gpt-4o-mini` и `gpt-4o` на загруженных постерах.
 
 ## VK Intake & Review v1.1
 
@@ -25,6 +25,19 @@ chat where the operator clicked. The
 batch can be finished with "🧹 Завершить…" which sequentially rebuilds all
 affected month pages. Operators can run `/vk_queue` to see current inbox counts
 and get a button to start reviewing candidates.
+
+### Bucket windows and priorities
+
+Each queue item is assigned to a time-based bucket by comparing its `event_ts_hint` with the current moment:
+
+- **URGENT** – events happening right now or within the next 48 hours (`VK_REVIEW_URGENT_MAX_H`). These are always served first if any exist.
+- **SOON** – events between the urgent horizon and 14 days ahead (`VK_REVIEW_SOON_MAX_D`).
+- **LONG** – events between the SOON limit and 30 days ahead (`VK_REVIEW_LONG_MAX_D`).
+- **FAR** – events with hints beyond the LONG limit or without a parsed date at all.
+
+Items with hints older than two hours (`VK_REVIEW_REJECT_H`) are automatically rejected and, if the queue is empty, previously skipped cards are re-opened. Within the SOON/LONG/FAR buckets the reviewer sees cards chosen by a weighted lottery that multiplies the bucket size by its weight (`VK_REVIEW_W_SOON=3`, `VK_REVIEW_W_LONG=2`, `VK_REVIEW_W_FAR=6`). After five non-FAR selections (`VK_REVIEW_FAR_GAP_K=5`) the system forces a FAR pick as a streak breaker so distant events do not get starved.
+
+Within the winning bucket, cards are ordered by date with a tiny per-`group_id` jitter scaled by the square root of that group’s queue size. This spreads reviews across sources even when one community produces a large batch of similar events.
 
 Reposts use images from the original post, link and doc attachments rely on their
 previews, and only preview frames from videos are shown—video files are never
@@ -113,6 +126,14 @@ browse upcoming announcements. The command accepts dates like `2025-07-10`,
   export VK_CRAWL_BACKFILL_DAYS=14
   export VK_CRAWL_BACKFILL_AFTER_IDLE_H=24
   export VK_CRAWL_JITTER_SEC=600
+  export VK_REVIEW_REJECT_H=2         # reject hints older than this many hours
+  export VK_REVIEW_URGENT_MAX_H=48    # URGENT bucket spans up to this many hours ahead
+  export VK_REVIEW_SOON_MAX_D=14      # SOON bucket reaches this many days ahead
+  export VK_REVIEW_LONG_MAX_D=30      # LONG bucket extends to this many days ahead
+  export VK_REVIEW_W_SOON=3           # weight for SOON in the bucket lottery
+  export VK_REVIEW_W_LONG=2           # weight for LONG in the bucket lottery
+  export VK_REVIEW_W_FAR=6            # weight for FAR in the bucket lottery
+  export VK_REVIEW_FAR_GAP_K=5        # force FAR after this many non-FAR picks
   # keyword matching: regex by default; set to true to use pymorphy3 lemmas
   export VK_USE_PYMORPHY=false
   python main.py
