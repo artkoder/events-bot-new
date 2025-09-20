@@ -584,7 +584,16 @@ vk_group_sessions: set[int] = set()
 # user_id -> section (today/added) for VK time update
 vk_time_sessions: TTLCache[int, str] = TTLCache(maxsize=64, ttl=3600)
 # user_id -> vk_source_id for default time update
-vk_default_time_sessions: TTLCache[int, int] = TTLCache(maxsize=64, ttl=3600)
+@dataclass
+class VkDefaultTimeSession:
+    source_id: int
+    page: int
+    message: types.Message | None = None
+
+
+vk_default_time_sessions: TTLCache[int, VkDefaultTimeSession] = TTLCache(
+    maxsize=64, ttl=3600
+)
 # waiting for VK source add input
 vk_add_source_sessions: set[int] = set()
 
@@ -2265,6 +2274,93 @@ async def ensure_festival(
         logging.info("created festival %s", name)
         await rebuild_fest_nav_if_changed(db)
         return fest, True, True
+
+
+def _festival_admin_url(fest_id: int | None) -> str | None:
+    """Return admin URL for the festival if environment is configured."""
+
+    if not fest_id:
+        return None
+    template = os.getenv("FEST_ADMIN_URL_TEMPLATE")
+    if template:
+        try:
+            return template.format(id=fest_id)
+        except Exception:
+            logging.exception("failed to format FEST_ADMIN_URL_TEMPLATE", extra={"id": fest_id})
+            return None
+    base = os.getenv("FEST_ADMIN_BASE_URL")
+    if base:
+        return f"{base.rstrip('/')}/{fest_id}"
+    return None
+
+
+def _festival_location_text(fest: Festival) -> str:
+    parts = []
+    if fest.location_name:
+        parts.append(fest.location_name)
+    if fest.location_address:
+        parts.append(fest.location_address)
+    return " — ".join(parts) if parts else "—"
+
+
+def _festival_period_text(fest: Festival) -> str:
+    start = (fest.start_date or "").strip() if fest.start_date else ""
+    end = (fest.end_date or "").strip() if fest.end_date else ""
+    if start and end:
+        if start == end:
+            return start
+        return f"{start} — {end}"
+    return start or end or "—"
+
+
+def _festival_photo_count(fest: Festival) -> int:
+    urls = [u for u in (fest.photo_urls or []) if u]
+    if not urls and fest.photo_url:
+        return 1
+    if fest.photo_url and fest.photo_url not in urls:
+        urls.append(fest.photo_url)
+    return len(urls)
+
+
+def _festival_telegraph_url(fest: Festival) -> str | None:
+    if fest.telegraph_url:
+        return normalize_telegraph_url(fest.telegraph_url)
+    if fest.telegraph_path:
+        return normalize_telegraph_url(f"https://telegra.ph/{fest.telegraph_path.lstrip('/')}")
+    return None
+
+
+async def _build_makefest_response(
+    db: Database, fest: Festival, *, status: str
+) -> tuple[str, types.InlineKeyboardMarkup | None]:
+    telegraph_url = _festival_telegraph_url(fest)
+    lines = [
+        f"Статус: {status}",
+        f"ID: {fest.id if fest.id is not None else '—'}",
+        f"Название: {fest.name}",
+        f"Полное название: {fest.full_name or '—'}",
+        f"Период: {_festival_period_text(fest)}",
+        f"Город: {(fest.city or '—').strip() or '—'}",
+        f"Локация: {_festival_location_text(fest)}",
+        f"Фото: {_festival_photo_count(fest)}",
+        f"Telegraph: {telegraph_url or '—'}",
+        "",
+        "Событие привязано к фестивалю.",
+    ]
+
+    buttons: list[types.InlineKeyboardButton] = []
+    admin_url = _festival_admin_url(fest.id)
+    if admin_url:
+        buttons.append(types.InlineKeyboardButton(text="Админка", url=admin_url))
+    landing_url = await get_setting_value(db, "festivals_index_url") or await get_setting_value(
+        db, "fest_index_url"
+    )
+    if landing_url:
+        buttons.append(types.InlineKeyboardButton(text="Лендинг", url=landing_url))
+    markup = (
+        types.InlineKeyboardMarkup(inline_keyboard=[buttons]) if buttons else None
+    )
+    return "\n".join(lines), markup
 
 
 async def extract_telegra_ph_cover_url(
@@ -5897,11 +5993,9 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
         await schedule_event_update_tasks(db, event)
         asyncio.create_task(sync_festival_page(db, fest_obj.name))
         asyncio.create_task(sync_festivals_index_page(db))
-        summary_lines = [
-            f"Фестиваль {fest_obj.name} создан." if created else f"Фестиваль {fest_obj.name} обновлён.",
-            "Событие привязано к фестивалю.",
-        ]
-        await callback.message.answer("\n".join(summary_lines))
+        status = "создан" if created else "обновлён"
+        text, markup = await _build_makefest_response(db, fest_obj, status=status)
+        await callback.message.answer(text, reply_markup=markup)
         await show_edit_menu(callback.from_user.id, event, bot)
         await callback.answer("Готово")
     elif data.startswith("makefest_bind:"):
@@ -5950,7 +6044,7 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                 return
         fest_data = state["festival"]
         photos: list[str] = state.get("photos", [])
-        await ensure_festival(
+        fest_obj, _, _ = await ensure_festival(
             db,
             fest.name,
             full_name=clean_optional_str(fest_data.get("full_name")),
@@ -5982,9 +6076,10 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
         await schedule_event_update_tasks(db, event)
         asyncio.create_task(sync_festival_page(db, fest.name))
         asyncio.create_task(sync_festivals_index_page(db))
-        await callback.message.answer(
-            f"Событие привязано к фестивалю {fest.name}.",
+        text, markup = await _build_makefest_response(
+            db, fest_obj, status="привязан к существующему"
         )
+        await callback.message.answer(text, reply_markup=markup)
         await show_edit_menu(callback.from_user.id, event, bot)
         await callback.answer("Готово")
     elif data.startswith("togglefree:"):
@@ -17541,7 +17636,43 @@ async def _fetch_vk_sources(db: Database) -> list[tuple[int, int, str, str, str 
     return rows
 
 
-async def handle_vk_list(message: types.Message, db: Database, bot: Bot, edit: types.Message | None = None) -> None:
+VK_SOURCES_PER_PAGE = 10
+VK_STATUS_LABELS: Sequence[tuple[str, str]] = (
+    ("pending", "Pending"),
+    ("skipped", "Skipped"),
+    ("imported", "Imported"),
+    ("rejected", "Rejected"),
+)
+
+
+def _zero_vk_status_counts() -> dict[str, int]:
+    return {key: 0 for key, _ in VK_STATUS_LABELS}
+
+
+async def _fetch_vk_inbox_counts(db: Database) -> dict[int, dict[str, int]]:
+    async with db.raw_conn() as conn:
+        cursor = await conn.execute(
+            "SELECT group_id, status, COUNT(*) FROM vk_inbox GROUP BY group_id, status"
+        )
+        rows = await cursor.fetchall()
+    counts: dict[int, dict[str, int]] = {}
+    for gid, status, amount in rows:
+        bucket = counts.get(gid)
+        if bucket is None:
+            bucket = _zero_vk_status_counts()
+            counts[gid] = bucket
+        if status in bucket:
+            bucket[status] = amount
+    return counts
+
+
+async def handle_vk_list(
+    message: types.Message,
+    db: Database,
+    bot: Bot,
+    edit: types.Message | None = None,
+    page: int = 1,
+) -> None:
     rows = await _fetch_vk_sources(db)
     if not rows:
         if edit:
@@ -17549,24 +17680,78 @@ async def handle_vk_list(message: types.Message, db: Database, bot: Bot, edit: t
         else:
             await bot.send_message(message.chat.id, "Список пуст")
         return
+    total_pages = max(1, (len(rows) + VK_SOURCES_PER_PAGE - 1) // VK_SOURCES_PER_PAGE)
+    page = max(1, min(page, total_pages))
+    start = (page - 1) * VK_SOURCES_PER_PAGE
+    end = start + VK_SOURCES_PER_PAGE
+    page_rows = rows[start:end]
+    inbox_counts = await _fetch_vk_inbox_counts(db)
+    page_items: list[tuple[int, tuple[int, int, str, str, str | None, str | None], dict[str, int]]] = []
+    for offset, row in enumerate(page_rows, start=start + 1):
+        rid, gid, screen, name, loc, dtime = row
+        counts = inbox_counts.get(gid)
+        if counts is None:
+            counts = _zero_vk_status_counts()
+        else:
+            counts = dict(counts)
+        page_items.append((offset, row, counts))
+
+    if page_items:
+        count_widths = {
+            key: max(1, max(len(str(item[2][key])) for item in page_items))
+            for key, _ in VK_STATUS_LABELS
+        }
+    else:
+        count_widths = {key: 1 for key, _ in VK_STATUS_LABELS}
+
     lines: list[str] = []
     buttons: list[list[types.InlineKeyboardButton]] = []
-    for idx, row in enumerate(rows, start=1):
+    for offset, row, counts in page_items:
         rid, gid, screen, name, loc, dtime = row
         info_parts = [f"id={gid}"]
         if loc:
             info_parts.append(loc)
         info = ", ".join(info_parts)
         lines.append(
-            f"{idx}. {name} (vk.com/{screen}) — {info}, типовое время: {dtime or '-'}"
+            f"{offset}. {name} (vk.com/{screen}) — {info}, типовое время: {dtime or '-'}"
         )
+        status_parts = []
+        for key, label in VK_STATUS_LABELS:
+            status_parts.append(
+                f"{label:<8} {counts[key]:>{count_widths[key]}}"
+            )
+        lines.append("    " + " | ".join(status_parts))
         buttons.append(
             [
-                types.InlineKeyboardButton(text=f"❌ {idx}", callback_data=f"vkdel:{rid}"),
-                types.InlineKeyboardButton(text=f"🕒 {idx}", callback_data=f"vkdt:{rid}"),
+                types.InlineKeyboardButton(
+                    text=f"❌ {offset}", callback_data=f"vkdel:{rid}:{page}"
+                ),
+                types.InlineKeyboardButton(
+                    text=f"🕒 {offset}", callback_data=f"vkdt:{rid}:{page}"
+                ),
             ]
         )
     text = "\n".join(lines)
+    if total_pages > 1:
+        nav_row: list[types.InlineKeyboardButton] = []
+        if page > 1:
+            nav_row.append(
+                types.InlineKeyboardButton(
+                    text="◀️", callback_data=f"vksrcpage:{page - 1}"
+                )
+            )
+        nav_row.append(
+            types.InlineKeyboardButton(
+                text=f"{page}/{total_pages}", callback_data=f"vksrcpage:{page}"
+            )
+        )
+        if page < total_pages:
+            nav_row.append(
+                types.InlineKeyboardButton(
+                    text="▶️", callback_data=f"vksrcpage:{page + 1}"
+                )
+            )
+        buttons.append(nav_row)
     markup = types.InlineKeyboardMarkup(inline_keyboard=buttons)
     if edit:
         await edit.edit_text(text, reply_markup=markup)
@@ -17574,9 +17759,26 @@ async def handle_vk_list(message: types.Message, db: Database, bot: Bot, edit: t
         await bot.send_message(message.chat.id, text, reply_markup=markup)
 
 
-async def handle_vk_delete_callback(callback: types.CallbackQuery, db: Database, bot: Bot) -> None:
+async def handle_vk_list_page_callback(
+    callback: types.CallbackQuery, db: Database, bot: Bot
+) -> None:
     try:
-        vid = int(callback.data.split(":", 1)[1])
+        page = int(callback.data.split(":", 1)[1])
+    except Exception:
+        await callback.answer()
+        return
+    await handle_vk_list(callback.message, db, bot, edit=callback.message, page=page)
+    await callback.answer()
+
+
+async def handle_vk_delete_callback(callback: types.CallbackQuery, db: Database, bot: Bot) -> None:
+    page = 1
+    try:
+        _, payload = callback.data.split(":", 1)
+        parts = payload.split(":", 1)
+        vid = int(parts[0])
+        if len(parts) > 1:
+            page = int(parts[1])
     except Exception:
         await callback.answer()
         return
@@ -17584,16 +17786,25 @@ async def handle_vk_delete_callback(callback: types.CallbackQuery, db: Database,
         await conn.execute("DELETE FROM vk_source WHERE id=?", (vid,))
         await conn.commit()
     await callback.answer("Удалено")
-    await handle_vk_list(callback.message, db, bot, edit=callback.message)
+    await handle_vk_list(callback.message, db, bot, edit=callback.message, page=page)
 
 
 async def handle_vk_dtime_callback(callback: types.CallbackQuery, db: Database, bot: Bot) -> None:
+    page = 1
     try:
-        vid = int(callback.data.split(":", 1)[1])
+        _, payload = callback.data.split(":", 1)
+        parts = payload.split(":", 1)
+        vid = int(parts[0])
+        if len(parts) > 1:
+            page = int(parts[1])
     except Exception:
         await callback.answer()
         return
-    vk_default_time_sessions[callback.from_user.id] = vid
+    vk_default_time_sessions[callback.from_user.id] = VkDefaultTimeSession(
+        source_id=vid,
+        page=page,
+        message=callback.message,
+    )
     async with db.raw_conn() as conn:
         cur = await conn.execute(
             "SELECT name, default_time FROM vk_source WHERE id=?", (vid,)
@@ -17610,9 +17821,10 @@ async def handle_vk_dtime_callback(callback: types.CallbackQuery, db: Database, 
 
 
 async def handle_vk_dtime_message(message: types.Message, db: Database, bot: Bot) -> None:
-    vid = vk_default_time_sessions.pop(message.from_user.id, None)
-    if not vid:
+    session = vk_default_time_sessions.pop(message.from_user.id, None)
+    if not session:
         return
+    vid = session.source_id
     text = (message.text or "").strip()
     if text in {"", "-"}:
         new_time: str | None = None
@@ -17637,6 +17849,14 @@ async def handle_vk_dtime_message(message: types.Message, db: Database, bot: Bot
     else:
         msg = f"Типовое время для {name} удалено"
     await bot.send_message(message.chat.id, msg)
+    if session.message:
+        await handle_vk_list(
+            session.message,
+            db,
+            bot,
+            edit=session.message,
+            page=session.page,
+        )
 
 
 async def send_vk_tmp_post(chat_id: int, batch: str, idx: int, total: int, db: Database, bot: Bot) -> None:
@@ -18209,7 +18429,15 @@ async def _vkrev_show_next(chat_id: int, batch_id: str, operator_id: int, db: Da
 
     url = f"https://vk.com/wall-{post.group_id}_{post.post_id}"
     pending = await _vkrev_queue_size(db)
-    status_line = f"ключи: {post.matched_kw or '-'} | дата: {'да' if post.has_date else 'нет'} | в очереди: {pending}"
+    if post.matched_kw == vk_intake.OCR_PENDING_SENTINEL:
+        matched_kw_display = "ожидает OCR"
+    elif post.matched_kw:
+        matched_kw_display = post.matched_kw
+    else:
+        matched_kw_display = "-"
+    status_line = (
+        f"ключи: {matched_kw_display} | дата: {'да' if post.has_date else 'нет'} | в очереди: {pending}"
+    )
     markup = types.InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -20244,6 +20472,9 @@ def create_app() -> web.Application:
     async def vk_delete_wrapper(callback: types.CallbackQuery):
         await handle_vk_delete_callback(callback, db, bot)
 
+    async def vk_list_page_wrapper(callback: types.CallbackQuery):
+        await handle_vk_list_page_callback(callback, db, bot)
+
     async def vk_dtime_cb_wrapper(callback: types.CallbackQuery):
         await handle_vk_dtime_callback(callback, db, bot)
 
@@ -20475,6 +20706,9 @@ def create_app() -> web.Application:
     )
     dp.message.register(
         vk_dtime_msg_wrapper, lambda m: m.from_user.id in vk_default_time_sessions
+    )
+    dp.callback_query.register(
+        vk_list_page_wrapper, lambda c: c.data.startswith("vksrcpage:")
     )
     dp.callback_query.register(vk_delete_wrapper, lambda c: c.data.startswith("vkdel:"))
     dp.callback_query.register(vk_dtime_cb_wrapper, lambda c: c.data.startswith("vkdt:"))

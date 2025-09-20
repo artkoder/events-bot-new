@@ -34,6 +34,9 @@ VK_CRAWL_BACKFILL_DAYS = int(os.getenv("VK_CRAWL_BACKFILL_DAYS", "14"))
 VK_CRAWL_BACKFILL_AFTER_IDLE_H = int(os.getenv("VK_CRAWL_BACKFILL_AFTER_IDLE_H", "24"))
 VK_USE_PYMORPHY = os.getenv("VK_USE_PYMORPHY", "false").lower() == "true"
 
+# Sentinel used to flag posts awaiting poster OCR before keyword/date checks.
+OCR_PENDING_SENTINEL = "__ocr_pending__"
+
 # optional pymorphy3 initialisation
 MORPH = None
 if VK_USE_PYMORPHY:  # pragma: no cover - optional dependency
@@ -898,39 +901,52 @@ async def crawl_once(db, *, broadcast: bool = False, bot: Any | None = None) -> 
                     continue
                 stats["posts_scanned"] += 1
                 group_posts += 1
-                kw_ok, kws = match_keywords(post["text"])
-                has_date = detect_date(post["text"])
-                event_ts_hint = extract_event_ts_hint(post["text"], default_time)
-                if kw_ok and has_date:
+                post_text = post.get("text", "")
+                photos = post.get("photos", []) or []
+                blank_single_photo = not post_text.strip() and len(photos) == 1
+
+                if blank_single_photo:
+                    matched_kw_value = OCR_PENDING_SENTINEL
+                    has_date_value = 0
+                    event_ts_hint = None
+                else:
+                    kw_ok, kws = match_keywords(post_text)
+                    has_date = detect_date(post_text)
+                    event_ts_hint = extract_event_ts_hint(post_text, default_time)
+                    if not (kw_ok and has_date):
+                        continue
                     if event_ts_hint is None or event_ts_hint < int(time.time()) + 2 * 3600:
                         continue
-                    stats["matches"] += 1
-                    try:
-                        async with db.raw_conn() as conn:
-                            cur = await conn.execute(
-                                """
-                                INSERT OR IGNORE INTO vk_inbox(
-                                    group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status
-                                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')
-                                """,
-                                (
-                                    gid,
-                                    pid,
-                                    ts,
-                                    post["text"],
-                                    ",".join(kws),
-                                    int(has_date),
-                                    event_ts_hint,
-                                ),
-                            )
-                            await conn.commit()
-                        if cur.rowcount == 0:
-                            stats["duplicates"] += 1
-                        else:
-                            stats["added"] += 1
-                            group_matched += 1
-                    except Exception:
-                        stats["errors"] += 1
+                    matched_kw_value = ",".join(kws)
+                    has_date_value = int(has_date)
+
+                stats["matches"] += 1
+                try:
+                    async with db.raw_conn() as conn:
+                        cur = await conn.execute(
+                            """
+                            INSERT OR IGNORE INTO vk_inbox(
+                                group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')
+                            """,
+                            (
+                                gid,
+                                pid,
+                                ts,
+                                post["text"],
+                                matched_kw_value,
+                                has_date_value,
+                                event_ts_hint,
+                            ),
+                        )
+                        await conn.commit()
+                    if cur.rowcount == 0:
+                        stats["duplicates"] += 1
+                    else:
+                        stats["added"] += 1
+                        group_matched += 1
+                except Exception:
+                    stats["errors"] += 1
 
                 if ts > max_ts or (ts == max_ts and pid > max_pid):
                     max_ts, max_pid = ts, pid
