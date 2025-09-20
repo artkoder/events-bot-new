@@ -631,13 +631,13 @@ class TouristFactor:
 
 
 TOURIST_FACTORS: list[TouristFactor] = [
-    TouristFactor("culture", "🏛️", "История и культура"),
-    TouristFactor("atmosphere", "🏙️", "Атмосфера города"),
-    TouristFactor("nature", "🌿", "Природа и активный отдых"),
-    TouristFactor("water", "🌊", "Море и побережье"),
-    TouristFactor("food", "🍽️", "Гастрономия"),
-    TouristFactor("family", "👨‍👩‍👧‍👦", "Семейный отдых"),
-    TouristFactor("events", "🎉", "События и фестивали"),
+    TouristFactor("targeted_for_tourists", "🎯", "Специально для туристов"),
+    TouristFactor("unique_to_region", "🧭", "Есть только здесь"),
+    TouristFactor("iconic_location", "📍", "Знаковое место"),
+    TouristFactor("shows_local_life", "🏙️", "Погружает в жизнь местных"),
+    TouristFactor("scenic_nature", "🌿", "Природа и виды"),
+    TouristFactor("local_cuisine", "🍽️", "Местная гастрономия"),
+    TouristFactor("family_friendly", "👨‍👩‍👧‍👦", "Подходит для семьи"),
 ]
 
 TOURIST_FACTOR_BY_CODE: dict[str, TouristFactor] = {
@@ -645,12 +645,18 @@ TOURIST_FACTOR_BY_CODE: dict[str, TouristFactor] = {
 }
 TOURIST_FACTOR_CODES: list[str] = [factor.code for factor in TOURIST_FACTORS]
 TOURIST_FACTOR_ALIASES: dict[str, str] = {
-    "history": "culture",
-    "sea": "water",
-    "nature": "nature",
-    "food": "food",
-    "family": "family",
-    "events": "events",
+    "history": "unique_to_region",
+    "culture": "unique_to_region",
+    "atmosphere": "shows_local_life",
+    "city": "shows_local_life",
+    "sea": "scenic_nature",
+    "water": "scenic_nature",
+    "nature": "scenic_nature",
+    "food": "local_cuisine",
+    "gastronomy": "local_cuisine",
+    "family": "family_friendly",
+    "events": "targeted_for_tourists",
+    "event": "targeted_for_tourists",
 }
 
 
