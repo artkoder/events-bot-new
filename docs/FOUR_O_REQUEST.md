@@ -26,6 +26,12 @@ If `docs/LOCATIONS.md` exists, its lines are appended to the system prompt as a
 list of known venues. This helps the model normalise `location_name` to a
 standard form.
 
+When the database stores festival metadata, the system prompt receives an extra
+JSON payload with canonical `festival_names` and normalised
+`festival_alias_pairs`. These pairs let the parser map alternative spellings to
+the correct festival so new events attach to existing records instead of
+creating duplicates.
+
 The response must be JSON with the fields listed in `docs/PROMPTS.md`. When the
 text describes multiple events, return an array of such objects.
 The prefix "Today is YYYY-MM-DD." helps the model infer the correct year for
@@ -66,13 +72,14 @@ fields.
 
 Festival pages also rely on 4o. To craft a festival blurb the bot sends the
 previous description (if any) together with the full text of up to five recent
-announcements. The prompt instructs the model:
+announcements and a fact sheet summarising период, город, длительность, число
+событий, ключевые сюжеты и площадки. The prompt asks the model to write like a
+culture journalist, stick strictly to the supplied facts, and return один абзац
+без списков, эмодзи и выдуманных подробностей. The final text is capped at 350
+characters, so the LLM keeps only the essentials and avoids clichés. Only
+information lifted from the provided materials may appear in the summary.
 The model also returns `festival_full` alongside `festival` so the bot can store
 the edition name separately.
-"Стиль профессионального журналиста в сфере мероприятий и культуры. Не
-используй типовые штампы, не выдумывай факты. Описание должно состоять из трёх
-предложений, если сведений мало — из одного". Only information from the
-provided texts may appear in the summary.
 If the description contains a date range like "с 27 августа по 6 сентября 2025",
 these dates define the festival period. When no range is present the period is
 calculated from the events added to the festival.
