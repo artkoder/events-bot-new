@@ -27,7 +27,9 @@ async def test_add_events_from_text_assigns_topics(tmp_path: Path, monkeypatch):
             }
         ]
 
-    async def fake_schedule_event_update_tasks(db_obj, event_obj, drain_nav=True):
+    async def fake_schedule_event_update_tasks(
+        db_obj, event_obj, drain_nav=True, skip_vk_sync=False
+    ):
         return {}
 
     async def fake_create_source_page(*args, **kwargs):
@@ -79,7 +81,9 @@ async def test_add_events_from_text_multiday_inherits_topics(tmp_path: Path, mon
         calls["classify"] += 1
         return ["PARTIES"]
 
-    async def fake_schedule_event_update_tasks(db_obj, event_obj, drain_nav=True):
+    async def fake_schedule_event_update_tasks(
+        db_obj, event_obj, drain_nav=True, skip_vk_sync=False
+    ):
         return {}
 
     async def fake_create_source_page(*args, **kwargs):

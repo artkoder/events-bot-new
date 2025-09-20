@@ -343,7 +343,9 @@ async def test_vk_persist_event_updates_ocr_records(tmp_path, monkeypatch):
     async def fake_assign_event_topics(event_obj):
         return [], len(event_obj.description or ""), None, False
 
-    async def fake_schedule_event_update_tasks(db_obj, event_obj, drain_nav=True):
+    async def fake_schedule_event_update_tasks(
+        db_obj, event_obj, drain_nav=True, skip_vk_sync=False
+    ):
         return {}
 
     monkeypatch.setattr(main, "assign_event_topics", fake_assign_event_topics)

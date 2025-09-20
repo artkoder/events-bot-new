@@ -6393,7 +6393,7 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
             session.add(event)
             await session.commit()
         makefest_sessions.pop(callback.from_user.id, None)
-        await schedule_event_update_tasks(db, event)
+        await schedule_event_update_tasks(db, event, skip_vk_sync=True)
         asyncio.create_task(sync_festival_page(db, fest_obj.name))
         asyncio.create_task(sync_festivals_index_page(db))
         status = "создан" if created else "обновлён"
@@ -6478,7 +6478,7 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
             session.add(event)
             await session.commit()
         makefest_sessions.pop(callback.from_user.id, None)
-        await schedule_event_update_tasks(db, event)
+        await schedule_event_update_tasks(db, event, skip_vk_sync=True)
         asyncio.create_task(sync_festival_page(db, fest.name))
         asyncio.create_task(sync_festivals_index_page(db))
         text, markup = await _build_makefest_response(
@@ -8407,7 +8407,7 @@ async def enqueue_job(
 
 
 async def schedule_event_update_tasks(
-    db: Database, ev: Event, *, drain_nav: bool = True
+    db: Database, ev: Event, *, drain_nav: bool = True, skip_vk_sync: bool = False
 ) -> dict[JobTask, str]:
     eid = ev.id
     results: dict[JobTask, str] = {}
@@ -8446,10 +8446,9 @@ async def schedule_event_update_tasks(
         results[JobTask.festival_pages] = await enqueue_job(
             db, eid, JobTask.festival_pages
         )
-    if is_vk_wall_url(ev.source_post_url) or ev.source_vk_post_url:
-        pass
-    else:
-        results[JobTask.vk_sync] = await enqueue_job(db, eid, JobTask.vk_sync)
+    if not skip_vk_sync:
+        if not (is_vk_wall_url(ev.source_post_url) or ev.source_vk_post_url):
+            results[JobTask.vk_sync] = await enqueue_job(db, eid, JobTask.vk_sync)
     logging.info("scheduled event tasks for %s", eid)
     if drain_nav:
         await _drain_nav_tasks(db, eid)
