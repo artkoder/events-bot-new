@@ -12,6 +12,8 @@ import logging
 import os
 import time as unixtime
 import time as _time
+import tempfile
+import calendar
 
 
 class DeduplicateFilter(logging.Filter):
@@ -3410,6 +3412,45 @@ def parse_iso_date(value: str) -> date | None:
         return date.fromisoformat(value.split("..", 1)[0])
     except Exception:
         return None
+
+
+def parse_period_range(value: str) -> tuple[date | None, date | None]:
+    """Parse period string like ``YYYY-MM`` or ``YYYY-MM-DD..YYYY-MM-DD``."""
+    if not value:
+        return None, None
+    raw = value.strip()
+    if not raw:
+        return None, None
+    if raw.startswith("period="):
+        raw = raw.split("=", 1)[1]
+    if ".." in raw:
+        start_raw, end_raw = raw.split("..", 1)
+    else:
+        start_raw, end_raw = raw, raw
+
+    def _parse_endpoint(component: str, *, is_start: bool) -> date | None:
+        comp = component.strip()
+        if not comp:
+            return None
+        try:
+            return date.fromisoformat(comp)
+        except ValueError:
+            if re.fullmatch(r"\d{4}-\d{2}", comp):
+                year, month = map(int, comp.split("-"))
+                day = 1 if is_start else calendar.monthrange(year, month)[1]
+                return date(year, month, day)
+            if re.fullmatch(r"\d{4}", comp):
+                year = int(comp)
+                month = 1 if is_start else 12
+                day = 1 if is_start else 31
+                return date(year, month, day)
+        return None
+
+    start = _parse_endpoint(start_raw, is_start=True)
+    end = _parse_endpoint(end_raw, is_start=False)
+    if start and end and end < start:
+        start, end = end, start
+    return start, end
 
 
 def parse_city_from_fest_name(name: str) -> str | None:
@@ -17874,6 +17915,164 @@ async def handle_dumpdb(message: types.Message, db: Database, bot: Bot):
     await bot.send_message(message.chat.id, "\n".join(lines))
 
 
+def _coerce_jsonish(value: Any) -> Any:
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped and stripped[0] in "[{":
+            with contextlib.suppress(json.JSONDecodeError):
+                return json.loads(stripped)
+    return value
+
+
+async def handle_tourist_export(message: types.Message, db: Database, bot: Bot) -> None:
+    args = shlex.split(message.text or "")[1:]
+    parser = argparse.ArgumentParser(prog="/tourist_export", add_help=False)
+    parser.add_argument("--period")
+    try:
+        opts, extra = parser.parse_known_args(args)
+    except SystemExit:
+        await bot.send_message(message.chat.id, "Invalid arguments")
+        return
+    period_arg = opts.period
+    if not period_arg and extra:
+        token = extra[0]
+        if token.startswith("period="):
+            period_arg = token.split("=", 1)[1]
+        else:
+            period_arg = token
+    start_date, end_date = (None, None)
+    if period_arg:
+        start_date, end_date = parse_period_range(period_arg)
+        if not start_date and not end_date:
+            await bot.send_message(message.chat.id, "Invalid period")
+            return
+
+    async with db.get_session() as session:
+        user = await session.get(User, message.from_user.id)
+        if not user or user.blocked:
+            await bot.send_message(message.chat.id, "Not authorized")
+            return
+
+        logger.info(
+            "tourist_export.request user=%s period=%s",
+            message.from_user.id,
+            period_arg or "",
+        )
+
+        pragma_rows = await session.execute(text("PRAGMA table_info('event')"))
+        event_columns = [row[1] for row in pragma_rows]
+        base_fields = [
+            "id",
+            "title",
+            "description",
+            "festival",
+            "date",
+            "end_date",
+            "time",
+            "location_name",
+            "location_address",
+            "city",
+            "ticket_price_min",
+            "ticket_price_max",
+            "ticket_link",
+            "event_type",
+            "emoji",
+            "is_free",
+            "pushkin_card",
+            "telegraph_url",
+            "source_post_url",
+            "source_vk_post_url",
+            "ics_url",
+            "topics",
+            "photo_urls",
+        ]
+        available_fields = [col for col in base_fields if col in event_columns]
+        tourist_fields = [col for col in event_columns if col.startswith("tourist_")]
+        seen: set[str] = set()
+        selected_columns: list[str] = []
+        for col in available_fields + tourist_fields:
+            if col in seen:
+                continue
+            seen.add(col)
+            selected_columns.append(col)
+        if "id" not in seen and "id" in event_columns:
+            selected_columns.insert(0, "id")
+        if not selected_columns:
+            await bot.send_message(message.chat.id, "No exportable fields")
+            return
+
+        query = text("SELECT {} FROM event".format(", ".join(selected_columns)))
+        rows = await session.execute(query)
+        records: list[dict[str, Any]] = []
+        for row in rows:
+            mapping = dict(row._mapping)
+            start = parse_iso_date(str(mapping.get("date", "") or ""))
+            end = parse_iso_date(str(mapping.get("end_date", "") or ""))
+            if not end:
+                end = start
+            if start_date and end and end < start_date:
+                continue
+            if end_date and start and start > end_date:
+                continue
+            record: dict[str, Any] = {}
+            for col in selected_columns:
+                record[col] = _coerce_jsonish(mapping.get(col))
+            records.append({
+                "_sort": (
+                    start or date.min,
+                    mapping.get("id") or 0,
+                ),
+                "data": record,
+            })
+
+    logger.info(
+        "tourist_export.start user=%s period=%s count=%s",
+        message.from_user.id,
+        period_arg or "",
+        len(records),
+    )
+
+    if not records:
+        await bot.send_message(message.chat.id, "No events found")
+        return
+
+    records.sort(key=lambda item: item["_sort"])
+    lines = [json.dumps(item["data"], ensure_ascii=False) for item in records]
+    payload = "\n".join(lines).encode("utf-8")
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    filename_bits = ["tourist_export", timestamp]
+    if start_date:
+        filename_bits.insert(1, start_date.isoformat())
+    if end_date and (not start_date or end_date != start_date):
+        filename_bits.insert(2 if start_date else 1, end_date.isoformat())
+    filename = "_".join(filename_bits) + ".jsonl"
+
+    max_buffer = 45 * 1024 * 1024
+    if len(payload) <= max_buffer:
+        file = types.BufferedInputFile(payload, filename=filename)
+        await bot.send_document(message.chat.id, file)
+    else:
+        tmp_path: str | None = None
+        try:
+            with tempfile.NamedTemporaryFile("wb", delete=False, suffix=".jsonl") as tmp:
+                tmp.write(payload)
+                tmp_path = tmp.name
+            file = types.FSInputFile(tmp_path, filename=filename)
+            await bot.send_document(message.chat.id, file)
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                with contextlib.suppress(Exception):
+                    os.remove(tmp_path)
+
+    logger.info(
+        "tourist_export.done user=%s count=%s bytes=%s",
+        message.from_user.id,
+        len(records),
+        len(payload),
+    )
+
+
 async def handle_telegraph_fix_author(message: types.Message, db: Database, bot: Bot):
     await bot.send_message(
         message.chat.id,
@@ -21065,6 +21264,9 @@ def create_app() -> web.Application:
     async def dumpdb_wrapper(message: types.Message):
         await handle_dumpdb(message, db, bot)
 
+    async def tourist_export_wrapper(message: types.Message):
+        await handle_tourist_export(message, db, bot)
+
     async def telegraph_fix_author_wrapper(message: types.Message):
         await handle_telegraph_fix_author(message, db, bot)
 
@@ -21392,6 +21594,7 @@ def create_app() -> web.Application:
     dp.message.register(ics_fix_nav_wrapper, Command("ics_fix_nav"))
     dp.message.register(users_wrapper, Command("users"))
     dp.message.register(dumpdb_wrapper, Command("dumpdb"))
+    dp.message.register(tourist_export_wrapper, Command("tourist_export"))
     dp.message.register(telegraph_fix_author_wrapper, Command("telegraph_fix_author"))
     dp.message.register(restore_wrapper, Command("restore"))
     dp.message.register(
