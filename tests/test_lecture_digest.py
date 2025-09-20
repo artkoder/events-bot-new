@@ -16,6 +16,7 @@ from digests import (
     compose_masterclasses_intro_via_4o,
     compose_exhibitions_intro_via_4o,
     aggregate_digest_topics,
+    normalize_topics,
     format_event_line_html,
     pick_display_link,
     normalize_titles_via_4o,
@@ -171,6 +172,21 @@ async def test_build_lectures_digest_candidates_limit(tmp_path):
     assert events[0].title == "e1"
 
 
+def test_normalize_topics_distinguishes_theatre_subtypes():
+    topics = [
+        "театр",
+        "классический спектакль",
+        "Драма",
+        "современный театр",
+        "модерн",
+        "experimental theatre",
+    ]
+
+    normalized = normalize_topics(topics)
+
+    assert normalized == ["THEATRE", "THEATRE_CLASSIC", "THEATRE_MODERN"]
+
+
 @pytest.mark.asyncio
 async def test_compose_intro_via_4o(monkeypatch, caplog):
     async def fake_ask(prompt, max_tokens=0):
@@ -259,6 +275,7 @@ async def test_compose_intro_via_4o_exhibition(monkeypatch):
         source_post_url="https://example.com/post",
         telegraph_url=None,
         telegraph_path=None,
+        event_type="мастер-класс",
     )
 
     captured_payload: dict[str, list] = {}
@@ -311,6 +328,7 @@ async def test_build_exhibitions_digest_preview(monkeypatch):
         source_post_url="https://example.com/exhibit",
         telegraph_url=None,
         telegraph_path=None,
+        event_type="выставка",
     )
 
     captured_payload: dict[str, list] = {}
@@ -527,11 +545,13 @@ def test_aggregate_topics():
         SimpleNamespace(topics=["TECH", "тех"]),
         SimpleNamespace(topics=["MUSIC"]),
         SimpleNamespace(topics=["культура"]),
+        SimpleNamespace(topics=["психология"]),
+        SimpleNamespace(topics=["mental health"]),
     ]
     assert aggregate_digest_topics(events) == [
         "EXHIBITIONS",
+        "PSYCHOLOGY",
         "CONCERTS",
-        "LECTURES",
     ]
 
 

@@ -1,6 +1,6 @@
 # Автотемы для событий
 
-Система автоматически классифицирует события по 17 зафиксированным темам. Метки
+Система автоматически классифицирует события по 20 зафиксированным темам. Метки
 сохраняются в карточке события и выводятся администраторам в интерфейсе бота.
 
 ## Доступные темы
@@ -15,8 +15,11 @@
 | `MOVIES` | «Кино» |
 | `EXHIBITIONS` | «Выставки и арт» |
 | `THEATRE` | «Театр» |
+| `THEATRE_CLASSIC` | «Классический театр и драма» |
+| `THEATRE_MODERN` | «Современный и экспериментальный театр» |
 | `LECTURES` | «Лекции и встречи» |
 | `MASTERCLASS` | «Мастер-классы» |
+| `PSYCHOLOGY` | «Психология» |
 | `SCIENCE_POP` | «Научпоп» |
 | `HANDMADE` | «Хендмейд/маркеты/ярмарки/МК» |
 | `NETWORKING` | «Нетворкинг и карьера» |
@@ -45,8 +48,11 @@
 - MOVIES — «Кино»
 - EXHIBITIONS — «Выставки и арт»
 - THEATRE — «Театр»
+- THEATRE_CLASSIC — «Классический театр и драма»
+- THEATRE_MODERN — «Современный и экспериментальный театр»
 - LECTURES — «Лекции и встречи»
 - MASTERCLASS — «Мастер-классы»
+- PSYCHOLOGY — «Психология»
 - SCIENCE_POP — «Научпоп»
 - HANDMADE — «Хендмейд/маркеты/ярмарки/МК»
 - NETWORKING — «Нетворкинг и карьера»
@@ -71,7 +77,8 @@
         "type": "string",
         "enum": [
           "STANDUP", "QUIZ_GAMES", "OPEN_AIR", "PARTIES", "CONCERTS",
-          "MOVIES", "EXHIBITIONS", "THEATRE", "LECTURES", "MASTERCLASS",
+          "MOVIES", "EXHIBITIONS", "THEATRE", "THEATRE_CLASSIC",
+          "THEATRE_MODERN", "LECTURES", "MASTERCLASS", "PSYCHOLOGY",
           "SCIENCE_POP", "HANDMADE", "NETWORKING", "ACTIVE",
           "PERSONALITIES", "KIDS_SCHOOL", "FAMILY"
         ]
