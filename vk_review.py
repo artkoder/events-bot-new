@@ -63,6 +63,7 @@ class InboxPost:
     has_date: int
     status: str
     review_batch: Optional[str]
+    imported_event_id: Optional[int]
 
 
 def _hours_from_env(name: str, default: float) -> float:
@@ -137,7 +138,7 @@ async def pick_next(db: Database, operator_id: int, batch_id: str) -> Optional[I
             # Continue reviewing rows that remain locked for this operator.
             cur = await conn.execute(
                 """
-                SELECT id, group_id, post_id, date, text, matched_kw, has_date, status, review_batch
+                SELECT id, group_id, post_id, date, text, matched_kw, has_date, status, review_batch, imported_event_id
                 FROM vk_inbox
                 WHERE status='locked' AND locked_by=?
                 ORDER BY locked_at ASC, id ASC
@@ -358,7 +359,7 @@ async def pick_next(db: Database, operator_id: int, batch_id: str) -> Optional[I
                         UPDATE vk_inbox
                         SET status='locked', locked_by=?, locked_at=CURRENT_TIMESTAMP, review_batch=?
                         WHERE id = (SELECT id FROM ranked)
-                        RETURNING id, group_id, post_id, date, text, matched_kw, has_date, status, review_batch
+                        RETURNING id, group_id, post_id, date, text, matched_kw, has_date, status, review_batch, imported_event_id
                     """
                     bucket_cursor = await conn.execute(
                         bucket_query,

@@ -3,7 +3,15 @@ from enum import Enum
 from typing import Optional
 
 from sqlmodel import Field, SQLModel
-from sqlalchemy import Column, DateTime, Index, JSON, UniqueConstraint, text
+from sqlalchemy import (
+    Column,
+    DateTime,
+    Index,
+    JSON,
+    SmallInteger,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.types import Enum as SAEnum
 
 
@@ -293,6 +301,18 @@ class Event(SQLModel, table=True):
     source_chat_id: Optional[int] = None
     source_message_id: Optional[int] = None
     creator_id: Optional[int] = None
+    tourist_label: Optional[int] = Field(
+        default=None, sa_column=Column(SmallInteger)
+    )
+    tourist_factors: list[str] = Field(
+        default_factory=list, sa_column=Column(JSON)
+    )
+    tourist_note: Optional[str] = None
+    tourist_label_by: Optional[int] = None
+    tourist_label_at: Optional[datetime] = Field(
+        default=None, sa_column=Column(DateTime(timezone=True))
+    )
+    tourist_label_source: Optional[str] = None
     photo_urls: list[str] = Field(default_factory=list, sa_column=Column(JSON))
     photo_count: int = 0
     topics: list[str] = Field(default_factory=list, sa_column=Column(JSON))
