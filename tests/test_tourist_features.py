@@ -345,13 +345,39 @@ async def test_tourist_factor_timeout(tmp_path, monkeypatch):
             "reply_markup": markup.model_dump(),
         }
     )
-    cb = make_callback(f"tourist:fx:targeted_for_tourists:{event_id}", message)
+    answers = patch_answer(monkeypatch)
     bot = DummyBot()
+    cb_menu = make_callback(f"tourist:fxmenu:{event_id}", message)
+    await main.process_request(cb_menu, db, bot)
+    assert any(call["text"] == "Выберите причины" for call in answers)
+    assert bot.edited_text_calls
+    menu_markup = bot.edited_text_calls[-1]["reply_markup"]
+    assert any(
+        btn.callback_data and btn.callback_data.startswith("tourist:fx:")
+        for row in menu_markup.inline_keyboard
+        for btn in row
+    )
 
-    patch_answer(monkeypatch)
+    main.tourist_reason_sessions.clear()
+
+    cb = make_callback(f"tourist:fx:targeted_for_tourists:{event_id}", message)
     await main.process_request(cb, db, bot)
-    assert bot.sent_messages
-    assert bot.sent_messages[-1]["text"] == "Сессия истекла, откройте причины заново"
+    assert len(bot.edited_text_calls) >= 2
+    restored_markup = bot.edited_text_calls[-1]["reply_markup"]
+    assert not any(
+        btn.callback_data and btn.callback_data.startswith("tourist:fx:")
+        for row in restored_markup.inline_keyboard
+        for btn in row
+    )
+    assert any(
+        btn.callback_data == f"tourist:fxmenu:{event_id}"
+        for row in restored_markup.inline_keyboard
+        for btn in row
+    )
+    assert not main.tourist_reason_sessions
+    assert len(answers) >= 2
+    assert answers[-1]["text"] == "Сессия истекла, откройте причины заново"
+    assert not answers[-1]["show_alert"]
 
 
 @pytest.mark.asyncio
