@@ -2156,6 +2156,9 @@ async def ensure_festival(
     full_name: str | None = None,
     photo_url: str | None = None,
     photo_urls: list[str] | None = None,
+    website_url: str | None = None,
+    program_url: str | None = None,
+    ticket_url: str | None = None,
     start_date: str | None = None,
     end_date: str | None = None,
     location_name: str | None = None,
@@ -2172,6 +2175,11 @@ async def ensure_festival(
         fest = res.scalar_one_or_none()
         if fest:
             updated = False
+            url_updates = {
+                "website_url": website_url.strip() if website_url else None,
+                "program_url": program_url.strip() if program_url else None,
+                "ticket_url": ticket_url.strip() if ticket_url else None,
+            }
             if photo_urls:
                 merged = fest.photo_urls[:]
                 for u in photo_urls:
@@ -2186,6 +2194,10 @@ async def ensure_festival(
                     updated = True
                 elif photo_urls:
                     fest.photo_url = photo_urls[0]
+                    updated = True
+            for field, value in url_updates.items():
+                if value and value != getattr(fest, field):
+                    setattr(fest, field, value)
                     updated = True
             if full_name and full_name != fest.full_name:
                 fest.full_name = full_name
@@ -2227,6 +2239,9 @@ async def ensure_festival(
             full_name=full_name,
             photo_url=photo_url or (photo_urls[0] if photo_urls else None),
             photo_urls=photo_urls or ([photo_url] if photo_url else []),
+            website_url=website_url.strip() if website_url else None,
+            program_url=program_url.strip() if program_url else None,
+            ticket_url=ticket_url.strip() if ticket_url else None,
             start_date=start_date,
             end_date=end_date,
             location_name=location_name,
@@ -7488,6 +7503,7 @@ async def add_events_from_text(
             full_name=festival_info.get("full_name"),
             photo_url=photo_u,
             photo_urls=catbox_urls,
+            program_url=program_url,
             start_date=start,
             end_date=end,
             location_name=loc_name,
@@ -7501,14 +7517,6 @@ async def add_events_from_text(
         festival_obj = fest_obj
         fest_created = created
         fest_updated = updated
-        if program_url and (not fest_obj.program_url or fest_obj.program_url != program_url):
-            async with db.get_session() as session:
-                fest_db = await session.get(Festival, fest_obj.id)
-                if fest_db and fest_db.program_url != program_url:
-                    fest_db.program_url = program_url
-                    await session.commit()
-                    fest_updated = True
-                    festival_obj = fest_db
         async def _safe_sync_fest(name: str) -> None:
             try:
                 await sync_festival_page(db, name)

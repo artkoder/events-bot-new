@@ -32,6 +32,14 @@ class DummyBot(Bot):
         return None
 
 
+@pytest.fixture(autouse=True)
+def _stub_fest_nav(monkeypatch):
+    async def nop(*a, **k):
+        return False
+
+    monkeypatch.setattr(main, "rebuild_fest_nav_if_changed", nop)
+
+
 @pytest.mark.asyncio
 async def test_ensure_festival_updates_city_when_changed(tmp_path: Path):
     db = Database(str(tmp_path / "db.sqlite"))
