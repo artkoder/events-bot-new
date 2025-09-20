@@ -944,6 +944,19 @@ async def update_tourist_message(
                 session.message_text = new_text
                 tourist_note_sessions[callback.from_user.id] = session
 
+
+async def _restore_tourist_reason_keyboard(
+    callback: types.CallbackQuery,
+    bot: Bot,
+    db: Database,
+    event_id: int,
+    source: str,
+) -> None:
+    async with db.get_session() as session:
+        event = await session.get(Event, event_id)
+    if event:
+        await update_tourist_message(callback, bot, event, source, menu=False)
+
 async def _build_makefest_session_state(
     event: Event, known_fests: Sequence[Festival]
 ) -> dict[str, Any]:
@@ -7155,19 +7168,21 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
             try:
                 session_state = tourist_reason_sessions[callback.from_user.id]
             except KeyError:
-                await bot.send_message(
-                    callback.message.chat.id,
-                    "Сессия истекла, откройте причины заново",
+                await _restore_tourist_reason_keyboard(
+                    callback, bot, db, event_id, source
                 )
-                await callback.answer()
+                await callback.answer(
+                    "Сессия истекла, откройте причины заново"
+                )
                 return
             if session_state.event_id != event_id:
                 tourist_reason_sessions.pop(callback.from_user.id, None)
-                await bot.send_message(
-                    callback.message.chat.id,
-                    "Сессия истекла, откройте причины заново",
+                await _restore_tourist_reason_keyboard(
+                    callback, bot, db, event_id, source
                 )
-                await callback.answer()
+                await callback.answer(
+                    "Сессия истекла, откройте причины заново"
+                )
                 return
             async with db.get_session() as session:
                 user = await session.get(User, callback.from_user.id)
