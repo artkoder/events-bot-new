@@ -702,7 +702,8 @@ def _normalize_tourist_factors(factors: Iterable[str]) -> list[str]:
 def build_tourist_status_lines(event: Event) -> list[str]:
     lines = [f"🌍 Туристам: {_tourist_label_display(event)}"]
     factors = _normalize_tourist_factors(event.tourist_factors or [])
-    lines.append(f"🧩 {len(factors)} причин")
+    if factors:
+        lines.append(f"🧩 {len(factors)} причин")
     if event.tourist_note and event.tourist_note.strip():
         lines.append("📝 есть комментарий")
     return lines
