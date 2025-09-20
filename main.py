@@ -631,13 +631,13 @@ class TouristFactor:
 
 
 TOURIST_FACTORS: list[TouristFactor] = [
-    TouristFactor("culture", "🏛️", "История и культура"),
-    TouristFactor("atmosphere", "🏙️", "Атмосфера города"),
-    TouristFactor("nature", "🌿", "Природа и активный отдых"),
-    TouristFactor("water", "🌊", "Море и побережье"),
-    TouristFactor("food", "🍽️", "Гастрономия"),
-    TouristFactor("family", "👨‍👩‍👧‍👦", "Семейный отдых"),
-    TouristFactor("events", "🎉", "События и фестивали"),
+    TouristFactor("targeted_for_tourists", "🎯", "Нацелен на туристов"),
+    TouristFactor("unique_to_region", "🧭", "Уникально для региона"),
+    TouristFactor("festival_major", "🎪", "Крупный фестиваль или событие"),
+    TouristFactor("nature_or_landmark", "🌊", "Природа или знаковое место"),
+    TouristFactor("photogenic_blogger", "📸", "Фотогенично, понравится блогерам"),
+    TouristFactor("local_flavor_crafts", "🍲", "Местный колорит и ремёсла"),
+    TouristFactor("easy_logistics", "🚆", "Простая логистика"),
 ]
 
 TOURIST_FACTOR_BY_CODE: dict[str, TouristFactor] = {
@@ -645,12 +645,25 @@ TOURIST_FACTOR_BY_CODE: dict[str, TouristFactor] = {
 }
 TOURIST_FACTOR_CODES: list[str] = [factor.code for factor in TOURIST_FACTORS]
 TOURIST_FACTOR_ALIASES: dict[str, str] = {
-    "history": "culture",
-    "sea": "water",
-    "nature": "nature",
-    "food": "food",
-    "family": "family",
-    "events": "events",
+    "history": "unique_to_region",
+    "culture": "unique_to_region",
+    "atmosphere": "local_flavor_crafts",
+    "city": "local_flavor_crafts",
+    "sea": "nature_or_landmark",
+    "water": "nature_or_landmark",
+    "nature": "nature_or_landmark",
+    "scenic_nature": "nature_or_landmark",
+    "iconic_location": "photogenic_blogger",
+    "shows_local_life": "local_flavor_crafts",
+    "local_cuisine": "local_flavor_crafts",
+    "food": "local_flavor_crafts",
+    "gastronomy": "local_flavor_crafts",
+    "family": "easy_logistics",
+    "family_friendly": "easy_logistics",
+    "events": "festival_major",
+    "event": "festival_major",
+    "photogenic": "photogenic_blogger",
+    "blogger": "photogenic_blogger",
 }
 
 
@@ -737,7 +750,7 @@ def build_tourist_keyboard_block(
         [
             types.InlineKeyboardButton(
                 text="Причины",
-                callback_data=f"tourist:fx:menu:{event.id}",
+                callback_data=f"tourist:fxmenu:{event.id}",
             )
         ],
         [
@@ -937,6 +950,19 @@ async def update_tourist_message(
                 session.markup = new_markup
                 session.message_text = new_text
                 tourist_note_sessions[callback.from_user.id] = session
+
+
+async def _restore_tourist_reason_keyboard(
+    callback: types.CallbackQuery,
+    bot: Bot,
+    db: Database,
+    event_id: int,
+    source: str,
+) -> None:
+    async with db.get_session() as session:
+        event = await session.get(Event, event_id)
+    if event:
+        await update_tourist_message(callback, bot, event, source, menu=False)
 
 async def _build_makefest_session_state(
     event: Event, known_fests: Sequence[Festival]
@@ -7242,11 +7268,34 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                 )
                 tourist_reason_sessions[callback.from_user.id] = session_state
                 await update_tourist_message(callback, bot, event, source, menu=True)
-                await callback.answer("Выберите причины")
+                await callback.answer("Отмечено")
             else:
                 tourist_reason_sessions.pop(callback.from_user.id, None)
                 await update_tourist_message(callback, bot, event, source)
                 await callback.answer("Отмечено")
+        elif action == "fxmenu":
+            try:
+                event_id = int(parts[2])
+            except (ValueError, IndexError):
+                event_id = 0
+            if not event_id:
+                await callback.answer("Некорректное событие", show_alert=True)
+                return
+            async with db.get_session() as session:
+                user = await session.get(User, callback.from_user.id)
+                event = await session.get(Event, event_id)
+                if not event or not _user_can_label_event(user):
+                    await callback.answer("Not authorized", show_alert=True)
+                    return
+            if callback.message:
+                tourist_reason_sessions[callback.from_user.id] = TouristReasonSession(
+                    event_id=event_id,
+                    chat_id=callback.message.chat.id,
+                    message_id=callback.message.message_id,
+                    source=source,
+                )
+                await update_tourist_message(callback, bot, event, source, menu=True)
+            await callback.answer("Выберите причины")
         elif action == "fx":
             code = parts[2] if len(parts) > 2 else ""
             try:
@@ -7256,41 +7305,24 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
             if not event_id:
                 await callback.answer("Некорректное событие", show_alert=True)
                 return
-            if code == "menu":
-                async with db.get_session() as session:
-                    user = await session.get(User, callback.from_user.id)
-                    event = await session.get(Event, event_id)
-                    if not event or not _user_can_label_event(user):
-                        await callback.answer("Not authorized", show_alert=True)
-                        return
-                if callback.message:
-                    tourist_reason_sessions[callback.from_user.id] = TouristReasonSession(
-                        event_id=event_id,
-                        chat_id=callback.message.chat.id,
-                        message_id=callback.message.message_id,
-                        source=source,
-                    )
-                    await update_tourist_message(
-                        callback, bot, event, source, menu=True
-                    )
-                await callback.answer("Выберите причины")
-                return
             try:
                 session_state = tourist_reason_sessions[callback.from_user.id]
             except KeyError:
-                await bot.send_message(
-                    callback.message.chat.id,
-                    "Сессия истекла, откройте причины заново",
+                await _restore_tourist_reason_keyboard(
+                    callback, bot, db, event_id, source
                 )
-                await callback.answer()
+                await callback.answer(
+                    "Сессия истекла, откройте причины заново"
+                )
                 return
             if session_state.event_id != event_id:
                 tourist_reason_sessions.pop(callback.from_user.id, None)
-                await bot.send_message(
-                    callback.message.chat.id,
-                    "Сессия истекла, откройте причины заново",
+                await _restore_tourist_reason_keyboard(
+                    callback, bot, db, event_id, source
                 )
-                await callback.answer()
+                await callback.answer(
+                    "Сессия истекла, откройте причины заново"
+                )
                 return
             async with db.get_session() as session:
                 user = await session.get(User, callback.from_user.id)
@@ -19906,6 +19938,10 @@ async def handle_vk_review_cb(callback: types.CallbackQuery, db: Database, bot: 
             row = await cur.fetchone()
         batch_id = row[0] if row else ""
         if action == "accept":
+            await bot.send_message(
+                callback.message.chat.id,
+                "⏳ Начинаю импорт события…",
+            )
             await _vkrev_import_flow(
                 callback.message.chat.id,
                 callback.from_user.id,

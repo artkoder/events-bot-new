@@ -199,6 +199,54 @@ async def test_shortpost_wall_post(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_handle_vk_review_accept_notifies_before_import(monkeypatch, tmp_path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    async with db.raw_conn() as conn:
+        await conn.execute(
+            "INSERT INTO vk_inbox(" "id, group_id, post_id, date, text, matched_kw, has_date, status, imported_event_id, review_batch"
+            ") VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (1, 1, 1, 0, "", None, 0, "pending", None, "batch"),
+        )
+        await conn.commit()
+
+    sent = []
+
+    async def fake_import_flow(
+        chat_id, operator_id, inbox_id, batch_id, db_, bot_, operator_extra=None
+    ):
+        sent.append((chat_id, operator_id, inbox_id, batch_id))
+        await bot_.send_message(chat_id, "import flow called")
+
+    monkeypatch.setattr(main, "_vkrev_import_flow", fake_import_flow)
+
+    bot = DummyBot()
+
+    async def fake_answer(self, *args, **kwargs):
+        return None
+
+    monkeypatch.setattr(types.CallbackQuery, "answer", fake_answer)
+
+    cb = types.CallbackQuery.model_validate(
+        {
+            "id": "1",
+            "from": {"id": 10, "is_bot": False, "first_name": "Op"},
+            "chat_instance": "1",
+            "data": "vkrev:accept:1",
+            "message": {"message_id": 1, "date": 0, "chat": {"id": 5, "type": "private"}},
+        }
+    )
+    cb._bot = bot
+
+    await main.handle_vk_review_cb(cb, db, bot)
+
+    assert sent == [(5, 10, 1, "batch")]
+    assert [m.text for m in bot.messages] == [
+        "⏳ Начинаю импорт события…",
+        "import flow called",
+    ]
+
+@pytest.mark.asyncio
 async def test_shortpost_publish_without_photo(tmp_path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
