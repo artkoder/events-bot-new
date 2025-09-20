@@ -623,13 +623,34 @@ add_event_sessions: TTLCache[int, bool] = TTLCache(maxsize=64, ttl=3600)
 # waiting for a date for events listing
 events_date_sessions: TTLCache[int, bool] = TTLCache(maxsize=64, ttl=3600)
 
-TOURIST_FACTORS: dict[str, str] = {
-    "history": "История и культура",
-    "sea": "Море и побережье",
-    "nature": "Природа",
-    "food": "Гастрономия",
-    "family": "Семейный отдых",
-    "events": "Событие",
+@dataclass(frozen=True)
+class TouristFactor:
+    code: str
+    emoji: str
+    title: str
+
+
+TOURIST_FACTORS: list[TouristFactor] = [
+    TouristFactor("culture", "🏛️", "История и культура"),
+    TouristFactor("atmosphere", "🏙️", "Атмосфера города"),
+    TouristFactor("nature", "🌿", "Природа и активный отдых"),
+    TouristFactor("water", "🌊", "Море и побережье"),
+    TouristFactor("food", "🍽️", "Гастрономия"),
+    TouristFactor("family", "👨‍👩‍👧‍👦", "Семейный отдых"),
+    TouristFactor("events", "🎉", "События и фестивали"),
+]
+
+TOURIST_FACTOR_BY_CODE: dict[str, TouristFactor] = {
+    factor.code: factor for factor in TOURIST_FACTORS
+}
+TOURIST_FACTOR_CODES: list[str] = [factor.code for factor in TOURIST_FACTORS]
+TOURIST_FACTOR_ALIASES: dict[str, str] = {
+    "history": "culture",
+    "sea": "water",
+    "nature": "nature",
+    "food": "food",
+    "family": "family",
+    "events": "events",
 }
 
 
@@ -668,9 +689,19 @@ def _tourist_label_display(event: Event) -> str:
     return "—"
 
 
+def _normalize_tourist_factors(factors: Iterable[str]) -> list[str]:
+    seen: set[str] = set()
+    for code in factors:
+        mapped = TOURIST_FACTOR_ALIASES.get(code, code)
+        if mapped in TOURIST_FACTOR_BY_CODE and mapped not in seen:
+            seen.add(mapped)
+    ordered = [code for code in TOURIST_FACTOR_CODES if code in seen]
+    return ordered
+
+
 def build_tourist_status_lines(event: Event) -> list[str]:
     lines = [f"🌍 Туристам: {_tourist_label_display(event)}"]
-    factors = event.tourist_factors or []
+    factors = _normalize_tourist_factors(event.tourist_factors or [])
     lines.append(f"🧩 {len(factors)} причин")
     if event.tourist_note and event.tourist_note.strip():
         lines.append("📝 есть комментарий")
@@ -731,15 +762,16 @@ def build_tourist_reason_rows(
     if not getattr(event, "id", None):
         return []
     _ = source
-    selected = set(event.tourist_factors or [])
+    normalized = _normalize_tourist_factors(event.tourist_factors or [])
+    selected = set(normalized)
     rows: list[list[types.InlineKeyboardButton]] = []
-    for code, label in TOURIST_FACTORS.items():
-        prefix = "✅" if code in selected else "➕"
+    for factor in TOURIST_FACTORS:
+        prefix = "✅" if factor.code in selected else "➕"
         rows.append(
             [
                 types.InlineKeyboardButton(
-                    text=f"{prefix} {label}",
-                    callback_data=f"tourist:fx:{code}:{event.id}",
+                    text=f"{prefix} {factor.emoji} {factor.title}",
+                    callback_data=f"tourist:fx:{factor.code}:{event.id}",
                 )
             ]
         )
@@ -7064,12 +7096,19 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                 if not event or not _user_can_label_event(user):
                     await callback.answer("Not authorized", show_alert=True)
                     return
-                factors = list(event.tourist_factors or [])
-                if code in factors:
-                    factors = [item for item in factors if item != code]
+                factor = TOURIST_FACTOR_BY_CODE.get(
+                    TOURIST_FACTOR_ALIASES.get(code, code)
+                )
+                if not factor:
+                    await callback.answer("Неизвестная причина", show_alert=True)
+                    return
+                effective_code = factor.code
+                factors = _normalize_tourist_factors(event.tourist_factors or [])
+                if effective_code in factors:
+                    factors = [item for item in factors if item != effective_code]
                 else:
-                    factors.append(code)
-                ordered = [item for item in TOURIST_FACTORS if item in factors]
+                    factors.append(effective_code)
+                ordered = _normalize_tourist_factors(factors)
                 event.tourist_factors = ordered
                 event.tourist_label_by = callback.from_user.id
                 event.tourist_label_at = datetime.now(timezone.utc)
@@ -7088,7 +7127,7 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                 extra={
                     "event_id": event_id,
                     "user_id": callback.from_user.id,
-                    "factor": code,
+                    "factor": effective_code,
                 },
             )
             await update_tourist_message(
