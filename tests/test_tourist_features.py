@@ -229,6 +229,11 @@ async def test_tourist_yes_callback_updates_event(tmp_path, monkeypatch):
     assert any(
         btn.text.startswith("➕ 🎯 Нацелен на туристов") for btn in factor_buttons
     )
+    assert any("🎪 Фестиваль / масштаб" in btn.text for btn in factor_buttons)
+    assert any(
+        "🌊 Природа / море / лендмарк / замок" in btn.text
+        for btn in factor_buttons
+    )
 
 
 @pytest.mark.asyncio
