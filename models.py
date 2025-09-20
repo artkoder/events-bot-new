@@ -401,6 +401,7 @@ class Festival(SQLModel, table=True):
     vk_poll_url: Optional[str] = None
     photo_url: Optional[str] = None
     photo_urls: list[str] = Field(default_factory=list, sa_column=Column(JSON))
+    aliases: list[str] = Field(default_factory=list, sa_column=Column(JSON))
     website_url: Optional[str] = None
     program_url: Optional[str] = None
     vk_url: Optional[str] = None
