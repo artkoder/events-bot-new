@@ -657,6 +657,7 @@ tourist_reason_sessions: TTLCache[int, TouristReasonSession] = TTLCache(
 tourist_note_sessions: TTLCache[int, TouristNoteSession] = TTLCache(
     maxsize=256, ttl=10 * 60
 )
+tourist_message_sources: dict[tuple[int, int], str] = {}
 
 
 def _tourist_label_display(event: Event) -> str:
@@ -676,46 +677,49 @@ def build_tourist_status_lines(event: Event) -> list[str]:
     return lines
 
 
+def _determine_tourist_source(callback: types.CallbackQuery) -> str:
+    message = callback.message
+    if message:
+        key = (message.chat.id, message.message_id)
+        stored = tourist_message_sources.get(key)
+        if stored:
+            return stored
+    return "tg"
+
+
 def build_tourist_keyboard_block(
     event: Event, source: str
 ) -> list[list[types.InlineKeyboardButton]]:
     if not getattr(event, "id", None):
         return []
-    label = event.tourist_label
-    yes_text = "✅ Да" if label == 1 else "Да"
-    no_text = "✅ Нет" if label == 0 else "Нет"
-    reasons_count = len(event.tourist_factors or [])
-    reasons_text = f"🧩 Причины ({reasons_count})"
-    note_text = "📝 Комментарий"
-    if event.tourist_note and event.tourist_note.strip():
-        note_text = "📝 Изменить комментарий"
+    _ = source
     rows: list[list[types.InlineKeyboardButton]] = [
         [
             types.InlineKeyboardButton(
-                text=yes_text, callback_data=f"tourist:yes:{event.id}:{source}"
+                text="Интересно туристам", callback_data=f"tourist:yes:{event.id}"
             ),
             types.InlineKeyboardButton(
-                text=no_text, callback_data=f"tourist:no:{event.id}:{source}"
+                text="Не интересно туристам", callback_data=f"tourist:no:{event.id}"
             ),
         ],
         [
             types.InlineKeyboardButton(
-                text=reasons_text,
-                callback_data=f"tourist:fxmenu:{event.id}:{source}",
+                text="Причины",
+                callback_data=f"tourist:fx:menu:{event.id}",
             )
         ],
         [
             types.InlineKeyboardButton(
-                text=note_text,
-                callback_data=f"tourist:note:start:{event.id}:{source}",
+                text="✍️ Комментарий",
+                callback_data=f"tourist:note:start:{event.id}",
             )
         ],
     ]
     if event.tourist_note and event.tourist_note.strip():
         rows[-1].append(
             types.InlineKeyboardButton(
-                text="♻️ Очистить",
-                callback_data=f"tourist:note:clear:{event.id}:{source}",
+                text="🧽 Очистить комментарий",
+                callback_data=f"tourist:note:clear:{event.id}",
             )
         )
     return rows
@@ -726,6 +730,7 @@ def build_tourist_reason_rows(
 ) -> list[list[types.InlineKeyboardButton]]:
     if not getattr(event, "id", None):
         return []
+    _ = source
     selected = set(event.tourist_factors or [])
     rows: list[list[types.InlineKeyboardButton]] = []
     for code, label in TOURIST_FACTORS.items():
@@ -734,15 +739,18 @@ def build_tourist_reason_rows(
             [
                 types.InlineKeyboardButton(
                     text=f"{prefix} {label}",
-                    callback_data=f"tourist:fx:{event.id}:{code}:{source}",
+                    callback_data=f"tourist:fx:{code}:{event.id}",
                 )
             ]
         )
     rows.append(
         [
             types.InlineKeyboardButton(
-                text="⬅️ Готово", callback_data=f"tourist:fxback:{event.id}:{source}"
-            )
+                text="Готово", callback_data=f"tourist:fxdone:{event.id}"
+            ),
+            types.InlineKeyboardButton(
+                text="Пропустить", callback_data=f"tourist:fxskip:{event.id}"
+            ),
         ]
     )
     return rows
@@ -835,6 +843,7 @@ async def update_tourist_message(
     message = callback.message
     if not message:
         return
+    tourist_message_sources[(message.chat.id, message.message_id)] = source
     new_markup = replace_tourist_block(message.reply_markup, event, source, menu=menu)
     new_text: str | None = None
     if update_text:
@@ -6959,38 +6968,15 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
     elif data.startswith("tourist:"):
         parts = data.split(":")
         action = parts[1] if len(parts) > 1 else ""
-        source = parts[-1] if len(parts) > 2 else "tg"
-        if action in {"yes", "no", "fxmenu", "fxback"}:
+        source = _determine_tourist_source(callback)
+        if action in {"yes", "no"}:
             try:
                 event_id = int(parts[2])
-            except (ValueError, IndexError):
-                event_id = 0
-        elif action == "fx":
-            try:
-                event_id = int(parts[2])
-                factor_code = parts[3]
-            except (ValueError, IndexError):
-                event_id = 0
-                factor_code = ""
-            if not event_id or not factor_code:
-                await callback.answer("Некорректное событие", show_alert=True)
-                return
-        elif action == "note":
-            note_action = parts[2] if len(parts) > 2 else ""
-            try:
-                event_id = int(parts[3])
             except (ValueError, IndexError):
                 event_id = 0
             if not event_id:
                 await callback.answer("Некорректное событие", show_alert=True)
                 return
-        else:
-            await callback.answer()
-            return
-        if action != "note" and action != "fx" and not event_id:
-            await callback.answer("Некорректное событие", show_alert=True)
-            return
-        if action in {"yes", "no"}:
             async with db.get_session() as session:
                 user = await session.get(User, callback.from_user.id)
                 event = await session.get(Event, event_id)
@@ -7004,7 +6990,6 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                 session.add(event)
                 await session.commit()
                 await session.refresh(event)
-            tourist_reason_sessions.pop(callback.from_user.id, None)
             tourist_note_sessions.pop(callback.from_user.id, None)
             logging.info(
                 "tourist_label_update",
@@ -7014,32 +6999,54 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                     "value": action,
                 },
             )
-            await update_tourist_message(callback, bot, event, source)
-            await callback.answer("Отмечено")
-        elif action == "fxmenu":
-            async with db.get_session() as session:
-                user = await session.get(User, callback.from_user.id)
-                event = await session.get(Event, event_id)
-                if not event or not _user_can_label_event(user):
-                    await callback.answer("Not authorized", show_alert=True)
-                    return
-            tourist_reason_sessions[callback.from_user.id] = TouristReasonSession(
-                event_id=event_id,
-                chat_id=callback.message.chat.id,
-                message_id=callback.message.message_id,
-                source=source,
-            )
-            await update_tourist_message(
-                callback, bot, event, source, menu=True
-            )
-            await callback.answer("Выберите причины")
+            if action == "yes" and callback.message:
+                session_state = TouristReasonSession(
+                    event_id=event_id,
+                    chat_id=callback.message.chat.id,
+                    message_id=callback.message.message_id,
+                    source=source,
+                )
+                tourist_reason_sessions[callback.from_user.id] = session_state
+                await update_tourist_message(callback, bot, event, source, menu=True)
+                await callback.answer("Выберите причины")
+            else:
+                tourist_reason_sessions.pop(callback.from_user.id, None)
+                await update_tourist_message(callback, bot, event, source)
+                await callback.answer("Отмечено")
         elif action == "fx":
+            code = parts[2] if len(parts) > 2 else ""
+            try:
+                event_id = int(parts[3])
+            except (ValueError, IndexError):
+                event_id = 0
+            if not event_id:
+                await callback.answer("Некорректное событие", show_alert=True)
+                return
+            if code == "menu":
+                async with db.get_session() as session:
+                    user = await session.get(User, callback.from_user.id)
+                    event = await session.get(Event, event_id)
+                    if not event or not _user_can_label_event(user):
+                        await callback.answer("Not authorized", show_alert=True)
+                        return
+                if callback.message:
+                    tourist_reason_sessions[callback.from_user.id] = TouristReasonSession(
+                        event_id=event_id,
+                        chat_id=callback.message.chat.id,
+                        message_id=callback.message.message_id,
+                        source=source,
+                    )
+                    await update_tourist_message(
+                        callback, bot, event, source, menu=True
+                    )
+                await callback.answer("Выберите причины")
+                return
             try:
                 session_state = tourist_reason_sessions[callback.from_user.id]
             except KeyError:
                 await bot.send_message(
                     callback.message.chat.id,
-                    "Сессия выбора причин истекла, нажмите кнопку заново.",
+                    "Сессия истекла, откройте причины заново",
                 )
                 await callback.answer()
                 return
@@ -7047,7 +7054,7 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                 tourist_reason_sessions.pop(callback.from_user.id, None)
                 await bot.send_message(
                     callback.message.chat.id,
-                    "Сессия выбора причин истекла, нажмите кнопку заново.",
+                    "Сессия истекла, откройте причины заново",
                 )
                 await callback.answer()
                 return
@@ -7058,15 +7065,15 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                     await callback.answer("Not authorized", show_alert=True)
                     return
                 factors = list(event.tourist_factors or [])
-                if factor_code in factors:
-                    factors = [code for code in factors if code != factor_code]
+                if code in factors:
+                    factors = [item for item in factors if item != code]
                 else:
-                    factors.append(factor_code)
-                ordered = [code for code in TOURIST_FACTORS if code in factors]
+                    factors.append(code)
+                ordered = [item for item in TOURIST_FACTORS if item in factors]
                 event.tourist_factors = ordered
                 event.tourist_label_by = callback.from_user.id
                 event.tourist_label_at = datetime.now(timezone.utc)
-                event.tourist_label_source = source
+                event.tourist_label_source = session_state.source
                 session.add(event)
                 await session.commit()
                 await session.refresh(event)
@@ -7074,35 +7081,50 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                 event_id=session_state.event_id,
                 chat_id=session_state.chat_id,
                 message_id=session_state.message_id,
-                source=source,
+                source=session_state.source,
             )
             logging.info(
                 "tourist_factor_toggle",
                 extra={
                     "event_id": event_id,
                     "user_id": callback.from_user.id,
-                    "factor": factor_code,
+                    "factor": code,
                 },
             )
             await update_tourist_message(
-                callback, bot, event, source, menu=True
+                callback, bot, event, session_state.source, menu=True
             )
             await callback.answer("Отмечено")
-        elif action == "fxback":
+        elif action in {"fxdone", "fxskip"}:
             try:
-                session_state = tourist_reason_sessions.pop(callback.from_user.id)
-            except KeyError:
-                session_state = None
+                event_id = int(parts[2])
+            except (ValueError, IndexError):
+                event_id = 0
+            if not event_id:
+                await callback.answer("Некорректное событие", show_alert=True)
+                return
+            session_state = tourist_reason_sessions.pop(callback.from_user.id, None)
+            session_source = session_state.source if session_state else source
             async with db.get_session() as session:
                 user = await session.get(User, callback.from_user.id)
                 event = await session.get(Event, event_id)
                 if not event or not _user_can_label_event(user):
                     await callback.answer("Not authorized", show_alert=True)
                     return
-            await update_tourist_message(callback, bot, event, source)
-            await callback.answer("Отмечено")
+            await update_tourist_message(
+                callback, bot, event, session_source, menu=False
+            )
+            if action == "fxdone":
+                await callback.answer("Причины сохранены")
+            else:
+                await callback.answer("Причины можно выбрать позже")
         elif action == "note":
             note_action = parts[2] if len(parts) > 2 else ""
+            try:
+                event_id = int(parts[3])
+            except (ValueError, IndexError):
+                await callback.answer("Некорректное событие", show_alert=True)
+                return
             if note_action == "start":
                 async with db.get_session() as session:
                     user = await session.get(User, callback.from_user.id)
