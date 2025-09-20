@@ -1,6 +1,8 @@
 # Changelog
 
 ## Unreleased
+- Added automatic topic assignment when adding or importing events, finalized the list of 17 topic keys,
+  display topics in the editor, and added the `/backfill_topics` command.
 - Added `/ocrtest` diagnostic command, чтобы сравнить распознавание афиш между `gpt-4o-mini` и `gpt-4o` с показом использования токенов.
 
 - Clarified the 4o parsing prompt to warn about possible OCR mistakes in poster snippets.
