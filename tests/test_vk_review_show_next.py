@@ -8,6 +8,7 @@ from aiogram import types
 from aiogram.exceptions import TelegramBadRequest
 
 import main
+import vk_intake
 import vk_review
 from main import Database, User
 
@@ -129,6 +130,51 @@ async def test_vkrev_show_next_truncates_long_text(tmp_path, monkeypatch):
     assert "⚠️ Текст поста был обрезан до" in text
     assert "https://vk.com/wall-1_10" in text
     assert "ключи:" in text
+
+
+@pytest.mark.asyncio
+async def test_vkrev_show_next_handles_blank_text(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    async with db.get_session() as session:
+        session.add(User(user_id=1))
+        await session.commit()
+    async with db.raw_conn() as conn:
+        await conn.execute(
+            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time) VALUES(?,?,?,?,?)",
+            (1, "club1", "Test Community", "", None),
+        )
+        await conn.execute(
+            "INSERT INTO vk_inbox(group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status) VALUES(?,?,?,?,?,?,?,?)",
+            (1, 10, 0, "", vk_intake.OCR_PENDING_SENTINEL, 0, None, "pending"),
+        )
+        await conn.commit()
+
+    async def fake_fetch(*args, **kwargs):
+        return []
+
+    async def fake_pick_next(db_obj, operator_id_arg, batch_id_arg):
+        return SimpleNamespace(
+            id=1,
+            group_id=1,
+            post_id=10,
+            text="",
+            matched_kw=vk_intake.OCR_PENDING_SENTINEL,
+            has_date=0,
+        )
+
+    monkeypatch.setattr(main, "_vkrev_fetch_photos", fake_fetch)
+    monkeypatch.setattr(vk_review, "pick_next", fake_pick_next)
+    bot = DummyBot()
+
+    await main._vkrev_show_next(1, "batch1", 1, db, bot)
+
+    assert bot.messages, "no message sent"
+    message = bot.messages[0]
+    assert isinstance(message.reply_markup, types.InlineKeyboardMarkup)
+    assert message.reply_markup.inline_keyboard
+    assert "https://vk.com/wall-1_10" in message.text
+    assert "ожидает OCR" in message.text
 
 
 @pytest.mark.asyncio

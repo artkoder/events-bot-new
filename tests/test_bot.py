@@ -3041,6 +3041,8 @@ async def test_makefest_create_links_event(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
     bot = DummyBot("123:abc")
+    main.settings_cache.clear()
+    monkeypatch.setenv("FEST_ADMIN_URL_TEMPLATE", "https://admin.local/festivals/{id}")
 
     async with db.get_session() as session:
         user = User(user_id=1, is_superadmin=True)
@@ -3053,6 +3055,7 @@ async def test_makefest_create_links_event(tmp_path: Path, monkeypatch):
             location_name="Hall",
             source_text="text",
         )
+        session.add(main.Setting(key="festivals_index_url", value="http://landing"))
         session.add_all([user, event])
         await session.commit()
         await session.refresh(event)
@@ -3110,13 +3113,13 @@ async def test_makefest_create_links_event(tmp_path: Path, monkeypatch):
         }
     ).as_(bot)
 
-    responses: list[str] = []
+    responses: list[tuple[str, types.InlineKeyboardMarkup | None]] = []
 
     async def cb_answer(text=None, **kwargs):
         return None
 
-    async def msg_answer(text, **kwargs):
-        responses.append(text)
+    async def msg_answer(text, reply_markup=None, **kwargs):
+        responses.append((text, reply_markup))
         return DummyMessage(102)
 
     object.__setattr__(cb, "answer", cb_answer)
@@ -3140,6 +3143,26 @@ async def test_makefest_create_links_event(tmp_path: Path, monkeypatch):
     assert updated_event and updated_event.festival == "New Fest"
     assert fest.photo_url == "https://example.com/photo.jpg"
     assert makefest_sessions.get(1) is None
+    text, markup = responses[-1]
+    lines = [line for line in text.splitlines() if line]
+    assert f"Статус: создан" in lines
+    assert f"ID: {fest.id}" in lines
+    assert "Название: New Fest" in lines
+    assert "Полное название: New Festival" in lines
+    assert "Период: 2025-06-01 — 2025-06-10" in lines
+    assert "Город: Town" in lines
+    assert "Локация: Hall — Street 1" in lines
+    assert "Фото: 1" in lines
+    assert "Telegraph: —" in lines
+    assert lines[-1] == "Событие привязано к фестивалю."
+    assert markup is not None
+    assert len(markup.inline_keyboard) == 1
+    assert len(markup.inline_keyboard[0]) == 2
+    admin_btn, landing_btn = markup.inline_keyboard[0]
+    assert admin_btn.text == "Админка"
+    assert admin_btn.url == f"https://admin.local/festivals/{fest.id}"
+    assert landing_btn.text == "Лендинг"
+    assert landing_btn.url == "http://landing"
 
 
 @pytest.mark.asyncio
@@ -3148,6 +3171,8 @@ async def test_makefest_bind_existing_festival(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
     bot = DummyBot("123:abc")
+    main.settings_cache.clear()
+    monkeypatch.setenv("FEST_ADMIN_URL_TEMPLATE", "https://admin.local/festivals/{id}")
 
     async with db.get_session() as session:
         user = User(user_id=1, is_superadmin=True)
@@ -3161,6 +3186,7 @@ async def test_makefest_bind_existing_festival(tmp_path: Path, monkeypatch):
             location_name="Hall",
             source_text="text",
         )
+        session.add(main.Setting(key="festivals_index_url", value="http://landing"))
         session.add_all([user, fest, event])
         await session.commit()
         await session.refresh(event)
@@ -3219,13 +3245,13 @@ async def test_makefest_bind_existing_festival(tmp_path: Path, monkeypatch):
         }
     ).as_(bot)
 
-    responses: list[str] = []
+    responses: list[tuple[str, types.InlineKeyboardMarkup | None]] = []
 
     async def cb_answer(text=None, **kwargs):
         return None
 
-    async def msg_answer(text, **kwargs):
-        responses.append(text)
+    async def msg_answer(text, reply_markup=None, **kwargs):
+        responses.append((text, reply_markup))
         return DummyMessage(103)
 
     object.__setattr__(cb, "answer", cb_answer)
@@ -3247,6 +3273,26 @@ async def test_makefest_bind_existing_festival(tmp_path: Path, monkeypatch):
     assert updated_event and updated_event.festival == "Existing"
     assert updated_fest and updated_fest.full_name == "Existing Updated"
     assert makefest_sessions.get(1) is None
+    text, markup = responses[-1]
+    lines = [line for line in text.splitlines() if line]
+    assert "Статус: привязан к существующему" in lines
+    assert f"ID: {updated_fest.id}" in lines
+    assert "Название: Existing" in lines
+    assert "Полное название: Existing Updated" in lines
+    assert "Период: 2025-06-01 — 2025-06-10" in lines
+    assert "Город: Town" in lines
+    assert "Локация: Hall — Street 1" in lines
+    assert "Фото: 1" in lines
+    assert "Telegraph: —" in lines
+    assert lines[-1] == "Событие привязано к фестивалю."
+    assert markup is not None
+    assert len(markup.inline_keyboard) == 1
+    assert len(markup.inline_keyboard[0]) == 2
+    admin_btn, landing_btn = markup.inline_keyboard[0]
+    assert admin_btn.text == "Админка"
+    assert admin_btn.url == f"https://admin.local/festivals/{updated_fest.id}"
+    assert landing_btn.text == "Лендинг"
+    assert landing_btn.url == "http://landing"
 
 
 @pytest.mark.asyncio
