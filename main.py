@@ -16920,7 +16920,33 @@ async def show_festival_edit_menu(user_id: int, fest: Festival, bot: Bot):
     await bot.send_message(user_id, "\n".join(lines), reply_markup=markup)
 
 
-FEST_MERGE_PAGE_SIZE = 6
+FEST_MERGE_PAGE_SIZE = 12
+
+
+_FEST_MERGE_TOKEN_RE = re.compile(r"\w+", re.UNICODE)
+
+
+def _festival_merge_tokens(fest: Festival) -> set[str]:
+    tokens: set[str] = set()
+    if fest.name:
+        tokens.update(token.lower() for token in _FEST_MERGE_TOKEN_RE.findall(fest.name))
+    if fest.city:
+        tokens.add(fest.city.lower())
+    return tokens
+
+
+def _sort_festival_merge_targets(
+    source: Festival, targets: Sequence[Festival]
+) -> list[Festival]:
+    source_tokens = _festival_merge_tokens(source)
+    scored: list[tuple[int, str, int, Festival]] = []
+    for index, target in enumerate(targets):
+        target_tokens = _festival_merge_tokens(target)
+        overlap = len(source_tokens & target_tokens)
+        name_key = (target.name or "").lower()
+        scored.append((overlap, name_key, index, target))
+    scored.sort(key=lambda item: (-item[0], item[1], item[2]))
+    return [item[3] for item in scored]
 
 
 def _format_festival_merge_line(fest: Festival) -> str:
@@ -16942,11 +16968,12 @@ def _format_festival_merge_line(fest: Festival) -> str:
 def build_festival_merge_selection(
     source: Festival, targets: Sequence[Festival], page: int
 ) -> tuple[str, types.InlineKeyboardMarkup]:
-    total = len(targets)
+    sorted_targets = _sort_festival_merge_targets(source, targets)
+    total = len(sorted_targets)
     total_pages = max(1, (total + FEST_MERGE_PAGE_SIZE - 1) // FEST_MERGE_PAGE_SIZE)
     page = max(1, min(page, total_pages))
     start = (page - 1) * FEST_MERGE_PAGE_SIZE
-    visible = targets[start : start + FEST_MERGE_PAGE_SIZE]
+    visible = sorted_targets[start : start + FEST_MERGE_PAGE_SIZE]
 
     heading = (
         f"🧩 Склеить фестиваль «{source.name}» (ID {source.id}).\n"
