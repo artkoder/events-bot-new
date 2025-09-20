@@ -766,7 +766,7 @@ def build_tourist_keyboard_block(
         [
             types.InlineKeyboardButton(
                 text="Причины",
-                callback_data=f"tourist:fx:start:{event.id}",
+                callback_data=f"tourist:fxdone:{event.id}",
             )
         ],
         [
@@ -7318,23 +7318,6 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
             if not event_id:
                 await callback.answer("Некорректное событие", show_alert=True)
                 return
-            if code == "start":
-                async with db.get_session() as session:
-                    user = await session.get(User, callback.from_user.id)
-                    event = await session.get(Event, event_id)
-                    if not event or not _user_can_label_event(user):
-                        await callback.answer("Not authorized", show_alert=True)
-                        return
-                if callback.message:
-                    tourist_reason_sessions[callback.from_user.id] = TouristReasonSession(
-                        event_id=event_id,
-                        chat_id=callback.message.chat.id,
-                        message_id=callback.message.message_id,
-                        source=source,
-                    )
-                    await update_tourist_message(callback, bot, event, source, menu=True)
-                await callback.answer("Выберите причины")
-                return
             try:
                 session_state = tourist_reason_sessions[callback.from_user.id]
             except KeyError:
@@ -7406,14 +7389,30 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
             if not event_id:
                 await callback.answer("Некорректное событие", show_alert=True)
                 return
-            session_state = tourist_reason_sessions.pop(callback.from_user.id, None)
-            session_source = session_state.source if session_state else source
             async with db.get_session() as session:
                 user = await session.get(User, callback.from_user.id)
                 event = await session.get(Event, event_id)
                 if not event or not _user_can_label_event(user):
                     await callback.answer("Not authorized", show_alert=True)
                     return
+            session_state = tourist_reason_sessions.get(callback.from_user.id)
+            if action == "fxdone" and (
+                not session_state
+                or session_state.event_id != event_id
+                or (callback.message and session_state.message_id != callback.message.message_id)
+            ):
+                if callback.message:
+                    tourist_reason_sessions[callback.from_user.id] = TouristReasonSession(
+                        event_id=event_id,
+                        chat_id=callback.message.chat.id,
+                        message_id=callback.message.message_id,
+                        source=source,
+                    )
+                    await update_tourist_message(callback, bot, event, source, menu=True)
+                await callback.answer("Выберите причины")
+                return
+            session_state = tourist_reason_sessions.pop(callback.from_user.id, None)
+            session_source = session_state.source if session_state else source
             await update_tourist_message(
                 callback, bot, event, session_source, menu=False
             )
