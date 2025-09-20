@@ -73,10 +73,12 @@ async def test_vk_list_shows_numbers_and_default_time(tmp_path):
     lines = bot.messages[0].text.splitlines()
     assert lines[0].startswith("1.")
     assert "типовое время: 19:00" in lines[0]
-    assert lines[1] == "    Pending  2 | Skipped  1 | Imported  0 | Rejected 0"
-    assert lines[2].startswith("2.")
-    assert "типовое время: -" in lines[2]
-    assert lines[3] == "    Pending  0 | Skipped  0 | Imported 12 | Rejected 1"
+    assert lines[1] == "    Pending | Skipped | Imported | Rejected"
+    assert lines[2] == "          2 |       1 |        0 |        0"
+    assert lines[3].startswith("2.")
+    assert "типовое время: -" in lines[3]
+    assert lines[4] == "    Pending | Skipped | Imported | Rejected"
+    assert lines[5] == "          0 |       0 |       12 |        1"
     buttons = bot.messages[0].reply_markup.inline_keyboard
     assert buttons[0][0].text == "❌ 1"
     assert buttons[0][0].callback_data.endswith(":1")
@@ -99,7 +101,8 @@ async def test_vk_list_shows_numbers_and_default_time(tmp_path):
     assert callback.answered
     page2_lines = bot.messages[0].text.splitlines()
     assert page2_lines[0].startswith("11.")
-    assert page2_lines[1] == "    Pending  0 | Skipped  0 | Imported 0 | Rejected 0"
+    assert page2_lines[1] == "    Pending | Skipped | Imported | Rejected"
+    assert page2_lines[2] == "          0 |       0 |        0 |        0"
     nav_row = bot.messages[0].reply_markup.inline_keyboard[-1]
     assert nav_row[0].callback_data == "vksrcpage:1"
 

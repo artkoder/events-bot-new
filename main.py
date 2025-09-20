@@ -17831,12 +17831,20 @@ async def handle_vk_list(
         page_items.append((offset, row, counts))
 
     if page_items:
-        count_widths = {
-            key: max(1, max(len(str(item[2][key])) for item in page_items))
-            for key, _ in VK_STATUS_LABELS
+        column_widths = {
+            key: max(
+                len(label),
+                max(len(str(item[2][key])) for item in page_items),
+            )
+            for key, label in VK_STATUS_LABELS
         }
     else:
-        count_widths = {key: 1 for key, _ in VK_STATUS_LABELS}
+        column_widths = {key: len(label) for key, label in VK_STATUS_LABELS}
+
+    header_parts = [
+        label.ljust(column_widths[key]) for key, label in VK_STATUS_LABELS
+    ]
+    header_line = "    " + " | ".join(header_parts)
 
     lines: list[str] = []
     buttons: list[list[types.InlineKeyboardButton]] = []
@@ -17849,12 +17857,12 @@ async def handle_vk_list(
         lines.append(
             f"{offset}. {name} (vk.com/{screen}) — {info}, типовое время: {dtime or '-'}"
         )
-        status_parts = []
-        for key, label in VK_STATUS_LABELS:
-            status_parts.append(
-                f"{label:<8} {counts[key]:>{count_widths[key]}}"
-            )
-        lines.append("    " + " | ".join(status_parts))
+        value_parts = [
+            str(counts[key]).rjust(column_widths[key])
+            for key, _ in VK_STATUS_LABELS
+        ]
+        lines.append(header_line)
+        lines.append("    " + " | ".join(value_parts))
         buttons.append(
             [
                 types.InlineKeyboardButton(
