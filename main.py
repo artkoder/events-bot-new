@@ -18079,7 +18079,7 @@ async def handle_tourist_export(message: types.Message, db: Database, bot: Bot) 
 
     async with db.get_session() as session:
         user = await session.get(User, message.from_user.id)
-        if not user or user.blocked:
+        if not _user_can_label_event(user):
             await bot.send_message(message.chat.id, "Not authorized")
             return
 

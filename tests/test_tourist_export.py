@@ -142,3 +142,30 @@ async def test_tourist_export_collects_all_events(tmp_path):
         if item["id"] == 2:
             assert item["tourist_event_type"] == "music"
             assert item["tourist_tags"] == ["concert"]
+
+
+@pytest.mark.asyncio
+async def test_tourist_export_partner_not_authorized(tmp_path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.get_session() as session:
+        user = User(user_id=1, username="partner", is_partner=True)
+        session.add(user)
+        await session.commit()
+
+    message = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "P"},
+            "text": "/tourist_export",
+        }
+    )
+    bot = DummyBot()
+
+    await main.handle_tourist_export(message, db, bot)
+
+    assert bot.messages == [(1, "Not authorized")]
+    assert not bot.documents
