@@ -5307,13 +5307,26 @@ def _read_base_prompt() -> str:
 @lru_cache(maxsize=8)
 def _prompt_cache(
     festival_key: tuple[str, ...] | None,
-    alias_key: tuple[tuple[str, int], ...] | None,
 ) -> str:
     txt = _read_base_prompt()
     if festival_key:
+        txt += "\nUse the JSON below to normalise festival names and map aliases.\n"
+    return txt
+
+
+def _build_prompt(
+    festival_names: Sequence[str] | None,
+    festival_alias_pairs: Sequence[tuple[str, int]] | None,
+) -> str:
+    festival_key = tuple(sorted(festival_names)) if festival_names else None
+    prompt = _prompt_cache(festival_key)
+    if festival_key:
         payload: dict[str, Any] = {"festival_names": list(festival_key)}
-        if alias_key:
-            txt += (
+        alias_pairs = (
+            tuple(sorted(festival_alias_pairs)) if festival_alias_pairs else None
+        )
+        if alias_pairs:
+            prompt += (
                 "\nFestival normalisation helper:\n"
                 "- Compute norm(text) by casefolding, trimming, removing quotes,"
                 " leading words (фестиваль/международный/областной/городской)"
@@ -5323,22 +5336,10 @@ def _prompt_cache(
                 "- When norm(text) matches alias_norm, use"
                 " festival_names[festival_index] as the canonical name.\n"
             )
-            payload["festival_alias_pairs"] = [list(pair) for pair in alias_key]
+            payload["festival_alias_pairs"] = [list(pair) for pair in alias_pairs]
         json_block = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-        txt += (
-            "\nUse the JSON below to normalise festival names and map aliases.\n"
-            + json_block
-        )
-    return txt
-
-
-def _build_prompt(
-    festival_names: Sequence[str] | None,
-    festival_alias_pairs: Sequence[tuple[str, int]] | None,
-) -> str:
-    festival_key = tuple(sorted(festival_names)) if festival_names else None
-    alias_key = tuple(sorted(festival_alias_pairs)) if festival_alias_pairs else None
-    return _prompt_cache(festival_key, alias_key)
+        prompt += json_block
+    return prompt
 
 
 async def parse_event_via_4o(

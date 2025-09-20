@@ -29,3 +29,22 @@ def test_build_prompt_omits_alias_section_when_empty():
     prompt = main._build_prompt(["Fest"], [])
     data = _extract_prompt_json(prompt)
     assert data == {"festival_names": ["Fest"]}
+
+
+def test_aliases_bypass_cache_layer():
+    main._prompt_cache.cache_clear()
+    prompt_initial = main._build_prompt([
+        "Fest",
+    ], [
+        ("old-alias", 0),
+    ])
+    data_initial = _extract_prompt_json(prompt_initial)
+    assert data_initial["festival_alias_pairs"] == [["old-alias", 0]]
+
+    prompt_updated = main._build_prompt([
+        "Fest",
+    ], [
+        ("new-alias", 0),
+    ])
+    data_updated = _extract_prompt_json(prompt_updated)
+    assert data_updated["festival_alias_pairs"] == [["new-alias", 0]]
