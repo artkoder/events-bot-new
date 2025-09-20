@@ -14008,10 +14008,6 @@ async def merge_festivals(
         for field in (
             "full_name",
             "description",
-            "telegraph_url",
-            "telegraph_path",
-            "vk_post_url",
-            "vk_poll_url",
             "website_url",
             "program_url",
             "vk_url",
