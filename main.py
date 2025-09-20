@@ -5730,7 +5730,6 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
         await schedule_event_update_tasks(db, event)
         asyncio.create_task(sync_festival_page(db, fest_obj.name))
         asyncio.create_task(sync_festivals_index_page(db))
-        asyncio.create_task(sync_festival_vk_post(db, fest_obj.name, bot))
         summary_lines = [
             f"Фестиваль {fest_obj.name} создан." if created else f"Фестиваль {fest_obj.name} обновлён.",
             "Событие привязано к фестивалю.",
@@ -5816,7 +5815,6 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
         await schedule_event_update_tasks(db, event)
         asyncio.create_task(sync_festival_page(db, fest.name))
         asyncio.create_task(sync_festivals_index_page(db))
-        asyncio.create_task(sync_festival_vk_post(db, fest.name, bot))
         await callback.message.answer(
             f"Событие привязано к фестивалю {fest.name}.",
         )
