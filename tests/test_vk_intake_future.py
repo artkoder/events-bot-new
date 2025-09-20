@@ -47,3 +47,45 @@ async def test_crawl_skips_past_events(tmp_path, monkeypatch):
         cur = await conn.execute("SELECT post_id FROM vk_inbox")
         rows = await cur.fetchall()
     assert rows == [(2,)]
+
+
+@pytest.mark.asyncio
+async def test_crawl_inserts_blank_single_photo_post(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    async with db.raw_conn() as conn:
+        await conn.execute(
+            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time) VALUES(?,?,?,?,?)",
+            (1, "g", "Group", "", None),
+        )
+        await conn.commit()
+
+    post_ts = int(time.time()) + 10
+    posts = [
+        {
+            "date": post_ts,
+            "post_id": 3,
+            "text": "   ",
+            "photos": [{"id": 1, "sizes": []}],
+        }
+    ]
+
+    async def fake_wall_since(gid, since, count, offset=0):
+        return posts if offset == 0 else []
+
+    monkeypatch.setattr(main, "vk_wall_since", fake_wall_since)
+
+    async def no_sleep(_):
+        pass
+
+    monkeypatch.setattr(vk_intake.asyncio, "sleep", no_sleep)
+
+    stats = await vk_intake.crawl_once(db)
+    assert stats["added"] == 1
+    async with db.raw_conn() as conn:
+        cur = await conn.execute(
+            "SELECT text, matched_kw, has_date, event_ts_hint FROM vk_inbox WHERE post_id=?",
+            (3,),
+        )
+        row = await cur.fetchone()
+    assert row == ("   ", vk_intake.OCR_PENDING_SENTINEL, 0, None)
