@@ -7,7 +7,7 @@ import pytest
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
 import main
-from main import Database, merge_festivals
+from main import Database, merge_festivals, normalize_alias
 from models import Event, Festival
 
 
@@ -86,5 +86,70 @@ async def test_merge_festivals_preserves_manual_urls(tmp_path, monkeypatch):
         merged_event = await session.get(Event, event_id)
         assert merged_event is not None
         assert merged_event.festival == "DestFest"
+
+    await db.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_merge_festivals_limits_aliases(tmp_path, monkeypatch):
+    db_path = tmp_path / "db.sqlite"
+    db = Database(str(db_path))
+    await db.init()
+
+    async def fake_ask(prompt):
+        return "generated"
+
+    async def noop(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(main, "ask_4o", fake_ask)
+    monkeypatch.setattr(main, "sync_festival_page", noop)
+    monkeypatch.setattr(main, "rebuild_fest_nav_if_changed", noop)
+    monkeypatch.setattr(main, "sync_festival_vk_post", noop)
+
+    async with db.get_session() as session:
+        dst = Festival(
+            name="DestFest",
+            aliases=["Фестиваль \"Весна\"", "Весна", "Зима"],
+        )
+        src = Festival(
+            name="Супер фестиваль",
+            full_name='Фестиваль "Супер Весна"',
+            aliases=[
+                "Международный Весна",
+                "Лето",
+                "Весна",
+                "Осень",
+                "Областной праздник",
+                "Городской праздник",
+                "Утро",
+                "Вечер",
+                "Ночь",
+            ],
+        )
+        session.add(dst)
+        session.add(src)
+        await session.flush()
+        dst_id = dst.id
+        src_id = src.id
+        await session.commit()
+
+    await merge_festivals(db, src_id, dst_id, bot=None)
+
+    async with db.get_session() as session:
+        dst_fest = await session.get(Festival, dst_id)
+        assert dst_fest is not None
+        assert dst_fest.aliases == [
+            "весна",
+            "зима",
+            "лето",
+            "осень",
+            "праздник",
+            "утро",
+            "вечер",
+            "ночь",
+        ]
+        normalized_aliases = [normalize_alias(alias) for alias in dst_fest.aliases]
+        assert len(normalized_aliases) == len(set(normalized_aliases)) <= 8
 
     await db.engine.dispose()
