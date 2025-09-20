@@ -18209,7 +18209,15 @@ async def _vkrev_show_next(chat_id: int, batch_id: str, operator_id: int, db: Da
 
     url = f"https://vk.com/wall-{post.group_id}_{post.post_id}"
     pending = await _vkrev_queue_size(db)
-    status_line = f"ключи: {post.matched_kw or '-'} | дата: {'да' if post.has_date else 'нет'} | в очереди: {pending}"
+    if post.matched_kw == vk_intake.OCR_PENDING_SENTINEL:
+        matched_kw_display = "ожидает OCR"
+    elif post.matched_kw:
+        matched_kw_display = post.matched_kw
+    else:
+        matched_kw_display = "-"
+    status_line = (
+        f"ключи: {matched_kw_display} | дата: {'да' if post.has_date else 'нет'} | в очереди: {pending}"
+    )
     markup = types.InlineKeyboardMarkup(
         inline_keyboard=[
             [
