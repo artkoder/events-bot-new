@@ -221,6 +221,15 @@ class Database:
             await _add_column(conn, "event", "vk_repost_url TEXT")
             await _add_column(conn, "event", "topics TEXT DEFAULT '[]'")
             await _add_column(conn, "event", "topics_manual BOOLEAN DEFAULT 0")
+            await _add_column(conn, "event", "tourist_label SMALLINT")
+            await _add_column(conn, "event", "tourist_factors TEXT")
+            await _add_column(conn, "event", "tourist_note TEXT")
+            await _add_column(conn, "event", "tourist_label_by INTEGER")
+            await _add_column(conn, "event", "tourist_label_at TIMESTAMP")
+            await _add_column(conn, "event", "tourist_label_source TEXT")
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_event_tourist_label ON event(tourist_label)"
+            )
 
             await conn.execute(
                 """

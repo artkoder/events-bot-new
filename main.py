@@ -623,6 +623,279 @@ add_event_sessions: TTLCache[int, bool] = TTLCache(maxsize=64, ttl=3600)
 # waiting for a date for events listing
 events_date_sessions: TTLCache[int, bool] = TTLCache(maxsize=64, ttl=3600)
 
+TOURIST_FACTORS: dict[str, str] = {
+    "history": "История и культура",
+    "sea": "Море и побережье",
+    "nature": "Природа",
+    "food": "Гастрономия",
+    "family": "Семейный отдых",
+    "events": "Событие",
+}
+
+
+@dataclass
+class TouristReasonSession:
+    event_id: int
+    chat_id: int
+    message_id: int
+    source: str
+
+
+@dataclass
+class TouristNoteSession:
+    event_id: int
+    chat_id: int
+    message_id: int
+    source: str
+    markup: types.InlineKeyboardMarkup | None
+    message_text: str | None
+
+
+tourist_reason_sessions: TTLCache[int, TouristReasonSession] = TTLCache(
+    maxsize=256, ttl=15 * 60
+)
+tourist_note_sessions: TTLCache[int, TouristNoteSession] = TTLCache(
+    maxsize=256, ttl=10 * 60
+)
+
+
+def _tourist_label_display(event: Event) -> str:
+    if event.tourist_label == 1:
+        return "Да"
+    if event.tourist_label == 0:
+        return "Нет"
+    return "—"
+
+
+def build_tourist_status_lines(event: Event) -> list[str]:
+    lines = [f"🌍 Туристам: {_tourist_label_display(event)}"]
+    factors = event.tourist_factors or []
+    lines.append(f"🧩 {len(factors)} причин")
+    if event.tourist_note and event.tourist_note.strip():
+        lines.append("📝 есть комментарий")
+    return lines
+
+
+def build_tourist_keyboard_block(
+    event: Event, source: str
+) -> list[list[types.InlineKeyboardButton]]:
+    if not getattr(event, "id", None):
+        return []
+    label = event.tourist_label
+    yes_text = "✅ Да" if label == 1 else "Да"
+    no_text = "✅ Нет" if label == 0 else "Нет"
+    reasons_count = len(event.tourist_factors or [])
+    reasons_text = f"🧩 Причины ({reasons_count})"
+    note_text = "📝 Комментарий"
+    if event.tourist_note and event.tourist_note.strip():
+        note_text = "📝 Изменить комментарий"
+    rows: list[list[types.InlineKeyboardButton]] = [
+        [
+            types.InlineKeyboardButton(
+                text=yes_text, callback_data=f"tourist:yes:{event.id}:{source}"
+            ),
+            types.InlineKeyboardButton(
+                text=no_text, callback_data=f"tourist:no:{event.id}:{source}"
+            ),
+        ],
+        [
+            types.InlineKeyboardButton(
+                text=reasons_text,
+                callback_data=f"tourist:fxmenu:{event.id}:{source}",
+            )
+        ],
+        [
+            types.InlineKeyboardButton(
+                text=note_text,
+                callback_data=f"tourist:note:start:{event.id}:{source}",
+            )
+        ],
+    ]
+    if event.tourist_note and event.tourist_note.strip():
+        rows[-1].append(
+            types.InlineKeyboardButton(
+                text="♻️ Очистить",
+                callback_data=f"tourist:note:clear:{event.id}:{source}",
+            )
+        )
+    return rows
+
+
+def build_tourist_reason_rows(
+    event: Event, source: str
+) -> list[list[types.InlineKeyboardButton]]:
+    if not getattr(event, "id", None):
+        return []
+    selected = set(event.tourist_factors or [])
+    rows: list[list[types.InlineKeyboardButton]] = []
+    for code, label in TOURIST_FACTORS.items():
+        prefix = "✅" if code in selected else "➕"
+        rows.append(
+            [
+                types.InlineKeyboardButton(
+                    text=f"{prefix} {label}",
+                    callback_data=f"tourist:fx:{event.id}:{code}:{source}",
+                )
+            ]
+        )
+    rows.append(
+        [
+            types.InlineKeyboardButton(
+                text="⬅️ Готово", callback_data=f"tourist:fxback:{event.id}:{source}"
+            )
+        ]
+    )
+    return rows
+
+
+def append_tourist_block(
+    base_rows: Sequence[Sequence[types.InlineKeyboardButton]],
+    event: Event,
+    source: str,
+) -> list[list[types.InlineKeyboardButton]]:
+    rows = [list(row) for row in base_rows]
+    if getattr(event, "id", None):
+        rows.extend(build_tourist_keyboard_block(event, source))
+    return rows
+
+
+def replace_tourist_block(
+    markup: types.InlineKeyboardMarkup | None,
+    event: Event,
+    source: str,
+    *,
+    menu: bool = False,
+) -> types.InlineKeyboardMarkup:
+    base_rows: list[list[types.InlineKeyboardButton]] = []
+    if markup and markup.inline_keyboard:
+        for row in markup.inline_keyboard:
+            if any(
+                btn.callback_data and btn.callback_data.startswith("tourist:")
+                for btn in row
+            ):
+                continue
+            base_rows.append([btn for btn in row])
+    if getattr(event, "id", None):
+        if menu:
+            base_rows.extend(build_tourist_reason_rows(event, source))
+        else:
+            base_rows.extend(build_tourist_keyboard_block(event, source))
+    return types.InlineKeyboardMarkup(inline_keyboard=base_rows)
+
+
+def apply_tourist_status_to_text(original_text: str | None, event: Event) -> str:
+    status_lines = build_tourist_status_lines(event)
+    if not original_text:
+        return "\n".join(status_lines) if status_lines else ""
+    lines = original_text.splitlines()
+    if not lines:
+        return original_text
+    header = lines[0]
+    rest = list(lines[1:])
+    while rest and rest[0].startswith(("🌍", "🧩", "📝")):
+        rest.pop(0)
+    return "\n".join([header, *status_lines, *rest])
+
+
+def build_event_card_message(
+    header: str,
+    event: Event,
+    detail_lines: Sequence[str],
+    extra_lines: Sequence[str] | None = None,
+) -> str:
+    body_lines = [*build_tourist_status_lines(event), *detail_lines]
+    if extra_lines:
+        for extra in extra_lines:
+            if extra:
+                body_lines.append(extra)
+    if body_lines:
+        return "\n".join([header, *body_lines])
+    return header
+
+
+def _user_can_label_event(user: User | None) -> bool:
+    if not user or user.blocked:
+        return False
+    if user.is_superadmin:
+        return True
+    if user.is_partner:
+        return False
+    return True
+
+
+async def update_tourist_message(
+    callback: types.CallbackQuery,
+    bot: Bot,
+    event: Event,
+    source: str,
+    *,
+    menu: bool = False,
+    update_text: bool = True,
+) -> None:
+    message = callback.message
+    if not message:
+        return
+    new_markup = replace_tourist_block(message.reply_markup, event, source, menu=menu)
+    new_text: str | None = None
+    if update_text:
+        current = message.text if message.text is not None else message.caption
+        if current is not None:
+            new_text = apply_tourist_status_to_text(current, event)
+    try:
+        if new_text is not None:
+            if message.text is not None:
+                await bot.edit_message_text(
+                    chat_id=message.chat.id,
+                    message_id=message.message_id,
+                    text=new_text,
+                    reply_markup=new_markup,
+                )
+            elif message.caption is not None:
+                await bot.edit_message_caption(
+                    chat_id=message.chat.id,
+                    message_id=message.message_id,
+                    caption=new_text,
+                    reply_markup=new_markup,
+                )
+            else:
+                await bot.edit_message_reply_markup(
+                    chat_id=message.chat.id,
+                    message_id=message.message_id,
+                    reply_markup=new_markup,
+                )
+        else:
+            await bot.edit_message_reply_markup(
+                chat_id=message.chat.id,
+                message_id=message.message_id,
+                reply_markup=new_markup,
+            )
+    except TelegramBadRequest as exc:  # pragma: no cover - network quirks
+        logging.warning(
+            "tourist_update_failed",
+            extra={"event_id": getattr(event, "id", None), "error": exc.message},
+        )
+        if new_text is None:
+            return
+        with contextlib.suppress(Exception):
+            await bot.edit_message_reply_markup(
+                chat_id=message.chat.id,
+                message_id=message.message_id,
+                reply_markup=new_markup,
+            )
+    if new_text is not None:
+        try:
+            session = tourist_note_sessions[callback.from_user.id]
+        except KeyError:
+            pass
+        else:
+            if (
+                session.chat_id == message.chat.id
+                and session.message_id == message.message_id
+            ):
+                session.markup = new_markup
+                session.message_text = new_text
+                tourist_note_sessions[callback.from_user.id] = session
+
 async def _build_makefest_session_state(
     event: Event, known_fests: Sequence[Festival]
 ) -> dict[str, Any]:
@@ -6683,6 +6956,205 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
         except Exception as e:
             logging.error("failed to update free button: %s", e)
         await callback.answer("Marked")
+    elif data.startswith("tourist:"):
+        parts = data.split(":")
+        action = parts[1] if len(parts) > 1 else ""
+        source = parts[-1] if len(parts) > 2 else "tg"
+        if action in {"yes", "no", "fxmenu", "fxback"}:
+            try:
+                event_id = int(parts[2])
+            except (ValueError, IndexError):
+                event_id = 0
+        elif action == "fx":
+            try:
+                event_id = int(parts[2])
+                factor_code = parts[3]
+            except (ValueError, IndexError):
+                event_id = 0
+                factor_code = ""
+            if not event_id or not factor_code:
+                await callback.answer("Некорректное событие", show_alert=True)
+                return
+        elif action == "note":
+            note_action = parts[2] if len(parts) > 2 else ""
+            try:
+                event_id = int(parts[3])
+            except (ValueError, IndexError):
+                event_id = 0
+            if not event_id:
+                await callback.answer("Некорректное событие", show_alert=True)
+                return
+        else:
+            await callback.answer()
+            return
+        if action != "note" and action != "fx" and not event_id:
+            await callback.answer("Некорректное событие", show_alert=True)
+            return
+        if action in {"yes", "no"}:
+            async with db.get_session() as session:
+                user = await session.get(User, callback.from_user.id)
+                event = await session.get(Event, event_id)
+                if not event or not _user_can_label_event(user):
+                    await callback.answer("Not authorized", show_alert=True)
+                    return
+                event.tourist_label = 1 if action == "yes" else 0
+                event.tourist_label_by = callback.from_user.id
+                event.tourist_label_at = datetime.now(timezone.utc)
+                event.tourist_label_source = source
+                session.add(event)
+                await session.commit()
+                await session.refresh(event)
+            tourist_reason_sessions.pop(callback.from_user.id, None)
+            tourist_note_sessions.pop(callback.from_user.id, None)
+            logging.info(
+                "tourist_label_update",
+                extra={
+                    "event_id": event_id,
+                    "user_id": callback.from_user.id,
+                    "value": action,
+                },
+            )
+            await update_tourist_message(callback, bot, event, source)
+            await callback.answer("Отмечено")
+        elif action == "fxmenu":
+            async with db.get_session() as session:
+                user = await session.get(User, callback.from_user.id)
+                event = await session.get(Event, event_id)
+                if not event or not _user_can_label_event(user):
+                    await callback.answer("Not authorized", show_alert=True)
+                    return
+            tourist_reason_sessions[callback.from_user.id] = TouristReasonSession(
+                event_id=event_id,
+                chat_id=callback.message.chat.id,
+                message_id=callback.message.message_id,
+                source=source,
+            )
+            await update_tourist_message(
+                callback, bot, event, source, menu=True
+            )
+            await callback.answer("Выберите причины")
+        elif action == "fx":
+            try:
+                session_state = tourist_reason_sessions[callback.from_user.id]
+            except KeyError:
+                await bot.send_message(
+                    callback.message.chat.id,
+                    "Сессия выбора причин истекла, нажмите кнопку заново.",
+                )
+                await callback.answer()
+                return
+            if session_state.event_id != event_id:
+                tourist_reason_sessions.pop(callback.from_user.id, None)
+                await bot.send_message(
+                    callback.message.chat.id,
+                    "Сессия выбора причин истекла, нажмите кнопку заново.",
+                )
+                await callback.answer()
+                return
+            async with db.get_session() as session:
+                user = await session.get(User, callback.from_user.id)
+                event = await session.get(Event, event_id)
+                if not event or not _user_can_label_event(user):
+                    await callback.answer("Not authorized", show_alert=True)
+                    return
+                factors = list(event.tourist_factors or [])
+                if factor_code in factors:
+                    factors = [code for code in factors if code != factor_code]
+                else:
+                    factors.append(factor_code)
+                ordered = [code for code in TOURIST_FACTORS if code in factors]
+                event.tourist_factors = ordered
+                event.tourist_label_by = callback.from_user.id
+                event.tourist_label_at = datetime.now(timezone.utc)
+                event.tourist_label_source = source
+                session.add(event)
+                await session.commit()
+                await session.refresh(event)
+            tourist_reason_sessions[callback.from_user.id] = TouristReasonSession(
+                event_id=session_state.event_id,
+                chat_id=session_state.chat_id,
+                message_id=session_state.message_id,
+                source=source,
+            )
+            logging.info(
+                "tourist_factor_toggle",
+                extra={
+                    "event_id": event_id,
+                    "user_id": callback.from_user.id,
+                    "factor": factor_code,
+                },
+            )
+            await update_tourist_message(
+                callback, bot, event, source, menu=True
+            )
+            await callback.answer("Отмечено")
+        elif action == "fxback":
+            try:
+                session_state = tourist_reason_sessions.pop(callback.from_user.id)
+            except KeyError:
+                session_state = None
+            async with db.get_session() as session:
+                user = await session.get(User, callback.from_user.id)
+                event = await session.get(Event, event_id)
+                if not event or not _user_can_label_event(user):
+                    await callback.answer("Not authorized", show_alert=True)
+                    return
+            await update_tourist_message(callback, bot, event, source)
+            await callback.answer("Отмечено")
+        elif action == "note":
+            note_action = parts[2] if len(parts) > 2 else ""
+            if note_action == "start":
+                async with db.get_session() as session:
+                    user = await session.get(User, callback.from_user.id)
+                    event = await session.get(Event, event_id)
+                    if not event or not _user_can_label_event(user):
+                        await callback.answer("Not authorized", show_alert=True)
+                        return
+                tourist_note_sessions.pop(callback.from_user.id, None)
+                tourist_note_sessions[callback.from_user.id] = TouristNoteSession(
+                    event_id=event_id,
+                    chat_id=callback.message.chat.id,
+                    message_id=callback.message.message_id,
+                    source=source,
+                    markup=callback.message.reply_markup,
+                    message_text=(
+                        callback.message.text
+                        if callback.message and callback.message.text is not None
+                        else (
+                            callback.message.caption
+                            if callback.message
+                            else None
+                        )
+                    ),
+                )
+                await bot.send_message(
+                    callback.message.chat.id,
+                    "Отправьте комментарий для туристов одним сообщением. Сессия длится 10 минут.",
+                )
+                await callback.answer("Ожидаю")
+            elif note_action == "clear":
+                async with db.get_session() as session:
+                    user = await session.get(User, callback.from_user.id)
+                    event = await session.get(Event, event_id)
+                    if not event or not _user_can_label_event(user):
+                        await callback.answer("Not authorized", show_alert=True)
+                        return
+                    event.tourist_note = None
+                    event.tourist_label_by = callback.from_user.id
+                    event.tourist_label_at = datetime.now(timezone.utc)
+                    event.tourist_label_source = source
+                    session.add(event)
+                    await session.commit()
+                    await session.refresh(event)
+                tourist_note_sessions.pop(callback.from_user.id, None)
+                logging.info(
+                    "tourist_note_cleared",
+                    extra={"event_id": event_id, "user_id": callback.from_user.id},
+                )
+                await update_tourist_message(callback, bot, event, source)
+                await callback.answer("Отмечено")
+            else:
+                await callback.answer()
     elif data.startswith("festedit:"):
         fid = int(data.split(":")[1])
         async with db.get_session() as session:
@@ -8920,12 +9392,15 @@ async def handle_add_event(
                 callback_data=f"edit:{saved.id}",
             )
         )
-        markup = types.InlineKeyboardMarkup(
-            inline_keyboard=[buttons_first, buttons_second]
+        inline_keyboard = append_tourist_block(
+            [buttons_first, buttons_second], saved, "tg"
         )
-        text_out = f"Event {status}\n" + "\n".join(lines)
+        markup = types.InlineKeyboardMarkup(inline_keyboard=inline_keyboard)
+        extra_lines = [ocr_line] if ocr_line else None
+        text_out = build_event_card_message(
+            f"Event {status}", saved, lines, extra_lines=extra_lines
+        )
         if ocr_line:
-            text_out = f"{text_out}\n{ocr_line}"
             ocr_line = None
         await bot.send_message(message.chat.id, text_out, reply_markup=markup)
         await notify_event_added(db, bot, user, saved, added)
@@ -9014,12 +9489,16 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
             callback_data=f"edit:{event.id}",
         )
     )
-    markup = types.InlineKeyboardMarkup(
-        inline_keyboard=[buttons_first, buttons_second]
+    inline_keyboard = append_tourist_block(
+        [buttons_first, buttons_second], event, "tg"
+    )
+    markup = types.InlineKeyboardMarkup(inline_keyboard=inline_keyboard)
+    text_out = build_event_card_message(
+        f"Event {status}", event, lines
     )
     await bot.send_message(
         message.chat.id,
-        f"Event {status}\n" + "\n".join(lines),
+        text_out,
         reply_markup=markup,
     )
     await notify_event_added(db, bot, user, event, added)
@@ -18771,25 +19250,30 @@ async def _vkrev_show_next(chat_id: int, batch_id: str, operator_id: int, db: Da
     status_line = (
         f"ключи: {matched_kw_display} | дата: {'да' if post.has_date else 'нет'} | в очереди: {pending}"
     )
-    markup = types.InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                types.InlineKeyboardButton(text="✅ Добавить", callback_data=f"vkrev:accept:{post.id}"),
-                types.InlineKeyboardButton(text="📝 Добавить с доп.инфо", callback_data=f"vkrev:accept_extra:{post.id}"),
-            ],
-            [
-                types.InlineKeyboardButton(text="✖️ Отклонить", callback_data=f"vkrev:reject:{post.id}"),
-                types.InlineKeyboardButton(text="⏭ Пропустить", callback_data=f"vkrev:skip:{post.id}"),
-            ],
-            [types.InlineKeyboardButton(text="⏹ Стоп", callback_data=f"vkrev:stop:{batch_id}")],
-            [
-                types.InlineKeyboardButton(
-                    text="🧹 Завершить и обновить страницы месяцев",
-                    callback_data=f"vkrev:finish:{batch_id}",
-                )
-            ],
-        ]
-    )
+    inline_keyboard = [
+        [
+            types.InlineKeyboardButton(text="✅ Добавить", callback_data=f"vkrev:accept:{post.id}"),
+            types.InlineKeyboardButton(text="📝 Добавить с доп.инфо", callback_data=f"vkrev:accept_extra:{post.id}"),
+        ],
+        [
+            types.InlineKeyboardButton(text="✖️ Отклонить", callback_data=f"vkrev:reject:{post.id}"),
+            types.InlineKeyboardButton(text="⏭ Пропустить", callback_data=f"vkrev:skip:{post.id}"),
+        ],
+        [types.InlineKeyboardButton(text="⏹ Стоп", callback_data=f"vkrev:stop:{batch_id}")],
+        [
+            types.InlineKeyboardButton(
+                text="🧹 Завершить и обновить страницы месяцев",
+                callback_data=f"vkrev:finish:{batch_id}",
+            )
+        ],
+    ]
+    imported_event_id = getattr(post, "imported_event_id", None)
+    if imported_event_id:
+        async with db.get_session() as session:
+            event = await session.get(Event, imported_event_id)
+        if event:
+            inline_keyboard = append_tourist_block(inline_keyboard, event, "vk")
+    markup = types.InlineKeyboardMarkup(inline_keyboard=inline_keyboard)
     post_text = post.text or ""
     tail_lines = [group_name, "", url, "", status_line]
     tail_str = "\n".join(tail_lines)
@@ -18873,6 +19357,8 @@ async def _vkrev_import_flow(
     res = await vk_intake.persist_event_and_pages(
         draft, photos, db, source_post_url=source_post_url
     )
+    async with db.get_session() as session:
+        event_obj = await session.get(Event, res.event_id)
     await vk_review.mark_imported(
         db, inbox_id, batch_id, operator_id, res.event_id, res.event_date
     )
@@ -18886,25 +19372,27 @@ async def _vkrev_import_flow(
     if admin_chat:
         await bot.send_message(int(admin_chat), links)
     await bot.send_message(chat_id, links)
-    markup = types.InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                types.InlineKeyboardButton(
-                    text="↪️ Репостнуть в Vk",
-                    callback_data=f"vkrev:repost:{res.event_id}",
-                ),
-                types.InlineKeyboardButton(
-                    text="✂️ Сокращённый рерайт",
-                    callback_data=f"vkrev:shortpost:{res.event_id}",
-                ),
-            ]
+    base_keyboard = [
+        [
+            types.InlineKeyboardButton(
+                text="↪️ Репостнуть в Vk",
+                callback_data=f"vkrev:repost:{res.event_id}",
+            ),
+            types.InlineKeyboardButton(
+                text="✂️ Сокращённый рерайт",
+                callback_data=f"vkrev:shortpost:{res.event_id}",
+            ),
         ]
-    )
+    ]
+    if event_obj:
+        inline_keyboard = append_tourist_block(base_keyboard, event_obj, "vk")
+    else:
+        inline_keyboard = base_keyboard
+    markup = types.InlineKeyboardMarkup(inline_keyboard=inline_keyboard)
     def _display(value: str | None) -> str:
         return value if value else "—"
 
-    info_lines = [
-        "Импортировано",
+    detail_lines = [
         f"Тип: {_display(res.event_type)}",
         f"Дата начала: {_display(res.event_date)}",
         f"Дата окончания: {_display(res.event_end_date)}",
@@ -18913,12 +19401,19 @@ async def _vkrev_import_flow(
     ]
     if draft.poster_media and draft.ocr_tokens_remaining is not None:
         if getattr(draft, "ocr_limit_notice", None):
-            info_lines.append(draft.ocr_limit_notice)
-        info_lines.append(
+            detail_lines.append(draft.ocr_limit_notice)
+        detail_lines.append(
             f"OCR: потрачено {draft.ocr_tokens_spent}, осталось {draft.ocr_tokens_remaining}"
         )
 
-    await bot.send_message(chat_id, "\n".join(info_lines), reply_markup=markup)
+    if event_obj:
+        message_text = build_event_card_message(
+            "Импортировано", event_obj, detail_lines
+        )
+    else:
+        message_text = "\n".join(["Импортировано", *detail_lines])
+
+    await bot.send_message(chat_id, message_text, reply_markup=markup)
 
 
 async def handle_vk_review_cb(callback: types.CallbackQuery, db: Database, bot: Bot) -> None:
@@ -19473,6 +19968,70 @@ async def handle_vk_extra_message(message: types.Message, db: Database, bot: Bot
     )
 
 
+async def handle_tourist_note_message(message: types.Message, db: Database, bot: Bot) -> None:
+    try:
+        session_state = tourist_note_sessions.pop(message.from_user.id)
+    except KeyError:
+        await bot.send_message(
+            message.chat.id,
+            "Сессия для комментария истекла, нажмите кнопку заново.",
+        )
+        return
+    async with db.get_session() as session:
+        user = await session.get(User, message.from_user.id)
+        event = await session.get(Event, session_state.event_id)
+        if not event or not _user_can_label_event(user):
+            await bot.send_message(message.chat.id, "Not authorized")
+            return
+        note_text = (message.text or "").strip()
+        event.tourist_note = note_text or None
+        event.tourist_label_by = message.from_user.id
+        event.tourist_label_at = datetime.now(timezone.utc)
+        event.tourist_label_source = session_state.source
+        session.add(event)
+        await session.commit()
+        await session.refresh(event)
+    logging.info(
+        "tourist_note_saved",
+        extra={
+            "event_id": session_state.event_id,
+            "user_id": message.from_user.id,
+            "has_note": bool(event.tourist_note),
+        },
+    )
+    await bot.send_message(message.chat.id, "Комментарий сохранён.")
+    base_markup = session_state.markup
+    new_markup = replace_tourist_block(base_markup, event, session_state.source)
+    original_text = session_state.message_text
+    if original_text is not None:
+        updated_text = apply_tourist_status_to_text(original_text, event)
+        try:
+            await bot.edit_message_text(
+                chat_id=session_state.chat_id,
+                message_id=session_state.message_id,
+                text=updated_text,
+                reply_markup=new_markup,
+            )
+        except TelegramBadRequest as exc:  # pragma: no cover - Telegram quirks
+            logging.warning(
+                "tourist_note_message_update_failed",
+                extra={"event_id": session_state.event_id, "error": exc.message},
+            )
+            with contextlib.suppress(Exception):
+                await bot.edit_message_reply_markup(
+                    chat_id=session_state.chat_id,
+                    message_id=session_state.message_id,
+                    reply_markup=new_markup,
+                )
+    else:
+        with contextlib.suppress(Exception):
+            await bot.edit_message_reply_markup(
+                chat_id=session_state.chat_id,
+                message_id=session_state.message_id,
+                reply_markup=new_markup,
+            )
+
+
 async def handle_vk_shortpost_edit_message(message: types.Message, db: Database, bot: Bot) -> None:
     info = vk_shortpost_edit_sessions.pop(message.from_user.id, None)
     if not info:
@@ -19958,10 +20517,13 @@ async def _process_forwarded(
             inline_keyboard = [buttons[:-1], [buttons[-1]]]
         else:
             inline_keyboard = [[buttons[0]]]
+        inline_keyboard = append_tourist_block(inline_keyboard, saved, "tg")
         markup = types.InlineKeyboardMarkup(inline_keyboard=inline_keyboard)
-        text_out = f"Event {status}\n" + "\n".join(lines)
+        extra_lines = [ocr_line] if ocr_line else None
+        text_out = build_event_card_message(
+            f"Event {status}", saved, lines, extra_lines=extra_lines
+        )
         if ocr_line:
-            text_out = f"{text_out}\n{ocr_line}"
             ocr_line = None
         logging.info("sending response for event %s", saved.id)
         try:
@@ -20826,6 +21388,9 @@ def create_app() -> web.Application:
     async def vk_extra_msg_wrapper(message: types.Message):
         await handle_vk_extra_message(message, db, bot)
 
+    async def tourist_note_wrapper(message: types.Message):
+        await handle_tourist_note_message(message, db, bot)
+
     async def vk_shortpost_edit_msg_wrapper(message: types.Message):
         await handle_vk_shortpost_edit_message(message, db, bot)
 
@@ -20962,6 +21527,9 @@ def create_app() -> web.Application:
     dp.message.register(vk_queue_wrapper, lambda m: m.text == VK_BTN_QUEUE_SUMMARY)
     dp.message.register(vk_add_msg_wrapper, lambda m: m.from_user.id in vk_add_source_sessions)
     dp.message.register(vk_extra_msg_wrapper, lambda m: m.from_user.id in vk_review_extra_sessions)
+    dp.message.register(
+        tourist_note_wrapper, lambda m: m.from_user.id in tourist_note_sessions
+    )
     dp.message.register(
         vk_shortpost_edit_msg_wrapper,
         lambda m: m.from_user.id in vk_shortpost_edit_sessions,
