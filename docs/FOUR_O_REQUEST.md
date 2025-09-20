@@ -76,3 +76,10 @@ provided texts may appear in the summary.
 If the description contains a date range like "с 27 августа по 6 сентября 2025",
 these dates define the festival period. When no range is present the period is
 calculated from the events added to the festival.
+
+## Logging
+
+OpenAI usage resets daily at 00:00 UTC. The `four_o.usage` log records each
+request with its token count and the remaining budget as defined by
+`FOUR_O_DAILY_TOKEN_LIMIT`. Grafana dashboards can filter by the
+`four_o.usage` key to visualise daily token spend.
