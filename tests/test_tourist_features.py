@@ -89,8 +89,12 @@ def test_tourist_block_appended(base_rows, source):
     )
     rows = append_tourist_block(base_rows, event, source)
     flat = [btn.callback_data for row in rows for btn in row]
-    assert any(cb and cb.startswith("tourist:yes:") for cb in flat)
-    assert any(cb and cb.startswith("tourist:note:start:") for cb in flat)
+    texts = [btn.text for row in rows for btn in row]
+    assert f"tourist:yes:{event.id}" in flat
+    assert f"tourist:note:start:{event.id}" in flat
+    assert "Интересно туристам" in texts
+    assert "Причины" in texts
+    assert "✍️ Комментарий" in texts
 
 
 @pytest.mark.asyncio
@@ -126,7 +130,7 @@ async def test_tourist_yes_callback_updates_event(tmp_path, monkeypatch):
             "reply_markup": markup.model_dump(),
         }
     )
-    callback = make_callback(f"tourist:yes:{event_id}:tg", message)
+    callback = make_callback(f"tourist:yes:{event_id}", message)
     answers = patch_answer(monkeypatch)
     bot = DummyBot()
     await main.process_request(callback, db, bot)
@@ -135,9 +139,20 @@ async def test_tourist_yes_callback_updates_event(tmp_path, monkeypatch):
         assert updated.tourist_label == 1
         assert updated.tourist_label_by == 1
         assert updated.tourist_label_source == "tg"
-    assert any(call["text"] == "Отмечено" for call in answers)
+    session_state = main.tourist_reason_sessions.get(1)
+    assert session_state and session_state.event_id == event_id
+    assert any(call["text"] == "Выберите причины" for call in answers)
     assert bot.edited_text_calls
-    assert "🌍 Туристам: Да" in bot.edited_text_calls[-1]["text"]
+    last_call = bot.edited_text_calls[-1]
+    assert "🌍 Туристам: Да" in last_call["text"]
+    markup = last_call["reply_markup"]
+    reason_callbacks = [
+        btn.callback_data
+        for row in markup.inline_keyboard
+        for btn in row
+        if btn.callback_data
+    ]
+    assert f"tourist:fxdone:{event_id}" in reason_callbacks
 
 
 @pytest.mark.asyncio
@@ -176,18 +191,62 @@ async def test_tourist_factor_flow(tmp_path, monkeypatch):
     )
     answers = patch_answer(monkeypatch)
     bot = DummyBot()
-    cb_menu = make_callback(f"tourist:fxmenu:{event_id}:tg", message)
+    cb_menu = make_callback(f"tourist:fx:menu:{event_id}", message)
     await main.process_request(cb_menu, db, bot)
     assert main.tourist_reason_sessions
-    cb_toggle = make_callback(f"tourist:fx:{event_id}:history:tg", message)
+    cb_toggle = make_callback(f"tourist:fx:history:{event_id}", message)
     await main.process_request(cb_toggle, db, bot)
     async with db.get_session() as session:
         updated = await session.get(Event, event_id)
         assert updated.tourist_factors == ["history"]
-    cb_back = make_callback(f"tourist:fxback:{event_id}:tg", message)
-    await main.process_request(cb_back, db, bot)
+    cb_done = make_callback(f"tourist:fxdone:{event_id}", message)
+    await main.process_request(cb_done, db, bot)
     assert not main.tourist_reason_sessions
-    assert any(call["text"] == "Отмечено" for call in answers)
+    assert any(call["text"] == "Причины сохранены" for call in answers)
+
+
+@pytest.mark.asyncio
+async def test_tourist_factor_skip(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    async with db.get_session() as session:
+        session.add(User(user_id=1))
+        event = Event(
+            title="Title",
+            description="",
+            date="2025-09-01",
+            time="10:00",
+            location_name="Loc",
+            source_text="Src",
+        )
+        session.add(event)
+        await session.commit()
+        await session.refresh(event)
+        event_id = event.id
+    async with db.get_session() as session:
+        event = await session.get(Event, event_id)
+        markup = types.InlineKeyboardMarkup(
+            inline_keyboard=append_tourist_block([[types.InlineKeyboardButton(text="Edit", callback_data="edit")]], event, "tg")
+        )
+        text = build_event_card_message("Event added", event, ["title: Title"])
+    message = types.Message.model_validate(
+        {
+            "message_id": 250,
+            "date": 0,
+            "chat": {"id": 25, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": text,
+            "reply_markup": markup.model_dump(),
+        }
+    )
+    answers = patch_answer(monkeypatch)
+    bot = DummyBot()
+    cb_menu = make_callback(f"tourist:fx:menu:{event_id}", message)
+    await main.process_request(cb_menu, db, bot)
+    cb_skip = make_callback(f"tourist:fxskip:{event_id}", message)
+    await main.process_request(cb_skip, db, bot)
+    assert not main.tourist_reason_sessions
+    assert any(call["text"] == "Причины можно выбрать позже" for call in answers)
 
 
 @pytest.mark.asyncio
@@ -224,13 +283,13 @@ async def test_tourist_factor_timeout(tmp_path, monkeypatch):
             "reply_markup": markup.model_dump(),
         }
     )
-    cb = make_callback(f"tourist:fx:{event_id}:history:tg", message)
+    cb = make_callback(f"tourist:fx:history:{event_id}", message)
     bot = DummyBot()
 
     patch_answer(monkeypatch)
     await main.process_request(cb, db, bot)
     assert bot.sent_messages
-    assert "Сессия" in bot.sent_messages[-1]["text"]
+    assert bot.sent_messages[-1]["text"] == "Сессия истекла, откройте причины заново"
 
 
 @pytest.mark.asyncio
@@ -267,7 +326,7 @@ async def test_tourist_note_flow(tmp_path, monkeypatch):
             "reply_markup": markup.model_dump(),
         }
     )
-    cb = make_callback(f"tourist:note:start:{event_id}:tg", message)
+    cb = make_callback(f"tourist:note:start:{event_id}", message)
     answers = patch_answer(monkeypatch)
     bot = DummyBot()
     await main.process_request(cb, db, bot)
@@ -345,7 +404,7 @@ async def test_tourist_note_clear(tmp_path, monkeypatch):
             "reply_markup": markup.model_dump(),
         }
     )
-    cb = make_callback(f"tourist:note:clear:{event_id}:tg", message)
+    cb = make_callback(f"tourist:note:clear:{event_id}", message)
     answers = patch_answer(monkeypatch)
     bot = DummyBot()
     await main.process_request(cb, db, bot)
