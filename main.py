@@ -6938,6 +6938,139 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
         msg = "Обложка обновлена" if ok else "Картинка не найдена"
         await callback.message.answer(msg)
         await callback.answer()
+    elif data.startswith("festmerge_do:"):
+        try:
+            _, src_raw, dst_raw = data.split(":")
+            src_id = int(src_raw)
+            dst_id = int(dst_raw)
+        except ValueError:
+            await callback.answer("Некорректный запрос", show_alert=True)
+            return
+        async with db.get_session() as session:
+            if not await session.get(User, callback.from_user.id):
+                await callback.answer("Not authorized", show_alert=True)
+                return
+            src = await session.get(Festival, src_id)
+            dst = await session.get(Festival, dst_id)
+        if not src or not dst:
+            await callback.answer("Festival not found", show_alert=True)
+            return
+        src_name = src.name
+        dst_name = dst.name
+        ok = await merge_festivals(db, src_id, dst_id, bot)
+        if not ok:
+            await callback.answer("Не удалось объединить", show_alert=True)
+            return
+        async with db.get_session() as session:
+            dest = await session.get(Festival, dst_id)
+        if dest:
+            festival_edit_sessions[callback.from_user.id] = (dst_id, None)
+            await show_festival_edit_menu(callback.from_user.id, dest, bot)
+        await callback.message.edit_text(
+            f"Фестиваль «{src_name}» объединён с «{dst_name}».",
+        )
+        await callback.answer("Склеено")
+    elif data.startswith("festmerge_to:"):
+        parts = data.split(":")
+        if len(parts) != 4:
+            await callback.answer("Некорректный запрос", show_alert=True)
+            return
+        _, src_raw, dst_raw, page_raw = parts
+        try:
+            src_id = int(src_raw)
+            dst_id = int(dst_raw)
+            page = int(page_raw)
+        except ValueError:
+            await callback.answer("Некорректный запрос", show_alert=True)
+            return
+        async with db.get_session() as session:
+            if not await session.get(User, callback.from_user.id):
+                await callback.answer("Not authorized", show_alert=True)
+                return
+            src = await session.get(Festival, src_id)
+            dst = await session.get(Festival, dst_id)
+        if not src or not dst:
+            await callback.answer("Festival not found", show_alert=True)
+            return
+        confirm_lines = [
+            "Вы уверены, что хотите склеить фестивали?",
+            f"Источник: {src.id} {src.name}",
+            f"Цель: {dst.id} {dst.name}",
+            "Все события и данные источника будут перенесены, сам фестиваль будет удалён.",
+        ]
+        keyboard = types.InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    types.InlineKeyboardButton(
+                        text="✅ Склеить",
+                        callback_data=f"festmerge_do:{src_id}:{dst_id}",
+                    )
+                ],
+                [
+                    types.InlineKeyboardButton(
+                        text="⬅️ Назад",
+                        callback_data=f"festmergep:{src_id}:{page}",
+                    ),
+                    types.InlineKeyboardButton(
+                        text="Отмена",
+                        callback_data=f"festedit:{src_id}",
+                    ),
+                ],
+            ]
+        )
+        await callback.message.edit_text("\n".join(confirm_lines), reply_markup=keyboard)
+        await callback.answer()
+    elif data.startswith("festmergep:"):
+        parts = data.split(":")
+        if len(parts) != 3:
+            await callback.answer("Некорректный запрос", show_alert=True)
+            return
+        _, src_raw, page_raw = parts
+        try:
+            src_id = int(src_raw)
+            page = int(page_raw)
+        except ValueError:
+            await callback.answer("Некорректный запрос", show_alert=True)
+            return
+        async with db.get_session() as session:
+            if not await session.get(User, callback.from_user.id):
+                await callback.answer("Not authorized", show_alert=True)
+                return
+            src = await session.get(Festival, src_id)
+            if not src:
+                await callback.answer("Festival not found", show_alert=True)
+                return
+            res = await session.execute(
+                select(Festival).where(Festival.id != src_id).order_by(Festival.name)
+            )
+            targets = list(res.scalars().all())
+        text, markup = build_festival_merge_selection(src, targets, page)
+        await callback.message.edit_text(text, reply_markup=markup)
+        await callback.answer()
+    elif data.startswith("festmerge:"):
+        try:
+            fid = int(data.split(":")[1])
+        except (IndexError, ValueError):
+            await callback.answer("Некорректный запрос", show_alert=True)
+            return
+        async with db.get_session() as session:
+            if not await session.get(User, callback.from_user.id):
+                await callback.answer("Not authorized", show_alert=True)
+                return
+            fest = await session.get(Festival, fid)
+            if not fest:
+                await callback.answer("Festival not found", show_alert=True)
+                return
+            res = await session.execute(
+                select(Festival).where(Festival.id != fid).order_by(Festival.name)
+            )
+            targets = list(res.scalars().all())
+        if not targets:
+            await callback.answer("Нет других фестивалей", show_alert=True)
+            return
+        text, markup = build_festival_merge_selection(fest, targets, page=1)
+        await callback.message.answer(text, reply_markup=markup)
+        await callback.answer()
     elif data.startswith("festimgs:"):
         fid = int(data.split(":")[1])
         async with db.get_session() as session:
@@ -13901,6 +14034,130 @@ async def generate_festival_description(fest: Festival, events: list[Event]) -> 
         return ""
 
 
+async def regenerate_festival_description(db: Database, name: str) -> None:
+    """Regenerate and persist festival description using latest events."""
+    async with db.get_session() as session:
+        result = await session.execute(select(Festival).where(Festival.name == name))
+        fest = result.scalar_one_or_none()
+        if not fest:
+            return
+
+        events_query = (
+            select(Event)
+            .where(Event.festival == fest.name)
+            .order_by(Event.date, Event.time)
+        )
+        events_res = await session.execute(events_query)
+        events = list(events_res.scalars().all())
+
+        description = (await generate_festival_description(fest, events)).strip()
+        if not description:
+            return
+
+        if description != (fest.description or ""):
+            fest.description = description
+            await session.commit()
+
+
+async def merge_festivals(
+    db: Database, src_id: int, dst_id: int, bot: Bot | None = None
+) -> bool:
+    """Merge two festivals moving events, media and metadata."""
+
+    if src_id == dst_id:
+        logging.warning("merge_festivals: identical ids src=%s dst=%s", src_id, dst_id)
+        return False
+
+    async with db.get_session() as session:
+        src = await session.get(Festival, src_id)
+        dst = await session.get(Festival, dst_id)
+
+        if not src or not dst:
+            logging.error(
+                "merge_festivals: missing festivals src=%s dst=%s", src_id, dst_id
+            )
+            return False
+
+        src_name = src.name
+        dst_name = dst.name
+
+        await session.execute(
+            update(Event).where(Event.festival == src_name).values(festival=dst_name)
+        )
+
+        merged_photos: list[str] = []
+        for url in list(dst.photo_urls or []) + list(src.photo_urls or []):
+            if url and url not in merged_photos:
+                merged_photos.append(url)
+        if merged_photos:
+            dst.photo_urls = merged_photos
+            if not dst.photo_url or dst.photo_url not in merged_photos:
+                dst.photo_url = merged_photos[0]
+        elif src.photo_url and not dst.photo_url:
+            dst.photo_url = src.photo_url
+
+        def _fill(field: str) -> None:
+            dst_val = getattr(dst, field)
+            src_val = getattr(src, field)
+            if (dst_val is None or dst_val == "") and src_val:
+                setattr(dst, field, src_val)
+
+        for field in (
+            "full_name",
+            "description",
+            "telegraph_url",
+            "telegraph_path",
+            "vk_post_url",
+            "vk_poll_url",
+            "website_url",
+            "program_url",
+            "vk_url",
+            "tg_url",
+            "ticket_url",
+            "location_name",
+            "location_address",
+            "city",
+            "source_text",
+            "source_post_url",
+            "source_chat_id",
+            "source_message_id",
+        ):
+            _fill(field)
+
+        alias_set: set[str] = set()
+        for alias in list(dst.aliases or []) + list(src.aliases or []):
+            if alias:
+                alias_set.add(alias)
+        alias_set.add(src_name)
+        if src.full_name:
+            alias_set.add(src.full_name)
+        alias_set.discard(dst_name)
+        if dst.full_name:
+            alias_set.discard(dst.full_name)
+        dst.aliases = sorted(alias_set)
+
+        events_res = await session.execute(
+            select(Event).where(Event.festival == dst_name)
+        )
+        all_events = list(events_res.scalars().all())
+        start, end = festival_date_range(all_events)
+        if not start and src.start_date:
+            start = parse_iso_date(src.start_date)
+        if not end and src.end_date:
+            end = parse_iso_date(src.end_date)
+        dst.start_date = start.isoformat() if start else None
+        dst.end_date = end.isoformat() if end else None
+
+        await session.delete(src)
+        await session.commit()
+
+    await regenerate_festival_description(db, dst_name)
+    await sync_festival_page(db, dst_name)
+    await rebuild_fest_nav_if_changed(db)
+    await sync_festival_vk_post(db, dst_name, bot)
+    return True
+
+
 async def generate_festival_poll_text(fest: Festival) -> str:
     """Use LLM to craft poll question for VK."""
     base = (
@@ -16519,10 +16776,94 @@ async def show_festival_edit_menu(user_id: int, fest: Festival, bot: Bot):
                 callback_data=f"festimgs:{fest.id}",
             )
         ],
+        [
+            types.InlineKeyboardButton(
+                text="🧩 Склеить с…",
+                callback_data=f"festmerge:{fest.id}",
+            )
+        ],
         [types.InlineKeyboardButton(text="Done", callback_data="festeditdone")],
     ]
     markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard)
     await bot.send_message(user_id, "\n".join(lines), reply_markup=markup)
+
+
+FEST_MERGE_PAGE_SIZE = 6
+
+
+def _format_festival_merge_line(fest: Festival) -> str:
+    parts = [f"{fest.id} {fest.name}"]
+    if fest.start_date and fest.end_date:
+        if fest.start_date == fest.end_date:
+            parts.append(fest.start_date)
+        else:
+            parts.append(f"{fest.start_date}..{fest.end_date}")
+    elif fest.start_date:
+        parts.append(fest.start_date)
+    elif fest.end_date:
+        parts.append(fest.end_date)
+    if fest.city:
+        parts.append(f"#{fest.city}")
+    return " · ".join(parts)
+
+
+def build_festival_merge_selection(
+    source: Festival, targets: Sequence[Festival], page: int
+) -> tuple[str, types.InlineKeyboardMarkup]:
+    total = len(targets)
+    total_pages = max(1, (total + FEST_MERGE_PAGE_SIZE - 1) // FEST_MERGE_PAGE_SIZE)
+    page = max(1, min(page, total_pages))
+    start = (page - 1) * FEST_MERGE_PAGE_SIZE
+    visible = targets[start : start + FEST_MERGE_PAGE_SIZE]
+
+    heading = (
+        f"🧩 Склеить фестиваль «{source.name}» (ID {source.id}).\n"
+        f"Выберите фестиваль-цель (страница {page}/{total_pages}):"
+    )
+    lines = [heading]
+    keyboard: list[list[types.InlineKeyboardButton]] = []
+
+    if not visible:
+        lines.append("Нет других фестивалей для объединения.")
+    else:
+        for target in visible:
+            lines.append(_format_festival_merge_line(target))
+            button_text = target.name
+            if target.city:
+                button_text = f"{target.name} · #{target.city}"
+            keyboard.append(
+                [
+                    types.InlineKeyboardButton(
+                        text=button_text,
+                        callback_data=f"festmerge_to:{source.id}:{target.id}:{page}",
+                    )
+                ]
+            )
+
+    nav_row: list[types.InlineKeyboardButton] = []
+    if total_pages > 1 and page > 1:
+        nav_row.append(
+            types.InlineKeyboardButton(
+                text="⬅️ Назад",
+                callback_data=f"festmergep:{source.id}:{page-1}",
+            )
+        )
+    if total_pages > 1 and page < total_pages:
+        nav_row.append(
+            types.InlineKeyboardButton(
+                text="Вперёд ➡️",
+                callback_data=f"festmergep:{source.id}:{page+1}",
+            )
+        )
+    if nav_row:
+        keyboard.append(nav_row)
+
+    keyboard.append(
+        [types.InlineKeyboardButton(text="Отмена", callback_data=f"festedit:{source.id}")]
+    )
+
+    markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard)
+    return "\n".join(lines), markup
 
 
 async def handle_events(message: types.Message, db: Database, bot: Bot):
@@ -21656,6 +21997,7 @@ def create_app() -> web.Application:
         or c.data.startswith("setfest:")
         or c.data.startswith("festdays:")
         or c.data.startswith("festimgs:")
+        or c.data.startswith("festmerge")
         or c.data.startswith("festsetcover:")
         or c.data.startswith("requeue:")
     ,

@@ -303,6 +303,7 @@ class Database:
                     vk_poll_url TEXT,
                     photo_url TEXT,
                     photo_urls JSON,
+                    aliases JSON,
                     website_url TEXT,
                     program_url TEXT,
                     vk_url TEXT,
@@ -325,6 +326,7 @@ class Database:
             await _add_column(conn, "festival", "ticket_url TEXT")
             await _add_column(conn, "festival", "nav_hash TEXT")
             await _add_column(conn, "festival", "photo_urls JSON")
+            await _add_column(conn, "festival", "aliases JSON")
             await _add_column(conn, "festival", "source_post_url TEXT")
             await _add_column(conn, "festival", "source_chat_id INTEGER")
             await _add_column(conn, "festival", "source_message_id INTEGER")
