@@ -26,6 +26,10 @@ batch can be finished with "🧹 Завершить…" which sequentially rebui
 affected month pages. Operators can run `/vk_queue` to see current inbox counts
 and get a button to start reviewing candidates.
 
+Even terse posts—such as a single photo with an empty caption—also enter the
+queue and are marked as **Ожидает OCR** so operators know they still require
+text extraction before review.
+
 ### Bucket windows and priorities
 
 Each queue item is assigned to a time-based bucket by comparing its `event_ts_hint` with the current moment:
