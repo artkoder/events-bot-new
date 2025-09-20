@@ -3155,14 +3155,14 @@ async def test_makefest_create_links_event(tmp_path: Path, monkeypatch):
     assert makefest_sessions.get(1) is None
     text, markup = responses[-1]
     lines = [line for line in text.splitlines() if line]
-    assert f"Статус: создан" in lines
+    assert "✅ Фестиваль создан и привязан" in lines
     assert f"ID: {fest.id}" in lines
     assert "Название: New Fest" in lines
     assert "Полное название: New Festival" in lines
     assert "Период: 2025-06-01 — 2025-06-10" in lines
     assert "Город: Town" in lines
     assert "Локация: Hall — Street 1" in lines
-    assert "Фото: 1" in lines
+    assert "Фото добавлено: 1" in lines
     assert "Telegraph: —" in lines
     assert lines[-1] == "Событие привязано к фестивалю."
     assert markup is not None
@@ -3291,14 +3291,14 @@ async def test_makefest_bind_existing_festival(tmp_path: Path, monkeypatch):
     assert makefest_sessions.get(1) is None
     text, markup = responses[-1]
     lines = [line for line in text.splitlines() if line]
-    assert "Статус: привязан к существующему" in lines
+    assert "✅ Фестиваль привязан к существующему и привязан" in lines
     assert f"ID: {updated_fest.id}" in lines
     assert "Название: Existing" in lines
     assert "Полное название: Existing Updated" in lines
     assert "Период: 2025-06-01 — 2025-06-10" in lines
     assert "Город: Town" in lines
     assert "Локация: Hall — Street 1" in lines
-    assert "Фото: 1" in lines
+    assert "Фото добавлено: 1" in lines
     assert "Telegraph: —" in lines
     assert lines[-1] == "Событие привязано к фестивалю."
     assert markup is not None
