@@ -91,7 +91,7 @@ def test_tourist_block_appended(base_rows, source):
     flat = [btn.callback_data for row in rows for btn in row]
     texts = [btn.text for row in rows for btn in row]
     assert f"tourist:yes:{event.id}" in flat
-    assert f"tourist:fxmenu:{event.id}" in flat
+    assert f"tourist:fx:start:{event.id}" in flat
     assert f"tourist:note:start:{event.id}" in flat
     assert "Интересно туристам" in texts
     assert "Причины" in texts
@@ -267,7 +267,7 @@ async def test_tourist_factor_flow(tmp_path, monkeypatch):
     )
     answers = patch_answer(monkeypatch)
     bot = DummyBot()
-    cb_menu = make_callback(f"tourist:fxmenu:{event_id}", message)
+    cb_menu = make_callback(f"tourist:fx:start:{event_id}", message)
     await main.process_request(cb_menu, db, bot)
     assert main.tourist_reason_sessions
     assert any(call["text"] == "Выберите причины" for call in answers)
@@ -323,7 +323,7 @@ async def test_tourist_factor_skip(tmp_path, monkeypatch):
     )
     answers = patch_answer(monkeypatch)
     bot = DummyBot()
-    cb_menu = make_callback(f"tourist:fxmenu:{event_id}", message)
+    cb_menu = make_callback(f"tourist:fx:start:{event_id}", message)
     await main.process_request(cb_menu, db, bot)
     cb_skip = make_callback(f"tourist:fxskip:{event_id}", message)
     await main.process_request(cb_skip, db, bot)
@@ -367,7 +367,7 @@ async def test_tourist_factor_timeout(tmp_path, monkeypatch):
     )
     answers = patch_answer(monkeypatch)
     bot = DummyBot()
-    cb_menu = make_callback(f"tourist:fxmenu:{event_id}", message)
+    cb_menu = make_callback(f"tourist:fx:start:{event_id}", message)
     await main.process_request(cb_menu, db, bot)
     assert any(call["text"] == "Выберите причины" for call in answers)
     assert bot.edited_text_calls
@@ -384,15 +384,17 @@ async def test_tourist_factor_timeout(tmp_path, monkeypatch):
     await main.process_request(cb, db, bot)
     assert len(bot.edited_text_calls) >= 2
     restored_markup = bot.edited_text_calls[-1]["reply_markup"]
-    assert not any(
-        btn.callback_data and btn.callback_data.startswith("tourist:fx:")
+    restored_callbacks = [
+        btn.callback_data
         for row in restored_markup.inline_keyboard
         for btn in row
-    )
-    assert any(
-        btn.callback_data == f"tourist:fxmenu:{event_id}"
-        for row in restored_markup.inline_keyboard
-        for btn in row
+        if btn.callback_data
+    ]
+    assert f"tourist:fx:start:{event_id}" in restored_callbacks
+    assert all(
+        callback == f"tourist:fx:start:{event_id}"
+        or not callback.startswith("tourist:fx:")
+        for callback in restored_callbacks
     )
     assert not main.tourist_reason_sessions
     assert len(answers) >= 2
