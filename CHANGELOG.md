@@ -5,6 +5,7 @@
 - Результаты распознавания кешируются и уважают дневной лимит в 10 млн токенов.
 - Added `/ocrtest` diagnostic command, чтобы сравнить распознавание афиш между `gpt-4o-mini` и `gpt-4o` с показом использования токенов.
 - Clarified the 4o parsing prompt to warn about possible OCR mistakes in poster snippets.
+- VK Intake помещает посты с одной фотографией и пустым текстом в очередь и отмечает их статусом «Ожидает OCR».
 
 ## v0.1.0 – Deploy + US-02 + /tz
 - Initial Fly.io deployment config.
