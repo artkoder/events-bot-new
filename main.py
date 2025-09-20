@@ -611,7 +611,7 @@ partner_info_sessions: TTLCache[int, int] = TTLCache(maxsize=64, ttl=3600)
 festival_edit_sessions: TTLCache[int, tuple[int, str | None]] = TTLCache(maxsize=64, ttl=3600)
 
 # user_id -> cached festival inference for makefest flow
-makefest_sessions: TTLCache[int, dict[str, Any]] = TTLCache(maxsize=64, ttl=15 * 60)
+makefest_sessions: TTLCache[int, dict[str, Any]] = TTLCache(maxsize=64, ttl=3600)
 
 # cache for first image in Telegraph pages
 telegraph_first_image: TTLCache[str, str] = TTLCache(maxsize=128, ttl=24 * 3600)
