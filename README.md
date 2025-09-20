@@ -3,7 +3,7 @@
 Telegram bot for publishing event announcements. Daily announcements can also be posted to a VK group.
 Use `/regdailychannels` and `/daily` to manage both Telegram channels and the VK group including posting times.
 
-Superadmins can use `/vk` to manage VK Intake: add or list sources, check or review events, and open the queue summary. Команда `/ocrtest` помогает сравнить распознавание афиш между `gpt-4o-mini` и `gpt-4o` на загруженных постерах.
+Superadmins can use `/vk` to manage VK Intake: add or list sources, check or review events, and open the queue summary. The review UI highlights the bucket (URGENT/SOON/LONG/FAR) that produced the current card so operators understand the selection. Команда `/ocrtest` помогает сравнить распознавание афиш между `gpt-4o-mini` и `gpt-4o` на загруженных постерах.
 
 ## VK Intake & Review v1.1
 
@@ -26,6 +26,19 @@ batch can be finished with "🧹 Завершить…" which sequentially rebui
 affected month pages. Operators can run `/vk_queue` to see current inbox counts
 and get a button to start reviewing candidates.
 
+### Bucket windows and priorities
+
+Each queue item is assigned to a time-based bucket by comparing its `event_ts_hint` with the current moment:
+
+- **URGENT** – events happening right now or within the next 48 hours (`VK_REVIEW_URGENT_MAX_H`). These are always served first if any exist.
+- **SOON** – events between the urgent horizon and 14 days ahead (`VK_REVIEW_SOON_MAX_D`).
+- **LONG** – events between the SOON limit and 30 days ahead (`VK_REVIEW_LONG_MAX_D`).
+- **FAR** – events with hints beyond the LONG limit or without a parsed date at all.
+
+Items with hints older than two hours (`VK_REVIEW_REJECT_H`) are automatically rejected and, if the queue is empty, previously skipped cards are re-opened. Within the SOON/LONG/FAR buckets the reviewer sees cards chosen by a weighted lottery that multiplies the bucket size by its weight (`VK_REVIEW_W_SOON=3`, `VK_REVIEW_W_LONG=2`, `VK_REVIEW_W_FAR=6`). After five non-FAR selections (`VK_REVIEW_FAR_GAP_K=5`) the system forces a FAR pick as a streak breaker so distant events do not get starved.
+
+Within the winning bucket, cards are ordered by date with a tiny per-`group_id` jitter scaled by the square root of that group’s queue size. This spreads reviews across sources even when one community produces a large batch of similar events.
+
 Reposts use images from the original post, link and doc attachments rely on their
 previews, and only preview frames from videos are shown—video files are never
 downloaded.
@@ -35,6 +48,17 @@ Fly.io with a webhook.
 
 Forwarded posts from moderators or admins are treated the same as the `/addevent` command.
 Use `/setchannel` to pick one of the channels where the bot has admin rights and register it either as an announcement source or as the calendar asset channel. `/channels` lists all admin channels and lets you disable these roles. When the asset channel is set, forwarded posts from it get a **Добавить в календарь** button linking to the calendar file.
+
+### Poster OCR and token usage
+
+When an event is added through `/addevent`, forwarded by a moderator, or imported from VK, the bot uploads each poster image to Catbox once and reuses the same bytes for OCR. Recognized text is cached per hash/detail/model pair, mixed into the 4o prompt alongside the operator message, and stored in the `EventPoster` records that feed later LLM passes. Operators see a short usage line indicating how many OCR tokens were spent and how many remain for the current day.
+
+Poster recognition can be tuned with environment variables:
+
+- `POSTER_OCR_MODEL` — overrides the default `gpt-4o-mini` model used for OCR.
+- `POSTER_OCR_DETAIL` — forwarded to the Vision API (`auto` by default) to balance quality and latency.
+
+The bot enforces a daily OCR budget of 10 000 000 tokens. Cached posters continue to work after the limit is reached, but new, uncached uploads are skipped until the counter resets at UTC midnight. Operators receive a warning whenever recognition is skipped because the limit was exhausted.
 
 Bot messages display dates in the format `DD.MM.YYYY`. Public pages such as
 Telegraph posts use the short form "D месяц" (e.g. `2 июля`).
@@ -113,6 +137,14 @@ browse upcoming announcements. The command accepts dates like `2025-07-10`,
   export VK_CRAWL_BACKFILL_DAYS=14
   export VK_CRAWL_BACKFILL_AFTER_IDLE_H=24
   export VK_CRAWL_JITTER_SEC=600
+  export VK_REVIEW_REJECT_H=2         # reject hints older than this many hours
+  export VK_REVIEW_URGENT_MAX_H=48    # URGENT bucket spans up to this many hours ahead
+  export VK_REVIEW_SOON_MAX_D=14      # SOON bucket reaches this many days ahead
+  export VK_REVIEW_LONG_MAX_D=30      # LONG bucket extends to this many days ahead
+  export VK_REVIEW_W_SOON=3           # weight for SOON in the bucket lottery
+  export VK_REVIEW_W_LONG=2           # weight for LONG in the bucket lottery
+  export VK_REVIEW_W_FAR=6            # weight for FAR in the bucket lottery
+  export VK_REVIEW_FAR_GAP_K=5        # force FAR after this many non-FAR picks
   # keyword matching: regex by default; set to true to use pymorphy3 lemmas
   export VK_USE_PYMORPHY=false
   python main.py
