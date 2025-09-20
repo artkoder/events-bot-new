@@ -6968,139 +6968,6 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
         msg = "Обложка обновлена" if ok else "Картинка не найдена"
         await callback.message.answer(msg)
         await callback.answer()
-    elif data.startswith("festmerge_do:"):
-        try:
-            _, src_raw, dst_raw = data.split(":")
-            src_id = int(src_raw)
-            dst_id = int(dst_raw)
-        except ValueError:
-            await callback.answer("Некорректный запрос", show_alert=True)
-            return
-        async with db.get_session() as session:
-            if not await session.get(User, callback.from_user.id):
-                await callback.answer("Not authorized", show_alert=True)
-                return
-            src = await session.get(Festival, src_id)
-            dst = await session.get(Festival, dst_id)
-        if not src or not dst:
-            await callback.answer("Festival not found", show_alert=True)
-            return
-        src_name = src.name
-        dst_name = dst.name
-        ok = await merge_festivals(db, src_id, dst_id, bot)
-        if not ok:
-            await callback.answer("Не удалось объединить", show_alert=True)
-            return
-        async with db.get_session() as session:
-            dest = await session.get(Festival, dst_id)
-        if dest:
-            festival_edit_sessions[callback.from_user.id] = (dst_id, None)
-            await show_festival_edit_menu(callback.from_user.id, dest, bot)
-        await callback.message.edit_text(
-            f"Фестиваль «{src_name}» объединён с «{dst_name}».",
-        )
-        await callback.answer("Склеено")
-    elif data.startswith("festmerge_to:"):
-        parts = data.split(":")
-        if len(parts) != 4:
-            await callback.answer("Некорректный запрос", show_alert=True)
-            return
-        _, src_raw, dst_raw, page_raw = parts
-        try:
-            src_id = int(src_raw)
-            dst_id = int(dst_raw)
-            page = int(page_raw)
-        except ValueError:
-            await callback.answer("Некорректный запрос", show_alert=True)
-            return
-        async with db.get_session() as session:
-            if not await session.get(User, callback.from_user.id):
-                await callback.answer("Not authorized", show_alert=True)
-                return
-            src = await session.get(Festival, src_id)
-            dst = await session.get(Festival, dst_id)
-        if not src or not dst:
-            await callback.answer("Festival not found", show_alert=True)
-            return
-        confirm_lines = [
-            "Вы уверены, что хотите склеить фестивали?",
-            f"Источник: {src.id} {src.name}",
-            f"Цель: {dst.id} {dst.name}",
-            "Все события и данные источника будут перенесены, сам фестиваль будет удалён.",
-        ]
-        keyboard = types.InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    types.InlineKeyboardButton(
-                        text="✅ Склеить",
-                        callback_data=f"festmerge_do:{src_id}:{dst_id}",
-                    )
-                ],
-                [
-                    types.InlineKeyboardButton(
-                        text="⬅️ Назад",
-                        callback_data=f"festmergep:{src_id}:{page}",
-                    ),
-                    types.InlineKeyboardButton(
-                        text="Отмена",
-                        callback_data=f"festedit:{src_id}",
-                    ),
-                ],
-            ]
-        )
-        await callback.message.edit_text("\n".join(confirm_lines), reply_markup=keyboard)
-        await callback.answer()
-    elif data.startswith("festmergep:"):
-        parts = data.split(":")
-        if len(parts) != 3:
-            await callback.answer("Некорректный запрос", show_alert=True)
-            return
-        _, src_raw, page_raw = parts
-        try:
-            src_id = int(src_raw)
-            page = int(page_raw)
-        except ValueError:
-            await callback.answer("Некорректный запрос", show_alert=True)
-            return
-        async with db.get_session() as session:
-            if not await session.get(User, callback.from_user.id):
-                await callback.answer("Not authorized", show_alert=True)
-                return
-            src = await session.get(Festival, src_id)
-            if not src:
-                await callback.answer("Festival not found", show_alert=True)
-                return
-            res = await session.execute(
-                select(Festival).where(Festival.id != src_id).order_by(Festival.name)
-            )
-            targets = list(res.scalars().all())
-        text, markup = build_festival_merge_selection(src, targets, page)
-        await callback.message.edit_text(text, reply_markup=markup)
-        await callback.answer()
-    elif data.startswith("festmerge:"):
-        try:
-            fid = int(data.split(":")[1])
-        except (IndexError, ValueError):
-            await callback.answer("Некорректный запрос", show_alert=True)
-            return
-        async with db.get_session() as session:
-            if not await session.get(User, callback.from_user.id):
-                await callback.answer("Not authorized", show_alert=True)
-                return
-            fest = await session.get(Festival, fid)
-            if not fest:
-                await callback.answer("Festival not found", show_alert=True)
-                return
-            res = await session.execute(
-                select(Festival).where(Festival.id != fid).order_by(Festival.name)
-            )
-            targets = list(res.scalars().all())
-        if not targets:
-            await callback.answer("Нет других фестивалей", show_alert=True)
-            return
-        text, markup = build_festival_merge_selection(fest, targets, page=1)
-        await callback.message.answer(text, reply_markup=markup)
-        await callback.answer()
     elif data.startswith("festimgs:"):
         fid = int(data.split(":")[1])
         async with db.get_session() as session:
@@ -16902,6 +16769,181 @@ def build_festival_merge_selection(
     return "\n".join(lines), markup
 
 
+async def handle_festmerge_callback(
+    callback: types.CallbackQuery, db: Database, _bot: Bot
+) -> None:
+    """Show merge selection for a festival."""
+
+    try:
+        fid = int((callback.data or "").split(":")[1])
+    except (IndexError, ValueError):
+        await callback.answer("Некорректный запрос", show_alert=True)
+        return
+
+    async with db.get_session() as session:
+        if not await session.get(User, callback.from_user.id):
+            await callback.answer("Not authorized", show_alert=True)
+            return
+        fest = await session.get(Festival, fid)
+        if not fest:
+            await callback.answer("Festival not found", show_alert=True)
+            return
+        res = await session.execute(
+            select(Festival).where(Festival.id != fid).order_by(Festival.name)
+        )
+        targets = list(res.scalars().all())
+
+    if not targets:
+        await callback.answer("Нет других фестивалей", show_alert=True)
+        return
+
+    text, markup = build_festival_merge_selection(fest, targets, page=1)
+    await callback.message.answer(text, reply_markup=markup)
+    await callback.answer()
+
+
+async def handle_festmerge_page_callback(
+    callback: types.CallbackQuery, db: Database, _: Bot
+) -> None:
+    """Handle pagination inside merge selection."""
+
+    parts = (callback.data or "").split(":")
+    if len(parts) != 3:
+        await callback.answer("Некорректный запрос", show_alert=True)
+        return
+    _, src_raw, page_raw = parts
+    try:
+        src_id = int(src_raw)
+        page = int(page_raw)
+    except ValueError:
+        await callback.answer("Некорректный запрос", show_alert=True)
+        return
+
+    async with db.get_session() as session:
+        if not await session.get(User, callback.from_user.id):
+            await callback.answer("Not authorized", show_alert=True)
+            return
+        src = await session.get(Festival, src_id)
+        if not src:
+            await callback.answer("Festival not found", show_alert=True)
+            return
+        res = await session.execute(
+            select(Festival).where(Festival.id != src_id).order_by(Festival.name)
+        )
+        targets = list(res.scalars().all())
+
+    text, markup = build_festival_merge_selection(src, targets, page)
+    await callback.message.edit_text(text, reply_markup=markup)
+    await callback.answer()
+
+
+async def handle_festmerge_to_callback(
+    callback: types.CallbackQuery, db: Database, _: Bot
+) -> None:
+    """Confirm merge target selection."""
+
+    parts = (callback.data or "").split(":")
+    if len(parts) != 4:
+        await callback.answer("Некорректный запрос", show_alert=True)
+        return
+    _, src_raw, dst_raw, page_raw = parts
+    try:
+        src_id = int(src_raw)
+        dst_id = int(dst_raw)
+        page = int(page_raw)
+    except ValueError:
+        await callback.answer("Некорректный запрос", show_alert=True)
+        return
+
+    async with db.get_session() as session:
+        if not await session.get(User, callback.from_user.id):
+            await callback.answer("Not authorized", show_alert=True)
+            return
+        src = await session.get(Festival, src_id)
+        dst = await session.get(Festival, dst_id)
+
+    if not src or not dst:
+        await callback.answer("Festival not found", show_alert=True)
+        return
+
+    confirm_lines = [
+        "Вы уверены, что хотите склеить фестивали?",
+        f"Источник: {src.id} {src.name}",
+        f"Цель: {dst.id} {dst.name}",
+        "Все события и данные источника будут перенесены, сам фестиваль будет удалён.",
+    ]
+    keyboard = types.InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                types.InlineKeyboardButton(
+                    text="✅ Склеить",
+                    callback_data=f"festmerge_do:{src_id}:{dst_id}",
+                )
+            ],
+            [
+                types.InlineKeyboardButton(
+                    text="⬅️ Назад",
+                    callback_data=f"festmergep:{src_id}:{page}",
+                ),
+                types.InlineKeyboardButton(
+                    text="Отмена",
+                    callback_data=f"festedit:{src_id}",
+                ),
+            ],
+        ]
+    )
+    await callback.message.edit_text("\n".join(confirm_lines), reply_markup=keyboard)
+    await callback.answer()
+
+
+async def handle_festmerge_do_callback(
+    callback: types.CallbackQuery, db: Database, bot: Bot
+) -> None:
+    """Execute merge and report result."""
+
+    parts = (callback.data or "").split(":")
+    if len(parts) != 3:
+        await callback.answer("Некорректный запрос", show_alert=True)
+        return
+    _, src_raw, dst_raw = parts
+    try:
+        src_id = int(src_raw)
+        dst_id = int(dst_raw)
+    except ValueError:
+        await callback.answer("Некорректный запрос", show_alert=True)
+        return
+
+    async with db.get_session() as session:
+        if not await session.get(User, callback.from_user.id):
+            await callback.answer("Not authorized", show_alert=True)
+            return
+        src = await session.get(Festival, src_id)
+        dst = await session.get(Festival, dst_id)
+
+    if not src or not dst:
+        await callback.answer("Festival not found", show_alert=True)
+        return
+
+    src_name = src.name
+    dst_name = dst.name
+    ok = await merge_festivals(db, src_id, dst_id, bot)
+    if not ok:
+        await callback.answer("Не удалось объединить", show_alert=True)
+        return
+
+    async with db.get_session() as session:
+        dest = await session.get(Festival, dst_id)
+
+    if dest:
+        festival_edit_sessions[callback.from_user.id] = (dst_id, None)
+        await show_festival_edit_menu(callback.from_user.id, dest, bot)
+
+    await callback.message.edit_text(
+        f"Фестиваль «{src_name}» объединён с «{dst_name}»."
+    )
+    await callback.answer("Склеено")
+
+
 async def handle_events(message: types.Message, db: Database, bot: Bot):
     parts = message.text.split(maxsplit=1)
     offset = await get_tz_offset(db)
@@ -21981,6 +22023,18 @@ def create_app() -> web.Application:
     async def mem_wrapper(message: types.Message):
         await handle_mem(message, db, bot)
 
+    async def festmerge_do_wrapper(callback: types.CallbackQuery):
+        await handle_festmerge_do_callback(callback, db, bot)
+
+    async def festmerge_to_wrapper(callback: types.CallbackQuery):
+        await handle_festmerge_to_callback(callback, db, bot)
+
+    async def festmerge_page_wrapper(callback: types.CallbackQuery):
+        await handle_festmerge_page_callback(callback, db, bot)
+
+    async def festmerge_wrapper(callback: types.CallbackQuery):
+        await handle_festmerge_callback(callback, db, bot)
+
     async def backfill_topics_wrapper(message: types.Message):
         await handle_backfill_topics(message, db, bot)
 
@@ -22037,10 +22091,21 @@ def create_app() -> web.Application:
         or c.data.startswith("setfest:")
         or c.data.startswith("festdays:")
         or c.data.startswith("festimgs:")
-        or c.data.startswith("festmerge")
         or c.data.startswith("festsetcover:")
         or c.data.startswith("requeue:")
     ,
+    )
+    dp.callback_query.register(
+        festmerge_do_wrapper, lambda c: c.data and c.data.startswith("festmerge_do:")
+    )
+    dp.callback_query.register(
+        festmerge_to_wrapper, lambda c: c.data and c.data.startswith("festmerge_to:")
+    )
+    dp.callback_query.register(
+        festmerge_page_wrapper, lambda c: c.data and c.data.startswith("festmergep:")
+    )
+    dp.callback_query.register(
+        festmerge_wrapper, lambda c: c.data and c.data.startswith("festmerge:")
     )
     dp.callback_query.register(
         ocr_detail_wrapper,
