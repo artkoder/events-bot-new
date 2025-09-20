@@ -1386,6 +1386,58 @@ FOUR_O_TIMEOUT = float(os.getenv("FOUR_O_TIMEOUT", "60"))
 FOUR_O_PROMPT_LIMIT = int(os.getenv("FOUR_O_PROMPT_LIMIT", "4000"))
 FOUR_O_RESPONSE_LIMIT = int(os.getenv("FOUR_O_RESPONSE_LIMIT", "1000"))
 
+# Track OpenAI usage against a daily budget.  OpenAI resets usage at midnight UTC.
+FOUR_O_DAILY_TOKEN_LIMIT = int(os.getenv("FOUR_O_DAILY_TOKEN_LIMIT", "2000000"))
+
+
+def _current_utc_date() -> date:
+    return datetime.now(timezone.utc).date()
+
+
+_four_o_usage_state = {
+    "date": _current_utc_date(),
+    "used": 0,
+}
+
+
+def _record_four_o_usage(
+    operation: str,
+    model: str,
+    prompt_tokens: int | None,
+    completion_tokens: int | None,
+    total_tokens: int | None,
+) -> int:
+    limit = max(FOUR_O_DAILY_TOKEN_LIMIT, 0)
+    today = _current_utc_date()
+    state_date = _four_o_usage_state.get("date")
+    if state_date != today:
+        _four_o_usage_state["date"] = today
+        _four_o_usage_state["used"] = 0
+    if total_tokens is not None:
+        spent = max(int(total_tokens), 0)
+    else:
+        spent = max(int(prompt_tokens or 0) + int(completion_tokens or 0), 0)
+    previous_used = _four_o_usage_state["used"]
+    new_used = previous_used + spent
+    if limit:
+        new_used = min(new_used, limit)
+    else:
+        new_used = 0
+    _four_o_usage_state["used"] = new_used
+    remaining = max(limit - new_used, 0)
+    logging.info(
+        "four_o.usage op=%s model=%s spent=%d remaining=%d/%d prompt=%d completion=%d total=%d",
+        operation,
+        model,
+        spent,
+        remaining,
+        limit,
+        int(prompt_tokens or 0),
+        int(completion_tokens or 0),
+        int(total_tokens or 0),
+    )
+    return remaining
+
 
 # Run blocking Telegraph API calls with a timeout and simple retries
 async def telegraph_call(func, /, *args, retries: int = 3, **kwargs):
@@ -5238,6 +5290,14 @@ async def parse_event_via_4o(
                 resp.raise_for_status()
                 return await resp.json()
     data_raw = await asyncio.wait_for(_call(), FOUR_O_TIMEOUT)
+    usage = data_raw.get("usage") or {}
+    _record_four_o_usage(
+        "parse",
+        str(payload.get("model", "unknown")),
+        usage.get("prompt_tokens"),
+        usage.get("completion_tokens"),
+        usage.get("total_tokens"),
+    )
     content = (
         data_raw.get("choices", [{}])[0]
         .get("message", {})
@@ -5330,6 +5390,14 @@ async def ask_4o(
                 return await resp.json()
 
     data = await asyncio.wait_for(_call(), FOUR_O_TIMEOUT)
+    usage = data.get("usage") or {}
+    _record_four_o_usage(
+        "ask",
+        str(payload.get("model", "unknown")),
+        usage.get("prompt_tokens"),
+        usage.get("completion_tokens"),
+        usage.get("total_tokens"),
+    )
     logging.debug("4o response: %s", data)
     content = (
         data.get("choices", [{}])[0]
