@@ -21,6 +21,14 @@ def test_event_topic_prompt_mentions_topics():
     assert "ярмарк" in prompt.casefold()
 
 
+def test_topic_labels_include_theatre_subtypes():
+    assert main.TOPIC_LABELS["THEATRE_CLASSIC"] == "Классический театр и драма"
+    assert (
+        main.TOPIC_LABELS["THEATRE_MODERN"]
+        == "Современный и экспериментальный театр"
+    )
+
+
 @pytest.mark.asyncio
 async def test_classify_event_topics_filters_and_limits(monkeypatch):
     monkeypatch.setenv("FOUR_O_MINI", "1")
@@ -98,6 +106,10 @@ def test_normalize_topic_identifier_legacy_aliases():
         "психология": "PSYCHOLOGY",
         "Psychology": "PSYCHOLOGY",
         "mental health": "PSYCHOLOGY",
+        "классический спектакль": "THEATRE_CLASSIC",
+        "Драма": "THEATRE_CLASSIC",
+        "современный театр": "THEATRE_MODERN",
+        "experimental theatre": "THEATRE_MODERN",
     }
     for raw, expected in cases.items():
         assert models.normalize_topic_identifier(raw) == expected

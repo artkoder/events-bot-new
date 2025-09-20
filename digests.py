@@ -17,7 +17,22 @@ from models import Event, normalize_topic_identifier
 # Mapping of canonical topic -> set of synonyms (in lowercase)
 TOPIC_SYNONYMS: dict[str, set[str]] = {
     "EXHIBITIONS": {"art", "искусство", "выставка", "выставки", "галерея"},
-    "THEATRE": {"theatre", "театр", "спектакль", "performance"},
+    "THEATRE": {"theatre", "театр", "спектакль", "спектакли", "performance"},
+    "THEATRE_CLASSIC": {
+        "classic theatre",
+        "классический театр",
+        "классический спектакль",
+        "драма",
+        "драматический театр",
+    },
+    "THEATRE_MODERN": {
+        "modern theatre",
+        "современный театр",
+        "современные спектакли",
+        "модерн",
+        "experimental theatre",
+        "экспериментальный театр",
+    },
     "CONCERTS": {"concert", "music", "музыка", "концерт", "sound"},
     "MOVIES": {"cinema", "movie", "film", "кино", "фильм"},
     "LECTURES": {
