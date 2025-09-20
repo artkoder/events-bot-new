@@ -123,7 +123,7 @@ def test_build_event_card_message_with_factors():
         time="10:00",
         location_name="L",
         source_text="S",
-        tourist_factors=["targeted_for_tourists", "local_cuisine"],
+        tourist_factors=["targeted_for_tourists", "local_flavor_crafts"],
         tourist_label=1,
     )
     text = build_event_card_message("Event added", event, ["title: Title"])
@@ -133,9 +133,29 @@ def test_build_event_card_message_with_factors():
 def test_normalize_tourist_factors_handles_legacy_codes():
     normalized = main._normalize_tourist_factors(["culture", "food", "events"])
     assert normalized == [
-        "targeted_for_tourists",
         "unique_to_region",
-        "local_cuisine",
+        "festival_major",
+        "local_flavor_crafts",
+    ]
+
+
+def test_normalize_tourist_factors_idempotent_and_ordered():
+    normalized = main._normalize_tourist_factors(
+        [
+            "festival_major",
+            "events",
+            "scenic_nature",
+            "nature_or_landmark",
+            "targeted_for_tourists",
+            "targeted_for_tourists",
+            "local_cuisine",
+        ]
+    )
+    assert normalized == [
+        "targeted_for_tourists",
+        "festival_major",
+        "nature_or_landmark",
+        "local_flavor_crafts",
     ]
 
 
@@ -207,7 +227,7 @@ async def test_tourist_yes_callback_updates_event(tmp_path, monkeypatch):
     }
     assert expected_callbacks <= {btn.callback_data for btn in factor_buttons}
     assert any(
-        btn.text.startswith("➕ 🎯 Специально для туристов") for btn in factor_buttons
+        btn.text.startswith("➕ 🎯 Нацелен на туристов") for btn in factor_buttons
     )
 
 

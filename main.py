@@ -631,13 +631,13 @@ class TouristFactor:
 
 
 TOURIST_FACTORS: list[TouristFactor] = [
-    TouristFactor("targeted_for_tourists", "🎯", "Специально для туристов"),
-    TouristFactor("unique_to_region", "🧭", "Есть только здесь"),
-    TouristFactor("iconic_location", "📍", "Знаковое место"),
-    TouristFactor("shows_local_life", "🏙️", "Погружает в жизнь местных"),
-    TouristFactor("scenic_nature", "🌿", "Природа и виды"),
-    TouristFactor("local_cuisine", "🍽️", "Местная гастрономия"),
-    TouristFactor("family_friendly", "👨‍👩‍👧‍👦", "Подходит для семьи"),
+    TouristFactor("targeted_for_tourists", "🎯", "Нацелен на туристов"),
+    TouristFactor("unique_to_region", "🧭", "Уникально для региона"),
+    TouristFactor("festival_major", "🎪", "Крупный фестиваль или событие"),
+    TouristFactor("nature_or_landmark", "🌊", "Природа или знаковое место"),
+    TouristFactor("photogenic_blogger", "📸", "Фотогенично, понравится блогерам"),
+    TouristFactor("local_flavor_crafts", "🍲", "Местный колорит и ремёсла"),
+    TouristFactor("easy_logistics", "🚆", "Простая логистика"),
 ]
 
 TOURIST_FACTOR_BY_CODE: dict[str, TouristFactor] = {
@@ -647,16 +647,23 @@ TOURIST_FACTOR_CODES: list[str] = [factor.code for factor in TOURIST_FACTORS]
 TOURIST_FACTOR_ALIASES: dict[str, str] = {
     "history": "unique_to_region",
     "culture": "unique_to_region",
-    "atmosphere": "shows_local_life",
-    "city": "shows_local_life",
-    "sea": "scenic_nature",
-    "water": "scenic_nature",
-    "nature": "scenic_nature",
-    "food": "local_cuisine",
-    "gastronomy": "local_cuisine",
-    "family": "family_friendly",
-    "events": "targeted_for_tourists",
-    "event": "targeted_for_tourists",
+    "atmosphere": "local_flavor_crafts",
+    "city": "local_flavor_crafts",
+    "sea": "nature_or_landmark",
+    "water": "nature_or_landmark",
+    "nature": "nature_or_landmark",
+    "scenic_nature": "nature_or_landmark",
+    "iconic_location": "photogenic_blogger",
+    "shows_local_life": "local_flavor_crafts",
+    "local_cuisine": "local_flavor_crafts",
+    "food": "local_flavor_crafts",
+    "gastronomy": "local_flavor_crafts",
+    "family": "easy_logistics",
+    "family_friendly": "easy_logistics",
+    "events": "festival_major",
+    "event": "festival_major",
+    "photogenic": "photogenic_blogger",
+    "blogger": "photogenic_blogger",
 }
 
 
