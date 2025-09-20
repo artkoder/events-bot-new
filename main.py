@@ -5303,24 +5303,39 @@ def _read_base_prompt() -> str:
     return prompt
 
 
-@lru_cache(maxsize=2)
-def _prompt_cache(festival_key: tuple[str, ...] | None) -> str:
+@lru_cache(maxsize=8)
+def _prompt_cache(
+    festival_key: tuple[str, ...] | None,
+    alias_key: tuple[tuple[str, str], ...] | None,
+) -> str:
     txt = _read_base_prompt()
     if festival_key:
-        txt += "\nKnown festivals:\n" + "\n".join(festival_key)
+        payload: dict[str, Any] = {"festival_names": list(festival_key)}
+        if alias_key:
+            payload["festival_alias_pairs"] = [list(pair) for pair in alias_key]
+        json_block = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        txt += (
+            "\nUse the JSON below to normalise festival names and map aliases.\n"
+            + json_block
+        )
     return txt
 
 
-def _build_prompt(festival_names: list[str] | None) -> str:
-    key = tuple(sorted(festival_names)) if festival_names else None
-    return _prompt_cache(key)
+def _build_prompt(
+    festival_names: Sequence[str] | None,
+    festival_alias_pairs: Sequence[tuple[str, str]] | None,
+) -> str:
+    festival_key = tuple(sorted(festival_names)) if festival_names else None
+    alias_key = tuple(sorted(festival_alias_pairs)) if festival_alias_pairs else None
+    return _prompt_cache(festival_key, alias_key)
 
 
 async def parse_event_via_4o(
     text: str,
     source_channel: str | None = None,
     *,
-    festival_names: list[str] | None = None,
+    festival_names: Sequence[str] | None = None,
+    festival_alias_pairs: Sequence[tuple[str, str]] | None = None,
     poster_texts: Sequence[str] | None = None,
     poster_summary: str | None = None,
     **extra: str | None,
@@ -5329,7 +5344,7 @@ async def parse_event_via_4o(
     if not token:
         raise RuntimeError("FOUR_O_TOKEN is missing")
     url = os.getenv("FOUR_O_URL", "https://api.openai.com/v1/chat/completions")
-    prompt = _build_prompt(festival_names)
+    prompt = _build_prompt(festival_names, festival_alias_pairs)
     if poster_summary:
         prompt = f"{prompt}\nPoster summary:\n{poster_summary.strip()}"
     headers = {
@@ -9030,9 +9045,34 @@ async def add_events_from_text(
         llm_text = text
         if channel_title:
             llm_text = f"{channel_title}\n{llm_text}"
+        today = datetime.now(LOCAL_TZ).date()
+        cutoff_date = (today - timedelta(days=31)).isoformat()
+        festival_names_set: set[str] = set()
+        alias_pairs_set: set[tuple[str, str]] = set()
         async with db.get_session() as session:
-            res_f = await session.execute(select(Festival.name))
-            fest_names = [r[0] for r in res_f.fetchall()]
+            stmt = select(Festival).where(
+                or_(
+                    Festival.end_date.is_(None),
+                    Festival.end_date >= cutoff_date,
+                    Festival.start_date.is_(None),
+                )
+            )
+            res_f = await session.execute(stmt)
+            for fest in res_f.scalars():
+                name = (fest.name or "").strip()
+                if name:
+                    festival_names_set.add(name)
+                base_norm = normalize_alias(name)
+                aliases = getattr(fest, "aliases", None) or []
+                if not aliases or not name:
+                    continue
+                for alias in aliases:
+                    norm = normalize_alias(alias)
+                    if not norm or norm == base_norm:
+                        continue
+                    alias_pairs_set.add((norm, name))
+        fest_names = sorted(festival_names_set)
+        fest_alias_pairs = sorted(alias_pairs_set)
         parse_kwargs: dict[str, Any] = {}
         if poster_texts:
             parse_kwargs["poster_texts"] = poster_texts
@@ -9044,11 +9084,15 @@ async def add_events_from_text(
                     llm_text,
                     source_channel,
                     festival_names=fest_names,
+                    festival_alias_pairs=fest_alias_pairs,
                     **parse_kwargs,
                 )
             else:
                 parsed = await parse_event_via_4o(
-                    llm_text, festival_names=fest_names, **parse_kwargs
+                    llm_text,
+                    festival_names=fest_names,
+                    festival_alias_pairs=fest_alias_pairs,
+                    **parse_kwargs,
                 )
         except TypeError:
             if source_channel:
