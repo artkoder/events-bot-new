@@ -95,6 +95,9 @@ def test_normalize_topic_identifier_legacy_aliases():
         "Personalities": "PERSONALITIES",
         "дети": "KIDS_SCHOOL",
         "семейные": "FAMILY",
+        "психология": "PSYCHOLOGY",
+        "Psychology": "PSYCHOLOGY",
+        "mental health": "PSYCHOLOGY",
     }
     for raw, expected in cases.items():
         assert models.normalize_topic_identifier(raw) == expected

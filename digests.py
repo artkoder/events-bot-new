@@ -37,7 +37,8 @@ TOPIC_SYNONYMS: dict[str, set[str]] = {
     "STANDUP": {"standup", "стендап", "стендапы", "комедия"},
     "QUIZ_GAMES": {"quiz", "квиз", "квизы", "игра", "настолки"},
     "OPEN_AIR": {"open-air", "open air", "фестиваль", "фестивали", "openair"},
-    "SCIENCE_POP": {"science", "science_pop", "научпоп", "технологии", "психология"},
+    "SCIENCE_POP": {"science", "science_pop", "научпоп", "технологии"},
+    "PSYCHOLOGY": {"психология", "psychology", "mental health"},
     "HANDMADE": {
         "handmade",
         "hand-made",
