@@ -28,9 +28,12 @@ standard form.
 
 When the database stores festival metadata, the system prompt receives an extra
 JSON payload with canonical `festival_names` and normalised
-`festival_alias_pairs`. These pairs let the parser map alternative spellings to
-the correct festival so new events attach to existing records instead of
-creating duplicates.
+`festival_alias_pairs`. Each pair is `[alias_norm, festival_index]` where
+`alias_norm` is computed with the same rules as `norm(text)` (casefold, trim,
+strip quotes, remove the leading words «фестиваль»/«международный»/«областной»/
+«городской», collapse whitespace). These pairs let the parser map alternative
+spellings to the correct festival so new events attach to existing records
+instead of creating duplicates.
 
 The response must be JSON with the fields listed in `docs/PROMPTS.md`. When the
 text describes multiple events, return an array of such objects.

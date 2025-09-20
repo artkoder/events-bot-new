@@ -5307,12 +5307,22 @@ def _read_base_prompt() -> str:
 @lru_cache(maxsize=8)
 def _prompt_cache(
     festival_key: tuple[str, ...] | None,
-    alias_key: tuple[tuple[str, str], ...] | None,
+    alias_key: tuple[tuple[str, int], ...] | None,
 ) -> str:
     txt = _read_base_prompt()
     if festival_key:
         payload: dict[str, Any] = {"festival_names": list(festival_key)}
         if alias_key:
+            txt += (
+                "\nFestival normalisation helper:\n"
+                "- Compute norm(text) by casefolding, trimming, removing quotes,"
+                " leading words (фестиваль/международный/областной/городской)"
+                " and collapsing internal whitespace.\n"
+                "- Each entry in festival_alias_pairs is [alias_norm,"
+                " festival_index]; festival_index points to festival_names.\n"
+                "- When norm(text) matches alias_norm, use"
+                " festival_names[festival_index] as the canonical name.\n"
+            )
             payload["festival_alias_pairs"] = [list(pair) for pair in alias_key]
         json_block = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         txt += (
@@ -5324,7 +5334,7 @@ def _prompt_cache(
 
 def _build_prompt(
     festival_names: Sequence[str] | None,
-    festival_alias_pairs: Sequence[tuple[str, str]] | None,
+    festival_alias_pairs: Sequence[tuple[str, int]] | None,
 ) -> str:
     festival_key = tuple(sorted(festival_names)) if festival_names else None
     alias_key = tuple(sorted(festival_alias_pairs)) if festival_alias_pairs else None
@@ -5336,7 +5346,7 @@ async def parse_event_via_4o(
     source_channel: str | None = None,
     *,
     festival_names: Sequence[str] | None = None,
-    festival_alias_pairs: Sequence[tuple[str, str]] | None = None,
+    festival_alias_pairs: Sequence[tuple[str, int]] | None = None,
     poster_texts: Sequence[str] | None = None,
     poster_summary: str | None = None,
     **extra: str | None,
@@ -9049,7 +9059,7 @@ async def add_events_from_text(
         today = datetime.now(LOCAL_TZ).date()
         cutoff_date = (today - timedelta(days=31)).isoformat()
         festival_names_set: set[str] = set()
-        alias_pairs_set: set[tuple[str, str]] = set()
+        alias_map: dict[str, set[str]] = {}
         async with db.get_session() as session:
             stmt = select(Festival).where(
                 or_(
@@ -9071,9 +9081,12 @@ async def add_events_from_text(
                     norm = normalize_alias(alias)
                     if not norm or norm == base_norm:
                         continue
-                    alias_pairs_set.add((norm, name))
+                    alias_map.setdefault(name, set()).add(norm)
         fest_names = sorted(festival_names_set)
-        fest_alias_pairs = sorted(alias_pairs_set)
+        fest_alias_pairs: list[tuple[str, int]] = []
+        for idx, fest_name in enumerate(fest_names):
+            for alias_norm in sorted(alias_map.get(fest_name, ())):
+                fest_alias_pairs.append((alias_norm, idx))
         parse_kwargs: dict[str, Any] = {}
         if poster_texts:
             parse_kwargs["poster_texts"] = poster_texts
