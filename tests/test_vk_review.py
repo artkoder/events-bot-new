@@ -10,6 +10,7 @@ sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 import time as _time
 
 import vk_review
+import vk_intake
 from db import Database
 
 
@@ -75,6 +76,34 @@ async def test_pick_next_rejects_outdated(tmp_path):
     async with db.raw_conn() as conn:
         cur = await conn.execute("SELECT status FROM vk_inbox WHERE post_id=3")
         assert (await cur.fetchone())[0] == "rejected"
+
+
+@pytest.mark.asyncio
+async def test_pick_next_keeps_ocr_pending(tmp_path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    async with db.raw_conn() as conn:
+        await conn.execute(
+            """
+            INSERT INTO vk_inbox(group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status)
+            VALUES(?,?,?,?,?,?,?,?)
+            """,
+            (1, 42, 100, "", vk_intake.OCR_PENDING_SENTINEL, 0, None, "pending"),
+        )
+        await conn.commit()
+
+    post = await vk_review.pick_next(db, 123, "batch-ocr")
+    assert post is not None
+    assert post.post_id == 42
+    assert post.matched_kw == vk_intake.OCR_PENDING_SENTINEL
+
+    async with db.raw_conn() as conn:
+        cur = await conn.execute(
+            "SELECT status, event_ts_hint FROM vk_inbox WHERE post_id=42"
+        )
+        status, hint = await cur.fetchone()
+        assert status == "locked"
+        assert hint is None
 
 
 @pytest.mark.asyncio

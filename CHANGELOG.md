@@ -1,8 +1,9 @@
 # Changelog
 
 ## Unreleased
+- `/addevent`, форварды и VK-очередь теперь распознают афиши (один проход Catbox+OCR), подмешивают тексты в LLM и показывают расход/остаток токенов.
+- Результаты распознавания кешируются и уважают дневной лимит в 10 млн токенов.
 - Added `/ocrtest` diagnostic command, чтобы сравнить распознавание афиш между `gpt-4o-mini` и `gpt-4o` с показом использования токенов.
-
 - Clarified the 4o parsing prompt to warn about possible OCR mistakes in poster snippets.
 
 - Fixed VK review queue issue where `vk_review.pick_next` recalculates `event_ts_hint` and auto-rejects posts whose event date
