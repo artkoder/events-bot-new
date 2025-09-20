@@ -7,7 +7,7 @@
 | `/help` | - | Show commands available for your role. |
 | `/requests` | - | Superadmin sees pending registrations with approve/reject buttons. |
 | `/tz <±HH:MM>` | required offset | Set timezone offset (superadmin only). |
-| `/addevent <text>` | event description | Parse text with model 4o and store one or several events. The original text is published to Telegraph. Images up to 5&nbsp;MB are uploaded to Catbox and shown on that page. Forwarded messages from moderators are processed the same way. |
+| `/addevent <text>` | event description | Parse text with model 4o and store one or several events. Poster images are uploaded to Catbox once, recognized via OCR, cached, and the extracted text is passed to 4o together with a token usage report for the operator. Forwarded messages from moderators are processed the same way. |
 | `/addevent_raw <title>|<date>|<time>|<location>` | manual fields | Add event without LLM. The bot also creates a Telegraph page with the provided text and optional attached photo. |
 | `/images` | - | Toggle uploading photos to Catbox. |
 | `/vkgroup <id|off>` | required id or `off` | Set or disable VK group for daily announcements. |
@@ -37,6 +37,9 @@
 
 Use `/addevent` to let model 4o extract fields. `/addevent_raw` lets you
 input simple data separated by `|` pipes.
+
+Poster OCR reuses cached recognitions and shares a 10 000 000-token daily budget; once the limit is exhausted new posters wait
+until the next reset at UTC midnight.
 
 ## Event topics
 

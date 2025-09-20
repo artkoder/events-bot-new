@@ -28,3 +28,10 @@ When present the link is inserted into the Telegraph source page below the title
 If a text describes several events at once the LLM returns an array of event objects and the bot creates separate entries and Telegraph pages for each of them.
 Channels where the bot is admin are tracked in the `channel` table. Use `/setchannel` to choose an admin channel and mark it as an announcement source. The `/channels` command lists all admin channels and shows which ones are registered.
 `docs/LOCATIONS.md` contains standard venue names; its contents are appended to the 4o prompt so events use consistent `location_name` values.
+
+## Poster OCR pipeline
+
+- Poster media is uploaded to Catbox once per unique image; the resulting bytes feed both the Telegraph page and the OCR stage.
+- `poster_ocr.recognize_posters` caches results in `PosterOcrCache` by hash, detail level and model so retries reuse the stored text and token counts.
+- Daily usage is tracked in the `OcrUsage` table and compared against the 10 000 000-token budget. Cached entries keep working, while new, uncached OCR requests are blocked until the quota resets.
+- Recognized text is saved in `EventPoster` rows and injected into the downstream LLM pipeline so 4o sees both the operator draft and poster contents.

@@ -49,6 +49,17 @@ Fly.io with a webhook.
 Forwarded posts from moderators or admins are treated the same as the `/addevent` command.
 Use `/setchannel` to pick one of the channels where the bot has admin rights and register it either as an announcement source or as the calendar asset channel. `/channels` lists all admin channels and lets you disable these roles. When the asset channel is set, forwarded posts from it get a **Добавить в календарь** button linking to the calendar file.
 
+### Poster OCR and token usage
+
+When an event is added through `/addevent`, forwarded by a moderator, or imported from VK, the bot uploads each poster image to Catbox once and reuses the same bytes for OCR. Recognized text is cached per hash/detail/model pair, mixed into the 4o prompt alongside the operator message, and stored in the `EventPoster` records that feed later LLM passes. Operators see a short usage line indicating how many OCR tokens were spent and how many remain for the current day.
+
+Poster recognition can be tuned with environment variables:
+
+- `POSTER_OCR_MODEL` — overrides the default `gpt-4o-mini` model used for OCR.
+- `POSTER_OCR_DETAIL` — forwarded to the Vision API (`auto` by default) to balance quality and latency.
+
+The bot enforces a daily OCR budget of 10 000 000 tokens. Cached posters continue to work after the limit is reached, but new, uncached uploads are skipped until the counter resets at UTC midnight. Operators receive a warning whenever recognition is skipped because the limit was exhausted.
+
 Bot messages display dates in the format `DD.MM.YYYY`. Public pages such as
 Telegraph posts use the short form "D месяц" (e.g. `2 июля`).
 
