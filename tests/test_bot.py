@@ -2939,6 +2939,81 @@ async def test_makefest_preview_flow_stores_state(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_makefest_preview_uses_telegraph_path(tmp_path: Path, monkeypatch):
+    makefest_sessions.clear()
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async with db.get_session() as session:
+        user = User(user_id=1, is_superadmin=True)
+        event = Event(
+            title="Concert",
+            description="",
+            festival=None,
+            date="2025-07-01",
+            time="19:00",
+            location_name="Hall",
+            source_text="text",
+            telegraph_path="sample-path",
+        )
+        session.add_all([user, event])
+        await session.commit()
+        await session.refresh(event)
+
+    async def fake_infer(ev):
+        return {
+            "name": "Suggested",
+            "full_name": "Suggested Fest",
+            "summary": "A lovely fest",
+            "reason": "because",
+            "start_date": "2025-06-01",
+            "end_date": "2025-06-10",
+            "location_name": "Hall",
+            "location_address": "Street 1",
+            "city": "Town",
+            "existing_candidates": [],
+        }
+
+    async def fake_extract(value):
+        fake_extract.called_with = value
+        return ["https://telegra.ph/img.jpg"]
+
+    monkeypatch.setattr(main, "infer_festival_for_event_via_4o", fake_infer)
+    monkeypatch.setattr(main, "extract_telegraph_image_urls", fake_extract)
+
+    cb = types.CallbackQuery.model_validate(
+        {
+            "id": "cf2",
+            "from": {"id": 1, "is_bot": False, "first_name": "S"},
+            "chat_instance": "1",
+            "data": f"makefest:{event.id}",
+            "message": {
+                "message_id": 10,
+                "date": 0,
+                "chat": {"id": 1, "type": "private"},
+            },
+        }
+    ).as_(bot)
+
+    async def cb_answer(text=None, **kwargs):
+        return None
+
+    async def msg_answer(text, reply_markup=None, **kwargs):
+        return DummyMessage(101)
+
+    object.__setattr__(cb, "answer", cb_answer)
+    object.__setattr__(cb.message, "answer", msg_answer)
+
+    await process_request(cb, db, bot)
+
+    state = makefest_sessions.get(1)
+    assert state is not None
+    assert state["photos"] == ["https://telegra.ph/img.jpg"]
+    assert getattr(fake_extract, "called_with", None) == "sample-path"
+
+
+@pytest.mark.asyncio
 async def test_makefest_create_links_event(tmp_path: Path, monkeypatch):
     makefest_sessions.clear()
     db = Database(str(tmp_path / "db.sqlite"))
