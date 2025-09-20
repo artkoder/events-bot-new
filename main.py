@@ -683,6 +683,7 @@ class TouristNoteSession:
     source: str
     markup: types.InlineKeyboardMarkup | None
     message_text: str | None
+    menu: bool
 
 
 tourist_reason_sessions: TTLCache[int, TouristReasonSession] = TTLCache(
@@ -730,6 +731,21 @@ def _determine_tourist_source(callback: types.CallbackQuery) -> str:
         if stored:
             return stored
     return "tg"
+
+
+def _is_tourist_menu_markup(
+    markup: types.InlineKeyboardMarkup | None,
+) -> bool:
+    if not markup or not markup.inline_keyboard:
+        return False
+    for row in markup.inline_keyboard:
+        for btn in row:
+            data = btn.callback_data
+            if not data:
+                continue
+            if data.startswith("tourist:fxdone:") or data.startswith("tourist:fxskip:"):
+                return True
+    return False
 
 
 def build_tourist_keyboard_block(
@@ -789,6 +805,20 @@ def build_tourist_reason_rows(
                 )
             ]
         )
+    comment_row = [
+        types.InlineKeyboardButton(
+            text="✍️ Комментарий",
+            callback_data=f"tourist:note:start:{event.id}",
+        )
+    ]
+    if event.tourist_note and event.tourist_note.strip():
+        comment_row.append(
+            types.InlineKeyboardButton(
+                text="🧽 Очистить комментарий",
+                callback_data=f"tourist:note:clear:{event.id}",
+            )
+        )
+    rows.append(comment_row)
     rows.append(
         [
             types.InlineKeyboardButton(
@@ -7271,7 +7301,13 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                 await callback.answer("Отмечено")
             else:
                 tourist_reason_sessions.pop(callback.from_user.id, None)
-                await update_tourist_message(callback, bot, event, source)
+                await update_tourist_message(
+                    callback,
+                    bot,
+                    event,
+                    source,
+                    menu=_is_tourist_menu_markup(callback.message.reply_markup),
+                )
                 await callback.answer("Отмечено")
         elif action == "fx":
             code = parts[2] if len(parts) > 2 else ""
@@ -7415,6 +7451,7 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                             else None
                         )
                     ),
+                    menu=_is_tourist_menu_markup(callback.message.reply_markup),
                 )
                 await bot.send_message(
                     callback.message.chat.id,
@@ -7440,7 +7477,13 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                     "tourist_note_cleared",
                     extra={"event_id": event_id, "user_id": callback.from_user.id},
                 )
-                await update_tourist_message(callback, bot, event, source)
+                await update_tourist_message(
+                    callback,
+                    bot,
+                    event,
+                    source,
+                    menu=_is_tourist_menu_markup(callback.message.reply_markup),
+                )
                 await callback.answer("Отмечено")
             else:
                 await callback.answer()
@@ -20516,7 +20559,9 @@ async def handle_tourist_note_message(message: types.Message, db: Database, bot:
     )
     await bot.send_message(message.chat.id, confirmation_text)
     base_markup = session_state.markup
-    new_markup = replace_tourist_block(base_markup, event, session_state.source)
+    new_markup = replace_tourist_block(
+        base_markup, event, session_state.source, menu=session_state.menu
+    )
     original_text = session_state.message_text
     if original_text is not None:
         updated_text = apply_tourist_status_to_text(original_text, event)
