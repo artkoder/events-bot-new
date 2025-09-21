@@ -197,7 +197,6 @@ from markup import (
     FEST_INDEX_INTRO_START,
     FEST_INDEX_INTRO_END,
     linkify_for_telegraph,
-    expose_links_for_vk,
     sanitize_for_vk,
 )
 from aiogram.utils.text_decorations import html_decoration
@@ -20909,8 +20908,8 @@ def extract_message_text_with_links(message: types.Message) -> str:
     if not base_text:
         return ""
 
-    entities = list(message.entities or message.caption_entities or [])
-    if not entities:
+    html_text, _mode = ensure_html_text(message)
+    if not html_text:
         return base_text
 
     def escape_md_label(value: str) -> str:
@@ -20919,39 +20918,28 @@ def extract_message_text_with_links(message: types.Message) -> str:
     def escape_md_url(value: str) -> str:
         return value.replace("\\", "\\\\").replace(")", "\\)")
 
-    parts: list[str] = []
-    last_index = 0
-    text_len = len(base_text)
+    def repl_anchor(match: re.Match[str]) -> str:
+        href = match.group(1)
+        label_html = match.group(2)
+        label = re.sub(r"</?[^>]+>", "", label_html)
+        label = html.unescape(label)
+        label = label.replace("\xa0", " ")
+        label_md = escape_md_label(label)
+        if not label_md.strip():
+            return href
+        return f"[{label_md}]({escape_md_url(href)})"
 
-    for entity in sorted(entities, key=lambda e: e.offset):
-        start = max(0, min(entity.offset, text_len))
-        end = max(start, min(entity.offset + entity.length, text_len))
-        if start < last_index:
-            start = last_index
-        if end <= start:
-            continue
-        if last_index < start:
-            parts.append(base_text[last_index:start])
-        segment = base_text[start:end]
+    text = re.sub(r"(?is)<a[^>]+href=['\"]([^'\"]+)['\"][^>]*>(.*?)</a>", repl_anchor, html_text)
+    text = re.sub(r"(?i)<br\s*/?>", "\n", text)
+    text = re.sub(r"(?i)</p>", "\n", text)
+    text = re.sub(r"(?i)</div>", "\n", text)
+    text = re.sub(r"(?i)</li>", "\n", text)
+    text = re.sub(r"(?i)<li>", "• ", text)
+    text = re.sub(r"</?[^>]+>", "", text)
+    text = html.unescape(text)
+    text = text.replace("\xa0", " ")
 
-        if entity.type == "text_link" and getattr(entity, "url", None):
-            label = escape_md_label(segment) if segment else ""
-            url_md = escape_md_url(entity.url)
-            if label:
-                parts.append(f"[{label}]({url_md})")
-            else:
-                parts.append(entity.url)
-        elif entity.type == "url":
-            parts.append(segment)
-        else:
-            parts.append(segment)
-
-        last_index = end
-
-    if last_index < text_len:
-        parts.append(base_text[last_index:])
-
-    return "".join(parts)
+    return text or base_text
 
 
 async def handle_vk_extra_message(message: types.Message, db: Database, bot: Bot) -> None:
