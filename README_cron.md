@@ -1,6 +1,6 @@
 # Cron Schedule
 
-The bot uses APScheduler to run periodic maintenance tasks every 15 minutes. Each job checks whether its specific conditions are met and exits quickly if not.
+The bot uses APScheduler to run periodic maintenance tasks on a fixed schedule. Each job checks whether its specific conditions are met and exits quickly if not. VK crawling runs six times per day by default at `05:15`, `09:15`, `13:15`, `17:15`, `21:15` and `22:45` Europe/Kaliningrad time (`VK_CRAWL_TIMES_LOCAL` / `VK_CRAWL_TZ`).
 
 ## Jobs
 
