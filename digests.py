@@ -257,12 +257,103 @@ async def build_masterclasses_digest_candidates(
     return await _build_digest_candidates("мастер-класс", db, now, digest_id)
 
 
+def _event_end_date(event: Event) -> datetime | None:
+    """Return ``datetime`` for ``event.end_date`` if possible."""
+
+    raw = getattr(event, "end_date", None)
+    if not raw:
+        return None
+    try:
+        return datetime.strptime(raw, "%Y-%m-%d")
+    except ValueError:
+        logging.warning(
+            "digest.end_date.parse event_id=%s title=%r end_date_raw=%r parsed=null",  # noqa: G003
+            getattr(event, "id", None),
+            event.title,
+            raw,
+        )
+        return None
+
+
 async def build_exhibitions_digest_candidates(
     db: Database, now: datetime, digest_id: str | None = None
 ) -> Tuple[List[Event], int]:
     """Select exhibition events for the digest."""
 
-    return await _build_digest_candidates("выставка", db, now, digest_id)
+    today_iso = now.date().isoformat()
+    end_limit_iso = (now + timedelta(days=14)).date().isoformat()
+
+    async with db.get_session() as session:
+        res = await session.execute(
+            select(Event)
+            .where(
+                Event.event_type == "выставка",
+                Event.end_date.is_not(None),
+                Event.end_date >= today_iso,
+                Event.end_date <= end_limit_iso,
+            )
+            .order_by(Event.end_date, Event.date, Event.time)
+        )
+        events = list(res.scalars().all())
+
+    cutoff = now + timedelta(hours=2)
+    filtered: List[Event] = []
+    for ev in events:
+        start_dt = _event_start_datetime(ev, digest_id)
+        if start_dt >= now and start_dt < cutoff:
+            continue
+        filtered.append(ev)
+
+    events = filtered
+    events.sort(
+        key=lambda e: (
+            _event_end_date(e) or datetime.max,
+            _event_start_datetime(e, digest_id),
+        )
+    )
+
+    def _within_horizon(ev: Event, days: int) -> bool:
+        end_dt = _event_end_date(ev)
+        if end_dt is None:
+            return False
+        return end_dt.date() <= (now + timedelta(days=days)).date()
+
+    horizon = 7
+    result: List[Event] = []
+    for ev in events:
+        if not _within_horizon(ev, horizon):
+            continue
+        if pick_display_link(ev) is None:
+            logging.info(
+                "digest.skip.no_link event_id=%s title=%r event_type=%s",
+                getattr(ev, "id", None),
+                ev.title,
+                "выставка",
+            )
+            continue
+        result.append(ev)
+        if len(result) == 9:
+            break
+
+    if len(result) < 9:
+        horizon = 14
+        result = []
+        for ev in events:
+            if not _within_horizon(ev, horizon):
+                continue
+            if pick_display_link(ev) is None:
+                logging.info(
+                    "digest.skip.no_link event_id=%s title=%r event_type=%s",
+                    getattr(ev, "id", None),
+                    ev.title,
+                    "выставка",
+                )
+                continue
+            result.append(ev)
+            if len(result) == 9:
+                break
+
+    return result, horizon
 
 
 def normalize_topics(topics: Iterable[str]) -> List[str]:
