@@ -809,6 +809,7 @@ async def crawl_once(db, *, broadcast: bool = False, bot: Any | None = None) -> 
         "inbox_total": 0,
         "queue": {},
         "safety_cap_hits": 0,
+        "deep_backfill_triggers": 0,
     }
 
     async with db.raw_conn() as conn:
@@ -856,6 +857,7 @@ async def crawl_once(db, *, broadcast: bool = False, bot: Any | None = None) -> 
             posts: list[dict] = []
             pages_loaded = 0
             safety_cap_triggered = False
+            hard_cap_triggered = False
             reached_cursor_overlap = False
 
             if backfill:
@@ -903,6 +905,7 @@ async def crawl_once(db, *, broadcast: bool = False, bot: Any | None = None) -> 
                     if pages_loaded >= safety_cap_threshold:
                         safety_cap_triggered = True
                     if pages_loaded >= hard_cap:
+                        hard_cap_triggered = True
                         logging.warning(
                             "vk.crawl.inc.hard_cap group=%s pages=%s since=%s last_seen=%s",
                             gid,
@@ -934,6 +937,7 @@ async def crawl_once(db, *, broadcast: bool = False, bot: Any | None = None) -> 
             group_posts = 0
             group_matched = 0
             max_ts, max_pid = last_seen_ts, last_post_id
+            deep_backfill_scheduled = False
 
             for post in posts:
                 ts = post["date"]
@@ -994,16 +998,33 @@ async def crawl_once(db, *, broadcast: bool = False, bot: Any | None = None) -> 
 
             next_cursor_ts = max_ts
             next_cursor_pid = max_pid
-            if safety_cap_triggered and max_ts > 0:
+            cursor_updated_at = now_ts
+            if hard_cap_triggered and max_ts > 0 and not reached_cursor_overlap:
+                deep_backfill_scheduled = True
+                next_cursor_ts = last_seen_ts
+                next_cursor_pid = last_post_id
+                idle_threshold = VK_CRAWL_BACKFILL_AFTER_IDLE_H * 3600
+                cursor_updated_at = max(0, now_ts - idle_threshold - 60)
+            elif safety_cap_triggered and max_ts > 0:
                 adjusted_ts = max(last_seen_ts, max_ts - VK_CRAWL_OVERLAP_SEC)
                 if adjusted_ts < next_cursor_ts:
                     next_cursor_ts = adjusted_ts
                     next_cursor_pid = 0
 
+            if deep_backfill_scheduled:
+                stats["deep_backfill_triggers"] += 1
+                logging.warning(
+                    "vk.crawl.inc.deep_backfill_trigger group=%s pages=%s last_seen=%s next_ts=%s",
+                    gid,
+                    pages_loaded,
+                    last_seen_ts,
+                    max_ts,
+                )
+            
             async with db.raw_conn() as conn:
                 await conn.execute(
-                    "INSERT OR REPLACE INTO vk_crawl_cursor(group_id, last_seen_ts, last_post_id) VALUES(?,?,?)",
-                    (gid, next_cursor_ts, next_cursor_pid),
+                    "INSERT OR REPLACE INTO vk_crawl_cursor(group_id, last_seen_ts, last_post_id, updated_at) VALUES(?,?,?,?)",
+                    (gid, next_cursor_ts, next_cursor_pid, cursor_updated_at),
                 )
                 await conn.commit()
 

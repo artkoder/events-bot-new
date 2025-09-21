@@ -173,3 +173,96 @@ async def test_incremental_pagination_processes_full_backlog(
         newest_pid = max(p["post_id"] for p in posts if p["date"] == newest_ts)
         expected_cursor = (expected_cursor_ts, newest_pid)
     assert cursor_row == expected_cursor
+
+
+@pytest.mark.asyncio
+async def test_hard_cap_triggers_backfill(tmp_path, monkeypatch, caplog):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    async with db.raw_conn() as conn:
+        await conn.execute(
+            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time) VALUES(?,?,?,?,?)",
+            (1, "g", "Group", "", None),
+        )
+        last_seen_ts = int(time.time()) - 1000
+        await conn.execute(
+            "INSERT INTO vk_crawl_cursor(group_id, last_seen_ts, last_post_id) VALUES(?,?,?)",
+            (1, last_seen_ts, 0),
+        )
+        await conn.commit()
+
+    monkeypatch.setattr(vk_intake, "VK_CRAWL_PAGE_SIZE", 1)
+    monkeypatch.setattr(vk_intake, "VK_CRAWL_MAX_PAGES_INC", 1)
+    monkeypatch.setattr(vk_intake, "VK_CRAWL_OVERLAP_SEC", 5)
+    monkeypatch.setattr(vk_intake, "VK_CRAWL_PAGE_SIZE_BACKFILL", 4)
+    monkeypatch.setattr(vk_intake, "VK_CRAWL_MAX_PAGES_BACKFILL", 5)
+    monkeypatch.setattr(vk_intake, "VK_CRAWL_BACKFILL_DAYS", 30)
+    monkeypatch.setattr(vk_intake, "match_keywords", lambda text: (True, ["test"]))
+    monkeypatch.setattr(vk_intake, "detect_date", lambda text: True)
+    monkeypatch.setattr(
+        vk_intake,
+        "extract_event_ts_hint",
+        lambda text, default_time=None, *, tz=None: int(time.time()) + 86400,
+    )
+
+    base_ts = int(time.time()) - 900
+    total_posts = 12
+    posts = [
+        {
+            "date": base_ts + i * 10,
+            "post_id": 200 + i,
+            "text": "концерт 01.01.2099",
+            "photos": [],
+        }
+        for i in range(total_posts)
+    ]
+
+    call_log: list[tuple[int, int]] = []
+
+    async def fake_wall_since(gid, since, count, offset=0):
+        call_log.append((since, offset))
+        filtered = [p for p in posts if p["date"] >= since]
+        filtered.sort(key=lambda p: (p["date"], p["post_id"]), reverse=True)
+        start = offset
+        end = offset + count
+        return filtered[start:end]
+
+    monkeypatch.setattr(main, "vk_wall_since", fake_wall_since)
+
+    async def no_sleep(_):
+        pass
+
+    monkeypatch.setattr(vk_intake.asyncio, "sleep", no_sleep)
+
+    caplog.set_level(logging.WARNING)
+    stats_first = await vk_intake.crawl_once(db)
+
+    hard_cap_pages = max(1, vk_intake.VK_CRAWL_MAX_PAGES_INC) * 10
+    expected_first_added = min(total_posts, hard_cap_pages * vk_intake.VK_CRAWL_PAGE_SIZE)
+
+    assert stats_first["added"] == expected_first_added
+    assert stats_first["deep_backfill_triggers"] == 1
+    assert any("vk.crawl.inc.deep_backfill_trigger" in rec.message for rec in caplog.records)
+
+    async with db.raw_conn() as conn:
+        cur = await conn.execute(
+            "SELECT last_seen_ts, last_post_id, updated_at FROM vk_crawl_cursor WHERE group_id=?",
+            (1,),
+        )
+        cursor_row = await cur.fetchone()
+
+    assert cursor_row[0] == last_seen_ts
+    assert cursor_row[1] == 0
+    assert cursor_row[2] <= time.time() - vk_intake.VK_CRAWL_BACKFILL_AFTER_IDLE_H * 3600
+
+    caplog.clear()
+    stats_second = await vk_intake.crawl_once(db)
+
+    assert stats_second["added"] == total_posts - stats_first["added"]
+    assert any(since == 0 for since, _ in call_log)
+
+    async with db.raw_conn() as conn:
+        cur = await conn.execute("SELECT post_id FROM vk_inbox ORDER BY post_id")
+        inbox_rows = await cur.fetchall()
+
+    assert [pid for (pid,) in inbox_rows] == [200 + i for i in range(total_posts)]
