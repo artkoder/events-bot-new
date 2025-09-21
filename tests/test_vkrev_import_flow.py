@@ -618,6 +618,8 @@ async def test_handle_vk_extra_message_exposes_text_links(monkeypatch):
         chat=SimpleNamespace(id=111),
         text="Check this link",
         caption=None,
+        html_text=None,
+        caption_html=None,
         entities=[
             types.MessageEntity(
                 type="text_link",
@@ -644,6 +646,70 @@ async def test_handle_vk_extra_message_exposes_text_links(monkeypatch):
     assert "Check this [link](https://example.com)" in draft.source_text
     html = linkify_for_telegraph(draft.source_text)
     assert '<a href="https://example.com">link</a>' in html
+
+
+@pytest.mark.asyncio
+async def test_handle_vk_extra_message_preserves_emoji_offsets(monkeypatch):
+    captured: dict[str, object] = {}
+
+    async def fake_import_flow(
+        chat_id,
+        operator_id,
+        inbox_id,
+        batch_id,
+        db,
+        bot,
+        *,
+        operator_extra=None,
+    ):
+        captured["operator_extra"] = operator_extra
+
+    async def fake_parse(text, *args, **kwargs):
+        return [
+            {
+                "title": "T",
+                "date": "2025-09-02",
+                "time": "10:00",
+                "location_name": "Hall",
+            }
+        ]
+
+    monkeypatch.setattr(main, "_vkrev_import_flow", fake_import_flow)
+    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
+
+    user_id = 5252
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=user_id),
+        chat=SimpleNamespace(id=222),
+        text="Check 😄 link",
+        caption=None,
+        html_text=None,
+        caption_html=None,
+        entities=[
+            types.MessageEntity(
+                type="text_link",
+                offset=9,
+                length=4,
+                url="https://emoji.example",
+            )
+        ],
+        caption_entities=None,
+    )
+
+    main.vk_review_extra_sessions[user_id] = (9, "batch-9")
+    await main.handle_vk_extra_message(message, db=object(), bot=object())
+
+    operator_extra = captured.get("operator_extra")
+    assert operator_extra == "Check 😄 [link](https://emoji.example)"
+
+    draft = await vk_intake.build_event_payload_from_vk(
+        "Original announcement",
+        operator_extra=operator_extra,
+    )
+
+    assert "Check 😄 [link](https://emoji.example)" in draft.source_text
+    html = linkify_for_telegraph(draft.source_text)
+    assert '<a href="https://emoji.example">link</a>' in html
 
 
 @pytest.mark.asyncio
