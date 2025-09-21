@@ -393,9 +393,16 @@ async def test_compose_intro_via_4o_exhibition(monkeypatch):
     prompt = captured_prompt["value"]
     assert "Импрессионисты" in prompt
     assert "2025-05-01" in prompt and "2025-05-20" in prompt
-    assert "выставок" in prompt
+    assert "Не пропустите" in prompt
+    assert "заканчивается" in prompt
+    assert "1–2 связных предложения" in prompt
+    assert "без списков" in prompt
+    assert "description" in prompt and "date_range" in prompt
+    assert "даты окончания" in prompt
     assert "эмодзи" in prompt
     assert "не выдумывай детали" in prompt
+    assert "Сохрани каркас" not in prompt
+    assert "После тире подчеркни" not in prompt
 
 
     event = SimpleNamespace(
