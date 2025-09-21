@@ -22496,6 +22496,7 @@ def create_app() -> web.Application:
         or c.data.startswith("festimgs:")
         or c.data.startswith("festsetcover:")
         or c.data.startswith("requeue:")
+        or c.data.startswith("tourist:")
     ,
     )
     dp.callback_query.register(
