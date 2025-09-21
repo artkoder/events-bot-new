@@ -166,6 +166,8 @@ from digests import (
     extract_catbox_covers_from_telegraph,
     compose_digest_caption,
     compose_digest_intro_via_4o,
+    compose_masterclasses_intro_via_4o,
+    compose_exhibitions_intro_via_4o,
     visible_caption_len,
     attach_caption_if_fits,
 )
@@ -17576,20 +17578,53 @@ async def handle_digest_refresh(callback: types.CallbackQuery, bot: Bot) -> None
         len(excluded),
     )
 
-    titles = [session["items"][i]["norm_title"] for i in remaining]
+    digest_type = session.get("digest_type", "lectures")
+    horizon_days = session.get("horizon_days", 0)
     start = _time.monotonic()
     logging.info(
-        "digest.intro.llm.request digest_id=%s titles=%s",
+        "digest.intro.llm.request digest_id=%s type=%s items=%s",
         digest_id,
-        len(titles),
+        digest_type,
+        len(remaining),
     )
     try:
-        intro = await compose_digest_intro_via_4o(
-            len(remaining),
-            session.get("horizon_days", 0),
-            titles,
-            event_noun=session.get("items_noun", "лекций"),
-        )
+        if digest_type == "masterclasses":
+            payload = []
+            for idx in remaining:
+                item = session["items"][idx]
+                payload.append(
+                    {
+                        "title": item.get("norm_title") or item.get("title", ""),
+                        "description": item.get("norm_description", ""),
+                    }
+                )
+            intro = await compose_masterclasses_intro_via_4o(
+                len(payload), horizon_days, payload
+            )
+        elif digest_type == "exhibitions":
+            payload = []
+            for idx in remaining:
+                item = session["items"][idx]
+                start_date = item.get("date", "")
+                end_date = item.get("end_date") or start_date
+                payload.append(
+                    {
+                        "title": item.get("norm_title") or item.get("title", ""),
+                        "description": item.get("norm_description", ""),
+                        "date_range": {"start": start_date, "end": end_date},
+                    }
+                )
+            intro = await compose_exhibitions_intro_via_4o(
+                len(payload), horizon_days, payload
+            )
+        else:
+            titles = [session["items"][i]["norm_title"] for i in remaining]
+            intro = await compose_digest_intro_via_4o(
+                len(remaining),
+                horizon_days,
+                titles,
+                event_noun=session.get("items_noun", "лекций"),
+            )
     except Exception as e:
         logging.error(
             "digest.intro.llm.error digest_id=%s err=\"%s\"",
@@ -17599,8 +17634,9 @@ async def handle_digest_refresh(callback: types.CallbackQuery, bot: Bot) -> None
     else:
         duration_ms = int((_time.monotonic() - start) * 1000)
         logging.info(
-            "digest.intro.llm.response digest_id=%s text_len=%s took_ms=%s",
+            "digest.intro.llm.response digest_id=%s type=%s text_len=%s took_ms=%s",
             digest_id,
+            digest_type,
             len(intro),
             duration_ms,
         )
@@ -22807,6 +22843,12 @@ def create_app() -> web.Application:
     return app
 
 
+def _normalize_event_description(value: str | None) -> str:
+    if not value:
+        return ""
+    return re.sub(r"\s+", " ", value).strip()
+
+
 async def _handle_digest_select(
     callback: types.CallbackQuery,
     db: Database,
@@ -22870,6 +22912,10 @@ async def _handle_digest_select(
                 "index": idx,
                 "title": ev.title,
                 "norm_title": norm_title,
+                "event_type": ev.event_type,
+                "norm_description": _normalize_event_description(ev.description),
+                "date": ev.date,
+                "end_date": ev.end_date,
                 "link": pick_display_link(ev),
                 "cover_url": cover_url,
                 "line_html": line,
