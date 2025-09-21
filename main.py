@@ -1619,7 +1619,15 @@ async def telegraph_edit_page(
         caller,
         eid,
     )
-    return await telegraph_call(tg.edit_page, path, **kwargs)
+    try:
+        return await telegraph_call(tg.edit_page, path, **kwargs)
+    except TypeError as exc:
+        msg = str(exc)
+        if "author_name" in msg or "author_url" in msg:
+            kwargs.pop("author_name", None)
+            kwargs.pop("author_url", None)
+            return await telegraph_call(tg.edit_page, path, **kwargs)
+        raise
 
 
 def seconds_to_next_minute(now: datetime) -> float:
@@ -10630,6 +10638,7 @@ async def update_telegraph_event_page(
         url = ev.telegraph_url
 
     logline("TG-EVENT", event_id, "done", url=url)
+    await update_month_pages_for(event_id, db, bot)
     return url
 
 
@@ -11130,7 +11139,34 @@ async def patch_month_page_for_date(
     from telegraph.utils import nodes_to_html
 
     if need_rebuild:
-        return "rebuild"
+        logging.info(
+            "month_patch inline rebuild month=%s day=%s", month_key, d.isoformat()
+        )
+        from telegraph.utils import html_to_nodes, nodes_to_html
+
+        day_nodes = html_to_nodes(html_section)
+        nav_block = await build_month_nav_block(db, month_key)
+        nodes = ensure_footer_nav_with_hr(day_nodes, nav_block, month=month_key, page=part)
+        nodes, removed = dedup_same_date(nodes, d)
+        updated_html = nodes_to_html(nodes)
+        updated_html, _ = ensure_day_markers(updated_html, d)
+        updated_html = lint_telegraph_html(updated_html)
+        await telegraph_edit_page(
+            telegraph,
+            page_path,
+            title=title,
+            html_content=updated_html,
+            caller="month_build",
+        )
+        await set_section_hash(db, page_key, section_key, content_hash(updated_html))
+        async with db.get_session() as session:
+            db_page = await session.get(MonthPage, month_key)
+            setattr(db_page, hash_attr, content_hash(updated_html))
+            await session.commit()
+        logging.info(
+            "month_patch inline rebuild done month=%s day=%s", month_key, d.isoformat()
+        )
+        return True
 
     logging.info(
         "TG-MONTH dates=%s page=%s",
@@ -11314,6 +11350,7 @@ async def update_month_pages_for(event_id: int, db: Database, bot: Bot | None) -
 
     changed_any = False
     rebuild_any = False
+    rebuild_months: set[str] = set()
     for month, month_dates in months.items():
         # ensure the month page is created before attempting a patch
         await sync_month_page(db, month, update_links=True)
@@ -11323,6 +11360,7 @@ async def update_month_pages_for(event_id: int, db: Database, bot: Bot | None) -
             if changed == "rebuild":
                 changed_any = True
                 rebuild_any = True
+                rebuild_months.add(month)
                 async with db.get_session() as session:
                     page = await session.get(MonthPage, month)
                 logline(
@@ -11341,6 +11379,8 @@ async def update_month_pages_for(event_id: int, db: Database, bot: Bot | None) -
                 logline("TG-MONTH", event_id, "patch changed", month=month, url=url)
             else:
                 logline("TG-MONTH", event_id, "patch nochange", month=month)
+    for month in rebuild_months:
+        await sync_month_page(db, month, update_links=False, force=True)
     return "rebuild" if rebuild_any else changed_any
 
 
@@ -12850,10 +12890,13 @@ def exhibition_title_nodes(e: Event) -> list:
     if e.emoji and not e.title.strip().startswith(e.emoji):
         nodes.append(f"{e.emoji} ")
     title_text = e.title
-    if e.source_post_url:
-        nodes.append(
-            {"tag": "a", "attrs": {"href": e.source_post_url}, "children": [title_text]}
-        )
+    url = e.telegraph_url
+    if not url and e.telegraph_path:
+        url = f"https://telegra.ph/{e.telegraph_path.lstrip('/')}"
+    if not url and e.source_post_url:
+        url = e.source_post_url
+    if url:
+        nodes.append({"tag": "a", "attrs": {"href": url}, "children": [title_text]})
     else:
         nodes.append(title_text)
     return nodes
@@ -12991,6 +13034,9 @@ async def build_month_page_content(
             res_f = await session.execute(select(Festival))
             fest_map = {f.name.casefold(): f for f in res_f.scalars().all()}
     for e in events:
+        fest = fest_map.get((e.festival or "").casefold())
+        await ensure_event_telegraph_link(e, fest, db)
+    for e in exhibitions:
         fest = fest_map.get((e.festival or "").casefold())
         await ensure_event_telegraph_link(e, fest, db)
     fest_index_url = await get_setting_value(db, "fest_index_url")
