@@ -590,7 +590,7 @@ async def test_shortpost_type_line_for_hyphenated_type(monkeypatch):
 
     lines = msg.splitlines()
     date_idx = next(i for i, line in enumerate(lines) if line.startswith("🗓"))
-    assert lines[date_idx - 1] == "#мастеркласс"
+    assert lines[date_idx + 1] == "#мастеркласс"
 
     hashtags_line = lines[-1]
     hashtags = hashtags_line.split()
@@ -625,7 +625,7 @@ async def test_shortpost_plain_type_hashtag_not_repeated(monkeypatch):
 
     lines = msg.splitlines()
     date_idx = next(i for i, line in enumerate(lines) if line.startswith("🗓"))
-    assert lines[date_idx - 1] == "#выставка"
+    assert lines[date_idx + 1] == "#выставка"
 
     hashtags_line = lines[-1]
     assert "#выставка" not in hashtags_line.split()
