@@ -19466,9 +19466,7 @@ async def handle_vk_list(
             base_width = len(label)
             count_widths[key] = max(1, math.ceil(base_width * 1.7))
 
-    status_header_parts = [
-        f" {label:<{count_widths[key]}} " for key, label in VK_STATUS_LABELS
-    ]
+    status_header_parts = [f" {label} " for _, label in VK_STATUS_LABELS]
     status_header_line = "|".join(status_header_parts)
 
     lines: list[str] = []
