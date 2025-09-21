@@ -19462,7 +19462,7 @@ async def handle_vk_list(
     status_header_parts = [
         f" {label:<{count_widths[key]}} " for key, label in VK_STATUS_LABELS
     ]
-    status_header_line = "    " + "|".join(status_header_parts)
+    status_header_line = "|".join(status_header_parts)
 
     lines: list[str] = []
     buttons: list[list[types.InlineKeyboardButton]] = []
@@ -19480,7 +19480,7 @@ async def handle_vk_list(
             for key, _ in VK_STATUS_LABELS
         ]
         lines.append(status_header_line)
-        lines.append("    " + "|".join(value_parts))
+        lines.append("|".join(value_parts))
         buttons.append(
             [
                 types.InlineKeyboardButton(
