@@ -20320,6 +20320,7 @@ async def handle_vk_review_cb(callback: types.CallbackQuery, db: Database, bot: 
     assert callback.data
     parts = callback.data.split(":")
     action = parts[1] if len(parts) > 1 else ""
+    answered = False
     if action in {"accept", "accept_extra", "reject", "skip"}:
         inbox_id = int(parts[2]) if len(parts) > 2 else 0
         async with db.raw_conn() as conn:
@@ -20330,6 +20331,8 @@ async def handle_vk_review_cb(callback: types.CallbackQuery, db: Database, bot: 
             row = await cur.fetchone()
         batch_id = row[0] if row else ""
         if action == "accept":
+            await callback.answer("Запускаю импорт…")
+            answered = True
             await bot.send_message(
                 callback.message.chat.id,
                 "⏳ Начинаю импорт события…",
@@ -20410,7 +20413,8 @@ async def handle_vk_review_cb(callback: types.CallbackQuery, db: Database, bot: 
             callback.message.chat.id,
             "Отправьте новый текст поста одной строкой/сообщением",
         )
-    await callback.answer()
+    if not answered:
+        await callback.answer()
 
 
 async def _vkrev_handle_repost(callback: types.CallbackQuery, event_id: int, db: Database, bot: Bot) -> None:
