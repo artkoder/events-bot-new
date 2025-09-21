@@ -15,9 +15,9 @@ festival          - festival name or empty string
 festival_full     - full festival edition name or empty string
 date              - single date or range (YYYY-MM-DD or YYYY-MM-DD..YYYY-MM-DD)
 time              - start time or time range (HH:MM or HH:MM..HH:MM)
-location_name     - venue name, use standard directory form if known
-location_address  - street address if present (omit the city name)
-city              - city name
+location_name     - venue name; shorten bureaucratic phrases, trim honorifics to surnames/initials, avoid repeating the city
+location_address  - street address if present; drop markers like «ул.»/«улица», «д.»/«дом» and similar bureaucratic words, keep the concise street + number without the city name
+city              - city name only; do not duplicate it in `location_address`
 ticket_price_min  - minimum ticket price as integer or null
 ticket_price_max  - maximum ticket price as integer or null
 ticket_link       - URL for purchasing tickets **or** registration form if present; ignore map service links such as https://yandex.ru/maps/
@@ -29,6 +29,11 @@ end_date         - end date for multi-day events or null
 When a range is provided, put the start date in `date` and the end date in `end_date`.
 Always put the emoji at the start of `title` so headings are easily scannable.
 ```
+
+Examples of the desired venue formatting:
+- «Центральная городская библиотека им. А. Лунина, ул. Калинина, д. 4, Черняховск» → `location_name`: «Библиотека А. Лунина», `location_address`: «Калинина 4», `city`: «Черняховск».
+- «Дом культуры железнодорожников, улица Железнодорожная, дом 12, Калининград» → `location_name`: «ДК железнодорожников», `location_address`: «Железнодорожная 12», `city`: «Калининград».
+- «Музей янтаря имени И. Канта, проспект Мира, д. 1, Светлогорск» → `location_name`: «Музей янтаря им. Канта», `location_address`: «Мира 1», `city`: «Светлогорск».
 
 Do **not** include words like "Открытие" or "Закрытие" in exhibition titles.
 The bot adds these markers automatically on the opening and closing dates.
