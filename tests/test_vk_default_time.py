@@ -75,21 +75,21 @@ async def test_vk_list_shows_numbers_and_default_time(tmp_path):
     assert "типовое время: 19:00" in lines[0]
     assert (
         lines[1]
-        == "     Pending      | Skipped      | Imported       | Rejected       "
+        == " Pending      | Skipped      | Imported       | Rejected       "
     )
     assert (
         lines[2]
-        == "          2       |      1       |       0        |       0        "
+        == "      2       |      1       |       0        |       0        "
     )
     assert lines[3].startswith("2.")
     assert "типовое время: -" in lines[3]
     assert (
         lines[4]
-        == "     Pending      | Skipped      | Imported       | Rejected       "
+        == " Pending      | Skipped      | Imported       | Rejected       "
     )
     assert (
         lines[5]
-        == "          0       |      0       |       12       |       1        "
+        == "      0       |      0       |       12       |       1        "
     )
     buttons = bot.messages[0].reply_markup.inline_keyboard
     assert buttons[0][0].text == "❌ 1"
@@ -115,11 +115,11 @@ async def test_vk_list_shows_numbers_and_default_time(tmp_path):
     assert page2_lines[0].startswith("11.")
     assert (
         page2_lines[1]
-        == "     Pending      | Skipped      | Imported       | Rejected       "
+        == " Pending      | Skipped      | Imported       | Rejected       "
     )
     assert (
         page2_lines[2]
-        == "          0       |      0       |       0        |       0        "
+        == "      0       |      0       |       0        |       0        "
     )
     nav_row = bot.messages[0].reply_markup.inline_keyboard[-1]
     assert nav_row[0].callback_data == "vksrcpage:1"
