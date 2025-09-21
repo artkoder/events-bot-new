@@ -16667,7 +16667,7 @@ async def build_events_message(db: Database, target_date: date, tz: timezone, cr
                     text=f"\u270e {e.id}", callback_data=f"edit:{e.id}"
                 ),
                 types.InlineKeyboardButton(
-                    text=f"{icon} {e.id}",
+                    text=f"{icon} Рерайт {e.id}",
                     callback_data=f"vkrev:shortpost:{e.id}",
                 ),
             ]
