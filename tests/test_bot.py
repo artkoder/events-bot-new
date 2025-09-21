@@ -7242,6 +7242,7 @@ async def test_build_daily_posts_groups_many_new_events(tmp_path: Path, monkeypa
     monkeypatch.setattr(main, "datetime", FakeDatetime)
 
     future_date = (FakeDate.today() + timedelta(days=1)).isoformat()
+    expected_date = datetime.fromisoformat(future_date).strftime("%d.%m")
     added_at = datetime(2025, 7, 15, 9, 0, tzinfo=timezone.utc)
 
     async with db.get_session() as session:
@@ -7283,12 +7284,13 @@ async def test_build_daily_posts_groups_many_new_events(tmp_path: Path, monkeypa
         (sov_event_line, "event-0"),
         (kal_event_line, "event-5"),
     ):
+        assert line.startswith(f"{expected_date} ")
         assert "🚩" in line
         assert "🟡" in line
         assert "🎉" in line
         assert f'href="https://telegra.ph/{telegraph_suffix}"' in line
 
-    grouped_event_lines = [line for line in lines if line.startswith("🚩")]
+    grouped_event_lines = [line for line in lines if line.startswith(f"{expected_date} ")]
     assert len(grouped_event_lines) == 10
 
 

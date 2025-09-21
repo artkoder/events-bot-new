@@ -12746,6 +12746,20 @@ def format_event_daily_inline(
 ) -> str:
     """Return a compact single-line HTML representation for daily lists."""
 
+    date_part = ""
+    if e.date:
+        date_part = e.date.split("..", 1)[0]
+    elif e.end_date:
+        date_part = e.end_date.split("..", 1)[0]
+
+    formatted_date = ""
+    if date_part:
+        d = parse_iso_date(date_part)
+        if d:
+            formatted_date = d.strftime("%d.%m")
+        else:
+            formatted_date = date_part
+
     markers: list[str] = []
     if is_recent(e):
         markers.append("\U0001f6a9")
@@ -12773,8 +12787,10 @@ def format_event_daily_inline(
         link_href = e.source_post_url
     if link_href:
         title = f'<a href="{html.escape(link_href)}">{title}</a>'
-
-    return f"{prefix}{emoji_part}{title}".strip()
+    body = f"{prefix}{emoji_part}{title}".strip()
+    if formatted_date:
+        return f"{formatted_date} {body}".strip()
+    return body
 
 
 def format_exhibition_md(e: Event) -> str:
