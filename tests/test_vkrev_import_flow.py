@@ -9,6 +9,8 @@ from datetime import datetime
 import pytest
 from types import SimpleNamespace
 
+from aiogram import types
+
 import main
 import poster_ocr
 import vk_intake
@@ -17,6 +19,7 @@ from main import Database
 from models import Event, EventPoster, JobTask, Festival, PosterOcrCache
 from poster_media import PosterMedia
 from sqlmodel import select
+from markup import linkify_for_telegraph
 
 
 class DummyBot:
@@ -63,10 +66,14 @@ async def test_download_photo_media_logs_mime(monkeypatch, caplog):
         async def read(self, n: int = -1) -> bytes:
             return self._data
 
+        async def iter_chunked(self, _n: int):
+            yield self._data
+
     class FakeResponse:
         def __init__(self, data: bytes, headers: dict[str, str]) -> None:
             self.content = FakeContent(data)
             self.headers = headers
+            self.content_length = len(data)
 
         async def __aenter__(self):
             return self
@@ -118,6 +125,7 @@ async def test_download_photo_media_logs_mime(monkeypatch, caplog):
 
     monkeypatch.setattr(main, "ensure_jpeg", fake_ensure_jpeg)
     monkeypatch.setattr(main, "detect_image_type", fake_detect_image_type)
+    monkeypatch.setattr(main, "validate_jpeg_markers", lambda _data: None)
 
     caplog.set_level(logging.INFO)
     results = await vk_intake._download_photo_media(urls)
@@ -211,14 +219,13 @@ async def test_vkrev_import_flow_persists_url_and_skips_vk_sync(tmp_path, monkey
     assert ev.source_post_url == "https://vk.com/wall-1_2"
     assert captured["festival_names"] == ["Fest One"]
     assert JobTask.vk_sync not in tasks
-    assert bot.messages[-1].text == (
-        "Импортировано\n"
-        "Тип: —\n"
-        "Дата начала: 2025-09-02\n"
-        "Дата окончания: —\n"
-        "Время: 10:00\n"
-        "Бесплатное: нет"
-    )
+    message_lines = bot.messages[-1].text.splitlines()
+    assert message_lines[0] == "Импортировано"
+    assert "Тип: —" in message_lines
+    assert "Дата начала: 2025-09-02" in message_lines
+    assert "Дата окончания: —" in message_lines
+    assert "Время: 10:00" in message_lines
+    assert "Бесплатное: нет" in message_lines
 
 
 @pytest.mark.asyncio
@@ -572,6 +579,71 @@ async def test_build_event_payload_uses_extra_when_text_missing(monkeypatch):
     )
 
     assert draft.source_text == "Only extra"
+
+
+@pytest.mark.asyncio
+async def test_handle_vk_extra_message_exposes_text_links(monkeypatch):
+    captured: dict[str, object] = {}
+
+    async def fake_import_flow(
+        chat_id,
+        operator_id,
+        inbox_id,
+        batch_id,
+        db,
+        bot,
+        *,
+        operator_extra=None,
+    ):
+        captured["chat_id"] = chat_id
+        captured["operator_id"] = operator_id
+        captured["operator_extra"] = operator_extra
+
+    async def fake_parse(text, *args, **kwargs):
+        return [
+            {
+                "title": "T",
+                "date": "2025-09-02",
+                "time": "10:00",
+                "location_name": "Hall",
+            }
+        ]
+
+    monkeypatch.setattr(main, "_vkrev_import_flow", fake_import_flow)
+    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
+
+    user_id = 4242
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=user_id),
+        chat=SimpleNamespace(id=111),
+        text="Check this link",
+        caption=None,
+        entities=[
+            types.MessageEntity(
+                type="text_link",
+                offset=11,
+                length=4,
+                url="https://example.com",
+            )
+        ],
+        caption_entities=None,
+    )
+
+    main.vk_review_extra_sessions[user_id] = (7, "batch-7")
+    await main.handle_vk_extra_message(message, db=object(), bot=object())
+
+    assert user_id not in main.vk_review_extra_sessions
+    operator_extra = captured.get("operator_extra")
+    assert operator_extra == "Check this [link](https://example.com)"
+
+    draft = await vk_intake.build_event_payload_from_vk(
+        "Original announcement",
+        operator_extra=operator_extra,
+    )
+
+    assert "Check this [link](https://example.com)" in draft.source_text
+    html = linkify_for_telegraph(draft.source_text)
+    assert '<a href="https://example.com">link</a>' in html
 
 
 @pytest.mark.asyncio
