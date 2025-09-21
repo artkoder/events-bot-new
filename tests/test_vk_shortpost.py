@@ -199,6 +199,144 @@ async def test_shortpost_wall_post(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_shortpost_publish_uses_cached_preview(tmp_path, monkeypatch):
+    main.vk_shortpost_ops.clear()
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    async with db.raw_conn() as conn:
+        await conn.execute(
+            "INSERT INTO vk_inbox(id, group_id, post_id, date, text, matched_kw, has_date, status, imported_event_id, review_batch) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (1, 1, 2, 0, "text", None, 1, "imported", 77, "b"),
+        )
+        await conn.execute(
+            "INSERT INTO event(id, title, description, date, time, location_name, city, source_text, telegraph_url) VALUES(?,?,?,?,?,?,?,?,?)",
+            (77, "Test", "d", "2025-09-27", "19:00", "Place", "City", "source", "https://t"),
+        )
+        await conn.commit()
+
+    monkeypatch.setenv("VK_AFISHA_GROUP_ID", "-5")
+    main.VK_AFISHA_GROUP_ID = "-5"
+    monkeypatch.setattr(main, "VK_TOKEN_AFISHA", "token")
+
+    build_calls = 0
+
+    async def fake_build_short_vk_text(*args, **kwargs):
+        nonlocal build_calls
+        build_calls += 1
+        return "summary"
+
+    async def fake_build_short_vk_tags(*args, **kwargs):
+        return ["#tag"]
+
+    async def fake_get_event_poster_texts(event_id, _db):
+        return []
+
+    async def fake_show_next(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(main, "build_short_vk_text", fake_build_short_vk_text)
+    monkeypatch.setattr(main, "build_short_vk_tags", fake_build_short_vk_tags)
+    monkeypatch.setattr(main, "get_event_poster_texts", fake_get_event_poster_texts)
+    monkeypatch.setattr(main, "_vkrev_show_next", fake_show_next)
+
+    posts: list[dict] = []
+
+    async def fake_vk_api(method, **params):
+        if method == "wall.getById":
+            return []
+        raise AssertionError
+
+    async def fake__vk_api(method, params, db=None, bot=None, token=None, **kwargs):
+        if method == "wall.post":
+            posts.append(params)
+            return {"response": {"post_id": 42}}
+        raise AssertionError
+
+    monkeypatch.setattr(main, "vk_api", fake_vk_api)
+    monkeypatch.setattr(main, "_vk_api", fake__vk_api)
+
+    bot = DummyBot()
+    callback = types.CallbackQuery.model_validate(
+        {
+            "id": "1",
+            "from": {"id": 1, "is_bot": False, "first_name": "U"},
+            "chat_instance": "1",
+            "data": "vkrev:shortpost:77",
+            "message": {"message_id": 1, "date": 0, "chat": {"id": 1, "type": "private"}},
+        }
+    )
+
+    await main._vkrev_handle_shortpost(callback, 77, db, bot)
+    assert build_calls == 1
+
+    await main._vkrev_publish_shortpost(77, db, bot, actor_chat_id=1, operator_id=10)
+    assert build_calls == 1
+    assert posts and posts[0]["message"].startswith("TEST")
+
+    main.vk_shortpost_ops.clear()
+
+
+@pytest.mark.asyncio
+async def test_shortpost_publish_rebuilds_without_cache(tmp_path, monkeypatch):
+    main.vk_shortpost_ops.clear()
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    async with db.raw_conn() as conn:
+        await conn.execute(
+            "INSERT INTO vk_inbox(id, group_id, post_id, date, text, matched_kw, has_date, status, imported_event_id, review_batch) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (1, 1, 2, 0, "text", None, 1, "imported", 77, "b"),
+        )
+        await conn.execute(
+            "INSERT INTO event(id, title, description, date, time, location_name, city, source_text, telegraph_url) VALUES(?,?,?,?,?,?,?,?,?)",
+            (77, "Test", "d", "2025-09-27", "19:00", "Place", "City", "source", "https://t"),
+        )
+        await conn.commit()
+
+    monkeypatch.setenv("VK_AFISHA_GROUP_ID", "-5")
+    main.VK_AFISHA_GROUP_ID = "-5"
+    monkeypatch.setattr(main, "VK_TOKEN_AFISHA", "token")
+
+    build_calls = 0
+
+    async def fake_build_short_vk_text(*args, **kwargs):
+        nonlocal build_calls
+        build_calls += 1
+        return "summary"
+
+    async def fake_build_short_vk_tags(*args, **kwargs):
+        return ["#tag"]
+
+    async def fake_get_event_poster_texts(event_id, _db):
+        return []
+
+    async def fake_show_next(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(main, "build_short_vk_text", fake_build_short_vk_text)
+    monkeypatch.setattr(main, "build_short_vk_tags", fake_build_short_vk_tags)
+    monkeypatch.setattr(main, "get_event_poster_texts", fake_get_event_poster_texts)
+    monkeypatch.setattr(main, "_vkrev_show_next", fake_show_next)
+
+    async def fake_vk_api(method, **params):
+        if method == "wall.getById":
+            return []
+        raise AssertionError
+
+    async def fake__vk_api(method, params, db=None, bot=None, token=None, **kwargs):
+        if method == "wall.post":
+            return {"response": {"post_id": 42}}
+        raise AssertionError
+
+    monkeypatch.setattr(main, "vk_api", fake_vk_api)
+    monkeypatch.setattr(main, "_vk_api", fake__vk_api)
+
+    bot = DummyBot()
+
+    await main._vkrev_publish_shortpost(77, db, bot, actor_chat_id=1, operator_id=10)
+    assert build_calls == 1
+
+    main.vk_shortpost_ops.clear()
+@pytest.mark.asyncio
 async def test_handle_vk_review_accept_notifies_before_import(monkeypatch, tmp_path):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()

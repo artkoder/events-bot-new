@@ -630,8 +630,15 @@ vk_add_source_sessions: set[int] = set()
 # operator_id -> (inbox_id, batch_id) awaiting extra info during VK review
 vk_review_extra_sessions: dict[int, tuple[int, str]] = {}
 
-# event_id -> operator chat id awaiting shortpost publication
-vk_shortpost_ops: dict[int, int] = {}
+@dataclass
+class VkShortpostOpState:
+    chat_id: int
+    preview_text: str | None = None
+    preview_link_attachment: str | None = None
+
+
+# event_id -> operator chat id awaiting shortpost publication and cached preview
+vk_shortpost_ops: dict[int, VkShortpostOpState] = {}
 # admin user_id -> (event_id, admin_chat_message_id) awaiting custom shortpost text
 vk_shortpost_edit_sessions: dict[int, tuple[int, int]] = {}
 
@@ -20754,7 +20761,7 @@ async def _vkrev_handle_shortpost(callback: types.CallbackQuery, event_id: int, 
 
     poster_texts = await get_event_poster_texts(event_id, db)
 
-    message, _ = await _vkrev_build_shortpost(
+    message, link_attachment = await _vkrev_build_shortpost(
         ev,
         vk_url,
         for_preview=True,
@@ -20779,7 +20786,11 @@ async def _vkrev_handle_shortpost(callback: types.CallbackQuery, event_id: int, 
         "shortpost_preview_sent",
         extra={"eid": event_id, "chat_id": callback.message.chat.id},
     )
-    vk_shortpost_ops[event_id] = callback.message.chat.id
+    vk_shortpost_ops[event_id] = VkShortpostOpState(
+        chat_id=callback.message.chat.id,
+        preview_text=message,
+        preview_link_attachment=link_attachment,
+    )
 
 
 async def _vkrev_publish_shortpost(
@@ -20807,13 +20818,22 @@ async def _vkrev_publish_shortpost(
     if not ev:
         await bot.send_message(actor_chat_id, "❌ Не удалось: нет события")
         return
+    op_state = vk_shortpost_ops.get(event_id)
     poster_texts = await get_event_poster_texts(event_id, db)
     if text is None:
-        message, link_attachment = await _vkrev_build_shortpost(
-            ev,
-            vk_url,
-            poster_texts=poster_texts,
-        )
+        if op_state and op_state.preview_text is not None:
+            message = op_state.preview_text
+            link_attachment = (
+                op_state.preview_link_attachment
+                if op_state.preview_link_attachment is not None
+                else ev.telegraph_url or vk_url
+            )
+        else:
+            message, link_attachment = await _vkrev_build_shortpost(
+                ev,
+                vk_url,
+                poster_texts=poster_texts,
+            )
     else:
         message = text
         link_attachment = ev.telegraph_url or vk_url
@@ -20888,7 +20908,7 @@ async def _vkrev_publish_shortpost(
     }
     if attachments_str:
         params["attachments"] = attachments_str
-    operator_chat = vk_shortpost_ops.get(event_id)
+    operator_chat = op_state.chat_id if op_state else None
     try:
         data = await _vk_api(
             "wall.post",
