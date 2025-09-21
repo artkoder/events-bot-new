@@ -19486,10 +19486,24 @@ async def handle_vk_add_message(message: types.Message, db: Database, bot: Bot) 
     )
 
 
-async def _fetch_vk_sources(db: Database) -> list[tuple[int, int, str, str, str | None, str | None]]:
+async def _fetch_vk_sources(
+    db: Database,
+) -> list[tuple[int, int, str, str, str | None, str | None, str | None]]:
     async with db.raw_conn() as conn:
         cursor = await conn.execute(
-            "SELECT id, group_id, screen_name, name, location, default_time FROM vk_source ORDER BY id"
+            """
+            SELECT
+                s.id,
+                s.group_id,
+                s.screen_name,
+                s.name,
+                s.location,
+                s.default_time,
+                c.updated_at
+            FROM vk_source AS s
+            LEFT JOIN vk_crawl_cursor AS c ON c.group_id = s.group_id
+            ORDER BY s.id
+            """
         )
         rows = await cursor.fetchall()
     return rows
@@ -19545,9 +19559,11 @@ async def handle_vk_list(
     end = start + VK_SOURCES_PER_PAGE
     page_rows = rows[start:end]
     inbox_counts = await _fetch_vk_inbox_counts(db)
-    page_items: list[tuple[int, tuple[int, int, str, str, str | None, str | None], dict[str, int]]] = []
+    page_items: list[
+        tuple[int, tuple[int, int, str, str, str | None, str | None, str | None], dict[str, int]]
+    ] = []
     for offset, row in enumerate(page_rows, start=start + 1):
-        rid, gid, screen, name, loc, dtime = row
+        rid, gid, screen, name, loc, dtime, updated_at = row
         counts = inbox_counts.get(gid)
         if counts is None:
             counts = _zero_vk_status_counts()
@@ -19573,13 +19589,23 @@ async def handle_vk_list(
     lines: list[str] = []
     buttons: list[list[types.InlineKeyboardButton]] = []
     for offset, row, counts in page_items:
-        rid, gid, screen, name, loc, dtime = row
+        rid, gid, screen, name, loc, dtime, updated_at = row
         info_parts = [f"id={gid}"]
         if loc:
             info_parts.append(loc)
         info = ", ".join(info_parts)
+        if updated_at:
+            try:
+                parsed_updated = datetime.fromisoformat(updated_at)
+                if parsed_updated.tzinfo is None:
+                    parsed_updated = parsed_updated.replace(tzinfo=timezone.utc)
+                human_updated = parsed_updated.astimezone(LOCAL_TZ).strftime("%Y-%m-%d %H:%M")
+            except ValueError:
+                human_updated = updated_at
+        else:
+            human_updated = "-"
         lines.append(
-            f"{offset}. {name} (vk.com/{screen}) — {info}, типовое время: {dtime or '-'}"
+            f"{offset}. {name} (vk.com/{screen}) — {info}, типовое время: {dtime or '-'}, последняя проверка: {human_updated}"
         )
         value_parts = [
             f" {counts[key]:^{count_widths[key]}} "
