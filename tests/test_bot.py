@@ -7224,6 +7224,75 @@ async def test_build_daily_posts_split(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_build_daily_posts_groups_many_new_events(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    class FakeDate(date):
+        @classmethod
+        def today(cls):
+            return date(2025, 7, 15)
+
+    class FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2025, 7, 15, 12, 0, tzinfo=tz)
+
+    monkeypatch.setattr(main, "date", FakeDate)
+    monkeypatch.setattr(main, "datetime", FakeDatetime)
+
+    future_date = (FakeDate.today() + timedelta(days=1)).isoformat()
+    added_at = datetime(2025, 7, 15, 9, 0, tzinfo=timezone.utc)
+
+    async with db.get_session() as session:
+        for idx in range(10):
+            city = "Советск" if idx < 5 else None
+            session.add(
+                Event(
+                    title=f"Event {idx}",
+                    description="desc",
+                    source_text="src",
+                    date=future_date,
+                    time="10:00",
+                    location_name="Place",
+                    city=city,
+                    added_at=added_at,
+                    telegraph_url=f"https://telegra.ph/event-{idx}",
+                    source_post_url="https://vk.com/wall-1_1",
+                    emoji="🎉",
+                    is_free=True,
+                )
+            )
+        await session.commit()
+
+    posts = await main.build_daily_posts(db, timezone.utc)
+    assert posts
+    text, _ = posts[0]
+    _, section2 = text.split("\n\n\n", 1)
+    lines = section2.split("\n")
+
+    assert lines[0] == "<b><i>+10 ДОБАВИЛИ В АНОНС</i></b>"
+    sov_idx = lines.index("СОВЕТСК")
+    kal_idx = lines.index("КАЛИНИНГРАД")
+    assert lines[sov_idx - 1] == ""
+    assert lines[kal_idx - 1] == ""
+
+    sov_event_line = lines[sov_idx + 1]
+    kal_event_line = lines[kal_idx + 1]
+    for line, telegraph_suffix in (
+        (sov_event_line, "event-0"),
+        (kal_event_line, "event-5"),
+    ):
+        assert "🚩" in line
+        assert "🟡" in line
+        assert "🎉" in line
+        assert f'href="https://telegra.ph/{telegraph_suffix}"' in line
+
+    grouped_event_lines = [line for line in lines if line.startswith("🚩")]
+    assert len(grouped_event_lines) == 10
+
+
+@pytest.mark.asyncio
 async def test_daily_no_more_link(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
