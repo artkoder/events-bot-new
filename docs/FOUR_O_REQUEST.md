@@ -91,5 +91,5 @@ calculated from the events added to the festival.
 
 OpenAI usage resets daily at 00:00 UTC. The `four_o.usage` log records each
 request with its token count and the remaining budget as defined by
-`FOUR_O_DAILY_TOKEN_LIMIT`. Grafana dashboards can filter by the
-`four_o.usage` key to visualise daily token spend.
+`FOUR_O_DAILY_TOKEN_LIMIT` (1 000 000 tokens by default). Grafana dashboards can
+filter by the `four_o.usage` key to visualise daily token spend.
