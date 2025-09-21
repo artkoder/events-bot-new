@@ -601,7 +601,7 @@ def test_format_event_line_html_exhibition_missing_end_date(caplog):
 
     line = format_event_line_html(e, None)
 
-    assert line == "10.05 | T"
+    assert line == "по 10.05 | T"
     assert any("digest.end_date.missing" in r.message for r in caplog.records)
 
 
@@ -622,7 +622,7 @@ def test_format_event_line_html_exhibition_bad_end_date(caplog):
 
     line = format_event_line_html(e, None)
 
-    assert line == "10.05 | T"
+    assert line == "по 10.05 | T"
     assert any("digest.end_date.format" in r.message for r in caplog.records)
 
 

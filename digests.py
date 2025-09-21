@@ -873,6 +873,8 @@ def format_event_line_html(
                 getattr(event, "id", None),
                 event.event_type,
             )
+        if not date_part.startswith("по "):
+            date_part = f"по {dt.strftime('%d.%m')}"
         time_part = ""
     else:
         time_part = ""
