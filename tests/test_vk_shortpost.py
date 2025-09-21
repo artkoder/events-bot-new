@@ -164,6 +164,9 @@ async def test_shortpost_wall_post(tmp_path, monkeypatch):
     async def fake_ask(prompt, **kwargs):
         return "#a #b #c #d #e"
     monkeypatch.setattr(main, "ask_4o", fake_ask)
+    async def fake_location(parts):
+        return ", ".join(filter(None, parts))
+    monkeypatch.setattr(main, "build_short_vk_location", fake_location)
     bot = DummyBot()
     async def fake_answer(self, *args, **kwargs):
         return None
@@ -601,6 +604,9 @@ async def test_shortpost_no_time(monkeypatch):
 
     monkeypatch.setattr(main, "build_short_vk_text", fake_build_text)
     monkeypatch.setattr(main, "build_short_vk_tags", fake_tags)
+    async def fake_location(parts):
+        return ", ".join(filter(None, parts))
+    monkeypatch.setattr(main, "build_short_vk_location", fake_location)
 
     ev = Event(
         id=1,
@@ -627,6 +633,9 @@ async def test_shortpost_free_event_ticket_line(monkeypatch):
 
     monkeypatch.setattr(main, "build_short_vk_text", fake_build_text)
     monkeypatch.setattr(main, "build_short_vk_tags", fake_tags)
+    async def fake_location(parts):
+        return ", ".join(filter(None, parts))
+    monkeypatch.setattr(main, "build_short_vk_location", fake_location)
 
     ev = Event(
         id=1,
@@ -655,6 +664,9 @@ async def test_shortpost_midnight_time_hidden(monkeypatch):
 
     monkeypatch.setattr(main, "build_short_vk_text", fake_build_text)
     monkeypatch.setattr(main, "build_short_vk_tags", fake_tags)
+    async def fake_location(parts):
+        return ", ".join(filter(None, parts))
+    monkeypatch.setattr(main, "build_short_vk_location", fake_location)
 
     ev = Event(
         id=1,
@@ -680,6 +692,9 @@ async def test_shortpost_city_not_duplicated(monkeypatch):
 
     monkeypatch.setattr(main, "build_short_vk_text", fake_build_text)
     monkeypatch.setattr(main, "build_short_vk_tags", fake_tags)
+    async def fake_location(parts):
+        return ", ".join(filter(None, parts))
+    monkeypatch.setattr(main, "build_short_vk_location", fake_location)
 
     ev = Event(
         id=1,
@@ -695,9 +710,9 @@ async def test_shortpost_city_not_duplicated(monkeypatch):
 
     msg, _ = await main._vkrev_build_shortpost(ev, "https://vk.com/wall-1_1")
     location_line = next(
-        line for line in msg.splitlines() if line.startswith("📍 Локация:")
+        line for line in msg.splitlines() if line.startswith("📍 ")
     )
-    assert location_line == "📍 Локация: Place, City"
+    assert location_line == "📍 Place, City"
     assert "City, City" not in msg
 
 
@@ -711,6 +726,9 @@ async def test_shortpost_type_line_for_hyphenated_type(monkeypatch):
 
     monkeypatch.setattr(main, "build_short_vk_text", fake_build_text)
     monkeypatch.setattr(main, "ask_4o", fake_ask)
+    async def fake_location(parts):
+        return ", ".join(filter(None, parts))
+    monkeypatch.setattr(main, "build_short_vk_location", fake_location)
 
     ev = Event(
         id=1,
@@ -746,6 +764,9 @@ async def test_shortpost_plain_type_hashtag_not_repeated(monkeypatch):
 
     monkeypatch.setattr(main, "build_short_vk_text", fake_build_text)
     monkeypatch.setattr(main, "ask_4o", fake_ask)
+    async def fake_location(parts):
+        return ", ".join(filter(None, parts))
+    monkeypatch.setattr(main, "build_short_vk_location", fake_location)
 
     ev = Event(
         id=1,
@@ -779,6 +800,9 @@ async def test_shortpost_ongoing_exhibition(monkeypatch):
 
     monkeypatch.setattr(main, "build_short_vk_text", fake_build_text)
     monkeypatch.setattr(main, "build_short_vk_tags", fake_tags)
+    async def fake_location(parts):
+        return ", ".join(filter(None, parts))
+    monkeypatch.setattr(main, "build_short_vk_location", fake_location)
 
     class FakeDate(real_date):
         @classmethod
@@ -814,6 +838,9 @@ async def test_shortpost_preview_link(monkeypatch):
 
     monkeypatch.setattr(main, "build_short_vk_text", fake_build_text)
     monkeypatch.setattr(main, "build_short_vk_tags", fake_tags)
+    async def fake_location(parts):
+        return ", ".join(filter(None, parts))
+    monkeypatch.setattr(main, "build_short_vk_location", fake_location)
 
     ev = Event(
         id=1,

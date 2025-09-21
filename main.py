@@ -20157,6 +20157,37 @@ async def build_short_vk_tags(
     return tags[:7]
 
 
+async def build_short_vk_location(parts: Sequence[str]) -> str:
+    cleaned_parts = [part.strip() for part in parts if part and part.strip()]
+    if not cleaned_parts:
+        return ""
+    joined = ", ".join(cleaned_parts)
+    prompt = (
+        "Собери короткую и понятную формулировку адреса события для поста ВКонтакте. "
+        "Используй все важные части, убери дубли и лишние слова. Не пиши ничего, кроме адреса, "
+        "не добавляй слово «Локация» и эмодзи.\n"
+        f"Части адреса: {joined}"
+    )
+    try:
+        raw = await ask_4o(
+            prompt,
+            system_prompt=(
+                "Ты формируешь краткую строку с адресом события. "
+                "Верни только сам адрес без вводных слов и эмодзи."
+            ),
+            max_tokens=60,
+        )
+    except Exception:
+        return joined
+    location = raw.strip()
+    if not location:
+        return joined
+    location = re.sub(r"\s+", " ", location)
+    location = location.replace("📍", "").strip()
+    location = re.sub(r"^[Лл]окация[:\-\s]*", "", location).strip()
+    return location or joined
+
+
 async def _vkrev_show_next(chat_id: int, batch_id: str, operator_id: int, db: Database, bot: Bot) -> None:
     post = await vk_review.pick_next(db, operator_id, batch_id)
     if not post:
@@ -20729,7 +20760,9 @@ async def _vkrev_build_shortpost(
             loc_parts.append(ev.city)
             if city_normalized:
                 existing_normalized.add(city_normalized)
-    lines.append("📍 Локация: " + ", ".join(filter(None, loc_parts)))
+    location_text = await build_short_vk_location(loc_parts)
+    if location_text:
+        lines.append(f"📍 {location_text}")
     lines.append("")
     lines.append(summary)
     summary_idx = len(lines) - 1
