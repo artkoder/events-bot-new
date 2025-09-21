@@ -15271,6 +15271,8 @@ async def build_daily_posts(
                         partner_creator_ids=partner_creator_ids,
                     )
                 )
+        lines2.append("")
+        lines2.append("ℹ️ Нажмите на название мероприятия, чтобы открыть подробности")
     else:
         for e in events_new:
             w_url = None
