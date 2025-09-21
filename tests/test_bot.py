@@ -7277,6 +7277,11 @@ async def test_build_daily_posts_groups_many_new_events(tmp_path: Path, monkeypa
     kal_idx = lines.index("КАЛИНИНГРАД")
     assert lines[sov_idx - 1] == ""
     assert lines[kal_idx - 1] == ""
+    assert lines[-2] == ""
+    assert (
+        lines[-1]
+        == "ℹ️ Нажмите на название мероприятия, чтобы открыть подробности"
+    )
 
     sov_event_line = lines[sov_idx + 1]
     kal_event_line = lines[kal_idx + 1]
