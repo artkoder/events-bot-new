@@ -175,7 +175,12 @@ async def test_handle_digest_sends_masterclasses_preview(tmp_path, monkeypatch):
     assert bot.media_groups
     panel = bot.messages[-1]
     assert panel.text.startswith("Управление дайджестом мастер-классов")
-    assert main.digest_preview_sessions[digest_id]["items_noun"] == "мастер-классов"
+    session = main.digest_preview_sessions[digest_id]
+    assert session["items_noun"] == "мастер-классов"
+    assert session["items"][0]["event_type"] == "мастер-класс"
+    assert session["items"][0]["norm_description"] == "d"
+    assert session["items"][0]["date"]
+    assert session["items"][0]["end_date"] is None
 
 
 @pytest.mark.asyncio
@@ -194,6 +199,7 @@ async def test_handle_digest_sends_exhibitions_preview(tmp_path, monkeypatch):
             source_text="s",
             event_type="выставка",
             telegraph_url="https://telegra.ph/test3",
+            end_date=dt.strftime("%Y-%m-%d"),
         )
         session.add(ev)
         await session.commit()
@@ -234,7 +240,13 @@ async def test_handle_digest_sends_exhibitions_preview(tmp_path, monkeypatch):
     assert bot.media_groups
     panel = bot.messages[-1]
     assert panel.text.startswith("Управление дайджестом выставок")
-    assert main.digest_preview_sessions[digest_id]["items_noun"] == "выставок"
+    session = main.digest_preview_sessions[digest_id]
+    assert session["items_noun"] == "выставок"
+    item = session["items"][0]
+    assert item["event_type"] == "выставка"
+    assert item["norm_description"] == "d"
+    assert item["date"]
+    assert item["end_date"] == ev.date
 
 
 @pytest.mark.asyncio
