@@ -12600,6 +12600,8 @@ def format_event_daily(
     link_href: str | None = None
     if is_partner_creator and is_vk_wall_url(e.source_post_url):
         link_href = e.source_post_url
+    elif is_vk_wall_url(e.source_post_url):
+        link_href = e.telegraph_url or e.source_post_url
     elif is_vk_wall_url(e.source_vk_post_url):
         link_href = e.telegraph_url or e.source_vk_post_url
     elif e.source_post_url:
