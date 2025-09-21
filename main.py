@@ -19948,9 +19948,32 @@ async def build_short_vk_text(
     if fallback_from_title:
         return text
 
+    sentence_splitter = re.compile(r"(?<=[.!?])\s+")
+
+    def _truncate_sentences(source: str, limit: int) -> str:
+        if limit <= 0:
+            return ""
+        paragraphs: list[str] = []
+        remaining = limit
+        for block in source.split("\n\n"):
+            paragraph = block.strip()
+            if not paragraph or remaining <= 0:
+                continue
+            sentences = [part.strip() for part in sentence_splitter.split(paragraph) if part.strip()]
+            if not sentences:
+                continue
+            selected: list[str] = []
+            for sentence in sentences:
+                if remaining <= 0:
+                    break
+                selected.append(sentence)
+                remaining -= 1
+            if selected:
+                paragraphs.append(" ".join(selected))
+        return "\n\n".join(paragraphs).strip()
+
     def _fallback_summary() -> str:
-        sentences = re.split(r"(?<=[.!?])\s+", text)
-        fallback = " ".join(sentences[: min(max_sentences, 2)]).strip()
+        fallback = _truncate_sentences(text, min(max_sentences, 2))
         return fallback or text
 
     extra_blocks = [block.strip() for block in poster_texts or [] if block.strip()]
@@ -19988,8 +20011,7 @@ async def build_short_vk_text(
         "provide" in cleaned_lower and "text" in cleaned_lower
     ):
         return _fallback_summary()
-    sentences = re.split(r"(?<=[.!?])\s+", cleaned)
-    summary = " ".join(sentences[:max_sentences]).strip()
+    summary = _truncate_sentences(cleaned, max_sentences)
     return summary or _fallback_summary()
 
 

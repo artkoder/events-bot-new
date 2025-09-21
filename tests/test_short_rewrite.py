@@ -62,3 +62,21 @@ async def test_build_short_vk_text_handles_missing_text_reply(monkeypatch):
     result = await main.build_short_vk_text(event, original, max_sentences=3)
 
     assert result == "Первое предложение. Второе предложение."
+
+
+@pytest.mark.asyncio
+async def test_build_short_vk_text_preserves_paragraphs(monkeypatch):
+    async def fake_ask(prompt, **kwargs):
+        return (
+            "Первое предложение. Второе предложение.\n\n"
+            "Третье предложение. Четвертое предложение."
+        )
+
+    monkeypatch.setattr(main, "ask_4o", fake_ask)
+
+    event = SimpleNamespace(description="Описание события", title="Название события")
+
+    result = await main.build_short_vk_text(event, "Исходный текст", max_sentences=3)
+
+    assert result == "Первое предложение. Второе предложение.\n\nТретье предложение."
+    assert "\n\n" in result
