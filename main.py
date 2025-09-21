@@ -19455,9 +19455,9 @@ async def handle_vk_list(
         count_widths = {key: len(label) for key, label in VK_STATUS_LABELS}
 
     status_header_parts = [
-        label.ljust(count_widths[key]) for key, label in VK_STATUS_LABELS
+        f" {label:<{count_widths[key]}} " for key, label in VK_STATUS_LABELS
     ]
-    status_header_line = "    " + " | ".join(status_header_parts)
+    status_header_line = "    " + "|".join(status_header_parts)
 
     lines: list[str] = []
     buttons: list[list[types.InlineKeyboardButton]] = []
@@ -19471,11 +19471,11 @@ async def handle_vk_list(
             f"{offset}. {name} (vk.com/{screen}) — {info}, типовое время: {dtime or '-'}"
         )
         value_parts = [
-            str(counts[key]).rjust(count_widths[key])
+            f" {counts[key]:>{count_widths[key]}} "
             for key, _ in VK_STATUS_LABELS
         ]
         lines.append(status_header_line)
-        lines.append("    " + " | ".join(value_parts))
+        lines.append("    " + "|".join(value_parts))
         buttons.append(
             [
                 types.InlineKeyboardButton(
