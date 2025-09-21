@@ -109,7 +109,7 @@ async def test_build_exhibitions_digest_candidates(tmp_path):
     now = datetime(2025, 5, 1, 12, 0)
 
     async with db.get_session() as session:
-        def add(offset_days: int, time: str, title: str):
+        def add(offset_days: int, time: str, title: str, *, duration_days: int = 2):
             dt = now + timedelta(days=offset_days)
             ev = Event(
                 title=title,
@@ -120,10 +120,11 @@ async def test_build_exhibitions_digest_candidates(tmp_path):
                 source_text="s",
                 event_type="выставка",
                 source_post_url="http://example.com/" + title,
-                end_date=(dt + timedelta(days=2)).strftime("%Y-%m-%d"),
+                end_date=(dt + timedelta(days=duration_days)).strftime("%Y-%m-%d"),
             )
             session.add(ev)
 
+        add(-3, "10:00", "past", duration_days=7)
         add(0, "15:00", "e0")
         add(5, "12:00", "e5")
         add(9, "12:00", "e9")
@@ -133,7 +134,43 @@ async def test_build_exhibitions_digest_candidates(tmp_path):
     titles = [e.title for e in events]
 
     assert horizon == 14
-    assert titles == ["e0", "e5", "e9"]
+    assert titles == ["e0", "past", "e5", "e9"]
+
+
+@pytest.mark.asyncio
+async def test_build_exhibitions_digest_candidates_includes_ongoing(tmp_path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    now = datetime(2025, 5, 1, 12, 0)
+
+    async with db.get_session() as session:
+        def add_event(date_offset: int, *, end_offset: int, title: str, time: str = "12:00"):
+            start = now + timedelta(days=date_offset)
+            ev = Event(
+                title=title,
+                description="d",
+                date=start.strftime("%Y-%m-%d"),
+                time=time,
+                location_name="x",
+                source_text="s",
+                event_type="выставка",
+                source_post_url="http://example.com/" + title,
+                end_date=(start + timedelta(days=end_offset)).strftime("%Y-%m-%d"),
+            )
+            session.add(ev)
+
+        add_event(-5, end_offset=10, title="ongoing")
+        add_event(0, end_offset=1, title="soon", time="15:00")
+        add_event(0, end_offset=1, title="too-soon", time="13:00")
+        await session.commit()
+
+    events, horizon = await build_exhibitions_digest_candidates(db, now)
+    titles = [e.title for e in events]
+
+    assert horizon == 14
+    assert "ongoing" in titles
+    assert "soon" in titles
+    assert "too-soon" not in titles
 
 
 @pytest.mark.asyncio
