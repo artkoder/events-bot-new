@@ -20856,11 +20856,64 @@ async def _vkrev_publish_shortpost(
         logging.warning("shortpost_publish_failed", extra={"eid": event_id, "error": str(e)})
 
 
+def extract_message_text_with_links(message: types.Message) -> str:
+    """Return message text where hidden links are exposed for downstream use."""
+
+    base_text = message.text or message.caption or ""
+    if not base_text:
+        return ""
+
+    entities = list(message.entities or message.caption_entities or [])
+    if not entities:
+        return base_text
+
+    def escape_md_label(value: str) -> str:
+        return value.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
+
+    def escape_md_url(value: str) -> str:
+        return value.replace("\\", "\\\\").replace(")", "\\)")
+
+    parts: list[str] = []
+    last_index = 0
+    text_len = len(base_text)
+
+    for entity in sorted(entities, key=lambda e: e.offset):
+        start = max(0, min(entity.offset, text_len))
+        end = max(start, min(entity.offset + entity.length, text_len))
+        if start < last_index:
+            start = last_index
+        if end <= start:
+            continue
+        if last_index < start:
+            parts.append(base_text[last_index:start])
+        segment = base_text[start:end]
+
+        if entity.type == "text_link" and getattr(entity, "url", None):
+            label = escape_md_label(segment) if segment else ""
+            url_md = escape_md_url(entity.url)
+            if label:
+                parts.append(f"[{label}]({url_md})")
+            else:
+                parts.append(entity.url)
+        elif entity.type == "url":
+            parts.append(segment)
+        else:
+            parts.append(segment)
+
+        last_index = end
+
+    if last_index < text_len:
+        parts.append(base_text[last_index:])
+
+    return "".join(parts)
+
+
 async def handle_vk_extra_message(message: types.Message, db: Database, bot: Bot) -> None:
     info = vk_review_extra_sessions.pop(message.from_user.id, None)
     if not info:
         return
     inbox_id, batch_id = info
+    operator_extra = extract_message_text_with_links(message)
     await _vkrev_import_flow(
         message.chat.id,
         message.from_user.id,
@@ -20868,7 +20921,7 @@ async def handle_vk_extra_message(message: types.Message, db: Database, bot: Bot
         batch_id,
         db,
         bot,
-        operator_extra=message.text or "",
+        operator_extra=operator_extra,
     )
 
 
