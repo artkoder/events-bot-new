@@ -6,6 +6,7 @@ import pytest
 
 from main import Database, Event
 import logging
+import digests
 from digests import (
     build_lectures_digest_candidates,
     build_masterclasses_digest_candidates,
@@ -24,6 +25,7 @@ from digests import (
     visible_caption_len,
     compose_digest_caption,
     attach_caption_if_fits,
+    _build_digest_preview,
 )
 from aiogram import types
 
@@ -171,6 +173,64 @@ async def test_build_exhibitions_digest_candidates_includes_ongoing(tmp_path):
     assert "ongoing" in titles
     assert "soon" in titles
     assert "too-soon" not in titles
+
+
+@pytest.mark.asyncio
+async def test_normalize_titles_exhibition_keeps_original():
+    titles = [
+        "🎨 Выставка «Солнечный луч»",
+        "Выставка в Доме искусств",
+    ]
+
+    normalized = await normalize_titles_via_4o(titles, event_kind="exhibition")
+
+    assert [item["emoji"] for item in normalized] == ["🎨", ""]
+    cleaned = [item["title_clean"] for item in normalized]
+    assert cleaned == ["Выставка «Солнечный луч»", "Выставка в Доме искусств"]
+    assert all(not title.startswith("Лекция") for title in cleaned)
+
+
+@pytest.mark.asyncio
+async def test_build_digest_preview_exhibition_uses_clean_titles(monkeypatch):
+    events = [
+        SimpleNamespace(
+            id=1,
+            title="🎨 Выставка «Солнечный луч»",
+            description="desc",
+            date="2025-05-05",
+            time="12:00",
+            event_type="выставка",
+            end_date="2025-05-20",
+            source_post_url="https://example.com/post",
+            telegraph_url=None,
+            telegraph_path=None,
+        )
+    ]
+
+    async def fake_candidates_builder(db, now, digest_id):
+        return events, 14
+
+    async def fake_intro(*args, **kwargs):
+        return "intro"
+
+    monkeypatch.setattr(digests, "compose_exhibitions_intro_via_4o", fake_intro)
+
+    intro, lines, horizon, returned_events, norm_titles = await _build_digest_preview(
+        "digest-id",
+        db=None,
+        now=datetime(2025, 5, 1, 12, 0),
+        kind="exhibitions",
+        event_noun="выставок",
+        event_kind="exhibition",
+        candidates_builder=fake_candidates_builder,
+    )
+
+    assert intro == "intro"
+    assert horizon == 14
+    assert returned_events == events
+    assert norm_titles == ["Выставка «Солнечный луч»"]
+    assert lines and "Выставка «Солнечный луч»" in lines[0]
+    assert "Лекция" not in lines[0]
 
 
 @pytest.mark.asyncio

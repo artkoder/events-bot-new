@@ -657,13 +657,23 @@ async def compose_exhibitions_intro_via_4o(
     return text
 
 
+def _normalize_exhibition_title(title: str) -> dict[str, str]:
+    """Return exhibition title without lecture-specific formatting."""
+
+    emoji, rest = _split_leading_emoji(title)
+    cleaned = re.sub(r"\s+", " ", rest).strip()
+    if not cleaned:
+        cleaned = rest.strip() or title.strip()
+    return {"emoji": emoji, "title_clean": cleaned}
+
+
 async def normalize_titles_via_4o(
     titles: List[str], *, event_kind: str = "lecture"
 ) -> List[dict[str, str]]:
     """Normalize event titles using model 4o with regex fallback."""
 
     if event_kind == "exhibition":
-        return [_normalize_title_fallback(t, event_kind="exhibition") for t in titles]
+        return [_normalize_exhibition_title(t) for t in titles]
 
     from main import ask_4o  # local import to avoid a cycle
     import json
@@ -772,7 +782,7 @@ def _normalize_title_fallback(
     emoji, rest = _split_leading_emoji(title)
 
     if event_kind == "exhibition":
-        return {"emoji": emoji, "title_clean": rest.strip()}
+        return _normalize_exhibition_title(title)
 
     kind = event_kind if event_kind in {"lecture", "masterclass"} else "lecture"
     if kind == "masterclass":
