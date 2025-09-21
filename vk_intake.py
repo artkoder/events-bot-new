@@ -808,6 +808,7 @@ async def crawl_once(db, *, broadcast: bool = False, bot: Any | None = None) -> 
         "errors": 0,
         "inbox_total": 0,
         "queue": {},
+        "safety_cap_hits": 0,
     }
 
     async with db.raw_conn() as conn:
@@ -854,6 +855,8 @@ async def crawl_once(db, *, broadcast: bool = False, bot: Any | None = None) -> 
 
             posts: list[dict] = []
             pages_loaded = 0
+            safety_cap_triggered = False
+            reached_cursor_overlap = False
 
             if backfill:
                 horizon = now_ts - VK_CRAWL_BACKFILL_DAYS * 86400
@@ -872,21 +875,59 @@ async def crawl_once(db, *, broadcast: bool = False, bot: Any | None = None) -> 
             else:
                 since = max(0, last_seen_ts - VK_CRAWL_OVERLAP_SEC)
                 offset = 0
+                safety_cap_threshold = max(1, VK_CRAWL_MAX_PAGES_INC)
+                hard_cap = safety_cap_threshold * 10
                 while True:
                     page = await vk_wall_since(
                         gid, since, count=VK_CRAWL_PAGE_SIZE, offset=offset
                     )
                     pages_loaded += 1
                     posts.extend(page)
-                    if (
-                        len(page) == VK_CRAWL_PAGE_SIZE
-                        and page
-                        and min(p["date"] for p in page) >= since
-                        and pages_loaded < 1 + VK_CRAWL_MAX_PAGES_INC
-                    ):
-                        offset += VK_CRAWL_PAGE_SIZE
-                        continue
-                    break
+
+                    if page:
+                        oldest_page_post = min(
+                            page, key=lambda p: (p["date"], p["post_id"])
+                        )
+                        if oldest_page_post["date"] < last_seen_ts or (
+                            oldest_page_post["date"] == last_seen_ts
+                            and oldest_page_post["post_id"] <= last_post_id
+                        ):
+                            reached_cursor_overlap = True
+
+                    if not page or len(page) < VK_CRAWL_PAGE_SIZE:
+                        break
+
+                    if reached_cursor_overlap:
+                        break
+
+                    if pages_loaded >= safety_cap_threshold:
+                        safety_cap_triggered = True
+                    if pages_loaded >= hard_cap:
+                        logging.warning(
+                            "vk.crawl.inc.hard_cap group=%s pages=%s since=%s last_seen=%s",
+                            gid,
+                            pages_loaded,
+                            since,
+                            last_seen_ts,
+                        )
+                        break
+
+                    offset += VK_CRAWL_PAGE_SIZE
+
+                if safety_cap_triggered:
+                    stats["safety_cap_hits"] += 1
+                    logging.warning(
+                        "vk.crawl.inc.safety_cap group=%s pages=%s threshold=%s", 
+                        gid,
+                        pages_loaded,
+                        safety_cap_threshold,
+                    )
+                    try:
+                        import main
+
+                        main.vk_crawl_safety_cap_total += 1
+                    except Exception:
+                        pass
 
             pages_per_group.append(pages_loaded)
 
@@ -951,10 +992,18 @@ async def crawl_once(db, *, broadcast: bool = False, bot: Any | None = None) -> 
                 if ts > max_ts or (ts == max_ts and pid > max_pid):
                     max_ts, max_pid = ts, pid
 
+            next_cursor_ts = max_ts
+            next_cursor_pid = max_pid
+            if safety_cap_triggered and max_ts > 0:
+                adjusted_ts = max(last_seen_ts, max_ts - VK_CRAWL_OVERLAP_SEC)
+                if adjusted_ts < next_cursor_ts:
+                    next_cursor_ts = adjusted_ts
+                    next_cursor_pid = 0
+
             async with db.raw_conn() as conn:
                 await conn.execute(
                     "INSERT OR REPLACE INTO vk_crawl_cursor(group_id, last_seen_ts, last_post_id) VALUES(?,?,?)",
-                    (gid, max_ts, max_pid),
+                    (gid, next_cursor_ts, next_cursor_pid),
                 )
                 await conn.commit()
 
