@@ -281,7 +281,6 @@ async def build_exhibitions_digest_candidates(
     """Select exhibition events for the digest."""
 
     today_iso = now.date().isoformat()
-    end_limit_iso = (now + timedelta(days=14)).date().isoformat()
 
     async with db.get_session() as session:
         res = await session.execute(
@@ -290,9 +289,8 @@ async def build_exhibitions_digest_candidates(
                 Event.event_type == "выставка",
                 Event.end_date.is_not(None),
                 Event.end_date >= today_iso,
-                Event.end_date <= end_limit_iso,
             )
-            .order_by(Event.end_date, Event.date, Event.time)
+            .order_by(Event.date, Event.time)
         )
         events = list(res.scalars().all())
 

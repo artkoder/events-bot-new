@@ -174,6 +174,42 @@ async def test_build_exhibitions_digest_candidates_includes_ongoing(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_build_exhibitions_digest_candidates_keeps_past_start_in_horizon(tmp_path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    now = datetime(2025, 5, 1, 12, 0)
+
+    async with db.get_session() as session:
+        def add_event(offset_days: int, *, duration_days: int, title: str):
+            start = now + timedelta(days=offset_days)
+            ev = Event(
+                title=title,
+                description="d",
+                date=start.strftime("%Y-%m-%d"),
+                time="15:00",
+                location_name="x",
+                source_text="s",
+                event_type="выставка",
+                source_post_url="http://example.com/" + title,
+                end_date=(start + timedelta(days=duration_days)).strftime("%Y-%m-%d"),
+            )
+            session.add(ev)
+
+        add_event(-2, duration_days=5, title="ongoing")
+        for idx in range(8):
+            duration = 0 if idx == 7 else 1
+            add_event(idx, duration_days=duration, title=f"e{idx}")
+        await session.commit()
+
+    events, horizon = await build_exhibitions_digest_candidates(db, now)
+    titles = [e.title for e in events]
+
+    assert horizon == 7
+    assert len(events) == 9
+    assert "ongoing" in titles
+
+
+@pytest.mark.asyncio
 async def test_build_lectures_digest_candidates_limit(tmp_path):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
