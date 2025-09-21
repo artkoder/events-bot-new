@@ -20615,9 +20615,9 @@ async def _vkrev_build_shortpost(
         ev.title.upper(),
         "",
     ]
+    lines.append(date_line)
     if type_line:
         lines.append(type_line)
-    lines.append(date_line)
     if ev.ticket_link:
         if getattr(ev, "is_free", False):
             lines.append(f"🆓 Бесплатно, по регистрации {ev.ticket_link}")
