@@ -19620,12 +19620,15 @@ async def handle_vk_list(
         info = ", ".join(info_parts)
         if updated_at:
             try:
-                parsed_updated = datetime.fromisoformat(updated_at)
-                if parsed_updated.tzinfo is None:
-                    parsed_updated = parsed_updated.replace(tzinfo=timezone.utc)
+                if isinstance(updated_at, (int, float)):
+                    parsed_updated = datetime.fromtimestamp(updated_at, tz=timezone.utc)
+                else:
+                    parsed_updated = datetime.fromisoformat(updated_at)
+                    if parsed_updated.tzinfo is None:
+                        parsed_updated = parsed_updated.replace(tzinfo=timezone.utc)
                 human_updated = parsed_updated.astimezone(LOCAL_TZ).strftime("%Y-%m-%d %H:%M")
-            except ValueError:
-                human_updated = updated_at
+            except (ValueError, TypeError):
+                human_updated = str(updated_at)
         else:
             human_updated = "-"
         lines.append(
