@@ -19459,12 +19459,12 @@ async def handle_vk_list(
         for key, label in VK_STATUS_LABELS:
             max_value_len = max(len(str(item[2][key])) for item in page_items)
             base_width = max(len(label), max_value_len)
-            count_widths[key] = max(1, math.ceil(base_width * 1.7))
+            count_widths[key] = max(1, math.ceil(base_width * 1.87))
     else:
         count_widths = {}
         for key, label in VK_STATUS_LABELS:
             base_width = len(label)
-            count_widths[key] = max(1, math.ceil(base_width * 1.7))
+            count_widths[key] = max(1, math.ceil(base_width * 1.87))
 
     status_header_parts = [f" {label} " for _, label in VK_STATUS_LABELS]
     status_header_line = "|".join(status_header_parts)
