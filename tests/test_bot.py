@@ -5620,11 +5620,11 @@ async def test_events_markup_includes_rewrite_status(tmp_path: Path):
     _, markup = await main.build_events_message(db, target, timezone.utc)
 
     first_row = markup.inline_keyboard[0]
-    assert first_row[2].text == f"✂️ {first_id}"
+    assert first_row[2].text == f"✂️ Рерайт {first_id}"
     assert first_row[2].callback_data == f"vkrev:shortpost:{first_id}"
 
     second_row = markup.inline_keyboard[1]
-    assert second_row[2].text == f"✅ {second_id}"
+    assert second_row[2].text == f"✅ Рерайт {second_id}"
     assert second_row[2].callback_data == f"vkrev:shortpost:{second_id}"
 
 
