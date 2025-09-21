@@ -38,6 +38,17 @@ def test_format_event_daily_prefers_telegraph_for_vk_queue() -> None:
     assert '<a href="https://telegra.ph/test">' in rendered
 
 
+def test_format_event_daily_prefers_telegraph_for_vk_source_url() -> None:
+    event = make_event(
+        source_post_url="https://vk.com/wall-1_3",
+        telegraph_url="https://telegra.ph/source",
+    )
+
+    rendered = main.format_event_daily(event)
+
+    assert '<a href="https://telegra.ph/source">' in rendered
+
+
 def test_format_event_daily_handles_timezone_aware_added_at() -> None:
     event = make_event(
         added_at=datetime(2024, 1, 2, 12, tzinfo=timezone.utc),
