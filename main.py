@@ -14196,6 +14196,11 @@ async def merge_festivals(
         logging.warning("merge_festivals: identical ids src=%s dst=%s", src_id, dst_id)
         return False
 
+    moved_events_count = 0
+    aliases_added = 0
+    photos_added = 0
+    description_updated = False
+
     async with db.get_session() as session:
         src = await session.get(Festival, src_id)
         dst = await session.get(Festival, dst_id)
@@ -14209,6 +14214,14 @@ async def merge_festivals(
         src_name = src.name
         dst_name = dst.name
         dst_pk = dst.id
+
+        events_to_move_res = await session.execute(
+            select(Event.id).where(Event.festival == src_name)
+        )
+        moved_events_count = len(list(events_to_move_res.scalars()))
+
+        dst_photos_before = {url for url in list(dst.photo_urls or []) if url}
+        dst_cover_before = dst.photo_url
 
         await session.execute(
             update(Event).where(Event.festival == src_name).values(festival=dst_name)
@@ -14225,12 +14238,28 @@ async def merge_festivals(
         elif src.photo_url and not dst.photo_url:
             dst.photo_url = src.photo_url
 
+        if merged_photos:
+            photos_added = sum(
+                1 for url in merged_photos if url and url not in dst_photos_before
+            )
+        elif (
+            dst.photo_url
+            and dst.photo_url != dst_cover_before
+            and dst.photo_url not in dst_photos_before
+        ):
+            photos_added = 1
+
         def _fill(field: str) -> None:
             dst_val = getattr(dst, field)
             src_val = getattr(src, field)
             if (dst_val is None or dst_val == "") and src_val:
                 setattr(dst, field, src_val)
 
+        existing_aliases = {
+            normalized
+            for alias in list(dst.aliases or [])
+            if (normalized := normalize_alias(alias))
+        }
         for field in (
             "full_name",
             "description",
@@ -14274,6 +14303,7 @@ async def merge_festivals(
         add_alias(src.full_name)
 
         dst.aliases = merged_aliases
+        aliases_added = sum(1 for alias in merged_aliases if alias not in existing_aliases)
 
         events_res = await session.execute(
             select(Event).where(Event.festival == dst_name)
@@ -14299,10 +14329,20 @@ async def merge_festivals(
         if new_description and new_description != (dst.description or ""):
             dst.description = new_description
             await session.commit()
+            description_updated = True
 
     await sync_festival_page(db, dst_name)
     await rebuild_fest_nav_if_changed(db)
     await sync_festival_vk_post(db, dst_name, bot)
+    logging.info(
+        "merge_festivals: merged src=%s dst=%s events_moved=%s aliases_added=%s photos_added=%s description_updated=%s",
+        src_id,
+        dst_id,
+        moved_events_count,
+        aliases_added,
+        photos_added,
+        description_updated,
+    )
     return True
 
 
