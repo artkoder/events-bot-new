@@ -44,6 +44,10 @@ async def test_vk_list_shows_numbers_and_default_time(tmp_path):
                     "19:00" if idx == 1 else None,
                 ),
             )
+        await conn.execute(
+            "INSERT INTO vk_crawl_cursor(group_id, updated_at) VALUES(?, ?)",
+            (1, "2024-05-31 12:34:56"),
+        )
         # inbox stats for first two groups
         for post_id in range(2):
             await conn.execute(
@@ -73,6 +77,7 @@ async def test_vk_list_shows_numbers_and_default_time(tmp_path):
     lines = bot.messages[0].text.splitlines()
     assert lines[0].startswith("1.")
     assert "типовое время: 19:00" in lines[0]
+    assert "последняя проверка: 2024-05-31 12:34" in lines[0]
     assert lines[1] == " Pending | Skipped | Imported | Rejected "
     assert (
         lines[2]
@@ -80,6 +85,7 @@ async def test_vk_list_shows_numbers_and_default_time(tmp_path):
     )
     assert lines[3].startswith("2.")
     assert "типовое время: -" in lines[3]
+    assert ", последняя проверка: -" in lines[3]
     assert lines[4] == " Pending | Skipped | Imported | Rejected "
     assert (
         lines[5]
