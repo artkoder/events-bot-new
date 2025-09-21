@@ -21676,6 +21676,11 @@ async def _process_forwarded(
             ocr_line = base_line
     if not results:
         logging.info("no events parsed from forwarded text")
+        await bot.send_message(
+            message.chat.id,
+            "Я не смог найти события в пересланном посте. "
+            "Попробуйте добавить событие вручную или свяжитесь с поддержкой.",
+        )
         return
     for saved, added, lines, status in results:
         if status == "missing":
