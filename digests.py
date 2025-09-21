@@ -664,6 +664,9 @@ async def normalize_titles_via_4o(
 ) -> List[dict[str, str]]:
     """Normalize event titles using model 4o with regex fallback."""
 
+    if event_kind == "exhibition":
+        return [_normalize_title_fallback(t, event_kind="exhibition") for t in titles]
+
     from main import ask_4o  # local import to avoid a cycle
     import json
 
@@ -749,17 +752,29 @@ async def normalize_titles_via_4o(
     return [_normalize_title_fallback(t, event_kind=kind) for t in titles]
 
 
+_LEADING_EMOJI_RE = re.compile(
+    r"^([\U0001F300-\U0010FFFF](?:\uFE0F|[\U0001F3FB-\U0001F3FF])?"
+    r"(?:\u200D[\U0001F300-\U0010FFFF](?:\uFE0F|[\U0001F3FB-\U0001F3FF])?)*)"
+)
+
+
+def _split_leading_emoji(title: str) -> tuple[str, str]:
+    match = _LEADING_EMOJI_RE.match(title)
+    if not match:
+        return "", title
+    emoji = match.group(0)
+    return emoji, title[len(emoji) :]
+
+
 def _normalize_title_fallback(
     title: str, *, event_kind: str = "lecture"
 ) -> dict[str, str]:
     """Fallback normalization used when LLM is unavailable."""
 
-    # Extract leading emoji if any
-    emoji_match = re.match(r"^[\U0001F300-\U0010FFFF]", title)
-    emoji = ""
-    if emoji_match:
-        emoji = emoji_match.group(0)
-        title = title[len(emoji) :]
+    emoji, rest = _split_leading_emoji(title)
+
+    if event_kind == "exhibition":
+        return {"emoji": emoji, "title_clean": rest.strip()}
 
     kind = event_kind if event_kind in {"lecture", "masterclass"} else "lecture"
     if kind == "masterclass":
@@ -769,7 +784,7 @@ def _normalize_title_fallback(
         removal_pattern = r"^(?:[^\w]*?)*(?:Лекция|Лекторий)[\s:—-]*"
         prefix = "Лекция"
 
-    title = re.sub(removal_pattern, "", title, flags=re.IGNORECASE)
+    title = re.sub(removal_pattern, "", rest, flags=re.IGNORECASE)
     title = re.sub(r"^от\s+", "", title, flags=re.IGNORECASE)
     title = re.sub(r"\s+", " ", title).strip()
 

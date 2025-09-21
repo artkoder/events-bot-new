@@ -374,9 +374,6 @@ async def test_build_exhibitions_digest_preview(monkeypatch):
         captured_payload["value"] = exhibitions
         return "интро про выставки"
 
-    async def fake_normalize(titles, *, event_kind="lecture"):
-        return [{"emoji": "🖼️", "title_clean": "Импрессионисты"} for _ in titles]
-
     async def fake_candidates(db, now, digest_id=None):
         return [event], 14
 
@@ -384,7 +381,6 @@ async def test_build_exhibitions_digest_preview(monkeypatch):
         "digests.compose_exhibitions_intro_via_4o",
         fake_compose_exhibitions_intro,
     )
-    monkeypatch.setattr("digests.normalize_titles_via_4o", fake_normalize)
     monkeypatch.setattr(
         "digests.build_exhibitions_digest_candidates", fake_candidates
     )
@@ -398,13 +394,13 @@ async def test_build_exhibitions_digest_preview(monkeypatch):
     assert intro == "интро про выставки"
     assert captured_payload["value"] == [
         {
-            "title": "Импрессионисты",
+            "title": "Выставка «Импрессионисты»",
             "description": "Картины из музеев Европы.",
             "date_range": {"start": "2025-05-02", "end": "2025-05-20"},
         }
     ]
     assert horizon == 14
-    assert norm_titles == ["Импрессионисты"]
+    assert norm_titles == ["Выставка «Импрессионисты»"]
     assert len(lines) == 1
     assert events == [event]
 
@@ -486,6 +482,25 @@ async def test_normalize_titles_via_llm_masterclass(monkeypatch):
     assert res[0]["title_clean"] == "Мастер-класс Марии Ивановой: Акварель"
     assert res[1]["emoji"] == ""
     assert res[1]["title_clean"] == "Готовим штрудель"
+
+
+@pytest.mark.asyncio
+async def test_normalize_titles_exhibition_keeps_original(monkeypatch):
+    async def fake_ask(prompt, max_tokens=0):
+        raise AssertionError("LLM should not be called for exhibitions")
+
+    monkeypatch.setattr("main.ask_4o", fake_ask)
+    titles = [
+        "🖼️ Выставка — Импрессионисты",
+        "Современное искусство без эмодзи",
+    ]
+
+    res = await normalize_titles_via_4o(titles, event_kind="exhibition")
+
+    assert res[0]["emoji"] == "🖼️"
+    assert res[0]["title_clean"] == "Выставка — Импрессионисты"
+    assert res[1]["emoji"] == ""
+    assert res[1]["title_clean"] == "Современное искусство без эмодзи"
 
 
 def test_format_event_line_and_link_priority():
