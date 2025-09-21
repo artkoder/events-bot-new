@@ -510,6 +510,7 @@ vk_crawl_groups_total = 0
 vk_crawl_posts_scanned_total = 0
 vk_crawl_matched_total = 0
 vk_crawl_duplicates_total = 0
+vk_crawl_safety_cap_total = 0
 vk_inbox_inserted_total = 0
 vk_review_actions_total: dict[str, int] = defaultdict(int)
 vk_repost_attempts_total = 0
@@ -536,6 +537,7 @@ def format_metrics() -> str:
     lines.append(f"vk_crawl_posts_scanned_total {vk_crawl_posts_scanned_total}")
     lines.append(f"vk_crawl_matched_total {vk_crawl_matched_total}")
     lines.append(f"vk_crawl_duplicates_total {vk_crawl_duplicates_total}")
+    lines.append(f"vk_crawl_safety_cap_total {vk_crawl_safety_cap_total}")
     lines.append(f"vk_inbox_inserted_total {vk_inbox_inserted_total}")
     for action, count in vk_review_actions_total.items():
         lines.append(

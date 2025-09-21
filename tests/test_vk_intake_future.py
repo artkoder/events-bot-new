@@ -1,3 +1,4 @@
+import logging
 import os
 import sys
 import time
@@ -89,3 +90,86 @@ async def test_crawl_inserts_blank_single_photo_post(tmp_path, monkeypatch):
         )
         row = await cur.fetchone()
     assert row == ("   ", vk_intake.OCR_PENDING_SENTINEL, 0, None)
+
+
+@pytest.mark.asyncio
+async def test_incremental_pagination_processes_full_backlog(
+    tmp_path, monkeypatch, caplog
+):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    async with db.raw_conn() as conn:
+        await conn.execute(
+            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time) VALUES(?,?,?,?,?)",
+            (1, "g", "Group", "", None),
+        )
+        last_seen_ts = int(time.time()) - 1000
+        await conn.execute(
+            "INSERT INTO vk_crawl_cursor(group_id, last_seen_ts, last_post_id) VALUES(?,?,?)",
+            (1, last_seen_ts, 0),
+        )
+        await conn.commit()
+
+    monkeypatch.setattr(vk_intake, "VK_CRAWL_PAGE_SIZE", 2)
+    monkeypatch.setattr(vk_intake, "VK_CRAWL_MAX_PAGES_INC", 1)
+    monkeypatch.setattr(vk_intake, "VK_CRAWL_OVERLAP_SEC", 5)
+    monkeypatch.setattr(vk_intake, "match_keywords", lambda text: (True, ["test"]))
+    monkeypatch.setattr(vk_intake, "detect_date", lambda text: True)
+    monkeypatch.setattr(
+        vk_intake,
+        "extract_event_ts_hint",
+        lambda text, default_time=None, *, tz=None: int(time.time()) + 86400,
+    )
+
+    base_ts = int(time.time()) - 900
+    total_posts = 6
+    posts = [
+        {
+            "date": base_ts + i * 10,
+            "post_id": 100 + i,
+            "text": "концерт 01.01.2099",
+            "photos": [],
+        }
+        for i in range(total_posts)
+    ]
+
+    async def fake_wall_since(gid, since, count, offset=0):
+        filtered = [p for p in posts if p["date"] >= since]
+        filtered.sort(key=lambda p: (p["date"], p["post_id"]), reverse=True)
+        start = offset
+        end = offset + count
+        return filtered[start:end]
+
+    monkeypatch.setattr(main, "vk_wall_since", fake_wall_since)
+
+    async def no_sleep(_):
+        pass
+
+    monkeypatch.setattr(vk_intake.asyncio, "sleep", no_sleep)
+
+    caplog.set_level(logging.WARNING)
+    stats = await vk_intake.crawl_once(db)
+
+    assert stats["added"] == total_posts
+    assert stats["safety_cap_hits"] == 1
+    assert any("vk.crawl.inc.safety_cap" in rec.message for rec in caplog.records)
+
+    async with db.raw_conn() as conn:
+        cur = await conn.execute("SELECT post_id FROM vk_inbox ORDER BY post_id")
+        inbox_rows = await cur.fetchall()
+        cur = await conn.execute(
+            "SELECT last_seen_ts, last_post_id FROM vk_crawl_cursor WHERE group_id=?",
+            (1,),
+        )
+        cursor_row = await cur.fetchone()
+
+    assert [pid for (pid,) in inbox_rows] == [100 + i for i in range(total_posts)]
+
+    newest_ts = max(p["date"] for p in posts)
+    expected_cursor_ts = max(last_seen_ts, newest_ts - vk_intake.VK_CRAWL_OVERLAP_SEC)
+    if expected_cursor_ts < newest_ts:
+        expected_cursor = (expected_cursor_ts, 0)
+    else:
+        newest_pid = max(p["post_id"] for p in posts if p["date"] == newest_ts)
+        expected_cursor = (expected_cursor_ts, newest_pid)
+    assert cursor_row == expected_cursor
