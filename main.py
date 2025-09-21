@@ -12740,6 +12740,43 @@ def format_event_daily(
     return "\n".join(lines)
 
 
+def format_event_daily_inline(
+    e: Event,
+    partner_creator_ids: Collection[int] | None = None,
+) -> str:
+    """Return a compact single-line HTML representation for daily lists."""
+
+    markers: list[str] = []
+    if is_recent(e):
+        markers.append("\U0001f6a9")
+    if e.is_free:
+        markers.append("🟡")
+    prefix = "".join(f"{m} " for m in markers)
+
+    emoji_part = ""
+    if e.emoji and not e.title.strip().startswith(e.emoji):
+        emoji_part = f"{e.emoji} "
+
+    partner_creator_ids = partner_creator_ids or ()
+    is_partner_creator = (
+        e.creator_id in partner_creator_ids if e.creator_id is not None else False
+    )
+    title = html.escape(e.title)
+    link_href: str | None = None
+    if is_partner_creator and is_vk_wall_url(e.source_post_url):
+        link_href = e.source_post_url
+    elif is_vk_wall_url(e.source_post_url):
+        link_href = e.telegraph_url or e.source_post_url
+    elif is_vk_wall_url(e.source_vk_post_url):
+        link_href = e.telegraph_url or e.source_vk_post_url
+    elif e.source_post_url:
+        link_href = e.source_post_url
+    if link_href:
+        title = f'<a href="{html.escape(link_href)}">{title}</a>'
+
+    return f"{prefix}{emoji_part}{title}".strip()
+
+
 def format_exhibition_md(e: Event) -> str:
     prefix = ""
     if is_recent(e):
@@ -15198,22 +15235,39 @@ async def build_daily_posts(
     section1 = "\n".join(lines1)
 
     lines2 = [f"<b><i>+{len(events_new)} ДОБАВИЛИ В АНОНС</i></b>"]
-    for e in events_new:
-        w_url = None
-        d = parse_iso_date(e.date)
-        if d and d.weekday() == 5:
-            w = weekend_map.get(d.isoformat())
-            if w:
-                w_url = w.url
-        lines2.append("")
-        lines2.append(
-            format_event_daily(
-                e,
-                weekend_url=w_url,
-                festival=fest_map.get((e.festival or "").casefold()),
-                partner_creator_ids=partner_creator_ids,
+    if len(events_new) > 9:
+        grouped: dict[str, list[Event]] = {}
+        for e in events_new:
+            raw_city = (e.city or "Калининград").strip()
+            city = raw_city or "Калининград"
+            grouped.setdefault(city, []).append(e)
+        for city, events in grouped.items():
+            lines2.append("")
+            lines2.append(html.escape(city.upper()))
+            for e in events:
+                lines2.append(
+                    format_event_daily_inline(
+                        e,
+                        partner_creator_ids=partner_creator_ids,
+                    )
+                )
+    else:
+        for e in events_new:
+            w_url = None
+            d = parse_iso_date(e.date)
+            if d and d.weekday() == 5:
+                w = weekend_map.get(d.isoformat())
+                if w:
+                    w_url = w.url
+            lines2.append("")
+            lines2.append(
+                format_event_daily(
+                    e,
+                    weekend_url=w_url,
+                    festival=fest_map.get((e.festival or "").casefold()),
+                    partner_creator_ids=partner_creator_ids,
+                )
             )
-        )
     section2 = "\n".join(lines2)
 
     buttons = []
