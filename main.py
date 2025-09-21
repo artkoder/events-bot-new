@@ -14,6 +14,7 @@ import time as unixtime
 import time as _time
 import tempfile
 import calendar
+import math
 from collections import Counter
 
 
@@ -19450,9 +19451,13 @@ async def handle_vk_list(
         count_widths = {}
         for key, label in VK_STATUS_LABELS:
             max_value_len = max(len(str(item[2][key])) for item in page_items)
-            count_widths[key] = max(len(label), max_value_len)
+            base_width = max(len(label), max_value_len)
+            count_widths[key] = max(1, math.ceil(base_width * 1.7))
     else:
-        count_widths = {key: len(label) for key, label in VK_STATUS_LABELS}
+        count_widths = {}
+        for key, label in VK_STATUS_LABELS:
+            base_width = len(label)
+            count_widths[key] = max(1, math.ceil(base_width * 1.7))
 
     status_header_parts = [
         f" {label:<{count_widths[key]}} " for key, label in VK_STATUS_LABELS
