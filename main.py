@@ -773,13 +773,24 @@ def _is_tourist_menu_markup(
 ) -> bool:
     if not markup or not markup.inline_keyboard:
         return False
+    has_reason_buttons = False
+    has_done = False
+    has_skip = False
     for row in markup.inline_keyboard:
         for btn in row:
             data = btn.callback_data
             if not data:
                 continue
-            if data.startswith("tourist:fxdone:") or data.startswith("tourist:fxskip:"):
-                return True
+            if data.startswith("tourist:fx:"):
+                has_reason_buttons = True
+            elif data.startswith("tourist:fxdone"):
+                has_done = True
+            elif data.startswith("tourist:fxskip"):
+                has_skip = True
+    if has_reason_buttons:
+        return True
+    if has_done and has_skip:
+        return True
     return False
 
 

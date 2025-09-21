@@ -237,6 +237,66 @@ async def test_tourist_yes_callback_updates_event(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_tourist_no_keeps_base_keyboard(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    async with db.get_session() as session:
+        session.add(User(user_id=1))
+        event = Event(
+            title="Title",
+            description="",
+            date="2025-09-01",
+            time="10:00",
+            location_name="Loc",
+            source_text="Src",
+        )
+        session.add(event)
+        await session.commit()
+        await session.refresh(event)
+        event_id = event.id
+    async with db.get_session() as session:
+        event = await session.get(Event, event_id)
+        markup = types.InlineKeyboardMarkup(
+            inline_keyboard=append_tourist_block(
+                [[types.InlineKeyboardButton(text="Edit", callback_data="edit")]],
+                event,
+                "tg",
+            )
+        )
+        text = build_event_card_message("Event added", event, ["title: Title"])
+    message = types.Message.model_validate(
+        {
+            "message_id": 150,
+            "date": 0,
+            "chat": {"id": 15, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": text,
+            "reply_markup": markup.model_dump(),
+        }
+    )
+    callback = make_callback(f"tourist:no:{event_id}", message)
+    answers = patch_answer(monkeypatch)
+    bot = DummyBot()
+
+    await main.process_request(callback, db, bot)
+
+    assert any(call["text"] == "Отмечено" for call in answers)
+    assert bot.edited_text_calls
+    final_markup = bot.edited_text_calls[-1]["reply_markup"]
+    assert not main._is_tourist_menu_markup(final_markup)
+    assert all(
+        not (btn.callback_data or "").startswith("tourist:fx:")
+        for row in final_markup.inline_keyboard
+        for btn in row
+    )
+    assert all(
+        (btn.callback_data or "") != f"tourist:fxskip:{event_id}"
+        for row in final_markup.inline_keyboard
+        for btn in row
+    )
+
+
+@pytest.mark.asyncio
 async def test_tourist_factor_flow(tmp_path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
