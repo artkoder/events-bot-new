@@ -4,19 +4,23 @@ from typing import List
 MD_BOLD   = re.compile(r'(?<!\w)(\*\*|__)(.+?)\1(?!\w)', re.S)
 MD_ITALIC = re.compile(r'(?<!\w)(\*|_)(.+?)\1(?!\w)', re.S)
 
-MD_LINK   = re.compile(r'\[([^\]]+?)\]\((https?://[^)]+?)\)')
+MD_LINK   = re.compile(r'\[([^\]]+?)\]\((https?://(?:\\\)|[^)])+?)\)')
 MD_HEADER = re.compile(r'^(#{1,6})\s+(.+)$', re.M)
 
 _BARE_LINK_RE = re.compile(r'(?<!href=["\'])(https?://[^\s<>)]+)')
-_TEXT_LINK_RE = re.compile(r'([^<\[]+?)\s*\((https?://[^)]+)\)')
+_TEXT_LINK_RE = re.compile(r'([^<\[]+?)\s*\((https?://(?:\\\)|[^)])+)\)')
 _VK_LINK_RE = re.compile(r'\[([^|\]]+)\|([^\]]+)\]')
 _TG_MENTION_RE = re.compile(r'(?<![\w/@])@([a-zA-Z0-9_]{4,32})')
+
+
+def _unescape_md_url(url: str) -> str:
+    return url.replace("\\)", ")").replace("\\\\", "\\")
 
 def simple_md_to_html(text: str) -> str:
     """Конвертирует небольшой подмножество markdown → HTML для Telegraph."""
     text = html.escape(text)
     text = MD_HEADER.sub(lambda m: f'<h{len(m[1])}>{m[2]}</h{len(m[1])}>', text)
-    text = MD_LINK.sub(lambda m: f'<a href="{m[2]}">{m[1]}</a>', text)
+    text = MD_LINK.sub(lambda m: f'<a href="{_unescape_md_url(m[2])}">{m[1]}</a>', text)
     text = MD_BOLD.sub(r'<b>\2</b>', text)
     text = MD_ITALIC.sub(r'<i>\2</i>', text)
 
@@ -27,7 +31,7 @@ def simple_md_to_html(text: str) -> str:
 def linkify_for_telegraph(text_or_html: str) -> str:
     """Преобразует голые URL и пары «текст (url)» в кликабельные ссылки."""
     def repl_text(m: re.Match[str]) -> str:
-        label, href = m.group(1).strip(), m.group(2)
+        label, href = m.group(1).strip(), _unescape_md_url(m.group(2))
         return f'<a href="{href}">{label}</a>'
 
     def repl_bare(m: re.Match[str]) -> str:
@@ -44,7 +48,7 @@ def linkify_for_telegraph(text_or_html: str) -> str:
         return f'<a href="https://t.me/{username}">@{username}</a>'
 
     text = _VK_LINK_RE.sub(repl_vk, text_or_html)
-    text = MD_LINK.sub(lambda m: f'<a href="{m[2]}">{m[1]}</a>', text)
+    text = MD_LINK.sub(lambda m: f'<a href="{_unescape_md_url(m[2])}">{m[1]}</a>', text)
     text = _TEXT_LINK_RE.sub(repl_text, text)
     if "@" in text:
         parts = re.split(r'(<a\b[^>]*>.*?</a>)', text, flags=re.IGNORECASE | re.DOTALL)
@@ -62,7 +66,7 @@ def expose_links_for_vk(text_or_html: str) -> str:
         return f"{label} ({href})"
 
     def repl_md(m: re.Match[str]) -> str:
-        label, href = m.group(1), m.group(2)
+        label, href = m.group(1), _unescape_md_url(m.group(2))
         return f"{label} ({href})"
 
     text = re.sub(
@@ -71,7 +75,7 @@ def expose_links_for_vk(text_or_html: str) -> str:
         text_or_html,
         flags=re.IGNORECASE | re.DOTALL,
     )
-    text = re.sub(r"\[([^\]]+)\]\((https?://[^)]+)\)", repl_md, text)
+    text = re.sub(r"\[([^\]]+)\]\((https?://(?:\\\)|[^)])+)\)", repl_md, text)
     return text
 
 
