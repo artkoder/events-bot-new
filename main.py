@@ -20862,9 +20862,25 @@ async def _vkrev_publish_shortpost(
         return
     op_state = vk_shortpost_ops.get(event_id)
     poster_texts = await get_event_poster_texts(event_id, db)
+    def _ensure_publish_markup(message: str) -> str:
+        lines = message.split("\n")
+        markup = f"[{vk_url}|Источник]"
+        for idx, line in enumerate(lines):
+            if line.strip() == "Источник":
+                if idx + 1 < len(lines):
+                    del lines[idx + 1]
+                lines[idx] = markup
+                return "\n".join(lines)
+        for idx, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped.startswith("[") and stripped.endswith("|Источник]"):
+                lines[idx] = markup
+                return "\n".join(lines)
+        return message
+
     if text is None:
         if op_state and op_state.preview_text is not None:
-            message = op_state.preview_text
+            message = _ensure_publish_markup(op_state.preview_text)
             link_attachment = (
                 op_state.preview_link_attachment
                 if op_state.preview_link_attachment is not None
@@ -20877,7 +20893,7 @@ async def _vkrev_publish_shortpost(
                 poster_texts=poster_texts,
             )
     else:
-        message = text
+        message = _ensure_publish_markup(text)
         link_attachment = ev.telegraph_url or vk_url
 
     photo_attachments: list[str] = []
