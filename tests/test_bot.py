@@ -5589,6 +5589,46 @@ async def test_nav_future_has_prev(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_events_markup_includes_rewrite_status(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    target = date.fromisoformat(FUTURE_DATE)
+    async with db.get_session() as session:
+        first = Event(
+            title="No VK",
+            description="d",
+            source_text="t",
+            date=target.isoformat(),
+            time="09:00",
+            location_name="Hall",
+        )
+        second = Event(
+            title="With VK",
+            description="d",
+            source_text="t",
+            date=target.isoformat(),
+            time="10:00",
+            location_name="Hall",
+            vk_repost_url="https://vk.com/wall-1_1",
+        )
+        session.add_all([first, second])
+        await session.commit()
+
+        first_id, second_id = first.id, second.id
+
+    _, markup = await main.build_events_message(db, target, timezone.utc)
+
+    first_row = markup.inline_keyboard[0]
+    assert first_row[2].text == f"✂️ {first_id}"
+    assert first_row[2].callback_data == f"vkrev:shortpost:{first_id}"
+
+    second_row = markup.inline_keyboard[1]
+    assert second_row[2].text == f"✅ {second_id}"
+    assert second_row[2].callback_data == f"vkrev:shortpost:{second_id}"
+
+
+@pytest.mark.asyncio
 async def test_build_events_message_includes_topic_badges(tmp_path: Path):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()

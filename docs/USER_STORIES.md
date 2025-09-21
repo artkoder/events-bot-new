@@ -32,4 +32,5 @@
 |US-28|User|follow the calendar link on a Telegraph page|ICS download on phone|
 |US-29|Moderator|manage recurring events|confirm regular schedule|
 |US-30|Admin|register calendar asset channel|ICS files available in Telegram|
+|US-31|Moderator|trigger VK rewrite from `/events` and see status|run a shortpost when `✂️` shows and verify publication via `✅`|
 |US-D02|Admin|manual lecture digest with preview and channel buttons|prepare and send posts quicker|

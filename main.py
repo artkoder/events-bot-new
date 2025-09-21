@@ -16654,17 +16654,24 @@ async def build_events_message(db: Database, target_date: date, tz: timezone, cr
     if not lines:
         lines.append("No events")
 
-    keyboard = [
-        [
-            types.InlineKeyboardButton(
-                text=f"\u274c {e.id}", callback_data=f"del:{e.id}:{target_date.isoformat()}"
-            ),
-            types.InlineKeyboardButton(
-                text=f"\u270e {e.id}", callback_data=f"edit:{e.id}"
-            ),
-        ]
-        for e in events
-    ]
+    keyboard = []
+    for e in events:
+        icon = "✂️" if not e.vk_repost_url else "✅"
+        keyboard.append(
+            [
+                types.InlineKeyboardButton(
+                    text=f"\u274c {e.id}",
+                    callback_data=f"del:{e.id}:{target_date.isoformat()}",
+                ),
+                types.InlineKeyboardButton(
+                    text=f"\u270e {e.id}", callback_data=f"edit:{e.id}"
+                ),
+                types.InlineKeyboardButton(
+                    text=f"{icon} {e.id}",
+                    callback_data=f"vkrev:shortpost:{e.id}",
+                ),
+            ]
+        )
 
     today = datetime.now(tz).date()
     prev_day = target_date - timedelta(days=1)

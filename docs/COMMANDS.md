@@ -19,7 +19,7 @@
 | `✂️ Сокращённый рерайт` | - | LLM-сжатый текст без фото, предпросмотр и правка перед публикацией. |
 | `/ask4o <text>` | any text | Send query to model 4o and show plain response (superadmin only). |
 | `/ocrtest` | - | Сравнить распознавание афиш между gpt-4o-mini и gpt-4o (только супер-админ). |
-| `/events [DATE]` | optional date `YYYY-MM-DD`, `DD.MM.YYYY` or `D месяц [YYYY]` | List events for the day with delete and edit buttons. Dates are shown as `DD.MM.YYYY`. Choosing **Edit** lists all fields with inline buttons including a toggle for "Бесплатно". |
+| `/events [DATE]` | optional date `YYYY-MM-DD`, `DD.MM.YYYY` or `D месяц [YYYY]` | List events for the day with delete, edit and VK rewrite buttons. The rewrite control launches the shortpost flow; it shows `✂️` when the event has no VK repost yet and `✅` once the saved `vk_repost_url` confirms publication. Dates are shown as `DD.MM.YYYY`. Choosing **Edit** lists all fields with inline buttons including a toggle for "Бесплатно". |
 | `/setchannel` | - | Choose an admin channel and register it as an announcement or calendar asset source. |
 | `/channels` | - | List admin channels showing registered and asset ones with disable buttons. |
 | `/regdailychannels` | - | Choose admin channels for daily announcements and set the VK group. |
