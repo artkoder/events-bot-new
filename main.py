@@ -19471,7 +19471,7 @@ async def handle_vk_list(
             f"{offset}. {name} (vk.com/{screen}) — {info}, типовое время: {dtime or '-'}"
         )
         value_parts = [
-            f" {counts[key]:>{count_widths[key]}} "
+            f" {counts[key]:<{count_widths[key]}} "
             for key, _ in VK_STATUS_LABELS
         ]
         lines.append(status_header_line)
