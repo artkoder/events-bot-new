@@ -272,6 +272,9 @@ async def test_shortpost_publish_uses_cached_preview(tmp_path, monkeypatch):
     await main._vkrev_publish_shortpost(77, db, bot, actor_chat_id=1, operator_id=10)
     assert build_calls == 1
     assert posts and posts[0]["message"].startswith("TEST")
+    lines = posts[0]["message"].split("\n")
+    assert "Источник" not in lines
+    assert "[https://vk.com/wall-1_2|Источник]" in lines
 
     main.vk_shortpost_ops.clear()
 
