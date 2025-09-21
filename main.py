@@ -802,13 +802,17 @@ def build_tourist_keyboard_block(
     if not getattr(event, "id", None):
         return []
     _ = source
+    yes_prefix = "✅ " if event.tourist_label == 1 else ""
+    no_prefix = "✅ " if event.tourist_label == 0 else ""
     rows: list[list[types.InlineKeyboardButton]] = [
         [
             types.InlineKeyboardButton(
-                text="Интересно туристам", callback_data=f"tourist:yes:{event.id}"
+                text=f"{yes_prefix}Интересно туристам",
+                callback_data=f"tourist:yes:{event.id}"
             ),
             types.InlineKeyboardButton(
-                text="Не интересно туристам", callback_data=f"tourist:no:{event.id}"
+                text=f"{no_prefix}Не интересно туристам",
+                callback_data=f"tourist:no:{event.id}"
             ),
         ],
         [

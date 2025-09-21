@@ -52,6 +52,14 @@ def patch_answer(monkeypatch):
     return calls
 
 
+def _find_button(markup: types.InlineKeyboardMarkup, callback_data: str) -> types.InlineKeyboardButton:
+    for row in markup.inline_keyboard:
+        for btn in row:
+            if btn.callback_data == callback_data:
+                return btn
+    raise AssertionError(f"Button {callback_data} not found")
+
+
 def make_callback(data: str, message: types.Message, user_id: int = 1) -> types.CallbackQuery:
     return types.CallbackQuery.model_validate(
         {
@@ -96,6 +104,14 @@ def test_tourist_block_appended(base_rows, source):
     assert "Интересно туристам" in texts
     assert "Причины" in texts
     assert "✍️ Комментарий" in texts
+    yes_button = _find_button(
+        types.InlineKeyboardMarkup(inline_keyboard=rows), f"tourist:yes:{event.id}"
+    )
+    no_button = _find_button(
+        types.InlineKeyboardMarkup(inline_keyboard=rows), f"tourist:no:{event.id}"
+    )
+    assert yes_button.text == "Интересно туристам"
+    assert no_button.text == "Не интересно туристам"
 
 
 def test_build_event_card_message_without_factors():
@@ -209,6 +225,18 @@ async def test_tourist_yes_callback_updates_event(tmp_path, monkeypatch):
     assert "🌍 Туристам: Да" in last_call["text"]
     assert "🧩" not in last_call["text"]
     markup = last_call["reply_markup"]
+    assert main._is_tourist_menu_markup(markup)
+    updated_keyboard = main.build_tourist_keyboard_block(updated, "tg")
+    yes_button = _find_button(
+        types.InlineKeyboardMarkup(inline_keyboard=updated_keyboard),
+        f"tourist:yes:{event_id}",
+    )
+    no_button = _find_button(
+        types.InlineKeyboardMarkup(inline_keyboard=updated_keyboard),
+        f"tourist:no:{event_id}",
+    )
+    assert yes_button.text == "✅ Интересно туристам"
+    assert no_button.text == "Не интересно туристам"
     reason_callbacks = [
         btn.callback_data
         for row in markup.inline_keyboard
@@ -294,6 +322,10 @@ async def test_tourist_no_keeps_base_keyboard(tmp_path, monkeypatch):
         for row in final_markup.inline_keyboard
         for btn in row
     )
+    yes_button = _find_button(final_markup, f"tourist:yes:{event_id}")
+    no_button = _find_button(final_markup, f"tourist:no:{event_id}")
+    assert yes_button.text == "Интересно туристам"
+    assert no_button.text == "✅ Не интересно туристам"
 
 
 @pytest.mark.asyncio
@@ -350,6 +382,11 @@ async def test_tourist_factor_flow(tmp_path, monkeypatch):
     assert bot.edited_text_calls
     last_text = bot.edited_text_calls[-1]["text"]
     assert "🧩 1 причин" in last_text
+    final_markup = bot.edited_text_calls[-1]["reply_markup"]
+    yes_button = _find_button(final_markup, f"tourist:yes:{event_id}")
+    no_button = _find_button(final_markup, f"tourist:no:{event_id}")
+    assert yes_button.text == "Интересно туристам"
+    assert no_button.text == "Не интересно туристам"
 
 
 @pytest.mark.asyncio
