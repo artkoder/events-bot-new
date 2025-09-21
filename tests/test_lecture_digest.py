@@ -493,7 +493,7 @@ def test_format_event_line_html_exhibition_end_date():
 
     line = format_event_line_html(e, None)
 
-    assert line == "10.05 по 12.05 18:30 | T"
+    assert line == "по 12.05 | T"
 
 
 def test_format_event_line_html_exhibition_missing_end_date(caplog):
@@ -513,7 +513,7 @@ def test_format_event_line_html_exhibition_missing_end_date(caplog):
 
     line = format_event_line_html(e, None)
 
-    assert line == "10.05 18:30 | T"
+    assert line == "10.05 | T"
     assert any("digest.end_date.missing" in r.message for r in caplog.records)
 
 
@@ -534,7 +534,7 @@ def test_format_event_line_html_exhibition_bad_end_date(caplog):
 
     line = format_event_line_html(e, None)
 
-    assert line == "10.05 18:30 | T"
+    assert line == "10.05 | T"
     assert any("digest.end_date.format" in r.message for r in caplog.records)
 
 

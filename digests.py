@@ -749,7 +749,8 @@ def format_event_line_html(
 
     dt = datetime.strptime(event.date, "%Y-%m-%d")
     date_part = dt.strftime("%d.%m")
-    if (event.event_type or "").lower() == "выставка":
+    is_exhibition = (event.event_type or "").lower() == "выставка"
+    if is_exhibition:
         end_raw = getattr(event, "end_date", None)
         if end_raw:
             try:
@@ -761,24 +762,26 @@ def format_event_line_html(
                     end_raw,
                 )
             else:
-                date_part = f"{date_part} по {end_dt.strftime('%d.%m')}"
+                date_part = f"по {end_dt.strftime('%d.%m')}"
         else:
             logging.warning(
                 "digest.end_date.missing event_id=%s event_type=%r",
                 getattr(event, "id", None),
                 event.event_type,
             )
-    time_part = ""
-    parsed = parse_start_time(event.time or "")
-    if parsed is not None:
-        hh, mm = parsed
-        time_part = f" {hh:02d}:{mm:02d}"
+        time_part = ""
     else:
-        logging.warning(
-            "digest.time.format event_id=%s time_raw=%r parsed=none",
-            getattr(event, "id", None),
-            event.time,
-        )
+        time_part = ""
+        parsed = parse_start_time(event.time or "")
+        if parsed is not None:
+            hh, mm = parsed
+            time_part = f" {hh:02d}:{mm:02d}"
+        else:
+            logging.warning(
+                "digest.time.format event_id=%s time_raw=%r parsed=none",
+                getattr(event, "id", None),
+                event.time,
+            )
 
     title = title_override or event.title
     if link_url:
