@@ -415,6 +415,14 @@ class Festival(SQLModel, table=True):
     source_chat_id: Optional[int] = None
     source_message_id: Optional[int] = None
     nav_hash: Optional[str] = None
+    created_at: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(
+            DateTime(timezone=True),
+            nullable=False,
+            server_default=text("CURRENT_TIMESTAMP"),
+        ),
+    )
 
 
 class JobTask(str, Enum):
