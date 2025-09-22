@@ -2889,6 +2889,7 @@ async def ensure_festival(
             source_post_url=source_post_url,
             source_chat_id=source_chat_id,
             source_message_id=source_message_id,
+            created_at=datetime.now(timezone.utc),
         )
         session.add(fest)
         await session.commit()
@@ -15135,6 +15136,7 @@ async def build_daily_posts(
     today = now.date()
     yesterday_utc = recent_cutoff(tz, now)
     fest_map: dict[str, Festival] = {}
+    recent_festival_entries: list[str] = []
     partner_creator_ids: set[int] = set()
     async with db.get_session() as session:
         res_today = await session.execute(
@@ -15173,7 +15175,18 @@ async def build_daily_posts(
         ).scalars().all()
 
         res_fests = await session.execute(select(Festival))
-        fest_map = {f.name: f for f in res_fests.scalars().all()}
+        festivals = res_fests.scalars().all()
+        fest_map = {f.name: f for f in festivals}
+        recent_festivals: list[tuple[datetime, str]] = []
+        for fest in festivals:
+            url = _festival_telegraph_url(fest)
+            if not url:
+                continue
+            created_at = _ensure_utc(getattr(fest, "created_at", None))
+            if created_at and created_at >= yesterday_utc:
+                recent_festivals.append((created_at, f"{fest.name}-{url}"))
+        recent_festivals.sort(key=lambda item: item[0])
+        recent_festival_entries = [entry for _, entry in recent_festivals]
 
         creator_ids = {
             e.creator_id
@@ -15292,6 +15305,10 @@ async def build_daily_posts(
                     partner_creator_ids=partner_creator_ids,
                 )
             )
+    if recent_festival_entries:
+        lines2.append("")
+        lines2.append("ФЕСТИВАЛИ")
+        lines2.append(" ".join(recent_festival_entries))
     section2 = "\n".join(lines2)
 
     buttons = []

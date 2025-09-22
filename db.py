@@ -315,7 +315,8 @@ class Database:
                     source_text TEXT,
                     source_post_url TEXT,
                     source_chat_id INTEGER,
-                    source_message_id INTEGER
+                    source_message_id INTEGER,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
                 """
             )
@@ -330,6 +331,11 @@ class Database:
             await _add_column(conn, "festival", "source_post_url TEXT")
             await _add_column(conn, "festival", "source_chat_id INTEGER")
             await _add_column(conn, "festival", "source_message_id INTEGER")
+            await _add_column(
+                conn,
+                "festival",
+                "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+            )
 
             await conn.execute(
                 """
