@@ -1,4 +1,8 @@
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, timedelta
+
+import pytest
+
+from db import Database
 
 import main
 
@@ -57,3 +61,38 @@ def test_format_event_daily_handles_timezone_aware_added_at() -> None:
     rendered = main.format_event_daily(event)
 
     assert isinstance(rendered, str)
+
+
+@pytest.mark.asyncio
+async def test_build_daily_posts_lists_recent_festivals(tmp_path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    now = datetime(2025, 7, 15, 12, 0, tzinfo=timezone.utc)
+
+    async with db.get_session() as session:
+        session.add(
+            main.Festival(
+                name="Fest",
+                telegraph_path="Fest",
+                created_at=now,
+            )
+        )
+        session.add(
+            main.Event(
+                title="New Event",
+                description="Desc",
+                source_text="source",
+                date=(now.date() + timedelta(days=1)).isoformat(),
+                time="18:00",
+                location_name="Place",
+                added_at=now,
+            )
+        )
+        await session.commit()
+
+    posts = await main.build_daily_posts(db, timezone.utc, now)
+    text = posts[0][0]
+
+    assert "ФЕСТИВАЛИ" in text
+    assert "Fest-https://telegra.ph/Fest" in text
