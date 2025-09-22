@@ -1,10 +1,5 @@
 # Changelog
 
-## Unreleased
-
-- Компактные строки «Добавили в анонс» теперь начинаются с даты в формате `dd.mm`.
-- `/events` теперь содержит кнопку быстрого VK-рерайта с индикаторами `✂️`/`✅`, чтобы операторы видели, опубликован ли шортпост.
-
 ## [x.y.z+2] – 2025-09-22
 - `/addevent`, форварды и VK-очередь теперь распознают афиши (один проход Catbox+OCR), подмешивают тексты в LLM и показывают расход/остаток токенов.
 - Результаты распознавания кешируются и уважают дневной лимит в 10 млн токенов.
@@ -22,6 +17,12 @@
 
 - Fixed VK review queue issue where `vk_review.pick_next` recalculates `event_ts_hint` and auto-rejects posts whose event date
   disappeared or fell into the past (e.g., a 7 September announcement shown on 19 September).
+
+## v0.3.10 – 2025-09-21
+This release ships the updates that were previously listed under “Unreleased.”
+
+- Компактные строки «Добавили в анонс» теперь начинаются с даты в формате `dd.mm`.
+- `/events` теперь содержит кнопку быстрого VK-рерайта с индикаторами `✂️`/`✅`, чтобы операторы видели, опубликован ли шортпост.
 
 ## [x.y.z+1] - 2025-09-21
 ### Added
