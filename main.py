@@ -634,6 +634,15 @@ vk_add_source_sessions: set[int] = set()
 # operator_id -> (inbox_id, batch_id) awaiting extra info during VK review
 vk_review_extra_sessions: dict[int, tuple[int, str]] = {}
 
+
+@dataclass
+class VkReviewStorySession:
+    inbox_id: int
+    batch_id: str | None = None
+
+
+vk_review_story_sessions: dict[int, VkReviewStorySession] = {}
+
 @dataclass
 class VkShortpostOpState:
     chat_id: int
@@ -20445,6 +20454,11 @@ async def _vkrev_show_next(chat_id: int, batch_id: str, operator_id: int, db: Da
             types.InlineKeyboardButton(text="✖️ Отклонить", callback_data=f"vkrev:reject:{post.id}"),
             types.InlineKeyboardButton(text="⏭ Пропустить", callback_data=f"vkrev:skip:{post.id}"),
         ],
+        [
+            types.InlineKeyboardButton(
+                text="Создать историю", callback_data=f"vkrev:story:{post.id}"
+            )
+        ],
         [types.InlineKeyboardButton(text="⏹ Стоп", callback_data=f"vkrev:stop:{batch_id}")],
         [
             types.InlineKeyboardButton(
@@ -20602,6 +20616,100 @@ async def _vkrev_import_flow(
     await bot.send_message(chat_id, message_text, reply_markup=markup)
 
 
+def _vkrev_story_title(text: str | None, group_id: int, post_id: int) -> str:
+    if text:
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped:
+                return stripped[:64]
+    return f"История VK {group_id}_{post_id}"
+
+
+async def _vkrev_handle_story_choice(
+    callback: types.CallbackQuery,
+    placement: str,
+    inbox_id_hint: int,
+    db: Database,
+    bot: Bot,
+) -> None:
+    operator_id = callback.from_user.id
+    state = vk_review_story_sessions.get(operator_id)
+    if not state:
+        await bot.send_message(callback.message.chat.id, "Нет активной истории")
+        return
+    inbox_id = state.inbox_id
+    if inbox_id_hint and inbox_id_hint != inbox_id:
+        logging.info(
+            "vk_review story inbox mismatch operator=%s stored=%s hint=%s",
+            operator_id,
+            inbox_id,
+            inbox_id_hint,
+        )
+    async with db.raw_conn() as conn:
+        cur = await conn.execute(
+            "SELECT group_id, post_id, text FROM vk_inbox WHERE id=?",
+            (inbox_id,),
+        )
+        row = await cur.fetchone()
+    if not row:
+        vk_review_story_sessions.pop(operator_id, None)
+        await bot.send_message(callback.message.chat.id, "Инбокс не найден")
+        return
+    group_id, post_id, text = row
+    title = _vkrev_story_title(text, group_id, post_id)
+    source_url = f"https://vk.com/wall-{group_id}_{post_id}"
+    photos = await _vkrev_fetch_photos(group_id, post_id, db, bot)
+    try:
+        html_content, _, _ = await build_source_page_content(
+            title,
+            text,
+            source_url,
+            db=db,
+            catbox_urls=photos,
+        )
+        token = get_telegraph_token()
+        if not token:
+            raise RuntimeError("нет токена Telegraph")
+        tg = Telegraph(access_token=token)
+        from telegraph.utils import html_to_nodes
+
+        nodes = html_to_nodes(html_content)
+        page = await telegraph_create_page(
+            tg,
+            title=title,
+            author_name="Полюбить Калининград Анонсы",
+            content=nodes,
+            return_content=False,
+            caller="event_pipeline",
+        )
+    except Exception as exc:  # pragma: no cover - network and external API
+        logging.exception(
+            "vk_review story creation failed",
+            extra={"operator": operator_id, "inbox_id": inbox_id},
+        )
+        await bot.send_message(
+            callback.message.chat.id, f"❌ Не удалось создать историю: {exc}"
+        )
+        return
+    url = normalize_telegraph_url(page.get("url"))
+    if not url:
+        await bot.send_message(
+            callback.message.chat.id, "❌ Не удалось получить ссылку на Telegraph"
+        )
+        return
+    placement_display = {
+        "end": "в конце",
+        "middle": "посреди текста",
+    }.get(placement, placement or "неизвестно")
+    with contextlib.suppress(Exception):
+        await callback.message.edit_reply_markup()
+    await bot.send_message(
+        callback.message.chat.id,
+        f"История готова ({placement_display}): {url}",
+    )
+    vk_review_story_sessions.pop(operator_id, None)
+
+
 async def handle_vk_review_cb(callback: types.CallbackQuery, db: Database, bot: Bot) -> None:
     assert callback.data
     parts = callback.data.split(":")
@@ -20642,6 +20750,48 @@ async def handle_vk_review_cb(callback: types.CallbackQuery, db: Database, bot: 
             await vk_review.mark_skipped(db, inbox_id)
             vk_review_actions_total["skipped"] += 1
             await _vkrev_show_next(callback.message.chat.id, batch_id, callback.from_user.id, db, bot)
+    elif action == "story":
+        inbox_id = int(parts[2]) if len(parts) > 2 else 0
+        async with db.raw_conn() as conn:
+            cur = await conn.execute(
+                "SELECT review_batch FROM vk_inbox WHERE id=?",
+                (inbox_id,),
+            )
+            row = await cur.fetchone()
+        batch_id = row[0] if row else ""
+        vk_review_story_sessions[callback.from_user.id] = VkReviewStorySession(
+            inbox_id=inbox_id,
+            batch_id=batch_id,
+        )
+        placement_keyboard = types.InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    types.InlineKeyboardButton(
+                        text="В конце",
+                        callback_data=f"vkrev:storypos:end:{inbox_id}",
+                    )
+                ],
+                [
+                    types.InlineKeyboardButton(
+                        text="Посреди текста",
+                        callback_data=f"vkrev:storypos:middle:{inbox_id}",
+                    )
+                ],
+            ]
+        )
+        await bot.send_message(
+            callback.message.chat.id,
+            "Где разместить ссылку?",
+            reply_markup=placement_keyboard,
+        )
+        answered = True
+        await callback.answer()
+    elif action == "storypos":
+        placement = parts[2] if len(parts) > 2 else ""
+        inbox_id = int(parts[3]) if len(parts) > 3 else 0
+        answered = True
+        await callback.answer("Создаю историю…")
+        await _vkrev_handle_story_choice(callback, placement, inbox_id, db, bot)
     elif action == "stop":
         async with db.raw_conn() as conn:
             await conn.execute(
