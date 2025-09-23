@@ -12537,6 +12537,8 @@ def format_event_vk(
     highlight: bool = False,
     weekend_url: str | None = None,
     festival: Festival | None = None,
+    partner_creator_ids: Collection[int] | None = None,
+    prefer_vk_repost: bool = False,
 ) -> str:
 
     prefix = ""
@@ -12548,7 +12550,20 @@ def format_event_vk(
     if e.emoji and not e.title.strip().startswith(e.emoji):
         emoji_part = f"{e.emoji} "
 
-    vk_link = e.source_post_url if is_vk_wall_url(e.source_post_url) else None
+    partner_creator_ids = partner_creator_ids or ()
+    is_partner_creator = (
+        e.creator_id in partner_creator_ids if e.creator_id is not None else False
+    )
+
+    vk_link = None
+    if (
+        prefer_vk_repost
+        and not is_partner_creator
+        and is_vk_wall_url(e.vk_repost_url)
+    ):
+        vk_link = e.vk_repost_url
+    if not vk_link and is_vk_wall_url(e.source_post_url):
+        vk_link = e.source_post_url
     if not vk_link and is_vk_wall_url(e.source_vk_post_url):
         vk_link = e.source_vk_post_url
 
@@ -15358,6 +15373,8 @@ async def build_daily_sections_vk(
     tz: timezone,
     now: datetime | None = None,
 ) -> tuple[str, str]:
+    from models import User
+
     if now is None:
         now = datetime.now(tz)
     today = now.date()
@@ -15408,6 +15425,21 @@ async def build_daily_sections_vk(
                 )
             )
         ).scalars().all()
+
+        creator_ids = {
+            e.creator_id
+            for e in (*events_today, *events_new, *new_events)
+            if e.creator_id is not None
+        }
+        partner_creator_ids: set[int] = set()
+        if creator_ids:
+            res_partners = await session.execute(
+                select(User.user_id).where(
+                    User.user_id.in_(creator_ids),
+                    User.is_partner.is_(True),
+                )
+            )
+            partner_creator_ids = set(res_partners.scalars().all())
 
         weekend_count = 0
         if wpage:
@@ -15465,6 +15497,8 @@ async def build_daily_sections_vk(
                 highlight=True,
                 weekend_url=w_url,
                 festival=fest_map.get((e.festival or "").casefold()),
+                partner_creator_ids=partner_creator_ids,
+                prefer_vk_repost=True,
             )
         )
         lines1.append(VK_EVENT_SEPARATOR)
@@ -15505,6 +15539,8 @@ async def build_daily_sections_vk(
                 e,
                 weekend_url=w_url,
                 festival=fest_map.get((e.festival or "").casefold()),
+                partner_creator_ids=partner_creator_ids,
+                prefer_vk_repost=True,
             )
         )
         lines2.append(VK_EVENT_SEPARATOR)
