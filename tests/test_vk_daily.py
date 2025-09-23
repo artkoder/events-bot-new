@@ -1,4 +1,4 @@
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, timedelta
 from pathlib import Path
 
 import pytest
@@ -73,3 +73,65 @@ async def test_build_daily_sections_vk_links(tmp_path: Path):
         f"[https://vk.com/wall-1_4|{month_name_nominative('2025-08')}]" in sec1
     )
     assert "u1" not in sec1
+
+
+@pytest.mark.asyncio
+async def test_build_daily_sections_vk_prefers_repost_for_non_partner(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    today = date(2025, 7, 10)
+
+    async with db.get_session() as session:
+        session.add(
+            Event(
+                title="Party",
+                description="d",
+                source_text="s",
+                date=today.isoformat(),
+                time="10:00",
+                location_name="Club",
+                creator_id=404,
+                vk_repost_url="https://vk.com/wall-1_7",
+                added_at=datetime.now(timezone.utc) - timedelta(days=2),
+            )
+        )
+        await session.commit()
+
+    sec1, _ = await main.build_daily_sections_vk(
+        db, timezone.utc, now=datetime(2025, 7, 10, tzinfo=timezone.utc)
+    )
+    event_line = sec1.splitlines()[4]
+    assert event_line.startswith("👉 [https://vk.com/wall-1_7|")
+
+
+@pytest.mark.asyncio
+async def test_build_daily_sections_vk_keeps_partner_source_link(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    today = date(2025, 7, 10)
+
+    async with db.get_session() as session:
+        session.add(
+            main.User(user_id=505, is_partner=True),
+        )
+        session.add(
+            Event(
+                title="Party",
+                description="d",
+                source_text="s",
+                date=today.isoformat(),
+                time="10:00",
+                location_name="Club",
+                creator_id=505,
+                source_post_url="https://vk.com/wall-1_8",
+                vk_repost_url="https://vk.com/wall-1_9",
+                added_at=datetime.now(timezone.utc) - timedelta(days=2),
+            )
+        )
+        await session.commit()
+
+    sec1, _ = await main.build_daily_sections_vk(
+        db, timezone.utc, now=datetime(2025, 7, 10, tzinfo=timezone.utc)
+    )
+    event_line = sec1.splitlines()[4]
+    assert event_line.startswith("👉 [https://vk.com/wall-1_8|")
