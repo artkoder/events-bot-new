@@ -331,10 +331,29 @@ class Database:
             await _add_column(conn, "festival", "source_post_url TEXT")
             await _add_column(conn, "festival", "source_chat_id INTEGER")
             await _add_column(conn, "festival", "source_message_id INTEGER")
-            await _add_column(
-                conn,
-                "festival",
-                "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+
+            festival_cursor = await conn.execute("PRAGMA table_info('festival')")
+            festival_columns = await festival_cursor.fetchall()
+            await festival_cursor.close()
+            festival_column_names = {column[1] for column in festival_columns}
+            if "created_at" not in festival_column_names:
+                await conn.execute("ALTER TABLE festival ADD COLUMN created_at TIMESTAMP")
+                await conn.execute(
+                    "UPDATE festival SET created_at = CURRENT_TIMESTAMP WHERE created_at IS NULL"
+                )
+
+            await conn.execute(
+                """
+                CREATE TRIGGER IF NOT EXISTS festival_set_created_at
+                AFTER INSERT ON festival
+                FOR EACH ROW
+                WHEN NEW.created_at IS NULL
+                BEGIN
+                    UPDATE festival
+                    SET created_at = CURRENT_TIMESTAMP
+                    WHERE id = NEW.id;
+                END;
+                """
             )
 
             await conn.execute(
