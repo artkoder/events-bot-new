@@ -13337,6 +13337,7 @@ async def _sync_month_page_inner(
 
         if update_links:
             nav_block = await build_month_nav_block(db, month)
+            nav_update_failed = False
             for path_attr, hash_attr in (("path", "content_hash"), ("path2", "content_hash2")):
                 path = getattr(page, path_attr)
                 if not path:
@@ -13362,17 +13363,39 @@ async def _sync_month_page_inner(
                 )
                 if not changed_any and content_hash(updated_html) == content_hash(html_content):
                     continue
+                if len(updated_html.encode()) > TELEGRAPH_LIMIT:
+                    logging.warning(
+                        "Updated navigation for %s (%s) exceeds limit, rebuilding",
+                        month,
+                        path,
+                    )
+                    nav_update_failed = True
+                    break
                 title = page_data.get("title") or month_name_prepositional(month)
-                await telegraph_edit_page(
-                    tg,
-                    path,
-                    title=title,
-                    html_content=updated_html,
-                    caller="month_build",
-                )
+                try:
+                    await telegraph_edit_page(
+                        tg,
+                        path,
+                        title=title,
+                        html_content=updated_html,
+                        caller="month_build",
+                    )
+                except TelegraphException as e:
+                    msg = str(e).lower()
+                    if all(word in msg for word in ("content", "too", "big")):
+                        logging.warning(
+                            "Updated navigation for %s (%s) too big, rebuilding",
+                            month,
+                            path,
+                        )
+                        nav_update_failed = True
+                        break
+                    raise
                 setattr(page, hash_attr, content_hash(updated_html))
-            await commit_page()
-            return False
+            if not nav_update_failed:
+                await commit_page()
+                return False
+            logging.info("Falling back to full rebuild for %s", month)
 
         events, exhibitions = await get_month_data(db, month)
         nav_block = await build_month_nav_block(db, month)
