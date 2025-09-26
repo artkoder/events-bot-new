@@ -20620,7 +20620,13 @@ async def _vkrev_import_flow(
                 text="✂️ Сокращённый рерайт",
                 callback_data=f"vkrev:shortpost:{res.event_id}",
             ),
-        ]
+        ],
+        [
+            types.InlineKeyboardButton(
+                text="Редактировать",
+                callback_data=f"edit:{res.event_id}",
+            )
+        ],
     ]
     if event_obj:
         inline_keyboard = append_tourist_block(base_keyboard, event_obj, "vk")
