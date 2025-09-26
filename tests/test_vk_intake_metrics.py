@@ -13,7 +13,7 @@ async def test_vk_intake_processing_time_metric(tmp_path, monkeypatch):
 
     async def fake_build(text, **kwargs):
         assert kwargs.get("festival_names") == []
-        return vk_intake.EventDraft(title="T")
+        return [vk_intake.EventDraft(title="T")]
 
     async def fake_persist(draft, photos, db):
         return vk_intake.PersistResult(
@@ -28,13 +28,15 @@ async def test_vk_intake_processing_time_metric(tmp_path, monkeypatch):
             is_free=False,
         )
 
-    monkeypatch.setattr(vk_intake, "build_event_draft", fake_build)
+    monkeypatch.setattr(vk_intake, "build_event_drafts", fake_build)
     monkeypatch.setattr(vk_intake, "persist_event_and_pages", fake_persist)
 
     times = iter([1.0, 2.0])
     monkeypatch.setattr(vk_intake.time, "perf_counter", lambda: next(times))
 
-    await vk_intake.process_event("text", photos=[], db=db)
+    results = await vk_intake.process_event("text", photos=[], db=db)
+
+    assert len(results) == 1
 
     assert vk_intake.processing_time_seconds_total == pytest.approx(1.0)
 

@@ -20581,7 +20581,7 @@ async def _vkrev_import_flow(
     async with db.get_session() as session:
         res_f = await session.execute(select(Festival.name))
         festival_names = [row[0] for row in res_f.fetchall()]
-    draft = await vk_intake.build_event_draft(
+    drafts = await vk_intake.build_event_drafts(
         text,
         photos=photos,
         source_name=source[0] if source else None,
@@ -20592,66 +20592,88 @@ async def _vkrev_import_flow(
         db=db,
     )
     source_post_url = f"https://vk.com/wall-{group_id}_{post_id}"
-    res = await vk_intake.persist_event_and_pages(
-        draft, photos, db, source_post_url=source_post_url
-    )
-    async with db.get_session() as session:
-        event_obj = await session.get(Event, res.event_id)
+    persist_results: list[
+        tuple[vk_intake.EventDraft, vk_intake.PersistResult, Event | None]
+    ] = []
+    for draft in drafts:
+        res = await vk_intake.persist_event_and_pages(
+            draft, photos, db, source_post_url=source_post_url
+        )
+        async with db.get_session() as session:
+            event_obj = await session.get(Event, res.event_id)
+        persist_results.append((draft, res, event_obj))
+
+    if not persist_results:
+        await bot.send_message(chat_id, "LLM не вернул события")
+        return
+
+    first_res = persist_results[0][1]
     await vk_review.mark_imported(
-        db, inbox_id, batch_id, operator_id, res.event_id, res.event_date
+        db, inbox_id, batch_id, operator_id, first_res.event_id, first_res.event_date
     )
     vk_review_actions_total["imported"] += 1
-    links = (
-        f"✅ Telegraph — {res.telegraph_url}\n"
-        f"✅ Календарь (ICS) — {res.ics_supabase_url}\n"
-        f"✅ ICS (Telegram) — {res.ics_tg_url}"
-    )
+    link_lines: list[str] = []
+    for idx, (_draft, res, _event_obj) in enumerate(persist_results, start=1):
+        link_lines.append(f"Событие {idx}: ID {res.event_id}")
+        link_lines.append(f"✅ Telegraph — {res.telegraph_url}")
+        link_lines.append(f"✅ Календарь (ICS) — {res.ics_supabase_url}")
+        link_lines.append(f"✅ ICS (Telegram) — {res.ics_tg_url}")
+        if idx != len(persist_results):
+            link_lines.append("")
+    links = "\n".join(link_lines)
     admin_chat = os.getenv("ADMIN_CHAT_ID")
     if admin_chat:
         await bot.send_message(int(admin_chat), links)
     await bot.send_message(chat_id, links)
-    base_keyboard = [
-        [
-            types.InlineKeyboardButton(
-                text="↪️ Репостнуть в Vk",
-                callback_data=f"vkrev:repost:{res.event_id}",
-            ),
-            types.InlineKeyboardButton(
-                text="✂️ Сокращённый рерайт",
-                callback_data=f"vkrev:shortpost:{res.event_id}",
-            ),
+
+    for idx, (draft, res, event_obj) in enumerate(persist_results, start=1):
+        base_keyboard = [
+            [
+                types.InlineKeyboardButton(
+                    text="↪️ Репостнуть в Vk",
+                    callback_data=f"vkrev:repost:{res.event_id}",
+                ),
+                types.InlineKeyboardButton(
+                    text="✂️ Сокращённый рерайт",
+                    callback_data=f"vkrev:shortpost:{res.event_id}",
+                ),
+            ]
         ]
-    ]
-    if event_obj:
-        inline_keyboard = append_tourist_block(base_keyboard, event_obj, "vk")
-    else:
-        inline_keyboard = base_keyboard
-    markup = types.InlineKeyboardMarkup(inline_keyboard=inline_keyboard)
-    def _display(value: str | None) -> str:
-        return value if value else "—"
+        if event_obj:
+            inline_keyboard = append_tourist_block(base_keyboard, event_obj, "vk")
+        else:
+            inline_keyboard = base_keyboard
+        markup = types.InlineKeyboardMarkup(inline_keyboard=inline_keyboard)
 
-    detail_lines = [
-        f"Тип: {_display(res.event_type)}",
-        f"Дата начала: {_display(res.event_date)}",
-        f"Дата окончания: {_display(res.event_end_date)}",
-        f"Время: {_display(res.event_time)}",
-        f"Бесплатное: {'да' if res.is_free else 'нет'}",
-    ]
-    if draft.poster_media and draft.ocr_tokens_remaining is not None:
-        if getattr(draft, "ocr_limit_notice", None):
-            detail_lines.append(draft.ocr_limit_notice)
-        detail_lines.append(
-            f"OCR: потрачено {draft.ocr_tokens_spent}, осталось {draft.ocr_tokens_remaining}"
-        )
+        def _display(value: str | None) -> str:
+            return value if value else "—"
 
-    if event_obj:
-        message_text = build_event_card_message(
-            "Импортировано", event_obj, detail_lines
-        )
-    else:
-        message_text = "\n".join(["Импортировано", *detail_lines])
+        detail_lines = [
+            f"Тип: {_display(res.event_type)}",
+            f"Дата начала: {_display(res.event_date)}",
+            f"Дата окончания: {_display(res.event_end_date)}",
+            f"Время: {_display(res.event_time)}",
+            f"Бесплатное: {'да' if res.is_free else 'нет'}",
+        ]
+        if draft.poster_media and draft.ocr_tokens_remaining is not None:
+            if getattr(draft, "ocr_limit_notice", None):
+                detail_lines.append(draft.ocr_limit_notice)
+            detail_lines.append(
+                f"OCR: потрачено {draft.ocr_tokens_spent}, осталось {draft.ocr_tokens_remaining}"
+            )
 
-    await bot.send_message(chat_id, message_text, reply_markup=markup)
+        header = "Импортировано"
+        if len(persist_results) > 1:
+            header = f"Импортировано #{idx}"
+
+        if event_obj:
+            message_text = build_event_card_message(
+                header, event_obj, detail_lines
+            )
+        else:
+            message_text = "\n".join([header, *detail_lines])
+
+        await bot.send_message(chat_id, message_text, reply_markup=markup)
 
 
 def _vkrev_story_title(text: str | None, group_id: int, post_id: int) -> str:
