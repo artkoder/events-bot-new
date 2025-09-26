@@ -187,7 +187,7 @@ async def test_vkrev_import_flow_persists_url_and_skips_vk_sync(tmp_path, monkey
         db=None,
     ):
         captured["festival_names"] = festival_names
-        return draft
+        return [draft]
 
     captured = {}
 
@@ -207,7 +207,7 @@ async def test_vkrev_import_flow_persists_url_and_skips_vk_sync(tmp_path, monkey
         await session.commit()
 
     monkeypatch.setattr(main, "_vkrev_fetch_photos", fake_fetch)
-    monkeypatch.setattr(vk_intake, "build_event_draft", fake_build)
+    monkeypatch.setattr(vk_intake, "build_event_drafts", fake_build)
     monkeypatch.setattr(vk_review, "mark_imported", fake_mark_imported)
     monkeypatch.setattr(main, "enqueue_job", fake_enqueue_job)
 
@@ -269,7 +269,7 @@ async def test_vkrev_import_flow_reports_ocr_usage(tmp_path, monkeypatch):
         festival_names=None,
         db=None,
     ):
-        return draft
+        return [draft]
 
     async def fake_mark_imported(db_, inbox_id, batch_id, operator_id, event_id, event_date):
         pass
@@ -278,7 +278,7 @@ async def test_vkrev_import_flow_reports_ocr_usage(tmp_path, monkeypatch):
         return "job"
 
     monkeypatch.setattr(main, "_vkrev_fetch_photos", fake_fetch)
-    monkeypatch.setattr(vk_intake, "build_event_draft", fake_build)
+    monkeypatch.setattr(vk_intake, "build_event_drafts", fake_build)
     monkeypatch.setattr(vk_review, "mark_imported", fake_mark_imported)
     monkeypatch.setattr(main, "enqueue_job", fake_enqueue_job)
 
@@ -321,7 +321,7 @@ async def test_vkrev_import_flow_reports_ocr_limit(tmp_path, monkeypatch):
     )
 
     async def fake_build(*args, **kwargs):
-        return draft
+        return [draft]
 
     async def fake_mark_imported(*args, **kwargs):
         pass
@@ -330,7 +330,7 @@ async def test_vkrev_import_flow_reports_ocr_limit(tmp_path, monkeypatch):
         return "job"
 
     monkeypatch.setattr(main, "_vkrev_fetch_photos", fake_fetch)
-    monkeypatch.setattr(vk_intake, "build_event_draft", fake_build)
+    monkeypatch.setattr(vk_intake, "build_event_drafts", fake_build)
     monkeypatch.setattr(vk_review, "mark_imported", fake_mark_imported)
     monkeypatch.setattr(main, "enqueue_job", fake_enqueue_job)
 
@@ -340,6 +340,82 @@ async def test_vkrev_import_flow_reports_ocr_limit(tmp_path, monkeypatch):
     info_text = bot.messages[-1].text
     assert "OCR недоступен" in info_text
     assert "OCR: потрачено 0, осталось 0" in info_text
+
+
+@pytest.mark.asyncio
+async def test_vkrev_import_flow_handles_multiple_events(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.raw_conn() as conn:
+        await conn.execute(
+            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time) VALUES(?,?,?,?,?)",
+            (1, "club1", "Test Community", "", None),
+        )
+        await conn.execute(
+            "INSERT INTO vk_inbox(id, group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status) VALUES(?,?,?,?,?,?,?,?,?)",
+            (1, 1, 2, 0, "text", None, 1, 0, "pending"),
+        )
+        await conn.commit()
+
+    async def fake_fetch(*args, **kwargs):
+        return []
+
+    draft1 = vk_intake.EventDraft(
+        title="First",
+        date="2025-09-02",
+        time="10:00",
+        source_text="First",
+    )
+    draft2 = vk_intake.EventDraft(
+        title="Second",
+        date="2025-09-03",
+        time="12:00",
+        source_text="Second",
+    )
+
+    async def fake_build(*args, **kwargs):
+        return [draft1, draft2]
+
+    captured_mark_id: dict[str, int] = {}
+
+    async def fake_mark_imported(
+        db_, inbox_id, batch_id, operator_id, event_id, event_date
+    ):
+        captured_mark_id["event_id"] = event_id
+
+    tasks: list[str] = []
+
+    async def fake_enqueue_job(db_, eid, task, depends_on=None, coalesce_key=None):
+        tasks.append(task)
+        return "job"
+
+    async with db.get_session() as session:
+        session.add(Festival(name="Fest Multi"))
+        await session.commit()
+
+    monkeypatch.setattr(main, "_vkrev_fetch_photos", fake_fetch)
+    monkeypatch.setattr(vk_intake, "build_event_drafts", fake_build)
+    monkeypatch.setattr(vk_review, "mark_imported", fake_mark_imported)
+    monkeypatch.setattr(main, "enqueue_job", fake_enqueue_job)
+
+    bot = DummyBot()
+    await main._vkrev_import_flow(1, 1, 1, "batch1", db, bot)
+
+    async with db.get_session() as session:
+        events = (await session.execute(select(Event))).scalars().all()
+
+    assert len(events) == 2
+    stored_ids = sorted(event.id for event in events)
+    assert captured_mark_id["event_id"] == stored_ids[0]
+    assert JobTask.vk_sync not in tasks
+
+    assert len(bot.messages) == 3
+    summary_text = bot.messages[0].text
+    assert f"Событие 1: ID {stored_ids[0]}" in summary_text
+    assert f"Событие 2: ID {stored_ids[1]}" in summary_text
+    assert bot.messages[1].text.startswith("Импортировано #1")
+    assert bot.messages[2].text.startswith("Импортировано #2")
 
 
 @pytest.mark.asyncio
