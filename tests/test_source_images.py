@@ -126,3 +126,51 @@ async def test_build_source_page_content_cleans_tg_tags():
     assert "tg-spoiler" not in html
     assert "secret" in html
     assert "Бесплатно" in html
+
+
+@pytest.mark.asyncio
+async def test_build_source_page_content_inline_images():
+    html, _, uploaded = await main.build_source_page_content(
+        "T",
+        "line1\nline2\nline3",
+        None,
+        None,
+        None,
+        None,
+        None,
+        catbox_urls=[
+            "http://cat/0.jpg",
+            "http://cat/1.jpg",
+            "http://cat/2.jpg",
+        ],
+        image_mode="inline",
+    )
+    assert uploaded == 3
+    assert html.count('<img src="http://cat/') == 3
+    first_paragraph = html.index("<p>line1</p>")
+    second_paragraph = html.index("<p>line2</p>")
+    third_paragraph = html.index("<p>line3</p>")
+    tail1 = html.index('<img src="http://cat/1.jpg"/>')
+    tail2 = html.index('<img src="http://cat/2.jpg"/>')
+    assert first_paragraph < tail1 < second_paragraph
+    assert second_paragraph < tail2 < third_paragraph
+
+
+@pytest.mark.asyncio
+async def test_build_source_page_content_history_footer():
+    source = "https://example.com/src"
+    html, _, _ = await main.build_source_page_content(
+        "T",
+        "line1\nline2",
+        source,
+        None,
+        None,
+        None,
+        None,
+        catbox_urls=["http://cat/0.jpg"],
+        page_mode="history",
+    )
+    assert "https://t.me/kgdstories" in html
+    assert "https://t.me/kenigevents" not in html
+    assert f'<p><a href="{source}">Источник</a></p>' in html
+    assert html.rstrip().endswith(main.HISTORY_FOOTER_HTML)

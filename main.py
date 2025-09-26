@@ -4451,6 +4451,8 @@ FOOTER_LINK_HTML = (
     '<p>&#8203;</p>'
 )
 
+HISTORY_FOOTER_HTML = '<p><a href="https://t.me/kgdstories">Полюбить Калининград Истории</a></p>'
+
 
 TELEGRAPH_ALLOWED_TAGS = {
     "p",
@@ -20695,28 +20697,16 @@ async def _vkrev_handle_story_choice(
     title = _vkrev_story_title(text, group_id, post_id)
     source_url = f"https://vk.com/wall-{group_id}_{post_id}"
     photos = await _vkrev_fetch_photos(group_id, post_id, db, bot)
+    image_mode = "inline" if placement == "middle" else "tail"
     try:
-        html_content, _, _ = await build_source_page_content(
+        result = await create_source_page(
             title,
-            text,
+            text or "",
             source_url,
-            db=db,
+            db=None,
             catbox_urls=photos,
-        )
-        token = get_telegraph_token()
-        if not token:
-            raise RuntimeError("нет токена Telegraph")
-        tg = Telegraph(access_token=token)
-        from telegraph.utils import html_to_nodes
-
-        nodes = html_to_nodes(html_content)
-        page = await telegraph_create_page(
-            tg,
-            title=title,
-            author_name="Полюбить Калининград Анонсы",
-            content=nodes,
-            return_content=False,
-            caller="event_pipeline",
+            image_mode=image_mode,
+            page_mode="history",
         )
     except Exception as exc:  # pragma: no cover - network and external API
         logging.exception(
@@ -20727,7 +20717,14 @@ async def _vkrev_handle_story_choice(
             callback.message.chat.id, f"❌ Не удалось создать историю: {exc}"
         )
         return
-    url = normalize_telegraph_url(page.get("url"))
+    if not result:
+        await bot.send_message(
+            callback.message.chat.id, "❌ Не удалось создать историю"
+        )
+        return
+    url, _path, catbox_msg, _uploaded = result
+    if catbox_msg:
+        logging.info("vkrev story catbox: %s", catbox_msg)
     if not url:
         await bot.send_message(
             callback.message.chat.id, "❌ Не удалось получить ссылку на Telegraph"
@@ -22417,7 +22414,13 @@ async def build_source_page_content(
     *,
     display_link: bool = True,
     catbox_urls: list[str] | None = None,
+    image_mode: Literal["tail", "inline"] = "tail",
+    page_mode: Literal["default", "history"] = "default",
 ) -> tuple[str, str, int]:
+    if image_mode not in {"tail", "inline"}:
+        raise ValueError(f"unknown image_mode={image_mode}")
+    if page_mode not in {"default", "history"}:
+        raise ValueError(f"unknown page_mode={page_mode}")
     html_content = ""
     def strip_title(line_text: str) -> str:
         lines = line_text.splitlines()
@@ -22456,6 +22459,7 @@ async def build_source_page_content(
     spoiler_pat = re.compile(r"<tg-spoiler[^>]*>(.*?)</tg-spoiler>", re.DOTALL)
     tg_emoji_cleaned = 0
     tg_spoiler_unwrapped = 0
+    paragraphs: list[str] = []
     if html_text:
         html_text = strip_title(html_text)
         html_text = normalize_hashtag_dates(html_text)
@@ -22464,7 +22468,7 @@ async def build_source_page_content(
             html_text = html_text.replace(k, v)
         html_text = linkify_for_telegraph(html_text)
         _html_text_paragraph = html_text.replace("\n", "<br/>")
-        html_content += f"<p>{_html_text_paragraph}</p>"
+        paragraphs = [f"<p>{_html_text_paragraph}</p>"]
     else:
         clean_text = strip_title(text)
         clean_text = normalize_hashtag_dates(clean_text)
@@ -22474,12 +22478,29 @@ async def build_source_page_content(
         clean_text = spoiler_pat.sub(r"\1", clean_text)
         for k, v in CUSTOM_EMOJI_MAP.items():
             clean_text = clean_text.replace(k, v)
-        paragraphs = []
         for line in clean_text.splitlines():
             escaped = html.escape(line)
             linked = linkify_for_telegraph(escaped)
             paragraphs.append(f"<p>{linked}</p>")
-        html_content += "".join(paragraphs)
+    inline_used = 0
+    if paragraphs:
+        body_blocks: list[str] = [paragraphs[0]]
+        if image_mode == "inline" and tail:
+            for para in paragraphs[1:]:
+                if inline_used < len(tail):
+                    body_blocks.append(f'<img src="{html.escape(tail[inline_used])}"/>')
+                    inline_used += 1
+                body_blocks.append(para)
+            for extra_url in tail[inline_used:]:
+                body_blocks.append(f'<img src="{html.escape(extra_url)}"/>')
+                inline_used += 1
+        else:
+            body_blocks.extend(paragraphs[1:])
+        html_content += "".join(body_blocks)
+    elif image_mode == "inline" and tail:
+        for extra_url in tail:
+            html_content += f'<img src="{html.escape(extra_url)}"/>'
+        inline_used = len(tail)
     if db and hasattr(db, "get_session") and text and text.strip():
         from models import Event, Festival
         from sqlalchemy import select
@@ -22499,14 +22520,26 @@ async def build_source_page_content(
                     '<p>&#8203;</p>'
                 )
     nav_html = None
-    if db:
+    if db and page_mode != "history":
         nav_html = await build_month_nav_html(db)
         html_content = apply_month_nav(html_content, nav_html)
-    for url in tail:
-        html_content += f'<img src="{html.escape(url)}"/>'
+    if image_mode == "tail":
+        for url in tail:
+            html_content += f'<img src="{html.escape(url)}"/>'
     if nav_html and len(urls) >= 2:
         html_content += nav_html
-    html_content = apply_footer_link(html_content)
+    if page_mode == "history" and display_link and source_url:
+        html_content += f'<p><a href="{html.escape(source_url)}">Источник</a></p>'
+    if page_mode == "history":
+        html_content = html_content.replace(FOOTER_LINK_HTML, "").rstrip()
+        html_content = re.sub(
+            r'(?:<p>(?:&nbsp;|&#8203;)</p>)?<p><a href="https://t\.me/kgdstories">[^<]+</a></p>',
+            "",
+            html_content,
+        ).rstrip()
+        html_content += HISTORY_FOOTER_HTML
+    else:
+        html_content = apply_footer_link(html_content)
     html_content = lint_telegraph_html(html_content)
     mode = "html" if html_text else "plain"
     logging.info("SRC build mode=%s urls_total=%d input_urls=%d", mode, len(urls), input_count)
@@ -22537,6 +22570,8 @@ async def create_source_page(
     *,
     display_link: bool = True,
     catbox_urls: list[str] | None = None,
+    image_mode: Literal["tail", "inline"] = "tail",
+    page_mode: Literal["default", "history"] = "default",
 ) -> tuple[str, str, str, int] | None:
     """Create a Telegraph page with the original event text."""
     if db and text and text.strip():
@@ -22567,16 +22602,23 @@ async def create_source_page(
         db,
         display_link=display_link,
         catbox_urls=catbox_urls,
+        image_mode=image_mode,
+        page_mode=page_mode,
     )
     logging.info("SRC page compose uploaded=%d catbox_msg=%s", uploaded, catbox_msg)
     from telegraph.utils import html_to_nodes
 
     nodes = html_to_nodes(html_content)
+    author_name = (
+        "Полюбить Калининград Истории"
+        if page_mode == "history"
+        else "Полюбить Калининград Анонсы"
+    )
     try:
         page = await telegraph_create_page(
             tg,
             title=title,
-            author_name="Полюбить Калининград Анонсы",
+            author_name=author_name,
             content=nodes,
             return_content=False,
             caller="event_pipeline",
