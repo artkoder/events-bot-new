@@ -447,7 +447,7 @@ async def _download_photo_media(urls: Sequence[str]) -> list[tuple[bytes, str]]:
     return results
 
 
-async def build_event_payload_from_vk(
+async def build_event_drafts_from_vk(
     text: str,
     *,
     source_name: str | None = None,
@@ -501,7 +501,6 @@ async def build_event_payload_from_vk(
     )
     if not parsed:
         raise RuntimeError("LLM returned no event")
-    data = parsed[0]
 
     combined_text = text or ""
     extra_clean = (operator_extra or "").strip()
@@ -555,35 +554,69 @@ async def build_event_payload_from_vk(
         except (TypeError, ValueError):
             return bool(value)
 
-    ticket_price_min = clean_int(data.get("ticket_price_min"))
-    ticket_price_max = clean_int(data.get("ticket_price_max"))
-    links = [data["ticket_link"]] if data.get("ticket_link") else None
-    return EventDraft(
-        title=data.get("title", ""),
-        date=data.get("date"),
-        time=data.get("time") or default_time,
-        venue=data.get("location_name"),
-        description=data.get("short_description"),
-        festival=clean_str(data.get("festival")),
-        location_address=clean_str(data.get("location_address")),
-        city=clean_str(data.get("city")),
-        ticket_price_min=ticket_price_min,
-        ticket_price_max=ticket_price_max,
-        event_type=clean_str(data.get("event_type")),
-        emoji=clean_str(data.get("emoji")),
-        end_date=clean_str(data.get("end_date")),
-        is_free=clean_bool(data.get("is_free")),
-        pushkin_card=clean_bool(data.get("pushkin_card")),
-        links=links,
-        source_text=combined_text,
-        poster_media=poster_items,
-        poster_summary=poster_summary,
+    drafts: list[EventDraft] = []
+    for data in parsed:
+        ticket_price_min = clean_int(data.get("ticket_price_min"))
+        ticket_price_max = clean_int(data.get("ticket_price_max"))
+        links = [data["ticket_link"]] if data.get("ticket_link") else None
+        drafts.append(
+            EventDraft(
+                title=data.get("title", ""),
+                date=data.get("date"),
+                time=data.get("time") or default_time,
+                venue=data.get("location_name"),
+                description=data.get("short_description"),
+                festival=clean_str(data.get("festival")),
+                location_address=clean_str(data.get("location_address")),
+                city=clean_str(data.get("city")),
+                ticket_price_min=ticket_price_min,
+                ticket_price_max=ticket_price_max,
+                event_type=clean_str(data.get("event_type")),
+                emoji=clean_str(data.get("emoji")),
+                end_date=clean_str(data.get("end_date")),
+                is_free=clean_bool(data.get("is_free")),
+                pushkin_card=clean_bool(data.get("pushkin_card")),
+                links=links,
+                source_text=combined_text,
+                poster_media=poster_items,
+                poster_summary=poster_summary,
+                ocr_tokens_spent=ocr_tokens_spent,
+                ocr_tokens_remaining=ocr_tokens_remaining,
+            )
+        )
+
+    return drafts
+
+
+async def build_event_payload_from_vk(
+    text: str,
+    *,
+    source_name: str | None = None,
+    location_hint: str | None = None,
+    default_time: str | None = None,
+    operator_extra: str | None = None,
+    festival_names: list[str] | None = None,
+    poster_media: Sequence[PosterMedia] | None = None,
+    ocr_tokens_spent: int = 0,
+    ocr_tokens_remaining: int | None = None,
+) -> EventDraft:
+    drafts = await build_event_drafts_from_vk(
+        text,
+        source_name=source_name,
+        location_hint=location_hint,
+        default_time=default_time,
+        operator_extra=operator_extra,
+        festival_names=festival_names,
+        poster_media=poster_media,
         ocr_tokens_spent=ocr_tokens_spent,
         ocr_tokens_remaining=ocr_tokens_remaining,
     )
+    if not drafts:
+        raise RuntimeError("LLM returned no event")
+    return drafts[0]
 
 
-async def build_event_draft(
+async def build_event_drafts(
     text: str,
     *,
     photos: Sequence[str] | None = None,
@@ -648,7 +681,7 @@ async def build_event_draft(
         _, _, ocr_tokens_remaining = await poster_ocr.recognize_posters(
             db, [], log_context=ocr_log_context
         )
-    draft = await build_event_payload_from_vk(
+    drafts = await build_event_drafts_from_vk(
         text,
         source_name=source_name,
         location_hint=location_hint,
@@ -659,8 +692,35 @@ async def build_event_draft(
         ocr_tokens_spent=ocr_tokens_spent,
         ocr_tokens_remaining=ocr_tokens_remaining,
     )
-    draft.ocr_limit_notice = ocr_limit_notice
-    return draft
+    for draft in drafts:
+        draft.ocr_limit_notice = ocr_limit_notice
+    return drafts
+
+
+async def build_event_draft(
+    text: str,
+    *,
+    photos: Sequence[str] | None = None,
+    source_name: str | None = None,
+    location_hint: str | None = None,
+    default_time: str | None = None,
+    operator_extra: str | None = None,
+    festival_names: list[str] | None = None,
+    db: Database,
+) -> EventDraft:
+    drafts = await build_event_drafts(
+        text,
+        photos=photos,
+        source_name=source_name,
+        location_hint=location_hint,
+        default_time=default_time,
+        operator_extra=operator_extra,
+        festival_names=festival_names,
+        db=db,
+    )
+    if not drafts:
+        raise RuntimeError("LLM returned no event")
+    return drafts[0]
 
 
 async def persist_event_and_pages(
@@ -770,7 +830,7 @@ async def process_event(
     default_time: str | None = None,
     operator_extra: str | None = None,
     db: Database,
-) -> PersistResult:
+) -> list[PersistResult]:
     """Process VK post text into an event and track processing time."""
     start = time.perf_counter()
     from sqlalchemy import select
@@ -779,7 +839,7 @@ async def process_event(
     async with db.get_session() as session:
         res_f = await session.execute(select(Festival.name))
         festival_names = [row[0] for row in res_f.fetchall()]
-    draft = await build_event_draft(
+    drafts = await build_event_drafts(
         text,
         photos=photos or [],
         source_name=source_name,
@@ -789,7 +849,11 @@ async def process_event(
         festival_names=festival_names,
         db=db,
     )
-    result = await persist_event_and_pages(draft, photos or [], db)
+    results: list[PersistResult] = []
+    for draft in drafts:
+        results.append(
+            await persist_event_and_pages(draft, photos or [], db)
+        )
     duration = time.perf_counter() - start
     global processing_time_seconds_total
     processing_time_seconds_total += duration
@@ -806,7 +870,7 @@ async def process_event(
                     break
     except Exception:
         pass
-    return result
+    return results
 
 
 async def crawl_once(db, *, broadcast: bool = False, bot: Any | None = None) -> dict[str, int]:
