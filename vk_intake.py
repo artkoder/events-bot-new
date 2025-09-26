@@ -36,6 +36,7 @@ VK_USE_PYMORPHY = os.getenv("VK_USE_PYMORPHY", "false").lower() == "true"
 
 # Sentinel used to flag posts awaiting poster OCR before keyword/date checks.
 OCR_PENDING_SENTINEL = "__ocr_pending__"
+HISTORY_MATCHED_KEYWORD = "history"
 
 # optional pymorphy3 initialisation
 MORPH = None
@@ -105,6 +106,16 @@ DATE_PATTERNS = [
 
 COMPILED_DATE_PATTERNS = [re.compile(p, re.I | re.U) for p in DATE_PATTERNS]
 
+HISTORICAL_TOPONYMS = [
+    "кёнигсберг",
+    "кенигсберг",
+    "гумбинен",
+    "инстербург",
+    "тильзит",
+    "мемель",
+]
+HISTORICAL_YEAR_RE = re.compile(r"\b(1\d{3})\b")
+
 NUM_DATE_RE = re.compile(r"\b(\d{1,2})[./-](\d{1,2})(?:[./-](\d{2,4}))?\b")
 DATE_RANGE_RE = re.compile(r"\b(\d{1,2})[–-](\d{1,2})(?:[./](\d{1,2}))\b")
 MONTH_NAME_RE = re.compile(r"\b(\d{1,2})\s+([а-яё.]+)\b", re.I)
@@ -144,6 +155,22 @@ def match_keywords(text: str) -> tuple[bool, list[str]]:
 def detect_date(text: str) -> bool:
     """Heuristically detect a date or time mention in the text."""
     return any(p.search(text) for p in COMPILED_DATE_PATTERNS)
+
+
+def detect_historical_context(text: str) -> bool:
+    """Return True if text mentions a pre-1995 year alongside historical toponyms."""
+
+    text_low = text.lower()
+    if not any(name in text_low for name in HISTORICAL_TOPONYMS):
+        return False
+    for match in HISTORICAL_YEAR_RE.findall(text_low):
+        try:
+            year = int(match)
+        except ValueError:
+            continue
+        if year <= 1994:
+            return True
+    return False
 
 
 def extract_event_ts_hint(
@@ -1019,15 +1046,22 @@ async def crawl_once(db, *, broadcast: bool = False, bot: Any | None = None) -> 
                     has_date_value = 0
                     event_ts_hint = None
                 else:
+                    history_hit = detect_historical_context(post_text)
                     kw_ok, kws = match_keywords(post_text)
                     has_date = detect_date(post_text)
-                    event_ts_hint = extract_event_ts_hint(post_text, default_time)
                     if not (kw_ok and has_date):
-                        continue
-                    if event_ts_hint is None or event_ts_hint < int(time.time()) + 2 * 3600:
-                        continue
-                    matched_kw_value = ",".join(kws)
-                    has_date_value = int(has_date)
+                        if history_hit:
+                            matched_kw_value = HISTORY_MATCHED_KEYWORD
+                            has_date_value = int(has_date)
+                            event_ts_hint = None
+                        else:
+                            continue
+                    else:
+                        event_ts_hint = extract_event_ts_hint(post_text, default_time)
+                        if event_ts_hint is None or event_ts_hint < int(time.time()) + 2 * 3600:
+                            continue
+                        matched_kw_value = ",".join(kws)
+                        has_date_value = int(has_date)
 
                 stats["matches"] += 1
                 try:
