@@ -7466,6 +7466,45 @@ def test_format_event_vk_prefers_source_post_url():
     assert "t.me/page" not in text
 
 
+def test_format_event_vk_prefers_vk_repost_for_non_partner():
+    e = Event(
+        title="T",
+        description="d",
+        source_text="s",
+        date="2025-07-10",
+        time="18:00",
+        location_name="Hall",
+        creator_id=101,
+        vk_repost_url="https://vk.com/wall-1_3",
+        added_at=datetime.now(timezone.utc) - timedelta(days=2),
+    )
+    text = main.format_event_vk(e, prefer_vk_repost=True)
+    lines = text.splitlines()
+    assert lines[0] == "[https://vk.com/wall-1_3|T]"
+
+
+def test_format_event_vk_keeps_partner_source_link_when_prefer_repost():
+    e = Event(
+        title="T",
+        description="d",
+        source_text="s",
+        date="2025-07-10",
+        time="18:00",
+        location_name="Hall",
+        creator_id=202,
+        source_post_url="https://vk.com/wall-1_4",
+        vk_repost_url="https://vk.com/wall-1_5",
+        added_at=datetime.now(timezone.utc) - timedelta(days=2),
+    )
+    text = main.format_event_vk(
+        e,
+        partner_creator_ids={202},
+        prefer_vk_repost=True,
+    )
+    lines = text.splitlines()
+    assert lines[0] == "[https://vk.com/wall-1_4|T]"
+
+
 @pytest.mark.asyncio
 async def test_daily_posts_festival_link(tmp_path: Path):
     db = Database(str(tmp_path / "db.sqlite"))
