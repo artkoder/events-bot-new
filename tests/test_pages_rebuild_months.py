@@ -239,6 +239,9 @@ async def test_pages_rebuild_split_keeps_day_boundaries(tmp_path, monkeypatch):
         def __init__(self, *args, **kwargs):
             pass
 
+        async def get_page(self, *args, **kwargs):
+            return {}
+
     monkeypatch.setattr(main, "Telegraph", DummyTelegraph)
 
     html_by_path: dict[str, str] = {}
@@ -289,4 +292,99 @@ async def test_pages_rebuild_split_keeps_day_boundaries(tmp_path, monkeypatch):
     assert days2
     assert days1.isdisjoint(days2)
     assert days1 | days2 == expected_days
+
+
+@pytest.mark.asyncio
+async def test_month_nav_update_falls_back_to_full_rebuild(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    month = "2025-10"
+
+    async with db.get_session() as session:
+        session.add(
+            MonthPage(
+                month=month,
+                url="https://telegra.ph/path1",
+                path="path1",
+                content_hash="old",
+            )
+        )
+        await session.commit()
+
+    monkeypatch.setattr(main, "get_telegraph_token", lambda: "token")
+
+    class DummyTelegraph:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    async def dummy_get_page(*args, **kwargs):
+        return {}
+
+    DummyTelegraph.get_page = dummy_get_page
+
+    monkeypatch.setattr(main, "Telegraph", DummyTelegraph)
+
+    async def fake_telegraph_call(func, path, return_html=True):
+        return {"content_html": "<p>old</p>", "title": "Old"}
+
+    monkeypatch.setattr(main, "telegraph_call", fake_telegraph_call)
+
+    async def fake_build_month_nav_block(db_obj, month_str):
+        return "<nav>links</nav>"
+
+    monkeypatch.setattr(main, "build_month_nav_block", fake_build_month_nav_block)
+
+    monkeypatch.setattr(
+        main,
+        "ensure_footer_nav_with_hr",
+        lambda html, nav_block, month, page: html + nav_block,
+    )
+
+    async def fake_get_month_data(db_obj, month_str):
+        return [], []
+
+    monkeypatch.setattr(main, "get_month_data", fake_get_month_data)
+
+    full_render_called = False
+
+    async def fake_build_month_page_content(db_obj, month_str, events, exhibitions):
+        nonlocal full_render_called
+        full_render_called = True
+        return ("Title", [{"tag": "p", "children": ["new"]}], 0)
+
+    monkeypatch.setattr(main, "build_month_page_content", fake_build_month_page_content)
+
+    edit_calls: list[dict] = []
+
+    async def fake_edit_page(
+        tg,
+        path,
+        *,
+        title,
+        html_content,
+        caller="event_pipeline",
+        **kwargs,
+    ):
+        call_index = len(edit_calls)
+        edit_calls.append({"path": path, "html": html_content})
+        if call_index == 0:
+            raise main.TelegraphException("CONTENT TOO BIG")
+        return {"url": f"https://telegra.ph/{path}", "path": path}
+
+    monkeypatch.setattr(main, "telegraph_edit_page", fake_edit_page)
+
+    async def fake_check_month_page_markers(tg, path):
+        return None
+
+    monkeypatch.setattr(main, "check_month_page_markers", fake_check_month_page_markers)
+
+    await main._sync_month_page_inner(db, month, update_links=True)
+
+    assert full_render_called
+    assert len(edit_calls) == 2
+
+    async with db.get_session() as session:
+        page = await session.get(MonthPage, month)
+
+    assert page.content_hash == main.content_hash(edit_calls[-1]["html"])
 
