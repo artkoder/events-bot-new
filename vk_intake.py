@@ -158,11 +158,9 @@ def detect_date(text: str) -> bool:
 
 
 def detect_historical_context(text: str) -> bool:
-    """Return True if text mentions a pre-1995 year alongside historical toponyms."""
+    """Return True if text mentions a pre-1995 year or historical toponyms."""
 
     text_low = text.lower()
-    if not any(name in text_low for name in HISTORICAL_TOPONYMS):
-        return False
     for match in HISTORICAL_YEAR_RE.findall(text_low):
         try:
             year = int(match)
@@ -170,7 +168,7 @@ def detect_historical_context(text: str) -> bool:
             continue
         if year <= 1994:
             return True
-    return False
+    return any(name in text_low for name in HISTORICAL_TOPONYMS)
 
 
 def extract_event_ts_hint(
@@ -1059,6 +1057,7 @@ async def crawl_once(db, *, broadcast: bool = False, bot: Any | None = None) -> 
                 photos = post.get("photos", []) or []
                 blank_single_photo = not post_text.strip() and len(photos) == 1
 
+                history_hit = False
                 if blank_single_photo:
                     matched_kw_value = OCR_PENDING_SENTINEL
                     has_date_value = 0
@@ -1067,19 +1066,18 @@ async def crawl_once(db, *, broadcast: bool = False, bot: Any | None = None) -> 
                     history_hit = detect_historical_context(post_text)
                     kw_ok, kws = match_keywords(post_text)
                     has_date = detect_date(post_text)
-                    if not (kw_ok and has_date):
-                        if history_hit:
-                            matched_kw_value = HISTORY_MATCHED_KEYWORD
-                            has_date_value = int(has_date)
-                            event_ts_hint = None
-                        else:
-                            continue
-                    else:
+                    if kw_ok and has_date:
                         event_ts_hint = extract_event_ts_hint(post_text, default_time)
                         if event_ts_hint is None or event_ts_hint < int(time.time()) + 2 * 3600:
                             continue
                         matched_kw_value = ",".join(kws)
                         has_date_value = int(has_date)
+                    elif history_hit:
+                        matched_kw_value = HISTORY_MATCHED_KEYWORD
+                        has_date_value = int(has_date)
+                        event_ts_hint = None
+                    else:
+                        continue
 
                 stats["matches"] += 1
                 try:
