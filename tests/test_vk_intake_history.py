@@ -17,6 +17,7 @@ from db import Database
     [
         "Наш рассказ о событиях 1944 года.",
         "Прогулка по старинному Кёнигсбергу.",
+        "Экскурсия в атмосферный Пиллау.",
     ],
 )
 async def test_crawl_enqueues_historical_posts(tmp_path, monkeypatch, post_text):
