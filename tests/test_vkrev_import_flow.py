@@ -419,6 +419,175 @@ async def test_vkrev_import_flow_handles_multiple_events(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_vkrev_import_flow_requires_festival_when_forced(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.raw_conn() as conn:
+        await conn.execute(
+            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time) VALUES(?,?,?,?,?)",
+            (1, "club1", "Test Community", "", None),
+        )
+        await conn.execute(
+            "INSERT INTO vk_inbox(id, group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status) VALUES(?,?,?,?,?,?,?,?,?)",
+            (1, 1, 2, 0, "text", None, 1, 0, "pending"),
+        )
+        await conn.commit()
+
+    async def fake_fetch(*args, **kwargs):
+        return []
+
+    draft = vk_intake.EventDraft(
+        title="T",
+        date="2025-09-02",
+        time="10:00",
+        source_text="T",
+    )
+
+    async def fake_build(*args, **kwargs):
+        return [draft]
+
+    mark_called = False
+
+    async def fake_mark_imported(*args, **kwargs):
+        nonlocal mark_called
+        mark_called = True
+
+    async def fake_persist(*args, **kwargs):
+        raise AssertionError("persist should not be called when festival is required")
+
+    monkeypatch.setattr(main, "_vkrev_fetch_photos", fake_fetch)
+    monkeypatch.setattr(vk_intake, "build_event_drafts", fake_build)
+    monkeypatch.setattr(vk_review, "mark_imported", fake_mark_imported)
+    monkeypatch.setattr(vk_intake, "persist_event_and_pages", fake_persist)
+
+    setattr(main.parse_event_via_4o, "_festival", None)
+
+    bot = DummyBot()
+    await main._vkrev_import_flow(
+        1,
+        1,
+        1,
+        "batch1",
+        db,
+        bot,
+        force_festival=True,
+    )
+
+    assert mark_called is False
+    assert bot.messages[-1].text == "❌ Не удалось распознать фестиваль, импорт остановлен."
+    assert getattr(main.parse_event_via_4o, "_festival", None) is None
+
+
+@pytest.mark.asyncio
+async def test_vkrev_import_flow_creates_festival_and_reports_status(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.raw_conn() as conn:
+        await conn.execute(
+            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time) VALUES(?,?,?,?,?)",
+            (1, "club1", "Test Community", "", None),
+        )
+        await conn.execute(
+            "INSERT INTO vk_inbox(id, group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status) VALUES(?,?,?,?,?,?,?,?,?)",
+            (1, 1, 2, 0, "text", None, 1, 0, "pending"),
+        )
+        await conn.commit()
+
+    async def fake_fetch(*args, **kwargs):
+        return []
+
+    poster = PosterMedia(data=b"", name="p1", catbox_url="https://cat.box/image.jpg")
+    draft = vk_intake.EventDraft(
+        title="T",
+        date="2025-09-02",
+        time="10:00",
+        source_text="Source",
+        poster_media=[poster],
+    )
+
+    async def fake_build(*args, **kwargs):
+        return [draft]
+
+    async def fake_mark_imported(*args, **kwargs):
+        pass
+
+    async def fake_enqueue_job(*args, **kwargs):
+        return "job"
+
+    sync_calls: list[tuple[str, tuple]] = []
+
+    async def fake_sync_page(db_obj, name):
+        sync_calls.append(("page", (name,)))
+
+    async def fake_sync_index(db_obj):
+        sync_calls.append(("index", tuple()))
+
+    async def fake_sync_vk(db_obj, name, bot_obj, *, strict=False):
+        sync_calls.append(("vk", (name, strict)))
+
+    fest_payload = {
+        "name": "Fest Alpha",
+        "full_name": "Fest Alpha International",
+        "start_date": "2025-07-01",
+        "end_date": "2025-07-05",
+        "location_name": "Main Hall",
+        "location_address": "Main Hall, Fest City",
+        "city": "Fest City",
+        "website_url": "https://fest.example",
+        "program_url": "https://fest.example/program",
+        "ticket_url": "https://fest.example/tickets",
+    }
+
+    monkeypatch.setattr(main, "_vkrev_fetch_photos", fake_fetch)
+    monkeypatch.setattr(vk_intake, "build_event_drafts", fake_build)
+    monkeypatch.setattr(vk_review, "mark_imported", fake_mark_imported)
+    monkeypatch.setattr(main, "enqueue_job", fake_enqueue_job)
+    monkeypatch.setattr(main, "sync_festival_page", fake_sync_page)
+    monkeypatch.setattr(main, "sync_festivals_index_page", fake_sync_index)
+    monkeypatch.setattr(main, "rebuild_festivals_index_if_needed", fake_sync_index)
+    monkeypatch.setattr(main, "sync_festival_vk_post", fake_sync_vk)
+
+    setattr(main.parse_event_via_4o, "_festival", fest_payload)
+
+    bot = DummyBot()
+    await main._vkrev_import_flow(
+        1,
+        1,
+        1,
+        "batch1",
+        db,
+        bot,
+        force_festival=True,
+    )
+
+    async with db.get_session() as session:
+        fest = (
+            await session.execute(select(Festival).where(Festival.name == "Fest Alpha"))
+        ).scalar_one()
+        event = (await session.execute(select(Event))).scalars().one()
+
+    assert fest.full_name == "Fest Alpha International"
+    assert fest.photo_urls == ["https://cat.box/image.jpg"]
+    assert fest.website_url == "https://fest.example"
+    assert fest.program_url == "https://fest.example/program"
+    assert fest.ticket_url == "https://fest.example/tickets"
+    assert fest.start_date == "2025-07-01"
+    assert fest.end_date == "2025-07-05"
+    assert fest.location_name == "Main Hall"
+    assert fest.city == "Fest City"
+    assert fest.source_post_url == "https://vk.com/wall-1_2"
+    assert event.festival == "Fest Alpha"
+
+    assert ("page", ("Fest Alpha",)) in sync_calls
+    assert ("index", tuple()) in sync_calls
+    assert ("vk", ("Fest Alpha", True)) in sync_calls
+
+    detail_text = bot.messages[-1].text
+    assert "Фестиваль: Fest Alpha (создан)" in detail_text
+
+@pytest.mark.asyncio
 async def test_vk_persist_event_updates_ocr_records(tmp_path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
