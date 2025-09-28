@@ -12,7 +12,14 @@ from db import Database
 
 
 @pytest.mark.asyncio
-async def test_crawl_enqueues_historical_posts(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "post_text",
+    [
+        "Наш рассказ о событиях 1944 года.",
+        "Прогулка по старинному Кёнигсбергу.",
+    ],
+)
+async def test_crawl_enqueues_historical_posts(tmp_path, monkeypatch, post_text):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
 
@@ -23,7 +30,6 @@ async def test_crawl_enqueues_historical_posts(tmp_path, monkeypatch):
         )
         await conn.commit()
 
-    post_text = "В 1945 году в Кёнигсберге пройдет фестиваль памяти"
     posts = [
         {
             "date": int(time.time()),
