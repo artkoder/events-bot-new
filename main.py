@@ -15233,7 +15233,12 @@ async def build_daily_posts(
                 continue
             created_at = _ensure_utc(getattr(fest, "created_at", None))
             if created_at and created_at >= yesterday_utc:
-                recent_festivals.append((created_at, f"{fest.name}-{url}"))
+                recent_festivals.append(
+                    (
+                        created_at,
+                        f'<a href="{url}">✨ {html.escape(fest.name)}</a>',
+                    )
+                )
         recent_festivals.sort(key=lambda item: item[0])
         recent_festival_entries = [entry for _, entry in recent_festivals]
 
