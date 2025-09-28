@@ -455,6 +455,8 @@ async def build_event_drafts_from_vk(
     default_time: str | None = None,
     operator_extra: str | None = None,
     festival_names: list[str] | None = None,
+    festival_alias_pairs: Sequence[tuple[str, int]] | None = None,
+    festival_hint: bool = False,
     poster_media: Sequence[PosterMedia] | None = None,
     ocr_tokens_spent: int = 0,
     ocr_tokens_remaining: int | None = None,
@@ -480,6 +482,12 @@ async def build_event_drafts_from_vk(
         llm_text = f"{llm_text}\n{operator_extra}"
     if default_time:
         llm_text = f"{llm_text}\nЕсли время не указано, предположи начало в {default_time}."
+    if festival_hint:
+        llm_text = (
+            f"{llm_text}\n"
+            "Оператор подтверждает, что пост описывает фестиваль. "
+            "Сопоставь с существующими фестивалями (JSON ниже) или создай новый."
+        )
 
     poster_items = list(poster_media or [])
     poster_texts = collect_poster_texts(poster_items)
@@ -495,6 +503,8 @@ async def build_event_drafts_from_vk(
         parse_kwargs["poster_texts"] = poster_texts
     if poster_summary:
         parse_kwargs["poster_summary"] = poster_summary
+    if festival_alias_pairs:
+        parse_kwargs["festival_alias_pairs"] = festival_alias_pairs
 
     parsed = await parse_event_via_4o(
         llm_text, festival_names=festival_names, **extra, **parse_kwargs
@@ -625,6 +635,8 @@ async def build_event_drafts(
     default_time: str | None = None,
     operator_extra: str | None = None,
     festival_names: list[str] | None = None,
+    festival_alias_pairs: list[tuple[str, int]] | None = None,
+    festival_hint: bool = False,
     db: Database,
 ) -> EventDraft:
     photo_bytes = await _download_photo_media(photos or [])
@@ -688,6 +700,8 @@ async def build_event_drafts(
         default_time=default_time,
         operator_extra=operator_extra,
         festival_names=festival_names,
+        festival_alias_pairs=festival_alias_pairs,
+        festival_hint=festival_hint,
         poster_media=poster_items,
         ocr_tokens_spent=ocr_tokens_spent,
         ocr_tokens_remaining=ocr_tokens_remaining,
@@ -706,6 +720,8 @@ async def build_event_draft(
     default_time: str | None = None,
     operator_extra: str | None = None,
     festival_names: list[str] | None = None,
+    festival_alias_pairs: list[tuple[str, int]] | None = None,
+    festival_hint: bool = False,
     db: Database,
 ) -> EventDraft:
     drafts = await build_event_drafts(
@@ -716,6 +732,8 @@ async def build_event_draft(
         default_time=default_time,
         operator_extra=operator_extra,
         festival_names=festival_names,
+        festival_alias_pairs=festival_alias_pairs,
+        festival_hint=festival_hint,
         db=db,
     )
     if not drafts:
