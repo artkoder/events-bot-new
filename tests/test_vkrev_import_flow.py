@@ -5,6 +5,7 @@ import asyncio
 import hashlib
 import logging
 from datetime import datetime
+from typing import Any
 
 import pytest
 from types import SimpleNamespace
@@ -184,9 +185,13 @@ async def test_vkrev_import_flow_persists_url_and_skips_vk_sync(tmp_path, monkey
         default_time=None,
         operator_extra=None,
         festival_names=None,
+        festival_alias_pairs=None,
+        festival_hint=False,
         db=None,
     ):
         captured["festival_names"] = festival_names
+        captured["festival_alias_pairs"] = festival_alias_pairs
+        captured["festival_hint"] = festival_hint
         return [draft]
 
     captured = {}
@@ -218,6 +223,8 @@ async def test_vkrev_import_flow_persists_url_and_skips_vk_sync(tmp_path, monkey
         ev = await session.get(Event, captured["event_id"])
     assert ev.source_post_url == "https://vk.com/wall-1_2"
     assert captured["festival_names"] == ["Fest One"]
+    assert captured["festival_alias_pairs"] is None
+    assert captured["festival_hint"] is False
     assert JobTask.vk_sync not in tasks
     message_lines = bot.messages[-1].text.splitlines()
     assert message_lines[0] == "Импортировано"
@@ -267,6 +274,8 @@ async def test_vkrev_import_flow_reports_ocr_usage(tmp_path, monkeypatch):
         default_time=None,
         operator_extra=None,
         festival_names=None,
+        festival_alias_pairs=None,
+        festival_hint=False,
         db=None,
     ):
         return [draft]
@@ -340,6 +349,95 @@ async def test_vkrev_import_flow_reports_ocr_limit(tmp_path, monkeypatch):
     info_text = bot.messages[-1].text
     assert "OCR недоступен" in info_text
     assert "OCR: потрачено 0, осталось 0" in info_text
+
+
+@pytest.mark.asyncio
+async def test_vkrev_import_flow_passes_festival_hint(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.raw_conn() as conn:
+        await conn.execute(
+            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time) VALUES(?,?,?,?,?)",
+            (1, "club1", "Test Community", "", None),
+        )
+        await conn.execute(
+            "INSERT INTO vk_inbox(id, group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status) VALUES(?,?,?,?,?,?,?,?,?)",
+            (1, 1, 2, 0, "text", None, 1, 0, "pending"),
+        )
+        await conn.commit()
+
+    async with db.get_session() as session:
+        session.add(Festival(name="Fest One", aliases=["Fest Alias"]))
+        await session.commit()
+
+    captured: dict[str, Any] = {}
+
+    async def fake_fetch(*args, **kwargs):
+        return []
+
+    async def fake_download_photo_media(_photos):
+        return []
+
+    async def fake_recognize_posters(db_, photo_bytes, log_context=None):
+        return [], 0, 0
+
+    async def fake_parse(text: str, *args, **kwargs):
+        captured["text"] = text
+        captured["festival_names"] = kwargs.get("festival_names")
+        captured["festival_alias_pairs"] = kwargs.get("festival_alias_pairs")
+        return [
+            {
+                "title": "Fest Event",
+                "date": "2025-09-02",
+                "time": "10:00",
+                "short_description": "Desc",
+                "location_name": "Venue",
+            }
+        ]
+
+    def fake_require(name: str):
+        assert name == "parse_event_via_4o"
+        return fake_parse
+
+    async def fake_persist(draft, photos, db_, source_post_url=None):
+        return vk_intake.PersistResult(
+            event_id=1,
+            telegraph_url="https://t",
+            ics_supabase_url="https://s",
+            ics_tg_url="https://tg",
+            event_date="2025-09-02",
+            event_end_date=None,
+            event_time="10:00",
+            event_type=None,
+            is_free=False,
+        )
+
+    async def fake_mark_imported(*args, **kwargs):
+        pass
+
+    monkeypatch.setattr(main, "_vkrev_fetch_photos", fake_fetch)
+    monkeypatch.setattr(vk_intake, "_download_photo_media", fake_download_photo_media)
+    monkeypatch.setattr(vk_intake.poster_ocr, "recognize_posters", fake_recognize_posters)
+    monkeypatch.setattr(vk_intake, "require_main_attr", fake_require)
+    monkeypatch.setattr(vk_intake, "persist_event_and_pages", fake_persist)
+    monkeypatch.setattr(vk_review, "mark_imported", fake_mark_imported)
+
+    bot = DummyBot()
+    await main._vkrev_import_flow(
+        1,
+        1,
+        1,
+        "batch1",
+        db,
+        bot,
+        festival_hint=True,
+    )
+
+    assert "Оператор подтверждает" in captured["text"]
+    assert captured["festival_names"] == ["Fest One"]
+    expected_alias = main.normalize_alias("Fest Alias")
+    assert captured["festival_alias_pairs"] == [(expected_alias, 0)]
 
 
 @pytest.mark.asyncio

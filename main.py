@@ -20588,6 +20588,7 @@ async def _vkrev_import_flow(
     db: Database,
     bot: Bot,
     operator_extra: str | None = None,
+    festival_hint: bool | None = None,
     *,
     force_festival: bool = False,
 ) -> None:
@@ -20609,8 +20610,42 @@ async def _vkrev_import_flow(
         source = await cur.fetchone()
     photos = await _vkrev_fetch_photos(group_id, post_id, db, bot)
     async with db.get_session() as session:
-        res_f = await session.execute(select(Festival.name))
-        festival_names = [row[0] for row in res_f.fetchall()]
+        res_f = await session.execute(select(Festival))
+        festivals = res_f.scalars().all()
+    festival_names = sorted(
+        {
+            (fest.name or "").strip()
+            for fest in festivals
+            if (fest.name or "").strip()
+        }
+    )
+    festival_alias_pairs: list[tuple[str, int]] = []
+    if festival_names:
+        index_map = {name: idx for idx, name in enumerate(festival_names)}
+        for fest in festivals:
+            name = (fest.name or "").strip()
+            if not name:
+                continue
+            idx = index_map.get(name)
+            if idx is None:
+                continue
+            base_norm = normalize_alias(name)
+            for alias in getattr(fest, "aliases", None) or []:
+                norm = normalize_alias(alias)
+                if not norm or norm == base_norm:
+                    continue
+                festival_alias_pairs.append((norm, idx))
+        if festival_alias_pairs:
+            seen_pairs: set[tuple[str, int]] = set()
+            deduped: list[tuple[str, int]] = []
+            for pair in festival_alias_pairs:
+                if pair in seen_pairs:
+                    continue
+                seen_pairs.add(pair)
+                deduped.append(pair)
+            festival_alias_pairs = deduped
+    if festival_hint is None:
+        festival_hint = force_festival
     drafts = await vk_intake.build_event_drafts(
         text,
         photos=photos,
@@ -20619,6 +20654,8 @@ async def _vkrev_import_flow(
         default_time=source[2] if source else None,
         operator_extra=operator_extra,
         festival_names=festival_names,
+        festival_alias_pairs=festival_alias_pairs or None,
+        festival_hint=festival_hint,
         db=db,
     )
     source_post_url = f"https://vk.com/wall-{group_id}_{post_id}"
