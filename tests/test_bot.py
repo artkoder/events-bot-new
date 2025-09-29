@@ -4045,8 +4045,24 @@ async def test_stats_pages(tmp_path: Path, monkeypatch):
 
     async with db.get_session() as session:
         session.add(main.MonthPage(month=prev_month, url="u", path="mp_prev"))
-        session.add(main.MonthPage(month=cur_month, url="u2", path="mp_cur"))
-        session.add(main.MonthPage(month=next_month, url="u3", path="mp_next"))
+        session.add(
+            main.MonthPage(
+                month=cur_month,
+                url="u2",
+                path="mp_cur",
+                url2="u2b",
+                path2="mp_cur_2",
+            )
+        )
+        session.add(
+            main.MonthPage(
+                month=next_month,
+                url="u3",
+                path="",
+                url2="u3b",
+                path2="mp_next_2",
+            )
+        )
         session.add(main.WeekendPage(start=prev_weekend.isoformat(), url="w1", path="wp_prev"))
         session.add(main.WeekendPage(start=cur_weekend.isoformat(), url="w2", path="wp_cur"))
         session.add(main.WeekendPage(start=next_weekend.isoformat(), url="w3", path="wp_next"))
@@ -4062,7 +4078,8 @@ async def test_stats_pages(tmp_path: Path, monkeypatch):
             views = {
                 "mp_prev": {"views": 100},
                 "mp_cur": {"views": 200},
-                "mp_next": {"views": 300},
+                "mp_cur_2": {"views": 50},
+                "mp_next_2": {"views": 400},
                 "wp_prev": {"views": 10},
                 "wp_cur": {"views": 20},
                 "wp_next": {"views": 30},
@@ -4099,7 +4116,8 @@ async def test_stats_pages(tmp_path: Path, monkeypatch):
     assert any("100" in l for l in lines)  # previous month
     assert any("10" in l for l in lines)   # previous weekend
     assert any("20" in l for l in lines)   # current weekend
-    assert any("300" in l for l in lines)  # future month
+    assert any("250" in l for l in lines)  # current month combines views
+    assert any("400" in l for l in lines)  # future month with only path2
 
 
 

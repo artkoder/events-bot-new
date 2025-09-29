@@ -18471,9 +18471,29 @@ async def collect_page_stats(db: Database) -> list[str]:
 
     lines: list[str] = []
 
-    if mp_prev and mp_prev.path:
+    async def month_views(mp: MonthPage) -> int | None:
+        paths: list[tuple[str, str | None]] = []
+        if mp.path:
+            paths.append((mp.path, mp.url))
+        if mp.path2:
+            paths.append((mp.path2, mp.url2))
+        if not paths:
+            return None
 
-        views = await fetch_views(mp_prev.path, mp_prev.url)
+        total = 0
+        has_value = False
+        for path, url in paths:
+            views = await fetch_views(path, url)
+            if views is None:
+                continue
+            total += views
+            has_value = True
+
+        return total if has_value else None
+
+    if mp_prev:
+
+        views = await month_views(mp_prev)
 
         if views is not None:
             month_dt = date.fromisoformat(mp_prev.month + "-01")
@@ -18498,10 +18518,10 @@ async def collect_page_stats(db: Database) -> list[str]:
             lines.append(f"{label}: {views} просмотров")
 
     for mp in future_months:
-        if not mp.path:
+        if not (mp.path or mp.path2):
             continue
 
-        views = await fetch_views(mp.path, mp.url)
+        views = await month_views(mp)
 
         if views is not None:
             month_dt = date.fromisoformat(mp.month + "-01")
