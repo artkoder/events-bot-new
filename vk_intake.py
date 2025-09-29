@@ -519,7 +519,9 @@ async def build_event_drafts_from_vk(
     parsed = await parse_event_via_4o(
         llm_text, festival_names=festival_names, **extra, **parse_kwargs
     )
-    if not parsed:
+    festival_payload = getattr(parse_event_via_4o, "_festival", None)
+    parsed_events = list(parsed) if parsed else []
+    if not parsed_events and not festival_payload:
         raise RuntimeError("LLM returned no event")
 
     combined_text = text or ""
@@ -575,7 +577,7 @@ async def build_event_drafts_from_vk(
             return bool(value)
 
     drafts: list[EventDraft] = []
-    for data in parsed:
+    for data in parsed_events:
         ticket_price_min = clean_int(data.get("ticket_price_min"))
         ticket_price_max = clean_int(data.get("ticket_price_max"))
         links = [data["ticket_link"]] if data.get("ticket_link") else None
