@@ -26,6 +26,7 @@ from digests import (
     compose_digest_caption,
     attach_caption_if_fits,
     _build_digest_preview,
+    _normalize_title_fallback,
 )
 from aiogram import types
 
@@ -188,6 +189,14 @@ async def test_normalize_titles_exhibition_keeps_original():
     cleaned = [item["title_clean"] for item in normalized]
     assert cleaned == ["Выставка «Солнечный луч»", "Выставка в Доме искусств"]
     assert all(not title.startswith("Лекция") for title in cleaned)
+
+
+def test_normalize_title_fallback_keeps_non_name_prefix():
+    title = "Исторический интенсив: история XX века"
+
+    normalized = _normalize_title_fallback(title)
+
+    assert normalized == {"emoji": "", "title_clean": title}
 
 
 @pytest.mark.asyncio

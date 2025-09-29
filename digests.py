@@ -772,6 +772,16 @@ def _split_leading_emoji(title: str) -> tuple[str, str]:
     return emoji, title[len(emoji) :]
 
 
+_NAME_PART_RE = re.compile(r"^[A-ZА-ЯЁ][a-zа-яё]+(?:-[A-ZА-ЯЁ][a-zа-яё]+)*$")
+
+
+def _looks_like_full_name(candidate: str) -> bool:
+    parts = candidate.split()
+    if len(parts) != 2:
+        return False
+    return all(_NAME_PART_RE.match(part) for part in parts)
+
+
 def _normalize_title_fallback(
     title: str, *, event_kind: str = "lecture"
 ) -> dict[str, str]:
@@ -801,7 +811,8 @@ def _normalize_title_fallback(
     if m:
         who = m.group("who").strip()
         what = m.group("what").strip()
-        title = f"{prefix} {who}: {what}"
+        if _looks_like_full_name(who):
+            title = f"{prefix} {who}: {what}"
 
     return {"emoji": emoji, "title_clean": title}
 
