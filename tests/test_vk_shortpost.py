@@ -357,7 +357,15 @@ async def test_handle_vk_review_accept_notifies_before_import(monkeypatch, tmp_p
     sent = []
 
     async def fake_import_flow(
-        chat_id, operator_id, inbox_id, batch_id, db_, bot_, operator_extra=None
+        chat_id,
+        operator_id,
+        inbox_id,
+        batch_id,
+        db_,
+        bot_,
+        operator_extra=None,
+        *,
+        force_festival=False,
     ):
         sent.append((chat_id, operator_id, inbox_id, batch_id))
         await bot_.send_message(chat_id, "import flow called")
