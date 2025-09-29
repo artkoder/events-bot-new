@@ -458,14 +458,15 @@ async def mark_imported(
     inbox_id: int,
     batch_id: str,
     operator_id: int,
-    event_id: int,
-    event_date: str,
+    event_id: int | None,
+    event_date: str | None,
 ) -> None:
     """Mark inbox row as imported and accumulate affected month.
 
     ``event_date`` should be in ISO ``YYYY-MM-DD`` format.  The month part is
     stored in ``vk_review_batch.months_csv`` as a comma separated set.  The
-    row is unlocked and linked with ``event_id``.
+    row is unlocked and linked with ``event_id`` (which may be ``None`` when
+    only a festival record is created).
     """
 
     month = (event_date or "")[:7]

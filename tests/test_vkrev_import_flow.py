@@ -517,6 +517,91 @@ async def test_vkrev_import_flow_handles_multiple_events(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_vkrev_import_flow_creates_festival_without_events(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.raw_conn() as conn:
+        await conn.execute(
+            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time) VALUES(?,?,?,?,?)",
+            (1, "club1", "Test Community", "", None),
+        )
+        await conn.execute(
+            "INSERT INTO vk_inbox(id, group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status) VALUES(?,?,?,?,?,?,?,?,?)",
+            (1, 1, 2, 0, "Festival post", None, 1, 0, "pending"),
+        )
+        await conn.commit()
+
+    async def fake_fetch(*args, **kwargs):
+        return []
+
+    async def fake_build(*args, **kwargs):
+        return []
+
+    sync_calls: list[tuple[str, str]] = []
+
+    async def fake_sync_page(db_obj, name, **kwargs):
+        sync_calls.append(("page", name))
+
+    async def fake_sync_index(db_obj, **kwargs):
+        sync_calls.append(("index", ""))
+
+    async def fake_sync_vk(db_obj, name, bot_obj, **kwargs):
+        sync_calls.append(("vk", name))
+        return None
+
+    monkeypatch.setattr(main, "_vkrev_fetch_photos", fake_fetch)
+    monkeypatch.setattr(vk_intake, "build_event_drafts", fake_build)
+    async def fake_rebuild_nav(db_obj):
+        sync_calls.append(("nav", ""))
+        return False
+
+    monkeypatch.setattr(main, "sync_festival_page", fake_sync_page)
+    monkeypatch.setattr(main, "sync_festivals_index_page", fake_sync_index)
+    monkeypatch.setattr(main, "sync_festival_vk_post", fake_sync_vk)
+    monkeypatch.setattr(main, "rebuild_fest_nav_if_changed", fake_rebuild_nav)
+    monkeypatch.setattr(main.parse_event_via_4o, "_festival", {
+        "name": "Fest Solo",
+        "start_date": "2025-07-01",
+        "end_date": "2025-07-07",
+        "location_name": "Main Park",
+        "city": "Kaliningrad",
+        "website_url": "https://fest.example",
+    }, raising=False)
+
+    bot = DummyBot()
+    await main._vkrev_import_flow(1, 1, 1, "batch1", db, bot)
+
+    async with db.get_session() as session:
+        result = await session.execute(select(Festival).where(Festival.name == "Fest Solo"))
+        fest = result.scalar_one()
+
+    assert fest.start_date == "2025-07-01"
+    assert fest.end_date == "2025-07-07"
+    assert fest.location_name == "Main Park"
+    assert fest.city == "Kaliningrad"
+    assert fest.website_url == "https://fest.example"
+    assert fest.photo_urls == []
+    assert fest.source_text == "Festival post"
+
+    message_text = bot.messages[-1].text
+    assert "Импортировано только фестиваль" in message_text
+    assert "Фестиваль: Fest Solo" in message_text
+    assert "События не импортированы" in message_text
+
+    async with db.raw_conn() as conn:
+        cur = await conn.execute(
+            "SELECT status, imported_event_id FROM vk_inbox WHERE id=?",
+            (1,),
+        )
+        status, imported_event_id = await cur.fetchone()
+    assert status == "imported"
+    assert imported_event_id is None
+
+    assert ("page", "Fest Solo") in sync_calls
+
+
+@pytest.mark.asyncio
 async def test_vkrev_import_flow_requires_festival_when_forced(tmp_path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()

@@ -20678,10 +20678,11 @@ async def _vkrev_import_flow(
         festival_info_raw = {"name": festival_info_raw}
 
     poster_urls: list[str] = []
-    if drafts:
+    first_draft = drafts[0] if drafts else None
+    if first_draft and first_draft.poster_media:
         poster_urls = [
             media.catbox_url
-            for media in drafts[0].poster_media
+            for media in first_draft.poster_media
             if getattr(media, "catbox_url", None)
         ]
     poster_urls = [url for url in poster_urls if url]
@@ -20691,6 +20692,8 @@ async def _vkrev_import_flow(
     fest_updated = False
     fest_status_line: str | None = None
     fest_data: dict[str, Any] | None = None
+    fest_start_date: str | None = None
+    fest_end_date: str | None = None
     if isinstance(festival_info_raw, dict):
         fest_data = festival_info_raw
         fest_name = clean_optional_str(
@@ -20706,7 +20709,7 @@ async def _vkrev_import_flow(
         )
         return
 
-    if fest_name and drafts:
+    if fest_name:
         start_raw = None
         end_raw = None
         location_name = None
@@ -20728,10 +20731,12 @@ async def _vkrev_import_flow(
             program_url = clean_optional_str(fest_data.get("program_url"))
             ticket_url = clean_optional_str(fest_data.get("ticket_url"))
             full_name = clean_optional_str(fest_data.get("full_name"))
-        start_date = canonicalize_date(start_raw)
-        end_date = canonicalize_date(end_raw)
+        fest_start_date = canonicalize_date(start_raw)
+        fest_end_date = canonicalize_date(end_raw)
         location_address = strip_city_from_address(location_address, city)
-        source_text_value = drafts[0].source_text or text
+        source_text_value = text
+        if first_draft and first_draft.source_text:
+            source_text_value = first_draft.source_text
         festival_obj, fest_created, fest_updated = await ensure_festival(
             db,
             fest_name,
@@ -20741,8 +20746,8 @@ async def _vkrev_import_flow(
             website_url=website_url,
             program_url=program_url,
             ticket_url=ticket_url,
-            start_date=start_date,
-            end_date=end_date,
+            start_date=fest_start_date,
+            end_date=fest_end_date,
             location_name=location_name,
             location_address=location_address,
             city=city,
@@ -20754,6 +20759,21 @@ async def _vkrev_import_flow(
                 draft.festival = festival_obj.name
             status = "создан" if fest_created else "обновлён" if fest_updated else "без изменений"
             fest_status_line = f"Фестиваль: {festival_obj.name} ({status})"
+
+    async def _sync_festival_updates() -> None:
+        if festival_obj and (fest_created or fest_updated):
+            try:
+                await sync_festival_page(db, festival_obj.name)
+            except Exception:
+                logging.exception("festival page sync failed for %s", festival_obj.name)
+            try:
+                await sync_festivals_index_page(db)
+            except Exception:
+                logging.exception("festival index sync failed")
+            try:
+                await sync_festival_vk_post(db, festival_obj.name, bot, strict=True)
+            except Exception:
+                logging.exception("festival vk sync failed for %s", festival_obj.name)
 
     persist_results: list[
         tuple[vk_intake.EventDraft, vk_intake.PersistResult, Event | None]
@@ -20767,7 +20787,20 @@ async def _vkrev_import_flow(
         persist_results.append((draft, res, event_obj))
 
     if not persist_results:
-        await bot.send_message(chat_id, "LLM не вернул события")
+        if festival_obj:
+            fest_month_hint = fest_start_date or fest_end_date or ""
+            await vk_review.mark_imported(
+                db, inbox_id, batch_id, operator_id, None, fest_month_hint
+            )
+            vk_review_actions_total["imported"] += 1
+            message_lines = ["Импортировано только фестиваль"]
+            if fest_status_line:
+                message_lines.append(fest_status_line)
+            message_lines.append("События не импортированы.")
+            await bot.send_message(chat_id, "\n".join(message_lines))
+            await _sync_festival_updates()
+        else:
+            await bot.send_message(chat_id, "LLM не вернул события")
         return
 
     first_res = persist_results[0][1]
@@ -20789,19 +20822,7 @@ async def _vkrev_import_flow(
         await bot.send_message(int(admin_chat), links)
     await bot.send_message(chat_id, links)
 
-    if festival_obj and (fest_created or fest_updated):
-        try:
-            await sync_festival_page(db, festival_obj.name)
-        except Exception:
-            logging.exception("festival page sync failed for %s", festival_obj.name)
-        try:
-            await sync_festivals_index_page(db)
-        except Exception:
-            logging.exception("festival index sync failed")
-        try:
-            await sync_festival_vk_post(db, festival_obj.name, bot, strict=True)
-        except Exception:
-            logging.exception("festival vk sync failed for %s", festival_obj.name)
+    await _sync_festival_updates()
 
     for idx, (draft, res, event_obj) in enumerate(persist_results, start=1):
         base_keyboard = [
