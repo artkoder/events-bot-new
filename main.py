@@ -4483,7 +4483,7 @@ TELEGRAPH_ALLOWED_TAGS = {
 }
 
 _TG_HEADER_RE = re.compile(r"<(/?)h([1-6])(\b[^>]*)>", re.IGNORECASE)
-_TG_TAG_RE = re.compile(r"<\/?([a-z0-9]+)", re.IGNORECASE)
+_TELEGRAPH_TAG_RE = re.compile(r"<\/?([a-z0-9]+)", re.IGNORECASE)
 
 
 def sanitize_telegraph_html(html: str) -> str:
@@ -4495,7 +4495,7 @@ def sanitize_telegraph_html(html: str) -> str:
         return f"<{slash}h{level}{attrs}>"
 
     html = _TG_HEADER_RE.sub(repl, html)
-    tags = {t.lower() for t in _TG_TAG_RE.findall(html)}
+    tags = {t.lower() for t in _TELEGRAPH_TAG_RE.findall(html)}
     disallowed = [t for t in tags if t not in TELEGRAPH_ALLOWED_TAGS]
     if disallowed:
         raise ValueError(f"Unsupported tag(s): {', '.join(disallowed)}")

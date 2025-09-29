@@ -4,10 +4,12 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import main
+import vk_intake
 from db import Database
 from models import Festival, Event
 from telegraph.utils import nodes_to_html
 from markup import FEST_INDEX_INTRO_START, FEST_INDEX_INTRO_END
+from sqlalchemy import select
 
 
 @pytest.mark.asyncio
@@ -197,6 +199,61 @@ async def test_sync_festivals_index_page_sorted(tmp_path: Path, monkeypatch):
     await main.sync_festivals_index_page(db)
     html = stored["html"]
     assert html.index("Soon") < html.index("Later")
+
+
+@pytest.mark.asyncio
+async def test_persist_event_updates_festival_range(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.get_session() as session:
+        session.add(
+            Festival(
+                name="Fest",
+                start_date="2025-06-01",
+                end_date="2025-06-05",
+            )
+        )
+        await session.commit()
+
+    async def fake_assign_event_topics(event):
+        return [], 0, None, False
+
+    async def fake_schedule_event_update_tasks(*args, **kwargs):
+        return {}
+
+    nav_calls = {"rebuild": 0}
+
+    async def fake_rebuild_fest_nav_if_changed(db_obj):
+        nav_calls["rebuild"] += 1
+        return True
+
+    monkeypatch.setattr(main, "assign_event_topics", fake_assign_event_topics)
+    monkeypatch.setattr(main, "schedule_event_update_tasks", fake_schedule_event_update_tasks)
+    monkeypatch.setattr(main, "rebuild_fest_nav_if_changed", fake_rebuild_fest_nav_if_changed)
+
+    draft = vk_intake.EventDraft(
+        title="New Event",
+        date="2025-06-10",
+        time="10:00",
+        festival="Fest",
+        end_date="2025-06-12",
+        source_text="New Event",
+    )
+
+    await vk_intake.persist_event_and_pages(draft, [], db)
+
+    async with db.get_session() as session:
+        fest = (
+            await session.execute(select(Festival).where(Festival.name == "Fest"))
+        ).scalar_one()
+
+    assert fest.start_date == "2025-06-01"
+    assert fest.end_date == "2025-06-12"
+    assert nav_calls["rebuild"] == 1
+
+    items = await main.upcoming_festivals(db, today=date(2025, 6, 6))
+    assert any(f.name == "Fest" for _, _, f in items)
 
 
 @pytest.mark.asyncio
