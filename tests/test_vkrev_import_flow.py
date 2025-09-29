@@ -937,10 +937,12 @@ async def test_handle_vk_extra_message_exposes_text_links(monkeypatch):
         bot,
         *,
         operator_extra=None,
+        force_festival=False,
     ):
         captured["chat_id"] = chat_id
         captured["operator_id"] = operator_id
         captured["operator_extra"] = operator_extra
+        captured["force_festival"] = force_festival
 
     async def fake_parse(text, *args, **kwargs):
         return [
@@ -974,12 +976,13 @@ async def test_handle_vk_extra_message_exposes_text_links(monkeypatch):
         caption_entities=None,
     )
 
-    main.vk_review_extra_sessions[user_id] = (7, "batch-7")
+    main.vk_review_extra_sessions[user_id] = (7, "batch-7", False)
     await main.handle_vk_extra_message(message, db=object(), bot=object())
 
     assert user_id not in main.vk_review_extra_sessions
     operator_extra = captured.get("operator_extra")
     assert operator_extra == "Check this [link](https://example.com)"
+    assert captured.get("force_festival") is False
 
     draft = await vk_intake.build_event_payload_from_vk(
         "Original announcement",
@@ -1004,10 +1007,12 @@ async def test_handle_vk_extra_message_exposes_text_links_with_parentheses(monke
         bot,
         *,
         operator_extra=None,
+        force_festival=False,
     ):
         captured["chat_id"] = chat_id
         captured["operator_id"] = operator_id
         captured["operator_extra"] = operator_extra
+        captured["force_festival"] = force_festival
 
     async def fake_parse(text, *args, **kwargs):
         return [
@@ -1042,13 +1047,14 @@ async def test_handle_vk_extra_message_exposes_text_links_with_parentheses(monke
         caption_entities=None,
     )
 
-    main.vk_review_extra_sessions[user_id] = (8, "batch-8")
+    main.vk_review_extra_sessions[user_id] = (8, "batch-8", False)
     await main.handle_vk_extra_message(message, db=object(), bot=object())
 
     assert user_id not in main.vk_review_extra_sessions
     operator_extra = captured.get("operator_extra")
     escaped_url = url.replace(")", "\\)")
     assert operator_extra == f"Check this [link]({escaped_url})"
+    assert captured.get("force_festival") is False
 
     draft = await vk_intake.build_event_payload_from_vk(
         "Original announcement",
@@ -1073,8 +1079,10 @@ async def test_handle_vk_extra_message_preserves_emoji_offsets(monkeypatch):
         bot,
         *,
         operator_extra=None,
+        force_festival=False,
     ):
         captured["operator_extra"] = operator_extra
+        captured["force_festival"] = force_festival
 
     async def fake_parse(text, *args, **kwargs):
         return [
@@ -1108,11 +1116,12 @@ async def test_handle_vk_extra_message_preserves_emoji_offsets(monkeypatch):
         caption_entities=None,
     )
 
-    main.vk_review_extra_sessions[user_id] = (9, "batch-9")
+    main.vk_review_extra_sessions[user_id] = (9, "batch-9", False)
     await main.handle_vk_extra_message(message, db=object(), bot=object())
 
     operator_extra = captured.get("operator_extra")
     assert operator_extra == "Check 😄 [link](https://emoji.example)"
+    assert captured.get("force_festival") is False
 
     draft = await vk_intake.build_event_payload_from_vk(
         "Original announcement",
@@ -1122,6 +1131,153 @@ async def test_handle_vk_extra_message_preserves_emoji_offsets(monkeypatch):
     assert "Check 😄 [link](https://emoji.example)" in draft.source_text
     html = linkify_for_telegraph(draft.source_text)
     assert '<a href="https://emoji.example">link</a>' in html
+
+
+@pytest.mark.asyncio
+async def test_handle_vk_extra_message_forces_festival(monkeypatch):
+    captured: dict[str, object] = {}
+
+    async def fake_import_flow(
+        chat_id,
+        operator_id,
+        inbox_id,
+        batch_id,
+        db,
+        bot,
+        *,
+        operator_extra=None,
+        force_festival=False,
+    ):
+        captured["force_festival"] = force_festival
+        captured["operator_extra"] = operator_extra
+
+    async def fake_parse(text, *args, **kwargs):
+        return [
+            {
+                "title": "T",
+                "date": "2025-09-02",
+                "time": "10:00",
+                "location_name": "Hall",
+            }
+        ]
+
+    monkeypatch.setattr(main, "_vkrev_import_flow", fake_import_flow)
+    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
+
+    user_id = 5353
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=user_id),
+        chat=SimpleNamespace(id=222),
+        text="Доп.инфо",
+        caption=None,
+        html_text=None,
+        caption_html=None,
+        entities=[],
+        caption_entities=None,
+    )
+
+    main.vk_review_extra_sessions[user_id] = (10, "batch-10", True)
+    await main.handle_vk_extra_message(message, db=object(), bot=object())
+
+    assert captured["force_festival"] is True
+    assert captured["operator_extra"] == "Доп.инфо"
+    main.vk_review_extra_sessions.clear()
+
+
+@pytest.mark.asyncio
+async def test_handle_vk_review_accept_fest_forces_flag(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    async with db.raw_conn() as conn:
+        await conn.execute(
+            "INSERT INTO vk_inbox("
+            "id, group_id, post_id, date, text, matched_kw, has_date, status, review_batch"
+            ") VALUES(?,?,?,?,?,?,?,?,?)",
+            (1, 1, 1, 0, "", None, 0, "pending", "batch"),
+        )
+        await conn.commit()
+
+    captured: dict[str, object] = {}
+
+    async def fake_import_flow(
+        chat_id,
+        operator_id,
+        inbox_id,
+        batch_id,
+        db_,
+        bot_,
+        *,
+        operator_extra=None,
+        force_festival=False,
+    ):
+        captured["force_festival"] = force_festival
+        captured["args"] = (chat_id, operator_id, inbox_id, batch_id)
+
+    monkeypatch.setattr(main, "_vkrev_import_flow", fake_import_flow)
+
+    bot = DummyBot()
+
+    async def fake_answer(self, *args, **kwargs):
+        return None
+
+    monkeypatch.setattr(types.CallbackQuery, "answer", fake_answer)
+
+    callback = types.CallbackQuery.model_validate(
+        {
+            "id": "1",
+            "from": {"id": 10, "is_bot": False, "first_name": "Op"},
+            "chat_instance": "1",
+            "data": "vkrev:accept_fest:1",
+            "message": {"message_id": 1, "date": 0, "chat": {"id": 5, "type": "private"}},
+        }
+    )
+    callback._bot = bot
+
+    await main.handle_vk_review_cb(callback, db, bot)
+
+    assert captured["force_festival"] is True
+    assert captured["args"] == (5, 10, 1, "batch")
+    assert any("⏳" in msg.text for msg in bot.messages)
+
+
+@pytest.mark.asyncio
+async def test_handle_vk_review_accept_fest_extra_records_session(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    async with db.raw_conn() as conn:
+        await conn.execute(
+            "INSERT INTO vk_inbox("
+            "id, group_id, post_id, date, text, matched_kw, has_date, status, review_batch"
+            ") VALUES(?,?,?,?,?,?,?,?,?)",
+            (1, 1, 1, 0, "", None, 0, "pending", "batch"),
+        )
+        await conn.commit()
+
+    main.vk_review_extra_sessions.clear()
+
+    bot = DummyBot()
+
+    async def fake_answer(self, *args, **kwargs):
+        return None
+
+    monkeypatch.setattr(types.CallbackQuery, "answer", fake_answer)
+
+    callback = types.CallbackQuery.model_validate(
+        {
+            "id": "2",
+            "from": {"id": 20, "is_bot": False, "first_name": "Op"},
+            "chat_instance": "2",
+            "data": "vkrev:accept_fest_extra:1",
+            "message": {"message_id": 2, "date": 0, "chat": {"id": 7, "type": "private"}},
+        }
+    )
+    callback._bot = bot
+
+    await main.handle_vk_review_cb(callback, db, bot)
+
+    assert main.vk_review_extra_sessions[20] == (1, "batch", True)
+    assert bot.messages[-1].text == "Отправьте доп. информацию одним сообщением"
+    main.vk_review_extra_sessions.clear()
 
 
 @pytest.mark.asyncio

@@ -173,6 +173,13 @@ async def test_vkrev_show_next_handles_blank_text(tmp_path, monkeypatch):
     message = bot.messages[0]
     assert isinstance(message.reply_markup, types.InlineKeyboardMarkup)
     assert message.reply_markup.inline_keyboard
+    callbacks = {
+        button.callback_data
+        for row in message.reply_markup.inline_keyboard
+        for button in row
+    }
+    assert "vkrev:accept_fest:1" in callbacks
+    assert "vkrev:accept_fest_extra:1" in callbacks
     assert "https://vk.com/wall-1_10" in message.text
     assert "ожидает OCR" in message.text
 

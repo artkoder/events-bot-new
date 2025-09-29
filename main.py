@@ -632,7 +632,7 @@ vk_default_time_sessions: TTLCache[int, VkDefaultTimeSession] = TTLCache(
 vk_add_source_sessions: set[int] = set()
 
 # operator_id -> (inbox_id, batch_id) awaiting extra info during VK review
-vk_review_extra_sessions: dict[int, tuple[int, str]] = {}
+vk_review_extra_sessions: dict[int, tuple[int, str, bool]] = {}
 
 
 @dataclass
@@ -20514,7 +20514,20 @@ async def _vkrev_show_next(chat_id: int, batch_id: str, operator_id: int, db: Da
     inline_keyboard = [
         [
             types.InlineKeyboardButton(text="✅ Добавить", callback_data=f"vkrev:accept:{post.id}"),
-            types.InlineKeyboardButton(text="📝 Добавить с доп.инфо", callback_data=f"vkrev:accept_extra:{post.id}"),
+            types.InlineKeyboardButton(
+                text="🎉 Добавить (+ фестиваль)",
+                callback_data=f"vkrev:accept_fest:{post.id}",
+            ),
+        ],
+        [
+            types.InlineKeyboardButton(
+                text="📝 Добавить с доп.инфо",
+                callback_data=f"vkrev:accept_extra:{post.id}",
+            ),
+            types.InlineKeyboardButton(
+                text="📝🎉 Добавить с доп.инфо (+ фестиваль)",
+                callback_data=f"vkrev:accept_fest_extra:{post.id}",
+            ),
         ],
         [
             types.InlineKeyboardButton(text="✖️ Отклонить", callback_data=f"vkrev:reject:{post.id}"),
@@ -20936,7 +20949,14 @@ async def handle_vk_review_cb(callback: types.CallbackQuery, db: Database, bot: 
     parts = callback.data.split(":")
     action = parts[1] if len(parts) > 1 else ""
     answered = False
-    if action in {"accept", "accept_extra", "reject", "skip"}:
+    if action in {
+        "accept",
+        "accept_extra",
+        "accept_fest",
+        "accept_fest_extra",
+        "reject",
+        "skip",
+    }:
         inbox_id = int(parts[2]) if len(parts) > 2 else 0
         async with db.raw_conn() as conn:
             cur = await conn.execute(
@@ -20945,9 +20965,9 @@ async def handle_vk_review_cb(callback: types.CallbackQuery, db: Database, bot: 
             )
             row = await cur.fetchone()
         batch_id = row[0] if row else ""
-        if action == "accept":
-            force_festival = False
-            if len(parts) > 3:
+        if action in {"accept", "accept_fest"}:
+            force_festival = action == "accept_fest"
+            if action == "accept" and len(parts) > 3:
                 force_arg = parts[3].strip().lower()
                 force_festival = force_arg in {"1", "true", "fest", "festival", "force"}
             await callback.answer("Запускаю импорт…")
@@ -20965,9 +20985,17 @@ async def handle_vk_review_cb(callback: types.CallbackQuery, db: Database, bot: 
                 bot,
                 force_festival=force_festival,
             )
-        elif action == "accept_extra":
-            vk_review_extra_sessions[callback.from_user.id] = (inbox_id, batch_id)
-            await bot.send_message(callback.message.chat.id, "Отправьте доп. информацию одним сообщением")
+        elif action in {"accept_extra", "accept_fest_extra"}:
+            force_festival = action == "accept_fest_extra"
+            vk_review_extra_sessions[callback.from_user.id] = (
+                inbox_id,
+                batch_id,
+                force_festival,
+            )
+            await bot.send_message(
+                callback.message.chat.id,
+                "Отправьте доп. информацию одним сообщением",
+            )
         elif action == "reject":
             await vk_review.mark_rejected(db, inbox_id)
             vk_review_actions_total["rejected"] += 1
@@ -21025,6 +21053,7 @@ async def handle_vk_review_cb(callback: types.CallbackQuery, db: Database, bot: 
                 (callback.from_user.id,),
             )
             await conn.commit()
+        vk_review_extra_sessions.pop(callback.from_user.id, None)
         buttons = [
             [types.KeyboardButton(text=VK_BTN_ADD_SOURCE)],
             [types.KeyboardButton(text=VK_BTN_LIST_SOURCES)],
@@ -21598,7 +21627,7 @@ async def handle_vk_extra_message(message: types.Message, db: Database, bot: Bot
     info = vk_review_extra_sessions.pop(message.from_user.id, None)
     if not info:
         return
-    inbox_id, batch_id = info
+    inbox_id, batch_id, force_festival = info
     operator_extra = extract_message_text_with_links(message)
     await _vkrev_import_flow(
         message.chat.id,
@@ -21608,6 +21637,7 @@ async def handle_vk_extra_message(message: types.Message, db: Database, bot: Bot
         db,
         bot,
         operator_extra=operator_extra,
+        force_festival=force_festival,
     )
 
 
