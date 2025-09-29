@@ -28,7 +28,13 @@ class DummyBot:
         self.messages = []
 
     async def send_message(self, chat_id, text, **kwargs):
-        self.messages.append(SimpleNamespace(chat_id=chat_id, text=text))
+        self.messages.append(
+            SimpleNamespace(
+                chat_id=chat_id,
+                text=text,
+                reply_markup=kwargs.get("reply_markup"),
+            )
+        )
         return SimpleNamespace(message_id=1)
 
     async def send_media_group(self, chat_id, media):
@@ -233,6 +239,17 @@ async def test_vkrev_import_flow_persists_url_and_skips_vk_sync(tmp_path, monkey
     assert "Дата окончания: —" in message_lines
     assert "Время: 10:00" in message_lines
     assert "Бесплатное: нет" in message_lines
+
+    markup = bot.messages[-1].reply_markup
+    assert isinstance(markup, types.InlineKeyboardMarkup)
+    edit_buttons = [
+        btn
+        for row in markup.inline_keyboard
+        for btn in row
+        if getattr(btn, "text", "") == "Редактировать"
+    ]
+    assert edit_buttons
+    assert edit_buttons[0].callback_data == f"edit:{captured['event_id']}"
 
 
 @pytest.mark.asyncio

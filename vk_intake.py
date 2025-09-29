@@ -470,8 +470,8 @@ async def build_event_drafts_from_vk(
     poster_media: Sequence[PosterMedia] | None = None,
     ocr_tokens_spent: int = 0,
     ocr_tokens_remaining: int | None = None,
-) -> EventDraft:
-    """Return a normalised event draft extracted from a VK post.
+) -> list[EventDraft]:
+    """Return normalised event drafts extracted from a VK post.
 
     The function delegates parsing to the same LLM helper used by ``/add`` and
     forwarded posts.  When ``operator_extra`` is supplied it takes precedence
@@ -648,7 +648,8 @@ async def build_event_drafts(
     festival_alias_pairs: list[tuple[str, int]] | None = None,
     festival_hint: bool = False,
     db: Database,
-) -> EventDraft:
+) -> list[EventDraft]:
+    """Download posters, run OCR and return event drafts for a VK post."""
     photo_bytes = await _download_photo_media(photos or [])
     poster_items: list[PosterMedia] = []
     ocr_tokens_spent = 0
@@ -875,6 +876,7 @@ async def process_event(
         default_time=default_time,
         operator_extra=operator_extra,
         festival_names=festival_names,
+        festival_hint=False,
         db=db,
     )
     results: list[PersistResult] = []
