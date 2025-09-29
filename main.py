@@ -4427,11 +4427,17 @@ async def rebuild_festivals_index_if_needed(
     return status, url
 
 
-async def rebuild_fest_nav_if_changed(db: Database) -> bool:
+async def rebuild_fest_nav_if_changed(
+    db: Database, run_id: str | None = None
+) -> bool:
     """Rebuild festival navigation and enqueue update jobs if changed.
 
     Returns ``True`` if navigation hash changed and jobs were scheduled.
+    ``run_id`` is provided by the scheduler and logged for traceability.
     """
+
+    if run_id is not None:
+        logging.debug("rebuild_fest_nav_if_changed run_id=%s", run_id)
 
     _, _, changed = await build_festivals_nav_block(db)
     if not changed:
