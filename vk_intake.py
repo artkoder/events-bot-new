@@ -765,7 +765,8 @@ async def persist_event_and_pages(
     Links to these artefacts are returned in :class:`PersistResult`.
     """
     from datetime import datetime
-    from models import Event
+    from models import Event, Festival
+    from sqlalchemy import select
     import sys
 
     main_mod = sys.modules.get("main") or sys.modules.get("__main__")
@@ -775,6 +776,7 @@ async def persist_event_and_pages(
     upsert_event_posters = main_mod.upsert_event_posters
     assign_event_topics = main_mod.assign_event_topics
     schedule_event_update_tasks = main_mod.schedule_event_update_tasks
+    rebuild_fest_nav_if_changed = main_mod.rebuild_fest_nav_if_changed
 
     poster_urls = [m.catbox_url for m in draft.poster_media if m.catbox_url]
     photo_urls = poster_urls or list(photos or [])
@@ -834,6 +836,38 @@ async def persist_event_and_pages(
     logging.info(
         "persist_event_and_pages: source_post_url=%s", saved.source_post_url
     )
+
+    nav_update_needed = False
+    if saved.festival:
+        parts = [p.strip() for p in (saved.date or "").split("..") if p.strip()]
+        start_str = parts[0] if parts else None
+        end_str = parts[-1] if len(parts) > 1 else None
+        if not end_str:
+            end_str = saved.end_date or start_str
+        if start_str or end_str:
+            async with db.get_session() as session:
+                res = await session.execute(
+                    select(Festival).where(Festival.name == saved.festival)
+                )
+                festival = res.scalar_one_or_none()
+                if festival is not None:
+                    changed = False
+                    if start_str and (
+                        festival.start_date is None or start_str < festival.start_date
+                    ):
+                        festival.start_date = start_str
+                        changed = True
+                    if end_str and (
+                        festival.end_date is None or end_str > festival.end_date
+                    ):
+                        festival.end_date = end_str
+                        changed = True
+                    if changed:
+                        session.add(festival)
+                        await session.commit()
+                        nav_update_needed = True
+    if nav_update_needed:
+        await rebuild_fest_nav_if_changed(db)
     await schedule_event_update_tasks(db, saved)
 
     async with db.get_session() as session:
