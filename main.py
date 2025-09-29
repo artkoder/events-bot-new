@@ -1782,6 +1782,11 @@ HELP_COMMANDS = [
         "roles": {"superadmin"},
     },
     {
+        "usage": "/tourist_export [period]",
+        "desc": "Export events with tourist_* fields to JSONL",
+        "roles": {"user", "superadmin"},
+    },
+    {
         "usage": "/tz <±HH:MM>",
         "desc": "Set timezone offset",
         "roles": {"superadmin"},
