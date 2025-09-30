@@ -39,6 +39,10 @@ async def test_sync_festivals_index_page_created(tmp_path: Path, monkeypatch, ca
 
     stored = {}
 
+    await main.set_setting_value(
+        db, "festivals_index_cover", "https://example.com/cover.jpg"
+    )
+
     class DummyTelegraph:
         def __init__(self, *args, **kwargs):
             pass
@@ -70,6 +74,11 @@ async def test_sync_festivals_index_page_created(tmp_path: Path, monkeypatch, ca
         await main.sync_festivals_index_page(db)
 
     html = stored["html"]
+    assert html.startswith('<figure><img src="https://example.com/cover.jpg"/></figure>')
+    assert '<figure><img src="https://example.com/cover.jpg"/></figure>' in html
+    assert html.index(FEST_INDEX_INTRO_START) > html.index(
+        '<figure><img src="https://example.com/cover.jpg"/></figure>'
+    )
     assert "Все фестивали Калининградской области" not in html
     assert html.count("<h3>") == 2
     assert (
@@ -406,3 +415,63 @@ async def test_rebuild_festivals_index_force_updates(tmp_path: Path, monkeypatch
     status, _ = await main.rebuild_festivals_index_if_needed(db, force=True)
     assert status == "updated"
     assert calls["edited"] == before + 1
+
+
+@pytest.mark.asyncio
+async def test_weekendimg_photo_updates_festivals_cover(monkeypatch):
+    user_id = 123
+    prev_wait = dict(main.weekend_img_wait.items())
+    main.weekend_img_wait.clear()
+    main.weekend_img_wait[user_id] = main.FESTIVALS_INDEX_MARKER
+
+    recorded: dict[str, object] = {}
+
+    async def fake_extract(message, bot):
+        return [(b"data", "cover.jpg")]
+
+    async def fake_upload(images, limit=1, force=True, event_hint=None):
+        return ["https://catbox.moe/cover.jpg"], ""
+
+    async def fake_set(db_obj, key, value):
+        recorded["set"] = (db_obj, key, value)
+
+    async def fake_sync(db_obj):
+        recorded["sync"] = db_obj
+
+    async def fake_rebuild(db_obj, force=False):
+        recorded["rebuild"] = force
+        return "updated", "https://telegra.ph/fests"
+
+    monkeypatch.setattr(main, "extract_images", fake_extract)
+    monkeypatch.setattr(main, "upload_images", fake_upload)
+    monkeypatch.setattr(main, "set_setting_value", fake_set)
+    monkeypatch.setattr(main, "sync_festivals_index_page", fake_sync)
+    monkeypatch.setattr(main, "rebuild_festivals_index_if_needed", fake_rebuild)
+
+    class DummyUser:
+        def __init__(self, ident: int) -> None:
+            self.id = ident
+
+    class DummyMessage:
+        def __init__(self, ident: int) -> None:
+            self.from_user = DummyUser(ident)
+            self.replies: list[str] = []
+
+        async def reply(self, text: str) -> None:
+            self.replies.append(text)
+
+    message = DummyMessage(user_id)
+    db_obj = object()
+
+    try:
+        await main.handle_weekendimg_photo(message, db_obj, bot=None)
+        cleared = user_id not in main.weekend_img_wait
+    finally:
+        main.weekend_img_wait.clear()
+        main.weekend_img_wait.update(prev_wait)
+
+    assert recorded["set"] == (db_obj, "festivals_index_cover", "https://catbox.moe/cover.jpg")
+    assert recorded["sync"] is db_obj
+    assert recorded["rebuild"] is True
+    assert message.replies and "https://telegra.ph/fests" in message.replies[-1]
+    assert cleared
