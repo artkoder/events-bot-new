@@ -669,6 +669,10 @@ telegraph_first_image: TTLCache[str, str] = TTLCache(maxsize=128, ttl=24 * 3600)
 # pending event text/photo input
 AddEventMode = Literal["event", "festival"]
 add_event_sessions: TTLCache[int, AddEventMode] = TTLCache(maxsize=64, ttl=3600)
+
+
+class FestivalRequiredError(RuntimeError):
+    """Raised when festival mode requires an explicit festival but none was found."""
 # waiting for a date for events listing
 events_date_sessions: TTLCache[int, bool] = TTLCache(maxsize=64, ttl=3600)
 
@@ -9019,6 +9023,7 @@ async def add_events_from_text(
     html_text: str | None = None,
     media: list[tuple[bytes, str]] | tuple[bytes, str] | None = None,
     poster_media: Sequence[PosterMedia] | None = None,
+    force_festival: bool = False,
     *,
     raise_exc: bool = False,
     source_chat_id: int | None = None,
@@ -9117,6 +9122,12 @@ async def add_events_from_text(
         llm_text = text
         if channel_title:
             llm_text = f"{channel_title}\n{llm_text}"
+        if force_festival:
+            llm_text = (
+                f"{llm_text}\n"
+                "Оператор подтверждает, что пост описывает фестиваль. "
+                "Сопоставь с существующими фестивалями (JSON ниже) или создай новый."
+            )
         today = datetime.now(LOCAL_TZ).date()
         cutoff_date = (today - timedelta(days=31)).isoformat()
         festival_names_set: set[str] = set()
@@ -9214,7 +9225,13 @@ async def add_events_from_text(
     fest_created = False
     fest_updated = False
     if festival_info:
-        fest_name = festival_info.get("name") or festival_info.get("festival")
+        fest_name = (
+            festival_info.get("name")
+            or festival_info.get("festival")
+            or festival_info.get("full_name")
+        )
+        if force_festival and not (fest_name and fest_name.strip()):
+            raise FestivalRequiredError("festival name missing")
         start = canonicalize_date(festival_info.get("start_date") or festival_info.get("date"))
         end = canonicalize_date(festival_info.get("end_date"))
         loc_name = festival_info.get("location_name")
@@ -9272,6 +9289,8 @@ async def add_events_from_text(
                 festival_obj = res.scalar_one_or_none()
         if festival_obj:
             await try_set_fest_cover_from_program(db, festival_obj)
+    elif force_festival:
+        raise FestivalRequiredError("festival name missing")
     for data in parsed:
         logging.info(
             "processing event candidate: %s on %s %s",
@@ -9582,7 +9601,8 @@ async def handle_add_event(
     db: Database,
     bot: Bot,
     *,
-    using_session: AddEventMode | None = None,
+    session_mode: AddEventMode | None = None,
+    force_festival: bool = False,
     media: list[tuple[bytes, str]] | None = None,
     poster_media: Sequence[PosterMedia] | None = None,
     catbox_msg: str | None = None,
@@ -9591,7 +9611,7 @@ async def handle_add_event(
     logging.info(
         "handle_add_event start: user=%s len=%d", message.from_user.id, len(text_raw)
     )
-    if using_session:
+    if session_mode:
         text_raw = strip_leading_cmd(text_raw)
         text_content = text_raw
     else:
@@ -9634,6 +9654,7 @@ async def handle_add_event(
             html_lines = html_text.splitlines()
             if html_lines and is_vk_wall_url(html_lines[0].strip()):
                 html_text = "\n".join(html_lines[1:]).lstrip()
+    effective_force_festival = force_festival or session_mode == "festival"
     try:
         results = await add_events_from_text(
             db,
@@ -9642,6 +9663,7 @@ async def handle_add_event(
             html_text,
             normalized_media,
             poster_media=poster_items,
+            force_festival=effective_force_festival,
             raise_exc=True,
             creator_id=creator_id,
             display_source=False if source_link else True,
@@ -9649,6 +9671,14 @@ async def handle_add_event(
 
             bot=None,
         )
+    except FestivalRequiredError:
+        await bot.send_message(
+            message.chat.id,
+            "Не удалось распознать фестиваль. Уточните название фестиваля и попробуйте снова.",
+        )
+        if session_mode == "festival":
+            add_event_sessions[message.from_user.id] = "festival"
+        return
     except Exception as e:
         await bot.send_message(message.chat.id, f"LLM error: {e}")
         return
@@ -9926,7 +9956,13 @@ async def add_event_queue_worker(db: Database, bot: Bot, limit: int = 2):
         try:
             async def _run():
                 if kind == "regular":
-                    await handle_add_event(msg, db, bot, using_session=session_mode)
+                    await handle_add_event(
+                        msg,
+                        db,
+                        bot,
+                        session_mode=session_mode,
+                        force_festival=session_mode == "festival",
+                    )
                 else:
                     await handle_add_event_raw(msg, db, bot)
             await asyncio.wait_for(_run(), timeout=ADD_EVENT_TIMEOUT)
@@ -9951,7 +9987,7 @@ async def add_event_queue_worker(db: Database, bot: Bot, limit: int = 2):
                     msg.chat.id,
                     "❌ Ошибка при обработке... Попробуйте ещё раз...",
                 )
-                if session_mode:
+                if session_mode == "festival":
                     add_event_sessions[msg.from_user.id] = session_mode
             except Exception:  # pragma: no cover - notify fail
                 logging.exception("add_event_queue_worker notify failed")
@@ -22023,7 +22059,8 @@ async def finalize_album(gid: str, db: Database, bot: Bot) -> None:
             msg,
             db,
             bot,
-            using_session=mode_for_call,
+            session_mode=mode_for_call,
+            force_festival=mode_for_call == "festival",
             media=media,
             poster_media=poster_items,
             catbox_msg=catbox_msg,
