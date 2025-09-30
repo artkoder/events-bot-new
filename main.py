@@ -3135,8 +3135,10 @@ async def try_set_fest_cover_from_program(
         fresh = await session.get(Festival, fest.id)
         if not fresh:
             return False
-        if cover not in fresh.photo_urls:
-            fresh.photo_urls = [cover] + fresh.photo_urls
+        photos = list(fresh.photo_urls or [])
+        if cover not in photos:
+            photos = [cover] + photos
+        fresh.photo_urls = photos
         fresh.photo_url = cover
         await session.commit()
     logging.info("telegraph_cover: set_ok")
