@@ -1965,7 +1965,14 @@ async def test_addevent_session_strip_cmd(tmp_path: Path, monkeypatch):
     captured: dict[str, str] = {}
 
     async def fake_add_events_from_text(
-        db, text, source_link, html_text, media, raise_exc, creator_id, display_source, source_channel, bot
+        db,
+        text,
+        source_link,
+        html_text,
+        media,
+        poster_media=None,
+        force_festival: bool = False,
+        **kwargs,
     ):
         captured["text"] = text
         captured["html"] = html_text
@@ -1995,10 +2002,41 @@ async def test_addevent_session_strip_cmd(tmp_path: Path, monkeypatch):
         }
     )
 
-    await handle_add_event(msg, db, bot, using_session=True)
+    await handle_add_event(msg, db, bot, session_mode="event")
 
     assert captured["text"] == "Some info"
     assert captured["html"] == "Some info"
+
+
+@pytest.mark.asyncio
+async def test_handle_add_event_festival_missing(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async def fake_add_events_from_text(*args, **kwargs):
+        raise main.FestivalRequiredError("missing")
+
+    monkeypatch.setattr(main, "add_events_from_text", fake_add_events_from_text)
+    main.add_event_sessions.clear()
+
+    msg = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "Описание фестиваля",
+        }
+    )
+
+    await handle_add_event(msg, db, bot, session_mode="festival")
+
+    assert any(
+        "Не удалось распознать фестиваль" in message for _chat, message, _ in bot.messages
+    )
+    assert main.add_event_sessions[msg.from_user.id] == "festival"
+    main.add_event_sessions.pop(msg.from_user.id, None)
 
 
 @pytest.mark.asyncio
@@ -2010,11 +2048,18 @@ async def test_addevent_vk_wall_link(tmp_path: Path, monkeypatch):
     captured = {}
 
     async def fake_add_events_from_text(
-        db, text, source_link, html_text, media, raise_exc, creator_id, display_source, source_channel, bot
+        db,
+        text,
+        source_link,
+        html_text,
+        media,
+        poster_media=None,
+        force_festival: bool = False,
+        **kwargs,
     ):
         captured["text"] = text
         captured["source"] = source_link
-        captured["display"] = display_source
+        captured["display"] = kwargs.get("display_source")
         ev = Event(
             id=1,
             title="T",
@@ -2053,7 +2098,14 @@ async def test_addevent_vk_wall_link_query(tmp_path: Path, monkeypatch):
     captured = {}
 
     async def fake_add_events_from_text(
-        db, text, source_link, html_text, media, raise_exc, creator_id, display_source, source_channel, bot
+        db,
+        text,
+        source_link,
+        html_text,
+        media,
+        poster_media=None,
+        force_festival: bool = False,
+        **kwargs,
     ):
         captured["text"] = text
         captured["source"] = source_link
@@ -5987,6 +6039,65 @@ async def test_extract_ticket_link(tmp_path: Path, monkeypatch):
     results = await main.add_events_from_text(db, "text", None, html, None)
     ev = results[0][0]
     assert ev.ticket_link == "https://reg"
+
+
+@pytest.mark.asyncio
+async def test_add_events_from_text_force_festival_hint(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    captured: dict[str, str] = {}
+
+    async def fake_parse(text: str, *args, **kwargs) -> list[dict]:
+        captured["text"] = text
+        fake_parse._festival = {"name": "Fest"}
+        return []
+
+    async def fake_ensure_festival(db_obj, name: str | None = None, **kwargs):
+        class _Fest:
+            def __init__(self, fest_name: str) -> None:
+                self.id = 1
+                self.name = fest_name
+
+        return _Fest(name or ""), False, False
+
+    async def fake_recognize_posters(db_obj, media, log_context):
+        return [], 0, 0
+
+    async def noop(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr(main, "ensure_festival", fake_ensure_festival)
+    monkeypatch.setattr(poster_ocr, "recognize_posters", fake_recognize_posters)
+    monkeypatch.setattr(main, "sync_festival_page", noop)
+    monkeypatch.setattr(main, "sync_festivals_index_page", noop)
+    monkeypatch.setattr(main, "sync_festival_vk_post", noop)
+    monkeypatch.setattr(main, "notify_superadmin", noop)
+    monkeypatch.setattr(main, "try_set_fest_cover_from_program", noop)
+
+    await main.add_events_from_text(db, "info", None, None, None, force_festival=True)
+
+    assert "Оператор подтверждает, что пост описывает фестиваль" in captured["text"]
+
+
+@pytest.mark.asyncio
+async def test_add_events_from_text_force_festival_requires_name(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async def fake_parse(text: str, *args, **kwargs) -> list[dict]:
+        fake_parse._festival = {}
+        return []
+
+    async def fake_recognize_posters(db_obj, media, log_context):
+        return [], 0, 0
+
+    monkeypatch.setattr("main.parse_event_via_4o", fake_parse)
+    monkeypatch.setattr(poster_ocr, "recognize_posters", fake_recognize_posters)
+
+    with pytest.raises(main.FestivalRequiredError):
+        await main.add_events_from_text(db, "info", None, None, None, force_festival=True)
 
 
 @pytest.mark.asyncio
