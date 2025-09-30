@@ -103,3 +103,34 @@ async def test_try_set_fest_cover_handles_none_photo_urls(tmp_path: Path, monkey
         fest = await session.get(Festival, fid)
         assert fest.photo_url == "https://telegra.ph/file/cover-none.jpg"
         assert fest.photo_urls == ["https://telegra.ph/file/cover-none.jpg"]
+
+
+@pytest.mark.asyncio
+async def test_try_set_fest_cover_uses_telegraph_url(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    async with db.get_session() as session:
+        fest = Festival(name="Fest3", telegraph_url="https://telegra.ph/fallback")
+        session.add(fest)
+        await session.commit()
+        fid = fest.id
+
+    called_urls: list[str] = []
+
+    async def fake_extract(url, *, event_id=None):
+        called_urls.append(url)
+        return "https://telegra.ph/file/cover-telegraph.jpg"
+
+    monkeypatch.setattr(main, "extract_telegra_ph_cover_url", fake_extract)
+
+    async with db.get_session() as session:
+        fest = await session.get(Festival, fid)
+        ok = await main.try_set_fest_cover_from_program(db, fest)
+        assert ok
+
+    assert called_urls == ["https://telegra.ph/fallback"]
+
+    async with db.get_session() as session:
+        fest = await session.get(Festival, fid)
+        assert fest.photo_url == "https://telegra.ph/file/cover-telegraph.jpg"
+        assert fest.photo_urls == ["https://telegra.ph/file/cover-telegraph.jpg"]
