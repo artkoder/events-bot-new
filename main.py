@@ -667,7 +667,8 @@ makefest_sessions: TTLCache[int, dict[str, Any]] = TTLCache(maxsize=64, ttl=3600
 telegraph_first_image: TTLCache[str, str] = TTLCache(maxsize=128, ttl=24 * 3600)
 
 # pending event text/photo input
-add_event_sessions: TTLCache[int, bool] = TTLCache(maxsize=64, ttl=3600)
+AddEventMode = Literal["event", "festival"]
+add_event_sessions: TTLCache[int, AddEventMode] = TTLCache(maxsize=64, ttl=3600)
 # waiting for a date for events listing
 events_date_sessions: TTLCache[int, bool] = TTLCache(maxsize=64, ttl=3600)
 
@@ -1285,7 +1286,9 @@ settings_cache: TTLCache[str, str | None] = TTLCache(maxsize=64, ttl=300)
 
 # queue for background event processing
 # limit the queue to avoid unbounded growth if parsing slows down
-add_event_queue: asyncio.Queue[tuple[str, types.Message, bool, int]] = asyncio.Queue(
+add_event_queue: asyncio.Queue[
+    tuple[str, types.Message, AddEventMode | None, int]
+] = asyncio.Queue(
     maxsize=200
 )
 # allow more time for handling slow background operations
@@ -1672,6 +1675,7 @@ def seconds_to_next_minute(now: datetime) -> float:
 
 # main menu buttons
 MENU_ADD_EVENT = "\u2795 Добавить событие"
+MENU_ADD_FESTIVAL = "\u2795 Добавить фестиваль"
 MENU_EVENTS = "\U0001f4c5 События"
 VK_BTN_ADD_SOURCE = "\u2795 Добавить сообщество"
 VK_BTN_LIST_SOURCES = "\U0001f4cb Показать список сообществ"
@@ -6152,7 +6156,10 @@ async def send_main_menu(bot: Bot, user: User | None, chat_id: int) -> None:
     """Show main menu buttons depending on user role."""
     async with span("render"):
         buttons = [
-            [types.KeyboardButton(text=MENU_ADD_EVENT)],
+            [
+                types.KeyboardButton(text=MENU_ADD_EVENT),
+                types.KeyboardButton(text=MENU_ADD_FESTIVAL),
+            ],
             [types.KeyboardButton(text=MENU_EVENTS)],
         ]
         markup = types.ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
@@ -9575,7 +9582,7 @@ async def handle_add_event(
     db: Database,
     bot: Bot,
     *,
-    using_session: bool = False,
+    using_session: AddEventMode | None = None,
     media: list[tuple[bytes, str]] | None = None,
     poster_media: Sequence[PosterMedia] | None = None,
     catbox_msg: str | None = None,
@@ -9843,13 +9850,20 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
     logging.info("handle_add_event_raw finished for user %s", message.from_user.id)
 
 
-async def enqueue_add_event(message: types.Message, db: Database, bot: Bot):
+async def enqueue_add_event(
+    message: types.Message,
+    db: Database,
+    bot: Bot,
+    *,
+    session_mode: AddEventMode | None = None,
+):
     """Queue an event addition for background processing."""
-    using_session = message.from_user.id in add_event_sessions
-    if using_session:
+    if session_mode is None:
+        session_mode = add_event_sessions.get(message.from_user.id)
+    if session_mode:
         add_event_sessions.pop(message.from_user.id, None)
     try:
-        add_event_queue.put_nowait(("regular", message, using_session, 0))
+        add_event_queue.put_nowait(("regular", message, session_mode, 0))
     except asyncio.QueueFull:
         logging.warning(
             "enqueue_add_event queue full for user=%s", message.from_user.id
@@ -9875,7 +9889,7 @@ async def enqueue_add_event(message: types.Message, db: Database, bot: Bot):
 async def enqueue_add_event_raw(message: types.Message, db: Database, bot: Bot):
     """Queue a raw event addition for background processing."""
     try:
-        add_event_queue.put_nowait(("raw", message, False, 0))
+        add_event_queue.put_nowait(("raw", message, None, 0))
     except asyncio.QueueFull:
         logging.warning(
             "enqueue_add_event_raw queue full for user=%s", message.from_user.id
@@ -9899,7 +9913,7 @@ async def add_event_queue_worker(db: Database, bot: Bot, limit: int = 2):
 
     global _ADD_EVENT_LAST_DEQUEUE_TS
     while True:
-        kind, msg, using_session, attempts = await add_event_queue.get()
+        kind, msg, session_mode, attempts = await add_event_queue.get()
         _ADD_EVENT_LAST_DEQUEUE_TS = _time.monotonic()
         logging.info(
             "add_event_queue dequeued user=%s attempts=%d qsize=%d",
@@ -9912,7 +9926,7 @@ async def add_event_queue_worker(db: Database, bot: Bot, limit: int = 2):
         try:
             async def _run():
                 if kind == "regular":
-                    await handle_add_event(msg, db, bot, using_session=using_session)
+                    await handle_add_event(msg, db, bot, using_session=session_mode)
                 else:
                     await handle_add_event_raw(msg, db, bot)
             await asyncio.wait_for(_run(), timeout=ADD_EVENT_TIMEOUT)
@@ -9937,8 +9951,8 @@ async def add_event_queue_worker(db: Database, bot: Bot, limit: int = 2):
                     msg.chat.id,
                     "❌ Ошибка при обработке... Попробуйте ещё раз...",
                 )
-                if using_session:
-                    add_event_sessions[msg.from_user.id] = True
+                if session_mode:
+                    add_event_sessions[msg.from_user.id] = session_mode
             except Exception:  # pragma: no cover - notify fail
                 logging.exception("add_event_queue_worker notify failed")
         finally:
@@ -19469,11 +19483,27 @@ async def handle_add_event_start(message: types.Message, db: Database, bot: Bot)
         if not user or user.blocked:
             await bot.send_message(message.chat.id, "Not authorized")
             return
-    add_event_sessions[message.from_user.id] = True
+    add_event_sessions[message.from_user.id] = "event"
     logging.info(
         "handle_add_event_start session opened for user %s", message.from_user.id
     )
     await bot.send_message(message.chat.id, "Send event text and optional photo")
+
+
+async def handle_add_festival_start(message: types.Message, db: Database, bot: Bot):
+    """Initiate festival creation via the menu."""
+    logging.info("handle_add_festival_start from user %s", message.from_user.id)
+    async with db.get_session() as session:
+        user = await session.get(User, message.from_user.id)
+        if not user or user.blocked:
+            await bot.send_message(message.chat.id, "Not authorized")
+            return
+    add_event_sessions[message.from_user.id] = "festival"
+    logging.info(
+        "handle_add_festival_start session opened for user %s",
+        message.from_user.id,
+    )
+    await bot.send_message(message.chat.id, "Пришлите текст фестиваля…")
 
 
 async def handle_vk_link_command(message: types.Message, db: Database, bot: Bot):
@@ -21973,6 +22003,9 @@ async def finalize_album(gid: str, db: Database, bot: Bot) -> None:
     LAST_CATBOX_MSG = catbox_msg
     LAST_HTML_MODE = state.html_mode
     msg = state.message
+    session_mode = None
+    if msg and msg.from_user:
+        session_mode = add_event_sessions.get(msg.from_user.id)
     if msg.forward_date or msg.forward_from_chat or getattr(msg, "forward_origin", None):
         await _process_forwarded(
             msg,
@@ -21985,11 +22018,12 @@ async def finalize_album(gid: str, db: Database, bot: Bot) -> None:
             catbox_msg=catbox_msg,
         )
     else:
+        mode_for_call: AddEventMode = session_mode or "event"
         await handle_add_event(
             msg,
             db,
             bot,
-            using_session=True,
+            using_session=mode_for_call,
             media=media,
             poster_media=poster_items,
             catbox_msg=catbox_msg,
@@ -23129,12 +23163,21 @@ def create_app() -> web.Application:
         logging.info("add_event_start_wrapper start: user=%s", message.from_user.id)
         await handle_add_event_start(message, db, bot)
 
+    async def add_festival_start_wrapper(message: types.Message):
+        logging.info(
+            "add_festival_start_wrapper start: user=%s", message.from_user.id
+        )
+        await handle_add_festival_start(message, db, bot)
+
     async def add_event_session_wrapper(message: types.Message):
         logging.info("add_event_session_wrapper start: user=%s", message.from_user.id)
+        session_mode = add_event_sessions.get(message.from_user.id)
         if message.media_group_id:
             await handle_add_event_media_group(message, db, bot)
         else:
-            await enqueue_add_event(message, db, bot)
+            await enqueue_add_event(
+                message, db, bot, session_mode=session_mode
+            )
 
     async def vk_link_cmd_wrapper(message: types.Message):
         logging.info("vk_link_cmd_wrapper start: user=%s", message.from_user.id)
@@ -23329,6 +23372,9 @@ def create_app() -> web.Application:
     dp.message.register(events_menu_wrapper, lambda m: m.text == MENU_EVENTS)
     dp.message.register(events_date_wrapper, lambda m: m.from_user.id in events_date_sessions)
     dp.message.register(add_event_start_wrapper, lambda m: m.text == MENU_ADD_EVENT)
+    dp.message.register(
+        add_festival_start_wrapper, lambda m: m.text == MENU_ADD_FESTIVAL
+    )
     dp.message.register(vk_link_cmd_wrapper, Command("vklink"))
     dp.message.register(vk_cmd_wrapper, Command("vk"))
     dp.message.register(vk_crawl_now_wrapper, Command("vk_crawl_now"))
