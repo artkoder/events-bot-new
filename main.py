@@ -64,6 +64,16 @@ def logline(tag: str, eid: int | None, msg: str, **kw) -> None:
     )
 
 
+def log_festcover(level: int, festival_id: int | None, action: str, **kw: object) -> None:
+    details = " ".join(f"{key}={value}" for key, value in kw.items() if value is not None)
+    parts = [f"festcover.{action}"]
+    if festival_id is not None:
+        parts.append(f"festival_id={festival_id}")
+    if details:
+        parts.append(details)
+    logging.log(level, " ".join(parts))
+
+
 _QUOTE_CHARS = "'\"«»“”„‹›‚‘’`"
 _START_WORDS = ("фестиваль", "международный", "областной", "городской")
 
@@ -3125,24 +3135,61 @@ async def try_set_fest_cover_from_program(
 ) -> bool:
     """Fetch Telegraph cover and set festival.photo_url if missing."""
     if not force and fest.photo_url:
+        log_festcover(
+            logging.DEBUG,
+            fest.id,
+            "skip_existing_photo",
+            force=force,
+            current=fest.photo_url,
+        )
         return False
     target_url = fest.program_url or _festival_telegraph_url(fest)
     if not target_url:
+        log_festcover(
+            logging.INFO,
+            fest.id,
+            "skip_no_program_url",
+            force=force,
+        )
         return False
     cover = await extract_telegra_ph_cover_url(target_url)
     if not cover:
+        log_festcover(
+            logging.INFO,
+            fest.id,
+            "skip_no_cover_found",
+            target_url=target_url,
+        )
         return False
     async with db.get_session() as session:
         fresh = await session.get(Festival, fest.id)
         if not fresh:
+            log_festcover(
+                logging.INFO,
+                fest.id,
+                "skip_festival_missing",
+            )
             return False
         photos = list(fresh.photo_urls or [])
         if cover not in photos:
             photos = [cover] + photos
+        else:
+            log_festcover(
+                logging.DEBUG,
+                fest.id,
+                "cover_already_listed",
+                cover=cover,
+            )
         fresh.photo_urls = photos
         fresh.photo_url = cover
         await session.commit()
-    logging.info("telegraph_cover: set_ok")
+    log_festcover(
+        logging.INFO,
+        fest.id,
+        "set_ok",
+        cover=cover,
+        target_url=target_url,
+    )
     return True
 
 
@@ -7107,7 +7154,22 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
         if not fest:
             await callback.answer("Festival not found", show_alert=True)
             return
+        log_festcover(
+            logging.INFO,
+            fest.id,
+            "request",
+            initiator=callback.from_user.id,
+            force=True,
+            program_url=fest.program_url,
+        )
         ok = await try_set_fest_cover_from_program(db, fest, force=True)
+        log_festcover(
+            logging.INFO,
+            fest.id,
+            "result",
+            initiator=callback.from_user.id,
+            success=ok,
+        )
         msg = "Обложка обновлена" if ok else "Картинка не найдена"
         await callback.message.answer(msg)
         await callback.answer()
