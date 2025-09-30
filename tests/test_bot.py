@@ -7910,6 +7910,70 @@ async def test_festdays_callback_creates_events(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_festimgs_handles_missing_photo_urls(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async with db.get_session() as session:
+        fest = Festival(name="Jazz")
+        session.add(fest)
+        await session.commit()
+        fid = fest.id
+        fest.photo_urls = None
+        fest.photo_url = None
+        await session.commit()
+
+    cb = types.CallbackQuery.model_validate(
+        {
+            "id": "1",
+            "data": f"festimgs:{fid}",
+            "from": {"id": 1, "is_bot": False, "first_name": "U"},
+            "chat_instance": "1",
+            "message": {
+                "message_id": 1,
+                "date": 0,
+                "chat": {"id": 1, "type": "private"},
+                "from": BOT_SENDER,
+                "text": "stub",
+            },
+        }
+    ).as_(bot)
+
+    responses: list[tuple[str | None, dict[str, Any]]] = []
+
+    async def dummy_message_answer(text=None, **kwargs):
+        responses.append((text, kwargs))
+        return None
+
+    acknowledgements: list[str | None] = []
+
+    async def dummy_callback_answer(text=None, **kwargs):
+        acknowledgements.append(text)
+        return None
+
+    object.__setattr__(cb.message, "answer", dummy_message_answer)
+    object.__setattr__(cb, "answer", dummy_callback_answer)
+
+    await process_request(cb, db, bot)
+
+    assert responses, "callback message.answer was not invoked"
+    text, kwargs = responses[-1]
+    assert text is not None
+    assert "Всего: 0" in text
+    assert "Текущая обложка: #0" in text
+    markup = kwargs.get("reply_markup")
+    assert markup is not None
+    assert len(markup.inline_keyboard) == 1
+    cancel_row = markup.inline_keyboard[0]
+    assert len(cancel_row) == 1
+    cancel_btn = cancel_row[0]
+    assert cancel_btn.text == "Отмена"
+    assert cancel_btn.callback_data == f"festedit:{fid}"
+    assert acknowledgements == [None]
+
+
+@pytest.mark.asyncio
 async def test_festdays_single_day_copies_source(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()

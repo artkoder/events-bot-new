@@ -7080,10 +7080,11 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
         if not fest:
             await callback.answer("Festival not found", show_alert=True)
             return
-        total = len(fest.photo_urls)
+        photo_urls = list(fest.photo_urls or [])
+        total = len(photo_urls)
         current = (
-            fest.photo_urls.index(fest.photo_url) + 1
-            if fest.photo_url in fest.photo_urls
+            photo_urls.index(fest.photo_url) + 1
+            if fest.photo_url in photo_urls
             else 0
         )
         text = (
@@ -7111,10 +7112,11 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
         idx_i = int(idx)
         async with db.get_session() as session:
             fest = await session.get(Festival, fid_i)
-            if not fest or idx_i < 1 or idx_i > len(fest.photo_urls):
+            photo_urls = list(fest.photo_urls or []) if fest else []
+            if not fest or idx_i < 1 or idx_i > len(photo_urls):
                 await callback.answer("Invalid selection", show_alert=True)
                 return
-            fest.photo_url = fest.photo_urls[idx_i - 1]
+            fest.photo_url = photo_urls[idx_i - 1]
             await session.commit()
             name = fest.name
         asyncio.create_task(sync_festival_page(db, name))
