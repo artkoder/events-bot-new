@@ -76,3 +76,30 @@ async def test_try_set_fest_cover_from_program(tmp_path: Path, monkeypatch):
     async with db.get_session() as session:
         fest = await session.get(Festival, fid)
         assert fest.photo_url == "https://telegra.ph/file/cover.jpg"
+
+
+@pytest.mark.asyncio
+async def test_try_set_fest_cover_handles_none_photo_urls(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    async with db.get_session() as session:
+        fest = Festival(name="Fest2", program_url="https://telegra.ph/none")
+        fest.photo_urls = None
+        session.add(fest)
+        await session.commit()
+        fid = fest.id
+
+    async def fake_extract(url, *, event_id=None):
+        return "https://telegra.ph/file/cover-none.jpg"
+
+    monkeypatch.setattr(main, "extract_telegra_ph_cover_url", fake_extract)
+
+    async with db.get_session() as session:
+        fest = await session.get(Festival, fid)
+        ok = await main.try_set_fest_cover_from_program(db, fest)
+        assert ok
+
+    async with db.get_session() as session:
+        fest = await session.get(Festival, fid)
+        assert fest.photo_url == "https://telegra.ph/file/cover-none.jpg"
+        assert fest.photo_urls == ["https://telegra.ph/file/cover-none.jpg"]
