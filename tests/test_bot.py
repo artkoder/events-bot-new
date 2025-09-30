@@ -6781,6 +6781,16 @@ async def test_build_exhibitions_message_filters_past_end(tmp_path: Path, monkey
     monkeypatch.setattr(main, "datetime", FakeDatetime)
 
     async with db.get_session() as session:
+        no_end_event = Event(
+            title="FutureExpo",
+            description="d",
+            source_text="s",
+            date="2025-08-20",
+            end_date=None,
+            time="10:00",
+            location_name="Hall",
+            event_type="выставка",
+        )
         session.add_all(
             [
                 Event(
@@ -6803,6 +6813,7 @@ async def test_build_exhibitions_message_filters_past_end(tmp_path: Path, monkey
                     location_name="Hall",
                     event_type="выставка",
                 ),
+                no_end_event,
             ]
         )
         await session.commit()
@@ -6810,9 +6821,15 @@ async def test_build_exhibitions_message_filters_past_end(tmp_path: Path, monkey
     chunks, markup = await main.build_exhibitions_message(db, timezone.utc)
     combined = "\n".join(chunks)
     assert "TodayExpo" in combined
+    assert "FutureExpo" in combined
     assert "YesterdayExpo" not in combined
     assert markup is not None
-    assert len(markup.inline_keyboard) == 1
+    assert len(markup.inline_keyboard) == 2
+    assert any(
+        btn.callback_data == f"del:{no_end_event.id}:exh"
+        for row in markup.inline_keyboard
+        for btn in row
+    )
 
 
 @pytest.mark.asyncio

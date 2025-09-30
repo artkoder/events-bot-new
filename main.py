@@ -16879,8 +16879,11 @@ async def build_exhibitions_message(
         result = await session.execute(
             select(Event)
             .where(
-                Event.end_date.is_not(None),
-                Event.end_date >= today_iso,
+                or_(
+                    Event.end_date.is_not(None),
+                    and_(Event.end_date.is_(None), Event.date >= today_iso),
+                ),
+                or_(Event.end_date >= today_iso, Event.end_date.is_(None)),
             )
             .order_by(Event.date)
         )
