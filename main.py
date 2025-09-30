@@ -3144,23 +3144,14 @@ async def try_set_fest_cover_from_program(
         )
         return False
     target_url = fest.program_url or _festival_telegraph_url(fest)
-    if not target_url:
-        log_festcover(
-            logging.INFO,
-            fest.id,
-            "skip_no_program_url",
-            force=force,
-        )
-        return False
-    cover = await extract_telegra_ph_cover_url(target_url)
-    if not cover:
-        log_festcover(
-            logging.INFO,
-            fest.id,
-            "skip_no_cover_found",
-            target_url=target_url,
-        )
-        return False
+    cover = None
+    skip_reason: str | None = None
+    if target_url:
+        cover = await extract_telegra_ph_cover_url(target_url)
+        if not cover:
+            skip_reason = "skip_no_cover_found"
+    else:
+        skip_reason = "skip_no_program_url"
     async with db.get_session() as session:
         fresh = await session.get(Festival, fest.id)
         if not fresh:
@@ -3170,27 +3161,101 @@ async def try_set_fest_cover_from_program(
                 "skip_festival_missing",
             )
             return False
-        photos = list(fresh.photo_urls or [])
-        if cover not in photos:
-            photos = [cover] + photos
-        else:
+        existing_photos = list(fresh.photo_urls or [])
+        existing_set = set(existing_photos)
+        event_cover_urls: list[str] = []
+        if fresh.name:
+            result = await session.execute(
+                select(Event.telegraph_url, Event.photo_urls)
+                .where(Event.festival == fresh.name)
+                .order_by(Event.id)
+            )
+            seen_event_urls: set[str] = set()
+            for telegraph_url, event_photos in result:
+                candidate = next((url for url in (event_photos or []) if url), None)
+                if not candidate and telegraph_url:
+                    candidate = await extract_telegra_ph_cover_url(telegraph_url)
+                if candidate and candidate not in seen_event_urls:
+                    seen_event_urls.add(candidate)
+                    event_cover_urls.append(candidate)
+
+        candidate_urls: list[str] = []
+        if cover:
+            candidate_urls.append(cover)
+        candidate_urls.extend(event_cover_urls)
+
+        new_urls: list[str] = []
+        seen_candidates: set[str] = set()
+        for url in candidate_urls:
+            if not url or url in seen_candidates:
+                continue
+            seen_candidates.add(url)
+            if url in existing_set:
+                continue
+            new_urls.append(url)
+
+        updated_photos = existing_photos
+        photos_changed = False
+        if new_urls:
+            updated_photos = new_urls + existing_photos
+            fresh.photo_urls = updated_photos
+            photos_changed = True
+        if cover and cover in existing_set and cover not in new_urls:
             log_festcover(
                 logging.DEBUG,
                 fest.id,
                 "cover_already_listed",
                 cover=cover,
             )
-        fresh.photo_urls = photos
-        fresh.photo_url = cover
-        await session.commit()
-    log_festcover(
-        logging.INFO,
-        fest.id,
-        "set_ok",
-        cover=cover,
-        target_url=target_url,
-    )
-    return True
+
+        selected_cover: str | None = None
+        if cover:
+            selected_cover = cover
+        elif new_urls and (
+            force or not fresh.photo_url or fresh.photo_url not in updated_photos
+        ):
+            selected_cover = new_urls[0]
+
+        cover_changed = False
+        if selected_cover and fresh.photo_url != selected_cover:
+            fresh.photo_url = selected_cover
+            cover_changed = True
+
+        if photos_changed or cover_changed:
+            await session.commit()
+        success = bool(cover) or bool(new_urls)
+    if success:
+        log_festcover(
+            logging.INFO,
+            fest.id,
+            "set_ok",
+            cover=cover,
+            target_url=target_url,
+            new_event_covers=len(new_urls),
+        )
+        return True
+    if skip_reason == "skip_no_program_url":
+        log_festcover(
+            logging.INFO,
+            fest.id,
+            "skip_no_program_url",
+            force=force,
+        )
+    elif skip_reason == "skip_no_cover_found":
+        log_festcover(
+            logging.INFO,
+            fest.id,
+            "skip_no_cover_found",
+            target_url=target_url,
+        )
+    else:
+        log_festcover(
+            logging.DEBUG,
+            fest.id,
+            "skip_no_updates",
+            force=force,
+        )
+    return False
 
 
 async def get_superadmin_id(db: Database) -> int | None:
