@@ -3124,11 +3124,12 @@ async def try_set_fest_cover_from_program(
     db: Database, fest: Festival, force: bool = False
 ) -> bool:
     """Fetch Telegraph cover and set festival.photo_url if missing."""
-    if not fest.program_url:
-        return False
     if not force and fest.photo_url:
         return False
-    cover = await extract_telegra_ph_cover_url(fest.program_url)
+    target_url = fest.program_url or _festival_telegraph_url(fest)
+    if not target_url:
+        return False
+    cover = await extract_telegra_ph_cover_url(target_url)
     if not cover:
         return False
     async with db.get_session() as session:
