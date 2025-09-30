@@ -1203,6 +1203,7 @@ digest_preview_sessions: TTLCache[str, dict] = TTLCache(maxsize=64, ttl=30 * 60)
 
 # ожидание фото после выбора выходных: user_id -> start(YYYY-MM-DD)
 weekend_img_wait: TTLCache[int, str] = TTLCache(maxsize=100, ttl=900)
+FESTIVALS_INDEX_MARKER = "festivals-index"
 
 # remove leading command like /addevent or /addevent@bot
 def strip_leading_cmd(text: str, cmds: tuple[str, ...] = ("addevent",)) -> str:
@@ -1910,7 +1911,10 @@ HELP_COMMANDS.insert(
     0,
     {
         "usage": "/weekendimg",
-        "desc": "Добавить обложку к странице выходных: выбрать дату и загрузить фото в Catbox",
+        "desc": (
+            "Добавить обложку к странице выходных или лендинга фестивалей: "
+            "выбрать дату/лендинг и загрузить фото в Catbox"
+        ),
         "roles": {"superadmin"},
     },
 )
@@ -4180,13 +4184,19 @@ async def sync_festivals_index_page(db: Database) -> None:
     nodes, with_img, without_img, spacers, compact_tail = _build_festival_cards(items)
     from telegraph.utils import nodes_to_html
 
+    cover_url = await get_setting_value(db, "festivals_index_cover")
+    cover_html = (
+        f'<figure><img src="{html.escape(cover_url)}"/></figure>' if cover_url else ""
+    )
     intro_html = (
         f"{FEST_INDEX_INTRO_START}<p><i>Вот какие фестивали нашёл для вас канал "
         f'<a href="https://t.me/kenigevents">Полюбить Калининград Анонсы</a>.</i></p>'
         f"{FEST_INDEX_INTRO_END}"
     )
-    html = intro_html + (nodes_to_html(nodes) if nodes else "") + FOOTER_LINK_HTML
-    html = sanitize_telegraph_html(html)
+    content_html = (
+        cover_html + intro_html + (nodes_to_html(nodes) if nodes else "") + FOOTER_LINK_HTML
+    )
+    content_html = sanitize_telegraph_html(content_html)
     path = await get_setting_value(db, "fest_index_path")
     url = await get_setting_value(db, "fest_index_url")
     title = "Все фестивали Калининградской области"
@@ -4194,11 +4204,18 @@ async def sync_festivals_index_page(db: Database) -> None:
     try:
         if path:
             await telegraph_edit_page(
-                tg, path, title=title, html_content=html, caller="festival_build"
+                tg,
+                path,
+                title=title,
+                html_content=content_html,
+                caller="festival_build",
             )
         else:
             data = await telegraph_create_page(
-                tg, title=title, html_content=html, caller="festival_build"
+                tg,
+                title=title,
+                html_content=content_html,
+                caller="festival_build",
             )
             url = normalize_telegraph_url(data.get("url"))
             path = data.get("path")
@@ -4276,15 +4293,19 @@ async def rebuild_festivals_index_if_needed(
     nodes, with_img, without_img, spacers, compact_tail = _build_festival_cards(items)
     from telegraph.utils import nodes_to_html
 
+    cover_url = await get_setting_value(db, "festivals_index_cover")
+    cover_html = (
+        f'<figure><img src="{html.escape(cover_url)}"/></figure>' if cover_url else ""
+    )
     intro_html = (
         f"{FEST_INDEX_INTRO_START}<p><i>Вот какие фестивали нашёл для вас канал "
         f'<a href="https://t.me/kenigevents">Полюбить Калининград Анонсы</a>.'
         f"</i></p>{FEST_INDEX_INTRO_END}"
     )
     nav_html = nodes_to_html(nodes) if nodes else "<p>Пока нет ближайших фестивалей</p>"
-    html = intro_html + nav_html + FOOTER_LINK_HTML
-    html = sanitize_telegraph_html(html)
-    new_hash = hashlib.sha256(html.encode("utf-8")).hexdigest()
+    content_html = cover_html + intro_html + nav_html + FOOTER_LINK_HTML
+    content_html = sanitize_telegraph_html(content_html)
+    new_hash = hashlib.sha256(content_html.encode("utf-8")).hexdigest()
     old_hash = await get_setting_value(db, "festivals_index_hash")
     url = await get_setting_value(db, "festivals_index_url") or await get_setting_value(
         db, "fest_index_url"
@@ -4304,7 +4325,7 @@ async def rebuild_festivals_index_if_needed(
                 "old_hash": (old_hash or "")[:6],
                 "new_hash": new_hash[:6],
                 "count": len(items),
-                "size": len(html),
+                "size": len(content_html),
                 "took_ms": dur,
                 "with_img": with_img,
                 "without_img": without_img,
@@ -4333,7 +4354,7 @@ async def rebuild_festivals_index_if_needed(
                     "old_hash": (old_hash or "")[:6],
                     "new_hash": new_hash[:6],
                     "count": len(items),
-                    "size": len(html),
+                    "size": len(content_html),
                     "took_ms": dur,
                     "with_img": with_img,
                     "without_img": without_img,
@@ -4353,7 +4374,7 @@ async def rebuild_festivals_index_if_needed(
                 telegraph,
                 path,
                 title=title,
-                html_content=html,
+                html_content=content_html,
                 caller="festival_build",
             )
             status = "updated"
@@ -4361,7 +4382,10 @@ async def rebuild_festivals_index_if_needed(
                 url = f"https://telegra.ph/{path}"
         else:
             data = await telegraph_create_page(
-                telegraph, title=title, html_content=html, caller="festival_build"
+                telegraph,
+                title=title,
+                html_content=content_html,
+                caller="festival_build",
             )
             url = normalize_telegraph_url(data.get("url"))
             path = data.get("path")
@@ -4392,7 +4416,7 @@ async def rebuild_festivals_index_if_needed(
                 "old_hash": (old_hash or "")[:6],
                 "new_hash": new_hash[:6],
                 "count": len(items),
-                "size": len(html),
+                "size": len(content_html),
                 "took_ms": dur,
                 "with_img": with_img,
                 "without_img": without_img,
@@ -4422,7 +4446,7 @@ async def rebuild_festivals_index_if_needed(
             "old_hash": (old_hash or "")[:6],
             "new_hash": new_hash[:6],
             "count": len(items),
-            "size": len(html),
+            "size": len(content_html),
             "took_ms": dur,
             "with_img": with_img,
             "without_img": without_img,
@@ -18216,17 +18240,24 @@ async def handle_weekendimg_cmd(message: types.Message, db: Database, bot: Bot):
     today = datetime.now(LOCAL_TZ).date()
     first = next_weekend_start(today)
     dates = [first + timedelta(days=7 * i) for i in range(5)]
-    kb = types.InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                types.InlineKeyboardButton(
-                    text=f"Выходные {format_weekend_range(d)}",
-                    callback_data=f"weekimg:{d.isoformat()}",
-                )
-            ]
-            for d in dates
+    rows = [
+        [
+            types.InlineKeyboardButton(
+                text=f"Выходные {format_weekend_range(d)}",
+                callback_data=f"weekimg:{d.isoformat()}",
+            )
+        ]
+        for d in dates
+    ]
+    rows.append(
+        [
+            types.InlineKeyboardButton(
+                text="Обложка лендинга фестивалей",
+                callback_data=f"weekimg:{FESTIVALS_INDEX_MARKER}",
+            )
         ]
     )
+    kb = types.InlineKeyboardMarkup(inline_keyboard=rows)
     await message.answer("Выберите выходные для обложки:", reply_markup=kb)
 
 
@@ -18241,10 +18272,25 @@ async def handle_weekendimg_cb(callback: types.CallbackQuery, db: Database, bot:
     start = callback.data.split(":", 1)[1]
     weekend_img_wait[callback.from_user.id] = start
     await callback.message.edit_reply_markup(reply_markup=None)
-    await callback.message.answer(
-        f"Выбраны выходные {format_weekend_range(date.fromisoformat(start))}.\n"
-        "Пришлите обложку одним сообщением (фото или файл).",
-    )
+    if start == FESTIVALS_INDEX_MARKER:
+        await callback.message.answer(
+            "Выбрана обложка лендинга фестивалей.\n"
+            "Пришлите обложку одним сообщением (фото или файл).",
+        )
+    else:
+        try:
+            start_date = date.fromisoformat(start)
+        except ValueError:
+            await callback.message.answer(
+                "Не удалось распознать дату. Попробуйте выбрать вариант ещё раз."
+            )
+            weekend_img_wait.pop(callback.from_user.id, None)
+            await callback.answer()
+            return
+        await callback.message.answer(
+            f"Выбраны выходные {format_weekend_range(start_date)}.\n"
+            "Пришлите обложку одним сообщением (фото или файл).",
+        )
     await callback.answer()
 
 
@@ -18264,6 +18310,32 @@ async def handle_weekendimg_photo(message: types.Message, db: Database, bot: Bot
         return
 
     cover = urls[0]
+    if start == FESTIVALS_INDEX_MARKER:
+        landing_url = ""
+        try:
+            await set_setting_value(db, "festivals_index_cover", cover)
+            await sync_festivals_index_page(db)
+            _, landing_url = await rebuild_festivals_index_if_needed(
+                db, force=True
+            )
+        except Exception:
+            logging.exception("Failed to update festivals index cover")
+            await message.reply(
+                "Обложка сохранена, но страницу не удалось обновить. Попробуйте ещё раз."
+            )
+        else:
+            if landing_url:
+                await message.reply(
+                    f"Готово! Обложка лендинга обновлена.\n{landing_url}"
+                )
+            else:
+                await message.reply(
+                    "Обложка сохранена, но ссылку на лендинг получить не удалось."
+                )
+        finally:
+            weekend_img_wait.pop(message.from_user.id, None)
+        return
+
     await set_setting_value(db, f"weekend_cover:{start}", cover)
     await sync_weekend_page(db, start, update_links=True, post_vk=False, force=True)
 
