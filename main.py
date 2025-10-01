@@ -17095,6 +17095,7 @@ async def build_exhibitions_message(
         result = await session.execute(
             select(Event)
             .where(
+                Event.event_type == "выставка",
                 or_(
                     Event.end_date.is_not(None),
                     and_(Event.end_date.is_(None), Event.date >= today_iso),
