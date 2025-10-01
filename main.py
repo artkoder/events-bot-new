@@ -21409,7 +21409,7 @@ async def handle_vk_review_cb(callback: types.CallbackQuery, db: Database, bot: 
         )
         await bot.send_message(
             callback.message.chat.id,
-            "Где разместить ссылку?",
+            "Где разместить иллюстрации?",
             reply_markup=placement_keyboard,
         )
         answered = True
