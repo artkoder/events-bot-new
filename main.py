@@ -5592,13 +5592,37 @@ async def parse_event_via_4o(
     gc.collect()
     logging.info("Sending 4o parse request to %s", url)
     session = get_http_session()
+    call_started = _time.monotonic()
+    semaphore_acquired = False
+    semaphore_wait: float | None = None
+
     async def _call():
+        nonlocal semaphore_acquired, semaphore_wait
+        wait_started = _time.monotonic()
         async with span("http"):
             async with HTTP_SEMAPHORE:
+                semaphore_acquired = True
+                semaphore_wait = _time.monotonic() - wait_started
                 resp = await session.post(url, json=payload, headers=headers)
                 resp.raise_for_status()
                 return await resp.json()
-    data_raw = await asyncio.wait_for(_call(), FOUR_O_TIMEOUT)
+
+    try:
+        data_raw = await asyncio.wait_for(_call(), FOUR_O_TIMEOUT)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        elapsed = _time.monotonic() - call_started
+        setattr(
+            exc,
+            "_four_o_call_meta",
+            {
+                "elapsed": elapsed,
+                "semaphore_acquired": semaphore_acquired,
+                "semaphore_wait": semaphore_wait,
+            },
+        )
+        raise
     usage = data_raw.get("usage") or {}
     _record_four_o_usage(
         "parse",
@@ -9267,6 +9291,7 @@ async def add_events_from_text(
     poster_texts = collect_poster_texts(poster_items)
     poster_summary = build_poster_summary(poster_items)
 
+    llm_call_started = _time.monotonic()
     try:
         # Free any lingering objects before heavy LLM call to reduce peak memory
         gc.collect()
@@ -9349,7 +9374,25 @@ async def add_events_from_text(
             festival_info = {"name": festival_info}
         logging.info("LLM returned %d events", len(parsed))
     except Exception as e:
-        logging.error("LLM error: %s", e)
+        elapsed_total = _time.monotonic() - llm_call_started
+        meta = getattr(e, "_four_o_call_meta", {}) or {}
+        meta_elapsed = meta.get("elapsed")
+        meta_wait = meta.get("semaphore_wait")
+
+        def _fmt_duration(value: float | None) -> str:
+            return f"{value:.2f}s" if isinstance(value, (int, float)) else str(value)
+
+        logging.exception(
+            "LLM error (%s) source=%s len=%d total_elapsed=%s call_elapsed=%s "
+            "semaphore_acquired=%s semaphore_wait=%s",
+            type(e).__name__,
+            source_marker,
+            len(text),
+            _fmt_duration(elapsed_total),
+            _fmt_duration(meta_elapsed),
+            meta.get("semaphore_acquired"),
+            _fmt_duration(meta_wait),
+        )
         if raise_exc:
             raise
         return []
@@ -15576,6 +15619,8 @@ async def build_daily_posts(
         lines2.append(" ".join(recent_festival_entries))
     section2 = "\n".join(lines2)
 
+    fest_index_url = await get_setting_value(db, "fest_index_url")
+
     buttons = []
     if wpage:
         sunday = w_start + timedelta(days=1)
@@ -15599,6 +15644,10 @@ async def build_daily_posts(
                 text=f"{prefix}Мероприятия на {month_name_nominative(next_month(cur_month))}",
                 url=mp_next.url,
             )
+        )
+    if fest_index_url:
+        buttons.append(
+            types.InlineKeyboardButton(text="Фестивали", url=fest_index_url)
         )
     markup = None
     if buttons:
