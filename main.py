@@ -114,7 +114,7 @@ from typing import (
     Collection,
     Sequence,
 )
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, ParseResult
 import uuid
 import textwrap
 # тяжёлый стек подтягиваем только если понадобится
@@ -23085,6 +23085,57 @@ async def build_source_page_content(
             linked = linkify_for_telegraph(escaped)
             paragraphs.append(f"<p>{linked}</p>")
     inline_used = 0
+    if page_mode == "history" and paragraphs:
+        anchor_re = re.compile(r"<a\b[^>]*href=(['\"])(.*?)\1[^>]*>(.*?)</a>", re.IGNORECASE | re.DOTALL)
+
+        def _parse_href(raw: str | None) -> ParseResult | None:
+            if not raw:
+                return None
+            candidate = html.unescape(raw).strip()
+            if not candidate:
+                return None
+            parsed = urlparse(candidate)
+            if parsed.scheme:
+                final = parsed
+            elif candidate.startswith("//"):
+                final = urlparse("https:" + candidate)
+            else:
+                final = urlparse("https://" + candidate.lstrip("/"))
+            return final
+
+        def _normalized_parts(raw: str | None) -> tuple[str, str, str, str, str] | None:
+            parsed = _parse_href(raw)
+            if not parsed:
+                return None
+            host = parsed.netloc.lower()
+            if host.startswith("www."):
+                host = host[4:]
+            path = parsed.path or "/"
+            if path != "/":
+                path = path.rstrip("/")
+            return host, path, parsed.params, parsed.query, parsed.fragment
+
+        source_parts = _normalized_parts(source_url)
+
+        def _is_vk_href(raw: str | None) -> bool:
+            parsed = _parse_href(raw)
+            if not parsed:
+                return False
+            host = parsed.netloc.lower()
+            if host.startswith("www."):
+                host = host[4:]
+            return host == "vk.com" or host.endswith(".vk.com")
+
+        def _replace_anchor(match: re.Match[str]) -> str:
+            href = match.group(2)
+            parts = _normalized_parts(href)
+            if source_parts and parts == source_parts:
+                return match.group(0)
+            if _is_vk_href(href):
+                return match.group(3)
+            return match.group(0)
+
+        paragraphs = [anchor_re.sub(_replace_anchor, para) for para in paragraphs]
     if paragraphs:
         body_blocks: list[str] = [paragraphs[0]]
         if image_mode == "inline" and tail:

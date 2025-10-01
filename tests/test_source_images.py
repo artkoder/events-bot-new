@@ -174,3 +174,26 @@ async def test_build_source_page_content_history_footer():
     assert "https://t.me/kenigevents" not in html
     assert f'<p><a href="{source}">Источник</a></p>' in html
     assert html.rstrip().endswith(main.HISTORY_FOOTER_HTML)
+
+
+@pytest.mark.asyncio
+async def test_build_source_page_content_history_strips_vk_links():
+    source = "https://vk.com/source"
+    text = (
+        "Смотрите https://vk.com/club123\n"
+        "Также https://m.vk.com/event987 и https://example.com/page\n"
+        "[club999|ВК синтаксис]"
+    )
+    html, _, _ = await main.build_source_page_content(
+        "T",
+        text,
+        source,
+        None,
+        None,
+        None,
+        None,
+        page_mode="history",
+    )
+    assert html.count('href="https://vk.com') == 1
+    assert f'<p><a href="{source}">Источник</a></p>' in html
+    assert 'href="https://example.com/page"' in html
