@@ -246,15 +246,20 @@ async def test_pages_rebuild_split_keeps_day_boundaries(tmp_path, monkeypatch):
 
     html_by_path: dict[str, str] = {}
 
-    async def fake_create_page(tg, *, title, html_content, caller="event_pipeline", **kwargs):
+    async def fake_create_page(tg, *args, caller="event_pipeline", **kwargs):
+        _title = args[0] if args else kwargs.get("title", "")
+        html_content = kwargs.get("html_content") or kwargs.get("content")
         path = f"path{len(html_by_path) + 1}"
-        html_by_path[path] = html_content
+        if html_content is not None:
+            html_by_path[path] = html_content
         return {"url": f"https://telegra.ph/{path}", "path": path}
 
     async def fake_edit_page(
-        tg, path, *, title, html_content, caller="event_pipeline", **kwargs
+        tg, path, *args, caller="event_pipeline", **kwargs
     ):
-        html_by_path[path] = html_content
+        html_content = kwargs.get("html_content") or kwargs.get("content")
+        if html_content is not None:
+            html_by_path[path] = html_content
         return {"url": f"https://telegra.ph/{path}", "path": path}
 
     async def fake_check_month_page_markers(tg, path):
@@ -347,7 +352,16 @@ async def test_month_nav_update_falls_back_to_full_rebuild(tmp_path, monkeypatch
 
     full_render_called = False
 
-    async def fake_build_month_page_content(db_obj, month_str, events, exhibitions):
+    async def fake_build_month_page_content(
+        db_obj,
+        month_str,
+        events,
+        exhibitions,
+        continuation_url=None,
+        size_limit=None,
+        *,
+        include_ics=True,
+    ):
         nonlocal full_render_called
         full_render_called = True
         return ("Title", [{"tag": "p", "children": ["new"]}], 0)
