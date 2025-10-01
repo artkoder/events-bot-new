@@ -5682,6 +5682,45 @@ async def parse_event_via_4o(
     raise RuntimeError("bad 4o response")
 
 
+FOUR_O_EDITOR_PROMPT = textwrap.dedent(
+    """
+    Ты — выпускающий редактор русскоязычного Telegram-канала о событиях.
+    Переформатируй текст истории для публикации на Telegraph: исправь опечатки,
+    разбей материал на короткие абзацы, добавь понятные подзаголовки и подходящие эмодзи.
+    Сохраняй факты, даты, имена и ссылки, не добавляй новые данные.
+    Используй только простой HTML или markdown, понятный Telegraph (<p>, <h3>, <ul>, <ol>, <b>, <i>, <a>, <blockquote>, <br/>).
+    Не добавляй вводные комментарии, пояснения об обработке или служебные пометки — верни только готовый текст.
+    """
+)
+
+
+async def compose_story_editorial_via_4o(text: str, *, title: str | None = None) -> str:
+    """Return formatted HTML/markdown for Telegraph using the 4o editor prompt."""
+
+    raw = (text or "").strip()
+    if not raw:
+        return ""
+    sections: list[str] = []
+    if title:
+        title_clean = title.strip()
+        if title_clean:
+            sections.append(f"Заголовок: {title_clean}")
+    sections.append("Текст:\n" + raw)
+    prompt_text = "\n\n".join(sections)
+    response = await ask_4o(
+        prompt_text,
+        system_prompt=FOUR_O_EDITOR_PROMPT,
+        max_tokens=FOUR_O_RESPONSE_LIMIT,
+    )
+    formatted = (response or "").strip()
+    if formatted.startswith("```"):
+        formatted = re.sub(r"^```[a-zA-Z]*\n?", "", formatted)
+        if formatted.endswith("```"):
+            formatted = formatted[:-3]
+        formatted = formatted.strip()
+    return formatted
+
+
 async def ask_4o(
     text: str,
     *,
@@ -21273,11 +21312,38 @@ async def _vkrev_handle_story_choice(
     source_url = f"https://vk.com/wall-{group_id}_{post_id}"
     photos = await _vkrev_fetch_photos(group_id, post_id, db, bot)
     image_mode = "inline" if placement == "middle" else "tail"
+    source_text = text or ""
+    editor_html: str | None = None
+    if source_text.strip():
+        try:
+            editor_candidate = await compose_story_editorial_via_4o(
+                source_text,
+                title=title,
+            )
+        except Exception as exc:
+            logging.warning(
+                "vk_review story editor request failed",  # pragma: no cover - logging only
+                extra={
+                    "operator": operator_id,
+                    "inbox_id": inbox_id,
+                    "error": str(exc),
+                },
+            )
+        else:
+            cleaned = editor_candidate.strip()
+            if cleaned:
+                editor_html = cleaned
+            else:
+                logging.warning(
+                    "vk_review story editor returned empty response",
+                    extra={"operator": operator_id, "inbox_id": inbox_id},
+                )
     try:
         result = await create_source_page(
             title,
-            text or "",
+            source_text,
             source_url,
+            editor_html,
             db=None,
             catbox_urls=photos,
             image_mode=image_mode,
@@ -23062,15 +23128,82 @@ async def build_source_page_content(
     tg_emoji_cleaned = 0
     tg_spoiler_unwrapped = 0
     paragraphs: list[str] = []
+    def _wrap_plain_chunks(raw_chunk: str) -> list[str]:
+        chunk = raw_chunk.strip()
+        if not chunk:
+            return []
+        normalized = re.sub(r"<br\s*/?>", "<br/>", chunk, flags=re.IGNORECASE)
+        normalized = normalized.replace("\r", "")
+        parts = [
+            part.strip()
+            for part in re.split(r"(?:<br/>\s*){2,}|\n{2,}", normalized)
+            if part.strip()
+        ]
+        wrapped: list[str] = []
+        for part in parts:
+            segment = part.replace("\n", "<br/>")
+            segment = re.sub(r"^(?:<br/>\s*)+", "", segment, flags=re.IGNORECASE)
+            segment = re.sub(r"(?:<br/>\s*)+$", "", segment, flags=re.IGNORECASE)
+            wrapped.append(f"<p>{segment}</p>")
+        return wrapped
+
+    def _split_paragraph_block(block: str) -> list[str]:
+        match = re.match(r"(<p[^>]*>)(.*?)(</p>)", block, flags=re.IGNORECASE | re.DOTALL)
+        if not match:
+            return [block]
+        start_tag, body, end_tag = match.groups()
+        pieces = re.split(r"(?:<br\s*/?>\s*){2,}", body, flags=re.IGNORECASE)
+        result: list[str] = []
+        for piece in pieces:
+            cleaned = piece.strip()
+            if not cleaned:
+                continue
+            cleaned = re.sub(r"^(?:<br\s*/?>\s*)+", "", cleaned, flags=re.IGNORECASE)
+            cleaned = re.sub(r"(?:<br\s*/?>\s*)+$", "", cleaned, flags=re.IGNORECASE)
+            result.append(f"{start_tag}{cleaned}{end_tag}")
+        return result or [block]
+
+    def _editor_html_blocks(raw: str) -> list[str]:
+        text_value = raw.strip()
+        if not text_value:
+            return []
+        looks_like_html = bool(re.search(r"<\w+[^>]*>", text_value))
+        if looks_like_html:
+            sanitized = sanitize_telegram_html(text_value)
+            sanitized = linkify_for_telegraph(sanitized)
+        else:
+            sanitized = md_to_html(text_value)
+        sanitized = re.sub(r"<(\/?)h[12](\b)", r"<\1h3\2", sanitized, flags=re.IGNORECASE)
+        sanitized = re.sub(r"<br\s*/?>", "<br/>", sanitized, flags=re.IGNORECASE)
+        sanitized = sanitize_telegram_html(sanitized)
+        block_re = re.compile(
+            r"<(?P<tag>h[1-6]|p|ul|ol|blockquote|pre|table|figure)[^>]*>.*?</(?P=tag)>|<hr\b[^>]*>|<img\b[^>]*>",
+            re.IGNORECASE | re.DOTALL,
+        )
+        blocks: list[str] = []
+        pos = 0
+        for match in block_re.finditer(sanitized):
+            start, end = match.span()
+            if start > pos:
+                blocks.extend(_wrap_plain_chunks(sanitized[pos:start]))
+            block_value = match.group(0)
+            if block_value.lower().startswith("<p"):
+                blocks.extend(_split_paragraph_block(block_value))
+            else:
+                blocks.append(block_value)
+            pos = end
+        if pos < len(sanitized):
+            blocks.extend(_wrap_plain_chunks(sanitized[pos:]))
+        return [block for block in blocks if block.strip()]
+
     if html_text:
         html_text = strip_title(html_text)
         html_text = normalize_hashtag_dates(html_text)
+        html_text = html_text.replace("\r\n", "\n")
         html_text = sanitize_telegram_html(html_text)
         for k, v in CUSTOM_EMOJI_MAP.items():
             html_text = html_text.replace(k, v)
-        html_text = linkify_for_telegraph(html_text)
-        _html_text_paragraph = html_text.replace("\n", "<br/>")
-        paragraphs = [f"<p>{_html_text_paragraph}</p>"]
+        paragraphs = _editor_html_blocks(html_text)
     else:
         clean_text = strip_title(text)
         clean_text = normalize_hashtag_dates(clean_text)
