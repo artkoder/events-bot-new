@@ -7257,6 +7257,8 @@ async def test_build_daily_posts(tmp_path: Path, monkeypatch):
         session.add(WeekendPage(start=start.isoformat(), url="w", path="wp"))
         await session.commit()
 
+    await main.set_setting_value(db, "fest_index_url", "https://fest.example")
+
     posts = await main.build_daily_posts(db, timezone.utc)
     assert posts
     text, markup = posts[0]
@@ -7265,6 +7267,9 @@ async def test_build_daily_posts(tmp_path: Path, monkeypatch):
     assert text.count("\U0001f449") == 2
     first_btn = markup.inline_keyboard[0][0].text
     assert first_btn.startswith("(+1)")
+    fest_btn = markup.inline_keyboard[-1][0]
+    assert fest_btn.text == "Фестивали"
+    assert fest_btn.url == "https://fest.example"
 
 
 @pytest.mark.asyncio

@@ -15619,6 +15619,8 @@ async def build_daily_posts(
         lines2.append(" ".join(recent_festival_entries))
     section2 = "\n".join(lines2)
 
+    fest_index_url = await get_setting_value(db, "fest_index_url")
+
     buttons = []
     if wpage:
         sunday = w_start + timedelta(days=1)
@@ -15642,6 +15644,10 @@ async def build_daily_posts(
                 text=f"{prefix}Мероприятия на {month_name_nominative(next_month(cur_month))}",
                 url=mp_next.url,
             )
+        )
+    if fest_index_url:
+        buttons.append(
+            types.InlineKeyboardButton(text="Фестивали", url=fest_index_url)
         )
     markup = None
     if buttons:
