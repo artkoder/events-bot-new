@@ -219,6 +219,8 @@ class Database:
             await _add_column(conn, "event", "ics_post_url TEXT")
             await _add_column(conn, "event", "ics_post_id INTEGER")
             await _add_column(conn, "event", "vk_repost_url TEXT")
+            await _add_column(conn, "event", "vk_ticket_short_url TEXT")
+            await _add_column(conn, "event", "vk_ticket_short_key TEXT")
             await _add_column(conn, "event", "topics TEXT DEFAULT '[]'")
             await _add_column(conn, "event", "topics_manual BOOLEAN DEFAULT 0")
             await _add_column(conn, "event", "tourist_label SMALLINT")
