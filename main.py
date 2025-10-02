@@ -19826,6 +19826,8 @@ async def handle_edit_message(message: types.Message, db: Database, bot: Bot):
                     return
                 else:
                     setattr(event, field, value)
+                event.vk_ticket_short_url = None
+                event.vk_ticket_short_key = None
             else:
                 setattr(event, field, value)
         if field in {"title", "description", "source_text"} and not event.topics_manual:

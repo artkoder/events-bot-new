@@ -624,6 +624,8 @@ async def test_edit_remove_ticket_link(tmp_path: Path, monkeypatch):
     async with db.get_session() as session:
         event = (await session.execute(select(Event))).scalars().first()
         event.ticket_link = "https://reg"
+        event.vk_ticket_short_url = "https://vk.cc/abcd"
+        event.vk_ticket_short_key = "abcd"
         await session.commit()
 
     editing_sessions[1] = (event.id, "ticket_link")
@@ -641,6 +643,39 @@ async def test_edit_remove_ticket_link(tmp_path: Path, monkeypatch):
     async with db.get_session() as session:
         updated = await session.get(Event, event.id)
     assert updated.ticket_link is None
+    assert updated.vk_ticket_short_url is None
+    assert updated.vk_ticket_short_key is None
+
+
+@pytest.mark.asyncio
+async def test_vk_ticket_short_fields_persist(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.get_session() as session:
+        event = Event(
+            title="Title",
+            description="Desc",
+            festival=None,
+            date=FUTURE_DATE,
+            time="18:00",
+            location_name="Club",
+            location_address=None,
+            city="Калининград",
+            source_text="Source",
+            ticket_link="https://example.com",
+            vk_ticket_short_url="https://vk.cc/abcd",
+            vk_ticket_short_key="abcd",
+        )
+        session.add(event)
+        await session.commit()
+        await session.refresh(event)
+
+    async with db.get_session() as session:
+        stored = await session.get(Event, event.id)
+
+    assert stored.vk_ticket_short_url == "https://vk.cc/abcd"
+    assert stored.vk_ticket_short_key == "abcd"
 
 
 @pytest.mark.asyncio
