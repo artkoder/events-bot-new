@@ -315,10 +315,19 @@ async def test_handle_digest_sends_psychology_preview(tmp_path, monkeypatch):
     await main.handle_digest_select_psychology(cb, db, bot)
     assert bot.media_groups
     panel = bot.messages[-1]
-    assert panel.text.startswith("Управление дайджестом психологии")
+    expected_panel_text = (
+        "Управление дайджестом психологии\n"
+        "Выключите лишнее и нажмите «Обновить превью»."
+    )
+    assert panel.text == expected_panel_text
     session_data = main.digest_preview_sessions[digest_id]
     assert session_data["items_noun"] == "психологических событий"
     assert session_data["items"][0]["norm_topics"] == ["PSYCHOLOGY"]
+    assert session_data["intro_html"] == "Интро"
+    assert "Интро" in session_data.get("current_caption_html", "")
+    assert panel.reply_markup.inline_keyboard[0][0].text.startswith("✅ 1")
+    assert panel.reply_markup.inline_keyboard[-2][0].text == "🔄 Обновить превью"
+    assert panel.reply_markup.inline_keyboard[-1][0].text == "🗑 Скрыть панель"
 
     cb_refresh = SimpleNamespace(
         data=f"dg:r:{digest_id}",
