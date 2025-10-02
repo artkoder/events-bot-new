@@ -20,6 +20,7 @@
 - Список сообществ ВК показывает статусы `Pending | Skipped | Imported | Rejected` и поддерживает пагинацию.
 - Ежедневный Telegram-анонс теперь ссылается на Telegraph-страницу для событий из VK-очереди (кроме партнёрских авторов).
 - «✂️ Сокращённый рерайт» сохраняет разбивку на абзацы вместо склеивания всего текста в один блок.
+- Запустили психологический дайджест: в `/digest` появилась отдельная кнопка, подбор идёт по тематике и автоматически создаётся интро.
 
 - Introduced automatic topic classification with a closed topic list, editor display, and `/backfill_topics` command.
 - Classifier/digest topic list now includes the `PSYCHOLOGY`, `THEATRE_CLASSIC`, and `THEATRE_MODERN` categories.
