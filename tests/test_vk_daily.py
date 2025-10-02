@@ -135,3 +135,66 @@ async def test_build_daily_sections_vk_keeps_partner_source_link(tmp_path: Path)
     )
     event_line = sec1.splitlines()[4]
     assert event_line.startswith("👉 [https://vk.com/wall-1_8|")
+
+
+@pytest.mark.asyncio
+async def test_build_daily_sections_vk_short_link_reuse(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    today = date(2025, 7, 10)
+
+    call_ids: list[int] = []
+
+    async def fake_helper(event, db, **kwargs):
+        if event.id is not None:
+            call_ids.append(event.id)
+        event.vk_ticket_short_url = "https://vk.cc/short"
+        event.vk_ticket_short_key = "short"
+        if event.id is not None:
+            async with db.get_session() as session:
+                stored = await session.get(Event, event.id)
+                if stored:
+                    stored.vk_ticket_short_url = "https://vk.cc/short"
+                    stored.vk_ticket_short_key = "short"
+                    await session.commit()
+        return "https://vk.cc/short", "short"
+
+    monkeypatch.setattr(main, "ensure_vk_short_ticket_link", fake_helper)
+
+    async with db.get_session() as session:
+        event = Event(
+            title="Concert",
+            description="d",
+            source_text="s",
+            date=today.isoformat(),
+            time="19:00",
+            location_name="Club",
+            ticket_link="https://tickets",
+            added_at=datetime.now(timezone.utc) - timedelta(hours=1),
+        )
+        session.add(event)
+        await session.commit()
+        await session.refresh(event)
+        event_id = event.id
+
+    sec1, _ = await main.build_daily_sections_vk(
+        db, timezone.utc, now=datetime(2025, 7, 10, tzinfo=timezone.utc)
+    )
+
+    async with db.get_session() as session:
+        stored = await session.get(Event, event_id)
+        assert stored.vk_ticket_short_url == "https://vk.cc/short", call_ids
+        assert stored.vk_ticket_short_key == "short"
+
+    assert "https://vk.cc/short" in sec1
+    assert call_ids == [event_id]
+
+    async def fail_helper(*args, **kwargs):  # pragma: no cover - ensure reuse
+        raise AssertionError("short link should be reused")
+
+    monkeypatch.setattr(main, "ensure_vk_short_ticket_link", fail_helper)
+
+    sec1_again, _ = await main.build_daily_sections_vk(
+        db, timezone.utc, now=datetime(2025, 7, 10, tzinfo=timezone.utc)
+    )
+    assert "https://vk.cc/short" in sec1_again
