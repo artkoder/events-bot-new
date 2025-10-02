@@ -13,6 +13,8 @@ from digests import (
     build_masterclasses_digest_preview,
     build_exhibitions_digest_candidates,
     build_exhibitions_digest_preview,
+    build_psychology_digest_candidates,
+    build_psychology_digest_preview,
     compose_digest_intro_via_4o,
     compose_masterclasses_intro_via_4o,
     compose_exhibitions_intro_via_4o,
@@ -103,6 +105,105 @@ async def test_build_masterclasses_digest_candidates(tmp_path):
 
     assert horizon == 14
     assert titles == ["m0", "m3", "m8"]
+
+
+@pytest.mark.asyncio
+async def test_build_psychology_digest_candidates_filters_topics(tmp_path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    now = datetime(2025, 5, 1, 12, 0)
+
+    async with db.get_session() as session:
+        def add(title: str, *, topics: list[str], offset_days: int = 1):
+            dt = now + timedelta(days=offset_days)
+            ev = Event(
+                title=title,
+                description="d",
+                date=dt.strftime("%Y-%m-%d"),
+                time="18:00",
+                location_name="x",
+                source_text="s",
+                source_post_url=f"http://example.com/{title}",
+                event_type="лекция",
+                topics=topics,
+            )
+            session.add(ev)
+
+        add("Psych 1", topics=["Психология"])
+        add("History", topics=["История"])
+        add("Psych 2", topics=["mental health"], offset_days=2)
+        await session.commit()
+
+    events, horizon = await build_psychology_digest_candidates(db, now)
+    titles = [e.title for e in events]
+
+    assert horizon == 14
+    assert titles == ["Psych 1", "Psych 2"]
+
+
+@pytest.mark.asyncio
+async def test_build_psychology_digest_preview_filters_topics(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    now = datetime(2025, 5, 1, 12, 0)
+
+    async with db.get_session() as session:
+        session.add(
+            Event(
+                title="Mindfulness",
+                description="Keep calm",
+                date="2025-05-02",
+                time="18:30",
+                location_name="loc",
+                source_text="s",
+                source_post_url="http://example.com/mind",
+                event_type="лекция",
+                topics=["Психология", "wellbeing"],
+            )
+        )
+        session.add(
+            Event(
+                title="Other",
+                description="No",
+                date="2025-05-03",
+                time="19:00",
+                location_name="loc",
+                source_text="s",
+                source_post_url="http://example.com/other",
+                event_type="лекция",
+                topics=["История"],
+            )
+        )
+        await session.commit()
+
+    async def fake_normalize(titles, event_kind=None):
+        return [{"title_clean": title, "emoji": ""} for title in titles]
+
+    recorded_payload: list[list[dict[str, object]]] = []
+
+    async def fake_psych_intro(n, horizon_days, payload):
+        recorded_payload.append(payload)
+        return "Psych intro"
+
+    monkeypatch.setattr(digests, "normalize_titles_via_4o", fake_normalize)
+    monkeypatch.setattr(digests, "compose_psychology_intro_via_4o", fake_psych_intro)
+
+    intro, lines, horizon, events, norm_titles = await build_psychology_digest_preview(
+        "dg", db, now
+    )
+
+    assert intro == "Psych intro"
+    assert horizon == 14
+    assert [e.title for e in events] == ["Mindfulness"]
+    assert norm_titles == ["Mindfulness"]
+    assert len(lines) == 1
+    assert recorded_payload[-1] == [
+        {
+            "title": "Mindfulness",
+            "description": "Keep calm",
+            "topics": ["PSYCHOLOGY", "wellbeing"],
+        }
+    ]
 
 
 @pytest.mark.asyncio
