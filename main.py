@@ -23486,9 +23486,34 @@ async def create_source_page(
         page_mode=page_mode,
     )
     logging.info("SRC page compose uploaded=%d catbox_msg=%s", uploaded, catbox_msg)
-    from telegraph.utils import html_to_nodes
+    from telegraph.utils import html_to_nodes, InvalidHTML
 
-    nodes = html_to_nodes(html_content)
+    try:
+        nodes = html_to_nodes(html_content)
+    except InvalidHTML as exc:
+        if not html_text:
+            raise
+        logging.warning(
+            "Invalid HTML in source page, rebuilding without editor markup: %s", exc
+        )
+        html_content, catbox_msg, uploaded = await build_source_page_content(
+            title,
+            text,
+            source_url,
+            None,
+            media,
+            ics_url,
+            db,
+            display_link=display_link,
+            catbox_urls=catbox_urls,
+            image_mode=image_mode,
+            page_mode=page_mode,
+        )
+        try:
+            nodes = html_to_nodes(html_content)
+        except InvalidHTML:
+            logging.exception("Fallback source page content is still invalid")
+            raise
     author_name = (
         "Полюбить Калининград Истории"
         if page_mode == "history"
