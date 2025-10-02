@@ -648,6 +648,12 @@ async def test_shortpost_free_event_ticket_line(monkeypatch):
         return ", ".join(filter(None, parts))
     monkeypatch.setattr(main, "build_short_vk_location", fake_location)
 
+    async def fake_vk_api(method, params, db=None, bot=None, **kwargs):
+        assert method == "utils.getShortLink"
+        return {"short_url": "https://vk.cc/short", "key": "short"}
+
+    monkeypatch.setattr(main, "_vk_api", fake_vk_api)
+
     ev = Event(
         id=1,
         title="T",
@@ -661,11 +667,117 @@ async def test_shortpost_free_event_ticket_line(monkeypatch):
     )
 
     msg, _ = await main._vkrev_build_shortpost(ev, "https://vk.com/wall-1_1")
-    assert "🆓 Бесплатно, по регистрации https://tickets" in msg
+    assert "🆓 Бесплатно, по регистрации https://vk.cc/short" in msg
     assert "🎟 Билеты:" not in msg
+    assert ev.vk_ticket_short_url == "https://vk.cc/short"
+    assert ev.vk_ticket_short_key == "short"
 
 
 @pytest.mark.asyncio
+async def test_shortpost_short_link_fallback_on_error(monkeypatch):
+    async def fake_build_text(event, src, max_sent, **kwargs):
+        return "short summary"
+
+    async def fake_tags(event, summary, used_type_hashtag=None):
+        return ["#a", "#b", "#c", "#d", "#e"]
+
+    async def fake_location(parts):
+        return ", ".join(filter(None, parts))
+
+    async def failing_vk_api(method, params, db=None, bot=None, **kwargs):
+        raise RuntimeError("vk error")
+
+    monkeypatch.setattr(main, "build_short_vk_text", fake_build_text)
+    monkeypatch.setattr(main, "build_short_vk_tags", fake_tags)
+    monkeypatch.setattr(main, "build_short_vk_location", fake_location)
+    monkeypatch.setattr(main, "_vk_api", failing_vk_api)
+
+    ev = Event(
+        id=2,
+        title="T",
+        description="d",
+        date="2025-09-27",
+        time="",
+        location_name="Place",
+        source_text="src",
+        ticket_link="https://tickets",
+    )
+
+    msg, _ = await main._vkrev_build_shortpost(ev, "https://vk.com/wall-1_1")
+    assert "https://tickets" in msg
+    assert ev.vk_ticket_short_url is None
+
+
+@pytest.mark.asyncio
+async def test_shortpost_preview_keeps_original_link(monkeypatch):
+    async def fake_build_text(event, src, max_sent, **kwargs):
+        return "short summary"
+
+    async def fake_tags(event, summary, used_type_hashtag=None):
+        return ["#a", "#b", "#c", "#d", "#e"]
+
+    async def fake_location(parts):
+        return ", ".join(filter(None, parts))
+
+    async def failing_vk_api(*args, **kwargs):  # pragma: no cover - ensure not called
+        raise AssertionError("should not request short link for preview")
+
+    monkeypatch.setattr(main, "build_short_vk_text", fake_build_text)
+    monkeypatch.setattr(main, "build_short_vk_tags", fake_tags)
+    monkeypatch.setattr(main, "build_short_vk_location", fake_location)
+    monkeypatch.setattr(main, "_vk_api", failing_vk_api)
+
+    ev = Event(
+        id=3,
+        title="T",
+        description="d",
+        date="2025-09-27",
+        time="",
+        location_name="Place",
+        source_text="src",
+        ticket_link="https://tickets",
+    )
+
+    msg, _ = await main._vkrev_build_shortpost(
+        ev, "https://vk.com/wall-1_1", for_preview=True
+    )
+    assert "https://tickets" in msg
+
+
+@pytest.mark.asyncio
+async def test_shortpost_reuses_existing_short_link(monkeypatch):
+    async def fake_build_text(event, src, max_sent, **kwargs):
+        return "short summary"
+
+    async def fake_tags(event, summary, used_type_hashtag=None):
+        return ["#a", "#b", "#c", "#d", "#e"]
+
+    async def fake_location(parts):
+        return ", ".join(filter(None, parts))
+
+    async def failing_vk_api(*args, **kwargs):  # pragma: no cover - ensure not called
+        raise AssertionError("short link should be reused")
+
+    monkeypatch.setattr(main, "build_short_vk_text", fake_build_text)
+    monkeypatch.setattr(main, "build_short_vk_tags", fake_tags)
+    monkeypatch.setattr(main, "build_short_vk_location", fake_location)
+    monkeypatch.setattr(main, "_vk_api", failing_vk_api)
+
+    ev = Event(
+        id=4,
+        title="T",
+        description="d",
+        date="2025-09-27",
+        time="",
+        location_name="Place",
+        source_text="src",
+        ticket_link="https://tickets",
+        vk_ticket_short_url="https://vk.cc/existing",
+        vk_ticket_short_key="existing",
+    )
+
+    msg, _ = await main._vkrev_build_shortpost(ev, "https://vk.com/wall-1_1")
+    assert "https://vk.cc/existing" in msg
 async def test_shortpost_midnight_time_hidden(monkeypatch):
     async def fake_build_text(event, src, max_sent, **kwargs):
         return "short summary"

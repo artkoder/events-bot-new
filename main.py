@@ -224,6 +224,7 @@ from sections import (
     dedup_same_date,
 )
 from db import Database
+from shortlinks import ensure_vk_short_ticket_link
 from scheduling import startup as scheduler_startup, cleanup as scheduler_cleanup
 from sqlalchemy import select, update, delete, text, func, or_, and_, case
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12952,12 +12953,13 @@ def format_event_vk(
         lines.append("\u2705 Пушкинская карта")
 
     show_ticket_link = not vk_link
+    ticket_link_display = e.vk_ticket_short_url or e.ticket_link
     if e.is_free:
         lines.append("🟡 Бесплатно")
         if e.ticket_link:
             lines.append("по регистрации")
-            if show_ticket_link:
-                lines.append(f"\U0001f39f {e.ticket_link}")
+            if show_ticket_link and ticket_link_display:
+                lines.append(f"\U0001f39f {ticket_link_display}")
     elif e.ticket_link and (
         e.ticket_price_min is not None or e.ticket_price_max is not None
     ):
@@ -12966,15 +12968,15 @@ def format_event_vk(
         else:
             val = e.ticket_price_min if e.ticket_price_min is not None else e.ticket_price_max
             price = f"{val} руб." if val is not None else ""
-        if show_ticket_link:
+        if show_ticket_link and ticket_link_display:
             lines.append(f"Билеты в источнике {price}".strip())
-            lines.append(f"\U0001f39f {e.ticket_link}")
+            lines.append(f"\U0001f39f {ticket_link_display}")
         else:
             lines.append(f"Билеты {price}".strip())
     elif e.ticket_link:
         lines.append("по регистрации")
-        if show_ticket_link:
-            lines.append(f"\U0001f39f {e.ticket_link}")
+        if show_ticket_link and ticket_link_display:
+            lines.append(f"\U0001f39f {ticket_link_display}")
     else:
         price = ""
         if (
@@ -13064,10 +13066,11 @@ def format_event_daily(
     if e.pushkin_card:
         lines.append("\u2705 Пушкинская карта")
 
+    ticket_link_display = e.vk_ticket_short_url or e.ticket_link
     if e.is_free:
         txt = "🟡 Бесплатно"
-        if e.ticket_link:
-            txt += f' <a href="{html.escape(e.ticket_link)}">по регистрации</a>'
+        if e.ticket_link and ticket_link_display:
+            txt += f' <a href="{html.escape(ticket_link_display)}">по регистрации</a>'
         lines.append(txt)
     elif e.ticket_link and (
         e.ticket_price_min is not None or e.ticket_price_max is not None
@@ -13076,11 +13079,15 @@ def format_event_daily(
             price = f"от {e.ticket_price_min} до {e.ticket_price_max}"
         else:
             price = str(e.ticket_price_min or e.ticket_price_max or "")
-        lines.append(
-            f'<a href="{html.escape(e.ticket_link)}">Билеты в источнике</a> {price}'.strip()
-        )
+        if ticket_link_display:
+            lines.append(
+                f'<a href="{html.escape(ticket_link_display)}">Билеты в источнике</a> {price}'.strip()
+            )
     elif e.ticket_link:
-        lines.append(f'<a href="{html.escape(e.ticket_link)}">по регистрации</a>')
+        if ticket_link_display:
+            lines.append(
+                f'<a href="{html.escape(ticket_link_display)}">по регистрации</a>'
+            )
     else:
         price = ""
         if (
@@ -15661,6 +15668,21 @@ async def build_daily_posts(
             elif m == next_month(cur_month):
                 next_count += 1
 
+    processed_short_ids: set[int] = set()
+    for candidate in (*events_today, *events_new):
+        if (
+            candidate.ticket_link
+            and candidate.id is not None
+            and candidate.id not in processed_short_ids
+            and not (candidate.vk_ticket_short_url and candidate.vk_ticket_short_key)
+        ):
+            await ensure_vk_short_ticket_link(
+                candidate,
+                db,
+                vk_api_fn=_vk_api,
+            )
+            processed_short_ids.add(candidate.id)
+
     tag = f"{today.day}{MONTHS[today.month - 1]}"
     lines1 = [
         f"<b>АНОНС на {format_day_pretty(today)} {today.year} #ежедневныйанонс</b>",
@@ -15890,6 +15912,23 @@ async def build_daily_sections_vk(
                 cur_count += 1
             elif m == next_month(cur_month):
                 next_count += 1
+
+    processed_short_ids: set[int] = set()
+    for candidate in (*events_today, *events_new):
+        if (
+            candidate.ticket_link
+            and candidate.id is not None
+            and candidate.id not in processed_short_ids
+            and not (
+                candidate.vk_ticket_short_url and candidate.vk_ticket_short_key
+            )
+        ):
+            await ensure_vk_short_ticket_link(
+                candidate,
+                db,
+                vk_api_fn=_vk_api,
+            )
+            processed_short_ids.add(candidate.id)
 
     lines1 = [
         f"\U0001f4c5 АНОНС на {format_day_pretty(today)} {today.year}",
@@ -21751,6 +21790,9 @@ async def _vkrev_build_shortpost(
     ev: Event,
     vk_url: str,
     *,
+    db: Database | None = None,
+    session: AsyncSession | None = None,
+    bot: Bot | None = None,
     for_preview: bool = False,
     poster_texts: Sequence[str] | None = None,
 ) -> tuple[str, str | None]:
@@ -21849,11 +21891,24 @@ async def _vkrev_build_shortpost(
     lines.append(date_line)
     if type_line:
         lines.append(type_line)
+    ticket_url_for_message = ev.ticket_link
+    if ev.ticket_link and not for_preview:
+        short_result = await ensure_vk_short_ticket_link(
+            ev,
+            db,
+            session=session,
+            bot=bot,
+            vk_api_fn=_vk_api,
+        )
+        if short_result:
+            ticket_url_for_message = short_result[0]
     if ev.ticket_link:
         if getattr(ev, "is_free", False):
-            lines.append(f"🆓 Бесплатно, по регистрации {ev.ticket_link}")
+            lines.append(
+                f"🆓 Бесплатно, по регистрации {ticket_url_for_message}"
+            )
         else:
-            lines.append(f"🎟 Билеты: {ev.ticket_link}")
+            lines.append(f"🎟 Билеты: {ticket_url_for_message}")
     loc_parts: list[str] = []
     existing_normalized: set[str] = set()
     for part in (ev.location_name, ev.location_address):
@@ -21905,18 +21960,23 @@ async def _vkrev_handle_shortpost(callback: types.CallbackQuery, event_id: int, 
     vk_url = f"https://vk.com/wall-{group_id}_{post_id}"
     async with db.get_session() as session:
         ev = await session.get(Event, event_id)
-    if not ev:
-        await bot.send_message(callback.message.chat.id, "❌ Не удалось: нет события")
-        return
+        if not ev:
+            await bot.send_message(
+                callback.message.chat.id, "❌ Не удалось: нет события"
+            )
+            return
 
-    poster_texts = await get_event_poster_texts(event_id, db)
+        poster_texts = await get_event_poster_texts(event_id, db)
 
-    message, link_attachment = await _vkrev_build_shortpost(
-        ev,
-        vk_url,
-        for_preview=True,
-        poster_texts=poster_texts,
-    )
+        message, link_attachment = await _vkrev_build_shortpost(
+            ev,
+            vk_url,
+            db=db,
+            session=session,
+            bot=bot,
+            for_preview=True,
+            poster_texts=poster_texts,
+        )
     markup = types.InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -21965,11 +22025,11 @@ async def _vkrev_publish_shortpost(
     vk_url = f"https://vk.com/wall-{group_id}_{post_id}"
     async with db.get_session() as session:
         ev = await session.get(Event, event_id)
-    if not ev:
-        await bot.send_message(actor_chat_id, "❌ Не удалось: нет события")
-        return
-    op_state = vk_shortpost_ops.get(event_id)
-    poster_texts = await get_event_poster_texts(event_id, db)
+        if not ev:
+            await bot.send_message(actor_chat_id, "❌ Не удалось: нет события")
+            return
+        op_state = vk_shortpost_ops.get(event_id)
+        poster_texts = await get_event_poster_texts(event_id, db)
     def _ensure_publish_markup(message: str) -> str:
         lines = message.split("\n")
         markup = f"[{vk_url}|Источник]"
@@ -21986,6 +22046,7 @@ async def _vkrev_publish_shortpost(
                 return "\n".join(lines)
         return message
 
+    short_ticket = None
     if text is None:
         if op_state and op_state.preview_text is not None:
             message = _ensure_publish_markup(op_state.preview_text)
@@ -21994,15 +22055,35 @@ async def _vkrev_publish_shortpost(
                 if op_state.preview_link_attachment is not None
                 else ev.telegraph_url or vk_url
             )
+            if ev.ticket_link:
+                short_ticket = await ensure_vk_short_ticket_link(
+                    ev,
+                    db,
+                    bot=bot,
+                    vk_api_fn=_vk_api,
+                )
+                if short_ticket:
+                    message = message.replace(ev.ticket_link, short_ticket[0])
         else:
             message, link_attachment = await _vkrev_build_shortpost(
                 ev,
                 vk_url,
+                db=db,
+                bot=bot,
                 poster_texts=poster_texts,
             )
     else:
         message = _ensure_publish_markup(text)
         link_attachment = ev.telegraph_url or vk_url
+        if ev.ticket_link:
+            short_ticket = await ensure_vk_short_ticket_link(
+                ev,
+                db,
+                bot=bot,
+                vk_api_fn=_vk_api,
+            )
+            if short_ticket:
+                message = message.replace(ev.ticket_link, short_ticket[0])
 
     photo_attachments: list[str] = []
     try:
