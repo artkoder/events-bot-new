@@ -171,6 +171,7 @@ from digests import (
     build_lectures_digest_preview,
     build_masterclasses_digest_preview,
     build_exhibitions_digest_preview,
+    build_psychology_digest_preview,
     format_event_line_html,
     pick_display_link,
     extract_catbox_covers_from_telegraph,
@@ -178,6 +179,8 @@ from digests import (
     compose_digest_intro_via_4o,
     compose_masterclasses_intro_via_4o,
     compose_exhibitions_intro_via_4o,
+    compose_psychology_intro_via_4o,
+    normalize_topics,
     visible_caption_len,
     attach_caption_if_fits,
 )
@@ -17928,6 +17931,10 @@ async def show_digest_menu(message: types.Message, db: Database, bot: Bot) -> No
                 text="✅ Выставки",
                 callback_data=f"digest:select:exhibitions:{digest_id}",
             ),
+            types.InlineKeyboardButton(
+                text="✅\u202fПсихология",
+                callback_data=f"digest:select:psychology:{digest_id}",
+            ),
         ],
     ]
     markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard)
@@ -18167,6 +18174,20 @@ async def handle_digest_refresh(callback: types.CallbackQuery, bot: Bot) -> None
                     }
                 )
             intro = await compose_exhibitions_intro_via_4o(
+                len(payload), horizon_days, payload
+            )
+        elif digest_type == "psychology":
+            payload = []
+            for idx in remaining:
+                item = session["items"][idx]
+                payload.append(
+                    {
+                        "title": item.get("norm_title") or item.get("title", ""),
+                        "description": item.get("norm_description", ""),
+                        "topics": item.get("norm_topics", []),
+                    }
+                )
+            intro = await compose_psychology_intro_via_4o(
                 len(payload), horizon_days, payload
             )
         else:
@@ -23586,6 +23607,9 @@ def create_app() -> web.Application:
     async def digest_select_exhibitions_wrapper(callback: types.CallbackQuery):
         await handle_digest_select_exhibitions(callback, db, bot)
 
+    async def digest_select_psychology_wrapper(callback: types.CallbackQuery):
+        await handle_digest_select_psychology(callback, db, bot)
+
     async def digest_disabled_wrapper(callback: types.CallbackQuery):
         await callback.answer("Ещё не реализовано", show_alert=False)
 
@@ -23960,6 +23984,10 @@ def create_app() -> web.Application:
         lambda c: c.data.startswith("digest:select:exhibitions:"),
     )
     dp.callback_query.register(
+        digest_select_psychology_wrapper,
+        lambda c: c.data.startswith("digest:select:psychology:"),
+    )
+    dp.callback_query.register(
         digest_disabled_wrapper, lambda c: c.data == "digest:disabled"
     )
     dp.callback_query.register(
@@ -24141,6 +24169,7 @@ async def _handle_digest_select(
                 cover_url = covers[0] if covers else None
             except Exception:
                 cover_url = None
+        norm_topics = normalize_topics(getattr(ev, "topics", []))
         items.append(
             {
                 "event_id": ev.id,
@@ -24150,6 +24179,7 @@ async def _handle_digest_select(
                 "norm_title": norm_title,
                 "event_type": ev.event_type,
                 "norm_description": _normalize_event_description(ev.description),
+                "norm_topics": norm_topics,
                 "date": ev.date,
                 "end_date": ev.end_date,
                 "link": pick_display_link(ev),
@@ -24243,6 +24273,20 @@ async def handle_digest_select_exhibitions(
         preview_builder=build_exhibitions_digest_preview,
         items_noun="выставок",
         panel_text="Управление дайджестом выставок\nВыключите лишнее и нажмите «Обновить превью».",
+    )
+
+
+async def handle_digest_select_psychology(
+    callback: types.CallbackQuery, db: Database, bot: Bot
+) -> None:
+    await _handle_digest_select(
+        callback,
+        db,
+        bot,
+        digest_type="psychology",
+        preview_builder=build_psychology_digest_preview,
+        items_noun="психологических событий",
+        panel_text="Управление дайджестом психологии\nВыключите лишнее и нажмите «Обновить превью».",
     )
 
 

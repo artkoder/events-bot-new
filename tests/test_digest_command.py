@@ -6,6 +6,7 @@ from aiogram import types
 from types import SimpleNamespace
 
 import main
+import digests
 from main import Database, User, Event
 
 class DummyBot:
@@ -247,6 +248,89 @@ async def test_handle_digest_sends_exhibitions_preview(tmp_path, monkeypatch):
     assert item["norm_description"] == "d"
     assert item["date"]
     assert item["end_date"] == ev.date
+
+
+@pytest.mark.asyncio
+async def test_handle_digest_sends_psychology_preview(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    async with db.get_session() as session:
+        session.add(User(user_id=1, is_superadmin=True))
+        dt = datetime.now(timezone.utc) + timedelta(days=1)
+        ev = Event(
+            title="P1",
+            description="Описание",
+            date=dt.strftime("%Y-%m-%d"),
+            time="12:00",
+            location_name="loc",
+            source_text="s",
+            event_type="лекция",
+            telegraph_url="https://telegra.ph/test4",
+            topics=["Психология"],
+        )
+        session.add(ev)
+        await session.commit()
+
+    msg = types.Message.model_validate({
+        "message_id": 1,
+        "date": 0,
+        "chat": {"id": 1, "type": "private"},
+        "from": {"id": 1, "is_bot": False, "first_name": "U"},
+        "text": "/digest",
+    })
+    bot = DummyBot()
+
+    async def fake_ask(prompt, max_tokens=0):
+        return "Интро"
+
+    async def fake_extract(url, **kw):
+        return ["https://example.com/img4.jpg"]
+
+    recorded_payloads: list[list[dict[str, object]]] = []
+
+    async def fake_psych_intro(n, horizon_days, payload):
+        recorded_payloads.append(payload)
+        return "Интро"
+
+    monkeypatch.setattr(main, "ask_4o", fake_ask)
+    monkeypatch.setattr(main, "extract_catbox_covers_from_telegraph", fake_extract)
+    monkeypatch.setattr(main, "compose_psychology_intro_via_4o", fake_psych_intro)
+    monkeypatch.setattr(digests, "compose_psychology_intro_via_4o", fake_psych_intro)
+
+    await main.show_digest_menu(msg, db, bot)
+    menu_msg = bot.messages[0]
+    digest_id = menu_msg.reply_markup.inline_keyboard[2][1].callback_data.split(":")[-1]
+
+    async def answer(**kw):
+        return None
+
+    cb = SimpleNamespace(
+        id="1",
+        from_user=SimpleNamespace(id=1),
+        message=menu_msg,
+        data=f"digest:select:psychology:{digest_id}",
+        answer=answer,
+    )
+
+    await main.handle_digest_select_psychology(cb, db, bot)
+    assert bot.media_groups
+    panel = bot.messages[-1]
+    assert panel.text.startswith("Управление дайджестом психологии")
+    session_data = main.digest_preview_sessions[digest_id]
+    assert session_data["items_noun"] == "психологических событий"
+    assert session_data["items"][0]["norm_topics"] == ["PSYCHOLOGY"]
+
+    cb_refresh = SimpleNamespace(
+        data=f"dg:r:{digest_id}",
+        from_user=SimpleNamespace(id=1),
+        message=panel,
+        answer=answer,
+        id="2",
+    )
+
+    await main.handle_digest_refresh(cb_refresh, bot)
+    assert recorded_payloads
+    assert recorded_payloads[-1][0]["topics"] == ["PSYCHOLOGY"]
 
 
 @pytest.mark.asyncio
