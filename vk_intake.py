@@ -49,6 +49,8 @@ if VK_USE_PYMORPHY:  # pragma: no cover - optional dependency
         VK_USE_PYMORPHY = False
 
 # Keyword patterns for regex-based matching
+GROUP_CONTEXT_PATTERN = r"групп[аы]\s+[\"«'][^\"»']+[\"»']"
+
 KEYWORD_PATTERNS = [
     r"лекци(я|и|й|е|ю|ями|ях)",
     r"спектакл(ь|я|ю|ем|е|и|ей|ям|ями|ях)",
@@ -73,15 +75,21 @@ KEYWORD_PATTERNS = [
     r"жив(?:ой|ого|ым|ом)\s+звук(?:а|ом|у|и|ов)?",
     r"жив(?:ое|ом)?\s+исполнен\w*",
     r"выступлени(?:е|я|ю|ем|ями|ях)",
-    r"хит(ы|ов|ам|ами)?",
+    r"хит(?:ы|ов|ом|ам|ами|ах)?",
     r"в\s+исполнен(?:ии|ием|ию)",
-    r"групп(а|ы|е|ой|у|ами|ах)",
+    GROUP_CONTEXT_PATTERN,
+    r"band",
     r"бронировани(е|я|ю|ем)|билет(ы|а|ов)|регистраци(я|и|ю|ей)|афиш(а|и|е|у)",
     r"ведущ(ий|ая|ее|ие|его|ему|ем|им|их|ими|ую|ей)",
     r"караок[её]",
     r"трибь?ют|трибут|tribute(?:\s+show)?",
 ]
-KEYWORD_RE = re.compile(r"\b#?(?:" + "|".join(KEYWORD_PATTERNS) + r")\b", re.I | re.U)
+KEYWORD_RE = re.compile(r"(?<!\w)#?(?:" + "|".join(KEYWORD_PATTERNS) + r")(?!\w)", re.I | re.U)
+GROUP_CONTEXT_RE = re.compile(GROUP_CONTEXT_PATTERN, re.I | re.U)
+GROUP_NAME_RE = re.compile(
+    r"групп[аы]\s+[A-ZА-ЯЁ0-9][^\s,.:;!?]*(?:\s+[A-ZА-ЯЁ0-9][^\s,.:;!?]*){0,2}",
+    re.U,
+)
 
 # Pricing patterns provide an additional hint for event-like posts
 PRICE_AMOUNT_PATTERN = "\\d+(?:[ \\t\\u00a0\\u202f]\\d+)*"
@@ -128,7 +136,6 @@ KEYWORD_LEMMAS = {
     "хит",
     "исполнение",
     "выступление",
-    "группа",
     "бронирование",
     "билет",
     "регистрация",
@@ -138,6 +145,7 @@ KEYWORD_LEMMAS = {
     "трибьют",
     "трибут",
     "tribute",
+    "band",
 }
 
 # Date/time patterns used for quick detection
@@ -219,12 +227,28 @@ def match_keywords(text: str) -> tuple[bool, list[str]]:
                 if "живой звук" not in matched:
                     matched.append("живой звук")
                 break
+        for m in GROUP_CONTEXT_RE.finditer(text):
+            group_match = m.group(0).lower()
+            if group_match and group_match not in matched:
+                matched.append(group_match)
+        for m in GROUP_NAME_RE.finditer(text):
+            group_match = m.group(0).lower()
+            if group_match and group_match not in matched:
+                matched.append(group_match)
         for hint in price_matches:
             if hint and hint not in matched:
                 matched.append(hint)
         return bool(matched), matched
 
-    matched = [m.group(0).lstrip("#") for m in KEYWORD_RE.finditer(text_low)]
+    matched = [m.group(0).lower().lstrip("#") for m in KEYWORD_RE.finditer(text_low)]
+    for m in GROUP_CONTEXT_RE.finditer(text):
+        group_match = m.group(0).lower()
+        if group_match and group_match not in matched:
+            matched.append(group_match)
+    for m in GROUP_NAME_RE.finditer(text):
+        group_match = m.group(0).lower()
+        if group_match and group_match not in matched:
+            matched.append(group_match)
     for hint in price_matches:
         if hint and hint not in matched:
             matched.append(hint)

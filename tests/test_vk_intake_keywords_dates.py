@@ -77,6 +77,14 @@ def test_match_keywords_concert_phrases():
     assert any("жив" in k and "звук" in k for k in normalized)
 
 
+def test_match_keywords_hits_with_group_context():
+    ok, kws = match_keywords("Все хиты группы «Четыре» 21 ноября 19:00")
+    assert ok
+    normalized = {k.lower() for k in kws}
+    assert any(k.startswith("хит") for k in normalized)
+    assert any(k.startswith("групп") and "«" in k for k in normalized)
+
+
 def test_match_keywords_live_sound_and_performance():
     ok, kws = match_keywords(
         "Два часа живого звука в живом исполнении и особое выступление 17 октября"
