@@ -49,6 +49,15 @@ def test_match_keywords_prazdnik():
     assert any(k.startswith("праздник") for k in normalized)
 
 
+def test_match_keywords_poetry_songs_play():
+    ok, kws = match_keywords("стихи по кругу, сыграем песни 5 октября")
+    assert ok
+    normalized = {k.lower() for k in kws}
+    assert any(k.startswith("стих") for k in normalized)
+    assert any(k.startswith("сыгра") for k in normalized)
+    assert any(k.startswith("песн") for k in normalized)
+
+
 def test_detect_date_and_extract(monkeypatch):
     text = "Мастер-классы 14–15.09, регистрация по ссылке"
     assert detect_date(text)
