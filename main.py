@@ -17155,6 +17155,10 @@ async def build_events_message(db: Database, target_date: date, tz: timezone, cr
                 lines.append("-".join(price_parts))
         if e.telegraph_url:
             lines.append(f"исходное: {e.telegraph_url}")
+        if e.vk_ticket_short_key:
+            lines.append(
+                f"Статистика VK: https://vk.com/cc?act=stats&key={e.vk_ticket_short_key}"
+            )
         lines.append("")
     if not lines:
         lines.append("No events")
@@ -17175,13 +17179,6 @@ async def build_events_message(db: Database, target_date: date, tz: timezone, cr
                 callback_data=f"vkrev:shortpost:{e.id}",
             ),
         ]
-        if e.vk_ticket_short_key:
-            row.append(
-                types.InlineKeyboardButton(
-                    text="Статистика Вк ссылки",
-                    url=f"https://vk.com/cc?act=stats&key={e.vk_ticket_short_key}",
-                )
-            )
         keyboard.append(row)
 
     today = datetime.now(tz).date()
@@ -17269,6 +17266,10 @@ async def build_exhibitions_message(
                 lines.append("-".join(price_parts))
         if e.telegraph_url:
             lines.append(f"исходное: {e.telegraph_url}")
+        if e.vk_ticket_short_key:
+            lines.append(
+                f"Статистика VK: https://vk.com/cc?act=stats&key={e.vk_ticket_short_key}"
+            )
         lines.append("")
 
     if not lines:
@@ -17287,13 +17288,6 @@ async def build_exhibitions_message(
                 text=f"\u270e {e.id}", callback_data=f"edit:{e.id}"
             ),
         ]
-        if e.vk_ticket_short_key:
-            row.append(
-                types.InlineKeyboardButton(
-                    text="Статистика Вк ссылки",
-                    url=f"https://vk.com/cc?act=stats&key={e.vk_ticket_short_key}",
-                )
-            )
         keyboard.append(row)
     markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard) if events else None
     chunks: list[str] = []
