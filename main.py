@@ -1547,9 +1547,12 @@ def validate_jpeg_markers(data: bytes) -> None:
 # Timeout for OpenAI 4o requests (in seconds)
 FOUR_O_TIMEOUT = float(os.getenv("FOUR_O_TIMEOUT", "60"))
 
-# Limit prompt/response sizes for LLM calls (characters)
+# Limit prompt/response sizes for LLM calls
+# Prompt limit is measured in characters because we clip raw text before sending it
+# to the API, while response limits are expressed in tokens via the API parameters.
 FOUR_O_PROMPT_LIMIT = int(os.getenv("FOUR_O_PROMPT_LIMIT", "4000"))
 FOUR_O_RESPONSE_LIMIT = int(os.getenv("FOUR_O_RESPONSE_LIMIT", "1000"))
+FOUR_O_EDITOR_MAX_TOKENS = int(os.getenv("FOUR_O_EDITOR_MAX_TOKENS", "2000"))
 
 # Track OpenAI usage against a daily budget.  OpenAI resets usage at midnight UTC.
 FOUR_O_DAILY_TOKEN_LIMIT = int(os.getenv("FOUR_O_DAILY_TOKEN_LIMIT", "1000000"))
@@ -5747,7 +5750,7 @@ async def compose_story_editorial_via_4o(text: str, *, title: str | None = None)
     response = await ask_4o(
         prompt_text,
         system_prompt=FOUR_O_EDITOR_PROMPT,
-        max_tokens=FOUR_O_RESPONSE_LIMIT,
+        max_tokens=FOUR_O_EDITOR_MAX_TOKENS,
     )
     formatted = (response or "").strip()
     if formatted.startswith("```"):
@@ -5763,7 +5766,7 @@ async def ask_4o(
     *,
     system_prompt: str | None = None,
     response_format: dict | None = None,
-    max_tokens: int = 1000,
+    max_tokens: int = FOUR_O_RESPONSE_LIMIT,
     model: str | None = None,
 ) -> str:
     token = os.getenv("FOUR_O_TOKEN")
@@ -5814,8 +5817,6 @@ async def ask_4o(
         .get("content", "")
         .strip()
     )
-    if len(content) > FOUR_O_RESPONSE_LIMIT:
-        content = content[:FOUR_O_RESPONSE_LIMIT]
     del data
     gc.collect()
     return content
