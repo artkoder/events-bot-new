@@ -59,6 +59,13 @@ def test_match_keywords_prazdnik():
     assert any(k.startswith("праздник") for k in normalized)
 
 
+def test_match_keywords_events_digest():
+    ok, kws = match_keywords("Дайджест событий выходных 7–8 сентября")
+    assert ok
+    normalized = {k.lower() for k in kws}
+    assert any(k.startswith("событ") for k in normalized)
+
+
 def test_match_keywords_tribute():
     ok, kws = match_keywords("Сегодня трибьют группы Queen 1 сентября 20:00")
     assert ok
