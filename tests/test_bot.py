@@ -5734,7 +5734,7 @@ async def test_events_markup_includes_rewrite_status(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_events_markup_includes_vk_stats_button(tmp_path: Path):
+async def test_events_message_includes_vk_stats_text(tmp_path: Path):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
 
@@ -5760,16 +5760,15 @@ async def test_events_markup_includes_vk_stats_button(tmp_path: Path):
         session.add_all([plain, with_key])
         await session.commit()
 
-    _, markup = await main.build_events_message(db, target, timezone.utc)
+    text, markup = await main.build_events_message(db, target, timezone.utc)
+
+    assert "Статистика VK: https://vk.com/cc?act=stats&key=abcd" in text
 
     first_row = markup.inline_keyboard[0]
     assert len(first_row) == 3
 
     second_row = markup.inline_keyboard[1]
-    assert len(second_row) == 4
-    stats_button = second_row[-1]
-    assert stats_button.text == "Статистика Вк ссылки"
-    assert stats_button.url == "https://vk.com/cc?act=stats&key=abcd"
+    assert len(second_row) == 3
 
 
 @pytest.mark.asyncio
@@ -6907,7 +6906,7 @@ async def test_build_exhibitions_message_filters_past_end(tmp_path: Path, monkey
 
 
 @pytest.mark.asyncio
-async def test_exhibitions_markup_includes_vk_stats_button(tmp_path: Path):
+async def test_exhibitions_message_includes_vk_stats_text(tmp_path: Path):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
 
@@ -6938,17 +6937,17 @@ async def test_exhibitions_markup_includes_vk_stats_button(tmp_path: Path):
         session.add_all([without_key, with_key])
         await session.commit()
 
-    _, markup = await main.build_exhibitions_message(db, timezone.utc)
+    chunks, markup = await main.build_exhibitions_message(db, timezone.utc)
     assert markup is not None
+
+    combined = "\n".join(chunks)
+    assert "Статистика VK: https://vk.com/cc?act=stats&key=qwer" in combined
 
     first_row = markup.inline_keyboard[0]
     assert len(first_row) == 2
 
     second_row = markup.inline_keyboard[1]
-    assert len(second_row) == 3
-    stats_button = second_row[-1]
-    assert stats_button.text == "Статистика Вк ссылки"
-    assert stats_button.url == "https://vk.com/cc?act=stats&key=qwer"
+    assert len(second_row) == 2
 
 
 @pytest.mark.asyncio
