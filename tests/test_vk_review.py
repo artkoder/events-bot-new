@@ -9,6 +9,7 @@ sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
 import time as _time
 
+import main
 import vk_review
 import vk_intake
 from db import Database
@@ -616,3 +617,17 @@ async def test_pick_next_unlocks_stale_rows(tmp_path):
         )
         status, locked_by, review_batch = await cur.fetchone()
     assert status == "locked" and locked_by == 10 and review_batch == "batch"
+
+
+def test_vkrev_story_title_strips_vk_links() -> None:
+    text = (
+        "Орган в гумбинненской [https://vk.com/organ_school|Фридрихшуле] приглашает "
+        "на вечерний концерт в субботу"
+    )
+    result = main._vkrev_story_title(text, 1773, 204)
+    expected = (
+        "Орган в гумбинненской Фридрихшуле приглашает на вечерний концерт в субботу"
+    )
+    assert result == expected[:64]
+    assert "[" not in result
+    assert "vk.com" not in result
