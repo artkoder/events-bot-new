@@ -93,6 +93,78 @@ async def test_crawl_inserts_blank_single_photo_post(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_forced_backfill_respects_clamped_horizon(
+    tmp_path, monkeypatch
+):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    async with db.raw_conn() as conn:
+        await conn.execute(
+            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time, default_ticket_link) VALUES(?,?,?,?,?,?)",
+            (1, "g", "Group", "", None, None),
+        )
+        await conn.commit()
+
+    monkeypatch.setattr(vk_intake, "VK_CRAWL_BACKFILL_OVERRIDE_MAX_DAYS", 5)
+    monkeypatch.setattr(vk_intake, "match_keywords", lambda text: (True, ["test"]))
+    monkeypatch.setattr(vk_intake, "detect_date", lambda text: True)
+    monkeypatch.setattr(
+        vk_intake,
+        "extract_event_ts_hint",
+        lambda text, default_time=None, *, tz=None: int(time.time()) + 86400,
+    )
+
+    async def no_sleep(_):
+        pass
+
+    monkeypatch.setattr(vk_intake.asyncio, "sleep", no_sleep)
+
+    now_ts = int(time.time())
+    horizon_days = vk_intake.VK_CRAWL_BACKFILL_OVERRIDE_MAX_DAYS
+    recent_post = {
+        "date": now_ts - 86400,
+        "post_id": 101,
+        "text": "концерт 01.01.2099",
+        "photos": [],
+    }
+    stale_post = {
+        "date": now_ts - (horizon_days + 1) * 86400,
+        "post_id": 99,
+        "text": "концерт 01.01.2099",
+        "photos": [],
+    }
+
+    calls: list[tuple[int, int, int, int]] = []
+
+    async def fake_wall_since(gid, since, count, offset=0):
+        calls.append((gid, since, count, offset))
+        if offset == 0:
+            return [recent_post, stale_post]
+        return []
+
+    monkeypatch.setattr(main, "vk_wall_since", fake_wall_since)
+
+    stats = await vk_intake.crawl_once(
+        db,
+        force_backfill=True,
+        backfill_days=10,
+    )
+
+    assert stats["forced_backfill"] is True
+    assert stats["backfill_days_requested"] == 10
+    assert stats["backfill_days_used"] == horizon_days
+    assert all(call[1] == 0 for call in calls)
+
+    async with db.raw_conn() as conn:
+        cur = await conn.execute(
+            "SELECT post_id FROM vk_inbox ORDER BY post_id"
+        )
+        rows = await cur.fetchall()
+
+    assert rows == [(101,)]
+
+
+@pytest.mark.asyncio
 async def test_incremental_pagination_processes_full_backlog(
     tmp_path, monkeypatch, caplog
 ):

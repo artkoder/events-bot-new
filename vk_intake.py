@@ -32,6 +32,9 @@ VK_CRAWL_PAGE_SIZE_BACKFILL = int(os.getenv("VK_CRAWL_PAGE_SIZE_BACKFILL", "50")
 VK_CRAWL_MAX_PAGES_BACKFILL = int(os.getenv("VK_CRAWL_MAX_PAGES_BACKFILL", "3"))
 VK_CRAWL_BACKFILL_DAYS = int(os.getenv("VK_CRAWL_BACKFILL_DAYS", "14"))
 VK_CRAWL_BACKFILL_AFTER_IDLE_H = int(os.getenv("VK_CRAWL_BACKFILL_AFTER_IDLE_H", "24"))
+VK_CRAWL_BACKFILL_OVERRIDE_MAX_DAYS = int(
+    os.getenv("VK_CRAWL_BACKFILL_OVERRIDE_MAX_DAYS", "60")
+)
 VK_USE_PYMORPHY = os.getenv("VK_USE_PYMORPHY", "false").lower() == "true"
 
 # Sentinel used to flag posts awaiting poster OCR before keyword/date checks.
@@ -1074,7 +1077,14 @@ async def process_event(
     return results
 
 
-async def crawl_once(db, *, broadcast: bool = False, bot: Any | None = None) -> dict[str, int]:
+async def crawl_once(
+    db,
+    *,
+    broadcast: bool = False,
+    bot: Any | None = None,
+    force_backfill: bool = False,
+    backfill_days: int | None = None,
+) -> dict[str, Any]:
     """Crawl configured VK groups once and enqueue matching posts.
 
     The function scans groups listed in ``vk_source`` and uses cursors from
@@ -1091,6 +1101,12 @@ async def crawl_once(db, *, broadcast: bool = False, bot: Any | None = None) -> 
     )  # imported lazily to avoid circular import
 
     start = time.perf_counter()
+    override_backfill_days = (
+        max(1, min(backfill_days, VK_CRAWL_BACKFILL_OVERRIDE_MAX_DAYS))
+        if backfill_days is not None
+        else None
+    )
+
     stats = {
         "groups_checked": 0,
         "posts_scanned": 0,
@@ -1102,6 +1118,13 @@ async def crawl_once(db, *, broadcast: bool = False, bot: Any | None = None) -> 
         "queue": {},
         "safety_cap_hits": 0,
         "deep_backfill_triggers": 0,
+        "forced_backfill": force_backfill,
+        "backfill_days_used": (
+            override_backfill_days
+            if override_backfill_days is not None
+            else (VK_CRAWL_BACKFILL_DAYS if force_backfill else None)
+        ),
+        "backfill_days_requested": backfill_days if force_backfill else None,
     }
 
     async with db.raw_conn() as conn:
@@ -1142,7 +1165,7 @@ async def crawl_once(db, *, broadcast: bool = False, bot: Any | None = None) -> 
                 updated_at_ts = 0
 
             idle_h = (now_ts - updated_at_ts) / 3600 if updated_at_ts else None
-            backfill = last_seen_ts == 0 or (
+            backfill = force_backfill or last_seen_ts == 0 or (
                 idle_h is not None and idle_h >= VK_CRAWL_BACKFILL_AFTER_IDLE_H
             )
 
@@ -1153,7 +1176,13 @@ async def crawl_once(db, *, broadcast: bool = False, bot: Any | None = None) -> 
             reached_cursor_overlap = False
 
             if backfill:
-                horizon = now_ts - VK_CRAWL_BACKFILL_DAYS * 86400
+                window_days = (
+                    override_backfill_days
+                    if override_backfill_days is not None
+                    else VK_CRAWL_BACKFILL_DAYS
+                )
+                stats["backfill_days_used"] = window_days
+                horizon = now_ts - window_days * 86400
                 offset = 0
                 while pages_loaded < VK_CRAWL_MAX_PAGES_BACKFILL:
                     page = await vk_wall_since(
@@ -1376,6 +1405,17 @@ async def crawl_once(db, *, broadcast: bool = False, bot: Any | None = None) -> 
         admin_chat = os.getenv("ADMIN_CHAT_ID")
         if admin_chat:
             q = stats.get("queue", {})
+            forced_note = ""
+            if stats.get("forced_backfill"):
+                used_days = stats.get("backfill_days_used") or VK_CRAWL_BACKFILL_DAYS
+                requested_days = stats.get("backfill_days_requested")
+                forced_note = f", принудительный бэкафилл до {used_days} дн."
+                if (
+                    requested_days is not None
+                    and requested_days != used_days
+                ):
+                    forced_note += f" (запрошено {requested_days})"
+
             msg = (
                 f"Проверено {stats['groups_checked']} сообществ, "
                 f"просмотрено {stats['posts_scanned']} постов, "
@@ -1388,6 +1428,7 @@ async def crawl_once(db, *, broadcast: bool = False, bot: Any | None = None) -> 
                 f"rejected: {q.get('rejected',0)}), "
                 f"страниц на группу: {'/'.join(str(p) for p in stats['pages_per_group'])}, "
                 f"перекрытие: {stats['overlap_sec']} сек"
+                f"{forced_note}"
             )
             try:
                 await bot.send_message(int(admin_chat), msg)
