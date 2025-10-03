@@ -77,7 +77,6 @@ def log_festcover(level: int, festival_id: int | None, action: str, **kw: object
 _QUOTE_CHARS = "'\"«»“”„‹›‚‘’`"
 _START_WORDS = ("фестиваль", "международный", "областной", "городской")
 
-
 def normalize_alias(value: str | None) -> str:
     if not value:
         return ""
@@ -21873,12 +21872,30 @@ async def _vkrev_import_flow(
         await bot.send_message(chat_id, message_text, reply_markup=markup)
 
 
+_VK_STORY_LINK_RE = re.compile(r"\[([^\[\]]+)\]")
+
+
+def _vk_story_link_label(match: re.Match[str]) -> str:
+    content = match.group(1)
+    if "|" not in content:
+        return content
+    parts = [part.strip() for part in content.split("|")]
+    for candidate in parts[1:]:
+        if candidate:
+            return candidate
+    return ""
+
+
 def _vkrev_story_title(text: str | None, group_id: int, post_id: int) -> str:
     if text:
         for line in text.splitlines():
             stripped = line.strip()
-            if stripped:
-                return stripped[:64]
+            if not stripped:
+                continue
+            cleaned = _VK_STORY_LINK_RE.sub(_vk_story_link_label, stripped)
+            cleaned = re.sub(r"\s+", " ", cleaned).strip()
+            if cleaned:
+                return cleaned[:64]
     return f"История VK {group_id}_{post_id}"
 
 
