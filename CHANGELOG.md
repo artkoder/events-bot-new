@@ -21,6 +21,7 @@
 - Список сообществ ВК показывает статусы `Pending | Skipped | Imported | Rejected` и поддерживает пагинацию.
 - Ежедневный Telegram-анонс теперь ссылается на Telegraph-страницу для событий из VK-очереди (кроме партнёрских авторов).
 - «✂️ Сокращённый рерайт» сохраняет разбивку на абзацы вместо склеивания всего текста в один блок.
+- VK source settings now store default ticket-link button text and prompt; ingestion applies the saved link only when a post lacks its own ticket or registration URL, keeping operator-provided links untouched.
 - Запустили психологический дайджест: в `/digest` появилась отдельная кнопка, подбор идёт по тематике и автоматически создаётся интро.
 
 - Introduced automatic topic classification with a closed topic list, editor display, and `/backfill_topics` command.
