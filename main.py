@@ -16203,10 +16203,16 @@ def build_vk_source_header(event: Event, festival: Festival | None = None) -> li
     if event.pushkin_card:
         lines.append("\u2705 Пушкинская карта")
 
+    ticket_link_display = (
+        format_vk_short_url(event.vk_ticket_short_url)
+        if event.vk_ticket_short_url
+        else event.ticket_link
+    )
+
     if event.is_free:
         lines.append("🟡 Бесплатно")
         if event.ticket_link:
-            lines.append(f"\U0001f39f по регистрации {event.ticket_link}")
+            lines.append(f"\U0001f39f по регистрации {ticket_link_display}")
     elif event.ticket_link and (
         event.ticket_price_min is not None or event.ticket_price_max is not None
     ):
@@ -16220,9 +16226,9 @@ def build_vk_source_header(event: Event, festival: Festival | None = None) -> li
             )
             price = f"{val} руб." if val is not None else ""
         info = f"Билеты в источнике {price}".strip()
-        lines.append(f"\U0001f39f {info} {event.ticket_link}".strip())
+        lines.append(f"\U0001f39f {info} {ticket_link_display}".strip())
     elif event.ticket_link:
-        lines.append(f"\U0001f39f по регистрации {event.ticket_link}")
+        lines.append(f"\U0001f39f по регистрации {ticket_link_display}")
     else:
         price = ""
         if (
@@ -16381,6 +16387,9 @@ async def sync_vk_source_post(
         url = event.source_vk_post_url
         logging.info("sync_vk_source_post updated %s", url)
     else:
+        _short_link_result = await ensure_vk_short_ticket_link(
+            event, db, vk_api_fn=_vk_api, bot=bot
+        )
         message = build_vk_source_message(
             event, text, festival=festival, ics_url=ics_url
         )
