@@ -10,6 +10,16 @@ def test_match_keywords_variants():
     assert any("спект" in k for k in kws)
 
 
+def test_match_keywords_lead_host_variants():
+    ok, kws = match_keywords("Ведущая расскажет о программе")
+    assert ok
+    assert any("ведущ" in k for k in kws)
+
+    ok_hash, kws_hash = match_keywords("#Ведущий поделится опытом")
+    assert ok_hash
+    assert any("ведущ" in k for k in kws_hash)
+
+
 def test_detect_date_and_extract(monkeypatch):
     text = "Мастер-классы 14–15.09, регистрация по ссылке"
     assert detect_date(text)
