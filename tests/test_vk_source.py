@@ -107,6 +107,55 @@ async def test_sync_vk_source_post_uses_original_calendar_link_on_short_fail(
 
 
 @pytest.mark.asyncio
+async def test_sync_vk_source_post_refreshes_ics_short_link(monkeypatch):
+    main.VK_AFISHA_GROUP_ID = "1"
+
+    event = main.Event(
+        title="Title",
+        description="",
+        date="2024-01-01",
+        time="00:00",
+        location_name="Place",
+        ics_url="http://old",
+        vk_ics_short_url="https://vk.cc/old",
+        vk_ics_short_key="old",
+    )
+
+    captured: dict[str, str] = {}
+
+    async def fake_post(group_id, message, db=None, bot=None, attachments=None):
+        captured["text"] = message
+        return "https://vk.com/wall-1_2"
+
+    calls: list[tuple[str, dict[str, str]]] = []
+
+    async def fake_vk_api(method, params, db=None, bot=None, **kwargs):
+        calls.append((method, params))
+        if method == "utils.getShortLink":
+            return {"response": {"short_url": "https://vk.cc/newkey", "key": "newkey"}}
+        return {"response": {}}
+
+    monkeypatch.setattr(main, "post_to_vk", fake_post)
+    monkeypatch.setattr(main, "_vk_api", fake_vk_api)
+    monkeypatch.setattr(main, "vk_api", fake_vk_api)
+
+    url = await main.sync_vk_source_post(
+        event,
+        "Title\nDescription",
+        None,
+        None,
+        ics_url="http://new",
+    )
+
+    assert url == "https://vk.com/wall-1_2"
+    assert any(method == "utils.getShortLink" for method, _ in calls)
+    assert event.ics_url == "http://new"
+    assert event.vk_ics_short_url == "https://vk.cc/newkey"
+    assert event.vk_ics_short_key == "newkey"
+    assert "Добавить в календарь vk.cc/newkey" in captured["text"]
+
+
+@pytest.mark.asyncio
 async def test_sync_vk_source_post_attaches_photos(monkeypatch):
     main.VK_AFISHA_GROUP_ID = "1"
     main.VK_PHOTOS_ENABLED = True

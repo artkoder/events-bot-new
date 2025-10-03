@@ -5428,7 +5428,15 @@ async def ics_publish(event_id: int, db: Database, bot: Bot, progress=None) -> b
                 ev.ics_hash = ics_hash
                 ev.ics_updated_at = datetime.now(timezone.utc)
                 if supabase_url is not None:
+                    if ev.ics_url != supabase_url:
+                        ev.vk_ics_short_url = None
+                        ev.vk_ics_short_key = None
                     ev.ics_url = supabase_url
+                else:
+                    if ev.ics_url is not None or ev.vk_ics_short_url or ev.vk_ics_short_key:
+                        ev.ics_url = None
+                        ev.vk_ics_short_url = None
+                        ev.vk_ics_short_key = None
                 await session.commit()
         if supabase_url is not None:
             await update_source_page_ics(event_id, db, supabase_url)
@@ -7441,6 +7449,8 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
                 ev.ics_file_id = None
                 ev.ics_hash = None
                 ev.ics_updated_at = None
+                ev.vk_ics_short_url = None
+                ev.vk_ics_short_key = None
                 await session.commit()
         await callback.answer("Deleted")
     elif data.startswith("markfree:"):
@@ -16338,9 +16348,14 @@ async def sync_vk_source_post(
             logging.info("VK photo upload skipped: no group token")
 
     calendar_line_value: str | None = None
-    calendar_source_url = ics_url or event.ics_url
+    previous_ics_url = event.ics_url
+    calendar_source_url = event.ics_url if ics_url is None else ics_url
+    if calendar_source_url != previous_ics_url or calendar_source_url is None:
+        if event.vk_ics_short_url or event.vk_ics_short_key:
+            event.vk_ics_short_url = None
+            event.vk_ics_short_key = None
+    event.ics_url = calendar_source_url
     if calendar_source_url:
-        event.ics_url = calendar_source_url
         short_ics = await ensure_vk_short_ics_link(
             event,
             db,
