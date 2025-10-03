@@ -77,6 +77,17 @@ def test_match_keywords_concert_phrases():
     assert any("жив" in k and "звук" in k for k in normalized)
 
 
+def test_match_keywords_live_sound_and_performance():
+    ok, kws = match_keywords(
+        "Два часа живого звука в живом исполнении и особое выступление 17 октября"
+    )
+    assert ok
+    normalized = {k.lower() for k in kws}
+    assert any("жив" in k and "звук" in k for k in normalized)
+    assert any("жив" in k and "исполнен" in k for k in normalized)
+    assert any(k.startswith("выступлен") for k in normalized)
+
+
 def test_match_keywords_poetry_songs_play():
     ok, kws = match_keywords("стихи по кругу, сыграем песни 5 октября")
     assert ok
