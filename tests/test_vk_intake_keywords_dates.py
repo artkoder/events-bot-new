@@ -56,6 +56,13 @@ def test_match_keywords_tribute():
     assert "трибьют" in normalized
 
 
+def test_match_keywords_tribute_with_punctuation():
+    ok, kws = match_keywords("17 октября — трибьют группы ... 20:00")
+    assert ok
+    normalized = {k.lower() for k in kws}
+    assert "трибьют" in normalized
+
+
 def test_match_keywords_concert_phrases():
     text = (
         "Все хиты группы Лучшие песни в исполнении группы Мечта "
