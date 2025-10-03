@@ -20139,9 +20139,12 @@ async def handle_vk_add_message(message: types.Message, db: Database, bot: Bot) 
     screen = parts[-1]
     location = None
     default_time = None
+    default_ticket_link = None
     for p in parts[:-1]:
         if re.match(r"^\d{1,2}:\d{2}$", p):
             default_time = p if len(p.split(":")[0]) == 2 else f"0{p}"
+        elif p.startswith("http://") or p.startswith("https://"):
+            default_ticket_link = p
         else:
             location = p
     try:
@@ -20157,8 +20160,8 @@ async def handle_vk_add_message(message: types.Message, db: Database, bot: Bot) 
         return
     async with db.raw_conn() as conn:
         await conn.execute(
-            "INSERT OR IGNORE INTO vk_source(group_id, screen_name, name, location, default_time) VALUES(?,?,?,?,?)",
-            (gid, screen_name, name, location, default_time),
+            "INSERT OR IGNORE INTO vk_source(group_id, screen_name, name, location, default_time, default_ticket_link) VALUES(?,?,?,?,?,?)",
+            (gid, screen_name, name, location, default_time, default_ticket_link),
         )
         await conn.commit()
     extra = []
@@ -20166,6 +20169,8 @@ async def handle_vk_add_message(message: types.Message, db: Database, bot: Bot) 
         extra.append(location)
     if default_time:
         extra.append(default_time)
+    if default_ticket_link:
+        extra.append(default_ticket_link)
     suffix = f" — {', '.join(extra)}" if extra else ""
     await bot.send_message(
         message.chat.id,
@@ -20175,7 +20180,7 @@ async def handle_vk_add_message(message: types.Message, db: Database, bot: Bot) 
 
 async def _fetch_vk_sources(
     db: Database,
-) -> list[tuple[int, int, str, str, str | None, str | None, str | None]]:
+) -> list[tuple[int, int, str, str, str | None, str | None, str | None, str | None]]:
     async with db.raw_conn() as conn:
         cursor = await conn.execute(
             """
@@ -20186,6 +20191,7 @@ async def _fetch_vk_sources(
                 s.name,
                 s.location,
                 s.default_time,
+                s.default_ticket_link,
                 c.updated_at
             FROM vk_source AS s
             LEFT JOIN vk_crawl_cursor AS c ON c.group_id = s.group_id
@@ -20247,10 +20253,14 @@ async def handle_vk_list(
     page_rows = rows[start:end]
     inbox_counts = await _fetch_vk_inbox_counts(db)
     page_items: list[
-        tuple[int, tuple[int, int, str, str, str | None, str | None, str | None], dict[str, int]]
+        tuple[
+            int,
+            tuple[int, int, str, str, str | None, str | None, str | None, str | None],
+            dict[str, int],
+        ]
     ] = []
     for offset, row in enumerate(page_rows, start=start + 1):
-        rid, gid, screen, name, loc, dtime, updated_at = row
+        rid, gid, screen, name, loc, dtime, ticket_link, updated_at = row
         counts = inbox_counts.get(gid)
         if counts is None:
             counts = _zero_vk_status_counts()
@@ -20276,10 +20286,12 @@ async def handle_vk_list(
     lines: list[str] = []
     buttons: list[list[types.InlineKeyboardButton]] = []
     for offset, row, counts in page_items:
-        rid, gid, screen, name, loc, dtime, updated_at = row
+        rid, gid, screen, name, loc, dtime, ticket_link, updated_at = row
         info_parts = [f"id={gid}"]
         if loc:
             info_parts.append(loc)
+        if ticket_link:
+            info_parts.append(f"билеты: {ticket_link}")
         info = ", ".join(info_parts)
         if updated_at:
             try:
