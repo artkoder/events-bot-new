@@ -198,3 +198,26 @@ async def test_build_daily_sections_vk_short_link_reuse(tmp_path: Path, monkeypa
         db, timezone.utc, now=datetime(2025, 7, 10, tzinfo=timezone.utc)
     )
     assert "vk.cc/short" in sec1_again
+
+
+def test_build_vk_source_header_uses_short_ticket_link():
+    event = main.Event(
+        title="Concert",
+        description="desc",
+        source_text="src",
+        date="2025-07-07",
+        time="19:00",
+        location_name="Club",
+        ticket_link="https://tickets",
+        is_free=True,
+    )
+    event.vk_ticket_short_url = "https://vk.cc/short"
+
+    lines = main.build_vk_source_header(event)
+
+    registration_line = next(
+        line for line in lines if "по регистрации" in line
+    )
+
+    assert "vk.cc/short" in registration_line
+    assert "https://vk.cc/short" not in registration_line
