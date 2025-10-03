@@ -21416,7 +21416,7 @@ async def _vkrev_import_flow(
     group_id, post_id, text = row
     async with db.raw_conn() as conn:
         cur = await conn.execute(
-            "SELECT name, location, default_time FROM vk_source WHERE group_id=?",
+            "SELECT name, location, default_time, default_ticket_link FROM vk_source WHERE group_id=?",
             (group_id,),
         )
         source = await cur.fetchone()
@@ -21458,12 +21458,20 @@ async def _vkrev_import_flow(
             festival_alias_pairs = deduped
     if festival_hint is None:
         festival_hint = force_festival
+    source_name_val: str | None = None
+    location_hint_val: str | None = None
+    default_time_val: str | None = None
+    default_ticket_link_val: str | None = None
+    if source:
+        source_name_val, location_hint_val, default_time_val, default_ticket_link_val = source
+
     drafts = await vk_intake.build_event_drafts(
         text,
         photos=photos,
-        source_name=source[0] if source else None,
-        location_hint=source[1] if source else None,
-        default_time=source[2] if source else None,
+        source_name=source_name_val,
+        location_hint=location_hint_val,
+        default_time=default_time_val,
+        default_ticket_link=default_ticket_link_val,
         operator_extra=operator_extra,
         festival_names=festival_names,
         festival_alias_pairs=festival_alias_pairs or None,
