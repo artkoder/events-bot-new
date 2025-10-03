@@ -100,9 +100,16 @@ async def test_vk_list_shows_numbers_and_default_time(tmp_path):
     buttons = bot.messages[0].reply_markup.inline_keyboard
     assert buttons[0][0].text == "❌ 1"
     assert buttons[0][0].callback_data.endswith(":1")
-    assert buttons[0][1].text == "🕒 1"
-    assert buttons[1][0].text == "❌ 2"
-    assert buttons[1][0].callback_data.endswith(":1")
+    assert buttons[0][1].text == "⚙️ 1"
+    assert buttons[1][0].text == "🕒 1"
+    assert buttons[1][1].text == "🎟 1"
+    assert buttons[1][2].text == "📍 1"
+    assert buttons[2][0].text == "❌ 2"
+    assert buttons[2][0].callback_data.endswith(":1")
+    assert buttons[2][1].text == "⚙️ 2"
+    assert buttons[3][0].text == "🕒 2"
+    assert buttons[3][1].text == "🎟 2"
+    assert buttons[3][2].text == "📍 2"
     assert buttons[-1][-1].callback_data == "vksrcpage:2"
 
     class DummyCallback:
@@ -169,6 +176,121 @@ async def test_vk_default_time_message_updates_db(tmp_path):
     assert val is None
 
 
+@pytest.mark.asyncio
+async def test_vk_default_ticket_link_message_updates_db(tmp_path):
+    db = main.Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    async with db.raw_conn() as conn:
+        await conn.execute(
+            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time, default_ticket_link) VALUES(?,?,?,?,?,?)",
+            (1, "club1", "One", None, None, None),
+        )
+        await conn.commit()
+        cur = await conn.execute("SELECT id FROM vk_source")
+        (vid,) = await cur.fetchone()
+
+    bot = DummyBot()
+    list_message = DummyMessage(1, "", None)
+    main.vk_default_ticket_link_sessions.clear()
+    main.vk_default_ticket_link_sessions[1] = main.VkDefaultTicketLinkSession(
+        source_id=vid,
+        page=1,
+        message=list_message,
+    )
+    message = SimpleNamespace(
+        chat=SimpleNamespace(id=1),
+        from_user=SimpleNamespace(id=1),
+        text="https://tickets.new",
+    )
+    await main.handle_vk_ticket_link_message(message, db, bot)
+    async with db.raw_conn() as conn:
+        cur = await conn.execute(
+            "SELECT default_ticket_link FROM vk_source WHERE id=?",
+            (vid,),
+        )
+        (link_val,) = await cur.fetchone()
+    assert link_val == "https://tickets.new"
+    assert "https://tickets.new" in bot.messages[-1].text
+    assert "https://tickets.new" in list_message.text
+
+    main.vk_default_ticket_link_sessions[1] = main.VkDefaultTicketLinkSession(
+        source_id=vid,
+        page=1,
+        message=list_message,
+    )
+    message.text = "-"
+    await main.handle_vk_ticket_link_message(message, db, bot)
+    async with db.raw_conn() as conn:
+        cur = await conn.execute(
+            "SELECT default_ticket_link FROM vk_source WHERE id=?",
+            (vid,),
+        )
+        (link_val,) = await cur.fetchone()
+    assert link_val is None
+
+    main.vk_default_ticket_link_sessions[1] = main.VkDefaultTicketLinkSession(
+        source_id=vid,
+        page=1,
+        message=list_message,
+    )
+    message.text = "ftp://invalid"
+    await main.handle_vk_ticket_link_message(message, db, bot)
+    async with db.raw_conn() as conn:
+        cur = await conn.execute(
+            "SELECT default_ticket_link FROM vk_source WHERE id=?",
+            (vid,),
+        )
+        (link_val,) = await cur.fetchone()
+    assert link_val is None
+    assert "Неверный формат" in bot.messages[-1].text
+    assert 1 in main.vk_default_ticket_link_sessions
+
+
+@pytest.mark.asyncio
+async def test_vk_default_location_message_updates_db(tmp_path):
+    db = main.Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    async with db.raw_conn() as conn:
+        await conn.execute(
+            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time, default_ticket_link) VALUES(?,?,?,?,?,?)",
+            (1, "club1", "One", None, None, None),
+        )
+        await conn.commit()
+        cur = await conn.execute("SELECT id FROM vk_source")
+        (vid,) = await cur.fetchone()
+
+    bot = DummyBot()
+    list_message = DummyMessage(1, "", None)
+    main.vk_default_location_sessions.clear()
+    main.vk_default_location_sessions[1] = main.VkDefaultLocationSession(
+        source_id=vid,
+        page=1,
+        message=list_message,
+    )
+    message = SimpleNamespace(
+        chat=SimpleNamespace(id=1),
+        from_user=SimpleNamespace(id=1),
+        text="Калининград",
+    )
+    await main.handle_vk_location_message(message, db, bot)
+    async with db.raw_conn() as conn:
+        cur = await conn.execute("SELECT location FROM vk_source WHERE id=?", (vid,))
+        (location_val,) = await cur.fetchone()
+    assert location_val == "Калининград"
+    assert "Калининград" in bot.messages[-1].text
+    assert "Калининград" in list_message.text
+
+    main.vk_default_location_sessions[1] = main.VkDefaultLocationSession(
+        source_id=vid,
+        page=1,
+        message=list_message,
+    )
+    message.text = "-"
+    await main.handle_vk_location_message(message, db, bot)
+    async with db.raw_conn() as conn:
+        cur = await conn.execute("SELECT location FROM vk_source WHERE id=?", (vid,))
+        (location_val,) = await cur.fetchone()
+    assert location_val is None
 @pytest.mark.asyncio
 async def test_build_event_payload_includes_default_time(monkeypatch):
     captured = {}

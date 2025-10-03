@@ -643,9 +643,29 @@ class VkDefaultTimeSession:
     message: types.Message | None = None
 
 
+@dataclass
+class VkDefaultTicketLinkSession:
+    source_id: int
+    page: int
+    message: types.Message | None = None
+
+
+@dataclass
+class VkDefaultLocationSession:
+    source_id: int
+    page: int
+    message: types.Message | None = None
+
+
 vk_default_time_sessions: TTLCache[int, VkDefaultTimeSession] = TTLCache(
     maxsize=64, ttl=3600
 )
+vk_default_ticket_link_sessions: TTLCache[
+    int, VkDefaultTicketLinkSession
+] = TTLCache(maxsize=64, ttl=3600)
+vk_default_location_sessions: TTLCache[
+    int, VkDefaultLocationSession
+] = TTLCache(maxsize=64, ttl=3600)
 # waiting for VK source add input
 vk_add_source_sessions: set[int] = set()
 
@@ -20262,7 +20282,7 @@ async def handle_vk_list(
         ]
     ] = []
     for offset, row in enumerate(page_rows, start=start + 1):
-        rid, gid, screen, name, loc, dtime, ticket_link, updated_at = row
+        rid, gid, screen, name, loc, dtime, default_ticket_link, updated_at = row
         counts = inbox_counts.get(gid)
         if counts is None:
             counts = _zero_vk_status_counts()
@@ -20288,12 +20308,12 @@ async def handle_vk_list(
     lines: list[str] = []
     buttons: list[list[types.InlineKeyboardButton]] = []
     for offset, row, counts in page_items:
-        rid, gid, screen, name, loc, dtime, ticket_link, updated_at = row
+        rid, gid, screen, name, loc, dtime, default_ticket_link, updated_at = row
         info_parts = [f"id={gid}"]
         if loc:
             info_parts.append(loc)
-        if ticket_link:
-            info_parts.append(f"билеты: {ticket_link}")
+        if default_ticket_link:
+            info_parts.append(f"билеты: {default_ticket_link}")
         info = ", ".join(info_parts)
         if updated_at:
             try:
@@ -20323,7 +20343,20 @@ async def handle_vk_list(
                     text=f"❌ {offset}", callback_data=f"vkdel:{rid}:{page}"
                 ),
                 types.InlineKeyboardButton(
+                    text=f"⚙️ {offset}", callback_data=f"vkset:{rid}:{page}"
+                ),
+            ]
+        )
+        buttons.append(
+            [
+                types.InlineKeyboardButton(
                     text=f"🕒 {offset}", callback_data=f"vkdt:{rid}:{page}"
+                ),
+                types.InlineKeyboardButton(
+                    text=f"🎟 {offset}", callback_data=f"vklink:{rid}:{page}"
+                ),
+                types.InlineKeyboardButton(
+                    text=f"📍 {offset}", callback_data=f"vkloc:{rid}:{page}"
                 ),
             ]
         )
@@ -20383,6 +20416,194 @@ async def handle_vk_delete_callback(callback: types.CallbackQuery, db: Database,
         await conn.commit()
     await callback.answer("Удалено")
     await handle_vk_list(callback.message, db, bot, edit=callback.message, page=page)
+
+
+async def handle_vk_settings_callback(
+    callback: types.CallbackQuery, db: Database, bot: Bot
+) -> None:
+    page = 1
+    try:
+        _, payload = callback.data.split(":", 1)
+        parts = payload.split(":", 1)
+        vid = int(parts[0])
+        if len(parts) > 1:
+            page = int(parts[1])
+    except Exception:
+        await callback.answer()
+        return
+    async with db.raw_conn() as conn:
+        cur = await conn.execute(
+            "SELECT name, location, default_time, default_ticket_link FROM vk_source WHERE id=?",
+            (vid,),
+        )
+        row = await cur.fetchone()
+    if not row:
+        await callback.answer("Источник не найден", show_alert=True)
+        return
+    name, location, default_time, default_ticket_link = row
+    lines = [f"{name}"]
+    lines.append(f"Локация: {location or 'не указана'}")
+    lines.append(f"Типовое время: {default_time or 'не установлено'}")
+    lines.append(f"Ссылка на билеты: {default_ticket_link or 'не указана'}")
+    lines.append("Используйте кнопки 🕒, 🎟 и 📍 для изменений.")
+    if callback.message:
+        await bot.send_message(callback.message.chat.id, "\n".join(lines))
+    await callback.answer()
+
+
+async def handle_vk_ticket_link_callback(
+    callback: types.CallbackQuery, db: Database, bot: Bot
+) -> None:
+    page = 1
+    try:
+        _, payload = callback.data.split(":", 1)
+        parts = payload.split(":", 1)
+        vid = int(parts[0])
+        if len(parts) > 1:
+            page = int(parts[1])
+    except Exception:
+        await callback.answer()
+        return
+    vk_default_ticket_link_sessions[callback.from_user.id] = (
+        VkDefaultTicketLinkSession(
+            source_id=vid,
+            page=page,
+            message=callback.message,
+        )
+    )
+    async with db.raw_conn() as conn:
+        cur = await conn.execute(
+            "SELECT name, default_ticket_link FROM vk_source WHERE id=?",
+            (vid,),
+        )
+        row = await cur.fetchone()
+    name = row[0] if row else ""
+    current = row[1] if row else None
+    await bot.send_message(
+        callback.message.chat.id,
+        f"{name}: текущая ссылка на билеты — {current or 'не установлена'}. "
+        "Отправьте ссылку, начинающуюся с http(s)://, или '-' для удаления.",
+    )
+    await callback.answer()
+
+
+async def handle_vk_ticket_link_message(
+    message: types.Message, db: Database, bot: Bot
+) -> None:
+    session = vk_default_ticket_link_sessions.pop(message.from_user.id, None)
+    if not session:
+        return
+    vid = session.source_id
+    text = (message.text or "").strip()
+    if text in {"", "-"}:
+        new_link: str | None = None
+    else:
+        if not re.match(r"^https?://", text, re.IGNORECASE):
+            await bot.send_message(
+                message.chat.id,
+                "Неверный формат. Укажите ссылку, начинающуюся с http(s)://, или '-' для удаления.",
+            )
+            vk_default_ticket_link_sessions[message.from_user.id] = session
+            return
+        new_link = text
+    async with db.raw_conn() as conn:
+        await conn.execute(
+            "UPDATE vk_source SET default_ticket_link=? WHERE id=?",
+            (new_link, vid),
+        )
+        await conn.commit()
+        cur = await conn.execute(
+            "SELECT name FROM vk_source WHERE id=?",
+            (vid,),
+        )
+        row = await cur.fetchone()
+    name = row[0] if row else ""
+    if new_link:
+        msg = f"Ссылка на билеты для {name} установлена: {new_link}"
+    else:
+        msg = f"Ссылка на билеты для {name} удалена"
+    await bot.send_message(message.chat.id, msg)
+    if session.message:
+        await handle_vk_list(
+            session.message,
+            db,
+            bot,
+            edit=session.message,
+            page=session.page,
+        )
+
+
+async def handle_vk_location_callback(
+    callback: types.CallbackQuery, db: Database, bot: Bot
+) -> None:
+    page = 1
+    try:
+        _, payload = callback.data.split(":", 1)
+        parts = payload.split(":", 1)
+        vid = int(parts[0])
+        if len(parts) > 1:
+            page = int(parts[1])
+    except Exception:
+        await callback.answer()
+        return
+    vk_default_location_sessions[callback.from_user.id] = VkDefaultLocationSession(
+        source_id=vid,
+        page=page,
+        message=callback.message,
+    )
+    async with db.raw_conn() as conn:
+        cur = await conn.execute(
+            "SELECT name, location FROM vk_source WHERE id=?",
+            (vid,),
+        )
+        row = await cur.fetchone()
+    name = row[0] if row else ""
+    current = row[1] if row else None
+    await bot.send_message(
+        callback.message.chat.id,
+        f"{name}: текущая локация — {current or 'не указана'}. "
+        "Отправьте новую локацию или '-' для удаления.",
+    )
+    await callback.answer()
+
+
+async def handle_vk_location_message(
+    message: types.Message, db: Database, bot: Bot
+) -> None:
+    session = vk_default_location_sessions.pop(message.from_user.id, None)
+    if not session:
+        return
+    vid = session.source_id
+    text = (message.text or "").strip()
+    if text in {"", "-"}:
+        new_location: str | None = None
+    else:
+        new_location = text
+    async with db.raw_conn() as conn:
+        await conn.execute(
+            "UPDATE vk_source SET location=? WHERE id=?",
+            (new_location, vid),
+        )
+        await conn.commit()
+        cur = await conn.execute(
+            "SELECT name FROM vk_source WHERE id=?",
+            (vid,),
+        )
+        row = await cur.fetchone()
+    name = row[0] if row else ""
+    if new_location:
+        msg = f"Локация для {name} установлена: {new_location}"
+    else:
+        msg = f"Локация для {name} удалена"
+    await bot.send_message(message.chat.id, msg)
+    if session.message:
+        await handle_vk_list(
+            session.message,
+            db,
+            bot,
+            edit=session.message,
+            page=session.page,
+        )
 
 
 async def handle_vk_dtime_callback(callback: types.CallbackQuery, db: Database, bot: Bot) -> None:
@@ -23949,11 +24170,26 @@ def create_app() -> web.Application:
     async def vk_list_page_wrapper(callback: types.CallbackQuery):
         await handle_vk_list_page_callback(callback, db, bot)
 
+    async def vk_settings_cb_wrapper(callback: types.CallbackQuery):
+        await handle_vk_settings_callback(callback, db, bot)
+
     async def vk_dtime_cb_wrapper(callback: types.CallbackQuery):
         await handle_vk_dtime_callback(callback, db, bot)
 
     async def vk_dtime_msg_wrapper(message: types.Message):
         await handle_vk_dtime_message(message, db, bot)
+
+    async def vk_ticket_link_cb_wrapper(callback: types.CallbackQuery):
+        await handle_vk_ticket_link_callback(callback, db, bot)
+
+    async def vk_ticket_link_msg_wrapper(message: types.Message):
+        await handle_vk_ticket_link_message(message, db, bot)
+
+    async def vk_location_cb_wrapper(callback: types.CallbackQuery):
+        await handle_vk_location_callback(callback, db, bot)
+
+    async def vk_location_msg_wrapper(message: types.Message):
+        await handle_vk_location_message(message, db, bot)
 
     async def vk_next_wrapper(callback: types.CallbackQuery):
         await handle_vk_next_callback(callback, db, bot)
@@ -24221,11 +24457,28 @@ def create_app() -> web.Application:
     dp.message.register(
         vk_dtime_msg_wrapper, lambda m: m.from_user.id in vk_default_time_sessions
     )
+    dp.message.register(
+        vk_ticket_link_msg_wrapper,
+        lambda m: m.from_user.id in vk_default_ticket_link_sessions,
+    )
+    dp.message.register(
+        vk_location_msg_wrapper,
+        lambda m: m.from_user.id in vk_default_location_sessions,
+    )
     dp.callback_query.register(
         vk_list_page_wrapper, lambda c: c.data.startswith("vksrcpage:")
     )
     dp.callback_query.register(vk_delete_wrapper, lambda c: c.data.startswith("vkdel:"))
+    dp.callback_query.register(
+        vk_settings_cb_wrapper, lambda c: c.data.startswith("vkset:")
+    )
     dp.callback_query.register(vk_dtime_cb_wrapper, lambda c: c.data.startswith("vkdt:"))
+    dp.callback_query.register(
+        vk_ticket_link_cb_wrapper, lambda c: c.data.startswith("vklink:")
+    )
+    dp.callback_query.register(
+        vk_location_cb_wrapper, lambda c: c.data.startswith("vkloc:")
+    )
     dp.callback_query.register(vk_next_wrapper, lambda c: c.data.startswith("vknext:"))
     dp.callback_query.register(vk_review_cb_wrapper, lambda c: c.data and c.data.startswith("vkrev:"))
     dp.message.register(
