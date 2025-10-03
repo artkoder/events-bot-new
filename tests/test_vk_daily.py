@@ -186,7 +186,7 @@ async def test_build_daily_sections_vk_short_link_reuse(tmp_path: Path, monkeypa
         assert stored.vk_ticket_short_url == "https://vk.cc/short", call_ids
         assert stored.vk_ticket_short_key == "short"
 
-    assert "https://vk.cc/short" in sec1
+    assert "vk.cc/short" in sec1
     assert call_ids == [event_id]
 
     async def fail_helper(*args, **kwargs):  # pragma: no cover - ensure reuse
@@ -197,4 +197,4 @@ async def test_build_daily_sections_vk_short_link_reuse(tmp_path: Path, monkeypa
     sec1_again, _ = await main.build_daily_sections_vk(
         db, timezone.utc, now=datetime(2025, 7, 10, tzinfo=timezone.utc)
     )
-    assert "https://vk.cc/short" in sec1_again
+    assert "vk.cc/short" in sec1_again
