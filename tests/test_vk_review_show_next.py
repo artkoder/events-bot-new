@@ -45,8 +45,8 @@ async def test_vkrev_show_next_adds_blank_line_and_group_name(tmp_path, monkeypa
         await session.commit()
     async with db.raw_conn() as conn:
         await conn.execute(
-            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time) VALUES(?,?,?,?,?)",
-            (1, "club1", "Test Community", "", None),
+            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time, default_ticket_link) VALUES(?,?,?,?,?,?)",
+            (1, "club1", "Test Community", "", None, None),
         )
         await conn.execute(
             "INSERT INTO vk_inbox(group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status) VALUES(?,?,?,?,?,?,?,?)",
@@ -87,8 +87,8 @@ async def test_vkrev_show_next_truncates_long_text(tmp_path, monkeypatch):
         await session.commit()
     async with db.raw_conn() as conn:
         await conn.execute(
-            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time) VALUES(?,?,?,?,?)",
-            (1, "club1", "Test Community", "", None),
+            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time, default_ticket_link) VALUES(?,?,?,?,?,?)",
+            (1, "club1", "Test Community", "", None, None),
         )
         await conn.execute(
             "INSERT INTO vk_inbox(group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status) VALUES(?,?,?,?,?,?,?,?)",
@@ -141,8 +141,8 @@ async def test_vkrev_show_next_handles_blank_text(tmp_path, monkeypatch):
         await session.commit()
     async with db.raw_conn() as conn:
         await conn.execute(
-            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time) VALUES(?,?,?,?,?)",
-            (1, "club1", "Test Community", "", None),
+            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time, default_ticket_link) VALUES(?,?,?,?,?,?)",
+            (1, "club1", "Test Community", "", None, None),
         )
         await conn.execute(
             "INSERT INTO vk_inbox(group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status) VALUES(?,?,?,?,?,?,?,?)",
