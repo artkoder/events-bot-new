@@ -10,6 +10,16 @@ def test_match_keywords_variants():
     assert any("спект" in k for k in kws)
 
 
+def test_match_keywords_music_invite_pushkin_card():
+    text = "Приглашаем на музыкальный вечер 25 августа, доступно по Пушкинской карте"
+    ok, kws = match_keywords(text)
+    assert ok
+    normalized = {k.lower() for k in kws}
+    assert any(k.startswith("приглашаем") for k in normalized)
+    assert any(k.startswith("музык") for k in normalized)
+    assert any("пушкинск" in k and "карт" in k for k in normalized)
+
+
 def test_match_keywords_lead_host_variants():
     ok, kws = match_keywords("Ведущая расскажет о программе")
     assert ok

@@ -69,6 +69,8 @@ KEYWORD_PATTERNS = [
     r"встреч(а|и|е|у|ей|ам|ами|ах)",
     r"праздник(и|а|у|е|ом|ов|ам|ами|ах)?",
     r"праздничн(?:ый|ая|ое|ые|ого|ому|ым|ых|ую|ой|ыми|ом)",
+    r"музыкальн(?:ое|ый|ая|ые|ым|ых|ом|ой|ому|ыми)",
+    r"музык(?:а|и|е|у|ой|ою)",
     r"стих(?:и|отворен\w*)",
     r"песн(?:я|и|ей|е|ю|ями|ях|ью)",
     r"фортепиан(?:о|ный|ная|ные|ной|ном|ного|ному|ным|ных|нюю|ными)",
@@ -86,6 +88,8 @@ KEYWORD_PATTERNS = [
     r"ведущ(ий|ая|ее|ие|его|ему|ем|им|их|ими|ую|ей)",
     r"караок[её]",
     r"трибь?ют|трибут|tribute(?:\s+show)?",
+    r"приглашаем\s+(?:вас\s+)?на",
+    r"пушкинск(?:ая|ой)\s+карт(?:а|у|е)",
 ]
 KEYWORD_RE = re.compile(r"(?<!\w)#?(?:" + "|".join(KEYWORD_PATTERNS) + r")(?!\w)", re.I | re.U)
 GROUP_CONTEXT_RE = re.compile(GROUP_CONTEXT_PATTERN, re.I | re.U)
@@ -132,6 +136,8 @@ KEYWORD_LEMMAS = {
     "перформанс",
     "встреча",
     "праздник",
+    "музыка",
+    "музыкальный",
     "стих",
     "поэзия",
     "песня",
@@ -152,6 +158,7 @@ KEYWORD_LEMMAS = {
     "трибут",
     "tribute",
     "band",
+    "приглашать",
 }
 
 # Date/time patterns used for quick detection
@@ -228,11 +235,14 @@ def match_keywords(text: str) -> tuple[bool, list[str]]:
             lemmas.append(lemma)
             if lemma in KEYWORD_LEMMAS and lemma not in matched:
                 matched.append(lemma)
-        for first, second in zip(lemmas, lemmas[1:]):
+        for idx, (first, second) in enumerate(zip(lemmas, lemmas[1:])):
             if first == "живой" and second == "звук":
                 if "живой звук" not in matched:
                     matched.append("живой звук")
-                break
+            if first == "пушкинский" and second == "карта":
+                phrase = f"{tokens[idx]} {tokens[idx + 1]}"
+                if phrase not in matched:
+                    matched.append(phrase)
         for m in GROUP_CONTEXT_RE.finditer(text):
             group_match = m.group(0).lower()
             if group_match and group_match not in matched:
