@@ -21460,6 +21460,30 @@ async def _vkrev_show_next(chat_id: int, batch_id: str, operator_id: int, db: Da
     status_line = (
         f"ключи: {matched_kw_display} | дата: {'да' if post.has_date else 'нет'} | в очереди: {pending}"
     )
+    ts_hint = getattr(post, "event_ts_hint", None)
+    heading_line: str | None = None
+    event_lines: list[str] = []
+    if ts_hint and ts_hint > 0:
+        dt = datetime.fromtimestamp(ts_hint, tz=LOCAL_TZ)
+        heading_line = f"{dt.day:02d} {MONTHS[dt.month - 1]} {dt.strftime('%H:%M')}"
+        async with db.get_session() as session:
+            result = await session.execute(
+                select(Event).where(
+                    Event.date == dt.date().isoformat(),
+                    Event.time == dt.strftime("%H:%M"),
+                )
+            )
+            matched_events = result.scalars().all()
+        if matched_events:
+            for event in matched_events:
+                link = normalize_telegraph_url(event.telegraph_url)
+                if not link and event.telegraph_path:
+                    link = f"https://telegra.ph/{event.telegraph_path.lstrip('/')}"
+                event_lines.append(
+                    f"{event.title} — {link or 'Telegraph отсутствует'}"
+                )
+        else:
+            event_lines.append("Совпадений нет")
     inline_keyboard = [
         [
             types.InlineKeyboardButton(text="✅ Добавить", callback_data=f"vkrev:accept:{post.id}"),
@@ -21503,7 +21527,17 @@ async def _vkrev_show_next(chat_id: int, batch_id: str, operator_id: int, db: Da
             inline_keyboard = append_tourist_block(inline_keyboard, event, "vk")
     markup = types.InlineKeyboardMarkup(inline_keyboard=inline_keyboard)
     post_text = post.text or ""
-    tail_lines = [group_name, "", url, "", status_line]
+    def build_tail_lines(warning: str | None = None) -> list[str]:
+        lines = [group_name, "", url]
+        if heading_line:
+            lines.extend(["", heading_line, *event_lines])
+        lines.append("")
+        if warning:
+            lines.append(warning)
+        lines.append(status_line)
+        return lines
+
+    tail_lines = build_tail_lines()
     tail_str = "\n".join(tail_lines)
     if post_text:
         message_text = post_text + "\n" + tail_str
@@ -21514,7 +21548,7 @@ async def _vkrev_show_next(chat_id: int, batch_id: str, operator_id: int, db: Da
         warning_line = (
             f"⚠️ Текст поста был обрезан до {TELEGRAM_MESSAGE_LIMIT} символов"
         )
-        tail_lines = [group_name, "", url, "", warning_line, status_line]
+        tail_lines = build_tail_lines(warning_line)
         tail_str = "\n".join(tail_lines)
         if post_text:
             available = TELEGRAM_MESSAGE_LIMIT - len(tail_str) - 1
