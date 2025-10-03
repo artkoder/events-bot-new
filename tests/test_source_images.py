@@ -221,6 +221,21 @@ async def test_build_source_page_content_editor_blocks():
 
 
 @pytest.mark.asyncio
+async def test_build_source_page_content_consecutive_headings():
+    raw_html = "<h3>First heading<h3>Second heading<p>First paragraph<p>Second paragraph"
+    html, _, _ = await main.build_source_page_content(
+        "Title",
+        "text",
+        None,
+        raw_html,
+    )
+    assert html.count("<h3>First heading</h3>") == 1
+    assert html.count("<h3>Second heading</h3>") == 1
+    assert html.count("<p>First paragraph</p>") == 1
+    assert html.count("<p>Second paragraph</p>") == 1
+
+
+@pytest.mark.asyncio
 async def test_vkrev_story_editor_fallback(monkeypatch):
     operator_id = 123
     inbox_id = 456
