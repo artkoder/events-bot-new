@@ -20834,8 +20834,70 @@ async def handle_vk_crawl_now(message: types.Message, db: Database, bot: Bot) ->
         if not user or not user.is_superadmin:
             await bot.send_message(message.chat.id, "Not authorized")
             return
-    stats = await vk_intake.crawl_once(db, broadcast=True, bot=bot)
+    text = message.text or ""
+    try:
+        tokens = shlex.split(text)
+    except ValueError:
+        await bot.send_message(
+            message.chat.id,
+            "Не удалось разобрать параметры команды",
+        )
+        return
+
+    forced_backfill = False
+    requested_backfill_days: int | None = None
+    error_message: str | None = None
+
+    for token in tokens:
+        if not token.startswith("--backfill-days"):
+            continue
+        forced_backfill = True
+        if token == "--backfill-days":
+            error_message = "Используйте синтаксис --backfill-days=N"
+            break
+        if token.startswith("--backfill-days="):
+            value = token.split("=", 1)[1]
+            if not value:
+                error_message = "Значение для --backfill-days отсутствует"
+                break
+            try:
+                requested_backfill_days = int(value)
+            except ValueError:
+                error_message = "Значение --backfill-days должно быть целым числом"
+                break
+        else:
+            error_message = "Используйте синтаксис --backfill-days=N"
+            break
+
+    if error_message:
+        await bot.send_message(message.chat.id, error_message)
+        return
+
+    if forced_backfill and requested_backfill_days is not None and requested_backfill_days < 1:
+        await bot.send_message(
+            message.chat.id,
+            "Значение --backfill-days должно быть положительным",
+        )
+        return
+
+    stats = await vk_intake.crawl_once(
+        db,
+        broadcast=True,
+        bot=bot,
+        force_backfill=forced_backfill,
+        backfill_days=requested_backfill_days if forced_backfill else None,
+    )
     q = stats.get("queue", {})
+    forced_note = ""
+    if stats.get("forced_backfill"):
+        used_days = stats.get("backfill_days_used") or vk_intake.VK_CRAWL_BACKFILL_DAYS
+        requested_days = stats.get("backfill_days_requested")
+        forced_note = f", режим: принудительный бэкафилл до {used_days} дн."
+        if (
+            requested_days is not None
+            and requested_days != used_days
+        ):
+            forced_note += f" (запрошено {requested_days})"
     msg = (
         f"Проверено {stats['groups_checked']} сообществ, "
         f"просмотрено {stats['posts_scanned']} постов, "
@@ -20848,6 +20910,7 @@ async def handle_vk_crawl_now(message: types.Message, db: Database, bot: Bot) ->
         f"rejected: {q.get('rejected',0)})"
         f", страниц на группу: {'/'.join(str(p) for p in stats.get('pages_per_group', []))}, "
         f"перекрытие: {stats.get('overlap_sec')} сек"
+        f"{forced_note}"
     )
     await bot.send_message(message.chat.id, msg)
 
