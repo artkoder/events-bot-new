@@ -73,6 +73,7 @@ KEYWORD_PATTERNS = [
     r"бронировани(е|я|ю|ем)|билет(ы|а|ов)|регистраци(я|и|ю|ей)|афиш(а|и|е|у)",
     r"ведущ(ий|ая|ее|ие|его|ему|ем|им|их|ими|ую|ей)",
     r"караок[её]",
+    r"трибь?ют|трибут|tribute",
 ]
 KEYWORD_RE = re.compile(r"\b#?(?:" + "|".join(KEYWORD_PATTERNS) + r")\b", re.I | re.U)
 
@@ -124,6 +125,9 @@ KEYWORD_LEMMAS = {
     "афиша",
     "ведущий",
     "караоке",
+    "трибьют",
+    "трибут",
+    "tribute",
 }
 
 # Date/time patterns used for quick detection
