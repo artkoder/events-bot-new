@@ -17162,21 +17162,27 @@ async def build_events_message(db: Database, target_date: date, tz: timezone, cr
     keyboard = []
     for e in events:
         icon = "✂️" if not e.vk_repost_url else "✅"
-        keyboard.append(
-            [
+        row = [
+            types.InlineKeyboardButton(
+                text=f"\u274c {e.id}",
+                callback_data=f"del:{e.id}:{target_date.isoformat()}",
+            ),
+            types.InlineKeyboardButton(
+                text=f"\u270e {e.id}", callback_data=f"edit:{e.id}"
+            ),
+            types.InlineKeyboardButton(
+                text=f"{icon} Рерайт {e.id}",
+                callback_data=f"vkrev:shortpost:{e.id}",
+            ),
+        ]
+        if e.vk_ticket_short_key:
+            row.append(
                 types.InlineKeyboardButton(
-                    text=f"\u274c {e.id}",
-                    callback_data=f"del:{e.id}:{target_date.isoformat()}",
-                ),
-                types.InlineKeyboardButton(
-                    text=f"\u270e {e.id}", callback_data=f"edit:{e.id}"
-                ),
-                types.InlineKeyboardButton(
-                    text=f"{icon} Рерайт {e.id}",
-                    callback_data=f"vkrev:shortpost:{e.id}",
-                ),
-            ]
-        )
+                    text="Статистика Вк ссылки",
+                    url=f"https://vk.com/cc?act=stats&key={e.vk_ticket_short_key}",
+                )
+            )
+        keyboard.append(row)
 
     today = datetime.now(tz).date()
     prev_day = target_date - timedelta(days=1)
@@ -17271,8 +17277,9 @@ async def build_exhibitions_message(
     while lines and lines[-1] == "":
         lines.pop()
 
-    keyboard = [
-        [
+    keyboard = []
+    for e in events:
+        row = [
             types.InlineKeyboardButton(
                 text=f"\u274c {e.id}", callback_data=f"del:{e.id}:exh"
             ),
@@ -17280,8 +17287,14 @@ async def build_exhibitions_message(
                 text=f"\u270e {e.id}", callback_data=f"edit:{e.id}"
             ),
         ]
-        for e in events
-    ]
+        if e.vk_ticket_short_key:
+            row.append(
+                types.InlineKeyboardButton(
+                    text="Статистика Вк ссылки",
+                    url=f"https://vk.com/cc?act=stats&key={e.vk_ticket_short_key}",
+                )
+            )
+        keyboard.append(row)
     markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard) if events else None
     chunks: list[str] = []
     current_lines: list[str] = []
