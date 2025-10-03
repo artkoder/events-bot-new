@@ -52,6 +52,8 @@ async def _persist_short_link(
                 return
             stored.vk_ticket_short_url = event.vk_ticket_short_url
             stored.vk_ticket_short_key = event.vk_ticket_short_key
+            stored.vk_ics_short_url = event.vk_ics_short_url
+            stored.vk_ics_short_key = event.vk_ics_short_key
             await commit_session.commit()
     except Exception:  # pragma: no cover - log only
         logging.exception("vk_shortlink_persist_failed eid=%s", event.id)
@@ -82,76 +84,84 @@ def _log_short_link_fallback(event: Event, ticket_link: str, reason: str) -> Non
     )
 
 
-async def ensure_vk_short_ticket_link(
+async def _ensure_vk_short_link(
     event: Event,
     db: Database | None,
     *,
     session: "AsyncSession" | None = None,
     bot: "Bot" | None = None,
     vk_api_fn: VkApiCallable | None = None,
+    link_value: str,
+    url_attr: str,
+    key_attr: str,
+    link_kind: str,
 ) -> tuple[str, str] | None:
-    """Ensure that an event has a stored VK short ticket link.
-
-    Returns the ``(short_url, key)`` tuple or ``None`` on failure.
-    """
-
-    ticket_link = (event.ticket_link or "").strip()
-    if not ticket_link:
-        _log_short_link_fallback(event, ticket_link, "empty_ticket_link")
+    link = link_value.strip()
+    if not link:
+        _log_short_link_fallback(event, link, f"{link_kind}_empty_link")
         return None
 
-    parsed = urlparse(ticket_link)
+    parsed = urlparse(link)
     host = parsed.netloc.lower()
     if host == "vk.cc":
         key = parsed.path.strip("/")
         if not key:
             logging.warning(
-                "vk_shortlink_invalid_path eid=%s url=%s", event.id, ticket_link
+                "vk_shortlink_invalid_path kind=%s eid=%s url=%s",
+                link_kind,
+                event.id,
+                link,
             )
-            _log_short_link_fallback(event, ticket_link, "vk_shortlink_invalid_path")
+            _log_short_link_fallback(event, link, f"{link_kind}_invalid_path")
             return None
         short_url = f"https://vk.cc/{key}"
-        if (
-            event.vk_ticket_short_url != short_url
-            or event.vk_ticket_short_key != key
-        ):
-            event.vk_ticket_short_url = short_url
-            event.vk_ticket_short_key = key
+        current_url = getattr(event, url_attr)
+        current_key = getattr(event, key_attr)
+        if current_url != short_url or current_key != key:
+            setattr(event, url_attr, short_url)
+            setattr(event, key_attr, key)
             await _persist_short_link(event, db, session)
             _log_short_link_action(
                 event,
-                ticket_link,
+                link,
                 short_url,
-                action="saved",
+                action=f"{link_kind}_saved",
             )
         else:
             _log_short_link_action(
                 event,
-                ticket_link,
+                link,
                 short_url,
-                action="reused",
+                action=f"{link_kind}_reused",
             )
         return short_url, key
 
-    if event.vk_ticket_short_url and event.vk_ticket_short_key:
+    current_url = getattr(event, url_attr)
+    current_key = getattr(event, key_attr)
+    if current_url and current_key:
         _log_short_link_action(
             event,
-            ticket_link,
-            event.vk_ticket_short_url,
-            action="reused",
+            link,
+            current_url,
+            action=f"{link_kind}_reused",
         )
-        return event.vk_ticket_short_url, event.vk_ticket_short_key
+        return current_url, current_key
 
     if vk_api_fn is None:
-        logging.warning("vk_shortlink_no_api eid=%s url=%s", event.id, ticket_link)
-        _log_short_link_fallback(event, ticket_link, "vk_shortlink_no_api")
+        logging.warning(
+            "vk_shortlink_no_api kind=%s eid=%s url=%s", link_kind, event.id, link
+        )
+        _log_short_link_fallback(event, link, f"{link_kind}_no_api")
         return None
 
-    params = {"url": ticket_link}
+    params = {"url": link}
     try:
         response = await vk_api_fn("utils.getShortLink", params, db, bot)
     except Exception:
-        logging.exception("vk_shortlink_fetch_failed eid=%s", event.id)
+        logging.exception(
+            "vk_shortlink_fetch_failed kind=%s eid=%s", link_kind, event.id
+        )
+        _log_short_link_fallback(event, link, f"{link_kind}_fetch_failed")
         return None
 
     if isinstance(response, dict):
@@ -159,8 +169,13 @@ async def ensure_vk_short_ticket_link(
     else:
         payload = response
     if not isinstance(payload, dict):
-        logging.error("vk_shortlink_invalid_response eid=%s resp=%r", event.id, response)
-        _log_short_link_fallback(event, ticket_link, "vk_shortlink_invalid_response")
+        logging.error(
+            "vk_shortlink_invalid_response kind=%s eid=%s resp=%r",
+            link_kind,
+            event.id,
+            response,
+        )
+        _log_short_link_fallback(event, link, f"{link_kind}_invalid_response")
         return None
 
     key = payload.get("key")
@@ -169,21 +184,72 @@ async def ensure_vk_short_ticket_link(
         short_url = f"https://vk.cc/{key}"
     if not short_url or not key:
         logging.error(
-            "vk_shortlink_missing_data eid=%s resp=%r", event.id, payload
+            "vk_shortlink_missing_data kind=%s eid=%s resp=%r",
+            link_kind,
+            event.id,
+            payload,
         )
-        _log_short_link_fallback(event, ticket_link, "vk_shortlink_missing_data")
+        _log_short_link_fallback(event, link, f"{link_kind}_missing_data")
         return None
 
-    event.vk_ticket_short_url = short_url
-    event.vk_ticket_short_key = key
+    setattr(event, url_attr, short_url)
+    setattr(event, key_attr, key)
     await _persist_short_link(event, db, session)
     _log_short_link_action(
         event,
-        ticket_link,
+        link,
         short_url,
-        action="saved",
+        action=f"{link_kind}_saved",
     )
     return short_url, key
+
+
+async def ensure_vk_short_ticket_link(
+    event: Event,
+    db: Database | None,
+    *,
+    session: "AsyncSession" | None = None,
+    bot: "Bot" | None = None,
+    vk_api_fn: VkApiCallable | None = None,
+) -> tuple[str, str] | None:
+    """Ensure that an event has a stored VK short ticket link."""
+
+    ticket_link = event.ticket_link or ""
+    return await _ensure_vk_short_link(
+        event,
+        db,
+        session=session,
+        bot=bot,
+        vk_api_fn=vk_api_fn,
+        link_value=ticket_link,
+        url_attr="vk_ticket_short_url",
+        key_attr="vk_ticket_short_key",
+        link_kind="ticket",
+    )
+
+
+async def ensure_vk_short_ics_link(
+    event: Event,
+    db: Database | None,
+    *,
+    session: "AsyncSession" | None = None,
+    bot: "Bot" | None = None,
+    vk_api_fn: VkApiCallable | None = None,
+) -> tuple[str, str] | None:
+    """Ensure that an event has a stored VK short ICS link."""
+
+    ics_link = event.ics_url or ""
+    return await _ensure_vk_short_link(
+        event,
+        db,
+        session=session,
+        bot=bot,
+        vk_api_fn=vk_api_fn,
+        link_value=ics_link,
+        url_attr="vk_ics_short_url",
+        key_attr="vk_ics_short_key",
+        link_kind="ics",
+    )
 
 
 def format_vk_short_url(short_url: str) -> str:
