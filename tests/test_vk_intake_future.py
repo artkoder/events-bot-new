@@ -19,8 +19,8 @@ async def test_crawl_skips_past_events(tmp_path, monkeypatch):
     await db.init()
     async with db.raw_conn() as conn:
         await conn.execute(
-            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time) VALUES(?,?,?,?,?)",
-            (1, 'g', 'Group', '', None),
+            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time, default_ticket_link) VALUES(?,?,?,?,?,?)",
+            (1, 'g', 'Group', '', None, None),
         )
         await conn.commit()
 
@@ -56,8 +56,8 @@ async def test_crawl_inserts_blank_single_photo_post(tmp_path, monkeypatch):
     await db.init()
     async with db.raw_conn() as conn:
         await conn.execute(
-            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time) VALUES(?,?,?,?,?)",
-            (1, "g", "Group", "", None),
+            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time, default_ticket_link) VALUES(?,?,?,?,?,?)",
+            (1, "g", "Group", "", None, None),
         )
         await conn.commit()
 
@@ -100,8 +100,8 @@ async def test_incremental_pagination_processes_full_backlog(
     await db.init()
     async with db.raw_conn() as conn:
         await conn.execute(
-            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time) VALUES(?,?,?,?,?)",
-            (1, "g", "Group", "", None),
+            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time, default_ticket_link) VALUES(?,?,?,?,?,?)",
+            (1, "g", "Group", "", None, None),
         )
         last_seen_ts = int(time.time()) - 1000
         await conn.execute(
@@ -181,8 +181,8 @@ async def test_hard_cap_triggers_backfill(tmp_path, monkeypatch, caplog):
     await db.init()
     async with db.raw_conn() as conn:
         await conn.execute(
-            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time) VALUES(?,?,?,?,?)",
-            (1, "g", "Group", "", None),
+            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time, default_ticket_link) VALUES(?,?,?,?,?,?)",
+            (1, "g", "Group", "", None, None),
         )
         last_seen_ts = int(time.time()) - 1000
         await conn.execute(

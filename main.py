@@ -224,7 +224,11 @@ from sections import (
     dedup_same_date,
 )
 from db import Database
-from shortlinks import ensure_vk_short_ticket_link, format_vk_short_url
+from shortlinks import (
+    ensure_vk_short_ics_link,
+    ensure_vk_short_ticket_link,
+    format_vk_short_url,
+)
 from scheduling import startup as scheduler_startup, cleanup as scheduler_cleanup
 from sqlalchemy import select, update, delete, text, func, or_, and_, case
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16255,7 +16259,7 @@ def build_vk_source_message(
     text: str,
     festival: Festival | None = None,
     *,
-    ics_url: str | None = None,
+    calendar_url: str | None = None,
 ) -> str:
     """Build detailed VK post for an event including original source text."""
 
@@ -16263,8 +16267,8 @@ def build_vk_source_message(
     lines = build_vk_source_header(event, festival)
     lines.extend(text.strip().splitlines())
     lines.append(VK_BLANK_LINE)
-    if ics_url:
-        lines.append(f"Добавить в календарь {ics_url}")
+    if calendar_url:
+        lines.append(f"Добавить в календарь {calendar_url}")
     lines.append(VK_SOURCE_FOOTER)
     return "\n".join(lines)
 
@@ -16312,6 +16316,21 @@ async def sync_vk_source_post(
                 attachments = ids
         else:
             logging.info("VK photo upload skipped: no group token")
+
+    calendar_line_value: str | None = None
+    calendar_source_url = ics_url or event.ics_url
+    if calendar_source_url:
+        event.ics_url = calendar_source_url
+        short_ics = await ensure_vk_short_ics_link(
+            event,
+            db,
+            bot=bot,
+            vk_api_fn=_vk_api,
+        )
+        if short_ics:
+            calendar_line_value = format_vk_short_url(short_ics[0])
+        else:
+            calendar_line_value = calendar_source_url
 
     if event.source_vk_post_url:
         await ensure_vk_short_ticket_link(
@@ -16378,8 +16397,8 @@ async def sync_vk_source_post(
             new_lines.append(VK_BLANK_LINE)
             if idx < len(texts) - 1:
                 new_lines.append(CONTENT_SEPARATOR)
-        if ics_url:
-            new_lines.append(f"Добавить в календарь {ics_url}")
+        if calendar_line_value:
+            new_lines.append(f"Добавить в календарь {calendar_line_value}")
         new_lines.append(VK_SOURCE_FOOTER)
         new_message = "\n".join(new_lines)
         await edit_vk_post(
@@ -16396,7 +16415,7 @@ async def sync_vk_source_post(
             event, db, vk_api_fn=_vk_api, bot=bot
         )
         message = build_vk_source_message(
-            event, text, festival=festival, ics_url=ics_url
+            event, text, festival=festival, calendar_url=calendar_line_value
         )
         url = await post_to_vk(
             VK_AFISHA_GROUP_ID,
@@ -20122,9 +20141,12 @@ async def handle_vk_add_message(message: types.Message, db: Database, bot: Bot) 
     screen = parts[-1]
     location = None
     default_time = None
+    default_ticket_link = None
     for p in parts[:-1]:
         if re.match(r"^\d{1,2}:\d{2}$", p):
             default_time = p if len(p.split(":")[0]) == 2 else f"0{p}"
+        elif p.startswith("http://") or p.startswith("https://"):
+            default_ticket_link = p
         else:
             location = p
     try:
@@ -20140,8 +20162,8 @@ async def handle_vk_add_message(message: types.Message, db: Database, bot: Bot) 
         return
     async with db.raw_conn() as conn:
         await conn.execute(
-            "INSERT OR IGNORE INTO vk_source(group_id, screen_name, name, location, default_time) VALUES(?,?,?,?,?)",
-            (gid, screen_name, name, location, default_time),
+            "INSERT OR IGNORE INTO vk_source(group_id, screen_name, name, location, default_time, default_ticket_link) VALUES(?,?,?,?,?,?)",
+            (gid, screen_name, name, location, default_time, default_ticket_link),
         )
         await conn.commit()
     extra = []
@@ -20149,6 +20171,8 @@ async def handle_vk_add_message(message: types.Message, db: Database, bot: Bot) 
         extra.append(location)
     if default_time:
         extra.append(default_time)
+    if default_ticket_link:
+        extra.append(default_ticket_link)
     suffix = f" — {', '.join(extra)}" if extra else ""
     await bot.send_message(
         message.chat.id,
@@ -20158,7 +20182,7 @@ async def handle_vk_add_message(message: types.Message, db: Database, bot: Bot) 
 
 async def _fetch_vk_sources(
     db: Database,
-) -> list[tuple[int, int, str, str, str | None, str | None, str | None]]:
+) -> list[tuple[int, int, str, str, str | None, str | None, str | None, str | None]]:
     async with db.raw_conn() as conn:
         cursor = await conn.execute(
             """
@@ -20169,6 +20193,7 @@ async def _fetch_vk_sources(
                 s.name,
                 s.location,
                 s.default_time,
+                s.default_ticket_link,
                 c.updated_at
             FROM vk_source AS s
             LEFT JOIN vk_crawl_cursor AS c ON c.group_id = s.group_id
@@ -20230,10 +20255,14 @@ async def handle_vk_list(
     page_rows = rows[start:end]
     inbox_counts = await _fetch_vk_inbox_counts(db)
     page_items: list[
-        tuple[int, tuple[int, int, str, str, str | None, str | None, str | None], dict[str, int]]
+        tuple[
+            int,
+            tuple[int, int, str, str, str | None, str | None, str | None, str | None],
+            dict[str, int],
+        ]
     ] = []
     for offset, row in enumerate(page_rows, start=start + 1):
-        rid, gid, screen, name, loc, dtime, updated_at = row
+        rid, gid, screen, name, loc, dtime, ticket_link, updated_at = row
         counts = inbox_counts.get(gid)
         if counts is None:
             counts = _zero_vk_status_counts()
@@ -20259,10 +20288,12 @@ async def handle_vk_list(
     lines: list[str] = []
     buttons: list[list[types.InlineKeyboardButton]] = []
     for offset, row, counts in page_items:
-        rid, gid, screen, name, loc, dtime, updated_at = row
+        rid, gid, screen, name, loc, dtime, ticket_link, updated_at = row
         info_parts = [f"id={gid}"]
         if loc:
             info_parts.append(loc)
+        if ticket_link:
+            info_parts.append(f"билеты: {ticket_link}")
         info = ", ".join(info_parts)
         if updated_at:
             try:

@@ -26,8 +26,8 @@ async def test_crawl_enqueues_historical_posts(tmp_path, monkeypatch, post_text)
 
     async with db.raw_conn() as conn:
         await conn.execute(
-            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time) VALUES(?,?,?,?,?)",
-            (1, "g", "Group", "", None),
+            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time, default_ticket_link) VALUES(?,?,?,?,?,?)",
+            (1, "g", "Group", "", None, None),
         )
         await conn.commit()
 

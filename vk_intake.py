@@ -852,14 +852,10 @@ async def persist_event_and_pages(
                 festival = res.scalar_one_or_none()
                 if festival is not None:
                     changed = False
-                    if start_str and (
-                        festival.start_date is None or start_str < festival.start_date
-                    ):
+                    if start_str and festival.start_date is None:
                         festival.start_date = start_str
                         changed = True
-                    if end_str and (
-                        festival.end_date is None or end_str > festival.end_date
-                    ):
+                    if end_str and festival.end_date is None:
                         festival.end_date = end_str
                         changed = True
                     if changed:

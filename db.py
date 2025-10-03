@@ -221,6 +221,8 @@ class Database:
             await _add_column(conn, "event", "vk_repost_url TEXT")
             await _add_column(conn, "event", "vk_ticket_short_url TEXT")
             await _add_column(conn, "event", "vk_ticket_short_key TEXT")
+            await _add_column(conn, "event", "vk_ics_short_url TEXT")
+            await _add_column(conn, "event", "vk_ics_short_key TEXT")
             await _add_column(conn, "event", "topics TEXT DEFAULT '[]'")
             await _add_column(conn, "event", "topics_manual BOOLEAN DEFAULT 0")
             await _add_column(conn, "event", "tourist_label SMALLINT")
@@ -390,6 +392,7 @@ class Database:
                     name TEXT,
                     location TEXT,
                     default_time TEXT,
+                    default_ticket_link TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
                 """
@@ -397,6 +400,8 @@ class Database:
             await conn.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS ux_vk_source_group ON vk_source(group_id)"
             )
+
+            await _add_column(conn, "vk_source", "default_ticket_link TEXT")
 
             await conn.execute(
                 """
