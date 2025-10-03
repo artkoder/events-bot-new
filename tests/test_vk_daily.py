@@ -221,3 +221,51 @@ def test_build_vk_source_header_uses_short_ticket_link():
 
     assert "vk.cc/short" in registration_line
     assert "https://vk.cc/short" not in registration_line
+
+
+@pytest.mark.asyncio
+async def test_sync_vk_source_post_updates_short_link(monkeypatch):
+    event = main.Event(
+        id=123,
+        title="Concert",
+        description="desc",
+        source_text="src",
+        date="2025-07-07",
+        time="19:00",
+        location_name="Club",
+        ticket_link="https://tickets",
+        source_vk_post_url="https://vk.com/wall-1_1",
+    )
+
+    calls: list[int | None] = []
+
+    async def fake_helper(ev, db, *, bot=None, vk_api_fn=None):
+        calls.append(ev.id)
+        ev.vk_ticket_short_url = "https://vk.cc/fake"
+        ev.vk_ticket_short_key = "fake"
+        return "https://vk.cc/fake", "fake"
+
+    async def fake_vk_api(method: str, **params):
+        assert method == "wall.getById"
+        return {"response": [{"text": ""}]}
+
+    captured: dict[str, str] = {}
+
+    async def fake_edit(post_url, message, db=None, bot=None, attachments=None):
+        captured["post_url"] = post_url
+        captured["message"] = message
+        return True
+
+    monkeypatch.setattr(main, "VK_AFISHA_GROUP_ID", "-1")
+    monkeypatch.setattr(main, "ensure_vk_short_ticket_link", fake_helper)
+    monkeypatch.setattr(main, "vk_api", fake_vk_api)
+    monkeypatch.setattr(main, "edit_vk_post", fake_edit)
+
+    url = await main.sync_vk_source_post(event, event.source_text, db=None, bot=None)
+
+    assert url == event.source_vk_post_url
+    assert calls == [event.id]
+    assert event.vk_ticket_short_url == "https://vk.cc/fake"
+    assert "message" in captured
+    assert "vk.cc/fake" in captured["message"]
+    assert "https://vk.cc/fake" not in captured["message"]

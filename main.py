@@ -16312,6 +16312,9 @@ async def sync_vk_source_post(
             logging.info("VK photo upload skipped: no group token")
 
     if event.source_vk_post_url:
+        await ensure_vk_short_ticket_link(
+            event, db, bot=bot, vk_api_fn=_vk_api
+        )
         existing = ""
         try:
             ids = _vk_owner_and_post_id(event.source_vk_post_url)
