@@ -10,6 +10,30 @@ def test_match_keywords_variants():
     assert any("спект" in k for k in kws)
 
 
+def test_match_keywords_lead_host_variants():
+    ok, kws = match_keywords("Ведущая расскажет о программе")
+    assert ok
+    assert any("ведущ" in k for k in kws)
+
+    ok_hash, kws_hash = match_keywords("#Ведущий поделится опытом")
+    assert ok_hash
+    assert any("ведущ" in k for k in kws_hash)
+
+
+def test_match_keywords_cost_variants():
+    ok_free, kws_free = match_keywords("Вход свободный, приходите 12 мая")
+    assert ok_free
+    assert any("вход свободн" in k for k in kws_free)
+
+    ok_paid, kws_paid = match_keywords("Билеты по 500 руб. и регистрация обязательна")
+    assert ok_paid
+    assert any("500 руб" in k or "руб." in k for k in kws_paid)
+
+    ok_symbol, kws_symbol = match_keywords("Стоимость участия — 1 200₽")
+    assert ok_symbol
+    assert any("₽" in k for k in kws_symbol)
+
+
 def test_detect_date_and_extract(monkeypatch):
     text = "Мастер-классы 14–15.09, регистрация по ссылке"
     assert detect_date(text)

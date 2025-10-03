@@ -20375,6 +20375,15 @@ async def handle_vk_list(
                 ),
             ]
         )
+        if counts["rejected"] > 0:
+            buttons.append(
+                [
+                    types.InlineKeyboardButton(
+                        text=f"🚫 Rejected: {counts['rejected']}",
+                        callback_data=f"vkrejected:{gid}:{page}",
+                    )
+                ]
+            )
     text = "\n".join(lines)
     if total_pages > 1:
         nav_row: list[types.InlineKeyboardButton] = []
@@ -20431,6 +20440,69 @@ async def handle_vk_delete_callback(callback: types.CallbackQuery, db: Database,
         await conn.commit()
     await callback.answer("Удалено")
     await handle_vk_list(callback.message, db, bot, edit=callback.message, page=page)
+
+
+async def handle_vk_rejected_callback(
+    callback: types.CallbackQuery, db: Database, bot: Bot
+) -> None:
+    try:
+        _, payload = callback.data.split(":", 1)
+        parts = payload.split(":")
+        group_id = int(parts[0])
+    except Exception:
+        await callback.answer()
+        return
+
+    async with db.raw_conn() as conn:
+        cur = await conn.execute(
+            "SELECT name, screen_name FROM vk_source WHERE group_id=?",
+            (group_id,),
+        )
+        source_row = await cur.fetchone()
+        await cur.close()
+        cur = await conn.execute(
+            """
+            SELECT post_id
+            FROM vk_inbox
+            WHERE group_id=? AND status='rejected'
+            ORDER BY
+                COALESCE(created_at, '') DESC,
+                id DESC
+            LIMIT 30
+            """,
+            (group_id,),
+        )
+        rows = await cur.fetchall()
+        await cur.close()
+
+    if not rows:
+        await callback.answer("Нет отклонённых постов", show_alert=True)
+        return
+
+    if source_row:
+        name, screen = source_row
+    else:
+        name = None
+        screen = None
+
+    if name and screen:
+        header = f"{name} (vk.com/{screen})"
+    elif screen:
+        header = f"vk.com/{screen}"
+    elif name:
+        header = name
+    else:
+        header = f"group {group_id}"
+
+    links = [f"https://vk.com/wall-{group_id}_{post_id}" for (post_id,) in rows]
+    message_text = "\n".join([f"🚫 Отклонённые посты — {header}"] + links)
+
+    await bot.send_message(
+        callback.message.chat.id,
+        message_text,
+        disable_web_page_preview=True,
+    )
+    await callback.answer()
 
 
 async def handle_vk_settings_callback(
@@ -24193,6 +24265,9 @@ def create_app() -> web.Application:
     async def vk_list_page_wrapper(callback: types.CallbackQuery):
         await handle_vk_list_page_callback(callback, db, bot)
 
+    async def vk_rejected_cb_wrapper(callback: types.CallbackQuery):
+        await handle_vk_rejected_callback(callback, db, bot)
+
     async def vk_settings_cb_wrapper(callback: types.CallbackQuery):
         await handle_vk_settings_callback(callback, db, bot)
 
@@ -24353,6 +24428,9 @@ def create_app() -> web.Application:
     dp.callback_query.register(captcha_prompt_wrapper, lambda c: c.data == "captcha_input")
     dp.callback_query.register(captcha_delay_wrapper, lambda c: c.data == "captcha_delay")
     dp.callback_query.register(captcha_refresh_wrapper, lambda c: c.data == "captcha_refresh")
+    dp.callback_query.register(
+        vk_rejected_cb_wrapper, lambda c: c.data and c.data.startswith("vkrejected:")
+    )
     dp.message.register(tz_wrapper, Command("tz"))
     dp.message.register(
         add_event_session_wrapper, lambda m: m.from_user.id in add_event_sessions

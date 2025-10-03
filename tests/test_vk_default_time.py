@@ -11,6 +11,7 @@ class DummyMessage:
         self.chat = SimpleNamespace(id=chat_id)
         self.text = text
         self.reply_markup = reply_markup
+        self.extra_kwargs: dict[str, object] = {}
 
     async def edit_text(self, text, **kwargs):
         self.text = text
@@ -24,8 +25,19 @@ class DummyBot:
 
     async def send_message(self, chat_id, text, **kwargs):
         msg = DummyMessage(chat_id, text, kwargs.get("reply_markup"))
+        msg.extra_kwargs = kwargs
         self.messages.append(msg)
         return msg
+
+
+class DummyCallback:
+    def __init__(self, data, message):
+        self.data = data
+        self.message = message
+        self.answers: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    async def answer(self, *args, **kwargs):
+        self.answers.append((args, kwargs))
 
 
 @pytest.mark.asyncio
@@ -110,20 +122,15 @@ async def test_vk_list_shows_numbers_and_default_time(tmp_path):
     assert buttons[3][0].text == "🕒 2"
     assert buttons[3][1].text == "🎟 2"
     assert buttons[3][2].text == "📍 2"
+    rejected_buttons = [btn for row in buttons for btn in row if btn.text.startswith("🚫 Rejected")]
+    assert rejected_buttons, "expected rejected button"
+    assert rejected_buttons[0].text == "🚫 Rejected: 1"
+    assert rejected_buttons[0].callback_data == "vkrejected:2:1"
     assert buttons[-1][-1].callback_data == "vksrcpage:2"
-
-    class DummyCallback:
-        def __init__(self, data, message):
-            self.data = data
-            self.message = message
-            self.answered = False
-
-        async def answer(self, *args, **kwargs):
-            self.answered = True
 
     callback = DummyCallback("vksrcpage:2", bot.messages[0])
     await main.handle_vk_list_page_callback(callback, db, bot)
-    assert callback.answered
+    assert callback.answers
     page2_lines = bot.messages[0].text.splitlines()
     assert page2_lines[0].startswith("11.")
     assert page2_lines[1] == " Pending | Skipped | Imported | Rejected "
@@ -133,6 +140,63 @@ async def test_vk_list_shows_numbers_and_default_time(tmp_path):
     )
     nav_row = bot.messages[0].reply_markup.inline_keyboard[-1]
     assert nav_row[0].callback_data == "vksrcpage:1"
+
+
+@pytest.mark.asyncio
+async def test_vk_rejected_callback_sends_links(tmp_path):
+    db = main.Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    async with db.raw_conn() as conn:
+        await conn.execute(
+            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time, default_ticket_link) VALUES(?,?,?,?,?,?)",
+            (1, "club1", "Group 1", None, None, None),
+        )
+        for idx in range(2):
+            await conn.execute(
+                "INSERT INTO vk_inbox(group_id, post_id, date, text, matched_kw, has_date, status) VALUES(?,?,?,?,?,?,?)",
+                (1, 100 + idx, 0, "text", None, 1, "rejected"),
+            )
+        await conn.commit()
+
+    bot = DummyBot()
+    list_message = DummyMessage(1, "", None)
+    callback = DummyCallback("vkrejected:1:1", list_message)
+
+    await main.handle_vk_rejected_callback(callback, db, bot)
+
+    assert callback.answers
+    assert len(bot.messages) == 1
+    sent = bot.messages[0]
+    assert sent.extra_kwargs.get("disable_web_page_preview") is True
+    lines = sent.text.splitlines()
+    assert lines[0] == "🚫 Отклонённые посты — Group 1 (vk.com/club1)"
+    assert set(lines[1:]) == {
+        "https://vk.com/wall-1_100",
+        "https://vk.com/wall-1_101",
+    }
+
+
+@pytest.mark.asyncio
+async def test_vk_rejected_callback_alerts_when_empty(tmp_path):
+    db = main.Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    async with db.raw_conn() as conn:
+        await conn.execute(
+            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time, default_ticket_link) VALUES(?,?,?,?,?,?)",
+            (1, "club1", "Group 1", None, None, None),
+        )
+        await conn.commit()
+
+    bot = DummyBot()
+    list_message = DummyMessage(1, "", None)
+    callback = DummyCallback("vkrejected:1:1", list_message)
+
+    await main.handle_vk_rejected_callback(callback, db, bot)
+
+    assert not bot.messages
+    assert callback.answers
+    assert callback.answers[0][0] == ("Нет отклонённых постов",)
+    assert callback.answers[0][1].get("show_alert") is True
 
 
 @pytest.mark.asyncio
