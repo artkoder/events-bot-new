@@ -67,3 +67,48 @@ async def test_create_source_page_editor_html_fallback(monkeypatch):
     assert image_modes == ["inline", "inline"]
     assert len(html_calls) == 2
     assert "</p>" in html_calls[1]
+
+
+@pytest.mark.asyncio
+async def test_create_source_page_editor_html_autoclose(monkeypatch):
+    original_build = main.build_source_page_content
+    build_calls: list = []
+    html_outputs: list = []
+
+    async def tracking_build(*args, **kwargs):
+        if "html_text" in kwargs:
+            html_value = kwargs["html_text"]
+        elif len(args) > 3:
+            html_value = args[3]
+        else:
+            html_value = None
+        build_calls.append(html_value)
+        result = await original_build(*args, **kwargs)
+        html_outputs.append(result[0])
+        return result
+
+    monkeypatch.setattr(main, "build_source_page_content", tracking_build)
+    monkeypatch.setattr(main, "get_telegraph_token", lambda: "token")
+
+    async def fake_telegraph_create_page(*args, **kwargs):
+        return {"url": "https://telegra.ph/autoclose", "path": "autoclose"}
+
+    monkeypatch.setattr(main, "telegraph_create_page", fake_telegraph_create_page)
+
+    result = await main.create_source_page(
+        "Title",
+        "Body text",
+        "https://example.com",
+        html_text="<h3>Heading</p><p>Body</p>",
+        catbox_urls=["https://cat.box/image.jpg"],
+    )
+
+    assert len(build_calls) == 1
+    assert build_calls[0] == "<h3>Heading</p><p>Body</p>"
+    assert "<h3>Heading</h3>" in html_outputs[0]
+    assert result == (
+        "https://telegra.ph/autoclose",
+        "autoclose",
+        "",
+        1,
+    )

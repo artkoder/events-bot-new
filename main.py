@@ -23818,6 +23818,39 @@ async def build_source_page_content(
             result.append(f"{start_tag}{cleaned}{end_tag}")
         return result or [block]
 
+    def _fix_heading_paragraph_mismatches(raw: str) -> str:
+        tag_re = re.compile(r"<(/?)(h[1-6]|p)([^>]*)>", re.IGNORECASE)
+        result: list[str] = []
+        pos = 0
+        stack: list[str] = []
+        for match in tag_re.finditer(raw):
+            start, end = match.span()
+            result.append(raw[pos:start])
+            closing = match.group(1) == "/"
+            tag = match.group(2).lower()
+            tail = match.group(3) or ""
+            if not closing:
+                stack.append(tag)
+                result.append(f"<{tag}{tail}>")
+            else:
+                if not stack:
+                    pos = end
+                    continue
+                if tag not in stack:
+                    while stack:
+                        result.append(f"</{stack.pop()}>")
+                else:
+                    while stack and stack[-1] != tag:
+                        result.append(f"</{stack.pop()}>")
+                    if stack and stack[-1] == tag:
+                        stack.pop()
+                        result.append(f"</{tag}>")
+            pos = end
+        result.append(raw[pos:])
+        while stack:
+            result.append(f"</{stack.pop()}>")
+        return "".join(result)
+
     def _editor_html_blocks(raw: str) -> list[str]:
         text_value = raw.strip()
         if not text_value:
@@ -23858,6 +23891,7 @@ async def build_source_page_content(
         html_text = sanitize_telegram_html(html_text)
         for k, v in CUSTOM_EMOJI_MAP.items():
             html_text = html_text.replace(k, v)
+        html_text = _fix_heading_paragraph_mismatches(html_text)
         paragraphs = _editor_html_blocks(html_text)
     else:
         clean_text = strip_title(text)
