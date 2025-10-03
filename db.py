@@ -390,6 +390,7 @@ class Database:
                     name TEXT,
                     location TEXT,
                     default_time TEXT,
+                    default_ticket_link TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
                 """
@@ -397,6 +398,8 @@ class Database:
             await conn.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS ux_vk_source_group ON vk_source(group_id)"
             )
+
+            await _add_column(conn, "vk_source", "default_ticket_link TEXT")
 
             await conn.execute(
                 """

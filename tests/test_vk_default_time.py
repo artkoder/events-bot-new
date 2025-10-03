@@ -35,13 +35,14 @@ async def test_vk_list_shows_numbers_and_default_time(tmp_path):
     async with db.raw_conn() as conn:
         for idx in range(1, 13):
             await conn.execute(
-                "INSERT INTO vk_source(group_id, screen_name, name, location, default_time) VALUES(?,?,?,?,?)",
+                "INSERT INTO vk_source(group_id, screen_name, name, location, default_time, default_ticket_link) VALUES(?,?,?,?,?,?)",
                 (
                     idx,
                     f"club{idx}",
                     f"Group {idx}",
                     None,
                     "19:00" if idx == 1 else None,
+                    "https://tickets.example/club1" if idx == 1 else None,
                 ),
             )
         await conn.execute(
@@ -81,6 +82,7 @@ async def test_vk_list_shows_numbers_and_default_time(tmp_path):
     lines = bot.messages[0].text.splitlines()
     assert lines[0].startswith("1.")
     assert "типовое время: 19:00" in lines[0]
+    assert "билеты: https://tickets.example/club1" in lines[0]
     assert "последняя проверка: 2024-05-31 12:34" in lines[0]
     assert lines[1] == " Pending | Skipped | Imported | Rejected "
     assert (
@@ -132,8 +134,8 @@ async def test_vk_default_time_message_updates_db(tmp_path):
     await db.init()
     async with db.raw_conn() as conn:
         await conn.execute(
-            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time) VALUES(?,?,?,?,?)",
-            (1, "club1", "One", None, None),
+            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time, default_ticket_link) VALUES(?,?,?,?,?,?)",
+            (1, "club1", "One", None, None, None),
         )
         await conn.commit()
         cur = await conn.execute("SELECT id FROM vk_source")

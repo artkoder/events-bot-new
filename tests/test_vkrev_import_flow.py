@@ -168,8 +168,8 @@ async def test_vkrev_import_flow_persists_url_and_skips_vk_sync(tmp_path, monkey
 
     async with db.raw_conn() as conn:
         await conn.execute(
-            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time) VALUES(?,?,?,?,?)",
-            (1, "club1", "Test Community", "", None),
+            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time, default_ticket_link) VALUES(?,?,?,?,?,?)",
+            (1, "club1", "Test Community", "", None, None),
         )
         await conn.execute(
             "INSERT INTO vk_inbox(id, group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status) VALUES(?,?,?,?,?,?,?,?,?)",
@@ -259,8 +259,8 @@ async def test_vkrev_import_flow_reports_ocr_usage(tmp_path, monkeypatch):
 
     async with db.raw_conn() as conn:
         await conn.execute(
-            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time) VALUES(?,?,?,?,?)",
-            (1, "club1", "Test Community", "", None),
+            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time, default_ticket_link) VALUES(?,?,?,?,?,?)",
+            (1, "club1", "Test Community", "", None, None),
         )
         await conn.execute(
             "INSERT INTO vk_inbox(id, group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status) VALUES(?,?,?,?,?,?,?,?,?)",
@@ -322,8 +322,8 @@ async def test_vkrev_import_flow_reports_ocr_limit(tmp_path, monkeypatch):
 
     async with db.raw_conn() as conn:
         await conn.execute(
-            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time) VALUES(?,?,?,?,?)",
-            (1, "club1", "Test Community", "", None),
+            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time, default_ticket_link) VALUES(?,?,?,?,?,?)",
+            (1, "club1", "Test Community", "", None, None),
         )
         await conn.execute(
             "INSERT INTO vk_inbox(id, group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status) VALUES(?,?,?,?,?,?,?,?,?)",
@@ -375,8 +375,8 @@ async def test_vkrev_import_flow_passes_festival_hint(tmp_path, monkeypatch):
 
     async with db.raw_conn() as conn:
         await conn.execute(
-            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time) VALUES(?,?,?,?,?)",
-            (1, "club1", "Test Community", "", None),
+            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time, default_ticket_link) VALUES(?,?,?,?,?,?)",
+            (1, "club1", "Test Community", "", None, None),
         )
         await conn.execute(
             "INSERT INTO vk_inbox(id, group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status) VALUES(?,?,?,?,?,?,?,?,?)",
@@ -464,8 +464,8 @@ async def test_vkrev_import_flow_handles_multiple_events(tmp_path, monkeypatch):
 
     async with db.raw_conn() as conn:
         await conn.execute(
-            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time) VALUES(?,?,?,?,?)",
-            (1, "club1", "Test Community", "", None),
+            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time, default_ticket_link) VALUES(?,?,?,?,?,?)",
+            (1, "club1", "Test Community", "", None, None),
         )
         await conn.execute(
             "INSERT INTO vk_inbox(id, group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status) VALUES(?,?,?,?,?,?,?,?,?)",
@@ -540,8 +540,8 @@ async def test_vkrev_import_flow_creates_festival_without_events(tmp_path, monke
 
     async with db.raw_conn() as conn:
         await conn.execute(
-            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time) VALUES(?,?,?,?,?)",
-            (1, "club1", "Test Community", "", None),
+            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time, default_ticket_link) VALUES(?,?,?,?,?,?)",
+            (1, "club1", "Test Community", "", None, None),
         )
         await conn.execute(
             "INSERT INTO vk_inbox(id, group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status) VALUES(?,?,?,?,?,?,?,?,?)",
@@ -627,8 +627,8 @@ async def test_vkrev_import_flow_creates_festival_without_events_from_llm(
 
     async with db.raw_conn() as conn:
         await conn.execute(
-            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time) VALUES(?,?,?,?,?)",
-            (1, "club1", "Test Community", "", None),
+            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time, default_ticket_link) VALUES(?,?,?,?,?,?)",
+            (1, "club1", "Test Community", "", None, None),
         )
         await conn.execute(
             "INSERT INTO vk_inbox(id, group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status) VALUES(?,?,?,?,?,?,?,?,?)",
@@ -707,8 +707,8 @@ async def test_vkrev_import_flow_requires_festival_when_forced(tmp_path, monkeyp
 
     async with db.raw_conn() as conn:
         await conn.execute(
-            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time) VALUES(?,?,?,?,?)",
-            (1, "club1", "Test Community", "", None),
+            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time, default_ticket_link) VALUES(?,?,?,?,?,?)",
+            (1, "club1", "Test Community", "", None, None),
         )
         await conn.execute(
             "INSERT INTO vk_inbox(id, group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status) VALUES(?,?,?,?,?,?,?,?,?)",
@@ -768,8 +768,8 @@ async def test_vkrev_import_flow_creates_festival_and_reports_status(tmp_path, m
 
     async with db.raw_conn() as conn:
         await conn.execute(
-            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time) VALUES(?,?,?,?,?)",
-            (1, "club1", "Test Community", "", None),
+            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time, default_ticket_link) VALUES(?,?,?,?,?,?)",
+            (1, "club1", "Test Community", "", None, None),
         )
         await conn.execute(
             "INSERT INTO vk_inbox(id, group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status) VALUES(?,?,?,?,?,?,?,?,?)",
