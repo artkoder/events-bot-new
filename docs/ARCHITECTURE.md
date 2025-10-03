@@ -18,7 +18,7 @@ and allows deletion or editing through inline buttons. A
 helper `python main.py test_telegraph` checks Telegraph access and creates a
 Telegraph token automatically if needed.
 
-Each event stores optional ticket information (`ticket_price_min`, `ticket_price_max`, `ticket_link`). If the event was forwarded from a channel, the link to that post is saved in `source_post_url`.
+Each event stores optional ticket information (`ticket_price_min`, `ticket_price_max`, `ticket_link`) together with the cached vk.cc short link (`vk_ticket_short_url`) and the associated stats key (`vk_ticket_short_key`). If the event was forwarded from a channel, the link to that post is saved in `source_post_url`.
 Free events are marked with `is_free`. Telegraph pages are stored with both URL and path so they can be updated when the event description changes. If a message includes images (under 5&nbsp;MB each), they are uploaded to Catbox and embedded at the start of the source page.
 Month pages list upcoming events. When their content exceeds about 64&nbsp;kB the bot creates a second page and links to it from the first.
 Events also keep `event_type` (one of eight categories: спектакль, выставка, концерт, ярмарка, лекция, встреча, мастер-класс, кинопоказ) and an `emoji` suggested by the LLM. Multi-day events store `end_date` and appear with "Открытие" or "Закрытие" on the respective days. `/exhibitions` lists active exhibitions.

@@ -71,7 +71,9 @@ Dates are shown as `DD.MM.YYYY` in bot messages. Telegraph pages and other
 public posts use the format "D месяц" (for example, "2 июля").
 
 See `docs/COMMANDS.md` for available bot commands, including `/events` to
-browse upcoming announcements. The command accepts dates like `2025-07-10`,
+browse upcoming announcements. Ticket links in this view are shortened via
+vk.cc, and when a short key exists the bot adds a `Статистика VK: https://vk.com/cc?act=stats&key=…`
+line under the button row. The command accepts dates like `2025-07-10`,
 `10.07.2025` or `2 августа`.
 
 ## Управление фестивалями
@@ -267,7 +269,7 @@ A VK service (server) token helps keep read-only API traffic away from the user 
 - `docs/RECURRING_EVENTS.md` – design notes for repeating events.
 - `CHANGELOG.md` – project history.
 
-Each added event stores the original announcement text in a Telegraph page. The link is shown when the event is added and in the `/events` listing. Events may also contain ticket prices and a purchase link. Use the edit button in `/events` to change any field.
+Each added event stores the original announcement text in a Telegraph page. The link is shown when the event is added and in the `/events` listing. Events may also contain ticket prices, a purchase link, and the cached vk.cc short URL plus `vk_ticket_short_key` used for VK statistics. Use the edit button in `/events` to change any field.
 Links from the announcement text are preserved on the Telegraph page whenever possible so readers can follow the original sources.
 If the original message contains photos (under 5&nbsp;MB), they are uploaded to Catbox and displayed on the Telegraph page.
 The project uses `telegraph>=2.2.0`. `create_page` returns the page `url` and `path`;
