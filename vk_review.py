@@ -187,6 +187,7 @@ async def pick_next(db: Database, operator_id: int, batch_id: str) -> Optional[I
             await conn.commit()
             row = list(row)
             row[8] = batch_id
+            row[10] = ts_hint
             post = InboxPost(*row)
             logging.info(
                 "vk_review resume_locked id=%s operator=%s batch=%s",
@@ -416,7 +417,9 @@ async def pick_next(db: Database, operator_id: int, batch_id: str) -> Optional[I
                     (ts_hint, inbox_id),
                 )
             await conn.commit()
-            selected_row = row
+            selected_row = list(row)
+            if not skip_hint_recalc:
+                selected_row[10] = ts_hint
             final_bucket_name = bucket_name_for_history
             final_weight_config = weight_config_for_log
             if final_bucket_name and history is not None:

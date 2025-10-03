@@ -79,6 +79,71 @@ async def test_pick_next_rejects_outdated(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_pick_next_updates_hint_in_dataclass_for_new_selection(
+    tmp_path, monkeypatch
+):
+    future_hint = int(_time.time()) + 500_000
+    monkeypatch.setattr(vk_review, "extract_event_ts_hint", lambda text: future_hint)
+    monkeypatch.setattr(vk_review.random, "random", lambda: 0.0)
+
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    async with db.raw_conn() as conn:
+        await conn.execute(
+            """
+            INSERT INTO vk_inbox(group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status)
+            VALUES(?,?,?,?,?,?,?,?)
+            """,
+            (1, 77, 100, "future event", "k", 1, None, "pending"),
+        )
+        await conn.commit()
+
+    post = await vk_review.pick_next(db, 10, "batch-new-hint")
+    assert post is not None
+    assert post.event_ts_hint == future_hint
+
+    async with db.raw_conn() as conn:
+        cur = await conn.execute("SELECT event_ts_hint FROM vk_inbox WHERE id=?", (post.id,))
+        assert (await cur.fetchone())[0] == future_hint
+
+
+@pytest.mark.asyncio
+async def test_pick_next_updates_hint_for_resumed_lock(tmp_path, monkeypatch):
+    future_hint = int(_time.time()) + 600_000
+    monkeypatch.setattr(vk_review, "extract_event_ts_hint", lambda text: future_hint)
+
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    operator_id = 42
+    async with db.raw_conn() as conn:
+        await conn.execute(
+            """
+            INSERT INTO vk_inbox(
+                group_id, post_id, date, text, matched_kw, has_date,
+                event_ts_hint, status, locked_by, locked_at, review_batch
+            )
+            VALUES(?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP,?)
+            """,
+            (1, 88, 100, "future event", "k", 1, None, "locked", operator_id, "old-batch"),
+        )
+        await conn.commit()
+
+    post = await vk_review.pick_next(db, operator_id, "batch-resume")
+    assert post is not None
+    assert post.event_ts_hint == future_hint
+    assert post.review_batch == "batch-resume"
+
+    async with db.raw_conn() as conn:
+        cur = await conn.execute(
+            "SELECT event_ts_hint, review_batch FROM vk_inbox WHERE id=?",
+            (post.id,),
+        )
+        hint, batch = await cur.fetchone()
+        assert hint == future_hint
+        assert batch == "batch-resume"
+
+
+@pytest.mark.asyncio
 async def test_pick_next_keeps_ocr_pending(tmp_path):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
