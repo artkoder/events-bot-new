@@ -68,6 +68,24 @@ KEYWORD_PATTERNS = [
 ]
 KEYWORD_RE = re.compile(r"\b#?(?:" + "|".join(KEYWORD_PATTERNS) + r")\b", re.I | re.U)
 
+# Pricing patterns provide an additional hint for event-like posts
+PRICE_AMOUNT_PATTERN = "\\d+(?:[ \\t\\u00a0\\u202f]\\d+)*"
+PRICE_PATTERNS = [
+    r"вход\s+свободн(?:ый|а|о)",
+    r"бесплатн(?:о|ый|ая|ое|ые|ую|ым|ыми|ом|ых)",
+    r"\bплатн(?:о|ый|ая|ое|ые|ую|ым|ыми|ом|ых)\b",
+    r"\bстоимост[ьи]\b",
+    r"\bпо\s+донат(?:у|ам)?\b",
+    r"\bдонат(?:а|у|ом|ы)?\b",
+    r"\bпожертвовани[еяюомьях]*\b",
+    r"\bвзнос\b",
+    r"\bоплат\w*\b",
+    rf"(?:₽|руб(?:\.|лей|ля|ль)?|р\.?)\s*{PRICE_AMOUNT_PATTERN}",
+    rf"\b{PRICE_AMOUNT_PATTERN}\s*(?:₽|руб(?:\.|лей|ля|ль)?|р\.?)",
+    r"\bруб(?:\.|лей|ля|ль|ы)?\b",
+]
+PRICE_RE = re.compile("(?:" + "|".join(PRICE_PATTERNS) + ")", re.I | re.U)
+
 # Canonical keywords for morphological mode
 KEYWORD_LEMMAS = {
     "лекция",
@@ -152,8 +170,11 @@ processing_time_seconds_total: float = 0.0
 
 
 def match_keywords(text: str) -> tuple[bool, list[str]]:
-    """Return True and list of matched keywords if any are found."""
+    """Return True and list of matched keywords or pricing hints."""
+
     text_low = text.lower()
+    price_matches = [m.group(0).strip() for m in PRICE_RE.finditer(text_low)]
+
     if VK_USE_PYMORPHY and MORPH:
         tokens = re.findall(r"\w+", text_low)
         matched: list[str] = []
@@ -161,8 +182,15 @@ def match_keywords(text: str) -> tuple[bool, list[str]]:
             lemma = MORPH.parse(t)[0].normal_form
             if lemma in KEYWORD_LEMMAS and lemma not in matched:
                 matched.append(lemma)
+        for hint in price_matches:
+            if hint and hint not in matched:
+                matched.append(hint)
         return bool(matched), matched
+
     matched = [m.group(0).lstrip("#") for m in KEYWORD_RE.finditer(text_low)]
+    for hint in price_matches:
+        if hint and hint not in matched:
+            matched.append(hint)
     return bool(matched), matched
 
 
