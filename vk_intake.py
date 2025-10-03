@@ -70,6 +70,10 @@ KEYWORD_PATTERNS = [
     r"стих(?:и|отворен\w*)",
     r"песн(?:я|и|ей|е|ю|ями|ях|ью)",
     r"сыгра\w*",
+    r"жив(ой|ого|ым)\s+звук(а|ом|у|и|ов)?",
+    r"хит(ы|ов|ам|ами)?",
+    r"в\s+исполнен(?:ии|ием|ию)",
+    r"групп(а|ы|е|ой|у|ами|ах)",
     r"бронировани(е|я|ю|ем)|билет(ы|а|ов)|регистраци(я|и|ю|ей)|афиш(а|и|е|у)",
     r"ведущ(ий|ая|ее|ие|его|ему|ем|им|их|ими|ую|ей)",
     r"караок[её]",
@@ -119,6 +123,9 @@ KEYWORD_LEMMAS = {
     "поэзия",
     "песня",
     "сыграть",
+    "хит",
+    "исполнение",
+    "группа",
     "бронирование",
     "билет",
     "регистрация",
@@ -198,10 +205,17 @@ def match_keywords(text: str) -> tuple[bool, list[str]]:
     if VK_USE_PYMORPHY and MORPH:
         tokens = re.findall(r"\w+", text_low)
         matched: list[str] = []
+        lemmas: list[str] = []
         for t in tokens:
             lemma = MORPH.parse(t)[0].normal_form
+            lemmas.append(lemma)
             if lemma in KEYWORD_LEMMAS and lemma not in matched:
                 matched.append(lemma)
+        for first, second in zip(lemmas, lemmas[1:]):
+            if first == "живой" and second == "звук":
+                if "живой звук" not in matched:
+                    matched.append("живой звук")
+                break
         for hint in price_matches:
             if hint and hint not in matched:
                 matched.append(hint)
