@@ -34,6 +34,14 @@ def test_match_keywords_cost_variants():
     assert any("₽" in k for k in kws_symbol)
 
 
+def test_match_keywords_fest_and_karaoke():
+    ok, kws = match_keywords("КАШТАН FEST 3 октября 17:00 — жаркое караоке")
+    assert ok
+    normalized = {k.lower() for k in kws}
+    assert "fest" in normalized
+    assert "караоке" in normalized
+
+
 def test_detect_date_and_extract(monkeypatch):
     text = "Мастер-классы 14–15.09, регистрация по ссылке"
     assert detect_date(text)
