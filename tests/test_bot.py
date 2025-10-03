@@ -5734,6 +5734,45 @@ async def test_events_markup_includes_rewrite_status(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_events_markup_includes_vk_stats_button(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    target = date.fromisoformat(FUTURE_DATE)
+    async with db.get_session() as session:
+        plain = Event(
+            title="No stats",
+            description="d",
+            source_text="t",
+            date=target.isoformat(),
+            time="09:00",
+            location_name="Hall",
+        )
+        with_key = Event(
+            title="With stats",
+            description="d",
+            source_text="t",
+            date=target.isoformat(),
+            time="10:00",
+            location_name="Hall",
+            vk_ticket_short_key="abcd",
+        )
+        session.add_all([plain, with_key])
+        await session.commit()
+
+    _, markup = await main.build_events_message(db, target, timezone.utc)
+
+    first_row = markup.inline_keyboard[0]
+    assert len(first_row) == 3
+
+    second_row = markup.inline_keyboard[1]
+    assert len(second_row) == 4
+    stats_button = second_row[-1]
+    assert stats_button.text == "Статистика Вк ссылки"
+    assert stats_button.url == "https://vk.com/cc?act=stats&key=abcd"
+
+
+@pytest.mark.asyncio
 async def test_build_events_message_includes_topic_badges(tmp_path: Path):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
@@ -6865,6 +6904,51 @@ async def test_build_exhibitions_message_filters_past_end(tmp_path: Path, monkey
         for row in markup.inline_keyboard
         for btn in row
     )
+
+
+@pytest.mark.asyncio
+async def test_exhibitions_markup_includes_vk_stats_button(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    start = date.fromisoformat(FUTURE_DATE)
+    end = (start + timedelta(days=1)).isoformat()
+    async with db.get_session() as session:
+        without_key = Event(
+            title="Plain expo",
+            description="d",
+            source_text="s",
+            date=start.isoformat(),
+            end_date=end,
+            time="10:00",
+            location_name="Hall",
+            event_type="выставка",
+        )
+        with_key = Event(
+            title="Stats expo",
+            description="d",
+            source_text="s",
+            date=start.isoformat(),
+            end_date=end,
+            time="11:00",
+            location_name="Hall",
+            event_type="выставка",
+            vk_ticket_short_key="qwer",
+        )
+        session.add_all([without_key, with_key])
+        await session.commit()
+
+    _, markup = await main.build_exhibitions_message(db, timezone.utc)
+    assert markup is not None
+
+    first_row = markup.inline_keyboard[0]
+    assert len(first_row) == 2
+
+    second_row = markup.inline_keyboard[1]
+    assert len(second_row) == 3
+    stats_button = second_row[-1]
+    assert stats_button.text == "Статистика Вк ссылки"
+    assert stats_button.url == "https://vk.com/cc?act=stats&key=qwer"
 
 
 @pytest.mark.asyncio
