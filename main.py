@@ -224,7 +224,7 @@ from sections import (
     dedup_same_date,
 )
 from db import Database
-from shortlinks import ensure_vk_short_ticket_link
+from shortlinks import ensure_vk_short_ticket_link, format_vk_short_url
 from scheduling import startup as scheduler_startup, cleanup as scheduler_cleanup
 from sqlalchemy import select, update, delete, text, func, or_, and_, case
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12953,7 +12953,12 @@ def format_event_vk(
         lines.append("\u2705 Пушкинская карта")
 
     show_ticket_link = not vk_link
-    ticket_link_display = e.vk_ticket_short_url or e.ticket_link
+    formatted_short_ticket = (
+        format_vk_short_url(e.vk_ticket_short_url)
+        if e.vk_ticket_short_url
+        else None
+    )
+    ticket_link_display = formatted_short_ticket or e.ticket_link
     if e.is_free:
         lines.append("🟡 Бесплатно")
         if e.ticket_link:
@@ -21898,7 +21903,11 @@ async def _vkrev_build_shortpost(
     lines.append(date_line)
     if type_line:
         lines.append(type_line)
-    ticket_url_for_message = ev.ticket_link
+    ticket_url_for_message = (
+        format_vk_short_url(ev.vk_ticket_short_url)
+        if ev.vk_ticket_short_url
+        else ev.ticket_link
+    )
     if ev.ticket_link and not for_preview:
         short_result = await ensure_vk_short_ticket_link(
             ev,
@@ -21908,7 +21917,7 @@ async def _vkrev_build_shortpost(
             vk_api_fn=_vk_api,
         )
         if short_result:
-            ticket_url_for_message = short_result[0]
+            ticket_url_for_message = format_vk_short_url(short_result[0])
     if ev.ticket_link:
         if getattr(ev, "is_free", False):
             lines.append(
@@ -22070,7 +22079,9 @@ async def _vkrev_publish_shortpost(
                     vk_api_fn=_vk_api,
                 )
                 if short_ticket:
-                    message = message.replace(ev.ticket_link, short_ticket[0])
+                    message = message.replace(
+                        ev.ticket_link, format_vk_short_url(short_ticket[0])
+                    )
         else:
             message, link_attachment = await _vkrev_build_shortpost(
                 ev,
@@ -22090,7 +22101,9 @@ async def _vkrev_publish_shortpost(
                 vk_api_fn=_vk_api,
             )
             if short_ticket:
-                message = message.replace(ev.ticket_link, short_ticket[0])
+                message = message.replace(
+                    ev.ticket_link, format_vk_short_url(short_ticket[0])
+                )
 
     photo_attachments: list[str] = []
     try:

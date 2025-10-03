@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Optional, Protocol
 from urllib.parse import urlparse
 
@@ -183,3 +184,9 @@ async def ensure_vk_short_ticket_link(
         action="saved",
     )
     return short_url, key
+
+
+def format_vk_short_url(short_url: str) -> str:
+    """Return the VK short URL without the scheme prefix."""
+
+    return re.sub(r"^https?://", "", short_url, flags=re.IGNORECASE)

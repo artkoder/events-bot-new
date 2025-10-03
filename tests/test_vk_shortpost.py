@@ -667,7 +667,7 @@ async def test_shortpost_free_event_ticket_line(monkeypatch):
     )
 
     msg, _ = await main._vkrev_build_shortpost(ev, "https://vk.com/wall-1_1")
-    assert "🆓 Бесплатно, по регистрации https://vk.cc/short" in msg
+    assert "🆓 Бесплатно, по регистрации vk.cc/short" in msg
     assert "🎟 Билеты:" not in msg
     assert ev.vk_ticket_short_url == "https://vk.cc/short"
     assert ev.vk_ticket_short_key == "short"
@@ -777,7 +777,7 @@ async def test_shortpost_reuses_existing_short_link(monkeypatch):
     )
 
     msg, _ = await main._vkrev_build_shortpost(ev, "https://vk.com/wall-1_1")
-    assert "https://vk.cc/existing" in msg
+    assert "vk.cc/existing" in msg
 async def test_shortpost_midnight_time_hidden(monkeypatch):
     async def fake_build_text(event, src, max_sent, **kwargs):
         return "short summary"
