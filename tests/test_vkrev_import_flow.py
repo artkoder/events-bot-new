@@ -169,7 +169,7 @@ async def test_vkrev_import_flow_persists_url_and_skips_vk_sync(tmp_path, monkey
     async with db.raw_conn() as conn:
         await conn.execute(
             "INSERT INTO vk_source(group_id, screen_name, name, location, default_time, default_ticket_link) VALUES(?,?,?,?,?,?)",
-            (1, "club1", "Test Community", "", None, None),
+            (1, "club1", "Test Community", "", None, "https://fallback.local"),
         )
         await conn.execute(
             "INSERT INTO vk_inbox(id, group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status) VALUES(?,?,?,?,?,?,?,?,?)",
@@ -189,6 +189,7 @@ async def test_vkrev_import_flow_persists_url_and_skips_vk_sync(tmp_path, monkey
         source_name=None,
         location_hint=None,
         default_time=None,
+        default_ticket_link=None,
         operator_extra=None,
         festival_names=None,
         festival_alias_pairs=None,
@@ -198,6 +199,7 @@ async def test_vkrev_import_flow_persists_url_and_skips_vk_sync(tmp_path, monkey
         captured["festival_names"] = festival_names
         captured["festival_alias_pairs"] = festival_alias_pairs
         captured["festival_hint"] = festival_hint
+        captured["default_ticket_link"] = default_ticket_link
         return [draft]
 
     captured = {}
@@ -231,6 +233,7 @@ async def test_vkrev_import_flow_persists_url_and_skips_vk_sync(tmp_path, monkey
     assert captured["festival_names"] == ["Fest One"]
     assert captured["festival_alias_pairs"] is None
     assert captured["festival_hint"] is False
+    assert captured["default_ticket_link"] == "https://fallback.local"
     assert JobTask.vk_sync not in tasks
     message_lines = bot.messages[-1].text.splitlines()
     assert message_lines[0] == "Импортировано"
@@ -289,6 +292,7 @@ async def test_vkrev_import_flow_reports_ocr_usage(tmp_path, monkeypatch):
         source_name=None,
         location_hint=None,
         default_time=None,
+        default_ticket_link=None,
         operator_extra=None,
         festival_names=None,
         festival_alias_pairs=None,

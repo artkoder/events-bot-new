@@ -463,6 +463,7 @@ async def build_event_drafts_from_vk(
     source_name: str | None = None,
     location_hint: str | None = None,
     default_time: str | None = None,
+    default_ticket_link: str | None = None,
     operator_extra: str | None = None,
     festival_names: list[str] | None = None,
     festival_alias_pairs: Sequence[tuple[str, int]] | None = None,
@@ -487,11 +488,25 @@ async def build_event_drafts_from_vk(
     """
     parse_event_via_4o = require_main_attr("parse_event_via_4o")
 
+    fallback_ticket_link = (
+        default_ticket_link.strip()
+        if isinstance(default_ticket_link, str)
+        else default_ticket_link
+    )
+    if isinstance(fallback_ticket_link, str) and not fallback_ticket_link:
+        fallback_ticket_link = None
+
     llm_text = text
     if operator_extra:
         llm_text = f"{llm_text}\n{operator_extra}"
     if default_time:
         llm_text = f"{llm_text}\nЕсли время не указано, предположи начало в {default_time}."
+    if fallback_ticket_link:
+        llm_text = (
+            f"{llm_text}\n"
+            f"Если в посте нет ссылки на билеты или регистрацию, используй {fallback_ticket_link} как ссылку по умолчанию. "
+            "Не заменяй ссылки, которые уже указаны."
+        )
     if festival_hint:
         llm_text = (
             f"{llm_text}\n"
@@ -580,7 +595,14 @@ async def build_event_drafts_from_vk(
     for data in parsed_events:
         ticket_price_min = clean_int(data.get("ticket_price_min"))
         ticket_price_max = clean_int(data.get("ticket_price_max"))
-        links = [data["ticket_link"]] if data.get("ticket_link") else None
+        ticket_link = clean_str(data.get("ticket_link"))
+        links: list[str] | None
+        if ticket_link:
+            links = [ticket_link]
+        elif fallback_ticket_link:
+            links = [fallback_ticket_link]
+        else:
+            links = None
         drafts.append(
             EventDraft(
                 title=data.get("title", ""),
@@ -616,6 +638,7 @@ async def build_event_payload_from_vk(
     source_name: str | None = None,
     location_hint: str | None = None,
     default_time: str | None = None,
+    default_ticket_link: str | None = None,
     operator_extra: str | None = None,
     festival_names: list[str] | None = None,
     poster_media: Sequence[PosterMedia] | None = None,
@@ -627,6 +650,7 @@ async def build_event_payload_from_vk(
         source_name=source_name,
         location_hint=location_hint,
         default_time=default_time,
+        default_ticket_link=default_ticket_link,
         operator_extra=operator_extra,
         festival_names=festival_names,
         poster_media=poster_media,
@@ -645,6 +669,7 @@ async def build_event_drafts(
     source_name: str | None = None,
     location_hint: str | None = None,
     default_time: str | None = None,
+    default_ticket_link: str | None = None,
     operator_extra: str | None = None,
     festival_names: list[str] | None = None,
     festival_alias_pairs: list[tuple[str, int]] | None = None,
@@ -711,6 +736,7 @@ async def build_event_drafts(
         source_name=source_name,
         location_hint=location_hint,
         default_time=default_time,
+        default_ticket_link=default_ticket_link,
         operator_extra=operator_extra,
         festival_names=festival_names,
         festival_alias_pairs=festival_alias_pairs,
@@ -731,6 +757,7 @@ async def build_event_draft(
     source_name: str | None = None,
     location_hint: str | None = None,
     default_time: str | None = None,
+    default_ticket_link: str | None = None,
     operator_extra: str | None = None,
     festival_names: list[str] | None = None,
     festival_alias_pairs: list[tuple[str, int]] | None = None,
@@ -743,6 +770,7 @@ async def build_event_draft(
         source_name=source_name,
         location_hint=location_hint,
         default_time=default_time,
+        default_ticket_link=default_ticket_link,
         operator_extra=operator_extra,
         festival_names=festival_names,
         festival_alias_pairs=festival_alias_pairs,
