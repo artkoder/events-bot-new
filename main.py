@@ -23820,9 +23820,15 @@ async def build_source_page_content(
 
     def _fix_heading_paragraph_mismatches(raw: str) -> str:
         tag_re = re.compile(r"<(/?)(h[1-6]|p)([^>]*)>", re.IGNORECASE)
+        block_tags = {"p", "h1", "h2", "h3", "h4", "h5", "h6"}
         result: list[str] = []
         pos = 0
         stack: list[str] = []
+
+        def _flush_stack() -> None:
+            while stack:
+                result.append(f"</{stack.pop()}>")
+
         for match in tag_re.finditer(raw):
             start, end = match.span()
             result.append(raw[pos:start])
@@ -23830,6 +23836,8 @@ async def build_source_page_content(
             tag = match.group(2).lower()
             tail = match.group(3) or ""
             if not closing:
+                if tag in block_tags and stack:
+                    _flush_stack()
                 stack.append(tag)
                 result.append(f"<{tag}{tail}>")
             else:
@@ -23837,8 +23845,7 @@ async def build_source_page_content(
                     pos = end
                     continue
                 if tag not in stack:
-                    while stack:
-                        result.append(f"</{stack.pop()}>")
+                    _flush_stack()
                 else:
                     while stack and stack[-1] != tag:
                         result.append(f"</{stack.pop()}>")
