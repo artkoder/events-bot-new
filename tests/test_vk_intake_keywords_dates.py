@@ -105,6 +105,16 @@ def test_match_keywords_poetry_songs_play():
     assert any(k.startswith("песн") for k in normalized)
 
 
+def test_match_keywords_piano_works_composers():
+    text = "фортепианные дуэты, в программе произведения композиторов 24 августа"
+    ok, kws = match_keywords(text)
+    assert ok
+    normalized = {k.lower() for k in kws}
+    assert any(k.startswith("фортепиан") for k in normalized)
+    assert any("в программе" in k and "произведен" in k for k in normalized)
+    assert any(k.startswith("композитор") for k in normalized)
+
+
 def test_detect_date_and_extract(monkeypatch):
     text = "Мастер-классы 14–15.09, регистрация по ссылке"
     assert detect_date(text)
