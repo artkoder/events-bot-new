@@ -224,7 +224,11 @@ from sections import (
     dedup_same_date,
 )
 from db import Database
-from shortlinks import ensure_vk_short_ticket_link, format_vk_short_url
+from shortlinks import (
+    ensure_vk_short_ics_link,
+    ensure_vk_short_ticket_link,
+    format_vk_short_url,
+)
 from scheduling import startup as scheduler_startup, cleanup as scheduler_cleanup
 from sqlalchemy import select, update, delete, text, func, or_, and_, case
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16253,7 +16257,7 @@ def build_vk_source_message(
     text: str,
     festival: Festival | None = None,
     *,
-    ics_url: str | None = None,
+    calendar_url: str | None = None,
 ) -> str:
     """Build detailed VK post for an event including original source text."""
 
@@ -16261,8 +16265,8 @@ def build_vk_source_message(
     lines = build_vk_source_header(event, festival)
     lines.extend(text.strip().splitlines())
     lines.append(VK_BLANK_LINE)
-    if ics_url:
-        lines.append(f"Добавить в календарь {ics_url}")
+    if calendar_url:
+        lines.append(f"Добавить в календарь {calendar_url}")
     lines.append(VK_SOURCE_FOOTER)
     return "\n".join(lines)
 
@@ -16310,6 +16314,21 @@ async def sync_vk_source_post(
                 attachments = ids
         else:
             logging.info("VK photo upload skipped: no group token")
+
+    calendar_line_value: str | None = None
+    calendar_source_url = ics_url or event.ics_url
+    if calendar_source_url:
+        event.ics_url = calendar_source_url
+        short_ics = await ensure_vk_short_ics_link(
+            event,
+            db,
+            bot=bot,
+            vk_api_fn=_vk_api,
+        )
+        if short_ics:
+            calendar_line_value = format_vk_short_url(short_ics[0])
+        else:
+            calendar_line_value = calendar_source_url
 
     if event.source_vk_post_url:
         await ensure_vk_short_ticket_link(
@@ -16376,8 +16395,8 @@ async def sync_vk_source_post(
             new_lines.append(VK_BLANK_LINE)
             if idx < len(texts) - 1:
                 new_lines.append(CONTENT_SEPARATOR)
-        if ics_url:
-            new_lines.append(f"Добавить в календарь {ics_url}")
+        if calendar_line_value:
+            new_lines.append(f"Добавить в календарь {calendar_line_value}")
         new_lines.append(VK_SOURCE_FOOTER)
         new_message = "\n".join(new_lines)
         await edit_vk_post(
@@ -16394,7 +16413,7 @@ async def sync_vk_source_post(
             event, db, vk_api_fn=_vk_api, bot=bot
         )
         message = build_vk_source_message(
-            event, text, festival=festival, ics_url=ics_url
+            event, text, festival=festival, calendar_url=calendar_line_value
         )
         url = await post_to_vk(
             VK_AFISHA_GROUP_ID,

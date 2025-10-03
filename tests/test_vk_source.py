@@ -41,9 +41,12 @@ async def test_sync_vk_source_post_includes_calendar_link(monkeypatch):
 
     async def fake_vk_api(method, params, db=None, bot=None, token=None):
         calls.append((method, params))
+        if method == "utils.getShortLink":
+            return {"response": {"short_url": "https://vk.cc/abcd", "key": "abcd"}}
         return {"response": {}}
 
     monkeypatch.setattr(main, "_vk_api", fake_vk_api)
+    monkeypatch.setattr(main, "vk_api", fake_vk_api)
 
     url = await main.sync_vk_source_post(
         event,
@@ -58,8 +61,49 @@ async def test_sync_vk_source_post_includes_calendar_link(monkeypatch):
     lines = captured_message["text"].splitlines()
     assert lines[0] == "Title"
     assert lines[1] == main.VK_BLANK_LINE
-    assert "Добавить в календарь http://ics" in captured_message["text"]
+    assert "Добавить в календарь vk.cc/abcd" in captured_message["text"]
     assert captured_message["text"].endswith(main.VK_SOURCE_FOOTER)
+
+
+@pytest.mark.asyncio
+async def test_sync_vk_source_post_uses_original_calendar_link_on_short_fail(
+    monkeypatch,
+):
+    main.VK_AFISHA_GROUP_ID = "1"
+
+    event = main.Event(
+        title="Title",
+        description="",
+        date="2024-01-01",
+        time="00:00",
+        location_name="Place",
+    )
+
+    captured_message: dict[str, str] = {}
+
+    async def fake_post_to_vk(group_id, message, db=None, bot=None, attachments=None):
+        captured_message["text"] = message
+        return "https://vk.com/wall-1_2"
+
+    async def fake_vk_api(method, params, db=None, bot=None, token=None):
+        if method == "utils.getShortLink":
+            raise RuntimeError("fail")
+        return {"response": {}}
+
+    monkeypatch.setattr(main, "post_to_vk", fake_post_to_vk)
+    monkeypatch.setattr(main, "_vk_api", fake_vk_api)
+    monkeypatch.setattr(main, "vk_api", fake_vk_api)
+
+    url = await main.sync_vk_source_post(
+        event,
+        "Title\nDescription",
+        None,
+        None,
+        ics_url="http://ics",
+    )
+
+    assert url == "https://vk.com/wall-1_2"
+    assert "Добавить в календарь http://ics" in captured_message["text"]
 
 
 @pytest.mark.asyncio
@@ -84,10 +128,10 @@ async def test_sync_vk_source_post_attaches_photos(monkeypatch):
         uploaded.append((url, token))
         return f"ph{url[-1]}"
 
-    attachments: dict[str, list[str] | None] = {}
+    posted: dict[str, list[str] | None] = {}
 
     async def fake_post(group_id, message, db=None, bot=None, attachments=None):
-        attachments["vals"] = attachments
+        posted["vals"] = attachments
         return "https://vk.com/wall-1_2"
 
     monkeypatch.setattr(main, "upload_vk_photo", fake_upload)
@@ -97,7 +141,7 @@ async def test_sync_vk_source_post_attaches_photos(monkeypatch):
 
     assert url == "https://vk.com/wall-1_2"
     assert uploaded == [("http://img1", "ga")]
-    assert attachments["vals"] == ["ph1"]
+    assert posted["vals"] == ["ph1"]
 
 
 @pytest.mark.asyncio
@@ -238,15 +282,16 @@ async def test_sync_vk_source_post_appends_only_text(monkeypatch):
 
     existing = main.build_vk_source_message(event, "old text")
 
-    async def fake_vk_api(method, params, db=None, bot=None, token=None):
+    async def fake_vk_api(method, *_, **__):
         return {"response": [{"text": existing}]}
 
     edited = {}
 
-    async def fake_edit(url, message, db=None, bot=None):
+    async def fake_edit(url, message, db=None, bot=None, attachments=None):
         edited["text"] = message
 
     monkeypatch.setattr(main, "_vk_api", fake_vk_api)
+    monkeypatch.setattr(main, "vk_api", fake_vk_api)
     monkeypatch.setattr(main, "edit_vk_post", fake_edit)
 
     event.title = "New"
@@ -281,15 +326,16 @@ async def test_sync_vk_source_post_updates_without_append(monkeypatch):
 
     existing = main.build_vk_source_message(event, "old text")
 
-    async def fake_vk_api(method, params, db=None, bot=None, token=None):
+    async def fake_vk_api(method, *_, **__):
         return {"response": [{"text": existing}]}
 
     edited = {}
 
-    async def fake_edit(url, message, db=None, bot=None):
+    async def fake_edit(url, message, db=None, bot=None, attachments=None):
         edited["text"] = message
 
     monkeypatch.setattr(main, "_vk_api", fake_vk_api)
+    monkeypatch.setattr(main, "vk_api", fake_vk_api)
     monkeypatch.setattr(main, "edit_vk_post", fake_edit)
 
     event.title = "Updated Title"
