@@ -68,6 +68,8 @@ async def test_compose_meetups_intro_prompt_mentions_anti_cliche(monkeypatch):
     for wording in digests.MEETUPS_INTRO_FORBIDDEN_WORDINGS:
         assert wording in prompt
 
+    assert "Первая фраза должна начинаться с интригующего хука" in prompt
+
 
 def test_normalize_topics_distinguishes_urbanism_and_region():
     topics = digests.normalize_topics(["урбанистика", "калининград", "URBANISM"])
