@@ -22372,8 +22372,11 @@ async def _vkrev_build_shortpost(
                     type_line_used_tag = type_line
 
     tags = await build_short_vk_tags(ev, summary, used_type_hashtag=type_line_used_tag)
+    title_line = ev.title.upper() if ev.title else ""
+    if getattr(ev, "is_free", False):
+        title_line = f"🆓 {title_line}".strip()
     lines = [
-        ev.title.upper(),
+        title_line,
         "",
     ]
     lines.append(date_line)

@@ -667,6 +667,7 @@ async def test_shortpost_free_event_ticket_line(monkeypatch):
     )
 
     msg, _ = await main._vkrev_build_shortpost(ev, "https://vk.com/wall-1_1")
+    assert msg.splitlines()[0] == "🆓 T"
     assert "🆓 Бесплатно, по регистрации vk.cc/short" in msg
     assert "🎟 Билеты:" not in msg
     assert ev.vk_ticket_short_url == "https://vk.cc/short"
@@ -704,6 +705,7 @@ async def test_shortpost_short_link_fallback_on_error(monkeypatch):
     )
 
     msg, _ = await main._vkrev_build_shortpost(ev, "https://vk.com/wall-1_1")
+    assert msg.splitlines()[0] == "T"
     assert "https://tickets" in msg
     assert ev.vk_ticket_short_url is None
 
