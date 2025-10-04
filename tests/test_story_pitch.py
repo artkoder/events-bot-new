@@ -3,6 +3,13 @@ import pytest
 import main
 
 
+def test_four_o_pitch_prompt_contains_new_guidance():
+    prompt = main.FOUR_O_PITCH_PROMPT
+    assert "любопыт" in prompt
+    assert "гипербол" in prompt
+    assert "эмодзи" in prompt
+
+
 @pytest.mark.asyncio
 async def test_compose_story_pitch_via_4o_fallback_on_error(monkeypatch):
     async def fake_ask(*_args, **_kwargs):
