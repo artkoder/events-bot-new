@@ -46,7 +46,7 @@ async def test_classify_event_topics_filters_and_limits(monkeypatch):
         return json.dumps(
             {
                 "topics": [
-                    "MUSIC",
+                    "HISTORICAL_IMMERSION",
                     "неизвестная",
                     "art",
                     "CINEMA",
@@ -69,7 +69,7 @@ async def test_classify_event_topics_filters_and_limits(monkeypatch):
 
     result = await main.classify_event_topics(event)
 
-    assert result == ["CONCERTS", "EXHIBITIONS", "MOVIES"]
+    assert result == ["HISTORICAL_IMMERSION", "EXHIBITIONS", "MOVIES"]
     assert "#музыка" in captured["text"]
     kwargs = captured["kwargs"]
     assert kwargs["model"] == "gpt-4o-mini"
@@ -78,6 +78,7 @@ async def test_classify_event_topics_filters_and_limits(monkeypatch):
         "enum"
     ]
     assert enum_values == list(main.TOPIC_LABELS.keys())
+    assert "HISTORICAL_IMMERSION" in enum_values
 
 
 @pytest.mark.asyncio
@@ -116,6 +117,8 @@ def test_normalize_topic_identifier_legacy_aliases():
         "Драма": "THEATRE_CLASSIC",
         "современный театр": "THEATRE_MODERN",
         "experimental theatre": "THEATRE_MODERN",
+        "средневековье": "HISTORICAL_IMMERSION",
+        "исторические костюмы": "HISTORICAL_IMMERSION",
     }
     for raw, expected in cases.items():
         assert models.normalize_topic_identifier(raw) == expected
