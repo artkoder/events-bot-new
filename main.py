@@ -23987,18 +23987,29 @@ async def build_source_page_content(
 
         paragraphs = [anchor_re.sub(_replace_anchor, para) for para in paragraphs]
     if paragraphs:
-        body_blocks: list[str] = [paragraphs[0]]
         if image_mode == "inline" and tail:
-            for para in paragraphs[1:]:
-                if inline_used < len(tail):
-                    body_blocks.append(f'<img src="{html.escape(tail[inline_used])}"/>')
-                    inline_used += 1
+            paragraph_count = len(paragraphs)
+            image_count = len(tail)
+            base_count = min(image_count, paragraph_count)
+            positions: list[int] = []
+            if base_count:
+                step = paragraph_count / (base_count + 1)
+                positions = [math.ceil((idx + 1) * step) for idx in range(base_count)]
+            body_blocks: list[str] = []
+            base_index = 0
+            for idx, para in enumerate(paragraphs, start=1):
                 body_blocks.append(para)
+                while base_index < base_count and positions[base_index] == idx:
+                    body_blocks.append(
+                        f'<img src="{html.escape(tail[base_index])}"/>'
+                    )
+                    base_index += 1
+            inline_used = base_index
             for extra_url in tail[inline_used:]:
                 body_blocks.append(f'<img src="{html.escape(extra_url)}"/>')
                 inline_used += 1
         else:
-            body_blocks.extend(paragraphs[1:])
+            body_blocks = list(paragraphs)
         html_content += "".join(body_blocks)
     elif image_mode == "inline" and tail:
         for extra_url in tail:

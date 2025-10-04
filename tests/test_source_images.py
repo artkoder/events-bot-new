@@ -132,9 +132,10 @@ async def test_build_source_page_content_cleans_tg_tags():
 
 @pytest.mark.asyncio
 async def test_build_source_page_content_inline_images():
+    text = "\n\n".join(f"paragraph {idx}" for idx in range(1, 7))
     html, _, uploaded = await main.build_source_page_content(
         "T",
-        "line1\nline2\nline3",
+        text,
         None,
         None,
         None,
@@ -144,18 +145,23 @@ async def test_build_source_page_content_inline_images():
             "http://cat/0.jpg",
             "http://cat/1.jpg",
             "http://cat/2.jpg",
+            "http://cat/3.jpg",
+            "http://cat/4.jpg",
         ],
         image_mode="inline",
     )
-    assert uploaded == 3
-    assert html.count('<img src="http://cat/') == 3
-    first_paragraph = html.index("<p>line1</p>")
-    second_paragraph = html.index("<p>line2</p>")
-    third_paragraph = html.index("<p>line3</p>")
-    tail1 = html.index('<img src="http://cat/1.jpg"/>')
-    tail2 = html.index('<img src="http://cat/2.jpg"/>')
-    assert first_paragraph < tail1 < second_paragraph
-    assert second_paragraph < tail2 < third_paragraph
+    assert uploaded == 5
+    assert html.count('<img src="http://cat/') == 5
+    paragraph_positions = [
+        html.index(f"<p>paragraph {idx}</p>") for idx in range(1, 7)
+    ]
+    image_positions = [
+        html.index(f'<img src="http://cat/{idx}.jpg"/>') for idx in range(1, 5)
+    ]
+    assert paragraph_positions[1] < image_positions[0] < paragraph_positions[2]
+    assert paragraph_positions[2] < image_positions[1] < paragraph_positions[3]
+    assert paragraph_positions[3] < image_positions[2] < paragraph_positions[4]
+    assert paragraph_positions[4] < image_positions[3] < paragraph_positions[5]
 
 
 @pytest.mark.asyncio
