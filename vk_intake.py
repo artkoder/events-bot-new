@@ -310,7 +310,23 @@ def extract_event_ts_hint(
     text_low = text.lower()
 
     day = month = year = None
-    m = NUM_DATE_RE.search(text_low)
+    m = None
+    for candidate in NUM_DATE_RE.finditer(text_low):
+        start = candidate.start()
+        prev_idx = start - 1
+        while prev_idx >= 0 and text_low[prev_idx].isspace():
+            prev_idx -= 1
+        if prev_idx >= 0 and text_low[prev_idx] in "./-":
+            digit_count = 0
+            check_idx = prev_idx - 1
+            while check_idx >= 0 and text_low[check_idx].isdigit():
+                digit_count += 1
+                check_idx -= 1
+            if digit_count >= 3:
+                continue
+        m = candidate
+        break
+
     if m:
         day, month = int(m.group(1)), int(m.group(2))
         if m.group(3):

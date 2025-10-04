@@ -191,6 +191,22 @@ def test_extract_event_ts_hint_explicit_year_past(monkeypatch):
     assert extract_event_ts_hint(text) is None
 
 
+def test_extract_event_ts_hint_ignores_phone_number_segments(monkeypatch):
+    class FixedDatetime(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            tzinfo = tz or timezone.utc
+            return real_datetime(2024, 4, 1, tzinfo=tzinfo)
+
+    monkeypatch.setattr("vk_intake.datetime", FixedDatetime)
+
+    text = "Встречаемся в пт, звоните 474-30-04"
+    ts = extract_event_ts_hint(text)
+    assert ts is not None
+    dt = real_datetime.fromtimestamp(ts, tz=main.LOCAL_TZ)
+    assert (dt.year, dt.month, dt.day) == (2024, 4, 5)
+
+
 @pytest.mark.asyncio
 async def test_build_drafts_library_defaults_to_free(monkeypatch):
     async def fake_parse(*args, **kwargs):

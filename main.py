@@ -21631,6 +21631,12 @@ VK_LOCATION_TAG_OVERRIDES: dict[str, str] = {
 }
 
 
+VK_TOPIC_HASHTAGS: Mapping[str, str] = {
+    "FASHION": "#мода",
+    "KIDS_SCHOOL": "#дети",
+}
+
+
 async def build_short_vk_tags(
     event: Event, summary: str, used_type_hashtag: str | None = None
 ) -> list[str]:
@@ -21708,6 +21714,27 @@ async def build_short_vk_tags(
                         and hyphen_tag.lower() == used_type_hashtag_normalized
                     ):
                         add_tag(hyphen_tag)
+    topic_values = getattr(event, "topics", None) or []
+    for topic in topic_values:
+        if len(tags) >= 7:
+            break
+        normalized_topic = (topic or "").strip().upper()
+        if not normalized_topic:
+            continue
+        topic_tag = VK_TOPIC_HASHTAGS.get(normalized_topic)
+        if not topic_tag:
+            continue
+        topic_tag_clean = topic_tag.strip()
+        if not topic_tag_clean:
+            continue
+        if not topic_tag_clean.startswith("#"):
+            topic_tag_clean = "#" + topic_tag_clean.lstrip("#")
+        if (
+            used_type_hashtag_normalized
+            and topic_tag_clean.lower() == used_type_hashtag_normalized
+        ):
+            continue
+        add_tag(topic_tag_clean)
     needed = 7 - len(tags)
     if needed > 0:
         prompt = (
