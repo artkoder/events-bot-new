@@ -64,6 +64,8 @@ async def test_handle_vk_queue_shows_counts_and_button(tmp_path):
     await main.handle_vk_queue(msg, db, bot)
     assert bot.messages, "no message sent"
     sent = bot.messages[0]
+    assert sent.text.splitlines()[0].startswith("Обновление базы: ")
+    assert "05:15, 09:15, 13:15, 17:15, 21:15, 22:45" in sent.text
     assert "pending: 2" in sent.text
     assert "locked: 1" in sent.text
     assert sent.reply_markup.keyboard[0][0].text == main.VK_BTN_CHECK_EVENTS

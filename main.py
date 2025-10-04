@@ -21390,6 +21390,16 @@ async def handle_vk_queue(message: types.Message, db: Database, bot: Bot) -> Non
         f"imported: {counts.get('imported', 0)}",
         f"rejected: {counts.get('rejected', 0)}",
     ]
+    schedule_raw = os.getenv(
+        "VK_CRAWL_TIMES_LOCAL", "05:15,09:15,13:15,17:15,21:15,22:45"
+    )
+    schedule_times = [part.strip() for part in schedule_raw.split(",") if part.strip()]
+    schedule_line = ", ".join(schedule_times)
+    schedule_tz = os.getenv("VK_CRAWL_TZ")
+    if schedule_tz:
+        schedule_line = f"{schedule_line} ({schedule_tz})"
+    if schedule_line:
+        lines.insert(0, f"Обновление базы: {schedule_line}")
     markup = types.ReplyKeyboardMarkup(
         keyboard=[[types.KeyboardButton(text=VK_BTN_CHECK_EVENTS)]],
         resize_keyboard=True,
