@@ -11,6 +11,11 @@ async def test_month_page_updated_after_telegraph_build(tmp_path, monkeypatch):
 
     monkeypatch.setattr(m, "get_telegraph_token", lambda: "t")
 
+    async def fake_location(parts):
+        return " ".join(part.strip() for part in parts if part)
+
+    monkeypatch.setattr(m, "build_short_vk_location", fake_location)
+
     counter = {"i": 0}
 
     async def fake_create_page(tg, *args, **kwargs):

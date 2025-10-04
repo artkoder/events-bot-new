@@ -20,6 +20,7 @@ async def test_create_source_page_editor_html_fallback(monkeypatch):
         ics_url=None,
         db=None,
         *,
+        event_summary=None,
         display_link=True,
         catbox_urls=None,
         image_mode="tail",

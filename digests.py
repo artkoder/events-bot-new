@@ -706,6 +706,52 @@ def _detect_meetup_formats(event: Event, normalized: dict[str, str]) -> List[str
     return formats
 
 
+_MEETUPS_TONE_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "интрига": ("секрет", "закулисье", "впервые"),
+    "простота": ("открытая встреча", "без подготовки"),
+    "любопытство": ("узнаете", "редкие факты"),
+}
+
+_MEETUPS_TONE_PRIORITY: dict[str, int] = {
+    "любопытство": 0,
+    "интрига": 1,
+    "простота": 2,
+}
+
+_DEFAULT_MEETUPS_TONE_HINT = "простота+любопытство"
+
+
+def _update_meetups_tone(counter: Counter[str], text: str) -> None:
+    """Increment tone counters based on keywords found in ``text``."""
+
+    haystack = text.casefold()
+    for tone, keywords in _MEETUPS_TONE_KEYWORDS.items():
+        if any(keyword in haystack for keyword in keywords):
+            counter[tone] += 1
+
+
+def _select_meetups_tone_hint(counter: Counter[str]) -> str:
+    """Return combined tone hint from accumulated keyword ``counter``."""
+
+    if not counter:
+        return _DEFAULT_MEETUPS_TONE_HINT
+
+    sorted_items = sorted(
+        counter.items(),
+        key=lambda item: (
+            -item[1],
+            _MEETUPS_TONE_PRIORITY.get(item[0], len(_MEETUPS_TONE_PRIORITY)),
+        ),
+    )
+
+    top_tones = [tone for tone, count in sorted_items if count > 0][:2]
+
+    if not top_tones:
+        return _DEFAULT_MEETUPS_TONE_HINT
+
+    return "+".join(top_tones)
+
+
 async def compose_masterclasses_intro_via_4o(
     n: int, horizon_days: int, masterclasses: List[dict[str, str]]
 ) -> str:
@@ -882,7 +928,10 @@ async def compose_psychology_intro_via_4o(
 
 
 async def compose_meetups_intro_via_4o(
-    n: int, horizon_days: int, meetups: List[dict[str, object]]
+    n: int,
+    horizon_days: int,
+    meetups: List[dict[str, object]],
+    tone_hint: str | None = None,
 ) -> str:
     """Generate intro phrase for meetup digest via model 4o."""
 
@@ -899,6 +948,18 @@ async def compose_meetups_intro_via_4o(
     )
     has_club_flag = "true" if has_club else "false"
 
+    hint = tone_hint or _DEFAULT_MEETUPS_TONE_HINT
+    tone_tokens = [token for token in (hint or "").split("+") if token]
+    if tone_tokens:
+        formatted_tokens = [tone_tokens[0].capitalize()]
+        formatted_tokens.extend(token.lower() for token in tone_tokens[1:])
+        tone_pattern = " + ".join(formatted_tokens)
+        tone_instruction = (
+            f" Используй паттерн «{tone_pattern}», избегай остальных тонов."
+        )
+    else:
+        tone_instruction = ""
+
     prompt = (
         "Ты помогаешь телеграм-дайджесту мероприятий."
         f" Сформулируй живое интро на 1–2 предложения до ~200 символов к подборке из {n} встреч"
@@ -907,6 +968,7 @@ async def compose_meetups_intro_via_4o(
         " Опирайся на поля title, description, event_type и formats каждого события,"
         " чтобы выделить ключевые темы и форматы."
         f" Метаданные: has_club={has_club_flag}."
+        f"{tone_instruction}"
         " Если has_club=false, сделай акцент на живом общении: знакомстве с интересными людьми,"
         " Q&A и нетворкинге."
         " Не выдумывай фактов, используй только данные из JSON ниже."
@@ -914,13 +976,14 @@ async def compose_meetups_intro_via_4o(
     )
 
     logging.info(
-        "digest.intro.llm.request run_id=%s kind=meetups n=%s horizon=%s items_count=%s prompt_len=%s has_club=%s",
+        "digest.intro.llm.request run_id=%s kind=meetups n=%s horizon=%s items_count=%s prompt_len=%s has_club=%s tone_hint=%s",
         run_id,
         n,
         horizon_days,
         len(meetups),
         len(prompt),
         int(has_club),
+        hint,
     )
 
     start = time.monotonic()
@@ -1594,18 +1657,22 @@ async def _build_digest_preview(
         )
     elif event_kind == "meetups":
         meetups_payload: List[dict[str, object]] = []
+        tone_counter: Counter[str] = Counter()
         for ev, norm in zip(events, normalized):
             title_clean = norm.get("title_clean") or ev.title
+            description = (ev.description or "").strip()
             meetups_payload.append(
                 {
                     "title": title_clean,
-                    "description": (ev.description or "").strip(),
+                    "description": description,
                     "event_type": (ev.event_type or "").strip(),
                     "formats": _detect_meetup_formats(ev, norm),
                 }
             )
+            _update_meetups_tone(tone_counter, f"{title_clean} {description}")
+        tone_hint = _select_meetups_tone_hint(tone_counter)
         intro = await compose_meetups_intro_via_4o(
-            len(events), horizon, meetups_payload
+            len(events), horizon, meetups_payload, tone_hint
         )
     else:
         intro = await compose_digest_intro_via_4o(
