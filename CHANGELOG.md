@@ -3,6 +3,8 @@
 ## [Unreleased]
 - Системный промпт автоклассификации запрещает выбирать темы `FAMILY` и `KIDS_SCHOOL`, когда у события задан возрастной ценз; см. обновления в `main.py` (`EVENT_TOPIC_SYSTEM_PROMPT`) и документации `docs/llm_topics.md`.
 
+- Expanded THEATRE_CLASSIC and THEATRE_MODERN criteria to include canonical playwrights and contemporary production formats.
+
 ## [x.y.z+4] – 2025-10-04
 - Clarified the 4o parsing prompt and docs for same-day theatre showtimes: posters with one date and multiple start times now yield separate theatre events instead of a single merged entry.
 - Added admin digests for нетворкинг, развлечения, маркеты, классический/современный театр, встречи и клубы и кинопоказы; обновлён список синонимов тем и меню /digest.

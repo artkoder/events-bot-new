@@ -956,13 +956,175 @@ def _normalize_exhibition_title(title: str) -> dict[str, str]:
     return {"emoji": emoji, "title_clean": cleaned}
 
 
+def _align_event_contexts(
+    events: Iterable[Any] | None, expected_len: int
+) -> List[Any | None]:
+    """Return a list of ``events`` padded/truncated to ``expected_len``."""
+
+    if expected_len <= 0:
+        return []
+
+    if events is None:
+        return [None] * expected_len
+
+    seq = list(events)
+    if len(seq) < expected_len:
+        seq.extend([None] * (expected_len - len(seq)))
+    else:
+        seq = seq[:expected_len]
+    return seq
+
+
+def _prepare_meetup_context(event: Any | None) -> dict[str, str]:
+    """Extract context fields from ``event`` for meetup normalization."""
+
+    if event is None:
+        return {"event_type": "", "description": ""}
+
+    event_type = getattr(event, "event_type", "") or ""
+    description = getattr(event, "description", "") or ""
+    return {
+        "event_type": str(event_type),
+        "description": re.sub(r"\s+", " ", str(description)).strip(),
+    }
+
+
+def _truncate_context(text: str, *, limit: int = 220) -> str:
+    """Trim ``text`` to ``limit`` characters while keeping whole words."""
+
+    if len(text) <= limit:
+        return text
+
+    truncated = text[: limit + 1].rstrip()
+    if " " in truncated:
+        truncated = truncated.rsplit(" ", 1)[0]
+    if not truncated:
+        truncated = text[:limit].rstrip()
+    return truncated + "…"
+
+
+def _should_add_meetup_exhibition_clarifier(
+    event: Any | None, *, title: str
+) -> bool:
+    """Return ``True`` when meetup title should mention exhibition context."""
+
+    lower_title = title.casefold()
+    if "творческая встреча и открытие выставки" in lower_title:
+        return False
+    if "выстав" in lower_title:
+        return False
+
+    if event is None:
+        return False
+
+    event_type = (getattr(event, "event_type", "") or "").casefold()
+    description = (getattr(event, "description", "") or "").casefold()
+
+    if "выстав" in event_type:
+        return True
+    if "выстав" in description:
+        return True
+    return False
+
+
+def _apply_meetup_postprocessing(title: str, event: Any | None) -> str:
+    """Append clarifier for meetup events tied to exhibitions when needed."""
+
+    if _should_add_meetup_exhibition_clarifier(event, title=title):
+        return f"{title} — творческая встреча и открытие выставки"
+    return title
+
+
 async def normalize_titles_via_4o(
-    titles: List[str], *, event_kind: str = "lecture"
+    titles: List[str], *, event_kind: str = "lecture", events: Iterable[Any] | None = None
 ) -> List[dict[str, str]]:
     """Normalize event titles using model 4o with regex fallback."""
 
     if event_kind == "exhibition":
         return [_normalize_exhibition_title(t) for t in titles]
+
+    events_list = _align_event_contexts(events, len(titles))
+
+    if event_kind == "meetups":
+        from main import ask_4o  # local import to avoid a cycle
+        import json
+
+        contexts: List[str] = []
+        for idx, (title, event) in enumerate(zip(titles, events_list), start=1):
+            pieces = [f"Название: «{title}»"]
+            ctx = _prepare_meetup_context(event)
+            if ctx["event_type"]:
+                pieces.append(f"Тип: {ctx['event_type']}")
+            if ctx["description"]:
+                pieces.append(f"Описание: {_truncate_context(ctx['description'])}")
+            contexts.append(f"{idx}. " + " | ".join(pieces))
+
+        prompt_titles = "\n".join(contexts) if contexts else " | ".join(titles)
+        prompt = (
+            "Язык: русский.\n\n"
+            "Задача: вернуть JSON-массив объектов вида:\n\n"
+            '{"emoji": "👥" | "", "title_clean": "Название"}\n\n'
+            "Требования:\n"
+            "- Очистить лишние пробелы и переносы строк.\n"
+            "- Перенести ведущий эмодзи (если был) в поле emoji.\n"
+            "- Сохранить кавычки и ключевые слова в названии.\n"
+            "- Если по типу события или описанию видно, что встреча совмещена с открытием выставки, добавь в конец заголовка пояснение «— творческая встреча и открытие выставки».\n"
+            "- Без дополнительных слов, только JSON.\n\n"
+            "События:\n"
+            + prompt_titles
+        )
+
+        logging.info(
+            "digest.titles.llm.request kind=%s n=%s prompt_len=%s",
+            "meetups",
+            len(titles),
+            len(prompt),
+        )
+        start = time.monotonic()
+        try:
+            text = await ask_4o(prompt, max_tokens=300)
+        except Exception:
+            took_ms = int((time.monotonic() - start) * 1000)
+            logging.info(
+                "digest.titles.llm.response error text_len=0 took_ms=%s", took_ms
+            )
+            return [
+                _normalize_title_fallback(t, event_kind="meetups", event=ev)
+                for t, ev in zip(titles, events_list)
+            ]
+
+        took_ms = int((time.monotonic() - start) * 1000)
+        text = text.strip()
+        logging.info(
+            "digest.titles.llm.response ok text_len=%s took_ms=%s",
+            len(text),
+            took_ms,
+        )
+
+        try:
+            data = json.loads(text)
+            result: List[dict[str, str]] = []
+            for orig, item, event in zip(titles, data, events_list):
+                emoji = item.get("emoji") or ""
+                title_clean_raw = item.get("title_clean") or item.get("title") or orig
+                title_clean = _apply_meetup_postprocessing(title_clean_raw, event)
+                result.append({"emoji": emoji, "title_clean": title_clean})
+                logging.info(
+                    "digest.titles.llm.sample kind=%s before=%r after=%r emoji=%s",
+                    "meetups",
+                    orig,
+                    title_clean,
+                    emoji,
+                )
+            if len(result) == len(titles):
+                return result
+        except Exception:
+            pass
+
+        return [
+            _normalize_title_fallback(t, event_kind="meetups", event=ev)
+            for t, ev in zip(titles, events_list)
+        ]
 
     from main import ask_4o  # local import to avoid a cycle
     import json
@@ -1019,7 +1181,10 @@ async def normalize_titles_via_4o(
         logging.info(
             "digest.titles.llm.response error text_len=0 took_ms=%s", took_ms
         )
-        return [_normalize_title_fallback(t, event_kind=kind) for t in titles]
+        return [
+            _normalize_title_fallback(t, event_kind=kind, event=ev)
+            for t, ev in zip(titles, events_list)
+        ]
 
     took_ms = int((time.monotonic() - start) * 1000)
     text = text.strip()
@@ -1030,7 +1195,7 @@ async def normalize_titles_via_4o(
     try:
         data = json.loads(text)
         result: List[dict[str, str]] = []
-        for orig, item in zip(titles, data):
+        for orig, item, event in zip(titles, data, events_list):
             emoji = item.get("emoji") or ""
             title_clean = item.get("title_clean") or item.get("title") or orig
             result.append({"emoji": emoji, "title_clean": title_clean})
@@ -1046,7 +1211,12 @@ async def normalize_titles_via_4o(
     except Exception:
         pass
 
-    return [_normalize_title_fallback(t, event_kind=kind) for t in titles]
+    return [
+        _normalize_title_fallback(t, event_kind=kind, event=ev)
+        for t, ev in zip(titles, events_list)
+    ]
+
+
 
 
 _LEADING_EMOJI_RE = re.compile(
@@ -1074,7 +1244,7 @@ def _looks_like_full_name(candidate: str) -> bool:
 
 
 def _normalize_title_fallback(
-    title: str, *, event_kind: str = "lecture"
+    title: str, *, event_kind: str = "lecture", event: Any | None = None
 ) -> dict[str, str]:
     """Fallback normalization used when LLM is unavailable."""
 
@@ -1082,6 +1252,11 @@ def _normalize_title_fallback(
 
     if event_kind == "exhibition":
         return _normalize_exhibition_title(title)
+
+    if event_kind == "meetups":
+        cleaned = re.sub(r"\s+", " ", rest).strip() or rest.strip() or title.strip()
+        cleaned = _apply_meetup_postprocessing(cleaned, event)
+        return {"emoji": emoji, "title_clean": cleaned}
 
     kind = event_kind if event_kind in {"lecture", "masterclass"} else "lecture"
     if kind == "masterclass":
@@ -1369,7 +1544,9 @@ async def _build_digest_preview(
         return "", [], horizon, [], []
 
     titles = [e.title for e in events]
-    normalized = await normalize_titles_via_4o(titles, event_kind=event_kind)
+    normalized = await normalize_titles_via_4o(
+        titles, event_kind=event_kind, events=events
+    )
 
     if event_kind == "masterclass":
         masterclasses_payload: List[dict[str, str]] = []
