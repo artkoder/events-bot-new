@@ -302,11 +302,20 @@ def extract_event_ts_hint(
     default_time: str | None = None,
     *,
     tz: timezone | None = None,
+    publish_ts: datetime | int | float | None = None,
 ) -> int | None:
     """Return Unix timestamp for the nearest future datetime mentioned in text."""
     tzinfo = tz or require_main_attr("LOCAL_TZ")
 
-    now = datetime.now(tzinfo)
+    if publish_ts is None:
+        now = datetime.now(tzinfo)
+    elif isinstance(publish_ts, datetime):
+        if publish_ts.tzinfo is None:
+            now = publish_ts.replace(tzinfo=tzinfo)
+        else:
+            now = publish_ts.astimezone(tzinfo)
+    else:
+        now = datetime.fromtimestamp(publish_ts, tzinfo)
     text_low = text.lower()
 
     day = month = year = None
@@ -1313,7 +1322,9 @@ async def crawl_once(
                     kw_ok, kws = match_keywords(post_text)
                     has_date = detect_date(post_text)
                     if kw_ok and has_date:
-                        event_ts_hint = extract_event_ts_hint(post_text, default_time)
+                        event_ts_hint = extract_event_ts_hint(
+                            post_text, default_time, publish_ts=ts
+                        )
                         if event_ts_hint is None or event_ts_hint < int(time.time()) + 2 * 3600:
                             continue
                         matched_kw_value = ",".join(kws)
