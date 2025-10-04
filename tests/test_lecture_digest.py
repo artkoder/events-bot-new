@@ -16,6 +16,8 @@ from digests import (
     build_exhibitions_digest_preview,
     build_psychology_digest_candidates,
     build_psychology_digest_preview,
+    build_science_pop_digest_candidates,
+    build_science_pop_digest_preview,
     build_networking_digest_candidates,
     build_entertainment_digest_candidates,
     build_markets_digest_candidates,
@@ -174,6 +176,40 @@ async def test_build_psychology_digest_candidates_filters_topics(tmp_path):
 
     assert horizon == 14
     assert titles == ["Psych 1", "Psych 2"]
+
+
+@pytest.mark.asyncio
+async def test_build_science_pop_digest_candidates_filters_topics(tmp_path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    now = datetime(2025, 5, 1, 12, 0)
+
+    async with db.get_session() as session:
+        def add(title: str, *, topics: list[str], offset_days: int = 1):
+            dt = now + timedelta(days=offset_days)
+            ev = Event(
+                title=title,
+                description="d",
+                date=dt.strftime("%Y-%m-%d"),
+                time="19:00",
+                location_name="x",
+                source_text="s",
+                source_post_url=f"http://example.com/{title}",
+                event_type="лекция",
+                topics=topics,
+            )
+            session.add(ev)
+
+        add("Science Pop", topics=["Научпоп"])
+        add("Tech Talk", topics=["технологии"], offset_days=2)
+        add("Other", topics=["лекция"], offset_days=3)
+        await session.commit()
+
+    events, horizon = await build_science_pop_digest_candidates(db, now)
+    titles = [e.title for e in events]
+
+    assert horizon == 14
+    assert titles == ["Science Pop", "Tech Talk"]
 
 
 @pytest.mark.asyncio
@@ -636,6 +672,61 @@ async def test_build_digest_preview_exhibition_uses_clean_titles(monkeypatch):
     assert norm_titles == ["Выставка «Солнечный луч»"]
     assert lines and "Выставка «Солнечный луч»" in lines[0]
     assert "Лекция" not in lines[0]
+
+
+@pytest.mark.asyncio
+async def test_build_science_pop_digest_preview_uses_generic_intro(monkeypatch):
+    events = [
+        SimpleNamespace(
+            id=7,
+            title="Научпоп: космос",
+            description="Истории про космос",
+            date="2025-05-05",
+            time="18:00",
+            event_type="лекция",
+            source_post_url="https://example.com/science",
+            telegraph_url=None,
+            telegraph_path=None,
+        )
+    ]
+
+    captured: dict[str, object] = {}
+
+    async def fake_candidates(db, now, digest_id):
+        return events, 7
+
+    async def fake_intro(count, horizon, titles, *, event_noun):
+        captured["count"] = count
+        captured["horizon"] = horizon
+        captured["titles"] = titles
+        captured["event_noun"] = event_noun
+        return "intro"
+
+    async def fake_normalize(titles, *, event_kind, events):
+        captured["event_kind"] = event_kind
+        return [{"title_clean": t, "emoji": ""} for t in titles]
+
+    monkeypatch.setattr(
+        digests, "build_science_pop_digest_candidates", fake_candidates
+    )
+    monkeypatch.setattr(digests, "compose_digest_intro_via_4o", fake_intro)
+    monkeypatch.setattr(digests, "normalize_titles_via_4o", fake_normalize)
+
+    intro, lines, horizon, returned_events, norm_titles = (
+        await build_science_pop_digest_preview(
+            "digest-science",
+            db=None,
+            now=datetime(2025, 5, 1, 12, 0),
+        )
+    )
+
+    assert intro == "intro"
+    assert horizon == 7
+    assert returned_events == events
+    assert norm_titles == ["Научпоп: космос"]
+    assert captured["event_noun"] == "научно-популярных событий"
+    assert captured["event_kind"] == "science_pop"
+    assert lines and "Научпоп: космос" in lines[0]
 
 
 @pytest.mark.asyncio
