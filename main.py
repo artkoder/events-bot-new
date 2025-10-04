@@ -171,6 +171,13 @@ from digests import (
     build_masterclasses_digest_preview,
     build_exhibitions_digest_preview,
     build_psychology_digest_preview,
+    build_networking_digest_preview,
+    build_entertainment_digest_preview,
+    build_markets_digest_preview,
+    build_theatre_classic_digest_preview,
+    build_theatre_modern_digest_preview,
+    build_meetups_digest_preview,
+    build_movies_digest_preview,
     format_event_line_html,
     pick_display_link,
     extract_catbox_covers_from_telegraph,
@@ -18033,7 +18040,7 @@ async def show_digest_menu(message: types.Message, db: Database, bot: Bot) -> No
     keyboard = [
         [
             types.InlineKeyboardButton(
-                text="✅ Дайджест лекций",
+                text="✅ Лекции",
                 callback_data=f"digest:select:lectures:{digest_id}",
             ),
             types.InlineKeyboardButton(
@@ -18042,18 +18049,54 @@ async def show_digest_menu(message: types.Message, db: Database, bot: Bot) -> No
             ),
         ],
         [
-            types.InlineKeyboardButton(text="⏳ Выходные", callback_data="digest:disabled"),
-            types.InlineKeyboardButton(text="⏳ Популярное за неделю", callback_data="digest:disabled"),
-        ],
-        [
             types.InlineKeyboardButton(
                 text="✅ Выставки",
                 callback_data=f"digest:select:exhibitions:{digest_id}",
             ),
             types.InlineKeyboardButton(
-                text="✅\u202fПсихология",
+                text="✅ Психология",
                 callback_data=f"digest:select:psychology:{digest_id}",
             ),
+        ],
+        [
+            types.InlineKeyboardButton(
+                text="✅ Нетворкинг",
+                callback_data=f"digest:select:networking:{digest_id}",
+            ),
+            types.InlineKeyboardButton(
+                text="✅ Развлечения",
+                callback_data=f"digest:select:entertainment:{digest_id}",
+            ),
+        ],
+        [
+            types.InlineKeyboardButton(
+                text="✅ Маркеты",
+                callback_data=f"digest:select:markets:{digest_id}",
+            ),
+            types.InlineKeyboardButton(
+                text="✅ Кинопоказы",
+                callback_data=f"digest:select:movies:{digest_id}",
+            ),
+        ],
+        [
+            types.InlineKeyboardButton(
+                text="✅ Классический театр",
+                callback_data=f"digest:select:theatre_classic:{digest_id}",
+            ),
+            types.InlineKeyboardButton(
+                text="✅ Современный театр",
+                callback_data=f"digest:select:theatre_modern:{digest_id}",
+            ),
+        ],
+        [
+            types.InlineKeyboardButton(
+                text="✅ Встречи и клубы",
+                callback_data=f"digest:select:meetups:{digest_id}",
+            )
+        ],
+        [
+            types.InlineKeyboardButton(text="⏳ Выходные", callback_data="digest:disabled"),
+            types.InlineKeyboardButton(text="⏳ Популярное за неделю", callback_data="digest:disabled"),
         ],
     ]
     markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard)
@@ -24273,6 +24316,31 @@ def create_app() -> web.Application:
     async def digest_select_psychology_wrapper(callback: types.CallbackQuery):
         await handle_digest_select_psychology(callback, db, bot)
 
+    async def digest_select_networking_wrapper(callback: types.CallbackQuery):
+        await handle_digest_select_networking(callback, db, bot)
+
+    async def digest_select_entertainment_wrapper(callback: types.CallbackQuery):
+        await handle_digest_select_entertainment(callback, db, bot)
+
+    async def digest_select_markets_wrapper(callback: types.CallbackQuery):
+        await handle_digest_select_markets(callback, db, bot)
+
+    async def digest_select_theatre_classic_wrapper(
+        callback: types.CallbackQuery,
+    ):
+        await handle_digest_select_theatre_classic(callback, db, bot)
+
+    async def digest_select_theatre_modern_wrapper(
+        callback: types.CallbackQuery,
+    ):
+        await handle_digest_select_theatre_modern(callback, db, bot)
+
+    async def digest_select_meetups_wrapper(callback: types.CallbackQuery):
+        await handle_digest_select_meetups(callback, db, bot)
+
+    async def digest_select_movies_wrapper(callback: types.CallbackQuery):
+        await handle_digest_select_movies(callback, db, bot)
+
     async def digest_disabled_wrapper(callback: types.CallbackQuery):
         await callback.answer("Ещё не реализовано", show_alert=False)
 
@@ -24672,6 +24740,34 @@ def create_app() -> web.Application:
         lambda c: c.data.startswith("digest:select:psychology:"),
     )
     dp.callback_query.register(
+        digest_select_networking_wrapper,
+        lambda c: c.data.startswith("digest:select:networking:"),
+    )
+    dp.callback_query.register(
+        digest_select_entertainment_wrapper,
+        lambda c: c.data.startswith("digest:select:entertainment:"),
+    )
+    dp.callback_query.register(
+        digest_select_markets_wrapper,
+        lambda c: c.data.startswith("digest:select:markets:"),
+    )
+    dp.callback_query.register(
+        digest_select_theatre_classic_wrapper,
+        lambda c: c.data.startswith("digest:select:theatre_classic:"),
+    )
+    dp.callback_query.register(
+        digest_select_theatre_modern_wrapper,
+        lambda c: c.data.startswith("digest:select:theatre_modern:"),
+    )
+    dp.callback_query.register(
+        digest_select_meetups_wrapper,
+        lambda c: c.data.startswith("digest:select:meetups:"),
+    )
+    dp.callback_query.register(
+        digest_select_movies_wrapper,
+        lambda c: c.data.startswith("digest:select:movies:"),
+    )
+    dp.callback_query.register(
         digest_disabled_wrapper, lambda c: c.data == "digest:disabled"
     )
     dp.callback_query.register(
@@ -24988,6 +25084,104 @@ async def handle_digest_select_psychology(
         preview_builder=build_psychology_digest_preview,
         items_noun="психологических событий",
         panel_text="Управление дайджестом психологии\nВыключите лишнее и нажмите «Обновить превью».",
+    )
+
+
+async def handle_digest_select_networking(
+    callback: types.CallbackQuery, db: Database, bot: Bot
+) -> None:
+    await _handle_digest_select(
+        callback,
+        db,
+        bot,
+        digest_type="networking",
+        preview_builder=build_networking_digest_preview,
+        items_noun="нетворкингов",
+        panel_text="Управление дайджестом нетворкингов\nВыключите лишнее и нажмите «Обновить превью».",
+    )
+
+
+async def handle_digest_select_entertainment(
+    callback: types.CallbackQuery, db: Database, bot: Bot
+) -> None:
+    await _handle_digest_select(
+        callback,
+        db,
+        bot,
+        digest_type="entertainment",
+        preview_builder=build_entertainment_digest_preview,
+        items_noun="развлечений",
+        panel_text="Управление дайджестом развлечений\nВыключите лишнее и нажмите «Обновить превью».",
+    )
+
+
+async def handle_digest_select_markets(
+    callback: types.CallbackQuery, db: Database, bot: Bot
+) -> None:
+    await _handle_digest_select(
+        callback,
+        db,
+        bot,
+        digest_type="markets",
+        preview_builder=build_markets_digest_preview,
+        items_noun="маркетов",
+        panel_text="Управление дайджестом маркетов\nВыключите лишнее и нажмите «Обновить превью».",
+    )
+
+
+async def handle_digest_select_theatre_classic(
+    callback: types.CallbackQuery, db: Database, bot: Bot
+) -> None:
+    await _handle_digest_select(
+        callback,
+        db,
+        bot,
+        digest_type="theatre_classic",
+        preview_builder=build_theatre_classic_digest_preview,
+        items_noun="классических спектаклей",
+        panel_text="Управление дайджестом классического театра\nВыключите лишнее и нажмите «Обновить превью».",
+    )
+
+
+async def handle_digest_select_theatre_modern(
+    callback: types.CallbackQuery, db: Database, bot: Bot
+) -> None:
+    await _handle_digest_select(
+        callback,
+        db,
+        bot,
+        digest_type="theatre_modern",
+        preview_builder=build_theatre_modern_digest_preview,
+        items_noun="современных спектаклей",
+        panel_text="Управление дайджестом современного театра\nВыключите лишнее и нажмите «Обновить превью».",
+    )
+
+
+async def handle_digest_select_meetups(
+    callback: types.CallbackQuery, db: Database, bot: Bot
+) -> None:
+    await _handle_digest_select(
+        callback,
+        db,
+        bot,
+        digest_type="meetups",
+        preview_builder=build_meetups_digest_preview,
+        items_noun="встреч и клубов",
+        panel_text="Управление дайджестом встреч и клубов\nВыключите лишнее и нажмите «Обновить превью».",
+    )
+
+
+async def handle_digest_select_movies(
+    callback: types.CallbackQuery, db: Database, bot: Bot
+) -> None:
+    await _handle_digest_select(
+        callback,
+        db,
+        bot,
+        digest_type="movies",
+        preview_builder=build_movies_digest_preview,
+        items_noun="кинопоказов",
+        panel_text="Управление дайджестом кинопоказов\nВыключите лишнее и нажмите «Обновить превью».",
     )
 
 
