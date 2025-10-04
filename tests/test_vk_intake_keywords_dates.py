@@ -142,69 +142,58 @@ def test_match_keywords_piano_works_composers():
     assert any(k.startswith("композитор") for k in normalized)
 
 
-def test_detect_date_and_extract(monkeypatch):
+def test_detect_date_and_extract():
     text = "Мастер-классы 14–15.09, регистрация по ссылке"
     assert detect_date(text)
 
-    class FixedDatetime(real_datetime):
-        @classmethod
-        def now(cls, tz=None):
-            tzinfo = tz or timezone.utc
-            return real_datetime(2024, 8, 1, tzinfo=tzinfo)
-
-    monkeypatch.setattr("vk_intake.datetime", FixedDatetime)
-    ts = extract_event_ts_hint(text)
+    publish_dt = real_datetime(2024, 8, 1, tzinfo=main.LOCAL_TZ)
+    ts = extract_event_ts_hint(text, publish_ts=publish_dt)
     assert ts is not None
     dt = real_datetime.fromtimestamp(ts, tz=main.LOCAL_TZ)
     assert (dt.year, dt.month, dt.day) == (2024, 9, 15)
 
 
-def test_extract_event_ts_hint_recent_past(monkeypatch):
-    class FixedDatetime(real_datetime):
-        @classmethod
-        def now(cls, tz=None):
-            tzinfo = tz or timezone.utc
-            return real_datetime(2024, 10, 1, tzinfo=tzinfo)
-
-    monkeypatch.setattr("vk_intake.datetime", FixedDatetime)
-
+def test_extract_event_ts_hint_recent_past():
+    publish_dt = real_datetime(2024, 10, 1, tzinfo=main.LOCAL_TZ)
     past_text = "7 сентября прошла лекция"
-    assert extract_event_ts_hint(past_text) is None
+    assert extract_event_ts_hint(past_text, publish_ts=publish_dt) is None
 
     future_text = "7 января состоится концерт"
-    ts = extract_event_ts_hint(future_text)
+    ts = extract_event_ts_hint(future_text, publish_ts=publish_dt)
     assert ts is not None
     future_dt = real_datetime.fromtimestamp(ts, tz=main.LOCAL_TZ)
     assert (future_dt.year, future_dt.month, future_dt.day) == (2025, 1, 7)
 
 
-def test_extract_event_ts_hint_explicit_year_past(monkeypatch):
-    class FixedDatetime(real_datetime):
-        @classmethod
-        def now(cls, tz=None):
-            tzinfo = tz or timezone.utc
-            return real_datetime(2026, 1, 1, tzinfo=tzinfo)
-
-    monkeypatch.setattr("vk_intake.datetime", FixedDatetime)
-
+def test_extract_event_ts_hint_explicit_year_past():
+    publish_dt = real_datetime(2026, 1, 1, tzinfo=main.LOCAL_TZ)
     text = "Концерт состоится 17 сентября 2025 года"
-    assert extract_event_ts_hint(text) is None
+    assert extract_event_ts_hint(text, publish_ts=publish_dt) is None
 
 
-def test_extract_event_ts_hint_ignores_phone_number_segments(monkeypatch):
-    class FixedDatetime(real_datetime):
-        @classmethod
-        def now(cls, tz=None):
-            tzinfo = tz or timezone.utc
-            return real_datetime(2024, 4, 1, tzinfo=tzinfo)
-
-    monkeypatch.setattr("vk_intake.datetime", FixedDatetime)
-
+def test_extract_event_ts_hint_ignores_phone_number_segments():
+    publish_dt = real_datetime(2024, 4, 1, tzinfo=main.LOCAL_TZ)
     text = "Встречаемся в пт, звоните 474-30-04"
-    ts = extract_event_ts_hint(text)
+    ts = extract_event_ts_hint(text, publish_ts=publish_dt)
     assert ts is not None
     dt = real_datetime.fromtimestamp(ts, tz=main.LOCAL_TZ)
     assert (dt.year, dt.month, dt.day) == (2024, 4, 5)
+
+
+def test_extract_event_ts_hint_weekday_uses_publish_week(monkeypatch):
+    class FixedDatetime(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            tzinfo = tz or timezone.utc
+            return real_datetime(2024, 5, 13, tzinfo=tzinfo)
+
+    monkeypatch.setattr("vk_intake.datetime", FixedDatetime)
+
+    publish_dt = FixedDatetime(2024, 5, 6, tzinfo=main.LOCAL_TZ)
+    ts = extract_event_ts_hint("В ср встречаемся", publish_ts=publish_dt)
+    assert ts is not None
+    dt = real_datetime.fromtimestamp(ts, tz=main.LOCAL_TZ)
+    assert (dt.year, dt.month, dt.day) == (2024, 5, 8)
 
 
 @pytest.mark.asyncio

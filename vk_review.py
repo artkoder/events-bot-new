@@ -156,7 +156,12 @@ async def pick_next(db: Database, operator_id: int, batch_id: str) -> Optional[I
             matched_kw = row[5]
             has_date = row[6]
             skip_hint_recalc = matched_kw == OCR_PENDING_SENTINEL and has_date == 0
-            ts_hint = None if skip_hint_recalc else extract_event_ts_hint(text)
+            publish_ts = row[3]
+            ts_hint = (
+                None
+                if skip_hint_recalc
+                else extract_event_ts_hint(text, publish_ts=publish_ts)
+            )
             if not skip_hint_recalc and (ts_hint is None or ts_hint < reject_cutoff):
                 await conn.execute(
                     "UPDATE vk_inbox SET status='rejected', locked_by=NULL, locked_at=NULL, review_batch=NULL WHERE id=?",
@@ -399,7 +404,12 @@ async def pick_next(db: Database, operator_id: int, batch_id: str) -> Optional[I
             matched_kw = row[5]
             has_date = row[6]
             skip_hint_recalc = matched_kw == OCR_PENDING_SENTINEL and has_date == 0
-            ts_hint = None if skip_hint_recalc else extract_event_ts_hint(text)
+            publish_ts = row[3]
+            ts_hint = (
+                None
+                if skip_hint_recalc
+                else extract_event_ts_hint(text, publish_ts=publish_ts)
+            )
             if not skip_hint_recalc and (ts_hint is None or ts_hint < reject_cutoff):
                 await conn.execute(
                     "UPDATE vk_inbox SET status='rejected', locked_by=NULL, locked_at=NULL, review_batch=NULL WHERE id=?",

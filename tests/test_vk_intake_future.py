@@ -111,7 +111,8 @@ async def test_forced_backfill_respects_clamped_horizon(
     monkeypatch.setattr(
         vk_intake,
         "extract_event_ts_hint",
-        lambda text, default_time=None, *, tz=None: int(time.time()) + 86400,
+        lambda text, default_time=None, *, tz=None, publish_ts=None: int(time.time())
+        + 86400,
     )
 
     async def no_sleep(_):
@@ -190,7 +191,8 @@ async def test_incremental_pagination_processes_full_backlog(
     monkeypatch.setattr(
         vk_intake,
         "extract_event_ts_hint",
-        lambda text, default_time=None, *, tz=None: int(time.time()) + 86400,
+        lambda text, default_time=None, *, tz=None, publish_ts=None: int(time.time())
+        + 86400,
     )
 
     base_ts = int(time.time()) - 900
@@ -274,7 +276,8 @@ async def test_hard_cap_triggers_backfill(tmp_path, monkeypatch, caplog):
     monkeypatch.setattr(
         vk_intake,
         "extract_event_ts_hint",
-        lambda text, default_time=None, *, tz=None: int(time.time()) + 86400,
+        lambda text, default_time=None, *, tz=None, publish_ts=None: int(time.time())
+        + 86400,
     )
 
     base_ts = int(time.time()) - 900

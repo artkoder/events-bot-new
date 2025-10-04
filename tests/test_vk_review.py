@@ -84,7 +84,13 @@ async def test_pick_next_updates_hint_in_dataclass_for_new_selection(
     tmp_path, monkeypatch
 ):
     future_hint = int(_time.time()) + 500_000
-    monkeypatch.setattr(vk_review, "extract_event_ts_hint", lambda text: future_hint)
+    expected_publish_ts = 100
+
+    def fake_extract(text, default_time=None, *, tz=None, publish_ts=None):
+        assert publish_ts == expected_publish_ts
+        return future_hint
+
+    monkeypatch.setattr(vk_review, "extract_event_ts_hint", fake_extract)
     monkeypatch.setattr(vk_review.random, "random", lambda: 0.0)
 
     db = Database(str(tmp_path / "db.sqlite"))
@@ -111,7 +117,13 @@ async def test_pick_next_updates_hint_in_dataclass_for_new_selection(
 @pytest.mark.asyncio
 async def test_pick_next_updates_hint_for_resumed_lock(tmp_path, monkeypatch):
     future_hint = int(_time.time()) + 600_000
-    monkeypatch.setattr(vk_review, "extract_event_ts_hint", lambda text: future_hint)
+    expected_publish_ts = 100
+
+    def fake_extract(text, default_time=None, *, tz=None, publish_ts=None):
+        assert publish_ts == expected_publish_ts
+        return future_hint
+
+    monkeypatch.setattr(vk_review, "extract_event_ts_hint", fake_extract)
 
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
@@ -190,9 +202,27 @@ async def test_pick_next_recomputes_hint_and_rejects_recent_past(tmp_path, monke
     async with db.raw_conn() as conn:
         rows = [
             # Stored hint is far in future but text describes a past event
-            (1, 1, 100, "7 сентября прошла лекция", "k", 1, fixed_epoch + 1_000_000, "pending"),
+            (
+                1,
+                1,
+                fixed_epoch,
+                "7 сентября прошла лекция",
+                "k",
+                1,
+                fixed_epoch + 1_000_000,
+                "pending",
+            ),
             # Valid future event with even later hint so it becomes next candidate
-            (1, 2, 200, "7 января состоится концерт", "k", 1, fixed_epoch + 2_000_000, "pending"),
+            (
+                1,
+                2,
+                fixed_epoch,
+                "7 января состоится концерт",
+                "k",
+                1,
+                fixed_epoch + 2_000_000,
+                "pending",
+            ),
         ]
         await conn.executemany(
             "INSERT INTO vk_inbox(group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status) VALUES(?,?,?,?,?,?,?,?)",
@@ -216,7 +246,7 @@ async def test_pick_next_rejects_explicit_year_past(tmp_path, monkeypatch):
     monkeypatch.setattr(vk_review._time, "time", lambda: fixed_now)
     monkeypatch.setattr(vk_review.random, "random", lambda: 0.0)
 
-    def fake_extract(text: str):
+    def fake_extract(text: str, default_time=None, *, tz=None, publish_ts=None):
         return None if "2025" in text else fixed_now + 2_000_000
 
     monkeypatch.setattr(vk_review, "extract_event_ts_hint", fake_extract)
@@ -273,7 +303,7 @@ async def test_far_gap_override_triggers_after_k_non_far(tmp_path, monkeypatch):
     monkeypatch.setattr(vk_review._time, "time", lambda: fixed_now)
     monkeypatch.setattr(vk_review.random, "random", lambda: 0.0)
 
-    def fake_extract(text):
+    def fake_extract(text, default_time=None, *, tz=None, publish_ts=None):
         assert text.startswith("TS:")
         return int(text.split(":", 1)[1])
 
@@ -344,7 +374,7 @@ async def test_bucket_boundaries_use_weighted_selection(tmp_path, monkeypatch):
     urgent_cutoff = fixed_now + int(48 * 3600)
     soon_cutoff = fixed_now + int(14 * 86400)
 
-    def fake_extract(text):
+    def fake_extract(text, default_time=None, *, tz=None, publish_ts=None):
         return int(text.split(":", 1)[1])
 
     monkeypatch.setattr(vk_review, "extract_event_ts_hint", fake_extract)
@@ -395,7 +425,7 @@ async def test_pick_next_weighted_bucket_without_sqlite_math(tmp_path, monkeypat
 
     far_hint = fixed_now + int(60 * 86400)
 
-    def fake_extract(text: str) -> int:
+    def fake_extract(text: str, default_time=None, *, tz=None, publish_ts=None) -> int:
         return int(text.split(":", 1)[1])
 
     monkeypatch.setattr(vk_review, "extract_event_ts_hint", fake_extract)
@@ -434,7 +464,7 @@ async def test_history_tracks_fallback_bucket(tmp_path, monkeypatch):
 
     fallback_hint = fixed_now + int(7 * 86400)
 
-    def fake_extract(_text):
+    def fake_extract(_text, default_time=None, *, tz=None, publish_ts=None):
         return fallback_hint
 
     monkeypatch.setattr(vk_review, "extract_event_ts_hint", fake_extract)
