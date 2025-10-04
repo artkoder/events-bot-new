@@ -4280,6 +4280,8 @@ async def test_stats_events(tmp_path: Path, monkeypatch):
     assert lines[0].startswith("http://b")
     assert "10" in lines[0]
     assert "5" in lines[1]
+    assert lines[-2] == "Tokens gpt-4o: 0"
+    assert lines[-1] == "Tokens gpt-4o-mini: 0"
 
 
 @pytest.mark.asyncio
@@ -4373,6 +4375,8 @@ async def test_stats_festivals(tmp_path: Path, monkeypatch):
     assert any("Fest" in l and "50" in l for l in lines)
     assert any("Fest" in l and "70" in l and "40" in l for l in lines)
     assert all("OldFest" not in l for l in lines)
+    assert lines[-2] == "Tokens gpt-4o: 0"
+    assert lines[-1] == "Tokens gpt-4o-mini: 0"
 
 
 @pytest.mark.asyncio

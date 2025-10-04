@@ -6,6 +6,7 @@ from datetime import date, timedelta
 
 import logging
 import pytest
+from aiogram import types
 
 
 @pytest.fixture
@@ -32,10 +33,14 @@ def test_four_o_usage_resets_on_new_day(load_main, monkeypatch):
     remaining = main._record_four_o_usage("test", "gpt-4o", 10, 5, 15)
     assert remaining == 85
     assert main._four_o_usage_state["used"] == 15
+    assert main._four_o_usage_state["total"] == 15
+    assert main._four_o_usage_state["models"]["gpt-4o"] == 15
     monkeypatch.setattr(main, "_current_utc_date", lambda: day_two)
     remaining = main._record_four_o_usage("test", "gpt-4o", 2, 3, 5)
     assert remaining == 95
     assert main._four_o_usage_state["used"] == 5
+    assert main._four_o_usage_state["total"] == 5
+    assert main._four_o_usage_state["models"]["gpt-4o"] == 5
 
 
 def test_four_o_usage_remaining_is_never_negative(load_main, monkeypatch, caplog):
@@ -49,4 +54,48 @@ def test_four_o_usage_remaining_is_never_negative(load_main, monkeypatch, caplog
     remaining = main._record_four_o_usage("ask", "gpt-4o", 30, 20, 50)
     assert remaining == 0
     assert main._four_o_usage_state["used"] == 50
+    assert main._four_o_usage_state["total"] == 90
+    assert main._four_o_usage_state["models"]["gpt-4o"] == 90
     assert "remaining=0" in caplog.records[-1].message
+
+
+@pytest.mark.asyncio
+async def test_stats_reports_four_o_usage(load_main, tmp_path, monkeypatch):
+    main = load_main(1000)
+    db = main.Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    class DummyBot:
+        def __init__(self):
+            self.messages = []
+
+        async def send_message(self, chat_id, text, **kwargs):
+            self.messages.append((chat_id, text, kwargs))
+
+    bot = DummyBot()
+
+    async with db.get_session() as session:
+        session.add(main.User(user_id=1, is_superadmin=True))
+        await session.commit()
+
+    today = date(2024, 5, 4)
+    monkeypatch.setattr(main, "_current_utc_date", lambda: today)
+    main._record_four_o_usage("stats", "gpt-4o", 10, 0, 10)
+    main._record_four_o_usage("stats", "gpt-4o-mini", 2, 3, 5)
+
+    msg = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "Admin"},
+            "text": "/stats",
+        }
+    )
+
+    await main.handle_stats(msg, db, bot)
+
+    assert bot.messages
+    lines = bot.messages[-1][1].splitlines()
+    assert lines[-2] == "Tokens gpt-4o: 10"
+    assert lines[-1] == "Tokens gpt-4o-mini: 5"
