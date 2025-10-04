@@ -1,8 +1,11 @@
 # Changelog
 
 ## [Unreleased]
+
+## [x.y.z+4] – 2025-10-04
 - Clarified the 4o parsing prompt and docs for same-day theatre showtimes: posters with one date and multiple start times now yield separate theatre events instead of a single merged entry.
 - Added admin digests for нетворкинг, развлечения, маркеты, классический/современный театр, встречи и клубы и кинопоказы; обновлён список синонимов тем и меню /digest.
+- Library events without explicit prices now default to free, so operators can spot the change in billing behavior.
 
 ## [x.y.z+3] – 2025-09-23
 - Нормализованы HTML-заголовки и абзацы историй перед публикацией.
