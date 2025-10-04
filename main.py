@@ -11159,6 +11159,19 @@ async def update_telegraph_event_page(
         if not ev:
             return None
         display_link = False if ev.source_post_url else True
+        summary = SourcePageEventSummary(
+            date=getattr(ev, "date", None),
+            end_date=getattr(ev, "end_date", None),
+            time=getattr(ev, "time", None),
+            event_type=getattr(ev, "event_type", None),
+            location_name=(ev.location_name or None),
+            location_address=(ev.location_address or None),
+            city=(ev.city or None),
+            ticket_price_min=getattr(ev, "ticket_price_min", None),
+            ticket_price_max=getattr(ev, "ticket_price_max", None),
+            ticket_link=(ev.ticket_link or None),
+            is_free=bool(getattr(ev, "is_free", False)),
+        )
         html_content, _, _ = await build_source_page_content(
             ev.title or "Event",
             ev.source_text,
@@ -11167,6 +11180,7 @@ async def update_telegraph_event_page(
             None,
             ev.ics_url,
             db,
+            event_summary=summary,
             display_link=display_link,
             catbox_urls=ev.photo_urls,
         )
@@ -22559,6 +22573,16 @@ async def _vkrev_handle_repost(callback: types.CallbackQuery, event_id: int, db:
     await _vkrev_show_next(callback.message.chat.id, batch_id, callback.from_user.id, db, bot)
 
 
+def _normalize_location_part(part: str | None) -> str:
+    if not part:
+        return ""
+    normalized = unicodedata.normalize("NFKC", part)
+    normalized = normalized.replace("\xa0", " ")
+    normalized = re.sub(r"[^\w\s]", " ", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return normalized.casefold()
+
+
 async def _vkrev_build_shortpost(
     ev: Event,
     vk_url: str,
@@ -22569,14 +22593,6 @@ async def _vkrev_build_shortpost(
     for_preview: bool = False,
     poster_texts: Sequence[str] | None = None,
 ) -> tuple[str, str | None]:
-    def _normalize_loc_part(part: str | None) -> str:
-        if not part:
-            return ""
-        normalized = unicodedata.normalize("NFKC", part)
-        normalized = normalized.replace("\xa0", " ")
-        normalized = re.sub(r"[^\w\s]", " ", normalized)
-        normalized = re.sub(r"\s+", " ", normalized).strip()
-        return normalized.casefold()
 
     text_len = len(ev.source_text or "")
     if text_len < 200:
@@ -22694,11 +22710,11 @@ async def _vkrev_build_shortpost(
     for part in (ev.location_name, ev.location_address):
         if part:
             loc_parts.append(part)
-            normalized = _normalize_loc_part(part)
+            normalized = _normalize_location_part(part)
             if normalized:
                 existing_normalized.add(normalized)
     if ev.city:
-        city_normalized = _normalize_loc_part(ev.city)
+        city_normalized = _normalize_location_part(ev.city)
         if not city_normalized or city_normalized not in existing_normalized:
             loc_parts.append(ev.city)
             if city_normalized:
@@ -24032,6 +24048,184 @@ async def update_event_description(event: Event, db: Database) -> None:
             logging.info("stored description for event %s", event.id)
 
 
+@dataclass(slots=True)
+class SourcePageEventSummary:
+    date: str | None = None
+    end_date: str | None = None
+    time: str | None = None
+    event_type: str | None = None
+    location_name: str | None = None
+    location_address: str | None = None
+    city: str | None = None
+    ticket_price_min: int | None = None
+    ticket_price_max: int | None = None
+    ticket_link: str | None = None
+    is_free: bool = False
+
+
+def _format_summary_anchor_text(url: str) -> str:
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return url
+    host = (parsed.netloc or "").strip()
+    if not host:
+        return url
+    host = host.rstrip("/")
+    path = (parsed.path or "").strip()
+    path = path.rstrip("/")
+    if path:
+        display = f"{host}{path}"
+    else:
+        display = host
+    if len(display) > 48:
+        display = display[:47] + "…"
+    return display or url
+
+
+def _render_summary_anchor(url: str) -> str:
+    cleaned = (url or "").strip()
+    if not cleaned:
+        return ""
+    href = cleaned
+    try:
+        parsed = urlparse(cleaned)
+    except ValueError:
+        parsed = None
+    if parsed and not parsed.scheme:
+        if cleaned.startswith("//"):
+            href = "https:" + cleaned
+        else:
+            href = "https://" + cleaned.lstrip("/")
+    text = _format_summary_anchor_text(href)
+    return f'<a href="{html.escape(href)}">{html.escape(text)}</a>'
+
+
+def _format_ticket_price(min_price: int | None, max_price: int | None) -> str:
+    if (
+        min_price is not None
+        and max_price is not None
+        and min_price != max_price
+    ):
+        return f"от {min_price} до {max_price} руб."
+    if min_price is not None:
+        return f"{min_price} руб."
+    if max_price is not None:
+        return f"{max_price} руб."
+    return ""
+
+
+async def _build_source_summary_block(
+    event_summary: SourcePageEventSummary | None,
+) -> str:
+    if not event_summary:
+        return ""
+
+    parts: list[str] = []
+
+    start_date: date | None = None
+    try:
+        if event_summary.date:
+            start_date = date.fromisoformat(event_summary.date)
+    except ValueError:
+        start_date = None
+
+    if start_date:
+        default_date_str = f"{start_date.day} {MONTHS[start_date.month - 1]}"
+    elif event_summary.date:
+        try:
+            _, month, day = event_summary.date.split("-")
+            default_date_str = f"{int(day)} {MONTHS[int(month) - 1]}"
+        except Exception:
+            default_date_str = event_summary.date
+    else:
+        default_date_str = ""
+
+    end_date_obj: date | None = None
+    if event_summary.end_date:
+        try:
+            end_date_obj = date.fromisoformat(event_summary.end_date)
+        except ValueError:
+            end_date_obj = None
+
+    ongoing_exhibition = (
+        (event_summary.event_type or "").strip().casefold() == "выставка"
+        and start_date is not None
+        and end_date_obj is not None
+        and start_date <= date.today() <= end_date_obj
+    )
+
+    if ongoing_exhibition and end_date_obj is not None:
+        end_month_name = MONTHS[end_date_obj.month - 1]
+        year_suffix = ""
+        if start_date.year != end_date_obj.year:
+            year_suffix = f" {end_date_obj.year}"
+        date_line = f"🗓 по {end_date_obj.day} {end_month_name}{year_suffix}"
+    elif default_date_str:
+        time_part = ""
+        if event_summary.time and event_summary.time != "00:00":
+            time_part = f" ⏰ {event_summary.time}"
+        date_line = f"🗓 {default_date_str}{time_part}"
+    else:
+        date_line = ""
+
+    if date_line.strip():
+        parts.append(f"<p>{html.escape(date_line.strip())}</p>")
+
+    location_parts: list[str] = []
+    existing_normalized: set[str] = set()
+    for part in (event_summary.location_name, event_summary.location_address):
+        if part and part.strip():
+            location_parts.append(part)
+            normalized = _normalize_location_part(part)
+            if normalized:
+                existing_normalized.add(normalized)
+    if event_summary.city and event_summary.city.strip():
+        city_normalized = _normalize_location_part(event_summary.city)
+        if not city_normalized or city_normalized not in existing_normalized:
+            location_parts.append(event_summary.city)
+            if city_normalized:
+                existing_normalized.add(city_normalized)
+
+    location_line = ""
+    if location_parts:
+        try:
+            location_text = await build_short_vk_location(location_parts)
+        except Exception:
+            location_text = ", ".join(part.strip() for part in location_parts if part.strip())
+        if location_text.strip():
+            location_line = f"📍 {location_text.strip()}"
+    if location_line:
+        parts.append(f"<p>{html.escape(location_line)}</p>")
+
+    ticket_line = ""
+    anchor_html = ""
+    link_value = (event_summary.ticket_link or "").strip()
+    price_text = _format_ticket_price(
+        event_summary.ticket_price_min, event_summary.ticket_price_max
+    )
+    if event_summary.is_free:
+        ticket_line = "🆓 Бесплатно"
+        if link_value:
+            ticket_line += ", по регистрации"
+            anchor_html = _render_summary_anchor(link_value)
+    elif link_value:
+        if price_text:
+            ticket_line = f"🎟 Билеты {price_text}"
+        else:
+            ticket_line = "🎟 Билеты"
+        anchor_html = _render_summary_anchor(link_value)
+    elif price_text:
+        ticket_line = f"🎟 Билеты {price_text}"
+
+    if ticket_line:
+        parts.append(f"<p>{html.escape(ticket_line)}</p>")
+    if anchor_html:
+        parts.append(f"<p>{anchor_html}</p>")
+
+    return "".join(parts)
+
+
 async def build_source_page_content(
     title: str,
     text: str,
@@ -24041,6 +24235,7 @@ async def build_source_page_content(
     ics_url: str | None = None,
     db: Database | None = None,
     *,
+    event_summary: SourcePageEventSummary | None = None,
     display_link: bool = True,
     catbox_urls: list[str] | None = None,
     image_mode: Literal["tail", "inline"] = "tail",
@@ -24084,6 +24279,10 @@ async def build_source_page_content(
             html_content += (
                 f'<p>\U0001f4c5 <a href="{html.escape(ics_url)}">Добавить в календарь</a></p>'
             )
+    summary_html = await _build_source_summary_block(event_summary)
+    summary_added = bool(summary_html)
+    if summary_html:
+        html_content += summary_html
     emoji_pat = re.compile(r"<tg-emoji[^>]*>(.*?)</tg-emoji>", re.DOTALL)
     spoiler_pat = re.compile(r"<tg-spoiler[^>]*>(.*?)</tg-spoiler>", re.DOTALL)
     tg_emoji_cleaned = 0
@@ -24226,6 +24425,8 @@ async def build_source_page_content(
             else:
                 paragraphs.append(BODY_SPACER_HTML)
     if paragraphs:
+        if summary_added:
+            html_content += BODY_SPACER_HTML
         normalized_paragraphs: list[str] = []
         for block in paragraphs:
             block_stripped = block.strip()
@@ -24336,6 +24537,8 @@ async def build_source_page_content(
                 body_blocks.append(block)
         html_content += "".join(body_blocks)
     elif image_mode == "inline" and tail:
+        if summary_added:
+            html_content += BODY_SPACER_HTML
         for extra_url in tail:
             html_content += f'<img src="{html.escape(extra_url)}"/>'
         inline_used = len(tail)
