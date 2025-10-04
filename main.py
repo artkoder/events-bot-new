@@ -172,6 +172,7 @@ from digests import (
     build_masterclasses_digest_preview,
     build_exhibitions_digest_preview,
     build_psychology_digest_preview,
+    build_science_pop_digest_preview,
     build_networking_digest_preview,
     build_entertainment_digest_preview,
     build_markets_digest_preview,
@@ -18310,6 +18311,12 @@ async def show_digest_menu(message: types.Message, db: Database, bot: Bot) -> No
         ],
         [
             types.InlineKeyboardButton(
+                text="✅ Научпоп",
+                callback_data=f"digest:select:science_pop:{digest_id}",
+            )
+        ],
+        [
+            types.InlineKeyboardButton(
                 text="✅ Нетворкинг",
                 callback_data=f"digest:select:networking:{digest_id}",
             ),
@@ -21624,6 +21631,12 @@ VK_LOCATION_TAG_OVERRIDES: dict[str, str] = {
 }
 
 
+VK_TOPIC_HASHTAGS: Mapping[str, str] = {
+    "FASHION": "#мода",
+    "KIDS_SCHOOL": "#дети",
+}
+
+
 async def build_short_vk_tags(
     event: Event, summary: str, used_type_hashtag: str | None = None
 ) -> list[str]:
@@ -21701,6 +21714,27 @@ async def build_short_vk_tags(
                         and hyphen_tag.lower() == used_type_hashtag_normalized
                     ):
                         add_tag(hyphen_tag)
+    topic_values = getattr(event, "topics", None) or []
+    for topic in topic_values:
+        if len(tags) >= 7:
+            break
+        normalized_topic = (topic or "").strip().upper()
+        if not normalized_topic:
+            continue
+        topic_tag = VK_TOPIC_HASHTAGS.get(normalized_topic)
+        if not topic_tag:
+            continue
+        topic_tag_clean = topic_tag.strip()
+        if not topic_tag_clean:
+            continue
+        if not topic_tag_clean.startswith("#"):
+            topic_tag_clean = "#" + topic_tag_clean.lstrip("#")
+        if (
+            used_type_hashtag_normalized
+            and topic_tag_clean.lower() == used_type_hashtag_normalized
+        ):
+            continue
+        add_tag(topic_tag_clean)
     needed = 7 - len(tags)
     if needed > 0:
         prompt = (
@@ -24925,6 +24959,9 @@ def create_app() -> web.Application:
     async def digest_select_psychology_wrapper(callback: types.CallbackQuery):
         await handle_digest_select_psychology(callback, db, bot)
 
+    async def digest_select_science_pop_wrapper(callback: types.CallbackQuery):
+        await handle_digest_select_science_pop(callback, db, bot)
+
     async def digest_select_networking_wrapper(callback: types.CallbackQuery):
         await handle_digest_select_networking(callback, db, bot)
 
@@ -25349,6 +25386,10 @@ def create_app() -> web.Application:
         lambda c: c.data.startswith("digest:select:psychology:"),
     )
     dp.callback_query.register(
+        digest_select_science_pop_wrapper,
+        lambda c: c.data.startswith("digest:select:science_pop:"),
+    )
+    dp.callback_query.register(
         digest_select_networking_wrapper,
         lambda c: c.data.startswith("digest:select:networking:"),
     )
@@ -25693,6 +25734,20 @@ async def handle_digest_select_psychology(
         preview_builder=build_psychology_digest_preview,
         items_noun="психологических событий",
         panel_text="Управление дайджестом психологии\nВыключите лишнее и нажмите «Обновить превью».",
+    )
+
+
+async def handle_digest_select_science_pop(
+    callback: types.CallbackQuery, db: Database, bot: Bot
+) -> None:
+    await _handle_digest_select(
+        callback,
+        db,
+        bot,
+        digest_type="science_pop",
+        preview_builder=build_science_pop_digest_preview,
+        items_noun="научно-популярных событий",
+        panel_text="Управление дайджестом научпопа\nВыключите лишнее и нажмите «Обновить превью».",
     )
 
 
