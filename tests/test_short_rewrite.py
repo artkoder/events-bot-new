@@ -14,6 +14,7 @@ async def test_build_short_vk_text_uses_description_when_source_missing(monkeypa
 
     async def fake_ask(prompt, **kwargs):
         calls["prompt"] = prompt
+        calls["system_prompt"] = kwargs.get("system_prompt")
         return "Сжатый текст. Второе предложение."
 
     monkeypatch.setattr(main, "ask_4o", fake_ask)
@@ -32,7 +33,9 @@ async def test_build_short_vk_text_uses_description_when_source_missing(monkeypa
 
     assert "Длинное описание события" in calls["prompt"]
     assert "OCR блок" in calls["prompt"]
-    assert "Сразу начинай с главной идеи" in calls["prompt"]
+    assert "в первой строке не повторяй название" in calls["prompt"]
+    assert "Название проекта или события можно упомянуть позже" in calls["prompt"]
+    assert "в первой строке не повторяй название" in calls["system_prompt"]
     assert result == "Сжатый текст. Второе предложение."
 
 
