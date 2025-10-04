@@ -112,6 +112,7 @@ from typing import (
     Literal,
     Collection,
     Sequence,
+    Mapping,
 )
 from urllib.parse import urlparse, parse_qs, ParseResult
 import uuid
@@ -1609,17 +1610,52 @@ def _get_four_o_usage_snapshot() -> dict[str, Any]:
 def _record_four_o_usage(
     operation: str,
     model: str,
-    prompt_tokens: int | None,
-    completion_tokens: int | None,
-    total_tokens: int | None,
+    usage: Mapping[str, Any] | None,
 ) -> int:
     limit = max(FOUR_O_DAILY_TOKEN_LIMIT, 0)
     today = _current_utc_date()
     _ensure_four_o_usage_state(today)
+    usage_data: Mapping[str, Any] = usage or {}
+
+    def _coerce_int(value: Any) -> int | None:
+        try:
+            if value is None:
+                return None
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    prompt_tokens = _coerce_int(usage_data.get("prompt_tokens"))
+    completion_tokens = _coerce_int(usage_data.get("completion_tokens"))
+    total_tokens = _coerce_int(usage_data.get("total_tokens"))
+
+    if prompt_tokens is None:
+        prompt_tokens = _coerce_int(usage_data.get("input_tokens"))
+    if completion_tokens is None:
+        completion_tokens = _coerce_int(usage_data.get("output_tokens"))
+
+    extra_tokens = 0
+    for key, value in usage_data.items():
+        if key in {"total_tokens", "prompt_tokens", "completion_tokens", "input_tokens", "output_tokens"}:
+            continue
+        if "tokens" not in key:
+            continue
+        value_int = _coerce_int(value)
+        if value_int is None:
+            continue
+        extra_tokens += max(value_int, 0)
+
     if total_tokens is not None:
-        spent = max(int(total_tokens), 0)
+        spent = max(total_tokens, 0)
     else:
-        spent = max(int(prompt_tokens or 0) + int(completion_tokens or 0), 0)
+        spent = max(
+            (prompt_tokens or 0)
+            + (completion_tokens or 0)
+            + extra_tokens,
+            0,
+        )
+        if spent:
+            total_tokens = spent
     models = _four_o_usage_state.setdefault("models", {})
     models.setdefault(model, 0)
     models[model] += spent
@@ -5803,9 +5839,7 @@ async def parse_event_via_4o(
     _record_four_o_usage(
         "parse",
         str(payload.get("model", "unknown")),
-        usage.get("prompt_tokens"),
-        usage.get("completion_tokens"),
-        usage.get("total_tokens"),
+        usage,
     )
     content = (
         data_raw.get("choices", [{}])[0]
@@ -6004,9 +6038,7 @@ async def ask_4o(
     _record_four_o_usage(
         "ask",
         str(payload.get("model", "unknown")),
-        usage.get("prompt_tokens"),
-        usage.get("completion_tokens"),
-        usage.get("total_tokens"),
+        usage,
     )
     logging.debug("4o response: %s", data)
     content = (
