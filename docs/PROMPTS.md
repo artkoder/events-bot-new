@@ -161,6 +161,7 @@ Edit this file to tweak how requests are sent to 4o.
 - PSYCHOLOGY — «Психология»
 - SCIENCE_POP — «Научпоп»
 - HANDMADE — «Хендмейд/маркеты/ярмарки/МК»
+- FASHION — «Мода и стиль»
 - NETWORKING — «Нетворкинг и карьера»
 - ACTIVE — «Активный отдых и спорт»
 - PERSONALITIES — «Личности и встречи»

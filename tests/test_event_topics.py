@@ -35,6 +35,10 @@ def test_topic_labels_include_theatre_subtypes():
     )
 
 
+def test_topic_labels_include_fashion():
+    assert main.TOPIC_LABELS["FASHION"] == "Мода и стиль"
+
+
 @pytest.mark.asyncio
 async def test_classify_event_topics_filters_and_limits(monkeypatch):
     monkeypatch.setenv("FOUR_O_MINI", "1")
@@ -119,6 +123,13 @@ def test_normalize_topic_identifier_legacy_aliases():
         "experimental theatre": "THEATRE_MODERN",
         "средневековье": "HISTORICAL_IMMERSION",
         "исторические костюмы": "HISTORICAL_IMMERSION",
+        "мода": "FASHION",
+        "fashion": "FASHION",
+        "Fashion Week": "FASHION",
+        "показ мод": "FASHION",
+        "fashion show": "FASHION",
+        "styling": "FASHION",
+        "стиль": "FASHION",
     }
     for raw, expected in cases.items():
         assert models.normalize_topic_identifier(raw) == expected
