@@ -22245,6 +22245,13 @@ async def _vkrev_import_flow(
             f"Время: {_display(res.event_time)}",
             f"Бесплатное: {'да' if res.is_free else 'нет'}",
         ]
+        if event_obj:
+            detail_lines.append(
+                _format_topics_line(
+                    getattr(event_obj, "topics", None),
+                    bool(getattr(event_obj, "topics_manual", False)),
+                )
+            )
         if fest_status_line:
             detail_lines.append(fest_status_line)
         if draft.poster_media and draft.ocr_tokens_remaining is not None:

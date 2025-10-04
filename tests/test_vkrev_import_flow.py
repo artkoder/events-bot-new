@@ -17,7 +17,7 @@ import poster_ocr
 import vk_intake
 import vk_review
 from main import Database
-from models import Event, EventPoster, JobTask, Festival, PosterOcrCache
+from models import Event, EventPoster, JobTask, Festival, PosterOcrCache, TOPIC_LABELS
 from poster_media import PosterMedia
 from sqlmodel import select
 from markup import linkify_for_telegraph
@@ -224,6 +224,14 @@ async def test_vkrev_import_flow_persists_url_and_skips_vk_sync(tmp_path, monkey
     monkeypatch.setattr(vk_review, "mark_imported", fake_mark_imported)
     monkeypatch.setattr(main, "enqueue_job", fake_enqueue_job)
 
+    async def fake_assign_event_topics(event_obj):
+        topics = ["THEATRE", "FASHION"]
+        event_obj.topics = topics
+        event_obj.topics_manual = False
+        return topics, 0, None, False
+
+    monkeypatch.setattr(main, "assign_event_topics", fake_assign_event_topics)
+
     bot = DummyBot()
     await main._vkrev_import_flow(1, 1, 1, "batch1", db, bot)
 
@@ -242,6 +250,10 @@ async def test_vkrev_import_flow_persists_url_and_skips_vk_sync(tmp_path, monkey
     assert "Дата окончания: —" in message_lines
     assert "Время: 10:00" in message_lines
     assert "Бесплатное: нет" in message_lines
+    expected_topics_line = (
+        f"Темы: {TOPIC_LABELS['THEATRE']}, {TOPIC_LABELS['FASHION']}"
+    )
+    assert expected_topics_line in message_lines
 
     markup = bot.messages[-1].reply_markup
     assert isinstance(markup, types.InlineKeyboardMarkup)
