@@ -639,6 +639,7 @@ async def test_build_meetups_digest_preview_adds_exhibition_context(monkeypatch)
 
     monkeypatch.setattr("main.ask_4o", fake_ask)
     monkeypatch.setattr(digests, "compose_digest_intro_via_4o", fake_intro)
+    monkeypatch.setattr(digests, "compose_meetups_intro_via_4o", fake_intro)
 
     intro, lines, horizon, returned_events, norm_titles = await _build_digest_preview(
         "digest-meetup",
@@ -894,16 +895,17 @@ async def test_build_meetups_digest_preview_payload(monkeypatch):
         event_type="клуб",
     )
 
-    captured_payload: dict[str, list] = {}
+    captured_payload: dict[str, object] = {}
 
-    async def fake_compose_meetups_intro(n, horizon_days, meetups):
+    async def fake_compose_meetups_intro(n, horizon_days, meetups, tone_hint=None):
         captured_payload["value"] = meetups
+        captured_payload["tone_hint"] = tone_hint
         return "интро про встречи"
 
     async def fake_candidates(db, now, digest_id=None):
         return [event], 7
 
-    async def fake_normalize_titles(titles, event_kind="lecture"):
+    async def fake_normalize_titles(titles, event_kind="lecture", events=None):
         return [{"emoji": "🎬", "title_clean": "Киноклуб «Весна»"}]
 
     monkeypatch.setattr(
@@ -931,10 +933,105 @@ async def test_build_meetups_digest_preview_payload(monkeypatch):
             "formats": ["клуб", "творческий вечер"],
         }
     ]
+    assert captured_payload["tone_hint"] == "простота+любопытство"
     assert horizon == 7
     assert norm_titles == ["Киноклуб «Весна»"]
     assert len(lines) == 1
     assert events == [event]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "events_data, expected_hint",
+    [
+        (
+            [
+                {
+                    "title": "Закулисье проекта",
+                    "description": "Узнаете секреты впервые",
+                    "event_type": "встреча",
+                }
+            ],
+            "любопытство+интрига",
+        ),
+        (
+            [
+                {
+                    "title": "Открытая встреча друзей",
+                    "description": "",
+                    "event_type": "встреча",
+                },
+                {
+                    "title": "Тёплый круг",
+                    "description": "Без подготовки узнаете редкие факты",
+                    "event_type": "встреча",
+                },
+            ],
+            "простота+любопытство",
+        ),
+        (
+            [
+                {
+                    "title": "Секретная открытая встреча",
+                    "description": "Без подготовки и немного секретов",
+                    "event_type": "встреча",
+                }
+            ],
+            "интрига+простота",
+        ),
+    ],
+)
+async def test_build_meetups_digest_preview_tone_hints(
+    monkeypatch, events_data, expected_hint
+):
+    events = [
+        SimpleNamespace(
+            id=index + 1,
+            title=data["title"],
+            description=data["description"],
+            date="2025-05-05",
+            time="19:00",
+            location_name="Локация",
+            source_post_url=f"https://example.com/{index}",
+            telegraph_url=None,
+            telegraph_path=None,
+            event_type=data["event_type"],
+        )
+        for index, data in enumerate(events_data)
+    ]
+
+    captured: dict[str, object] = {}
+
+    async def fake_compose_meetups_intro(n, horizon_days, meetups, tone_hint=None):
+        captured["tone_hint"] = tone_hint
+        return "интро"
+
+    async def fake_candidates(db, now, digest_id=None):
+        return events, 7
+
+    async def fake_normalize_titles(titles, event_kind="lecture", events=None):
+        return [{"emoji": "", "title_clean": title} for title in titles]
+
+    monkeypatch.setattr(
+        "digests.compose_meetups_intro_via_4o", fake_compose_meetups_intro
+    )
+    monkeypatch.setattr(
+        "digests.build_meetups_digest_candidates", fake_candidates
+    )
+    monkeypatch.setattr("digests.normalize_titles_via_4o", fake_normalize_titles)
+    monkeypatch.setattr("digests.pick_display_link", lambda ev: ev.source_post_url)
+
+    now = datetime(2025, 5, 1, 12, 0)
+    intro, lines, horizon, returned_events, norm_titles = await build_meetups_digest_preview(
+        "digest-meetups", None, now
+    )
+
+    assert intro == "интро"
+    assert captured["tone_hint"] == expected_hint
+    assert horizon == 7
+    assert returned_events == events
+    assert len(lines) == len(events)
+    assert norm_titles == [item.title for item in events]
 
 
 @pytest.mark.asyncio
@@ -956,13 +1053,14 @@ async def test_compose_meetups_intro_without_clubs_emphasises_people(monkeypatch
         }
     ]
 
-    text = await compose_meetups_intro_via_4o(1, 7, payload)
+    text = await compose_meetups_intro_via_4o(1, 7, payload, "простота+любопытство")
     assert text == "интро"
 
     prompt = captured_prompt["value"]
     assert "has_club=false" in prompt
     assert "живом общении" in prompt or "интересными людьми" in prompt
     assert "q&a" in prompt.lower()
+    assert "Простота + любопытство" in prompt
 
 
 @pytest.mark.asyncio
@@ -984,11 +1082,12 @@ async def test_compose_meetups_intro_with_club_sets_flag(monkeypatch):
         }
     ]
 
-    text = await compose_meetups_intro_via_4o(1, 14, payload)
+    text = await compose_meetups_intro_via_4o(1, 14, payload, "любопытство+интрига")
     assert text == "интро"
 
     prompt = captured_prompt["value"]
     assert "has_club=true" in prompt
+    assert "Любопытство + интрига" in prompt
 
 
 @pytest.mark.asyncio
