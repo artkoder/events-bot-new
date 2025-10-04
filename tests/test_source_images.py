@@ -211,6 +211,94 @@ async def test_build_source_page_content_history_footer():
 
 
 @pytest.mark.asyncio
+async def test_build_source_page_content_summary_block(monkeypatch):
+    async def fake_location(parts):
+        return ", ".join(part.strip() for part in parts if part)
+
+    monkeypatch.setattr(main, "build_short_vk_location", fake_location)
+
+    summary = main.SourcePageEventSummary(
+        date="2024-05-01",
+        time="19:00",
+        location_name="Дом",
+        location_address="Улица",
+        city="Калининград",
+        ticket_price_min=500,
+        ticket_price_max=1000,
+        ticket_link="https://tickets.example.com/show",
+    )
+    html, _, _ = await main.build_source_page_content(
+        "Заголовок",
+        "Основной текст",
+        None,
+        None,
+        None,
+        None,
+        None,
+        event_summary=summary,
+    )
+    assert '<p>🗓 1 мая ⏰ 19:00</p>' in html
+    assert '<p>📍 Дом, Улица, Калининград</p>' in html
+    assert '<p>🎟 Билеты от 500 до 1000 руб.</p>' in html
+    assert (
+        '<p><a href="https://tickets.example.com/show">tickets.example.com/show</a></p>'
+        in html
+    )
+
+
+@pytest.mark.asyncio
+async def test_build_source_page_content_summary_block_free(monkeypatch):
+    async def fake_location(parts):
+        return "Локация"
+
+    monkeypatch.setattr(main, "build_short_vk_location", fake_location)
+
+    summary = main.SourcePageEventSummary(
+        date="2024-05-02",
+        location_name="Локация",
+        ticket_link="https://example.org/register",
+        is_free=True,
+    )
+    html, _, _ = await main.build_source_page_content(
+        "Title",
+        "Body",
+        None,
+        None,
+        None,
+        None,
+        None,
+        event_summary=summary,
+    )
+    assert '<p>🗓 2 мая</p>' in html
+    assert '<p>📍 Локация</p>' in html
+    assert '<p>🆓 Бесплатно, по регистрации</p>' in html
+    assert (
+        '<p><a href="https://example.org/register">example.org/register</a></p>'
+        in html
+    )
+
+
+@pytest.mark.asyncio
+async def test_build_source_page_content_summary_block_missing_fields():
+    summary = main.SourcePageEventSummary()
+    html, _, _ = await main.build_source_page_content(
+        "Title",
+        "Body text",
+        None,
+        None,
+        None,
+        None,
+        None,
+        event_summary=summary,
+    )
+    assert html.startswith('<p>Body text</p>')
+    assert '🗓' not in html
+    assert '📍' not in html
+    assert '🎟' not in html
+    assert '🆓' not in html
+
+
+@pytest.mark.asyncio
 async def test_build_source_page_content_history_strips_vk_links():
     source = "https://vk.com/source"
     text = (
