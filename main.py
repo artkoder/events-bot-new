@@ -1560,6 +1560,7 @@ FOUR_O_TIMEOUT = float(os.getenv("FOUR_O_TIMEOUT", "60"))
 FOUR_O_PROMPT_LIMIT = int(os.getenv("FOUR_O_PROMPT_LIMIT", "4000"))
 FOUR_O_RESPONSE_LIMIT = int(os.getenv("FOUR_O_RESPONSE_LIMIT", "1000"))
 FOUR_O_EDITOR_MAX_TOKENS = int(os.getenv("FOUR_O_EDITOR_MAX_TOKENS", "2000"))
+FOUR_O_PITCH_MAX_TOKENS = int(os.getenv("FOUR_O_PITCH_MAX_TOKENS", "200"))
 
 # Track OpenAI usage against a daily budget.  OpenAI resets usage at midnight UTC.
 FOUR_O_DAILY_TOKEN_LIMIT = int(os.getenv("FOUR_O_DAILY_TOKEN_LIMIT", "1000000"))
@@ -5741,6 +5742,63 @@ FOUR_O_EDITOR_PROMPT = textwrap.dedent(
     Не добавляй вводные комментарии, пояснения об обработке или служебные пометки — верни только готовый текст.
     """
 )
+
+
+FOUR_O_PITCH_PROMPT = textwrap.dedent(
+    """
+    Ты — редактор русскоязычного Telegram-канала о событиях.
+    Твоя задача — придумать одно продающее предложение для анонса истории.
+    Излагай ярко и по делу, избегай клише и упоминаний про нейросети или сам процесс написания.
+    Верни только готовое предложение без кавычек, комментариев и служебных пометок.
+    """
+)
+
+
+async def compose_story_pitch_via_4o(text: str, *, title: str | None = None) -> str:
+    """Return a single-sentence pitch using the 4o helper with graceful fallback."""
+
+    raw = (text or "").strip()
+    fallback = ""
+    if raw:
+        for line in raw.splitlines():
+            candidate = line.strip()
+            if candidate:
+                fallback = candidate
+                break
+    if not raw:
+        return fallback
+    sections: list[str] = [
+        "Сделай одно энергичное предложение, чтобы читатель захотел открыть историю на Telegraph.",
+    ]
+    if title:
+        title_clean = title.strip()
+        if title_clean:
+            sections.append(f"Заголовок: {title_clean}")
+    sections.append("Текст:\n" + raw)
+    prompt_text = "\n\n".join(sections)
+    try:
+        response = await ask_4o(
+            prompt_text,
+            system_prompt=FOUR_O_PITCH_PROMPT,
+            max_tokens=FOUR_O_PITCH_MAX_TOKENS,
+        )
+    except Exception as exc:  # pragma: no cover - logging only
+        logger.warning(
+            "vk_review story pitch request failed",
+            extra={"error": str(exc)},
+        )
+        return fallback
+    candidate = (response or "").strip()
+    if candidate.startswith("```"):
+        candidate = re.sub(r"^```[a-zA-Z]*\n?", "", candidate)
+        if candidate.endswith("```"):
+            candidate = candidate[:-3]
+        candidate = candidate.strip()
+    candidate = re.sub(r"\s+", " ", candidate)
+    candidate = candidate.strip(' "\'')
+    if candidate:
+        return candidate
+    return fallback
 
 
 async def compose_story_editorial_via_4o(text: str, *, title: str | None = None) -> str:
@@ -21986,7 +22044,23 @@ async def _vkrev_handle_story_choice(
     image_mode = "inline" if placement == "middle" else "tail"
     source_text = text or ""
     editor_html: str | None = None
+    pitch_text = ""
     if source_text.strip():
+        try:
+            pitch_text = await compose_story_pitch_via_4o(
+                source_text,
+                title=title,
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "vk_review story pitch failed",  # pragma: no cover - logging only
+                extra={
+                    "operator": operator_id,
+                    "inbox_id": inbox_id,
+                    "error": str(exc),
+                },
+            )
+            pitch_text = ""
         try:
             editor_candidate = await compose_story_editorial_via_4o(
                 source_text,
@@ -22010,6 +22084,13 @@ async def _vkrev_handle_story_choice(
                     "vk_review story editor returned empty response",
                     extra={"operator": operator_id, "inbox_id": inbox_id},
                 )
+    pitch_text = (pitch_text or "").strip()
+    if pitch_text:
+        pitch_html = f"<p><i>{html.escape(pitch_text)}</i></p>"
+        if editor_html:
+            editor_html = pitch_html + "\n" + editor_html
+        else:
+            editor_html = pitch_html
     try:
         result = await create_source_page(
             title,
@@ -22049,9 +22130,12 @@ async def _vkrev_handle_story_choice(
     }.get(placement, placement or "неизвестно")
     with contextlib.suppress(Exception):
         await callback.message.edit_reply_markup()
+    message_lines = [f"История готова ({placement_display}): {url}"]
+    if pitch_text:
+        message_lines.append(pitch_text)
     await bot.send_message(
         callback.message.chat.id,
-        f"История готова ({placement_display}): {url}",
+        "\n".join(message_lines),
     )
     vk_review_story_sessions.pop(operator_id, None)
 
