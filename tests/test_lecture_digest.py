@@ -69,6 +69,11 @@ async def test_compose_meetups_intro_prompt_mentions_anti_cliche(monkeypatch):
         assert wording in prompt
 
 
+def test_normalize_topics_distinguishes_urbanism_and_region():
+    topics = digests.normalize_topics(["урбанистика", "калининград", "URBANISM"])
+    assert topics == ["KRAEVEDENIE_KALININGRAD_OBLAST", "URBANISM"]
+
+
 @pytest.mark.asyncio
 async def test_build_lectures_digest_candidates_expand_to_14(tmp_path):
     db = Database(str(tmp_path / "db.sqlite"))
@@ -861,7 +866,7 @@ def test_normalize_topics_distinguishes_theatre_subtypes():
     assert normalized == ["THEATRE", "THEATRE_CLASSIC", "THEATRE_MODERN"]
 
 
-def test_normalize_topics_collapses_kaliningrad_synonyms():
+def test_normalize_topics_separates_kaliningrad_and_urbanism():
     topics = [
         "Калининград",
         "урбанистика",
@@ -871,7 +876,7 @@ def test_normalize_topics_collapses_kaliningrad_synonyms():
 
     normalized = normalize_topics(topics)
 
-    assert normalized == ["KRAEVEDENIE_KALININGRAD_OBLAST"]
+    assert normalized == ["KRAEVEDENIE_KALININGRAD_OBLAST", "URBANISM"]
 
 
 @pytest.mark.asyncio

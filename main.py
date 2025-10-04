@@ -21800,6 +21800,7 @@ VK_TOPIC_HASHTAGS: Mapping[str, str] = {
     "FASHION": "#мода",
     "KIDS_SCHOOL": "#детям",
     "FAMILY": "#семье",
+    "URBANISM": "#урбанистика",
     "KRAEVEDENIE_KALININGRAD_OBLAST": "#калининград",
 }
 

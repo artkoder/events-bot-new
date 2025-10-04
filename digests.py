@@ -117,6 +117,12 @@ TOPIC_SYNONYMS: dict[str, set[str]] = {
         "семейный",
         "для всей семьи",
     },
+    "URBANISM": {
+        "urbanism",
+        "урбанистика",
+        "урбанистический",
+        "урбанистике",
+    },
     "KRAEVEDENIE_KALININGRAD_OBLAST": {
         "краеведение",
         "краевед",
@@ -133,9 +139,6 @@ TOPIC_SYNONYMS: dict[str, set[str]] = {
         "koenigsberg",
         "kenigsberg",
         "kenig",
-        "урбанистика",
-        "urbanism",
-        "урбанистический",
         "янтарный край",
         "янтарного края",
         "39 регион",
