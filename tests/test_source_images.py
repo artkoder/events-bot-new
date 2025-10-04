@@ -152,6 +152,10 @@ async def test_build_source_page_content_inline_images():
     )
     assert uploaded == 5
     assert html.count('<img src="http://cat/') == 5
+    spacer = main.BODY_SPACER_HTML
+    assert f"<p>paragraph 1</p>{spacer}<p>paragraph 2</p>" in html
+    assert f"<p>paragraph 2</p>{spacer}<img src=\"http://cat/1.jpg\"/>" in html
+    assert f"<img src=\"http://cat/1.jpg\"/>{spacer}<p>paragraph 3</p>" in html
     paragraph_positions = [
         html.index(f"<p>paragraph {idx}</p>") for idx in range(1, 7)
     ]
@@ -162,6 +166,28 @@ async def test_build_source_page_content_inline_images():
     assert paragraph_positions[2] < image_positions[1] < paragraph_positions[3]
     assert paragraph_positions[3] < image_positions[2] < paragraph_positions[4]
     assert paragraph_positions[4] < image_positions[3] < paragraph_positions[5]
+
+
+@pytest.mark.asyncio
+async def test_build_source_page_content_history_spacing():
+    text = "Первый абзац\n\nВторой абзац\n\nТретий абзац"
+    html, _, _ = await main.build_source_page_content(
+        "История",
+        text,
+        "https://example.com/story",
+        None,
+        None,
+        None,
+        None,
+        page_mode="history",
+    )
+    spacer = main.BODY_SPACER_HTML
+    first = "<p>Первый абзац</p>"
+    second = "<p>Второй абзац</p>"
+    third = "<p>Третий абзац</p>"
+    assert f"{first}{spacer}{second}" in html
+    assert f"{second}{spacer}{third}" in html
+    assert not html.rstrip().endswith(spacer)
 
 
 @pytest.mark.asyncio
