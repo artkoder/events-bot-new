@@ -19,6 +19,11 @@ def test_event_topic_prompt_mentions_topics():
     assert "Бесплатно" in prompt
     assert "Фестивали" in prompt
     assert "ярмарк" in prompt.casefold()
+    assert "пьесы классических авторов" in prompt
+    assert "исторические или мифологические сюжеты" in prompt
+    assert "новой драме" in prompt
+    assert "экспериментальным, иммерсивным" in prompt
+    assert "ставь обе темы" in prompt
 
 
 def test_topic_labels_include_theatre_subtypes():
