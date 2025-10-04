@@ -1,6 +1,7 @@
 # Changelog
 
 ## [Unreleased]
+- Partner event notifications in the admin chat now include the first event photo plus Telegraph and VK links so operators know to review or edit the VK post.
 
 ## [x.y.z+4] – 2025-10-04
 - Clarified the 4o parsing prompt and docs for same-day theatre showtimes: posters with one date and multiple start times now yield separate theatre events instead of a single merged entry.
