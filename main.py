@@ -11581,9 +11581,14 @@ async def split_month_until_ok(
             return day_boundaries[pos]
         return day_boundaries[-1]
 
-    async def attempt(include_ics: bool) -> None:
+    async def attempt(include_ics: bool, include_details: bool) -> None:
         title, content, _ = await build_month_page_content(
-            db, month, events, exhibitions, include_ics=include_ics
+            db,
+            month,
+            events,
+            exhibitions,
+            include_ics=include_ics,
+            include_details=include_details,
         )
         html_full = unescape_html_comments(nodes_to_html(content))
         html_full = ensure_footer_nav_with_hr(html_full, nav_block, month=month, page=1)
@@ -11592,13 +11597,14 @@ async def split_month_until_ok(
         base_idx = max(1, min(len(events) - 1, int(TELEGRAPH_LIMIT // avg)))
         split_idx = snap_index(base_idx)
         logging.info(
-            "month_split start month=%s events=%d total_bytes=%d nav_bytes=%d split_idx=%d include_ics=%s",
+            "month_split start month=%s events=%d total_bytes=%d nav_bytes=%d split_idx=%d include_ics=%s include_details=%s",
             month,
             len(events),
             total_size,
             len(nav_block),
             split_idx,
             include_ics,
+            include_details,
         )
         attempts = 0
         fallback_reason = ""
@@ -11607,7 +11613,12 @@ async def split_month_until_ok(
             attempts += 1
             first, second = events[:split_idx], events[split_idx:]
             title2, content2, _ = await build_month_page_content(
-                db, month, second, exhibitions, include_ics=include_ics
+                db,
+                month,
+                second,
+                exhibitions,
+                include_ics=include_ics,
+                include_details=include_details,
             )
             rough2 = rough_size(content2) + len(nav_block)
             title1, content1, _ = await build_month_page_content(
@@ -11617,10 +11628,11 @@ async def split_month_until_ok(
                 [],
                 continuation_url="x",
                 include_ics=include_ics,
+                include_details=include_details,
             )
             rough1 = rough_size(content1) + len(nav_block) + 200
             logging.info(
-                "month_split try attempt=%d idx=%d first_events=%d second_events=%d rough1=%d rough2=%d include_ics=%s",
+                "month_split try attempt=%d idx=%d first_events=%d second_events=%d rough1=%d rough2=%d include_ics=%s include_details=%s",
                 attempts,
                 split_idx,
                 len(first),
@@ -11628,12 +11640,14 @@ async def split_month_until_ok(
                 rough1,
                 rough2,
                 include_ics,
+                include_details,
             )
             if rough1 > TELEGRAPH_LIMIT and rough2 > TELEGRAPH_LIMIT:
                 logging.info(
-                    "month_split forcing attempt idx=%d include_ics=%s",
+                    "month_split forcing attempt idx=%d include_ics=%s include_details=%s",
                     split_idx,
                     include_ics,
+                    include_details,
                 )
                 saw_both_too_big = True
             if rough1 > TELEGRAPH_LIMIT:
@@ -11642,9 +11656,10 @@ async def split_month_until_ok(
                 if new_idx != split_idx:
                     split_idx = new_idx
                     logging.info(
-                        "month_split adjust idx=%d reason=rough_size target=first include_ics=%s",
+                        "month_split adjust idx=%d reason=rough_size target=first include_ics=%s include_details=%s",
                         split_idx,
                         include_ics,
+                        include_details,
                     )
                     continue
             elif rough2 > TELEGRAPH_LIMIT:
@@ -11653,9 +11668,10 @@ async def split_month_until_ok(
                 if new_idx != split_idx:
                     split_idx = new_idx
                     logging.info(
-                        "month_split adjust idx=%d reason=rough_size target=second include_ics=%s",
+                        "month_split adjust idx=%d reason=rough_size target=second include_ics=%s include_details=%s",
                         split_idx,
                         include_ics,
+                        include_details,
                     )
                     continue
             html2 = unescape_html_comments(nodes_to_html(content2))
@@ -11692,9 +11708,10 @@ async def split_month_until_ok(
                     if new_idx != split_idx:
                         split_idx = new_idx
                         logging.info(
-                            "month_split adjust idx=%d reason=telegraph_too_big target=second include_ics=%s",
+                            "month_split adjust idx=%d reason=telegraph_too_big target=second include_ics=%s include_details=%s",
                             split_idx,
                             include_ics,
+                            include_details,
                         )
                         continue
                 raise
@@ -11707,6 +11724,7 @@ async def split_month_until_ok(
                 [],
                 continuation_url=page.url2,
                 include_ics=include_ics,
+                include_details=include_details,
             )
             html1 = unescape_html_comments(nodes_to_html(content1))
             html1 = ensure_footer_nav_with_hr(html1, nav_block, month=month, page=1)
@@ -11742,9 +11760,10 @@ async def split_month_until_ok(
                     if new_idx != split_idx:
                         split_idx = new_idx
                         logging.info(
-                            "month_split adjust idx=%d reason=telegraph_too_big target=first include_ics=%s",
+                            "month_split adjust idx=%d reason=telegraph_too_big target=first include_ics=%s include_details=%s",
                             split_idx,
                             include_ics,
+                            include_details,
                         )
                         continue
                 raise
@@ -11759,12 +11778,13 @@ async def split_month_until_ok(
                 db_page.content_hash2 = page.content_hash2
                 await session.commit()
             logging.info(
-                "month_split done month=%s idx=%d first_bytes=%d second_bytes=%d include_ics=%s",
+                "month_split done month=%s idx=%d first_bytes=%d second_bytes=%d include_ics=%s include_details=%s",
                 month,
                 split_idx,
                 rough1,
                 rough2,
                 include_ics,
+                include_details,
             )
             return
         if saw_both_too_big:
@@ -11772,17 +11792,18 @@ async def split_month_until_ok(
         if not fallback_reason:
             fallback_reason = "attempts_exhausted"
         logging.error(
-            "month_split failed month=%s attempts=%d last_idx=%d include_ics=%s reason=%s",
+            "month_split failed month=%s attempts=%d last_idx=%d include_ics=%s include_details=%s reason=%s",
             month,
             attempts,
             split_idx,
             include_ics,
+            include_details,
             fallback_reason,
         )
         raise TelegraphException("CONTENT_TOO_BIG")
 
     try:
-        await attempt(True)
+        await attempt(True, True)
         return
     except TelegraphException as exc:
         msg = str(exc).lower()
@@ -11790,7 +11811,16 @@ async def split_month_until_ok(
             raise
         logging.info("month_split retry_without_ics month=%s", month)
 
-    await attempt(False)
+    try:
+        await attempt(False, True)
+        return
+    except TelegraphException as exc:
+        msg = str(exc).lower()
+        if "content" not in msg or "too" not in msg or "big" not in msg:
+            raise
+        logging.info("month_split retry_without_details month=%s", month)
+
+    await attempt(False, False)
 
 
 async def patch_month_page_for_date(
@@ -13253,6 +13283,7 @@ def format_event_md(
     festival: Festival | None = None,
     *,
     include_ics: bool = True,
+    include_details: bool = True,
 ) -> str:
     prefix = ""
     if is_recent(e):
@@ -13300,7 +13331,7 @@ def format_event_md(
             price = ""
         if price:
             lines.append(f"Билеты {price}")
-    if e.telegraph_url:
+    if include_details and e.telegraph_url:
         cam = "\U0001f4f8" * min(2, max(0, e.photo_count))
         prefix = f"{cam} " if cam else ""
         more_line = f"{prefix}[подробнее]({e.telegraph_url})"
@@ -13700,11 +13731,13 @@ def event_to_nodes(
     *,
     show_festival: bool = True,
     include_ics: bool = True,
+    include_details: bool = True,
 ) -> list[dict]:
     md = format_event_md(
         e,
         festival if show_festival else None,
         include_ics=include_ics,
+        include_details=include_details,
     )
 
     lines = md.split("\n")
@@ -13831,6 +13864,7 @@ def add_day_sections(
     *,
     use_markers: bool = False,
     include_ics: bool = True,
+    include_details: bool = True,
 ):
     """Append event sections grouped by day to Telegraph content."""
     for d in days:
@@ -13858,6 +13892,7 @@ def add_day_sections(
                     fest_icon=True,
                     log_fest_link=use_markers,
                     include_ics=include_ics,
+                    include_details=include_details,
                 )
             )
         if use_markers:
@@ -13939,6 +13974,7 @@ async def build_month_page_content(
     size_limit: int | None = None,
     *,
     include_ics: bool = True,
+    include_details: bool = True,
 ) -> tuple[str, list, int]:
     if events is None or exhibitions is None:
         events, exhibitions = await get_month_data(db, month)
@@ -13966,6 +14002,7 @@ async def build_month_page_content(
             size_limit,
             fest_index_url,
             include_ics,
+            include_details,
         )
     logging.info("build_month_page_content size=%d", size)
     return title, content, size
@@ -13980,6 +14017,7 @@ def _build_month_page_content_sync(
     size_limit: int | None,
     fest_index_url: str | None,
     include_ics: bool,
+    include_details: bool,
 ) -> tuple[str, list, int]:
     # Ensure festivals have full Telegraph URLs for easy linking
     for fest in fest_map.values():
@@ -14046,6 +14084,7 @@ def _build_month_page_content_sync(
         add_many,
         use_markers=True,
         include_ics=include_ics,
+        include_details=include_details,
     )
 
     if exhibitions and not exceeded:

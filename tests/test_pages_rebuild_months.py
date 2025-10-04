@@ -361,6 +361,7 @@ async def test_month_nav_update_falls_back_to_full_rebuild(tmp_path, monkeypatch
         size_limit=None,
         *,
         include_ics=True,
+        include_details=True,
     ):
         nonlocal full_render_called
         full_render_called = True
