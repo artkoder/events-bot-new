@@ -39,6 +39,13 @@ def test_topic_labels_include_fashion():
     assert main.TOPIC_LABELS["FASHION"] == "Мода и стиль"
 
 
+def test_topic_labels_include_kaliningrad_topic():
+    assert (
+        main.TOPIC_LABELS["KRAEVEDENIE_KALININGRAD_OBLAST"]
+        == "Краеведение Калининградской области"
+    )
+
+
 @pytest.mark.asyncio
 async def test_classify_event_topics_filters_and_limits(monkeypatch):
     monkeypatch.setenv("FOUR_O_MINI", "1")
@@ -130,6 +137,10 @@ def test_normalize_topic_identifier_legacy_aliases():
         "fashion show": "FASHION",
         "styling": "FASHION",
         "стиль": "FASHION",
+        "урбанистика": "KRAEVEDENIE_KALININGRAD_OBLAST",
+        "URBANISM": "KRAEVEDENIE_KALININGRAD_OBLAST",
+        "краеведение": "KRAEVEDENIE_KALININGRAD_OBLAST",
+        "Kaliningrad": "KRAEVEDENIE_KALININGRAD_OBLAST",
     }
     for raw, expected in cases.items():
         assert models.normalize_topic_identifier(raw) == expected
@@ -154,3 +165,90 @@ async def test_classify_event_topics_handles_exception(monkeypatch):
     result = await main.classify_event_topics(event)
 
     assert result == []
+
+
+@pytest.mark.asyncio
+async def test_assign_event_topics_adds_kaliningrad_for_city(monkeypatch):
+    async def fake_classify(event):
+        return []
+
+    monkeypatch.setattr(main, "classify_event_topics", fake_classify)
+
+    event = SimpleNamespace(
+        title="Прогулка",
+        description="",
+        source_text="",
+        location_name="",
+        location_address="",
+        city="Калининград",
+        topics_manual=False,
+        topics=[],
+    )
+
+    topics, length, error, manual = await main.assign_event_topics(event)
+
+    assert topics == ["KRAEVEDENIE_KALININGRAD_OBLAST"]
+    assert length == 8
+    assert error is None
+    assert manual is False
+
+
+@pytest.mark.asyncio
+async def test_assign_event_topics_kaliningrad_uses_hashtags(monkeypatch):
+    async def fake_classify(event):
+        return ["CONCERTS"]
+
+    monkeypatch.setattr(main, "classify_event_topics", fake_classify)
+
+    event = SimpleNamespace(
+        title="Концерт",
+        description="Праздник",
+        source_text="Будем гулять #калининград #праздник",
+        location_name="",
+        location_address="",
+        city="Москва",
+        topics_manual=False,
+        topics=[],
+    )
+
+    topics, length, error, manual = await main.assign_event_topics(event)
+
+    assert topics == ["CONCERTS", "KRAEVEDENIE_KALININGRAD_OBLAST"]
+    assert error is None
+    assert manual is False
+
+
+@pytest.mark.asyncio
+async def test_assign_event_topics_skips_manual_and_duplicates(monkeypatch):
+    async def fake_classify(event):
+        return ["KRAEVEDENIE_KALININGRAD_OBLAST"]
+
+    monkeypatch.setattr(main, "classify_event_topics", fake_classify)
+
+    manual_event = SimpleNamespace(
+        title="Лекция",
+        description="",
+        source_text="",
+        location_name="",
+        location_address="",
+        city="Светлогорск",
+        topics_manual=True,
+        topics=["LECTURES"],
+    )
+
+    topics_manual, *_ = await main.assign_event_topics(manual_event)
+    assert topics_manual == ["LECTURES"]
+
+    auto_event = SimpleNamespace(
+        title="Экскурсия",
+        description="",
+        source_text="",
+        location_name="",
+        location_address="",
+        city="Зеленоградск",
+        topics_manual=False,
+        topics=[],
+    )
+
+    topics_auto, *_ = await main.assign_event_topics(auto_event)
+    assert topics_auto == ["KRAEVEDENIE_KALININGRAD_OBLAST"]
