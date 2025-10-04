@@ -1565,6 +1565,8 @@ FOUR_O_PITCH_MAX_TOKENS = int(os.getenv("FOUR_O_PITCH_MAX_TOKENS", "200"))
 # Track OpenAI usage against a daily budget.  OpenAI resets usage at midnight UTC.
 FOUR_O_DAILY_TOKEN_LIMIT = int(os.getenv("FOUR_O_DAILY_TOKEN_LIMIT", "1000000"))
 
+FOUR_O_TRACKED_MODELS: tuple[str, str] = ("gpt-4o", "gpt-4o-mini")
+
 
 def _current_utc_date() -> date:
     return datetime.now(timezone.utc).date()
@@ -1572,8 +1574,36 @@ def _current_utc_date() -> date:
 
 _four_o_usage_state = {
     "date": _current_utc_date(),
+    "total": 0,
     "used": 0,
+    "models": {model: 0 for model in FOUR_O_TRACKED_MODELS},
 }
+
+
+def _reset_four_o_usage_state(today: date) -> None:
+    _four_o_usage_state["date"] = today
+    _four_o_usage_state["total"] = 0
+    _four_o_usage_state["used"] = 0
+    _four_o_usage_state["models"] = {model: 0 for model in FOUR_O_TRACKED_MODELS}
+
+
+def _ensure_four_o_usage_state(current_date: date | None = None) -> None:
+    today = current_date or _current_utc_date()
+    if _four_o_usage_state.get("date") != today:
+        _reset_four_o_usage_state(today)
+
+
+def _get_four_o_usage_snapshot() -> dict[str, Any]:
+    _ensure_four_o_usage_state()
+    models = dict(_four_o_usage_state.get("models", {}))
+    for model in FOUR_O_TRACKED_MODELS:
+        models.setdefault(model, 0)
+    return {
+        "date": _four_o_usage_state.get("date"),
+        "total": _four_o_usage_state.get("total", 0),
+        "used": _four_o_usage_state.get("used", 0),
+        "models": models,
+    }
 
 
 def _record_four_o_usage(
@@ -1585,29 +1615,34 @@ def _record_four_o_usage(
 ) -> int:
     limit = max(FOUR_O_DAILY_TOKEN_LIMIT, 0)
     today = _current_utc_date()
-    state_date = _four_o_usage_state.get("date")
-    if state_date != today:
-        _four_o_usage_state["date"] = today
-        _four_o_usage_state["used"] = 0
+    _ensure_four_o_usage_state(today)
     if total_tokens is not None:
         spent = max(int(total_tokens), 0)
     else:
         spent = max(int(prompt_tokens or 0) + int(completion_tokens or 0), 0)
-    previous_used = _four_o_usage_state["used"]
+    models = _four_o_usage_state.setdefault("models", {})
+    models.setdefault(model, 0)
+    models[model] += spent
+    new_total = _four_o_usage_state.get("total", 0) + spent
+    _four_o_usage_state["total"] = new_total
+    previous_used = _four_o_usage_state.get("used", 0)
     new_used = previous_used + spent
     if limit:
         new_used = min(new_used, limit)
+        remaining = max(limit - new_used, 0)
     else:
         new_used = 0
+        remaining = 0
     _four_o_usage_state["used"] = new_used
-    remaining = max(limit - new_used, 0)
     logging.info(
-        "four_o.usage op=%s model=%s spent=%d remaining=%d/%d prompt=%d completion=%d total=%d",
+        "four_o.usage op=%s model=%s spent=%d remaining=%d/%d day_total=%d model_total=%d prompt=%d completion=%d total=%d",
         operation,
         model,
         spent,
         remaining,
         limit,
+        new_total,
+        models[model],
         int(prompt_tokens or 0),
         int(completion_tokens or 0),
         int(total_tokens or 0),
@@ -19817,6 +19852,14 @@ async def handle_stats(message: types.Message, db: Database, bot: Bot):
             lines.append("")
             lines.append("Фестивали (Вк) (просмотров, пользователи)")
             lines.extend(fest_vk)
+    usage_snapshot = _get_four_o_usage_snapshot()
+    usage_models = usage_snapshot.get("models", {})
+    lines.extend(
+        [
+            f"Tokens gpt-4o: {usage_models.get('gpt-4o', 0)}",
+            f"Tokens gpt-4o-mini: {usage_models.get('gpt-4o-mini', 0)}",
+        ]
+    )
     await bot.send_message(message.chat.id, "\n".join(lines) if lines else "No data")
 
 
