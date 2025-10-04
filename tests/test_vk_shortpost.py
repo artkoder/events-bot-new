@@ -139,6 +139,30 @@ async def test_build_short_vk_text_curiosity_hook_and_ban(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_build_short_vk_tags_include_topics(monkeypatch):
+    async def fake_ask(*args, **kwargs):
+        return "#экстра #тег"
+
+    monkeypatch.setattr(main, "ask_4o", fake_ask)
+
+    event = SimpleNamespace(
+        date="2025-01-15",
+        city="Калининград",
+        location_name="",
+        location_address="",
+        event_type="",
+        topics=["FASHION", "KIDS_SCHOOL"],
+        title="Показ и школа",
+    )
+
+    tags = await main.build_short_vk_tags(event, "Короткое описание")
+
+    assert "#мода" in tags
+    assert "#дети" in tags
+    assert 5 <= len(tags) <= 7
+
+
+@pytest.mark.asyncio
 async def test_shortpost_wall_post(tmp_path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
