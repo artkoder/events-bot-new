@@ -91,7 +91,7 @@ async def test_split_month_until_ok_fallback_without_ics(tmp_path: Path, monkeyp
     monkeypatch.setattr(main, "telegraph_edit_page", fake_edit_page)
 
     original_build = main.build_month_page_content
-    include_flags: list[bool] = []
+    include_flags: list[tuple[bool, bool]] = []
 
     async def tracked_build_month_page_content(
         db_obj,
@@ -102,8 +102,9 @@ async def test_split_month_until_ok_fallback_without_ics(tmp_path: Path, monkeyp
         size_limit=None,
         *,
         include_ics=True,
+        include_details=True,
     ):
-        include_flags.append(include_ics)
+        include_flags.append((include_ics, include_details))
         return await original_build(
             db_obj,
             month_str,
@@ -112,6 +113,7 @@ async def test_split_month_until_ok_fallback_without_ics(tmp_path: Path, monkeyp
             continuation_url=continuation_url,
             size_limit=size_limit,
             include_ics=include_ics,
+            include_details=include_details,
         )
 
     monkeypatch.setattr(main, "build_month_page_content", tracked_build_month_page_content)
@@ -126,8 +128,8 @@ async def test_split_month_until_ok_fallback_without_ics(tmp_path: Path, monkeyp
 
     assert any("добавить в календарь" in html for html in create_attempts)
     assert all("добавить в календарь" not in html for html in success_htmls)
-    assert include_flags[-1] is False
-    assert any(flag is False for flag in include_flags)
+    assert include_flags[-1] == (False, True)
+    assert any(not flags[0] for flags in include_flags)
 
     async with db.get_session() as session:
         stored = await session.get(MonthPage, month)
