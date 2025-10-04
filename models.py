@@ -42,6 +42,7 @@ TOPIC_LABELS: dict[str, str] = {
     "HISTORICAL_IMMERSION": "Исторические реконструкции и погружение",
     "KIDS_SCHOOL": "Дети и школа",
     "FAMILY": "Семейные события",
+    "URBANISM": "Урбанистика",
     "KRAEVEDENIE_KALININGRAD_OBLAST": "Краеведение Калининградской области",
 }
 
@@ -69,9 +70,9 @@ _TOPIC_LEGACY_ALIASES: dict[str, str] = {
     "BUSINESS": "LECTURES",
     "business": "LECTURES",
     "предпринимательство": "LECTURES",
-    "URBANISM": "KRAEVEDENIE_KALININGRAD_OBLAST",
-    "urbanism": "KRAEVEDENIE_KALININGRAD_OBLAST",
-    "урбанистика": "KRAEVEDENIE_KALININGRAD_OBLAST",
+    "urbanism": "URBANISM",
+    "урбанистика": "URBANISM",
+    "урбанистический": "URBANISM",
     "краеведение": "KRAEVEDENIE_KALININGRAD_OBLAST",
     "краевед": "KRAEVEDENIE_KALININGRAD_OBLAST",
     "краеведческий": "KRAEVEDENIE_KALININGRAD_OBLAST",

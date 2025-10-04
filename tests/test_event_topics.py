@@ -137,8 +137,9 @@ def test_normalize_topic_identifier_legacy_aliases():
         "fashion show": "FASHION",
         "styling": "FASHION",
         "стиль": "FASHION",
-        "урбанистика": "KRAEVEDENIE_KALININGRAD_OBLAST",
-        "URBANISM": "KRAEVEDENIE_KALININGRAD_OBLAST",
+        "урбанистика": "URBANISM",
+        "URBANISM": "URBANISM",
+        "урбанистический": "URBANISM",
         "краеведение": "KRAEVEDENIE_KALININGRAD_OBLAST",
         "Kaliningrad": "KRAEVEDENIE_KALININGRAD_OBLAST",
     }
@@ -252,3 +253,53 @@ async def test_assign_event_topics_skips_manual_and_duplicates(monkeypatch):
 
     topics_auto, *_ = await main.assign_event_topics(auto_event)
     assert topics_auto == ["KRAEVEDENIE_KALININGRAD_OBLAST"]
+
+
+@pytest.mark.asyncio
+async def test_assign_event_topics_preserves_urbanism(monkeypatch):
+    async def fake_classify(event):
+        return ["URBANISM"]
+
+    monkeypatch.setattr(main, "classify_event_topics", fake_classify)
+
+    event = SimpleNamespace(
+        title="Город и люди",
+        description="Обсуждаем развитие городской среды",
+        source_text="",
+        location_name="",
+        location_address="",
+        city="Москва",
+        topics_manual=False,
+        topics=[],
+    )
+
+    topics, length, error, manual = await main.assign_event_topics(event)
+
+    assert topics == ["URBANISM"]
+    assert error is None
+    assert manual is False
+
+
+@pytest.mark.asyncio
+async def test_assign_event_topics_adds_kaliningrad_to_urbanism(monkeypatch):
+    async def fake_classify(event):
+        return ["URBANISM"]
+
+    monkeypatch.setattr(main, "classify_event_topics", fake_classify)
+
+    event = SimpleNamespace(
+        title="Городские практики",
+        description="",
+        source_text="",
+        location_name="",
+        location_address="",
+        city="Калининград",
+        topics_manual=False,
+        topics=[],
+    )
+
+    topics, length, error, manual = await main.assign_event_topics(event)
+
+    assert topics == ["URBANISM", "KRAEVEDENIE_KALININGRAD_OBLAST"]
+    assert error is None
+    assert manual is False
