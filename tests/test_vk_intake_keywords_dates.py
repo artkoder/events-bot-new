@@ -1,6 +1,9 @@
 from datetime import datetime as real_datetime, timezone
 
+import pytest
+
 import main
+import vk_intake
 from vk_intake import match_keywords, detect_date, extract_event_ts_hint
 
 
@@ -186,3 +189,43 @@ def test_extract_event_ts_hint_explicit_year_past(monkeypatch):
 
     text = "Концерт состоится 17 сентября 2025 года"
     assert extract_event_ts_hint(text) is None
+
+
+@pytest.mark.asyncio
+async def test_build_drafts_library_defaults_to_free(monkeypatch):
+    async def fake_parse(*args, **kwargs):
+        return [
+            {
+                "title": "Лекция в библиотеке",
+                "location_name": "Центральная библиотека",
+                "location_address": "ул. Ленина, 10",
+            }
+        ]
+
+    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse, raising=False)
+
+    drafts = await vk_intake.build_event_drafts_from_vk(
+        "Встреча читателей в уютной библиотеке"
+    )
+
+    assert drafts and drafts[0].is_free is True
+
+
+@pytest.mark.asyncio
+async def test_build_drafts_library_respects_paid_keywords(monkeypatch):
+    async def fake_parse(*args, **kwargs):
+        return [
+            {
+                "title": "Лекция в библиотеке",
+                "location_name": "Центральная библиотека",
+                "location_address": "ул. Ленина, 10",
+            }
+        ]
+
+    monkeypatch.setattr(main, "parse_event_via_4o", fake_parse, raising=False)
+
+    drafts = await vk_intake.build_event_drafts_from_vk(
+        "Встреча читателей в библиотеке, вход 300 руб."
+    )
+
+    assert drafts and drafts[0].is_free is False
