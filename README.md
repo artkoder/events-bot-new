@@ -271,7 +271,10 @@ A VK service (server) token helps keep read-only API traffic away from the user 
 
 Each added event stores the original announcement text in a Telegraph page. The link is shown when the event is added and in the `/events` listing. Events may also contain ticket prices, a purchase link, and the cached vk.cc short URL plus `vk_ticket_short_key` used for VK statistics. Use the edit button in `/events` to change any field.
 Links from the announcement text are preserved on the Telegraph page whenever possible so readers can follow the original sources.
-If the original message contains photos (under 5&nbsp;MB), they are uploaded to Catbox and displayed on the Telegraph page.
+If the original message contains photos (under 5&nbsp;MB), they are uploaded to Catbox and displayed on the Telegraph page. Just
+under the cover the page now shows a «Быстрые факты» block with the event date and time (or the closing date for active
+exhibitions), normalized location details, and ticket information. Ticket and registration links are rendered as a separate
+line, and each line disappears when the source data is missing so operators immediately see which fields are optional.
 The project uses `telegraph>=2.2.0`. `create_page` returns the page `url` and `path`;
 only `edit_page(path=...)` accepts a `path` argument when updating existing pages.
 Editing an event lets you create or delete an ICS file for calendars. The file is uploaded to Supabase when `SUPABASE_URL` and `SUPABASE_KEY` are set. Files are named `Event-<id>-dd-mm-yyyy.ics` and include a link back to the event. Set `SUPABASE_BUCKET` if you use a bucket name other than `events-ics`.
