@@ -21498,6 +21498,8 @@ async def build_short_vk_text(
         "Сразу начинай с главной идеи — в первой строке не повторяй название события и не добавляй блок про дату, время, место или билеты. "
         "Название проекта или события можно упомянуть позже. "
         "Не повторяй дату, время и место события в абзацах — мы выводим их отдельными строками. "
+        "Сделай первую фразу крючком, который вызывает любопытство: это может быть вопрос или интригующая деталь. "
+        "Не используй фразу «Погрузитесь в мир» ни в каком виде. "
         f"Разбивай текст на абзацы для удобства чтения.\n\n{prompt_text}"
     )
     try:
@@ -21509,14 +21511,102 @@ async def build_short_vk_text(
                 "Не используй прямые рекламные формулировки, в том числе призывы покупать билеты. "
                 "Сразу начинай с сути — в первой строке не повторяй название события и не добавляй блок про дату, время, место или билеты. "
                 "Название проекта или события можно упомянуть позже. "
-                "Не повторяй дату, время и место события в абзацах — они выводятся отдельно."
+                "Не повторяй дату, время и место события в абзацах — они выводятся отдельно. "
+                "Первая фраза должна быть крючком, вызывающим любопытство, и избегай фразы «Погрузитесь в мир»."
             ),
             max_tokens=400,
         )
     except Exception:
         return _fallback_summary()
     cleaned = raw.strip()
-    cleaned_lower = cleaned.lower()
+    if not cleaned:
+        return _fallback_summary()
+
+    banned_phrase_pattern = re.compile(r"погрузитесь в мир", re.IGNORECASE)
+
+    def _remove_banned_sentences(value: str) -> str:
+        if not banned_phrase_pattern.search(value):
+            return value
+        paragraphs: list[str] = []
+        for block in value.split("\n\n"):
+            sentences = [
+                sentence.strip()
+                for sentence in sentence_splitter.split(block)
+                if sentence.strip()
+            ]
+            filtered = [
+                sentence
+                for sentence in sentences
+                if not banned_phrase_pattern.search(sentence)
+            ]
+            if filtered:
+                paragraphs.append(" ".join(filtered))
+        return "\n\n".join(paragraphs).strip()
+
+    def _ensure_curiosity_hook(value: str) -> str:
+        stripped = value.lstrip()
+        prefix = value[: len(value) - len(stripped)]
+        if not stripped:
+            return value
+        match = re.search(r"^([^\n]*?[.!?])(\s|$)", stripped)
+        if match:
+            first_sentence = match.group(1).strip()
+            separator = match.group(2) or ""
+            remainder = separator + stripped[match.end():]
+        else:
+            first_sentence = stripped
+            remainder = ""
+        hook_prefixes = (
+            "что если",
+            "представьте",
+            "знаете ли вы",
+            "как насчет",
+            "как насчёт",
+            "готовы ли вы",
+            "хотите узнать",
+            "угадайте",
+        )
+        first_lower = first_sentence.casefold()
+        has_hook = "?" in first_sentence or any(
+            first_lower.startswith(prefix) for prefix in hook_prefixes
+        )
+        if has_hook:
+            return prefix + stripped
+        base = first_sentence.rstrip(".!?").strip()
+        if not base:
+            return prefix + stripped
+        if len(base) > 1:
+            body = base[0].lower() + base[1:]
+        else:
+            body = base.lower()
+        new_first_sentence = f"Знаете ли вы, {body}?"
+        remainder = remainder.lstrip()
+        if remainder:
+            if remainder.startswith("\n"):
+                rebuilt = new_first_sentence + remainder
+            else:
+                rebuilt = new_first_sentence + " " + remainder
+        else:
+            rebuilt = new_first_sentence
+        return prefix + rebuilt
+
+    cleaned = _remove_banned_sentences(cleaned)
+    cleaned = cleaned.strip()
+    if not cleaned:
+        return _fallback_summary()
+    if banned_phrase_pattern.search(cleaned):
+        cleaned = banned_phrase_pattern.sub("", cleaned)
+        cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+        cleaned = re.sub(r" ?\n ?", "\n", cleaned)
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+        cleaned = cleaned.strip()
+        if not cleaned:
+            return _fallback_summary()
+    cleaned = _ensure_curiosity_hook(cleaned)
+    cleaned = cleaned.strip()
+    if not cleaned:
+        return _fallback_summary()
+    cleaned_lower = cleaned.casefold()
     if not cleaned:
         return _fallback_summary()
     if ("предостав" in cleaned_lower and "текст" in cleaned_lower) or (
