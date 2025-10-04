@@ -1064,6 +1064,32 @@ async def test_compose_meetups_intro_without_clubs_emphasises_people(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_compose_meetups_intro_bans_cliches(monkeypatch):
+    captured_prompt: dict[str, str] = {}
+
+    async def fake_ask(prompt, max_tokens=0):
+        captured_prompt["value"] = prompt
+        return "интро"
+
+    monkeypatch.setattr("main.ask_4o", fake_ask)
+
+    payload = [
+        {
+            "title": "Лекция о городе",
+            "description": "Обсуждаем общественные пространства.",
+            "event_type": "лекция",
+            "formats": ["лекция"],
+        }
+    ]
+
+    await compose_meetups_intro_via_4o(1, 7, payload, "простота+любопытство")
+
+    prompt = captured_prompt["value"]
+    assert "Запрещены фразы «Погрузитесь», «Не упустите шанс»" in prompt
+    assert "конструкции вида «мир …»" in prompt
+
+
+@pytest.mark.asyncio
 async def test_compose_meetups_intro_with_club_sets_flag(monkeypatch):
     captured_prompt: dict[str, str] = {}
 
