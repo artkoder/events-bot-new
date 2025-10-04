@@ -42,7 +42,6 @@ TOPIC_SYNONYMS: dict[str, set[str]] = {
         "лекции",
         "история",
         "история россии",
-        "урбанистика",
         "книги",
         "business",
         "встреча",
@@ -118,6 +117,33 @@ TOPIC_SYNONYMS: dict[str, set[str]] = {
         "семейный",
         "для всей семьи",
     },
+    "KRAEVEDENIE_KALININGRAD_OBLAST": {
+        "краеведение",
+        "краевед",
+        "краеведческий",
+        "краеведческие",
+        "калининград",
+        "kaliningrad",
+        "калининградская область",
+        "калининградской области",
+        "кёнигсберг",
+        "кенигсберг",
+        "königsberg",
+        "konigsberg",
+        "koenigsberg",
+        "kenigsberg",
+        "kenig",
+        "урбанистика",
+        "urbanism",
+        "урбанистический",
+        "янтарный край",
+        "янтарного края",
+        "39 регион",
+        "39-й регион",
+        "39й регион",
+        "39йрегион",
+        "#калининград",
+    },
 }
 
 # Reverse lookup for quick normalization
@@ -126,6 +152,26 @@ _REVERSE_SYNONYMS = {
     for canon, syns in TOPIC_SYNONYMS.items()
     for syn in syns
 }
+
+
+MEETUPS_INTRO_FORBIDDEN_WORDINGS: tuple[str, ...] = (
+    "«Погрузитесь»",
+    "«не упустите шанс»",
+    "конструкции с «мир …»",
+    "«Откройте для себя»",
+    "любые упоминания «горизонтов»",
+)
+
+
+def _format_forbidden_wordings(wordings: Iterable[str]) -> str:
+    items = list(wordings)
+    if not items:
+        return ""
+    if len(items) == 1:
+        return items[0]
+    if len(items) == 2:
+        return f"{items[0]} и {items[1]}"
+    return ", ".join(items[:-1]) + f" и {items[-1]}"
 
 
 def parse_start_time(raw: str) -> tuple[int, int] | None:
@@ -317,6 +363,20 @@ async def build_science_pop_digest_candidates(
 
     return await _build_digest_candidates(
         None, db, now, digest_id, topic_identifier="SCIENCE_POP"
+    )
+
+
+async def build_kraevedenie_digest_candidates(
+    db: Database, now: datetime, digest_id: str | None = None
+) -> Tuple[List[Event], int]:
+    """Select Kaliningrad regional heritage events for the digest."""
+
+    return await _build_digest_candidates(
+        None,
+        db,
+        now,
+        digest_id,
+        topic_identifier="KRAEVEDENIE_KALININGRAD_OBLAST",
     )
 
 
@@ -970,6 +1030,10 @@ async def compose_meetups_intro_via_4o(
     else:
         tone_instruction = ""
 
+    forbidden_guidance = _format_forbidden_wordings(
+        MEETUPS_INTRO_FORBIDDEN_WORDINGS
+    )
+
     prompt = (
         "Ты помогаешь телеграм-дайджесту мероприятий."
         f" Сформулируй живое интро на 1–2 предложения до ~200 символов к подборке из {n} встреч"
@@ -979,8 +1043,7 @@ async def compose_meetups_intro_via_4o(
         " чтобы выделить ключевые темы и форматы."
         f" Метаданные: has_club={has_club_flag}."
         f"{tone_instruction}"
-        " Избегай рекламных клише: не используй фразы вроде «Погрузитесь»,"
-        " «не упустите шанс» и конструкции с «мир …»."
+        f" Избегай рекламных клише: не используй {forbidden_guidance}."
         " Обязательно подчеркни живое общение: знакомство с интересными людьми, живое Q&A"
         " и нетворкинг."
         " Если has_club=false, сделай на этом акцент ещё заметнее."
@@ -1785,6 +1848,22 @@ async def build_science_pop_digest_preview(
         event_noun="научно-популярных событий",
         event_kind="science_pop",
         candidates_builder=build_science_pop_digest_candidates,
+    )
+
+
+async def build_kraevedenie_digest_preview(
+    digest_id: str, db: Database, now: datetime
+) -> tuple[str, List[str], int, List[Event], List[str]]:
+    """Build digest preview text for Kaliningrad heritage events."""
+
+    return await _build_digest_preview(
+        digest_id,
+        db,
+        now,
+        kind="kraevedenie",
+        event_noun="краеведческих событий",
+        event_kind="kraevedenie",
+        candidates_builder=build_kraevedenie_digest_candidates,
     )
 
 

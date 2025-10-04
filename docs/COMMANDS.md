@@ -25,7 +25,7 @@
 | `/regdailychannels` | - | Choose admin channels for daily announcements and set the VK group. |
 | `/daily` | - | Manage daily announcement channels and VK posting times; send test posts. |
 | `/exhibitions` | - | List active exhibitions similar to `/events`; each entry shows the period `c <start>` / `по <end>` and includes edit/delete buttons. |
-| `/digest` | - | Build lecture digest with images, toggles and quick send buttons (superadmin only). |
+| `/digest` | - | Build digest with images, toggles and quick send buttons (superadmin only). The menu offers лекции, мастер-классы, психология, научпоп, краеведение Калининградской области и другие подборки. |
 | `/backfill_topics [days]` | optional integer horizon | Superadmin only. Re-run the topic classifier for events dated from today up to `days` ahead (default 90). Sends a summary `processed=... updated=... skipped=...`; manual topics are skipped. |
 | `/pages` | - | Show links to Telegraph month and weekend pages. |
 | `/fest [archive] [page]` | optional `archive` flag and page number | List festivals with edit/delete options. Ten rows are shown per page with navigation buttons. Use `archive` to view finished festivals that no longer have upcoming events; omit it to see active ones. |
@@ -77,8 +77,15 @@ until the next reset at UTC midnight.
 - `PERSONALITIES` — «Личности и встречи»
 - `KIDS_SCHOOL` — «Дети и школа»
 - `FAMILY` — «Семейные события»
+- `KRAEVEDENIE_KALININGRAD_OBLAST` — «Краеведение Калининградской области»
 
 Чтобы закрепить ручные темы, установите `topics_manual` в меню редактирования
 (кнопка **Edit** → поле `topics_manual` → введите `true`). Пока флаг включён,
 автоклассификатор и `/backfill_topics` не переписывают метки. Вернуть автоматический
 режим можно, отправив `false`. Детали пайплайна описаны в `docs/llm_topics.md`.
+
+> **Региональные эвристики.** Даже если модель не вернула тему,
+> постпроцессор добавит `KRAEVEDENIE_KALININGRAD_OBLAST`, когда город,
+> адрес, хэштеги или ссылки указывают на Калининградскую область (например,
+> `Калининград`, `Светлогорск`, `#калининград`, домен `klgd`). Метка не ставится,
+> если событие переведено в ручной режим.

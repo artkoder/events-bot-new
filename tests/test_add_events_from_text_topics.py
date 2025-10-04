@@ -50,7 +50,7 @@ async def test_add_events_from_text_assigns_topics(tmp_path: Path, monkeypatch):
     async with db.get_session() as session:
         stored = await session.get(Event, saved_events[0].id)
 
-    assert stored.topics == ["CONCERTS", "FAMILY"]
+    assert stored.topics == ["CONCERTS", "FAMILY", "KRAEVEDENIE_KALININGRAD_OBLAST"]
     assert stored.topics_manual is False
 
 
@@ -109,5 +109,5 @@ async def test_add_events_from_text_multiday_inherits_topics(tmp_path: Path, mon
         (start_day + timedelta(days=1)).isoformat(),
     ]
     for ev in stored_events:
-        assert ev.topics == ["PARTIES"]
+        assert ev.topics == ["PARTIES", "KRAEVEDENIE_KALININGRAD_OBLAST"]
         assert ev.topics_manual is False
