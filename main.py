@@ -4634,10 +4634,12 @@ async def rebuild_fest_nav_if_changed(db: Database) -> bool:
 
 ICS_LABEL = "Добавить в календарь"
 
+BODY_SPACER_HTML = '<p>&#8203;</p>'
+
 FOOTER_LINK_HTML = (
-    '<p>&#8203;</p>'
-    '<p><a href="https://t.me/kenigevents">Полюбить Калининград Анонсы</a></p>'
-    '<p>&#8203;</p>'
+    BODY_SPACER_HTML
+    + '<p><a href="https://t.me/kenigevents">Полюбить Калининград Анонсы</a></p>'
+    + BODY_SPACER_HTML
 )
 
 HISTORY_FOOTER_HTML = '<p><a href="https://t.me/kgdstories">Полюбить Калининград Истории</a></p>'
@@ -23851,6 +23853,9 @@ async def build_source_page_content(
     tg_emoji_cleaned = 0
     tg_spoiler_unwrapped = 0
     paragraphs: list[str] = []
+    blank_paragraph_re = re.compile(
+        r"<p>(?:&nbsp;|&#8203;|\s|<br\s*/?>)*</p>", re.IGNORECASE
+    )
     def _wrap_plain_chunks(raw_chunk: str) -> list[str]:
         chunk = raw_chunk.strip()
         if not chunk:
@@ -23980,7 +23985,19 @@ async def build_source_page_content(
         for line in clean_text.splitlines():
             escaped = html.escape(line)
             linked = linkify_for_telegraph(escaped)
-            paragraphs.append(f"<p>{linked}</p>")
+            if linked.strip():
+                paragraphs.append(f"<p>{linked}</p>")
+            else:
+                paragraphs.append(BODY_SPACER_HTML)
+    if paragraphs:
+        normalized_paragraphs: list[str] = []
+        for block in paragraphs:
+            block_stripped = block.strip()
+            if blank_paragraph_re.fullmatch(block_stripped):
+                normalized_paragraphs.append(BODY_SPACER_HTML)
+            else:
+                normalized_paragraphs.append(block)
+        paragraphs = normalized_paragraphs
     inline_used = 0
     if page_mode == "history" and paragraphs:
         anchor_re = re.compile(r"<a\b[^>]*href=(['\"])(.*?)\1[^>]*>(.*?)</a>", re.IGNORECASE | re.DOTALL)
@@ -24034,8 +24051,10 @@ async def build_source_page_content(
 
         paragraphs = [anchor_re.sub(_replace_anchor, para) for para in paragraphs]
     if paragraphs:
+        spacer = BODY_SPACER_HTML
         if image_mode == "inline" and tail:
-            paragraph_count = len(paragraphs)
+            text_paragraphs = [p for p in paragraphs if p != BODY_SPACER_HTML]
+            paragraph_count = len(text_paragraphs)
             image_count = len(tail)
             base_count = min(image_count, paragraph_count)
             positions: list[int] = []
@@ -24044,19 +24063,41 @@ async def build_source_page_content(
                 positions = [math.ceil((idx + 1) * step) for idx in range(base_count)]
             body_blocks: list[str] = []
             base_index = 0
-            for idx, para in enumerate(paragraphs, start=1):
-                body_blocks.append(para)
-                while base_index < base_count and positions[base_index] == idx:
+            text_index = 0
+            for block in paragraphs:
+                if block == BODY_SPACER_HTML:
+                    if body_blocks and body_blocks[-1] != spacer:
+                        body_blocks.append(spacer)
+                    continue
+                if body_blocks and body_blocks[-1] != spacer:
+                    body_blocks.append(spacer)
+                body_blocks.append(block)
+                text_index += 1
+                inserted_for_para = False
+                while base_index < base_count and positions[base_index] == text_index:
+                    if not inserted_for_para:
+                        body_blocks.append(spacer)
+                        inserted_for_para = True
                     body_blocks.append(
                         f'<img src="{html.escape(tail[base_index])}"/>'
                     )
                     base_index += 1
-            inline_used = base_index
-            for extra_url in tail[inline_used:]:
+            for extra_url in tail[base_index:]:
+                if body_blocks:
+                    body_blocks.append(spacer)
                 body_blocks.append(f'<img src="{html.escape(extra_url)}"/>')
-                inline_used += 1
+                base_index += 1
+            inline_used = base_index
         else:
-            body_blocks = list(paragraphs)
+            body_blocks = []
+            for block in paragraphs:
+                if block == BODY_SPACER_HTML:
+                    if body_blocks and body_blocks[-1] != spacer:
+                        body_blocks.append(spacer)
+                    continue
+                if body_blocks and body_blocks[-1] != spacer:
+                    body_blocks.append(spacer)
+                body_blocks.append(block)
         html_content += "".join(body_blocks)
     elif image_mode == "inline" and tail:
         for extra_url in tail:
@@ -24076,9 +24117,9 @@ async def build_source_page_content(
             if row and row.telegraph_path:
                 href = row.telegraph_url or f"https://telegra.ph/{row.telegraph_path.lstrip('/')}"
                 html_content += (
-                    '<p>&#8203;</p>'
-                    f'<p>✨ <a href="{html.escape(href)}">{html.escape(row.festival)}</a></p>'
-                    '<p>&#8203;</p>'
+                    BODY_SPACER_HTML
+                    + f'<p>✨ <a href="{html.escape(href)}">{html.escape(row.festival)}</a></p>'
+                    + BODY_SPACER_HTML
                 )
     nav_html = None
     if db and page_mode != "history":
