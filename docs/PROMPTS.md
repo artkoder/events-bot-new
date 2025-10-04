@@ -14,7 +14,7 @@ short_description - one-sentence summary
 festival          - festival name or empty string
 festival_full     - full festival edition name or empty string
 date              - single date or range (YYYY-MM-DD or YYYY-MM-DD..YYYY-MM-DD)
-time              - start time or time range (HH:MM or HH:MM..HH:MM)
+time              - start time or time range (HH:MM or HH:MM..HH:MM). When a theatre announcement lists several start times for the same date (e.g. «начало в 12:00 и 17:00»), treat each start time as a separate event with the shared date instead of compressing them into a time range.
 location_name     - venue name; shorten bureaucratic phrases, trim honorifics to surnames/initials, avoid repeating the city
 location_address  - street address if present; drop markers like «ул.»/«улица», «д.»/«дом» and similar bureaucratic words, keep the concise street + number without the city name
 city              - city name only; do not duplicate it in `location_address`
@@ -75,6 +75,55 @@ Guidelines:
   fences.
 
 All fields must be present. No additional text.
+
+Example &mdash; спектакль с одной датой и несколькими показами:
+
+Input snippet:
+
+«15 мая в театре "Звезда" спектакль "Щелкунчик" (начало в 12:00 и 17:00).»
+
+Expected response:
+
+[
+  {
+    "title": "🎭 Щелкунчик",
+    "short_description": "Сказочный спектакль для всей семьи",
+    "festival": "",
+    "festival_full": "",
+    "date": "2025-05-15",
+    "time": "12:00",
+    "location_name": "Театр Звезда",
+    "location_address": "",
+    "city": "Калининград",
+    "ticket_price_min": null,
+    "ticket_price_max": null,
+    "ticket_link": "",
+    "is_free": false,
+    "pushkin_card": false,
+    "event_type": "спектакль",
+    "emoji": "🎭",
+    "end_date": null
+  },
+  {
+    "title": "🎭 Щелкунчик",
+    "short_description": "Сказочный спектакль для всей семьи",
+    "festival": "",
+    "festival_full": "",
+    "date": "2025-05-15",
+    "time": "17:00",
+    "location_name": "Театр Звезда",
+    "location_address": "",
+    "city": "Калининград",
+    "ticket_price_min": null,
+    "ticket_price_max": null,
+    "ticket_link": "",
+    "is_free": false,
+    "pushkin_card": false,
+    "event_type": "спектакль",
+    "emoji": "🎭",
+    "end_date": null
+  }
+]
 
 Edit this file to tweak how requests are sent to 4o.
 

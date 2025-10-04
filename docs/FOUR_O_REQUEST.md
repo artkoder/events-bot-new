@@ -36,7 +36,10 @@ spellings to the correct festival so new events attach to existing records
 instead of creating duplicates.
 
 The response must be JSON with the fields listed in `docs/PROMPTS.md`. When the
-text describes multiple events, return an array of such objects.
+text describes multiple events, return an array of such objects. Theatre
+announcements that share one date but list several start times (формулировки
+вроде «начало в 12:00 и 17:00») must therefore yield several objects that reuse
+the same date and differ only in `time` and other time-specific fields.
 The prefix "Today is YYYY-MM-DD." helps the model infer the correct year for
 dates that omit it and lets the model ignore any events scheduled before today.
 When a post is forwarded from a Telegram channel or imported from a VK group,
