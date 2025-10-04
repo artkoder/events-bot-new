@@ -2,6 +2,7 @@ import logging
 import os, sys
 import pytest
 import os, sys
+import re
 from types import SimpleNamespace
 from datetime import date as real_date
 
@@ -114,6 +115,27 @@ async def test_collect_photo_ids():
     ]
     photos = main._vkrev_collect_photo_ids(items, 10)
     assert photos == ["photo2_3", "photo1_1", "photo1_2_k"]
+
+
+@pytest.mark.asyncio
+async def test_build_short_vk_text_curiosity_hook_and_ban(monkeypatch):
+    captured: dict[str, object] = {}
+
+    async def fake_ask(prompt, *, system_prompt=None, **kwargs):
+        captured["user"] = prompt
+        captured["system"] = system_prompt
+        return "Погрузитесь в мир джаза. Вас ждёт вечер импровизаций и сюрпризов."
+
+    monkeypatch.setattr(main, "ask_4o", fake_ask)
+    event = SimpleNamespace(description="Описание события", title="Ночь джаза")
+
+    summary = await main.build_short_vk_text(event, "Исходный текст", max_sentences=2)
+
+    assert "Погрузитесь в мир" not in summary
+    first_sentence = re.split(r"(?<=[.!?])\s+", summary.strip())[0]
+    assert "?" in first_sentence
+    assert "Не используй фразу «Погрузитесь в мир»" in captured["user"]
+    assert "Первая фраза должна быть крючком" in (captured["system"] or "")
 
 
 @pytest.mark.asyncio

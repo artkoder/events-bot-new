@@ -112,6 +112,7 @@ from typing import (
     Literal,
     Collection,
     Sequence,
+    Mapping,
 )
 from urllib.parse import urlparse, parse_qs, ParseResult
 import uuid
@@ -1609,17 +1610,52 @@ def _get_four_o_usage_snapshot() -> dict[str, Any]:
 def _record_four_o_usage(
     operation: str,
     model: str,
-    prompt_tokens: int | None,
-    completion_tokens: int | None,
-    total_tokens: int | None,
+    usage: Mapping[str, Any] | None,
 ) -> int:
     limit = max(FOUR_O_DAILY_TOKEN_LIMIT, 0)
     today = _current_utc_date()
     _ensure_four_o_usage_state(today)
+    usage_data: Mapping[str, Any] = usage or {}
+
+    def _coerce_int(value: Any) -> int | None:
+        try:
+            if value is None:
+                return None
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    prompt_tokens = _coerce_int(usage_data.get("prompt_tokens"))
+    completion_tokens = _coerce_int(usage_data.get("completion_tokens"))
+    total_tokens = _coerce_int(usage_data.get("total_tokens"))
+
+    if prompt_tokens is None:
+        prompt_tokens = _coerce_int(usage_data.get("input_tokens"))
+    if completion_tokens is None:
+        completion_tokens = _coerce_int(usage_data.get("output_tokens"))
+
+    extra_tokens = 0
+    for key, value in usage_data.items():
+        if key in {"total_tokens", "prompt_tokens", "completion_tokens", "input_tokens", "output_tokens"}:
+            continue
+        if "tokens" not in key:
+            continue
+        value_int = _coerce_int(value)
+        if value_int is None:
+            continue
+        extra_tokens += max(value_int, 0)
+
     if total_tokens is not None:
-        spent = max(int(total_tokens), 0)
+        spent = max(total_tokens, 0)
     else:
-        spent = max(int(prompt_tokens or 0) + int(completion_tokens or 0), 0)
+        spent = max(
+            (prompt_tokens or 0)
+            + (completion_tokens or 0)
+            + extra_tokens,
+            0,
+        )
+        if spent:
+            total_tokens = spent
     models = _four_o_usage_state.setdefault("models", {})
     models.setdefault(model, 0)
     models[model] += spent
@@ -5803,9 +5839,7 @@ async def parse_event_via_4o(
     _record_four_o_usage(
         "parse",
         str(payload.get("model", "unknown")),
-        usage.get("prompt_tokens"),
-        usage.get("completion_tokens"),
-        usage.get("total_tokens"),
+        usage,
     )
     content = (
         data_raw.get("choices", [{}])[0]
@@ -6004,9 +6038,7 @@ async def ask_4o(
     _record_four_o_usage(
         "ask",
         str(payload.get("model", "unknown")),
-        usage.get("prompt_tokens"),
-        usage.get("completion_tokens"),
-        usage.get("total_tokens"),
+        usage,
     )
     logging.debug("4o response: %s", data)
     content = (
@@ -21466,6 +21498,8 @@ async def build_short_vk_text(
         "Сразу начинай с главной идеи — в первой строке не повторяй название события и не добавляй блок про дату, время, место или билеты. "
         "Название проекта или события можно упомянуть позже. "
         "Не повторяй дату, время и место события в абзацах — мы выводим их отдельными строками. "
+        "Сделай первую фразу крючком, который вызывает любопытство: это может быть вопрос или интригующая деталь. "
+        "Не используй фразу «Погрузитесь в мир» ни в каком виде. "
         f"Разбивай текст на абзацы для удобства чтения.\n\n{prompt_text}"
     )
     try:
@@ -21477,14 +21511,102 @@ async def build_short_vk_text(
                 "Не используй прямые рекламные формулировки, в том числе призывы покупать билеты. "
                 "Сразу начинай с сути — в первой строке не повторяй название события и не добавляй блок про дату, время, место или билеты. "
                 "Название проекта или события можно упомянуть позже. "
-                "Не повторяй дату, время и место события в абзацах — они выводятся отдельно."
+                "Не повторяй дату, время и место события в абзацах — они выводятся отдельно. "
+                "Первая фраза должна быть крючком, вызывающим любопытство, и избегай фразы «Погрузитесь в мир»."
             ),
             max_tokens=400,
         )
     except Exception:
         return _fallback_summary()
     cleaned = raw.strip()
-    cleaned_lower = cleaned.lower()
+    if not cleaned:
+        return _fallback_summary()
+
+    banned_phrase_pattern = re.compile(r"погрузитесь в мир", re.IGNORECASE)
+
+    def _remove_banned_sentences(value: str) -> str:
+        if not banned_phrase_pattern.search(value):
+            return value
+        paragraphs: list[str] = []
+        for block in value.split("\n\n"):
+            sentences = [
+                sentence.strip()
+                for sentence in sentence_splitter.split(block)
+                if sentence.strip()
+            ]
+            filtered = [
+                sentence
+                for sentence in sentences
+                if not banned_phrase_pattern.search(sentence)
+            ]
+            if filtered:
+                paragraphs.append(" ".join(filtered))
+        return "\n\n".join(paragraphs).strip()
+
+    def _ensure_curiosity_hook(value: str) -> str:
+        stripped = value.lstrip()
+        prefix = value[: len(value) - len(stripped)]
+        if not stripped:
+            return value
+        match = re.search(r"^([^\n]*?[.!?])(\s|$)", stripped)
+        if match:
+            first_sentence = match.group(1).strip()
+            separator = match.group(2) or ""
+            remainder = separator + stripped[match.end():]
+        else:
+            first_sentence = stripped
+            remainder = ""
+        hook_prefixes = (
+            "что если",
+            "представьте",
+            "знаете ли вы",
+            "как насчет",
+            "как насчёт",
+            "готовы ли вы",
+            "хотите узнать",
+            "угадайте",
+        )
+        first_lower = first_sentence.casefold()
+        has_hook = "?" in first_sentence or any(
+            first_lower.startswith(prefix) for prefix in hook_prefixes
+        )
+        if has_hook:
+            return prefix + stripped
+        base = first_sentence.rstrip(".!?").strip()
+        if not base:
+            return prefix + stripped
+        if len(base) > 1:
+            body = base[0].lower() + base[1:]
+        else:
+            body = base.lower()
+        new_first_sentence = f"Знаете ли вы, {body}?"
+        remainder = remainder.lstrip()
+        if remainder:
+            if remainder.startswith("\n"):
+                rebuilt = new_first_sentence + remainder
+            else:
+                rebuilt = new_first_sentence + " " + remainder
+        else:
+            rebuilt = new_first_sentence
+        return prefix + rebuilt
+
+    cleaned = _remove_banned_sentences(cleaned)
+    cleaned = cleaned.strip()
+    if not cleaned:
+        return _fallback_summary()
+    if banned_phrase_pattern.search(cleaned):
+        cleaned = banned_phrase_pattern.sub("", cleaned)
+        cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+        cleaned = re.sub(r" ?\n ?", "\n", cleaned)
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+        cleaned = cleaned.strip()
+        if not cleaned:
+            return _fallback_summary()
+    cleaned = _ensure_curiosity_hook(cleaned)
+    cleaned = cleaned.strip()
+    if not cleaned:
+        return _fallback_summary()
+    cleaned_lower = cleaned.casefold()
     if not cleaned:
         return _fallback_summary()
     if ("предостав" in cleaned_lower and "текст" in cleaned_lower) or (
