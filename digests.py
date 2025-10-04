@@ -73,6 +73,9 @@ TOPIC_SYNONYMS: dict[str, set[str]] = {
         "знакомства",
         "карьера",
         "деловые встречи",
+        "бизнес-завтрак",
+        "business breakfast",
+        "карьерный вечер",
     },
     "ACTIVE": {
         "active",
@@ -94,6 +97,9 @@ TOPIC_SYNONYMS: dict[str, set[str]] = {
         "встреча с автором",
         "встреча с героем",
         "встреча с артистом",
+        "книжный клуб",
+        "книжные клубы",
+        "book club",
     },
     "KIDS_SCHOOL": {
         "kids",
@@ -184,6 +190,7 @@ async def _build_digest_candidates(
     digest_id: str | None = None,
     *,
     topic_identifier: str | None = None,
+    topic_identifiers: Iterable[str] | None = None,
 ) -> Tuple[List[Event], int]:
     """Select events within the digest window with optional filters.
 
@@ -214,12 +221,22 @@ async def _build_digest_candidates(
         res = await session.execute(query)
         events = list(res.scalars().all())
 
+    topic_filters: set[str] = set()
     if topic_identifier:
         normalized_topic = normalize_topic_identifier(topic_identifier) or topic_identifier
+        topic_filters.add(normalized_topic)
+    if topic_identifiers:
+        for raw in topic_identifiers:
+            if not raw:
+                continue
+            canonical = normalize_topic_identifier(raw) or raw
+            topic_filters.add(canonical)
+
+    if topic_filters:
         filtered: List[Event] = []
         for event in events:
-            topics = normalize_topics(getattr(event, "topics", []))
-            if normalized_topic in topics:
+            topics = set(normalize_topics(getattr(event, "topics", [])))
+            if topics.intersection(topic_filters):
                 filtered.append(event)
         events = filtered
 
@@ -291,6 +308,86 @@ async def build_psychology_digest_candidates(
     return await _build_digest_candidates(
         None, db, now, digest_id, topic_identifier="PSYCHOLOGY"
     )
+
+
+async def build_networking_digest_candidates(
+    db: Database, now: datetime, digest_id: str | None = None
+) -> Tuple[List[Event], int]:
+    """Select networking-focused events for the digest."""
+
+    return await _build_digest_candidates(
+        None, db, now, digest_id, topic_identifier="NETWORKING"
+    )
+
+
+async def build_entertainment_digest_candidates(
+    db: Database, now: datetime, digest_id: str | None = None
+) -> Tuple[List[Event], int]:
+    """Select stand-up, quiz, party and open-air events for the digest."""
+
+    return await _build_digest_candidates(
+        None,
+        db,
+        now,
+        digest_id,
+        topic_identifiers=("STANDUP", "QUIZ_GAMES", "PARTIES", "OPEN_AIR"),
+    )
+
+
+async def build_markets_digest_candidates(
+    db: Database, now: datetime, digest_id: str | None = None
+) -> Tuple[List[Event], int]:
+    """Select handmade market events for the digest."""
+
+    return await _build_digest_candidates(
+        None, db, now, digest_id, topic_identifier="HANDMADE"
+    )
+
+
+async def build_theatre_classic_digest_candidates(
+    db: Database, now: datetime, digest_id: str | None = None
+) -> Tuple[List[Event], int]:
+    """Select classic theatre performances for the digest."""
+
+    return await _build_digest_candidates(
+        "спектакль",
+        db,
+        now,
+        digest_id,
+        topic_identifier="THEATRE_CLASSIC",
+    )
+
+
+async def build_theatre_modern_digest_candidates(
+    db: Database, now: datetime, digest_id: str | None = None
+) -> Tuple[List[Event], int]:
+    """Select modern theatre performances for the digest."""
+
+    return await _build_digest_candidates(
+        "спектакль",
+        db,
+        now,
+        digest_id,
+        topic_identifier="THEATRE_MODERN",
+    )
+
+
+async def build_meetups_digest_candidates(
+    db: Database, now: datetime, digest_id: str | None = None
+) -> Tuple[List[Event], int]:
+    """Select meetups and club events for the digest."""
+
+    return await _build_digest_candidates(
+        None, db, now, digest_id, topic_identifier="PERSONALITIES"
+    )
+
+
+async def build_movies_digest_candidates(
+    db: Database, now: datetime, digest_id: str | None = None
+) -> Tuple[List[Event], int]:
+    """Select movie screening events for the digest."""
+
+    return await _build_digest_candidates("кинопоказ", db, now, digest_id)
 
 
 def _event_end_date(event: Event) -> datetime | None:
@@ -1299,6 +1396,118 @@ async def build_psychology_digest_preview(
         event_noun="психологических событий",
         event_kind="psychology",
         candidates_builder=build_psychology_digest_candidates,
+    )
+
+
+async def build_networking_digest_preview(
+    digest_id: str, db: Database, now: datetime
+) -> tuple[str, List[str], int, List[Event], List[str]]:
+    """Build digest preview text for networking events."""
+
+    return await _build_digest_preview(
+        digest_id,
+        db,
+        now,
+        kind="networking",
+        event_noun="нетворкингов",
+        event_kind="networking",
+        candidates_builder=build_networking_digest_candidates,
+    )
+
+
+async def build_entertainment_digest_preview(
+    digest_id: str, db: Database, now: datetime
+) -> tuple[str, List[str], int, List[Event], List[str]]:
+    """Build digest preview text for entertainment events."""
+
+    return await _build_digest_preview(
+        digest_id,
+        db,
+        now,
+        kind="entertainment",
+        event_noun="развлечений",
+        event_kind="entertainment",
+        candidates_builder=build_entertainment_digest_candidates,
+    )
+
+
+async def build_markets_digest_preview(
+    digest_id: str, db: Database, now: datetime
+) -> tuple[str, List[str], int, List[Event], List[str]]:
+    """Build digest preview text for handmade markets."""
+
+    return await _build_digest_preview(
+        digest_id,
+        db,
+        now,
+        kind="markets",
+        event_noun="маркетов",
+        event_kind="markets",
+        candidates_builder=build_markets_digest_candidates,
+    )
+
+
+async def build_theatre_classic_digest_preview(
+    digest_id: str, db: Database, now: datetime
+) -> tuple[str, List[str], int, List[Event], List[str]]:
+    """Build digest preview text for classic theatre performances."""
+
+    return await _build_digest_preview(
+        digest_id,
+        db,
+        now,
+        kind="theatre_classic",
+        event_noun="классических спектаклей",
+        event_kind="theatre_classic",
+        candidates_builder=build_theatre_classic_digest_candidates,
+    )
+
+
+async def build_theatre_modern_digest_preview(
+    digest_id: str, db: Database, now: datetime
+) -> tuple[str, List[str], int, List[Event], List[str]]:
+    """Build digest preview text for modern theatre performances."""
+
+    return await _build_digest_preview(
+        digest_id,
+        db,
+        now,
+        kind="theatre_modern",
+        event_noun="современных спектаклей",
+        event_kind="theatre_modern",
+        candidates_builder=build_theatre_modern_digest_candidates,
+    )
+
+
+async def build_meetups_digest_preview(
+    digest_id: str, db: Database, now: datetime
+) -> tuple[str, List[str], int, List[Event], List[str]]:
+    """Build digest preview text for meetups and clubs."""
+
+    return await _build_digest_preview(
+        digest_id,
+        db,
+        now,
+        kind="meetups",
+        event_noun="встреч и клубов",
+        event_kind="meetups",
+        candidates_builder=build_meetups_digest_candidates,
+    )
+
+
+async def build_movies_digest_preview(
+    digest_id: str, db: Database, now: datetime
+) -> tuple[str, List[str], int, List[Event], List[str]]:
+    """Build digest preview text for movie screenings."""
+
+    return await _build_digest_preview(
+        digest_id,
+        db,
+        now,
+        kind="movies",
+        event_noun="кинопоказов",
+        event_kind="movies",
+        candidates_builder=build_movies_digest_candidates,
     )
 
 
