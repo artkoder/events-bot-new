@@ -861,6 +861,19 @@ def test_normalize_topics_distinguishes_theatre_subtypes():
     assert normalized == ["THEATRE", "THEATRE_CLASSIC", "THEATRE_MODERN"]
 
 
+def test_normalize_topics_collapses_kaliningrad_synonyms():
+    topics = [
+        "Калининград",
+        "урбанистика",
+        "краеведческий",
+        "#калининград",
+    ]
+
+    normalized = normalize_topics(topics)
+
+    assert normalized == ["KRAEVEDENIE_KALININGRAD_OBLAST"]
+
+
 @pytest.mark.asyncio
 async def test_compose_intro_via_4o(monkeypatch, caplog):
     async def fake_ask(prompt, max_tokens=0):
