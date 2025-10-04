@@ -1,6 +1,6 @@
 # Автотемы для событий
 
-Система автоматически классифицирует события по 21 зафиксированной теме. Метки
+Система автоматически классифицирует события по 22 зафиксированным темам. Метки
 сохраняются в карточке события и выводятся администраторам в интерфейсе бота.
 
 ## Доступные темы
@@ -22,6 +22,7 @@
 | `PSYCHOLOGY` | «Психология» |
 | `SCIENCE_POP` | «Научпоп» |
 | `HANDMADE` | «Хендмейд/маркеты/ярмарки/МК» |
+| `FASHION` | «Мода и стиль» |
 | `NETWORKING` | «Нетворкинг и карьера» |
 | `ACTIVE` | «Активный отдых и спорт» |
 | `PERSONALITIES` | «Личности и встречи» |
@@ -58,6 +59,7 @@
 - PSYCHOLOGY — «Психология»
 - SCIENCE_POP — «Научпоп»
 - HANDMADE — «Хендмейд/маркеты/ярмарки/МК»
+- FASHION — «Мода и стиль»
 - NETWORKING — «Нетворкинг и карьера»
 - ACTIVE — «Активный отдых и спорт»
 - PERSONALITIES — «Личности и встречи»
@@ -87,7 +89,7 @@
           "STANDUP", "QUIZ_GAMES", "OPEN_AIR", "PARTIES", "CONCERTS",
           "MOVIES", "EXHIBITIONS", "THEATRE", "THEATRE_CLASSIC",
           "THEATRE_MODERN", "LECTURES", "MASTERCLASS", "PSYCHOLOGY",
-          "SCIENCE_POP", "HANDMADE", "NETWORKING", "ACTIVE",
+          "SCIENCE_POP", "HANDMADE", "FASHION", "NETWORKING", "ACTIVE",
           "PERSONALITIES", "HISTORICAL_IMMERSION", "KIDS_SCHOOL", "FAMILY"
         ]
       },
