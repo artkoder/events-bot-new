@@ -69,6 +69,7 @@ until the next reset at UTC midnight.
 - `EXHIBITIONS` — «Выставки и арт»
 - `THEATRE` — «Театр»
 - `LECTURES` — «Лекции и встречи»
+- `KRAEVEDENIE_KALININGRAD_OBLAST` — «Краеведение Калининградской области»
 - `MASTERCLASS` — «Мастер-классы»
 - `SCIENCE_POP` — «Научпоп»
 - `HANDMADE` — «Хендмейд/маркеты/ярмарки/МК»
@@ -77,6 +78,8 @@ until the next reset at UTC midnight.
 - `PERSONALITIES` — «Личности и встречи»
 - `KIDS_SCHOOL` — «Дети и школа»
 - `FAMILY` — «Семейные события»
+
+Отдельную тему `KRAEVEDENIE_KALININGRAD_OBLAST` система ставит по региональным признакам Калининградской области (город, адрес, хэштеги, упоминания локальной истории). Для событий из других регионов её можно выбрать вручную.
 
 Чтобы закрепить ручные темы, установите `topics_manual` в меню редактирования
 (кнопка **Edit** → поле `topics_manual` → введите `true`). Пока флаг включён,

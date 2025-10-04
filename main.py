@@ -6401,6 +6401,93 @@ _EVENT_TOPIC_LISTING = "\n".join(
     f"- {topic} — «{label}»" for topic, label in TOPIC_LABELS.items()
 )
 
+_KRAEVEDENIE_TOPIC_ID = "KRAEVEDENIE_KALININGRAD_OBLAST"
+_KALININGRAD_CITY_NAMES = {
+    name.casefold()
+    for name in (
+        "Калининград",
+        "Зеленоградск",
+        "Светлогорск",
+        "Пионерский",
+        "Балтийск",
+        "Советск",
+        "Черняховск",
+        "Гвардейск",
+        "Гурьевск",
+        "Гусев",
+        "Янтарный",
+        "Полесск",
+        "Правдинск",
+        "Славск",
+        "Неман",
+        "Краснознаменск",
+        "Багратионовск",
+        "Ладушкин",
+        "Мамоново",
+    )
+}
+_KALININGRAD_REGION_KEYWORDS = (
+    "калининградская область",
+    "калининградской области",
+    "калининградскаяобласть",
+    "калининградскойобласти",
+    "калининградская обл",
+    "калининградской обл",
+    "калининградская обл.",
+    "калининградской обл.",
+    "калининград",
+    "kaliningrad",
+    "кёнигсберг",
+    "кенигсберг",
+    "koenigsberg",
+    "königsberg",
+    "янтарный край",
+    "янтарного края",
+)
+_KALININGRAD_LOCALITY_KEYWORDS = {
+    "зеленоградск",
+    "светлогорск",
+    "пионерский",
+    "балтийск",
+    "советск",
+    "черняховск",
+    "гвардейск",
+    "гурьевск",
+    "гусев",
+    "янтарный",
+    "полесск",
+    "правдинск",
+    "славск",
+    "неман",
+    "краснознаменск",
+    "багратионовск",
+    "ладушкин",
+    "мамоново",
+}
+_KALININGRAD_REGION_HASHTAG_PREFIXES = (
+    "калининград",
+    "kaliningrad",
+    "koenigsberg",
+    "königsberg",
+    "янтарныйкрай",
+    "39rus",
+    "39region",
+    "39_reg",
+    "kld",
+)
+_KALININGRAD_THEME_KEYWORDS = (
+    "краевед",
+    "урбанист",
+    "urbanism",
+)
+_KALININGRAD_THEME_HASHTAG_PREFIXES = (
+    "краевед",
+    "локальнаяистор",
+    "локальныеистор",
+    "урбанист",
+    "urbanism",
+)
+
 EVENT_TOPIC_SYSTEM_PROMPT = textwrap.dedent(
     f"""
     Ты — ассистент, который классифицирует культурные события по темам.
@@ -6413,6 +6500,7 @@ EVENT_TOPIC_SYSTEM_PROMPT = textwrap.dedent(
     Допустимые темы:
     {_EVENT_TOPIC_LISTING}
     Если ни одна тема не подходит, верни пустой массив.
+    Тему `KRAEVEDENIE_KALININGRAD_OBLAST` ставь для событий о локальной истории, урбанистике и краеведении Калининградской области, если в описании, городе, адресе или хэштегах есть признаки региона.
     Для театральных событий уточняй подтипы: `THEATRE_CLASSIC` ставь за постановки по канону — пьесы классических авторов (например, Шекспир, Мольер, Пушкин, Гоголь), исторические или мифологические сюжеты, традиционная драматургия; `THEATRE_MODERN` применяй к новой драме, современным текстам, экспериментальным, иммерсивным или мультимедийным форматам.
     Если классический сюжет переосмыслен в современном или иммерсивном исполнении, ставь обе темы `THEATRE_CLASSIC` и `THEATRE_MODERN`.
     """
@@ -6456,6 +6544,73 @@ def _extract_available_hashtags(event: Event) -> list[str]:
             if normalized and normalized not in seen:
                 seen[normalized] = None
     return list(seen.keys())
+
+
+def _matches_kaliningrad_local_history(event: Event) -> bool:
+    """Check whether an event is about Kaliningrad local history/urbanism."""
+
+    theme_match = False
+    region_match = False
+
+    def process_chunk(raw: str) -> None:
+        nonlocal theme_match, region_match
+        chunk = (raw or "").strip()
+        if not chunk:
+            return
+        lower = chunk.casefold()
+        if not region_match:
+            if any(keyword in lower for keyword in _KALININGRAD_REGION_KEYWORDS):
+                region_match = True
+            else:
+                for locality in _KALININGRAD_LOCALITY_KEYWORDS:
+                    if locality in lower:
+                        region_match = True
+                        break
+        if not theme_match:
+            if any(keyword in lower for keyword in _KALININGRAD_THEME_KEYWORDS):
+                theme_match = True
+            elif "локальн" in lower and "истор" in lower:
+                theme_match = True
+            elif "истор" in lower and (
+                "калининград" in lower
+                or "кёниг" in lower
+                or "koenigsberg" in lower
+                or "königsberg" in lower
+            ):
+                theme_match = True
+
+    city = getattr(event, "city", None)
+    if isinstance(city, str):
+        process_chunk(city)
+        if city.strip() and city.strip().casefold() in _KALININGRAD_CITY_NAMES:
+            region_match = True
+
+    for attr in ("location_name", "location_address", "title", "description", "source_text"):
+        value = getattr(event, attr, None)
+        if isinstance(value, str):
+            process_chunk(value)
+
+    for raw_tag in _extract_available_hashtags(event):
+        tag = (raw_tag or "").strip()
+        if not tag:
+            continue
+        if not tag.startswith("#"):
+            tag = "#" + tag.lstrip("#")
+        lower = tag.casefold()
+        body = lower.lstrip("#")
+        if not region_match:
+            for prefix in _KALININGRAD_REGION_HASHTAG_PREFIXES:
+                if body.startswith(prefix):
+                    region_match = True
+                    break
+        if not theme_match:
+            for prefix in _KALININGRAD_THEME_HASHTAG_PREFIXES:
+                if body.startswith(prefix):
+                    theme_match = True
+                    break
+        process_chunk(body)
+
+    return theme_match and region_match
 
 
 async def classify_event_topics(event: Event) -> list[str]:
@@ -6562,6 +6717,10 @@ async def assign_event_topics(event: Event) -> tuple[list[str], int, str | None,
         logging.exception("Topic classification raised an exception: %s", exc)
         topics = []
         error_text = str(exc)
+
+    if _matches_kaliningrad_local_history(event):
+        if _KRAEVEDENIE_TOPIC_ID not in topics:
+            topics.append(_KRAEVEDENIE_TOPIC_ID)
 
     event.topics = topics
     event.topics_manual = False
@@ -21634,6 +21793,7 @@ VK_LOCATION_TAG_OVERRIDES: dict[str, str] = {
 VK_TOPIC_HASHTAGS: Mapping[str, str] = {
     "FASHION": "#мода",
     "KIDS_SCHOOL": "#дети",
+    "KRAEVEDENIE_KALININGRAD_OBLAST": "#краеведение",
 }
 
 
