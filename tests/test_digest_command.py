@@ -430,6 +430,87 @@ async def test_handle_digest_sends_science_pop_preview(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_handle_digest_sends_kraevedenie_preview(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    async with db.get_session() as session:
+        session.add(User(user_id=1, is_superadmin=True))
+        dt = datetime.now(timezone.utc) + timedelta(days=1)
+        session.add(
+            Event(
+                title="Прогулка по форту",
+                description="История фортификаций",
+                date=dt.strftime("%Y-%m-%d"),
+                time="15:00",
+                location_name="Форт №5",
+                source_text="s",
+                event_type="экскурсия",
+                telegraph_url="https://telegra.ph/kraevedenie",
+                topics=["KRAEVEDENIE_KALININGRAD_OBLAST"],
+            )
+        )
+        await session.commit()
+
+    msg = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "U"},
+            "text": "/digest",
+        }
+    )
+    bot = DummyBot()
+
+    async def fake_ask(prompt, max_tokens=0):
+        return "Интро"
+
+    async def fake_extract(url, **kw):
+        return ["https://example.com/kraevedenie.jpg"]
+
+    async def fake_intro(count, horizon, titles, *, event_noun):
+        return f"{count}|{horizon}|{event_noun}"
+
+    monkeypatch.setattr(main, "ask_4o", fake_ask)
+    monkeypatch.setattr(main, "extract_catbox_covers_from_telegraph", fake_extract)
+    monkeypatch.setattr(main, "compose_digest_intro_via_4o", fake_intro)
+    monkeypatch.setattr(digests, "compose_digest_intro_via_4o", fake_intro)
+
+    await main.show_digest_menu(msg, db, bot)
+    menu_msg = bot.messages[0]
+    digest_id = (
+        get_menu_button(menu_msg.reply_markup, "kraevedenie").callback_data.split(":")[-1]
+    )
+
+    async def answer(**kw):
+        return None
+
+    cb = SimpleNamespace(
+        id="1",
+        from_user=SimpleNamespace(id=1),
+        message=menu_msg,
+        data=f"digest:select:kraevedenie:{digest_id}",
+        answer=answer,
+    )
+
+    await main.handle_digest_select_kraevedenie(cb, db, bot)
+    assert bot.media_groups
+    panel = bot.messages[-1]
+    expected_panel_text = (
+        "Управление дайджестом краеведения\n"
+        "Выключите лишнее и нажмите «Обновить превью»."
+    )
+    assert panel.text == expected_panel_text
+    session_data = main.digest_preview_sessions[digest_id]
+    assert session_data["items_noun"] == "краеведческих событий"
+    assert session_data["digest_type"] == "kraevedenie"
+    assert session_data["items"][0]["norm_topics"] == [
+        "KRAEVEDENIE_KALININGRAD_OBLAST"
+    ]
+    assert session_data["intro_html"].endswith("краеведческих событий")
+
+
+@pytest.mark.asyncio
 async def test_handle_digest_sends_networking_preview(tmp_path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()

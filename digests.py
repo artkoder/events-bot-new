@@ -42,7 +42,6 @@ TOPIC_SYNONYMS: dict[str, set[str]] = {
         "лекции",
         "история",
         "история россии",
-        "урбанистика",
         "книги",
         "business",
         "встреча",
@@ -117,6 +116,33 @@ TOPIC_SYNONYMS: dict[str, set[str]] = {
         "семейные",
         "семейный",
         "для всей семьи",
+    },
+    "KRAEVEDENIE_KALININGRAD_OBLAST": {
+        "краеведение",
+        "краевед",
+        "краеведческий",
+        "краеведческие",
+        "калининград",
+        "kaliningrad",
+        "калининградская область",
+        "калининградской области",
+        "кёнигсберг",
+        "кенигсберг",
+        "königsberg",
+        "konigsberg",
+        "koenigsberg",
+        "kenigsberg",
+        "kenig",
+        "урбанистика",
+        "urbanism",
+        "урбанистический",
+        "янтарный край",
+        "янтарного края",
+        "39 регион",
+        "39-й регион",
+        "39й регион",
+        "39йрегион",
+        "#калининград",
     },
 }
 
@@ -337,6 +363,20 @@ async def build_science_pop_digest_candidates(
 
     return await _build_digest_candidates(
         None, db, now, digest_id, topic_identifier="SCIENCE_POP"
+    )
+
+
+async def build_kraevedenie_digest_candidates(
+    db: Database, now: datetime, digest_id: str | None = None
+) -> Tuple[List[Event], int]:
+    """Select Kaliningrad regional heritage events for the digest."""
+
+    return await _build_digest_candidates(
+        None,
+        db,
+        now,
+        digest_id,
+        topic_identifier="KRAEVEDENIE_KALININGRAD_OBLAST",
     )
 
 
@@ -1810,6 +1850,22 @@ async def build_science_pop_digest_preview(
         event_noun="научно-популярных событий",
         event_kind="science_pop",
         candidates_builder=build_science_pop_digest_candidates,
+    )
+
+
+async def build_kraevedenie_digest_preview(
+    digest_id: str, db: Database, now: datetime
+) -> tuple[str, List[str], int, List[Event], List[str]]:
+    """Build digest preview text for Kaliningrad heritage events."""
+
+    return await _build_digest_preview(
+        digest_id,
+        db,
+        now,
+        kind="kraevedenie",
+        event_noun="краеведческих событий",
+        event_kind="kraevedenie",
+        candidates_builder=build_kraevedenie_digest_candidates,
     )
 
 

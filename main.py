@@ -173,6 +173,7 @@ from digests import (
     build_exhibitions_digest_preview,
     build_psychology_digest_preview,
     build_science_pop_digest_preview,
+    build_kraevedenie_digest_preview,
     build_networking_digest_preview,
     build_entertainment_digest_preview,
     build_markets_digest_preview,
@@ -6547,6 +6548,147 @@ def _event_topic_text_length(event: Event) -> int:
     return sum(len(part) for part in parts)
 
 
+_KALININGRAD_TOPIC_ID = "KRAEVEDENIE_KALININGRAD_OBLAST"
+_KALININGRAD_CITY_KEYWORDS: tuple[str, ...] = (
+    "калининград",
+    "светлогорск",
+    "зеленоградск",
+    "пионерский",
+    "янтарный",
+    "балтийск",
+    "светлый",
+    "гвардейск",
+    "советск",
+    "гусев",
+    "черняховск",
+    "полесск",
+    "неман",
+    "нестеров",
+    "правдинск",
+    "ладушкин",
+    "багратионовск",
+    "мамоново",
+    "славск",
+    "краснознаменск",
+)
+_KALININGRAD_REGION_KEYWORDS: tuple[str, ...] = (
+    "калининград",
+    "kaliningrad",
+    "калининградская область",
+    "калининградской области",
+    "калининградскаяобласть",
+    "калининградскойобласти",
+    "кёнигсберг",
+    "кенигсберг",
+    "kenigsberg",
+    "königsberg",
+    "koenigsberg",
+    "konigsberg",
+    "kenig",
+    "янтарный край",
+    "янтарного края",
+    "39 регион",
+    "39регион",
+    "39-й регион",
+    "39й регион",
+    "39йрегион",
+    "#калининград",
+    "#kaliningrad",
+    "#kenig",
+    "#kenigsberg",
+    "#кёнигсберг",
+    "#кенигсберг",
+    "#39регион",
+    "#39region",
+    "#39йрегион",
+    "39rus",
+    "klgd.ru",
+    "klgd",
+)
+_KALININGRAD_HASHTAGS: set[str] = {
+    "#калининград",
+    "#kaliningrad",
+    "#kenig",
+    "#kenigsberg",
+    "#кёнигсберг",
+    "#кенигсберг",
+    "#39регион",
+    "#39йрегион",
+    "#39region",
+    "#янтарныйкрай",
+}
+_KALININGRAD_URL_KEYWORDS: tuple[str, ...] = (
+    "kaliningrad",
+    "kenig",
+    "kenigsberg",
+    "koenigsberg",
+    "konigsberg",
+    "königsberg",
+    "klgd",
+)
+
+
+def _contains_kaliningrad_city(value: str | None) -> bool:
+    if not value or not isinstance(value, str):
+        return False
+    lowered = value.casefold()
+    return any(keyword in lowered for keyword in _KALININGRAD_CITY_KEYWORDS)
+
+
+def _contains_kaliningrad_keyword(value: str | None) -> bool:
+    if not value or not isinstance(value, str):
+        return False
+    lowered = value.casefold()
+    return any(keyword in lowered for keyword in _KALININGRAD_REGION_KEYWORDS)
+
+
+def _should_add_kaliningrad_topic(event: Event, topics: Iterable[str]) -> bool:
+    normalized_topics = {
+        normalize_topic_identifier(topic) or topic for topic in topics
+    }
+    if _KALININGRAD_TOPIC_ID in normalized_topics:
+        return False
+
+    if _contains_kaliningrad_city(getattr(event, "city", None)):
+        return True
+
+    text_fields = [
+        getattr(event, "location_address", None),
+        getattr(event, "location_name", None),
+        getattr(event, "description", None),
+        getattr(event, "source_text", None),
+        getattr(event, "title", None),
+    ]
+    for value in text_fields:
+        if _contains_kaliningrad_keyword(value):
+            return True
+
+    for hashtag in _extract_available_hashtags(event):
+        if hashtag.casefold() in _KALININGRAD_HASHTAGS:
+            return True
+
+    url_fields = [
+        getattr(event, "source_post_url", None),
+        getattr(event, "ticket_link", None),
+        getattr(event, "vk_repost_url", None),
+    ]
+    for value in url_fields:
+        if not value or not isinstance(value, str):
+            continue
+        lowered = value.casefold()
+        if any(keyword in lowered for keyword in _KALININGRAD_URL_KEYWORDS):
+            return True
+
+    return False
+
+
+def _apply_topic_postprocessors(event: Event, topics: list[str]) -> list[str]:
+    processed = list(dict.fromkeys(topics))
+    if _should_add_kaliningrad_topic(event, processed):
+        processed.append(_KALININGRAD_TOPIC_ID)
+    return processed
+
+
 async def assign_event_topics(event: Event) -> tuple[list[str], int, str | None, bool]:
     """Populate ``event.topics`` using automatic classification."""
 
@@ -6563,6 +6705,7 @@ async def assign_event_topics(event: Event) -> tuple[list[str], int, str | None,
         topics = []
         error_text = str(exc)
 
+    topics = _apply_topic_postprocessors(event, topics)
     event.topics = topics
     event.topics_manual = False
     return topics, text_length, error_text, False
@@ -18313,7 +18456,11 @@ async def show_digest_menu(message: types.Message, db: Database, bot: Bot) -> No
             types.InlineKeyboardButton(
                 text="✅ Научпоп",
                 callback_data=f"digest:select:science_pop:{digest_id}",
-            )
+            ),
+            types.InlineKeyboardButton(
+                text="✅ Краеведение",
+                callback_data=f"digest:select:kraevedenie:{digest_id}",
+            ),
         ],
         [
             types.InlineKeyboardButton(
@@ -21653,6 +21800,7 @@ VK_TOPIC_HASHTAGS: Mapping[str, str] = {
     "FASHION": "#мода",
     "KIDS_SCHOOL": "#детям",
     "FAMILY": "#семье",
+    "KRAEVEDENIE_KALININGRAD_OBLAST": "#калининград",
 }
 
 
@@ -24981,6 +25129,9 @@ def create_app() -> web.Application:
     async def digest_select_science_pop_wrapper(callback: types.CallbackQuery):
         await handle_digest_select_science_pop(callback, db, bot)
 
+    async def digest_select_kraevedenie_wrapper(callback: types.CallbackQuery):
+        await handle_digest_select_kraevedenie(callback, db, bot)
+
     async def digest_select_networking_wrapper(callback: types.CallbackQuery):
         await handle_digest_select_networking(callback, db, bot)
 
@@ -25409,6 +25560,10 @@ def create_app() -> web.Application:
         lambda c: c.data.startswith("digest:select:science_pop:"),
     )
     dp.callback_query.register(
+        digest_select_kraevedenie_wrapper,
+        lambda c: c.data.startswith("digest:select:kraevedenie:"),
+    )
+    dp.callback_query.register(
         digest_select_networking_wrapper,
         lambda c: c.data.startswith("digest:select:networking:"),
     )
@@ -25767,6 +25922,20 @@ async def handle_digest_select_science_pop(
         preview_builder=build_science_pop_digest_preview,
         items_noun="научно-популярных событий",
         panel_text="Управление дайджестом научпопа\nВыключите лишнее и нажмите «Обновить превью».",
+    )
+
+
+async def handle_digest_select_kraevedenie(
+    callback: types.CallbackQuery, db: Database, bot: Bot
+) -> None:
+    await _handle_digest_select(
+        callback,
+        db,
+        bot,
+        digest_type="kraevedenie",
+        preview_builder=build_kraevedenie_digest_preview,
+        items_noun="краеведческих событий",
+        panel_text="Управление дайджестом краеведения\nВыключите лишнее и нажмите «Обновить превью».",
     )
 
 
