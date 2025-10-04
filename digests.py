@@ -366,6 +366,20 @@ async def build_science_pop_digest_candidates(
     )
 
 
+async def build_kraevedenie_digest_candidates(
+    db: Database, now: datetime, digest_id: str | None = None
+) -> Tuple[List[Event], int]:
+    """Select Kaliningrad regional heritage events for the digest."""
+
+    return await _build_digest_candidates(
+        None,
+        db,
+        now,
+        digest_id,
+        topic_identifier="KRAEVEDENIE_KALININGRAD_OBLAST",
+    )
+
+
 async def build_networking_digest_candidates(
     db: Database, now: datetime, digest_id: str | None = None
 ) -> Tuple[List[Event], int]:
@@ -1834,6 +1848,22 @@ async def build_science_pop_digest_preview(
         event_noun="научно-популярных событий",
         event_kind="science_pop",
         candidates_builder=build_science_pop_digest_candidates,
+    )
+
+
+async def build_kraevedenie_digest_preview(
+    digest_id: str, db: Database, now: datetime
+) -> tuple[str, List[str], int, List[Event], List[str]]:
+    """Build digest preview text for Kaliningrad heritage events."""
+
+    return await _build_digest_preview(
+        digest_id,
+        db,
+        now,
+        kind="kraevedenie",
+        event_noun="краеведческих событий",
+        event_kind="kraevedenie",
+        candidates_builder=build_kraevedenie_digest_candidates,
     )
 
 
