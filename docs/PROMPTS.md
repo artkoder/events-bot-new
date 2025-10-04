@@ -165,6 +165,7 @@ Edit this file to tweak how requests are sent to 4o.
 - NETWORKING — «Нетворкинг и карьера»
 - ACTIVE — «Активный отдых и спорт»
 - PERSONALITIES — «Личности и встречи»
+- HISTORICAL_IMMERSION — «Исторические реконструкции и погружение»
 - KIDS_SCHOOL — «Дети и школа»
 - FAMILY — «Семейные события»
 Если ни одна тема не подходит, верни пустой массив.
