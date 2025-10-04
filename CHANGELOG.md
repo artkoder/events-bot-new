@@ -6,6 +6,8 @@
 - Уведомления в админ-чат для партнёров теперь включают первую фотографию события и ссылки на Telegraph и исходный VK-пост, чтобы операторы могли оперативно проверить публикацию.
 
 - Expanded THEATRE_CLASSIC and THEATRE_MODERN criteria to include canonical playwrights and contemporary production formats.
+- `/digest` для встреч и клубов теперь подсказывает тону интро по `_MEETUPS_TONE_KEYWORDS`, использует запасной вариант «простота+любопытство» и отдельно просит сделать акцент на живом общении и нетворкинге, если в подборке нет клубов; описание обновлено в `docs/digests.md`.
+- Заголовки митапов в `/digest` нормализуются постпроцессингом: если событие открывает выставку, к названию добавляется пояснение «— творческая встреча и открытие выставки», как задокументировано в `docs/digests.md`.
 
 ## v0.3.15 – 2025-10-04
 - Clarified the 4o parsing prompt and docs for same-day theatre showtimes: posters with one date and multiple start times now yield separate theatre events instead of a single merged entry.
