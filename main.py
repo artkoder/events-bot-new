@@ -21632,8 +21632,27 @@ VK_LOCATION_TAG_OVERRIDES: dict[str, str] = {
 
 
 VK_TOPIC_HASHTAGS: Mapping[str, str] = {
+    "STANDUP": "#стендап",
+    "QUIZ_GAMES": "#квиз",
+    "OPEN_AIR": "#openair",
+    "PARTIES": "#вечеринка",
+    "CONCERTS": "#музыка",
+    "MOVIES": "#кино",
+    "EXHIBITIONS": "#искусство",
+    "THEATRE": "#театр",
+    "THEATRE_CLASSIC": "#классика",
+    "THEATRE_MODERN": "#перфоманс",
+    "LECTURES": "#лекция",
+    "MASTERCLASS": "#мастеркласс",
+    "PSYCHOLOGY": "#здоровье",
+    "SCIENCE_POP": "#научпоп",
+    "HANDMADE": "#маркет",
+    "NETWORKING": "#митап",
+    "ACTIVE": "#спорт",
+    "HISTORICAL_IMMERSION": "#история",
     "FASHION": "#мода",
-    "KIDS_SCHOOL": "#дети",
+    "KIDS_SCHOOL": "#детям",
+    "FAMILY": "#семье",
 }
 
 

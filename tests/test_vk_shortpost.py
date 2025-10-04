@@ -147,18 +147,21 @@ async def test_build_short_vk_tags_include_topics(monkeypatch):
 
     event = SimpleNamespace(
         date="2025-01-15",
-        city="Калининград",
+        city="",
         location_name="",
         location_address="",
         event_type="",
-        topics=["FASHION", "KIDS_SCHOOL"],
+        topics=["STANDUP", "OPEN_AIR", "FASHION", "KIDS_SCHOOL", "FAMILY"],
         title="Показ и школа",
     )
 
     tags = await main.build_short_vk_tags(event, "Короткое описание")
 
+    assert "#стендап" in tags
+    assert "#openair" in tags
     assert "#мода" in tags
-    assert "#дети" in tags
+    assert "#детям" in tags
+    assert "#семье" in tags
     assert 5 <= len(tags) <= 7
 
 
