@@ -239,10 +239,9 @@ async def test_build_source_page_content_summary_block(monkeypatch):
     )
     assert '<p>🗓 1 мая ⏰ 19:00</p>' in html
     assert '<p>📍 Дом, Улица, Калининград</p>' in html
-    assert '<p>🎟 Билеты от 500 до 1000 руб.</p>' in html
     assert (
-        '<p><a href="https://tickets.example.com/show">tickets.example.com/show</a></p>'
-        in html
+        '<p>🎟 <a href="https://tickets.example.com/show">Билеты</a> '
+        "от 500 до 1000 руб.</p>" in html
     )
 
 
@@ -271,9 +270,8 @@ async def test_build_source_page_content_summary_block_free(monkeypatch):
     )
     assert '<p>🗓 2 мая</p>' in html
     assert '<p>📍 Локация</p>' in html
-    assert '<p>🆓 Бесплатно, по регистрации</p>' in html
     assert (
-        '<p><a href="https://example.org/register">example.org/register</a></p>'
+        '<p>🆓 <a href="https://example.org/register">Бесплатно, по регистрации</a></p>'
         in html
     )
 

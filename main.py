@@ -24463,7 +24463,7 @@ def _format_summary_anchor_text(url: str) -> str:
     return display or url
 
 
-def _render_summary_anchor(url: str) -> str:
+def _render_summary_anchor(url: str, text: str | None = None) -> str:
     cleaned = (url or "").strip()
     if not cleaned:
         return ""
@@ -24477,8 +24477,8 @@ def _render_summary_anchor(url: str) -> str:
             href = "https:" + cleaned
         else:
             href = "https://" + cleaned.lstrip("/")
-    text = _format_summary_anchor_text(href)
-    return f'<a href="{html.escape(href)}">{html.escape(text)}</a>'
+    display_text = text or _format_summary_anchor_text(href)
+    return f'<a href="{html.escape(href)}">{html.escape(display_text)}</a>'
 
 
 def _format_ticket_price(min_price: int | None, max_price: int | None) -> str:
@@ -24578,30 +24578,30 @@ async def _build_source_summary_block(
     if location_line:
         parts.append(f"<p>{html.escape(location_line)}</p>")
 
-    ticket_line = ""
-    anchor_html = ""
+    ticket_segments: list[str] = []
     link_value = (event_summary.ticket_link or "").strip()
     price_text = _format_ticket_price(
         event_summary.ticket_price_min, event_summary.ticket_price_max
     )
     if event_summary.is_free:
-        ticket_line = "🆓 Бесплатно"
         if link_value:
-            ticket_line += ", по регистрации"
-            anchor_html = _render_summary_anchor(link_value)
-    elif link_value:
-        if price_text:
-            ticket_line = f"🎟 Билеты {price_text}"
+            ticket_segments.append(html.escape("🆓 "))
+            ticket_segments.append(
+                _render_summary_anchor(link_value, "Бесплатно, по регистрации")
+            )
         else:
-            ticket_line = "🎟 Билеты"
-        anchor_html = _render_summary_anchor(link_value)
-    elif price_text:
-        ticket_line = f"🎟 Билеты {price_text}"
+            ticket_segments.append(html.escape("🆓 Бесплатно"))
+    else:
+        if link_value:
+            ticket_segments.append(html.escape("🎟 "))
+            ticket_segments.append(_render_summary_anchor(link_value, "Билеты"))
+            if price_text:
+                ticket_segments.append(html.escape(f" {price_text}"))
+        elif price_text:
+            ticket_segments.append(html.escape(f"🎟 Билеты {price_text}"))
 
-    if ticket_line:
-        parts.append(f"<p>{html.escape(ticket_line)}</p>")
-    if anchor_html:
-        parts.append(f"<p>{anchor_html}</p>")
+    if ticket_segments:
+        parts.append(f"<p>{''.join(ticket_segments)}</p>")
 
     return "".join(parts)
 
