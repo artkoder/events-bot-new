@@ -3564,6 +3564,99 @@ async def vk_captcha_pause_outbox(db: Database) -> None:
     _vk_captcha_resume = _resume
 
 
+@dataclass
+class PartnerAdminNotice:
+    chat_id: int
+    message_id: int
+    is_photo: bool
+    caption: str
+
+
+_PARTNER_ADMIN_NOTICES: dict[int, PartnerAdminNotice] = {}
+
+
+def _event_telegraph_link(event: Event) -> str | None:
+    if event.telegraph_url:
+        return event.telegraph_url
+    if event.telegraph_path:
+        return f"https://telegra.ph/{event.telegraph_path}"
+    return None
+
+
+def _partner_admin_caption(event: Event) -> str:
+    parts = [event.title]
+    telegraph_link = _event_telegraph_link(event)
+    if telegraph_link:
+        parts.append(f"Telegraph: {telegraph_link}")
+    if event.source_vk_post_url:
+        parts.append(f"VK: {event.source_vk_post_url}")
+    return "\n".join(parts)
+
+
+async def _send_or_update_partner_admin_notice(
+    db: Database,
+    bot: Bot,
+    event: Event,
+    user: User | None = None,
+) -> None:
+    if not bot or not event.id:
+        return
+    if user is None:
+        creator_id = event.creator_id
+        if not creator_id:
+            return
+        async with db.get_session() as session:
+            user = await session.get(User, creator_id)
+    if not user or not user.is_partner:
+        return
+    admin_id = await get_superadmin_id(db)
+    if not admin_id:
+        return
+    caption = _partner_admin_caption(event)
+    if not caption:
+        return
+    notice = _PARTNER_ADMIN_NOTICES.get(event.id)
+    photo_url = event.photo_urls[0] if event.photo_urls else None
+    if photo_url:
+        if notice and notice.is_photo and notice.caption == caption:
+            return
+        if notice and notice.is_photo:
+            async with span("tg-send"):
+                await bot.edit_message_caption(
+                    chat_id=notice.chat_id,
+                    message_id=notice.message_id,
+                    caption=caption,
+                )
+            _PARTNER_ADMIN_NOTICES[event.id] = PartnerAdminNotice(
+                notice.chat_id, notice.message_id, True, caption
+            )
+        else:
+            async with span("tg-send"):
+                msg = await bot.send_photo(admin_id, photo_url, caption=caption)
+            _PARTNER_ADMIN_NOTICES[event.id] = PartnerAdminNotice(
+                admin_id, msg.message_id, True, caption
+            )
+    else:
+        if notice and not notice.is_photo and notice.caption == caption:
+            return
+        if notice and not notice.is_photo:
+            async with span("tg-send"):
+                await bot.edit_message_text(
+                    caption,
+                    chat_id=notice.chat_id,
+                    message_id=notice.message_id,
+                )
+            _PARTNER_ADMIN_NOTICES[event.id] = PartnerAdminNotice(
+                notice.chat_id, notice.message_id, False, caption
+            )
+        else:
+            async with span("tg-send"):
+                msg = await bot.send_message(admin_id, caption)
+            _PARTNER_ADMIN_NOTICES[event.id] = PartnerAdminNotice(
+                admin_id, msg.message_id, False, caption
+            )
+
+
 async def notify_event_added(
     db: Database, bot: Bot, user: User | None, event: Event, added: bool
 ) -> None:
@@ -3572,13 +3665,13 @@ async def notify_event_added(
         return
     role = "partner" if user.is_partner else "user"
     name = f"@{user.username}" if user.username else str(user.user_id)
-    link = event.telegraph_url
-    if not link and event.telegraph_path:
-        link = f"https://telegra.ph/{event.telegraph_path}"
+    link = _event_telegraph_link(event)
     text = f"{name} ({role}) added event {event.title}"
     if link:
         text += f" — {link}"
     await notify_superadmin(db, bot, text)
+    if user.is_partner:
+        await _send_or_update_partner_admin_notice(db, bot, event, user=user)
 
 
 async def notify_inactive_partners(
@@ -6287,7 +6380,7 @@ EVENT_TOPIC_SYSTEM_PROMPT = textwrap.dedent(
     Допустимые темы:
     {_EVENT_TOPIC_LISTING}
     Если ни одна тема не подходит, верни пустой массив.
-    Для театральных событий уточняй подтипы: `THEATRE_CLASSIC` ставь за постановки по канону — пьесы классических авторов, исторические или мифологические сюжеты, традиционная драматургия; `THEATRE_MODERN` применяй к новой драме, современным текстам, экспериментальным, иммерсивным или мультимедийным форматам.
+    Для театральных событий уточняй подтипы: `THEATRE_CLASSIC` ставь за постановки по канону — пьесы классических авторов (например, Шекспир, Мольер, Пушкин, Гоголь), исторические или мифологические сюжеты, традиционная драматургия; `THEATRE_MODERN` применяй к новой драме, современным текстам, экспериментальным, иммерсивным или мультимедийным форматам.
     Если классический сюжет переосмыслен в современном или иммерсивном исполнении, ставь обе темы `THEATRE_CLASSIC` и `THEATRE_MODERN`.
     """
 ).strip()
@@ -12394,6 +12487,8 @@ async def job_sync_vk_source_post(event_id: int, db: Database, bot: Bot | None) 
     if ev.content_hash == new_hash and ev.source_vk_post_url:
         return
     vk_url = await sync_vk_source_post(ev, ev.source_text, db, bot, ics_url=ev.ics_url)
+    partner_user: User | None = None
+    event_for_notice: Event | None = None
     async with db.get_session() as session:
         obj = await session.get(Event, event_id)
         if obj:
@@ -12401,9 +12496,16 @@ async def job_sync_vk_source_post(event_id: int, db: Database, bot: Bot | None) 
                 obj.source_vk_post_url = vk_url
             obj.content_hash = new_hash
             session.add(obj)
+            if bot and obj.creator_id:
+                partner_user = await session.get(User, obj.creator_id)
             await session.commit()
+            event_for_notice = obj
     if vk_url:
         logline("VK", event_id, "event done", url=vk_url)
+        if bot and event_for_notice:
+            await _send_or_update_partner_admin_notice(
+                db, bot, event_for_notice, user=partner_user
+            )
 
 
 @dataclass

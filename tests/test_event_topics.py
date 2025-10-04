@@ -20,6 +20,7 @@ def test_event_topic_prompt_mentions_topics():
     assert "Фестивали" in prompt
     assert "ярмарк" in prompt.casefold()
     assert "пьесы классических авторов" in prompt
+    assert any(name in prompt for name in ("Шекспир", "Мольер", "Пушкин", "Гоголь"))
     assert "исторические или мифологические сюжеты" in prompt
     assert "новой драме" in prompt
     assert "экспериментальным, иммерсивным" in prompt
