@@ -670,6 +670,42 @@ async def compose_digest_intro_via_4o(
     return text
 
 
+def _detect_meetup_formats(event: Event, normalized: dict[str, str]) -> List[str]:
+    """Return a list of human-friendly meetup formats derived from text."""
+
+    haystack_parts = [
+        normalized.get("title_clean") or event.title,
+        event.description or "",
+        event.event_type or "",
+    ]
+    haystack = " ".join(haystack_parts).lower()
+
+    formats: List[str] = []
+
+    def add_format(condition: bool, label: str) -> None:
+        if condition and label not in formats:
+            formats.append(label)
+
+    add_format("клуб" in haystack or "club" in haystack, "клуб")
+    add_format(
+        re.search(r"\bвстреч", haystack) is not None
+        or "meetup" in haystack
+        or "meeting" in haystack,
+        "встреча",
+    )
+    add_format(
+        ("творчес" in haystack and "вечер" in haystack)
+        or "creative evening" in haystack,
+        "творческий вечер",
+    )
+    add_format("нетворкин" in haystack or "network" in haystack, "нетворкинг")
+    add_format("q&a" in haystack or "q & a" in haystack, "Q&A")
+    add_format("дискус" in haystack or "discussion" in haystack, "дискуссия")
+    add_format("форум" in haystack or "forum" in haystack, "форум")
+
+    return formats
+
+
 async def compose_masterclasses_intro_via_4o(
     n: int, horizon_days: int, masterclasses: List[dict[str, str]]
 ) -> str:
@@ -838,6 +874,71 @@ async def compose_psychology_intro_via_4o(
     text = text.strip()
     logging.info(
         "digest.intro.llm.response run_id=%s kind=psychology ok=ok text_len=%s took_ms=%s",
+        run_id,
+        len(text),
+        took_ms,
+    )
+    return text
+
+
+async def compose_meetups_intro_via_4o(
+    n: int, horizon_days: int, meetups: List[dict[str, object]]
+) -> str:
+    """Generate intro phrase for meetup digest via model 4o."""
+
+    from main import ask_4o  # local import to avoid cycle
+    import json
+    import uuid
+
+    run_id = uuid.uuid4().hex
+    horizon_word = "неделю" if horizon_days == 7 else "две недели"
+    data_json = json.dumps(meetups[:9], ensure_ascii=False)
+    has_club = any(
+        "клуб" in [fmt.casefold() for fmt in item.get("formats", [])]
+        for item in meetups
+    )
+    has_club_flag = "true" if has_club else "false"
+
+    prompt = (
+        "Ты помогаешь телеграм-дайджесту мероприятий."
+        f" Сформулируй живое интро на 1–2 предложения до ~200 символов к подборке из {n} встреч"
+        f" и клубов на ближайшую {horizon_word}."
+        " Добавь 1–2 уместных эмодзи, избегай приветствий и списков."
+        " Опирайся на поля title, description, event_type и formats каждого события,"
+        " чтобы выделить ключевые темы и форматы."
+        f" Метаданные: has_club={has_club_flag}."
+        " Если has_club=false, сделай акцент на живом общении: знакомстве с интересными людьми,"
+        " Q&A и нетворкинге."
+        " Не выдумывай фактов, используй только данные из JSON ниже."
+        f" Данные о встречах в JSON: {data_json}"
+    )
+
+    logging.info(
+        "digest.intro.llm.request run_id=%s kind=meetups n=%s horizon=%s items_count=%s prompt_len=%s has_club=%s",
+        run_id,
+        n,
+        horizon_days,
+        len(meetups),
+        len(prompt),
+        int(has_club),
+    )
+
+    start = time.monotonic()
+    try:
+        text = await ask_4o(prompt, max_tokens=160)
+    except Exception:
+        took_ms = int((time.monotonic() - start) * 1000)
+        logging.info(
+            "digest.intro.llm.response run_id=%s kind=meetups ok=error text_len=0 took_ms=%s",
+            run_id,
+            took_ms,
+        )
+        raise
+
+    took_ms = int((time.monotonic() - start) * 1000)
+    text = text.strip()
+    logging.info(
+        "digest.intro.llm.response run_id=%s kind=meetups ok=ok text_len=%s took_ms=%s",
         run_id,
         len(text),
         took_ms,
@@ -1490,6 +1591,21 @@ async def _build_digest_preview(
             )
         intro = await compose_psychology_intro_via_4o(
             len(events), horizon, psychology_payload
+        )
+    elif event_kind == "meetups":
+        meetups_payload: List[dict[str, object]] = []
+        for ev, norm in zip(events, normalized):
+            title_clean = norm.get("title_clean") or ev.title
+            meetups_payload.append(
+                {
+                    "title": title_clean,
+                    "description": (ev.description or "").strip(),
+                    "event_type": (ev.event_type or "").strip(),
+                    "formats": _detect_meetup_formats(ev, norm),
+                }
+            )
+        intro = await compose_meetups_intro_via_4o(
+            len(events), horizon, meetups_payload
         )
     else:
         intro = await compose_digest_intro_via_4o(

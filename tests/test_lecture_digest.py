@@ -21,10 +21,12 @@ from digests import (
     build_theatre_classic_digest_candidates,
     build_theatre_modern_digest_candidates,
     build_meetups_digest_candidates,
+    build_meetups_digest_preview,
     build_movies_digest_candidates,
     compose_digest_intro_via_4o,
     compose_masterclasses_intro_via_4o,
     compose_exhibitions_intro_via_4o,
+    compose_meetups_intro_via_4o,
     aggregate_digest_topics,
     normalize_topics,
     format_event_line_html,
@@ -875,6 +877,118 @@ async def test_compose_intro_via_4o_exhibition(monkeypatch):
     assert norm_titles == ["Акварель"]
     assert len(lines) == 1
     assert events == [event]
+
+
+@pytest.mark.asyncio
+async def test_build_meetups_digest_preview_payload(monkeypatch):
+    event = SimpleNamespace(
+        id=5,
+        title="🎬 Киноклуб «Весна»",
+        description="Творческий вечер с режиссёром и обсуждением фильма.",
+        date="2025-05-05",
+        time="19:00",
+        location_name="Дом культуры",
+        source_post_url="https://example.com/meetup",
+        telegraph_url=None,
+        telegraph_path=None,
+        event_type="клуб",
+    )
+
+    captured_payload: dict[str, list] = {}
+
+    async def fake_compose_meetups_intro(n, horizon_days, meetups):
+        captured_payload["value"] = meetups
+        return "интро про встречи"
+
+    async def fake_candidates(db, now, digest_id=None):
+        return [event], 7
+
+    async def fake_normalize_titles(titles, event_kind="lecture"):
+        return [{"emoji": "🎬", "title_clean": "Киноклуб «Весна»"}]
+
+    monkeypatch.setattr(
+        "digests.compose_meetups_intro_via_4o", fake_compose_meetups_intro
+    )
+    monkeypatch.setattr(
+        "digests.build_meetups_digest_candidates", fake_candidates
+    )
+    monkeypatch.setattr(
+        "digests.normalize_titles_via_4o", fake_normalize_titles
+    )
+    monkeypatch.setattr("digests.pick_display_link", lambda ev: ev.source_post_url)
+
+    now = datetime(2025, 5, 1, 12, 0)
+    intro, lines, horizon, events, norm_titles = await build_meetups_digest_preview(
+        "digest-meetups", None, now
+    )
+
+    assert intro == "интро про встречи"
+    assert captured_payload["value"] == [
+        {
+            "title": "Киноклуб «Весна»",
+            "description": "Творческий вечер с режиссёром и обсуждением фильма.",
+            "event_type": "клуб",
+            "formats": ["клуб", "творческий вечер"],
+        }
+    ]
+    assert horizon == 7
+    assert norm_titles == ["Киноклуб «Весна»"]
+    assert len(lines) == 1
+    assert events == [event]
+
+
+@pytest.mark.asyncio
+async def test_compose_meetups_intro_without_clubs_emphasises_people(monkeypatch):
+    captured_prompt: dict[str, str] = {}
+
+    async def fake_ask(prompt, max_tokens=0):
+        captured_prompt["value"] = prompt
+        return "интро"
+
+    monkeypatch.setattr("main.ask_4o", fake_ask)
+
+    payload = [
+        {
+            "title": "Встреча с автором",
+            "description": "Обсуждаем новую книгу и задаём вопросы.",
+            "event_type": "встреча",
+            "formats": ["встреча"],
+        }
+    ]
+
+    text = await compose_meetups_intro_via_4o(1, 7, payload)
+    assert text == "интро"
+
+    prompt = captured_prompt["value"]
+    assert "has_club=false" in prompt
+    assert "живом общении" in prompt or "интересными людьми" in prompt
+    assert "q&a" in prompt.lower()
+
+
+@pytest.mark.asyncio
+async def test_compose_meetups_intro_with_club_sets_flag(monkeypatch):
+    captured_prompt: dict[str, str] = {}
+
+    async def fake_ask(prompt, max_tokens=0):
+        captured_prompt["value"] = prompt
+        return "интро"
+
+    monkeypatch.setattr("main.ask_4o", fake_ask)
+
+    payload = [
+        {
+            "title": "Киноклуб",
+            "description": "Просмотр фильма",
+            "event_type": "клуб",
+            "formats": ["клуб"],
+        }
+    ]
+
+    text = await compose_meetups_intro_via_4o(1, 14, payload)
+    assert text == "интро"
+
+    prompt = captured_prompt["value"]
+    assert "has_club=true" in prompt
 
 
 @pytest.mark.asyncio
