@@ -1,5 +1,8 @@
 # Changelog
 
+## [Unreleased]
+- Clarified the 4o parsing prompt and docs for same-day theatre showtimes: posters with one date and multiple start times now yield separate theatre events instead of a single merged entry.
+
 ## [x.y.z+3] – 2025-09-23
 - Нормализованы HTML-заголовки и абзацы историй перед публикацией.
 - Равномерно распределяем inline-изображения в исторических текстах.
