@@ -1088,6 +1088,8 @@ async def test_compose_meetups_intro_with_club_sets_flag(monkeypatch):
     prompt = captured_prompt["value"]
     assert "has_club=true" in prompt
     assert "Любопытство + интрига" in prompt
+    assert "q&a" in prompt.lower()
+    assert "живое общение" in prompt or "интересными людьми" in prompt
 
 
 @pytest.mark.asyncio
