@@ -32,6 +32,7 @@ async def test_build_short_vk_text_uses_description_when_source_missing(monkeypa
 
     assert "Длинное описание события" in calls["prompt"]
     assert "OCR блок" in calls["prompt"]
+    assert "Сразу начинай с главной идеи" in calls["prompt"]
     assert result == "Сжатый текст. Второе предложение."
 
 
