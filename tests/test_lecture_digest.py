@@ -443,7 +443,7 @@ async def test_build_psychology_digest_preview_filters_topics(tmp_path, monkeypa
         )
         await session.commit()
 
-    async def fake_normalize(titles, event_kind=None):
+    async def fake_normalize(titles, event_kind=None, events=None):
         return [{"title_clean": title, "emoji": ""} for title in titles]
 
     recorded_payload: list[list[dict[str, object]]] = []
@@ -608,6 +608,51 @@ async def test_build_digest_preview_exhibition_uses_clean_titles(monkeypatch):
     assert norm_titles == ["Выставка «Солнечный луч»"]
     assert lines and "Выставка «Солнечный луч»" in lines[0]
     assert "Лекция" not in lines[0]
+
+
+@pytest.mark.asyncio
+async def test_build_meetups_digest_preview_adds_exhibition_context(monkeypatch):
+    events = [
+        SimpleNamespace(
+            id=42,
+            title="Творческая встреча «Диалог о живописи»",
+            description="Встреча с художником и открытие выставки.",
+            date="2025-05-05",
+            time="18:00",
+            event_type="выставка",
+            source_post_url="https://example.com/meetup",
+            telegraph_url=None,
+            telegraph_path=None,
+        )
+    ]
+
+    async def fake_candidates_builder(db, now, digest_id):
+        return events, 14
+
+    async def fake_intro(*args, **kwargs):
+        return "intro"
+
+    async def fake_ask(prompt, max_tokens=0):
+        raise RuntimeError("no llm")
+
+    monkeypatch.setattr("main.ask_4o", fake_ask)
+    monkeypatch.setattr(digests, "compose_digest_intro_via_4o", fake_intro)
+
+    intro, lines, horizon, returned_events, norm_titles = await _build_digest_preview(
+        "digest-meetup",
+        db=None,
+        now=datetime(2025, 5, 1, 12, 0),
+        kind="meetups",
+        event_noun="встреч",
+        event_kind="meetups",
+        candidates_builder=fake_candidates_builder,
+    )
+
+    assert intro == "intro"
+    assert horizon == 14
+    assert returned_events == events
+    assert norm_titles[0].endswith("— творческая встреча и открытие выставки")
+    assert "— творческая встреча и открытие выставки" in lines[0]
 
 
 @pytest.mark.asyncio
@@ -801,7 +846,7 @@ async def test_compose_intro_via_4o_exhibition(monkeypatch):
         captured_payload["value"] = masterclasses
         return "готовое интро"
 
-    async def fake_normalize(titles, *, event_kind="lecture"):
+    async def fake_normalize(titles, *, event_kind="lecture", events=None):
         return [{"emoji": "🎨", "title_clean": "Акварель"} for _ in titles]
 
     async def fake_candidates(db, now, digest_id=None):
@@ -981,6 +1026,49 @@ async def test_normalize_titles_exhibition_keeps_original(monkeypatch):
     assert res[0]["title_clean"] == "Выставка — Импрессионисты"
     assert res[1]["emoji"] == ""
     assert res[1]["title_clean"] == "Современное искусство без эмодзи"
+
+
+@pytest.mark.asyncio
+async def test_normalize_titles_meetups_adds_exhibition_clarifier(monkeypatch):
+    async def fake_ask(prompt, max_tokens=0):
+        raise RuntimeError("no llm")
+
+    monkeypatch.setattr("main.ask_4o", fake_ask)
+
+    events = [
+        SimpleNamespace(event_type="выставка", description="Открытие выставки молодых художников."),
+    ]
+    titles = ["Творческая встреча «Диалог о живописи»"]
+
+    res = await normalize_titles_via_4o(
+        titles, event_kind="meetups", events=events
+    )
+
+    assert res[0]["emoji"] == ""
+    assert res[0]["title_clean"].endswith(
+        "— творческая встреча и открытие выставки"
+    )
+
+
+@pytest.mark.asyncio
+async def test_normalize_titles_meetups_llm_postprocess(monkeypatch):
+    async def fake_ask(prompt, max_tokens=0):
+        return '[{"emoji":"","title_clean":"Творческая встреча «Диалог о живописи»"}]'
+
+    monkeypatch.setattr("main.ask_4o", fake_ask)
+
+    events = [
+        SimpleNamespace(event_type="выставка", description="Описание говорит о выставке."),
+    ]
+    titles = ["Творческая встреча «Диалог о живописи»"]
+
+    res = await normalize_titles_via_4o(
+        titles, event_kind="meetups", events=events
+    )
+
+    assert res[0]["title_clean"].endswith(
+        "— творческая встреча и открытие выставки"
+    )
 
 
 def test_format_event_line_and_link_priority():
