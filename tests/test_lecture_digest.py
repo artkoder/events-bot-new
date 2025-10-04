@@ -65,9 +65,8 @@ async def test_compose_meetups_intro_prompt_mentions_anti_cliche(monkeypatch):
     await compose_meetups_intro_via_4o(1, 7, [meetup])
 
     prompt = captured["prompt"]
-    assert "«Погрузитесь»" in prompt
-    assert "«не упустите шанс»" in prompt
-    assert "«мир …»" in prompt
+    for wording in digests.MEETUPS_INTRO_FORBIDDEN_WORDINGS:
+        assert wording in prompt
 
 
 @pytest.mark.asyncio
