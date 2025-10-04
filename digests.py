@@ -310,6 +310,16 @@ async def build_psychology_digest_candidates(
     )
 
 
+async def build_science_pop_digest_candidates(
+    db: Database, now: datetime, digest_id: str | None = None
+) -> Tuple[List[Event], int]:
+    """Select science-pop events for the digest."""
+
+    return await _build_digest_candidates(
+        None, db, now, digest_id, topic_identifier="SCIENCE_POP"
+    )
+
+
 async def build_networking_digest_candidates(
     db: Database, now: datetime, digest_id: str | None = None
 ) -> Tuple[List[Event], int]:
@@ -1759,6 +1769,22 @@ async def build_psychology_digest_preview(
         event_noun="психологических событий",
         event_kind="psychology",
         candidates_builder=build_psychology_digest_candidates,
+    )
+
+
+async def build_science_pop_digest_preview(
+    digest_id: str, db: Database, now: datetime
+) -> tuple[str, List[str], int, List[Event], List[str]]:
+    """Build digest preview text for science-pop events."""
+
+    return await _build_digest_preview(
+        digest_id,
+        db,
+        now,
+        kind="science_pop",
+        event_noun="научно-популярных событий",
+        event_kind="science_pop",
+        candidates_builder=build_science_pop_digest_candidates,
     )
 
 
