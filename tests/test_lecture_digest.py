@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import main
 from main import Database, Event
 import logging
 import digests
@@ -40,6 +41,31 @@ from digests import (
     _normalize_title_fallback,
 )
 from aiogram import types
+
+
+@pytest.mark.asyncio
+async def test_compose_meetups_intro_prompt_mentions_anti_cliche(monkeypatch):
+    captured: dict[str, str] = {}
+
+    async def fake_ask(prompt: str, *, max_tokens: int) -> str:
+        captured["prompt"] = prompt
+        return "ok"
+
+    monkeypatch.setattr(main, "ask_4o", fake_ask)
+
+    meetup = {
+        "title": "Design Meetup",
+        "description": "Discuss product design",
+        "event_type": "meetup",
+        "formats": ["лекция"],
+    }
+
+    await compose_meetups_intro_via_4o(1, 7, [meetup])
+
+    prompt = captured["prompt"]
+    assert "«Погрузитесь»" in prompt
+    assert "«не упустите шанс»" in prompt
+    assert "«мир …»" in prompt
 
 
 @pytest.mark.asyncio
