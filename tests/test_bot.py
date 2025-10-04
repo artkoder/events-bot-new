@@ -5451,6 +5451,11 @@ async def test_update_telegraph_event_page_deterministic(tmp_path: Path, monkeyp
     monkeypatch.setattr(main, "get_telegraph_token", lambda: "t")
     monkeypatch.setattr(main, "Telegraph", lambda access_token=None: object())
 
+    async def fake_location(parts):
+        return " ".join(part.strip() for part in parts if part)
+
+    monkeypatch.setattr(main, "build_short_vk_location", fake_location)
+
     await main.update_telegraph_event_page(1, db, None)
     await main.update_telegraph_event_page(1, db, None)
 
