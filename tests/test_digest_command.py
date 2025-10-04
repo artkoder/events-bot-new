@@ -62,6 +62,15 @@ class DummyBot:
         self.deleted.append((chat_id, message_id))
 
 
+def get_menu_button(markup: types.InlineKeyboardMarkup, digest_type: str) -> types.InlineKeyboardButton:
+    for row in markup.inline_keyboard:
+        for btn in row:
+            data = getattr(btn, "callback_data", "") or ""
+            if data.startswith(f"digest:select:{digest_type}:"):
+                return btn
+    raise AssertionError(f"Button for digest type {digest_type!r} not found")
+
+
 @pytest.mark.asyncio
 @pytest.mark.asyncio
 async def test_handle_digest_sends_preview(tmp_path, monkeypatch):
@@ -102,7 +111,7 @@ async def test_handle_digest_sends_preview(tmp_path, monkeypatch):
 
     await main.show_digest_menu(msg, db, bot)
     menu_msg = bot.messages[0]
-    digest_id = menu_msg.reply_markup.inline_keyboard[0][0].callback_data.split(":")[-1]
+    digest_id = get_menu_button(menu_msg.reply_markup, "lectures").callback_data.split(":")[-1]
     async def answer(**kw):
         return None
     cb = SimpleNamespace(
@@ -160,7 +169,7 @@ async def test_handle_digest_sends_masterclasses_preview(tmp_path, monkeypatch):
 
     await main.show_digest_menu(msg, db, bot)
     menu_msg = bot.messages[0]
-    digest_id = menu_msg.reply_markup.inline_keyboard[0][1].callback_data.split(":")[-1]
+    digest_id = get_menu_button(menu_msg.reply_markup, "masterclasses").callback_data.split(":")[-1]
 
     async def answer(**kw):
         return None
@@ -224,7 +233,7 @@ async def test_handle_digest_sends_exhibitions_preview(tmp_path, monkeypatch):
 
     await main.show_digest_menu(msg, db, bot)
     menu_msg = bot.messages[0]
-    digest_id = menu_msg.reply_markup.inline_keyboard[2][0].callback_data.split(":")[-1]
+    digest_id = get_menu_button(menu_msg.reply_markup, "exhibitions").callback_data.split(":")[-1]
 
     async def answer(**kw):
         return None
@@ -299,7 +308,7 @@ async def test_handle_digest_sends_psychology_preview(tmp_path, monkeypatch):
 
     await main.show_digest_menu(msg, db, bot)
     menu_msg = bot.messages[0]
-    digest_id = menu_msg.reply_markup.inline_keyboard[2][1].callback_data.split(":")[-1]
+    digest_id = get_menu_button(menu_msg.reply_markup, "psychology").callback_data.split(":")[-1]
 
     async def answer(**kw):
         return None
@@ -340,6 +349,222 @@ async def test_handle_digest_sends_psychology_preview(tmp_path, monkeypatch):
     await main.handle_digest_refresh(cb_refresh, bot)
     assert recorded_payloads
     assert recorded_payloads[-1][0]["topics"] == ["PSYCHOLOGY"]
+
+
+@pytest.mark.asyncio
+async def test_handle_digest_sends_networking_preview(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    async with db.get_session() as session:
+        session.add(User(user_id=1, is_superadmin=True))
+        dt = datetime.now(timezone.utc) + timedelta(days=1)
+        session.add(
+            Event(
+                title="Business Breakfast",
+                description="Networking",
+                date=dt.strftime("%Y-%m-%d"),
+                time="12:00",
+                location_name="Cafe",
+                source_text="s",
+                event_type="лекция",
+                telegraph_url="https://telegra.ph/networking",
+                topics=["NETWORKING"],
+            )
+        )
+        await session.commit()
+
+    msg = types.Message.model_validate({
+        "message_id": 1,
+        "date": 0,
+        "chat": {"id": 1, "type": "private"},
+        "from": {"id": 1, "is_bot": False, "first_name": "U"},
+        "text": "/digest",
+    })
+    bot = DummyBot()
+
+    async def fake_ask(prompt, max_tokens=0):
+        return "Интро"
+
+    async def fake_extract(url, **kw):
+        return []
+
+    monkeypatch.setattr(main, "ask_4o", fake_ask)
+    monkeypatch.setattr(main, "extract_catbox_covers_from_telegraph", fake_extract)
+
+    await main.show_digest_menu(msg, db, bot)
+    menu_msg = bot.messages[0]
+    digest_id = get_menu_button(menu_msg.reply_markup, "networking").callback_data.split(":")[-1]
+
+    async def answer(**kw):
+        return None
+
+    cb = SimpleNamespace(
+        id="1",
+        from_user=SimpleNamespace(id=1),
+        message=menu_msg,
+        data=f"digest:select:networking:{digest_id}",
+        answer=answer,
+    )
+
+    await main.handle_digest_select_networking(cb, db, bot)
+    session_data = main.digest_preview_sessions[digest_id]
+    assert session_data["items_noun"] == "нетворкингов"
+    assert session_data["digest_type"] == "networking"
+    assert session_data["items"][0]["norm_topics"] == ["NETWORKING"]
+
+
+@pytest.mark.asyncio
+async def test_handle_digest_sends_entertainment_preview(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    async with db.get_session() as session:
+        session.add(User(user_id=1, is_superadmin=True))
+        base = datetime.now(timezone.utc)
+
+        def add(offset, title, topics):
+            dt = base + timedelta(days=offset)
+            session.add(
+                Event(
+                    title=title,
+                    description="Fun",
+                    date=dt.strftime("%Y-%m-%d"),
+                    time="12:00",
+                    location_name="Club",
+                    source_text="s",
+                    event_type="вечеринка",
+                    telegraph_url="https://telegra.ph/ent",
+                    topics=topics,
+                )
+            )
+
+        add(1, "Standup", ["STANDUP"])
+        add(2, "Quiz", ["QUIZ_GAMES"])
+        session.add(
+            Event(
+                title="Lecture",
+                description="No",
+                date=(base + timedelta(days=3)).strftime("%Y-%m-%d"),
+                time="12:00",
+                location_name="Hall",
+                source_text="s",
+                event_type="лекция",
+                topics=["LECTURES"],
+            )
+        )
+        await session.commit()
+
+    msg = types.Message.model_validate({
+        "message_id": 1,
+        "date": 0,
+        "chat": {"id": 1, "type": "private"},
+        "from": {"id": 1, "is_bot": False, "first_name": "U"},
+        "text": "/digest",
+    })
+    bot = DummyBot()
+
+    async def fake_ask(prompt, max_tokens=0):
+        return "Интро"
+
+    async def fake_extract(url, **kw):
+        return []
+
+    monkeypatch.setattr(main, "ask_4o", fake_ask)
+    monkeypatch.setattr(main, "extract_catbox_covers_from_telegraph", fake_extract)
+
+    await main.show_digest_menu(msg, db, bot)
+    menu_msg = bot.messages[0]
+    digest_id = get_menu_button(menu_msg.reply_markup, "entertainment").callback_data.split(":")[-1]
+
+    async def answer(**kw):
+        return None
+
+    cb = SimpleNamespace(
+        id="1",
+        from_user=SimpleNamespace(id=1),
+        message=menu_msg,
+        data=f"digest:select:entertainment:{digest_id}",
+        answer=answer,
+    )
+
+    await main.handle_digest_select_entertainment(cb, db, bot)
+    session_data = main.digest_preview_sessions[digest_id]
+    assert session_data["items_noun"] == "развлечений"
+    assert session_data["digest_type"] == "entertainment"
+    titles = [item["title"] for item in session_data["items"]]
+    assert "Lecture" not in titles
+    assert set(titles) == {"Standup", "Quiz"}
+
+
+@pytest.mark.asyncio
+async def test_handle_digest_sends_movies_preview(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    async with db.get_session() as session:
+        session.add(User(user_id=1, is_superadmin=True))
+        dt = datetime.now(timezone.utc) + timedelta(days=1)
+        session.add(
+            Event(
+                title="Cinema Night",
+                description="Film",
+                date=dt.strftime("%Y-%m-%d"),
+                time="18:00",
+                location_name="Cinema",
+                source_text="s",
+                event_type="кинопоказ",
+                telegraph_url="https://telegra.ph/movies",
+            )
+        )
+        session.add(
+            Event(
+                title="Other",
+                description="No",
+                date=dt.strftime("%Y-%m-%d"),
+                time="18:00",
+                location_name="Hall",
+                source_text="s",
+                event_type="лекция",
+            )
+        )
+        await session.commit()
+
+    msg = types.Message.model_validate({
+        "message_id": 1,
+        "date": 0,
+        "chat": {"id": 1, "type": "private"},
+        "from": {"id": 1, "is_bot": False, "first_name": "U"},
+        "text": "/digest",
+    })
+    bot = DummyBot()
+
+    async def fake_ask(prompt, max_tokens=0):
+        return "Интро"
+
+    async def fake_extract(url, **kw):
+        return []
+
+    monkeypatch.setattr(main, "ask_4o", fake_ask)
+    monkeypatch.setattr(main, "extract_catbox_covers_from_telegraph", fake_extract)
+
+    await main.show_digest_menu(msg, db, bot)
+    menu_msg = bot.messages[0]
+    digest_id = get_menu_button(menu_msg.reply_markup, "movies").callback_data.split(":")[-1]
+
+    async def answer(**kw):
+        return None
+
+    cb = SimpleNamespace(
+        id="1",
+        from_user=SimpleNamespace(id=1),
+        message=menu_msg,
+        data=f"digest:select:movies:{digest_id}",
+        answer=answer,
+    )
+
+    await main.handle_digest_select_movies(cb, db, bot)
+    session_data = main.digest_preview_sessions[digest_id]
+    assert session_data["items_noun"] == "кинопоказов"
+    assert session_data["digest_type"] == "movies"
+    assert [item["title"] for item in session_data["items"]] == ["Cinema Night"]
 
 
 @pytest.mark.asyncio

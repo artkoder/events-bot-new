@@ -15,6 +15,13 @@ from digests import (
     build_exhibitions_digest_preview,
     build_psychology_digest_candidates,
     build_psychology_digest_preview,
+    build_networking_digest_candidates,
+    build_entertainment_digest_candidates,
+    build_markets_digest_candidates,
+    build_theatre_classic_digest_candidates,
+    build_theatre_modern_digest_candidates,
+    build_meetups_digest_candidates,
+    build_movies_digest_candidates,
     compose_digest_intro_via_4o,
     compose_masterclasses_intro_via_4o,
     compose_exhibitions_intro_via_4o,
@@ -139,6 +146,266 @@ async def test_build_psychology_digest_candidates_filters_topics(tmp_path):
 
     assert horizon == 14
     assert titles == ["Psych 1", "Psych 2"]
+
+
+@pytest.mark.asyncio
+async def test_build_networking_digest_candidates_filters_topics(tmp_path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    now = datetime(2025, 5, 1, 10, 0)
+
+    async with db.get_session() as session:
+        session.add(
+            Event(
+                title="Business Breakfast",
+                description="",
+                date="2025-05-02",
+                time="10:00",
+                location_name="Cafe",
+                source_text="s",
+                source_post_url="http://example.com/breakfast",
+                topics=["business breakfast"],
+            )
+        )
+        session.add(
+            Event(
+                title="Other Meetup",
+                description="",
+                date="2025-05-03",
+                time="12:00",
+                location_name="Hall",
+                source_text="s",
+                source_post_url="http://example.com/other",
+                topics=["LECTURES"],
+            )
+        )
+        await session.commit()
+
+    events, horizon = await build_networking_digest_candidates(db, now)
+    assert horizon == 14
+    assert [e.title for e in events] == ["Business Breakfast"]
+
+
+@pytest.mark.asyncio
+async def test_build_entertainment_digest_candidates_merges_topics(tmp_path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    now = datetime(2025, 5, 1, 9, 0)
+
+    async with db.get_session() as session:
+        def add(title: str, day_offset: int, time: str, topics: list[str]):
+            dt = now + timedelta(days=day_offset)
+            session.add(
+                Event(
+                    title=title,
+                    description="",
+                    date=dt.strftime("%Y-%m-%d"),
+                    time=time,
+                    location_name="Club",
+                    source_text="s",
+                    source_post_url=f"http://example.com/{title}",
+                    topics=topics,
+                )
+            )
+
+        add("Standup Night", 1, "19:00", ["STANDUP"])
+        add("Quiz Battle", 2, "20:00", ["QUIZ_GAMES"])
+        add("Party Mix", 3, "18:00", ["STANDUP", "QUIZ_GAMES"])
+        await session.commit()
+
+    events, horizon = await build_entertainment_digest_candidates(db, now)
+    titles = [e.title for e in events]
+    assert horizon == 14
+    assert titles == ["Standup Night", "Quiz Battle", "Party Mix"]
+
+
+@pytest.mark.asyncio
+async def test_build_markets_digest_candidates_filters_topics(tmp_path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    now = datetime(2025, 5, 1, 9, 0)
+
+    async with db.get_session() as session:
+        session.add(
+            Event(
+                title="Spring Market",
+                description="",
+                date="2025-05-02",
+                time="12:00",
+                location_name="Loft",
+                source_text="s",
+                source_post_url="http://example.com/market",
+                topics=["HANDMADE"],
+            )
+        )
+        session.add(
+            Event(
+                title="Concert",
+                description="",
+                date="2025-05-02",
+                time="15:00",
+                location_name="Stage",
+                source_text="s",
+                source_post_url="http://example.com/concert",
+                topics=["CONCERTS"],
+            )
+        )
+        await session.commit()
+
+    events, _ = await build_markets_digest_candidates(db, now)
+    assert [e.title for e in events] == ["Spring Market"]
+
+
+@pytest.mark.asyncio
+async def test_build_theatre_classic_digest_candidates_filters_event_type(tmp_path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    now = datetime(2025, 5, 1, 9, 0)
+
+    async with db.get_session() as session:
+        session.add(
+            Event(
+                title="Classic Drama",
+                description="",
+                date="2025-05-02",
+                time="19:00",
+                location_name="Theatre",
+                source_text="s",
+                source_post_url="http://example.com/drama",
+                event_type="спектакль",
+                topics=["THEATRE_CLASSIC"],
+            )
+        )
+        session.add(
+            Event(
+                title="Classic Talk",
+                description="",
+                date="2025-05-03",
+                time="19:00",
+                location_name="Hall",
+                source_text="s",
+                source_post_url="http://example.com/talk",
+                event_type="лекция",
+                topics=["THEATRE_CLASSIC"],
+            )
+        )
+        await session.commit()
+
+    events, _ = await build_theatre_classic_digest_candidates(db, now)
+    assert [e.title for e in events] == ["Classic Drama"]
+
+
+@pytest.mark.asyncio
+async def test_build_theatre_modern_digest_candidates_filters_event_type(tmp_path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    now = datetime(2025, 5, 1, 9, 0)
+
+    async with db.get_session() as session:
+        session.add(
+            Event(
+                title="Modern Show",
+                description="",
+                date="2025-05-02",
+                time="21:00",
+                location_name="Stage",
+                source_text="s",
+                source_post_url="http://example.com/modern",
+                event_type="спектакль",
+                topics=["THEATRE_MODERN"],
+            )
+        )
+        session.add(
+            Event(
+                title="Modern Lecture",
+                description="",
+                date="2025-05-03",
+                time="19:00",
+                location_name="Hall",
+                source_text="s",
+                source_post_url="http://example.com/modern-lecture",
+                event_type="лекция",
+                topics=["THEATRE_MODERN"],
+            )
+        )
+        await session.commit()
+
+    events, _ = await build_theatre_modern_digest_candidates(db, now)
+    assert [e.title for e in events] == ["Modern Show"]
+
+
+@pytest.mark.asyncio
+async def test_build_meetups_digest_candidates_filters_topics(tmp_path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    now = datetime(2025, 5, 1, 9, 0)
+
+    async with db.get_session() as session:
+        session.add(
+            Event(
+                title="Book Club",
+                description="",
+                date="2025-05-02",
+                time="18:00",
+                location_name="Library",
+                source_text="s",
+                source_post_url="http://example.com/bookclub",
+                topics=["book club"],
+            )
+        )
+        session.add(
+            Event(
+                title="Other Event",
+                description="",
+                date="2025-05-02",
+                time="20:00",
+                location_name="Cafe",
+                source_text="s",
+                source_post_url="http://example.com/other",
+                topics=["CONCERTS"],
+            )
+        )
+        await session.commit()
+
+    events, _ = await build_meetups_digest_candidates(db, now)
+    assert [e.title for e in events] == ["Book Club"]
+
+
+@pytest.mark.asyncio
+async def test_build_movies_digest_candidates_filters_event_type(tmp_path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    now = datetime(2025, 5, 1, 9, 0)
+
+    async with db.get_session() as session:
+        session.add(
+            Event(
+                title="Cinema Night",
+                description="",
+                date="2025-05-02",
+                time="21:00",
+                location_name="Cinema",
+                source_text="s",
+                source_post_url="http://example.com/cinema",
+                event_type="кинопоказ",
+            )
+        )
+        session.add(
+            Event(
+                title="Lecture",
+                description="",
+                date="2025-05-02",
+                time="18:00",
+                location_name="Hall",
+                source_text="s",
+                source_post_url="http://example.com/lecture",
+                event_type="лекция",
+            )
+        )
+        await session.commit()
+
+    events, _ = await build_movies_digest_candidates(db, now)
+    assert [e.title for e in events] == ["Cinema Night"]
 
 
 @pytest.mark.asyncio
