@@ -68,6 +68,8 @@ async def test_compose_meetups_intro_prompt_mentions_anti_cliche(monkeypatch):
     for wording in digests.MEETUPS_INTRO_FORBIDDEN_WORDINGS:
         assert wording in prompt
 
+    assert "Первая фраза должна начинаться с интригующего хука" in prompt
+
 
 @pytest.mark.asyncio
 async def test_build_lectures_digest_candidates_expand_to_14(tmp_path):
