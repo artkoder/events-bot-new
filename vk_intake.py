@@ -219,6 +219,11 @@ HISTORICAL_YEAR_RE = re.compile(r"\b(1\d{3})\b")
 
 NUM_DATE_RE = re.compile(r"\b(\d{1,2})[./-](\d{1,2})(?:[./-](\d{2,4}))?\b")
 PHONE_LIKE_RE = re.compile(r"^(?:\d{2}-){2,}\d{2}$")
+FEDERAL_PHONE_CANDIDATE_RE = re.compile(r"(?<!\d)(?:\+7|8)\D*\d(?:\D*\d){9}")
+CITY_PHONE_CANDIDATE_RE = re.compile(r"(?<!\d)\d(?:\D*\d){5}(?!\d)")
+PHONE_CANDIDATE_RE = re.compile(
+    rf"(?:{FEDERAL_PHONE_CANDIDATE_RE.pattern})|(?:{CITY_PHONE_CANDIDATE_RE.pattern})"
+)
 PHONE_CONTEXT_RE = re.compile(
     r"(\bтел(?:[.:]|ефон\w*|\b|(?=\d))|\bзвоните\b|\bзвонок\w*)",
     re.I | re.U,
@@ -402,6 +407,55 @@ def detect_historical_context(text: str) -> bool:
     return any(name in text_low for name in HISTORICAL_TOPONYMS)
 
 
+def normalize_phone_candidates(text: str) -> str:
+    """Strip separators from phone-like sequences without touching valid dates."""
+
+    def is_valid_date_sequence(parts: List[str]) -> bool:
+        if len(parts) < 3:
+            return False
+        try:
+            day = int(parts[0])
+            month = int(parts[1])
+        except ValueError:
+            return False
+        if not (1 <= day <= 31 and 1 <= month <= 12):
+            return False
+        year_part = parts[2]
+        if len(year_part) < 2:
+            return False
+        return True
+
+    result: List[str] = []
+    pos = 0
+    separators = set(" +()\t\r\n.-–\u00a0\u202f")
+    while True:
+        match = PHONE_CANDIDATE_RE.search(text, pos)
+        if not match:
+            break
+        start = match.start()
+        result.append(text[pos:start])
+        original = match.group(0)
+        trimmed_end = 0
+        for rel_idx, ch in enumerate(original):
+            if ch.isdigit() or ch in separators:
+                trimmed_end = rel_idx + 1
+            else:
+                break
+        trimmed = original[:trimmed_end]
+        if DATE_RANGE_RE.search(trimmed):
+            result.append(trimmed)
+        else:
+            parts = re.findall(r"\d+", trimmed)
+            if is_valid_date_sequence(parts):
+                result.append(trimmed)
+            else:
+                normalized = re.sub(r"\d", "x", trimmed)
+                result.append(normalized)
+        pos = start + trimmed_end
+    result.append(text[pos:])
+    return "".join(result)
+
+
 def extract_event_ts_hint(
     text: str,
     default_time: str | None = None,
@@ -421,7 +475,7 @@ def extract_event_ts_hint(
             now = publish_ts.astimezone(tzinfo)
     else:
         now = datetime.fromtimestamp(publish_ts, tzinfo)
-    text_low = text.lower()
+    text_low = normalize_phone_candidates(text.lower())
 
     day = month = year = None
     m = None
