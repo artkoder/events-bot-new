@@ -25,6 +25,7 @@ def test_event_topic_prompt_mentions_topics():
     assert "новой драме" in prompt
     assert "экспериментальным, иммерсивным" in prompt
     assert "ставь обе темы" in prompt
+    assert "не должен использоваться сам по себе" in prompt
 
 
 def test_topic_labels_include_theatre_subtypes():
