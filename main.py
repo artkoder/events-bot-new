@@ -25079,6 +25079,28 @@ async def build_source_page_content(
         paragraphs = [anchor_re.sub(_replace_anchor, para) for para in paragraphs]
     if paragraphs:
         spacer = BODY_SPACER_HTML
+
+        paragraph_tag_re = re.compile(r"<p\b", re.IGNORECASE)
+        heading_tag_re = re.compile(r"<h[1-6]\b", re.IGNORECASE)
+        media_tag_re = re.compile(r"<(?:figure|img)\b", re.IGNORECASE)
+
+        def _should_add_spacer(previous_blocks: list[str], upcoming: str) -> bool:
+            if not previous_blocks:
+                return False
+            last = previous_blocks[-1]
+            if last == spacer:
+                return False
+            if page_mode != "history":
+                return True
+            if not paragraph_tag_re.match(upcoming.strip()):
+                return True
+            last_stripped = last.strip()
+            if heading_tag_re.match(last_stripped):
+                return False
+            if media_tag_re.match(last_stripped):
+                return False
+            return True
+
         if image_mode == "inline" and tail:
             text_paragraphs = [p for p in paragraphs if p != BODY_SPACER_HTML]
             paragraph_count = len(text_paragraphs)
@@ -25093,16 +25115,16 @@ async def build_source_page_content(
             text_index = 0
             for block in paragraphs:
                 if block == BODY_SPACER_HTML:
-                    if body_blocks and body_blocks[-1] != spacer:
+                    if _should_add_spacer(body_blocks, spacer):
                         body_blocks.append(spacer)
                     continue
-                if body_blocks and body_blocks[-1] != spacer:
+                if _should_add_spacer(body_blocks, block):
                     body_blocks.append(spacer)
                 body_blocks.append(block)
                 text_index += 1
                 inserted_for_para = False
                 while base_index < base_count and positions[base_index] == text_index:
-                    if not inserted_for_para:
+                    if not inserted_for_para and _should_add_spacer(body_blocks, spacer):
                         body_blocks.append(spacer)
                         inserted_for_para = True
                     body_blocks.append(
@@ -25110,7 +25132,7 @@ async def build_source_page_content(
                     )
                     base_index += 1
             for extra_url in tail[base_index:]:
-                if body_blocks:
+                if _should_add_spacer(body_blocks, spacer):
                     body_blocks.append(spacer)
                 body_blocks.append(f'<img src="{html.escape(extra_url)}"/>')
                 base_index += 1
@@ -25119,10 +25141,10 @@ async def build_source_page_content(
             body_blocks = []
             for block in paragraphs:
                 if block == BODY_SPACER_HTML:
-                    if body_blocks and body_blocks[-1] != spacer:
+                    if _should_add_spacer(body_blocks, spacer):
                         body_blocks.append(spacer)
                     continue
-                if body_blocks and body_blocks[-1] != spacer:
+                if _should_add_spacer(body_blocks, block):
                     body_blocks.append(spacer)
                 body_blocks.append(block)
         html_content += "".join(body_blocks)
