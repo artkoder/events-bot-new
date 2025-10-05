@@ -4,6 +4,8 @@ import asyncio
 import html
 import logging
 from difflib import SequenceMatcher, ndiff
+from importlib import import_module
+from typing import Any, Awaitable, Callable
 
 from aiohttp import ClientSession
 from aiogram import Bot, types
@@ -20,6 +22,20 @@ DETAIL_LABELS = {
 }
 
 DETAIL_ORDER: tuple[DetailLevel, ...] = ("auto", "low", "high")
+
+_USAGE_LOGGER_CONFIGURED = False
+_LOG_TOKEN_USAGE: Callable[..., Awaitable[None]] | None = None
+_BOT_CODE: str | None = None
+
+
+def _ensure_usage_logger() -> None:
+    global _USAGE_LOGGER_CONFIGURED, _LOG_TOKEN_USAGE, _BOT_CODE
+    if _USAGE_LOGGER_CONFIGURED:
+        return
+    main_mod = import_module("main")
+    _LOG_TOKEN_USAGE = getattr(main_mod, "log_token_usage", None)
+    _BOT_CODE = getattr(main_mod, "BOT_CODE", None)
+    _USAGE_LOGGER_CONFIGURED = True
 
 def _main_keyboard(detail: DetailLevel) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -150,11 +166,34 @@ async def handle_photo(
     image_bytes, name = images[0]
     models = ("gpt-4o-mini", "gpt-4o")
     results: list[tuple[str, OcrResult | None, str | None]] = []
+    _ensure_usage_logger()
     for model in models:
         try:
             ocr_result = await run_ocr(image_bytes, model=model, detail=session.detail)
             session.last_texts[model] = ocr_result.text
             results.append((model, ocr_result, None))
+            if _LOG_TOKEN_USAGE is not None and _BOT_CODE is not None:
+                usage_payload = {
+                    "prompt_tokens": int(getattr(ocr_result.usage, "prompt_tokens", 0) or 0),
+                    "completion_tokens": int(getattr(ocr_result.usage, "completion_tokens", 0) or 0),
+                    "total_tokens": int(getattr(ocr_result.usage, "total_tokens", 0) or 0),
+                }
+                meta: dict[str, Any] = {
+                    "source": "vision_test.handle_photo",
+                    "detail": session.detail,
+                    "file": name,
+                }
+                try:
+                    await _LOG_TOKEN_USAGE(
+                        _BOT_CODE,
+                        model,
+                        usage_payload,
+                        endpoint="chat.completions",
+                        request_id=ocr_result.request_id,
+                        meta=meta,
+                    )
+                except Exception:  # pragma: no cover - defensive logging
+                    logging.exception("vision_test.log_token_usage_failed")
         except Exception as exc:  # pragma: no cover - depends on network
             logging.warning("OCR model failed: model=%s error=%s", model, exc)
             results.append((model, None, str(exc)))
