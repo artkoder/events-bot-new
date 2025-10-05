@@ -63,6 +63,7 @@ from main import (
     send_festival_poll,
     notify_inactive_partners,
     show_edit_menu,
+    BOT_CODE,
 )
 from poster_media import PosterMedia, process_media
 from models import EventPoster, PosterOcrCache, OcrUsage
@@ -4516,8 +4517,101 @@ async def test_stats_festivals(tmp_path: Path, monkeypatch):
     assert any("Fest" in l and "50" in l for l in lines)
     assert any("Fest" in l and "70" in l and "40" in l for l in lines)
     assert all("OldFest" not in l for l in lines)
-    assert lines[-2] == "Tokens gpt-4o: 0"
-    assert lines[-1] == "Tokens gpt-4o-mini: 0"
+    assert lines[-3] == "Tokens gpt-4o: 0"
+    assert lines[-2] == "Tokens gpt-4o-mini: 0"
+    assert lines[-1] == "Tokens total: 0"
+
+
+@pytest.mark.asyncio
+async def test_stats_supabase_usage(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    start_msg = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "/start",
+        }
+    )
+    await handle_start(start_msg, db, bot)
+
+    class FakeQuery:
+        def __init__(self, parent, table):
+            self.parent = parent
+            self.table = table
+            self.filters: list[tuple[str, str, str]] = []
+
+        def select(self, fields):
+            self.parent.selects.append((self.table, fields))
+            return self
+
+        def eq(self, column, value):
+            self.filters.append(("eq", column, value))
+            return self
+
+        def gte(self, column, value):
+            self.filters.append(("gte", column, value))
+            return self
+
+        def lt(self, column, value):
+            self.filters.append(("lt", column, value))
+            return self
+
+        def execute(self):
+            self.parent.calls.append((self.table, tuple(self.filters)))
+            data = self.parent.responses.get(self.table, [])
+            return SimpleNamespace(data=list(data))
+
+    class FakeSupabase:
+        def __init__(self):
+            self.tables: list[str] = []
+            self.selects: list[tuple[str, str]] = []
+            self.calls: list[tuple[str, tuple]] = []
+            self.responses = {
+                "token_usage_daily": [
+                    {"model": "gpt-4o", "total_tokens": 100},
+                    {"model": "gpt-4o-mini", "total_tokens": 50},
+                ]
+            }
+
+        def table(self, name: str):
+            self.tables.append(name)
+            return FakeQuery(self, name)
+
+    fake_client = FakeSupabase()
+    monkeypatch.setattr(main, "get_supabase_client", lambda: fake_client)
+
+    def fail_snapshot():
+        raise AssertionError("fallback should not be used")
+
+    monkeypatch.setattr(main, "_get_four_o_usage_snapshot", fail_snapshot)
+
+    msg = types.Message.model_validate(
+        {
+            "message_id": 2,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "/stats",
+        }
+    )
+
+    await handle_stats(msg, db, bot)
+
+    lines = bot.messages[-1][1].splitlines()
+    assert lines[-3:] == [
+        "Tokens gpt-4o: 100",
+        "Tokens gpt-4o-mini: 50",
+        "Tokens total: 150",
+    ]
+    assert fake_client.tables == ["token_usage_daily"]
+    filters = fake_client.calls[0][1]
+    assert ("eq", "bot", BOT_CODE) in filters
+    assert any(step[0] == "eq" and step[1] == "date" for step in filters)
 
 
 @pytest.mark.asyncio
