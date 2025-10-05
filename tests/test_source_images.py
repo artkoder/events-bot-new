@@ -75,6 +75,15 @@ def test_apply_ics_link_after_figure():
     assert res.index(main.ICS_LABEL) > res.index("</figure>")
 
 
+def test_apply_ics_link_appends_to_date_paragraph():
+    html = "<p>🗓 1 мая ⏰ 19:00</p><p>body</p>"
+    res = main.apply_ics_link(html, "http://ics")
+    assert (
+        '<p>🗓 1 мая ⏰ 19:00 📅 <a href="http://ics">Добавить в календарь</a></p>'
+        in res
+    )
+
+
 @pytest.mark.asyncio
 async def test_build_source_page_content_ics_with_cover():
     html, _, _ = await main.build_source_page_content(
@@ -100,6 +109,30 @@ async def test_build_source_page_content_ics_no_cover():
     )
     assert html.startswith('<p>📅 <a href="http://ics">Добавить в календарь</a></p>')
     assert html.index('http://ics') < html.index('<p>text</p>')
+
+
+@pytest.mark.asyncio
+async def test_build_source_page_content_summary_block_with_ics():
+    summary = main.SourcePageEventSummary(
+        date="2024-06-01",
+        time="18:30",
+        location_name="Место",
+    )
+    html, _, _ = await main.build_source_page_content(
+        "Title",
+        "Body",
+        None,
+        None,
+        None,
+        "http://ics",
+        None,
+        event_summary=summary,
+    )
+    assert (
+        '🗓 1 июня ⏰ 18:30 📅 <a href="http://ics">Добавить в календарь</a>'
+        in html
+    )
+    assert '<br/>📍 Место' in html
 
 
 @pytest.mark.asyncio
