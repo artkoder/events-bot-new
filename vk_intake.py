@@ -485,8 +485,16 @@ def extract_event_ts_hint(
                             )
                             if _tail_has_datetime(after_location):
                                 skip_due_to_location_tail = True
-                        elif next_alpha_word and next_alpha_word.startswith(EVENT_ADDRESS_PREFIXES):
-                            has_event_tail = True
+                        elif next_alpha_word and next_alpha_word.startswith(
+                            EVENT_ADDRESS_PREFIXES
+                        ):
+                            address_tail = remainder[len(next_alpha_word) :]
+                            address_tail = address_tail.lstrip(
+                                " \t\r\n.;:!?()[]{}«»\"'—–-"
+                            )
+                            if _tail_has_datetime(address_tail):
+                                has_event_tail = True
+                                skip_due_to_location_tail = True
                         else:
                             loc_match = re.match(r"(?:в|на)\s+([a-zа-яё.]+)", remainder)
                             if loc_match:
