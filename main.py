@@ -113,6 +113,7 @@ from typing import (
     Collection,
     Sequence,
     Mapping,
+    cast,
 )
 from urllib.parse import urlparse, parse_qs, ParseResult
 import uuid
@@ -408,6 +409,7 @@ def _week_vk_lock(start: str) -> asyncio.Lock:
 
 DB_PATH = os.getenv("DB_PATH", "/data/db.sqlite")
 db: Database | None = None
+BOT_CODE = os.getenv("BOT_CODE", "announcements")
 TELEGRAPH_TOKEN_FILE = os.getenv("TELEGRAPH_TOKEN_FILE", "/data/telegraph_token.txt")
 TELEGRAPH_AUTHOR_NAME = os.getenv(
     "TELEGRAPH_AUTHOR_NAME", "Полюбить Калининград Анонсы"
@@ -1692,6 +1694,64 @@ def _record_four_o_usage(
         int(total_tokens or 0),
     )
     return remaining
+
+
+async def log_token_usage(
+    bot: str,
+    model: str,
+    usage: Mapping[str, Any] | None,
+    *,
+    endpoint: str,
+    request_id: str | None,
+    meta: Mapping[str, Any] | None = None,
+) -> None:
+    client = get_supabase_client()
+    if client is None:
+        return
+
+    usage_data: Mapping[str, Any] = usage or {}
+
+    def _coerce_int(value: Any) -> int | None:
+        try:
+            if value is None:
+                return None
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    prompt_tokens = _coerce_int(usage_data.get("prompt_tokens"))
+    completion_tokens = _coerce_int(usage_data.get("completion_tokens"))
+    total_tokens = _coerce_int(usage_data.get("total_tokens"))
+
+    if prompt_tokens is None:
+        prompt_tokens = _coerce_int(usage_data.get("input_tokens"))
+    if completion_tokens is None:
+        completion_tokens = _coerce_int(usage_data.get("output_tokens"))
+    if total_tokens is None and None not in (prompt_tokens, completion_tokens):
+        total_tokens = cast(int, prompt_tokens) + cast(int, completion_tokens)
+
+    row = {
+        "bot": bot,
+        "model": model,
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": total_tokens,
+        "endpoint": endpoint,
+        "request_id": request_id,
+        "meta": dict(meta) if meta else None,
+        "at": datetime.utcnow(),
+    }
+
+    async def _log() -> None:
+        try:
+            def _insert() -> None:
+                client.table("token_usage").insert(row).execute()
+
+            await asyncio.to_thread(_insert)
+        except Exception as exc:  # pragma: no cover - network logging failure
+            logging.warning("log_token_usage failed: %s", exc, exc_info=True)
+
+    asyncio.create_task(_log())
 
 
 # Run blocking Telegraph API calls with a timeout and simple retries
@@ -5863,10 +5923,25 @@ async def parse_event_via_4o(
         )
         raise
     usage = data_raw.get("usage") or {}
+    model_name = str(payload.get("model", "unknown"))
     _record_four_o_usage(
         "parse",
-        str(payload.get("model", "unknown")),
+        model_name,
         usage,
+    )
+    request_id = data_raw.get("id")
+    meta_payload = {
+        key: extra[key]
+        for key in ("feature", "version")
+        if extra.get(key) is not None
+    }
+    await log_token_usage(
+        BOT_CODE,
+        model_name,
+        usage,
+        endpoint="chat.completions",
+        request_id=request_id,
+        meta=meta_payload or None,
     )
     content = (
         data_raw.get("choices", [{}])[0]
@@ -6027,6 +6102,7 @@ async def ask_4o(
     response_format: dict | None = None,
     max_tokens: int = FOUR_O_RESPONSE_LIMIT,
     model: str | None = None,
+    meta: Mapping[str, Any] | None = None,
 ) -> str:
     token = os.getenv("FOUR_O_TOKEN")
     if not token:
@@ -6066,10 +6142,19 @@ async def ask_4o(
     if isinstance(request_id, str):
         _last_ask_4o_request_id = request_id
     usage = data.get("usage") or {}
+    model_name = str(payload.get("model", "unknown"))
     _record_four_o_usage(
         "ask",
-        str(payload.get("model", "unknown")),
+        model_name,
         usage,
+    )
+    await log_token_usage(
+        BOT_CODE,
+        model_name,
+        usage,
+        endpoint="chat.completions",
+        request_id=data.get("id"),
+        meta=meta,
     )
     logging.debug("4o response: %s", data)
     content = (
