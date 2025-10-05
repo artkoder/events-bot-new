@@ -49,6 +49,56 @@ async def release_stale_locks(db: Database) -> int:
     return count
 
 
+async def refresh_vk_event_ts_hints(db: Database) -> int:
+    """Recompute :mod:`vk_inbox` timestamp hints for queued rows."""
+
+    updates: list[tuple[int | None, int]] = []
+    async with db.raw_conn() as conn:
+        original_row_factory = conn.row_factory
+        conn.row_factory = __import__("sqlite3").Row
+        try:
+            cursor = await conn.execute(
+                """
+                SELECT id, text, date, event_ts_hint
+                FROM vk_inbox
+                WHERE status IN ('pending', 'locked', 'skipped')
+                """
+            )
+            rows = await cursor.fetchall()
+            await cursor.close()
+
+            for row in rows:
+                inbox_id = row["id"]
+                text = row["text"] or ""
+                publish_ts = row["date"]
+                try:
+                    hint = extract_event_ts_hint(text, publish_ts=publish_ts)
+                except Exception:  # pragma: no cover - defensive
+                    logging.exception(
+                        "vk_review refresh_hint_failed id=%s", inbox_id
+                    )
+                    hint = None
+                if hint != row["event_ts_hint"]:
+                    updates.append((hint, inbox_id))
+
+            for hint, inbox_id in updates:
+                await conn.execute(
+                    "UPDATE vk_inbox SET event_ts_hint=? WHERE id=?",
+                    (hint, inbox_id),
+                )
+
+            if updates:
+                await conn.commit()
+        finally:
+            conn.row_factory = original_row_factory
+
+    if updates:
+        logging.info(
+            "vk_review refresh_vk_event_ts_hints updated=%s", len(updates)
+        )
+    return len(updates)
+
+
 _FAR_BUCKET_HISTORY: dict[int, deque[str]] = {}
 
 

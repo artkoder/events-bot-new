@@ -2097,6 +2097,7 @@ async def set_tz_offset(db: Database, value: str):
         await conn.commit()
     global LOCAL_TZ
     LOCAL_TZ = offset_to_timezone(value)
+    await vk_review.refresh_vk_event_ts_hints(db)
 
 
 async def get_catbox_enabled(db: Database) -> bool:

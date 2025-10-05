@@ -2,6 +2,7 @@ import os, sys
 import os, sys
 import os, sys
 from datetime import datetime as real_datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -410,6 +411,131 @@ async def test_bucket_boundaries_use_weighted_selection(tmp_path, monkeypatch):
     history = vk_review._FAR_BUCKET_HISTORY.get(operator_id)
     assert history is not None
     assert list(history) == ["SOON", "LONG"]
+
+
+@pytest.mark.asyncio
+async def test_refresh_hints_after_timezone_change(tmp_path, monkeypatch):
+    original_tz = main.LOCAL_TZ
+    try:
+        main.LOCAL_TZ = timezone.utc
+        db = Database(str(tmp_path / "db.sqlite"))
+        await db.init()
+
+        text = "Концерт 5 февраля 2099 в 19:00"
+        publish_ts = int(
+            real_datetime(2099, 1, 1, tzinfo=timezone.utc).timestamp()
+        )
+        old_hint = vk_intake.extract_event_ts_hint(text, publish_ts=publish_ts)
+        assert old_hint is not None
+
+        async with db.raw_conn() as conn:
+            await conn.execute(
+                """
+                INSERT INTO vk_source(
+                    group_id, screen_name, name, location, default_time, default_ticket_link
+                ) VALUES(?,?,?,?,?,?)
+                """,
+                (1, "club1", "Test Community", "", None, None),
+            )
+            await conn.execute(
+                """
+                INSERT INTO event(
+                    title, description, date, time, location_name, source_text, telegraph_url
+                ) VALUES(?,?,?,?,?,?,?)
+                """,
+                (
+                    "Совпадающее событие",
+                    "описание",
+                    "2099-02-05",
+                    "19:00",
+                    "Локация",
+                    "источник",
+                    "https://telegra.ph/test",
+                ),
+            )
+            cursor = await conn.execute(
+                """
+                INSERT INTO vk_inbox(
+                    group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status
+                ) VALUES(?,?,?,?,?,?,?,?)
+                """,
+                (1, 555, publish_ts, text, None, 1, old_hint, "pending"),
+            )
+            inbox_id = cursor.lastrowid
+            await conn.commit()
+
+        await main.set_tz_offset(db, "+03:00")
+
+        expected_dt = real_datetime(2099, 2, 5, 19, 0, tzinfo=main.LOCAL_TZ)
+        expected_hint = int(expected_dt.timestamp())
+        async with db.raw_conn() as conn:
+            cur = await conn.execute(
+                "SELECT event_ts_hint FROM vk_inbox WHERE id=?", (inbox_id,)
+            )
+            refreshed_hint = (await cur.fetchone())[0]
+            await cur.close()
+        assert refreshed_hint == expected_hint
+
+        async def fake_fetch(*args, **kwargs):
+            return []
+
+        async def fake_pick_next(db_obj, operator_id_arg, batch_id_arg):
+            async with db_obj.raw_conn() as conn:
+                cur = await conn.execute(
+                    """
+                    SELECT id, group_id, post_id, date, text, matched_kw, has_date,
+                           status, review_batch, imported_event_id, event_ts_hint
+                    FROM vk_inbox
+                    WHERE id=?
+                    """,
+                    (inbox_id,),
+                )
+                row = await cur.fetchone()
+                await cur.close()
+            return SimpleNamespace(
+                id=row[0],
+                group_id=row[1],
+                post_id=row[2],
+                date=row[3],
+                text=row[4],
+                matched_kw=row[5],
+                has_date=row[6],
+                status=row[7],
+                review_batch=row[8],
+                imported_event_id=row[9],
+                event_ts_hint=row[10],
+            )
+
+        monkeypatch.setattr(main, "_vkrev_fetch_photos", fake_fetch)
+        monkeypatch.setattr(vk_review, "pick_next", fake_pick_next)
+
+        class DummyBot:
+            def __init__(self):
+                self.messages: list[SimpleNamespace] = []
+
+            async def send_message(self, chat_id, text, **kwargs):
+                self.messages.append(SimpleNamespace(text=text, kwargs=kwargs))
+                return SimpleNamespace()
+
+            async def send_media_group(self, chat_id, media):
+                self.media = media
+
+        bot = DummyBot()
+        await main._vkrev_show_next(1, "batch", 99, db, bot)
+        assert bot.messages, "no message sent"
+        lines = bot.messages[0].text.splitlines()
+        heading = (
+            f"{expected_dt.day:02d} {main.MONTHS[expected_dt.month - 1]} "
+            f"{expected_dt.strftime('%H:%M')}"
+        )
+        assert heading in lines
+        heading_index = lines.index(heading)
+        assert (
+            lines[heading_index + 1]
+            == "Совпадающее событие — https://telegra.ph/test"
+        )
+    finally:
+        main.LOCAL_TZ = original_tz
 
 
 @pytest.mark.asyncio
