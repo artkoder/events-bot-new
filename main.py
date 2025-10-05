@@ -20160,6 +20160,91 @@ async def handle_queue_reap(message: types.Message, db: Database, bot: Bot) -> N
     await bot.send_message(message.chat.id, "\n".join(lines))
 
 
+def _coerce_optional_int(value: Any) -> int | None:
+    try:
+        if value is None:
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _format_token_usage_lines(
+    model_totals: Mapping[str, int], *, total_override: int | None = None
+) -> list[str]:
+    totals: dict[str, int] = {model: int(value) for model, value in model_totals.items()}
+    if not totals:
+        totals = {model: 0 for model in FOUR_O_TRACKED_MODELS}
+    for model in FOUR_O_TRACKED_MODELS:
+        totals.setdefault(model, 0)
+    lines = [f"Tokens {model}: {totals[model]}" for model in sorted(totals)]
+    total_value = total_override if total_override is not None else sum(totals.values())
+    lines.append(f"Tokens total: {total_value}")
+    return lines
+
+
+async def _collect_supabase_token_usage_lines() -> list[str] | None:
+    client = get_supabase_client()
+    if client is None:
+        return None
+
+    today = datetime.now(timezone.utc).date()
+    day_start = datetime.combine(today, time.min, tzinfo=timezone.utc)
+    day_end = day_start + timedelta(days=1)
+    date_str = today.isoformat()
+
+    def _fetch(table: str) -> list[Mapping[str, Any]]:
+        query = client.table(table)
+        if table == "token_usage_daily":
+            result = (
+                query.select("model,total_tokens")
+                .eq("bot", BOT_CODE)
+                .eq("date", date_str)
+                .execute()
+            )
+            return list(result.data or [])
+        result = (
+            query.select("model,total_tokens,prompt_tokens,completion_tokens,at")
+            .eq("bot", BOT_CODE)
+            .gte("at", day_start.isoformat())
+            .lt("at", day_end.isoformat())
+            .execute()
+        )
+        return list(result.data or [])
+
+    last_error: Exception | None = None
+    for table in ("token_usage_daily", "token_usage"):
+        try:
+            records = await asyncio.to_thread(_fetch, table)
+        except Exception as exc:  # pragma: no cover - network failure
+            logging.debug(
+                "stats.token_usage_query_failed table=%s error=%s",
+                table,
+                exc,
+                exc_info=True,
+            )
+            last_error = exc
+            continue
+
+        totals: dict[str, int] = {model: 0 for model in FOUR_O_TRACKED_MODELS}
+        for row in records:
+            model = row.get("model")
+            if not model:
+                continue
+            total_value = _coerce_optional_int(row.get("total_tokens"))
+            if total_value is None:
+                prompt = _coerce_optional_int(row.get("prompt_tokens")) or 0
+                completion = _coerce_optional_int(row.get("completion_tokens")) or 0
+                total_value = prompt + completion
+            totals[model] = totals.get(model, 0) + int(total_value or 0)
+
+        return _format_token_usage_lines(totals)
+
+    if last_error is not None:
+        raise last_error
+    return None
+
+
 async def handle_stats(message: types.Message, db: Database, bot: Bot):
     parts = message.text.split()
     mode = parts[1] if len(parts) > 1 else ""
@@ -20192,35 +20277,37 @@ async def handle_stats(message: types.Message, db: Database, bot: Bot):
             lines.append("")
             lines.append("Фестивали (Вк) (просмотров, пользователи)")
             lines.extend(fest_vk)
-    usage_snapshot = _get_four_o_usage_snapshot()
-    usage_models = usage_snapshot.get("models", {})
+    supabase_lines: list[str] | None = None
+    try:
+        supabase_lines = await _collect_supabase_token_usage_lines()
+    except Exception:  # pragma: no cover - network failure
+        logging.exception("stats.supabase_usage_failed")
 
-    def _coerce_int(value: Any) -> int:
-        try:
-            return int(value)
-        except (TypeError, ValueError):
-            return 0
+    if not supabase_lines:
+        usage_snapshot = _get_four_o_usage_snapshot()
+        usage_models = dict(usage_snapshot.get("models", {}))
 
-    mini_snapshot = _coerce_int(usage_models.get("gpt-4o-mini", 0))
-    ocr_tokens = 0
-    today_key = poster_ocr._today_key()
-    async with db.get_session() as session:
-        ocr_usage = await session.get(OcrUsage, today_key)
-        if ocr_usage and ocr_usage.spent_tokens:
-            ocr_tokens = max(int(ocr_usage.spent_tokens), 0)
-    new_mini_total = mini_snapshot + ocr_tokens
-    usage_models["gpt-4o-mini"] = new_mini_total
+        def _coerce_int(value: Any) -> int:
+            coerced = _coerce_optional_int(value)
+            return int(coerced or 0)
 
-    snapshot_total = _coerce_int(usage_snapshot.get("total", 0))
-    tokens_total = snapshot_total - mini_snapshot + new_mini_total
+        mini_snapshot = _coerce_int(usage_models.get("gpt-4o-mini", 0))
+        ocr_tokens = 0
+        today_key = poster_ocr._today_key()
+        async with db.get_session() as session:
+            ocr_usage = await session.get(OcrUsage, today_key)
+            if ocr_usage and ocr_usage.spent_tokens:
+                ocr_tokens = max(int(ocr_usage.spent_tokens), 0)
+        new_mini_total = mini_snapshot + ocr_tokens
+        usage_models["gpt-4o-mini"] = new_mini_total
 
-    lines.extend(
-        [
-            f"Tokens total: {tokens_total}",
-            f"Tokens gpt-4o: {usage_models.get('gpt-4o', 0)}",
-            f"Tokens gpt-4o-mini: {usage_models.get('gpt-4o-mini', 0)}",
-        ]
-    )
+        snapshot_total = _coerce_int(usage_snapshot.get("total", 0))
+        tokens_total = snapshot_total - mini_snapshot + new_mini_total
+
+        model_totals = {model: _coerce_int(value) for model, value in usage_models.items()}
+        supabase_lines = _format_token_usage_lines(model_totals, total_override=tokens_total)
+
+    lines.extend(supabase_lines)
     await bot.send_message(message.chat.id, "\n".join(lines) if lines else "No data")
 
 
