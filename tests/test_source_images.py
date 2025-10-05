@@ -211,6 +211,58 @@ async def test_build_source_page_content_inline_images():
 
 
 @pytest.mark.asyncio
+async def test_build_source_page_content_history_heading_without_spacer():
+    html, _, _ = await main.build_source_page_content(
+        "T",
+        "",
+        None,
+        "<h2>История</h2><p>Текст истории</p>",
+        None,
+        None,
+        None,
+        page_mode="history",
+    )
+    heading_close = "</h2>" if "</h2>" in html else "</h3>"
+    assert "<p>Текст истории</p>" in html
+    close_index = html.index(heading_close) + len(heading_close)
+    paragraph_index = html.index("<p>Текст истории</p>")
+    assert close_index <= paragraph_index
+    assert main.BODY_SPACER_HTML not in html[close_index:paragraph_index]
+
+
+@pytest.mark.asyncio
+async def test_build_source_page_content_history_inline_images_without_spacer():
+    html, _, _ = await main.build_source_page_content(
+        "T",
+        "",
+        None,
+        "<h2>Заголовок</h2><p>Первый абзац</p><p>Второй абзац</p>",
+        None,
+        None,
+        None,
+        catbox_urls=[
+            "http://cat/0.jpg",
+            "http://cat/1.jpg",
+            "http://cat/2.jpg",
+        ],
+        image_mode="inline",
+        page_mode="history",
+    )
+    figure_end = html.index("</figure>") + len("</figure>")
+    first_paragraph = html.index("<p>Первый абзац</p>")
+    assert figure_end <= first_paragraph
+    assert main.BODY_SPACER_HTML not in html[figure_end:first_paragraph]
+    first_image_fragment = '<img src="http://cat/1.jpg"/>'
+    first_image_end = html.index(first_image_fragment) + len(first_image_fragment)
+    assert main.BODY_SPACER_HTML not in html[first_image_end:html.index("<p>Первый абзац</p>")]
+    second_image_fragment = '<img src="http://cat/2.jpg"/>'
+    second_image_end = html.index(second_image_fragment) + len(second_image_fragment)
+    second_paragraph = html.index("<p>Второй абзац</p>")
+    assert second_image_end <= second_paragraph
+    assert main.BODY_SPACER_HTML not in html[second_image_end:second_paragraph]
+
+
+@pytest.mark.asyncio
 async def test_build_source_page_content_history_spacing():
     text = "Первый абзац\n\nВторой абзац\n\nТретий абзац"
     html, _, _ = await main.build_source_page_content(
