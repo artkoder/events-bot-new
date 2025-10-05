@@ -2043,8 +2043,8 @@ HELP_COMMANDS = [
         "roles": {"superadmin"},
     },
     {
-        "usage": "/stats [events]",
-        "desc": "Show Telegraph view counts",
+        "usage": "/stats [events|shortlinks]",
+        "desc": "Show Telegraph view counts and vk.cc click totals",
         "roles": {"superadmin"},
     },
     {
@@ -19571,6 +19571,101 @@ async def collect_event_stats(db: Database) -> list[str]:
     return [f"{url}: {v}" for url, v in stats]
 
 
+async def collect_vk_shortlink_click_stats(db: Database) -> list[str]:
+    """Return aggregated vk.cc click statistics for active events."""
+
+    today = datetime.now(LOCAL_TZ).date()
+    week_ago = today - timedelta(days=7)
+    async with db.get_session() as session:
+        result = await session.execute(
+            select(Event).where(Event.vk_ticket_short_key.is_not(None))
+        )
+        events = result.scalars().all()
+
+    entries: list[tuple[str, int, int]] = []
+
+    def _as_int(value: Any) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
+
+    for event in events:
+        key = (event.vk_ticket_short_key or "").strip()
+        if not key:
+            continue
+
+        date_raw = event.date or ""
+        start = parse_iso_date(date_raw)
+        if not start and ".." in date_raw:
+            start = parse_iso_date(date_raw.split("..", 1)[0])
+        if not start:
+            logger.warning(
+                "shortlink stats: skip event %s due to malformed start date %r",
+                event.id,
+                event.date,
+            )
+            continue
+
+        end: date | None = None
+        if event.end_date:
+            end = parse_iso_date(event.end_date)
+            if not end and ".." in event.end_date:
+                end = parse_iso_date(event.end_date.split("..", 1)[-1])
+        if not end and ".." in date_raw:
+            end_part = date_raw.split("..", 1)[1]
+            end = parse_iso_date(end_part)
+        if end is None:
+            end = start
+
+        if not (start >= today or end >= week_ago):
+            continue
+
+        try:
+            data = await vk_api(
+                "utils.getLinkStats",
+                key=key,
+                interval="forever",
+                intervals_count=1,
+            )
+        except VKAPIError as exc:
+            logger.warning(
+                "shortlink stats: vk api error for event %s key %s: %s",
+                event.id,
+                key,
+                exc,
+            )
+            continue
+
+        payload: Any = data
+        if isinstance(payload, dict):
+            payload = payload.get("response", payload)
+        if isinstance(payload, dict):
+            stats_list = payload.get("stats") or []
+        elif isinstance(payload, list):
+            stats_list = payload
+        else:
+            stats_list = []
+
+        clicks_total = 0
+        views_total = 0
+        for item in stats_list:
+            if not isinstance(item, dict):
+                continue
+            clicks_value = item.get("clicks")
+            if clicks_value is None:
+                clicks_value = item.get("visitors")
+            if clicks_value is None:
+                clicks_value = item.get("count")
+            clicks_total += _as_int(clicks_value)
+            views_total += _as_int(item.get("views"))
+
+        entries.append((event.title, clicks_total, views_total))
+
+    entries.sort(key=lambda item: (-item[1], -item[2], item[0]))
+    return [f"{title}: {clicks}" for title, clicks, _ in entries]
+
+
 async def collect_festivals_landing_stats(db: Database) -> str | None:
     """Return Telegraph view count for the festivals landing page."""
     path = await get_setting_value(db, "festivals_index_path") or await get_setting_value(
@@ -20047,6 +20142,12 @@ async def handle_stats(message: types.Message, db: Database, bot: Bot):
             return
     if mode == "events":
         lines = await collect_event_stats(db)
+    elif mode == "shortlinks":
+        lines = await collect_vk_shortlink_click_stats(db)
+        await bot.send_message(
+            message.chat.id, "\n".join(lines) if lines else "No data"
+        )
+        return
     else:
         lines = await collect_page_stats(db)
         fest_landing = await collect_festivals_landing_stats(db)
@@ -20087,9 +20188,9 @@ async def handle_stats(message: types.Message, db: Database, bot: Bot):
 
     lines.extend(
         [
+            f"Tokens total: {tokens_total}",
             f"Tokens gpt-4o: {usage_models.get('gpt-4o', 0)}",
             f"Tokens gpt-4o-mini: {usage_models.get('gpt-4o-mini', 0)}",
-            f"Tokens total: {tokens_total}",
         ]
     )
     await bot.send_message(message.chat.id, "\n".join(lines) if lines else "No data")
