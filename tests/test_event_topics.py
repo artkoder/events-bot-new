@@ -80,16 +80,22 @@ async def test_classify_event_topics_filters_and_limits(monkeypatch):
 
     result = await main.classify_event_topics(event)
 
-    assert result == ["HISTORICAL_IMMERSION", "EXHIBITIONS", "MOVIES"]
+    assert result == [
+        "HISTORICAL_IMMERSION",
+        "EXHIBITIONS",
+        "MOVIES",
+        "CONCERTS",
+        "URBANISM",
+    ]
     assert "#музыка" in captured["text"]
     kwargs = captured["kwargs"]
     assert kwargs["model"] == "gpt-4o-mini"
     assert kwargs["system_prompt"] == main.EVENT_TOPIC_SYSTEM_PROMPT
-    enum_values = kwargs["response_format"]["json_schema"]["schema"]["properties"]["topics"]["items"][
-        "enum"
-    ]
+    topics_schema = kwargs["response_format"]["json_schema"]["schema"]["properties"]["topics"]
+    enum_values = topics_schema["items"]["enum"]
     assert enum_values == list(main.TOPIC_LABELS.keys())
     assert "HISTORICAL_IMMERSION" in enum_values
+    assert topics_schema["maxItems"] == 5
 
 
 @pytest.mark.asyncio
@@ -171,7 +177,7 @@ async def test_classify_event_topics_handles_exception(monkeypatch):
 @pytest.mark.asyncio
 async def test_assign_event_topics_adds_kaliningrad_for_city(monkeypatch):
     async def fake_classify(event):
-        return []
+        return ["KRAEVEDENIE_KALININGRAD_OBLAST"]
 
     monkeypatch.setattr(main, "classify_event_topics", fake_classify)
 
@@ -197,7 +203,7 @@ async def test_assign_event_topics_adds_kaliningrad_for_city(monkeypatch):
 @pytest.mark.asyncio
 async def test_assign_event_topics_kaliningrad_uses_hashtags(monkeypatch):
     async def fake_classify(event):
-        return ["CONCERTS"]
+        return ["CONCERTS", "KRAEVEDENIE_KALININGRAD_OBLAST"]
 
     monkeypatch.setattr(main, "classify_event_topics", fake_classify)
 
@@ -283,7 +289,7 @@ async def test_assign_event_topics_preserves_urbanism(monkeypatch):
 @pytest.mark.asyncio
 async def test_assign_event_topics_adds_kaliningrad_to_urbanism(monkeypatch):
     async def fake_classify(event):
-        return ["URBANISM"]
+        return ["URBANISM", "KRAEVEDENIE_KALININGRAD_OBLAST"]
 
     monkeypatch.setattr(main, "classify_event_topics", fake_classify)
 

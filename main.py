@@ -260,6 +260,7 @@ from models import (
     JobOutbox,
     JobTask,
     JobStatus,
+    OcrUsage,
 )
 
 
@@ -6424,7 +6425,8 @@ _EVENT_TOPIC_LISTING = "\n".join(
 EVENT_TOPIC_SYSTEM_PROMPT = textwrap.dedent(
     f"""
     Ты — ассистент, который классифицирует культурные события по темам.
-    Верни JSON с массивом `topics`: выбери от 0 до 3 подходящих идентификаторов тем.
+    Ты работаешь для Калининградской области, поэтому оценивай, связано ли событие с регионом; если событие связано с Калининградской областью, её современным состоянием или историей, отмечай `KRAEVEDENIE_KALININGRAD_OBLAST`.
+    Верни JSON с массивом `topics`: выбери от 0 до 5 подходящих идентификаторов тем.
     Используй только идентификаторы из списка ниже, записывай их ровно так, как показано, и не добавляй другие значения.
     Не отмечай темы про скидки, «Бесплатно» или бесплатное участие и игнорируй «Фестивали», сетевые программы и серии мероприятий.
     Не повторяй одинаковые идентификаторы.
@@ -6451,7 +6453,7 @@ EVENT_TOPIC_RESPONSE_FORMAT = {
                         "type": "string",
                         "enum": list(TOPIC_LABELS.keys()),
                     },
-                    "maxItems": 3,
+                    "maxItems": 5,
                     "uniqueItems": True,
                 }
             },
@@ -6553,8 +6555,6 @@ async def classify_event_topics(event: Event) -> list[str]:
             continue
         seen.add(canonical)
         result.append(canonical)
-        if len(result) >= 3:
-            break
     return result
 
 
@@ -6565,147 +6565,6 @@ def _event_topic_text_length(event: Event) -> int:
         getattr(event, "source_text", "") or "",
     ]
     return sum(len(part) for part in parts)
-
-
-_KALININGRAD_TOPIC_ID = "KRAEVEDENIE_KALININGRAD_OBLAST"
-_KALININGRAD_CITY_KEYWORDS: tuple[str, ...] = (
-    "калининград",
-    "светлогорск",
-    "зеленоградск",
-    "пионерский",
-    "янтарный",
-    "балтийск",
-    "светлый",
-    "гвардейск",
-    "советск",
-    "гусев",
-    "черняховск",
-    "полесск",
-    "неман",
-    "нестеров",
-    "правдинск",
-    "ладушкин",
-    "багратионовск",
-    "мамоново",
-    "славск",
-    "краснознаменск",
-)
-_KALININGRAD_REGION_KEYWORDS: tuple[str, ...] = (
-    "калининград",
-    "kaliningrad",
-    "калининградская область",
-    "калининградской области",
-    "калининградскаяобласть",
-    "калининградскойобласти",
-    "кёнигсберг",
-    "кенигсберг",
-    "kenigsberg",
-    "königsberg",
-    "koenigsberg",
-    "konigsberg",
-    "kenig",
-    "янтарный край",
-    "янтарного края",
-    "39 регион",
-    "39регион",
-    "39-й регион",
-    "39й регион",
-    "39йрегион",
-    "#калининград",
-    "#kaliningrad",
-    "#kenig",
-    "#kenigsberg",
-    "#кёнигсберг",
-    "#кенигсберг",
-    "#39регион",
-    "#39region",
-    "#39йрегион",
-    "39rus",
-    "klgd.ru",
-    "klgd",
-)
-_KALININGRAD_HASHTAGS: set[str] = {
-    "#калининград",
-    "#kaliningrad",
-    "#kenig",
-    "#kenigsberg",
-    "#кёнигсберг",
-    "#кенигсберг",
-    "#39регион",
-    "#39йрегион",
-    "#39region",
-    "#янтарныйкрай",
-}
-_KALININGRAD_URL_KEYWORDS: tuple[str, ...] = (
-    "kaliningrad",
-    "kenig",
-    "kenigsberg",
-    "koenigsberg",
-    "konigsberg",
-    "königsberg",
-    "klgd",
-)
-
-
-def _contains_kaliningrad_city(value: str | None) -> bool:
-    if not value or not isinstance(value, str):
-        return False
-    lowered = value.casefold()
-    return any(keyword in lowered for keyword in _KALININGRAD_CITY_KEYWORDS)
-
-
-def _contains_kaliningrad_keyword(value: str | None) -> bool:
-    if not value or not isinstance(value, str):
-        return False
-    lowered = value.casefold()
-    return any(keyword in lowered for keyword in _KALININGRAD_REGION_KEYWORDS)
-
-
-def _should_add_kaliningrad_topic(event: Event, topics: Iterable[str]) -> bool:
-    normalized_topics = {
-        normalize_topic_identifier(topic) or topic for topic in topics
-    }
-    if _KALININGRAD_TOPIC_ID in normalized_topics:
-        return False
-
-    if _contains_kaliningrad_city(getattr(event, "city", None)):
-        return True
-
-    text_fields = [
-        getattr(event, "location_address", None),
-        getattr(event, "location_name", None),
-        getattr(event, "description", None),
-        getattr(event, "source_text", None),
-        getattr(event, "title", None),
-    ]
-    for value in text_fields:
-        if _contains_kaliningrad_keyword(value):
-            return True
-
-    for hashtag in _extract_available_hashtags(event):
-        if hashtag.casefold() in _KALININGRAD_HASHTAGS:
-            return True
-
-    url_fields = [
-        getattr(event, "source_post_url", None),
-        getattr(event, "ticket_link", None),
-        getattr(event, "vk_repost_url", None),
-    ]
-    for value in url_fields:
-        if not value or not isinstance(value, str):
-            continue
-        lowered = value.casefold()
-        if any(keyword in lowered for keyword in _KALININGRAD_URL_KEYWORDS):
-            return True
-
-    return False
-
-
-def _apply_topic_postprocessors(event: Event, topics: list[str]) -> list[str]:
-    processed = list(dict.fromkeys(topics))
-    if _should_add_kaliningrad_topic(event, processed):
-        processed.append(_KALININGRAD_TOPIC_ID)
-    return processed
 
 
 async def assign_event_topics(event: Event) -> tuple[list[str], int, str | None, bool]:
@@ -6724,7 +6583,7 @@ async def assign_event_topics(event: Event) -> tuple[list[str], int, str | None,
         topics = []
         error_text = str(exc)
 
-    topics = _apply_topic_postprocessors(event, topics)
+    topics = list(dict.fromkeys(topics))
     event.topics = topics
     event.topics_manual = False
     return topics, text_length, error_text, False
@@ -20112,10 +19971,31 @@ async def handle_stats(message: types.Message, db: Database, bot: Bot):
             lines.extend(fest_vk)
     usage_snapshot = _get_four_o_usage_snapshot()
     usage_models = usage_snapshot.get("models", {})
+
+    def _coerce_int(value: Any) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
+
+    mini_snapshot = _coerce_int(usage_models.get("gpt-4o-mini", 0))
+    ocr_tokens = 0
+    today_key = poster_ocr._today_key()
+    async with db.get_session() as session:
+        ocr_usage = await session.get(OcrUsage, today_key)
+        if ocr_usage and ocr_usage.spent_tokens:
+            ocr_tokens = max(int(ocr_usage.spent_tokens), 0)
+    new_mini_total = mini_snapshot + ocr_tokens
+    usage_models["gpt-4o-mini"] = new_mini_total
+
+    snapshot_total = _coerce_int(usage_snapshot.get("total", 0))
+    tokens_total = snapshot_total - mini_snapshot + new_mini_total
+
     lines.extend(
         [
             f"Tokens gpt-4o: {usage_models.get('gpt-4o', 0)}",
             f"Tokens gpt-4o-mini: {usage_models.get('gpt-4o-mini', 0)}",
+            f"Tokens total: {tokens_total}",
         ]
     )
     await bot.send_message(message.chat.id, "\n".join(lines) if lines else "No data")
