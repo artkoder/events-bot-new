@@ -62,7 +62,7 @@ from main import (
     show_edit_menu,
 )
 from poster_media import PosterMedia, process_media
-from models import EventPoster, PosterOcrCache
+from models import EventPoster, PosterOcrCache, OcrUsage
 import poster_ocr
 
 REAL_SYNC_WEEKEND_PAGE = main.sync_weekend_page
@@ -4217,6 +4217,8 @@ async def test_stats_events(tmp_path: Path, monkeypatch):
     prev_month_start = (date.today().replace(day=1) - timedelta(days=1)).replace(day=1)
     event_date = prev_month_start + timedelta(days=1)
 
+    today_key = poster_ocr._today_key()
+
     async with db.get_session() as session:
         session.add(
             Event(
@@ -4242,6 +4244,7 @@ async def test_stats_events(tmp_path: Path, monkeypatch):
                 telegraph_path="pb",
             )
         )
+        session.add(OcrUsage(date=today_key, spent_tokens=250))
         await session.commit()
 
     class DummyTG:
@@ -4255,6 +4258,12 @@ async def test_stats_events(tmp_path: Path, monkeypatch):
 
     monkeypatch.setattr(
         "main.Telegraph", lambda access_token=None, domain=None: DummyTG(access_token)
+    )
+
+    monkeypatch.setattr(
+        main,
+        "_get_four_o_usage_snapshot",
+        lambda: {"total": 1000, "models": {"gpt-4o": 5, "gpt-4o-mini": 200}},
     )
 
 
@@ -4280,8 +4289,9 @@ async def test_stats_events(tmp_path: Path, monkeypatch):
     assert lines[0].startswith("http://b")
     assert "10" in lines[0]
     assert "5" in lines[1]
-    assert lines[-2] == "Tokens gpt-4o: 0"
-    assert lines[-1] == "Tokens gpt-4o-mini: 0"
+    assert lines[-3] == "Tokens gpt-4o: 5"
+    assert lines[-2] == "Tokens gpt-4o-mini: 450"
+    assert lines[-1] == "Tokens total: 1050"
 
 
 @pytest.mark.asyncio

@@ -6,7 +6,8 @@
 - Уведомления в админ-чат для партнёров теперь включают первую фотографию события и ссылки на Telegraph и исходный VK-пост, чтобы операторы могли оперативно проверить публикацию.
 - Fixed VK weekday-based date inference so it anchors on the post’s publish date and skips phone-number fragments like `474-30-04`, preventing false matches in review notes.
 - Сокращённые VK-рерайты теперь дополняются тематическими хэштегами из ключевых тем события (например, `#стендап`, `#openair`, `#детям`, `#семье`).
-- Добавили тему `KRAEVEDENIE_KALININGRAD_OBLAST` с региональными эвристиками, чтобы классификатор уверенно выделял локальные краеведческие анонсы про область.
+- Тематический классификатор теперь доверяет 4o выбор темы `KRAEVEDENIE_KALININGRAD_OBLAST`, локальные эвристики отключены, а постобработка распределения тем удалена.
+- Ограничение на количество тем увеличено до пяти, промпты 4o обновлены под новый лимит и требования к краеведению.
 - Восстановили независимую тему `URBANISM`, чтобы классификатор снова различал городские трансформации и не смешивал их с инфраструктурой.
 - Month-page splitter final fallback now removes both «Добавить в календарь» and «Подробнее» links, keeping oversized months deployable despite Telegraph size limits and closing the recent operator request.
 
