@@ -223,6 +223,95 @@ PHONE_CONTEXT_RE = re.compile(
     r"(\bтел(?:[.:]|ефон\w*|\b|(?=\d))|\bзвоните\b|\bзвонок\w*)",
     re.I | re.U,
 )
+EVENT_LOCATION_PREFIXES = (
+    "клуб",
+    "бар",
+    "каф",
+    "рест",
+    "театр",
+    "музе",
+    "дом",
+    "дк",
+    "центр",
+    "парк",
+    "сад",
+    "площад",
+    "зал",
+    "галер",
+    "библиот",
+    "филармон",
+    "кин",
+    "сц",
+    "арен",
+    "лофт",
+    "коворк",
+    "конгресс",
+    "форум",
+    "павиль",
+    "дворц",
+    "манеж",
+    "усадь",
+    "гостин",
+    "отел",
+    "hotel",
+    "пансион",
+    "санатор",
+    "лагер",
+    "база",
+    "стадион",
+)
+EVENT_ADDRESS_PREFIXES = (
+    "ул",
+    "улиц",
+    "пр",
+    "просп",
+    "пл",
+    "пер",
+    "наб",
+    "бульв",
+    "бул",
+    "шос",
+    "тракт",
+    "дор",
+    "мкр",
+    "микр",
+    "проезд",
+    "пр-д",
+    "б-р",
+    "корп",
+    "строен",
+    "офис",
+)
+EVENT_ACTION_PREFIXES = (
+    "собира",
+    "встреч",
+    "приглаш",
+    "ждем",
+    "ждём",
+    "приход",
+    "начал",
+    "старт",
+    "будет",
+    "проход",
+    "пройдет",
+    "пройдёт",
+    "состо",
+    "откры",
+    "ждет",
+    "ждёт",
+    "обсужд",
+    "танцу",
+    "игра",
+    "мастер",
+    "лекци",
+    "семинар",
+    "экскурс",
+    "кинопоказ",
+    "показ",
+    "фестив",
+    "ярмар",
+    "праздн",
+)
 DATE_RANGE_RE = re.compile(r"\b(\d{1,2})[–-](\d{1,2})(?:[./](\d{1,2}))\b")
 MONTH_NAME_RE = re.compile(r"\b(\d{1,2})\s+([а-яё.]+)\b", re.I)
 TIME_RE = re.compile(r"\b([01]?\d|2[0-3])[:.][0-5]\d\b")
@@ -359,12 +448,39 @@ def extract_event_ts_hint(
             while trailing_idx < len(text_low) and text_low[trailing_idx] in trailing_chars:
                 trailing_idx += 1
             has_event_tail = False
+            next_alpha_word = None
+            following_is_phone_tail = False
             if trailing_idx < len(text_low):
                 remainder = text_low[trailing_idx:]
-                if text_low[trailing_idx].isalpha():
-                    has_event_tail = True
-                elif TIME_RE.match(remainder):
-                    has_event_tail = True
+                word_match = re.match(r"[a-zа-яё]+", remainder)
+                if word_match:
+                    next_alpha_word = word_match.group(0)
+                    if PHONE_CONTEXT_RE.match(next_alpha_word):
+                        following_is_phone_tail = True
+                if PHONE_CONTEXT_RE.match(remainder):
+                    following_is_phone_tail = True
+                if not following_is_phone_tail:
+                    if TIME_RE.match(remainder) or TIME_H_RE.match(remainder) or TIME_RANGE_RE.match(remainder):
+                        has_event_tail = True
+                    elif DOW_RE.match(remainder):
+                        has_event_tail = True
+                    else:
+                        if remainder.startswith("по адресу"):
+                            has_event_tail = True
+                        elif next_alpha_word and next_alpha_word.startswith(EVENT_ADDRESS_PREFIXES):
+                            has_event_tail = True
+                        else:
+                            loc_match = re.match(r"(?:в|на)\s+([a-zа-яё.]+)", remainder)
+                            if loc_match:
+                                loc_word = loc_match.group(1).strip(".")
+                                if loc_word.startswith(EVENT_LOCATION_PREFIXES):
+                                    has_event_tail = True
+                        if (
+                            not has_event_tail
+                            and next_alpha_word
+                            and next_alpha_word.startswith(EVENT_ACTION_PREFIXES)
+                        ):
+                            has_event_tail = True
             if not has_event_tail:
                 for phone_match in PHONE_CONTEXT_RE.finditer(context_slice):
                     match_end = context_start + phone_match.end()
