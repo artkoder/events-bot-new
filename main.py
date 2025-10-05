@@ -24569,10 +24569,7 @@ async def _build_source_summary_block(
 
     location_line = ""
     if location_parts:
-        try:
-            location_text = await build_short_vk_location(location_parts)
-        except Exception:
-            location_text = ", ".join(part.strip() for part in location_parts if part.strip())
+        location_text = ", ".join(part.strip() for part in location_parts if part.strip())
         if location_text.strip():
             location_line = f"📍 {location_text.strip()}"
     if location_line:
