@@ -4895,7 +4895,15 @@ def apply_ics_link(html_content: str, url: str | None) -> str:
     date_paragraph_re = re.compile(r"(<p[^>]*>.*?🗓.*?)(</p>)", re.DOTALL)
     match = date_paragraph_re.search(html_content)
     if match:
-        updated = match.group(1) + tail_html + match.group(2)
+        paragraph_html = match.group(0)
+        br_match = re.search(r"<br\s*/?>", paragraph_html, flags=re.IGNORECASE)
+        if br_match:
+            insert_pos = br_match.start()
+        else:
+            insert_pos = len(paragraph_html) - len(match.group(2))
+        updated = (
+            paragraph_html[:insert_pos] + tail_html + paragraph_html[insert_pos:]
+        )
         return html_content[: match.start()] + updated + html_content[match.end() :]
     link_html = (
         f'<p>\U0001f4c5 <a href="{html.escape(url)}">{ICS_LABEL}</a></p>'
