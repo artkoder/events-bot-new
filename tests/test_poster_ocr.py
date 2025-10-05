@@ -4,10 +4,13 @@ import hashlib
 import logging
 import os
 from dataclasses import dataclass
+from io import BytesIO
+from typing import Any
 
 import aiosqlite
 import pytest
 
+import main
 from db import Database
 from models import Event, EventPoster, OcrUsage, PosterOcrCache
 import poster_ocr
@@ -61,7 +64,9 @@ async def test_run_ocr_detects_png_mime(monkeypatch):
     monkeypatch.setenv("FOUR_O_URL", "https://example.test/v1/chat/completions")
     vision_test.ocr.configure_http(session=session, semaphore=semaphore)
 
-    png_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00\x01\x02"
+    buffer = BytesIO()
+    vision_test.ocr.Image.new("RGB", (1, 1), color=(255, 0, 0)).save(buffer, format="PNG")
+    png_bytes = buffer.getvalue()
 
     try:
         await vision_test.ocr.run_ocr(png_bytes, model="gpt-4o", detail="auto")
@@ -168,6 +173,62 @@ async def test_poster_ocr_cache_migrates_to_composite_pk(tmp_path, monkeypatch):
     assert migrated is not None
     assert migrated.text == "old text"
     assert str(migrated.created_at).startswith("2024-01-01 00:00:00")
+
+
+@pytest.mark.asyncio
+async def test_recognize_posters_logs_usage(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    poster = DummyPoster(b"poster-bytes")
+    monkeypatch.setenv("POSTER_OCR_MODEL", "gpt-4o-mini-usage-test")
+
+    async def fake_run_ocr(data, *, model, detail):
+        assert data == poster.data
+        assert model == "gpt-4o-mini-usage-test"
+        assert detail == "high"
+        return OcrResult(
+            text="logged",
+            usage=OcrUsageStats(prompt_tokens=11, completion_tokens=7, total_tokens=18),
+            request_id="chatcmpl-usage",
+        )
+
+    monkeypatch.setattr(poster_ocr, "run_ocr", fake_run_ocr)
+    monkeypatch.setattr(poster_ocr, "_ensure_http", lambda: None)
+    monkeypatch.setattr(poster_ocr, "_USAGE_LOGGER_CONFIGURED", False)
+    monkeypatch.setattr(poster_ocr, "_LOG_TOKEN_USAGE", None)
+    monkeypatch.setattr(poster_ocr, "_BOT_CODE", None)
+
+    calls: list[tuple[str, str, dict[str, int], str, str, dict[str, Any]]] = []
+
+    async def fake_log(bot, model, usage, *, endpoint, request_id, meta=None):
+        calls.append((bot, model, dict(usage), endpoint, request_id, dict(meta or {})))
+
+    monkeypatch.setattr(main, "log_token_usage", fake_log)
+
+    results, spent, remaining = await poster_ocr.recognize_posters(
+        db, [poster], detail="high"
+    )
+
+    digest = hashlib.sha256(poster.data).hexdigest()
+    assert calls == [
+        (
+            main.BOT_CODE,
+            "gpt-4o-mini-usage-test",
+            {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18},
+            "chat.completions",
+            "chatcmpl-usage",
+            {
+                "source": "poster_ocr",
+                "detail": "high",
+                "hash": digest,
+                "bytes": len(poster.data),
+            },
+        )
+    ]
+    assert results and results[0].text == "logged"
+    assert spent == 18
+    assert remaining == poster_ocr.DAILY_TOKEN_LIMIT - 18
 
 
 @pytest.mark.asyncio

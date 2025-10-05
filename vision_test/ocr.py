@@ -37,6 +37,7 @@ class OcrUsage:
 class OcrResult:
     text: str
     usage: OcrUsage
+    request_id: str | None = None
 
 
 def configure_http(*, session: ClientSession, semaphore: asyncio.Semaphore) -> None:
@@ -163,6 +164,7 @@ async def run_ocr(image_bytes: bytes, *, model: str, detail: str) -> OcrResult:
         message = choice.get("message", {})
         text = (message.get("content") or "").strip()
         usage_data = data.get("usage", {}) or {}
+        request_id = data.get("id")
     except (AttributeError, IndexError, TypeError) as exc:  # pragma: no cover - unexpected
         logging.error("Invalid OCR response: data=%s", data)
         raise RuntimeError("Incomplete OCR response") from exc
@@ -175,7 +177,7 @@ async def run_ocr(image_bytes: bytes, *, model: str, detail: str) -> OcrResult:
         completion_tokens=int(usage_data.get("completion_tokens", 0) or 0),
         total_tokens=int(usage_data.get("total_tokens", 0) or 0),
     )
-    return OcrResult(text=text, usage=usage)
+    return OcrResult(text=text, usage=usage, request_id=request_id)
 
 
 def _detect_image_mime(data: bytes) -> str:
