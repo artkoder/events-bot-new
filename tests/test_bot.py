@@ -1353,7 +1353,7 @@ async def test_parse_event_includes_date(monkeypatch):
     calls: list[tuple] = []
 
     async def fake_log(bot, model, usage, *, endpoint, request_id, meta=None):
-        calls.append((bot, model, usage, endpoint, request_id, meta))
+        calls.append((bot, model, usage, endpoint, request_id, {} if meta is None else meta))
 
     class DummySession:
         async def __aenter__(self):
@@ -1382,7 +1382,7 @@ async def test_parse_event_includes_date(monkeypatch):
 
     assert "Today is" in called["payload"]["messages"][1]["content"]
     assert calls == [
-        (main.BOT_CODE, "gpt-4o", {}, "chat.completions", None, None)
+        (main.BOT_CODE, "gpt-4o", {}, "chat.completions", None, {})
     ]
 
 
@@ -1392,7 +1392,7 @@ async def test_parse_event_includes_poster_hint(monkeypatch):
     calls: list[tuple] = []
 
     async def fake_log(bot, model, usage, *, endpoint, request_id, meta=None):
-        calls.append((bot, model, usage, endpoint, request_id, meta))
+        calls.append((bot, model, usage, endpoint, request_id, {} if meta is None else meta))
 
     class DummySession:
         async def __aenter__(self):
@@ -1426,7 +1426,7 @@ async def test_parse_event_includes_poster_hint(monkeypatch):
     )
     assert "Poster OCR:\n[1] Poster line" in user_content
     assert calls == [
-        (main.BOT_CODE, "gpt-4o", {}, "chat.completions", None, None)
+        (main.BOT_CODE, "gpt-4o", {}, "chat.completions", None, {})
     ]
 
 
@@ -2809,7 +2809,7 @@ async def test_parse_event_alias_channel_title(monkeypatch):
     calls: list[tuple] = []
 
     async def fake_log(bot, model, usage, *, endpoint, request_id, meta=None):
-        calls.append((bot, model, usage, endpoint, request_id, meta))
+        calls.append((bot, model, usage, endpoint, request_id, {} if meta is None else meta))
 
     class DummySession:
         async def __aenter__(self):
@@ -2838,7 +2838,7 @@ async def test_parse_event_alias_channel_title(monkeypatch):
 
     assert "Name" in seen["payload"]["messages"][1]["content"]
     assert calls == [
-        (main.BOT_CODE, "gpt-4o", {}, "chat.completions", None, None)
+        (main.BOT_CODE, "gpt-4o", {}, "chat.completions", None, {})
     ]
 
 

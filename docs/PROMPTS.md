@@ -16,6 +16,8 @@ festival_full     - full festival edition name or empty string
 date              - single date or range (YYYY-MM-DD or YYYY-MM-DD..YYYY-MM-DD)
 time              - start time or time range (HH:MM or HH:MM..HH:MM). When a theatre announcement lists several start times for the same date (e.g. «начало в 12:00 и 17:00»), treat each start time as a separate event with the shared date instead of compressing them into a time range.
 location_name     - venue name; shorten bureaucratic phrases, trim honorifics to surnames/initials, avoid repeating the city
+If the venue is listed in the appended reference from docs/LOCATIONS.md, copy the
+`location_name` exactly as it appears there.
 location_address  - street address if present; drop markers like «ул.»/«улица», «д.»/«дом» and similar bureaucratic words, keep the concise street + number without the city name
 city              - city name only; do not duplicate it in `location_address`
 ticket_price_min  - minimum ticket price as integer or null
