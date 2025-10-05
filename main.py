@@ -1707,6 +1707,12 @@ async def log_token_usage(
 ) -> None:
     client = get_supabase_client()
     if client is None:
+        logging.debug(
+            "log_token_usage skipped: Supabase client unavailable bot=%s model=%s request_id=%s",
+            bot,
+            model,
+            request_id,
+        )
         return
 
     usage_data: Mapping[str, Any] = usage or {}
@@ -1742,12 +1748,33 @@ async def log_token_usage(
         "at": datetime.utcnow(),
     }
 
+    logging.debug(
+        "log_token_usage scheduling bot=%s model=%s request_id=%s endpoint=%s prompt=%s completion=%s total=%s",
+        row["bot"],
+        row["model"],
+        row["request_id"],
+        row["endpoint"],
+        row["prompt_tokens"],
+        row["completion_tokens"],
+        row["total_tokens"],
+    )
+
     async def _log() -> None:
+        start = _time.monotonic()
         try:
             def _insert() -> None:
                 client.table("token_usage").insert(row).execute()
 
             await asyncio.to_thread(_insert)
+            elapsed_ms = (_time.monotonic() - start) * 1000
+            logging.info(
+                "log_token_usage success bot=%s model=%s request_id=%s endpoint=%s elapsed_ms=%.2f",
+                row["bot"],
+                row["model"],
+                row["request_id"],
+                row["endpoint"],
+                elapsed_ms,
+            )
         except Exception as exc:  # pragma: no cover - network logging failure
             logging.warning("log_token_usage failed: %s", exc, exc_info=True)
 
