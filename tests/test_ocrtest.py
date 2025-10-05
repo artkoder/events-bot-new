@@ -17,6 +17,12 @@ from vision_test import session as vision_session
 from main import Database, User
 
 
+MINIMAL_PNG = (
+    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde"
+    b"\x00\x00\x00\x0cIDATx\x9cc\xf8\xcf\xc0\x00\x00\x03\x01\x01\x00\xc9\xfe\x92\xef\x00\x00\x00\x00IEND\xaeB`\x82"
+)
+
+
 @pytest.fixture(autouse=True)
 def reset_vision_sessions():
     vision_session.reset_sessions()
@@ -178,6 +184,7 @@ async def test_handle_photo_uses_both_models(tmp_path, monkeypatch):
     await main.handle_ocrtest(msg, db, bot)
 
     calls: list[tuple[str, str]] = []
+    usage_logs: list[tuple[str, str, dict, str, str | None, dict]] = []
 
     async def fake_run_ocr(image: bytes, *, model: str, detail: str):
         calls.append((model, detail))
@@ -197,9 +204,17 @@ async def test_handle_photo_uses_both_models(tmp_path, monkeypatch):
                 completion_tokens=7,
                 total_tokens=27,
             ),
-        )
+            )
 
     monkeypatch.setattr(vision_test, "run_ocr", fake_run_ocr)
+    monkeypatch.setattr(vision_test, "_USAGE_LOGGER_CONFIGURED", False)
+    monkeypatch.setattr(vision_test, "_LOG_TOKEN_USAGE", None)
+    monkeypatch.setattr(vision_test, "_BOT_CODE", None)
+
+    async def fake_log(bot_code, model, usage, *, endpoint, request_id, meta):
+        usage_logs.append((bot_code, model, usage, endpoint, request_id, dict(meta)))
+
+    monkeypatch.setattr(main, "log_token_usage", fake_log)
 
     photo_msg = types.Message.model_validate(
         {
@@ -228,6 +243,14 @@ async def test_handle_photo_uses_both_models(tmp_path, monkeypatch):
     assert session is not None
     assert session.last_texts.get("gpt-4o")
     assert session.waiting_for_photo
+    assert len(usage_logs) == 2
+    assert [entry[0] for entry in usage_logs] == [main.BOT_CODE, main.BOT_CODE]
+    assert [entry[1] for entry in usage_logs] == ["gpt-4o-mini", "gpt-4o"]
+    assert all(entry[3] == "chat.completions" for entry in usage_logs)
+    assert all(entry[5]["detail"] == "auto" for entry in usage_logs)
+    assert all(entry[5]["file"] == "poster.jpg" for entry in usage_logs)
+    assert all(entry[5]["source"] == "vision_test.handle_photo" for entry in usage_logs)
+    assert all(entry[2]["total_tokens"] in {15, 27} for entry in usage_logs)
 
 
 @pytest.mark.asyncio
@@ -273,7 +296,7 @@ async def test_run_ocr_logs_body_snippet(monkeypatch, caplog):
     try:
         with caplog.at_level(logging.ERROR):
             with pytest.raises(RuntimeError) as excinfo:
-                await vision_ocr.run_ocr(b"image-bytes", model="test-model", detail="high")
+                await vision_ocr.run_ocr(MINIMAL_PNG, model="test-model", detail="high")
 
         assert "synthetic failure" in str(excinfo.value)
         assert any("synthetic failure" in record.getMessage() for record in caplog.records)
@@ -324,7 +347,7 @@ async def test_run_ocr_payload_structure(monkeypatch):
     vision_ocr.configure_http(session=session, semaphore=semaphore)
 
     try:
-        result = await vision_test.run_ocr(b"binarydata", model="gpt-4o", detail="auto")
+        result = await vision_test.run_ocr(MINIMAL_PNG, model="gpt-4o", detail="auto")
     finally:
         vision_ocr.clear_http()
 
