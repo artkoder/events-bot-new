@@ -225,6 +225,12 @@ def test_extract_event_ts_hint_phone_then_location_only():
     assert extract_event_ts_hint(text, publish_ts=publish_dt) is None
 
 
+def test_extract_event_ts_hint_city_code_with_location_tail():
+    publish_dt = real_datetime(2024, 10, 1, tzinfo=main.LOCAL_TZ)
+    text = "Запись по телефону 8 (4012) 27-01-26 — в клубе «Мечта»"
+    assert extract_event_ts_hint(text, publish_ts=publish_dt) is None
+
+
 def test_extract_event_ts_hint_phone_then_address_without_date():
     publish_dt = real_datetime(2024, 10, 1, tzinfo=main.LOCAL_TZ)
     text = "Телефон: 27-01-26 — ул. Ленина, 5"
