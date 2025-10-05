@@ -49,7 +49,7 @@ async def test_ask_4o_keeps_long_response(monkeypatch):
     calls: list[tuple] = []
 
     async def fake_log(bot, model, usage, *, endpoint, request_id, meta=None):
-        calls.append((bot, model, usage, endpoint, request_id, meta))
+        calls.append((bot, model, usage, endpoint, request_id, {} if meta is None else meta))
 
     monkeypatch.setattr(main, "log_token_usage", fake_log)
 
@@ -65,6 +65,6 @@ async def test_ask_4o_keeps_long_response(monkeypatch):
             payload["usage"],
             "chat.completions",
             payload["id"],
-            None,
+            {},
         )
     ]
