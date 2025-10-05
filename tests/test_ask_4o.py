@@ -29,6 +29,7 @@ async def test_ask_4o_keeps_long_response(monkeypatch):
     monkeypatch.setenv("FOUR_O_TOKEN", "test-token")
     long_content = "L" * (main.FOUR_O_RESPONSE_LIMIT + 200)
     payload = {
+        "id": "chatcmpl-test",
         "choices": [
             {
                 "message": {
@@ -45,8 +46,25 @@ async def test_ask_4o_keeps_long_response(monkeypatch):
     session = DummySession(payload)
     monkeypatch.setattr(main, "get_http_session", lambda: session)
 
+    calls: list[tuple] = []
+
+    async def fake_log(bot, model, usage, *, endpoint, request_id, meta=None):
+        calls.append((bot, model, usage, endpoint, request_id, meta))
+
+    monkeypatch.setattr(main, "log_token_usage", fake_log)
+
     result = await main.ask_4o("prompt", max_tokens=len(long_content))
 
     assert result == long_content
     assert session.post_calls, "session.post should be invoked"
     assert session.post_calls[0][1]["max_tokens"] == len(long_content)
+    assert calls == [
+        (
+            main.BOT_CODE,
+            "gpt-4o",
+            payload["usage"],
+            "chat.completions",
+            payload["id"],
+            None,
+        )
+    ]
