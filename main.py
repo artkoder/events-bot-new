@@ -20125,24 +20125,42 @@ async def handle_usage_test(message: types.Message, db: Database, bot: Bot):
         await bot.send_message(message.chat.id, "Supabase disabled")
         return
 
+    deadline = _time.monotonic() + 1.0
+    row: Mapping[str, object] | None = None
+
     try:
-        response = (
-            client.table("token_usage")
-            .select("prompt_tokens,completion_tokens,total_tokens")
-            .eq("request_id", request_id)
-            .order("created_at", desc=True)
-            .limit(1)
-            .execute()
-        )
-        records = getattr(response, "data", response)
-        row = (records or [{}])[0]
-        prompt_tokens = int(row.get("prompt_tokens") or 0)
-        completion_tokens = int(row.get("completion_tokens") or 0)
-        total_tokens = int(row.get("total_tokens") or (prompt_tokens + completion_tokens))
+        while True:
+            response = (
+                client.table("token_usage")
+                .select("prompt_tokens,completion_tokens,total_tokens")
+                .eq("request_id", request_id)
+                .order("created_at", desc=True)
+                .limit(1)
+                .execute()
+            )
+            records = getattr(response, "data", response)
+            if records:
+                row = records[0]
+                break
+            now = _time.monotonic()
+            if now >= deadline:
+                break
+            await asyncio.sleep(min(0.1, deadline - now))
     except Exception as exc:  # pragma: no cover - supabase failure
         logging.exception("usage_test supabase query failed")
         await bot.send_message(message.chat.id, f"Supabase query failed: {exc}")
         return
+
+    if row is None:
+        await bot.send_message(
+            message.chat.id,
+            f"Token usage for request {request_id} was not yet available; please retry.",
+        )
+        return
+
+    prompt_tokens = int(row.get("prompt_tokens") or 0)
+    completion_tokens = int(row.get("completion_tokens") or 0)
+    total_tokens = int(row.get("total_tokens") or (prompt_tokens + completion_tokens))
 
     bot_label = getattr(bot, "id", None)
     if bot_label is None:
