@@ -192,6 +192,15 @@ def test_extract_event_ts_hint_phone_like_sequence_only():
     assert extract_event_ts_hint(text, publish_ts=publish_dt) is None
 
 
+def test_extract_event_ts_hint_telegram_phrase_keeps_date():
+    publish_dt = real_datetime(2024, 10, 1, tzinfo=main.LOCAL_TZ)
+    text = "Наш телеграм-канал расскажет 10-12-24"
+    ts = extract_event_ts_hint(text, publish_ts=publish_dt)
+    assert ts is not None
+    dt = real_datetime.fromtimestamp(ts, tz=main.LOCAL_TZ)
+    assert (dt.year, dt.month, dt.day) == (2024, 12, 10)
+
+
 def test_extract_event_ts_hint_weekday_uses_publish_week(monkeypatch):
     class FixedDatetime(real_datetime):
         @classmethod
