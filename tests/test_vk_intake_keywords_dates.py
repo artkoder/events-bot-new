@@ -195,6 +195,12 @@ def test_extract_event_ts_hint_phone_like_sequence_with_event_tail():
     assert (dt.year, dt.month, dt.day) == (2024, 10, 20)
 
 
+def test_extract_event_ts_hint_plain_phone_without_code():
+    publish_dt = real_datetime(2024, 4, 1, tzinfo=main.LOCAL_TZ)
+    text = "Запись по телефону 27-01-26"
+    assert extract_event_ts_hint(text, publish_ts=publish_dt) is None
+
+
 def test_extract_event_ts_hint_phone_like_sequence_only():
     publish_dt = real_datetime(2024, 4, 1, tzinfo=main.LOCAL_TZ)
     text = "Запись по телефону 8 (4012) 27-01-26"
@@ -235,6 +241,15 @@ def test_extract_event_ts_hint_city_code_with_location_tail():
     publish_dt = real_datetime(2024, 10, 1, tzinfo=main.LOCAL_TZ)
     text = "Запись по телефону 8 (4012) 27-01-26 — в клубе «Мечта»"
     assert extract_event_ts_hint(text, publish_ts=publish_dt) is None
+
+
+def test_extract_event_ts_hint_actual_date_preserved():
+    publish_dt = real_datetime(2024, 4, 1, tzinfo=main.LOCAL_TZ)
+    text = "Концерт 20-10-24"
+    ts = extract_event_ts_hint(text, publish_ts=publish_dt)
+    assert ts is not None
+    dt = real_datetime.fromtimestamp(ts, tz=main.LOCAL_TZ)
+    assert (dt.year, dt.month, dt.day) == (2024, 10, 20)
 
 
 def test_extract_event_ts_hint_phone_then_address_without_date():
