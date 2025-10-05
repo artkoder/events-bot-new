@@ -207,6 +207,11 @@ HISTORICAL_TOPONYMS = [
 HISTORICAL_YEAR_RE = re.compile(r"\b(1\d{3})\b")
 
 NUM_DATE_RE = re.compile(r"\b(\d{1,2})[./-](\d{1,2})(?:[./-](\d{2,4}))?\b")
+PHONE_LIKE_RE = re.compile(r"^(?:\d{2}-){2,}\d{2}$")
+PHONE_CONTEXT_RE = re.compile(
+    r"(тел(?:\.|:)?|телефон\w*|звоните|звонок\w*)",
+    re.I | re.U,
+)
 DATE_RANGE_RE = re.compile(r"\b(\d{1,2})[–-](\d{1,2})(?:[./](\d{1,2}))\b")
 MONTH_NAME_RE = re.compile(r"\b(\d{1,2})\s+([а-яё.]+)\b", re.I)
 TIME_RE = re.compile(r"\b([01]?\d|2[0-3])[:.][0-5]\d\b")
@@ -332,6 +337,12 @@ def extract_event_ts_hint(
                 digit_count += 1
                 check_idx -= 1
             if digit_count >= 3:
+                continue
+        if PHONE_LIKE_RE.match(candidate.group(0)):
+            context_start = max(0, start - 30)
+            context_end = min(len(text_low), candidate.end() + 10)
+            context_slice = text_low[context_start:context_end]
+            if PHONE_CONTEXT_RE.search(context_slice):
                 continue
         m = candidate
         break

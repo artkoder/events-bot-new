@@ -180,6 +180,12 @@ def test_extract_event_ts_hint_ignores_phone_number_segments():
     assert (dt.year, dt.month, dt.day) == (2024, 4, 5)
 
 
+def test_extract_event_ts_hint_phone_like_sequence_only():
+    publish_dt = real_datetime(2024, 4, 1, tzinfo=main.LOCAL_TZ)
+    text = "Запись по телефону 8 (4012) 27-01-26"
+    assert extract_event_ts_hint(text, publish_ts=publish_dt) is None
+
+
 def test_extract_event_ts_hint_weekday_uses_publish_week(monkeypatch):
     class FixedDatetime(real_datetime):
         @classmethod
