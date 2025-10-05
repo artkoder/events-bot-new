@@ -358,6 +358,8 @@ def extract_event_ts_hint(
                 match_end = context_start + phone_match.end()
                 if match_end <= start:
                     intervening = text_low[match_end:start]
+                    if re.search(r"\s[–—-]\s", intervening):
+                        break
                     if not re.search(r"[a-zа-яё]", intervening):
                         if "\n" in intervening or "\r" in intervening:
                             continue
