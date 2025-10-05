@@ -80,16 +80,22 @@ async def test_classify_event_topics_filters_and_limits(monkeypatch):
 
     result = await main.classify_event_topics(event)
 
-    assert result == ["HISTORICAL_IMMERSION", "EXHIBITIONS", "MOVIES"]
+    assert result == [
+        "HISTORICAL_IMMERSION",
+        "EXHIBITIONS",
+        "MOVIES",
+        "CONCERTS",
+        "URBANISM",
+    ]
     assert "#музыка" in captured["text"]
     kwargs = captured["kwargs"]
     assert kwargs["model"] == "gpt-4o-mini"
     assert kwargs["system_prompt"] == main.EVENT_TOPIC_SYSTEM_PROMPT
-    enum_values = kwargs["response_format"]["json_schema"]["schema"]["properties"]["topics"]["items"][
-        "enum"
-    ]
+    topics_schema = kwargs["response_format"]["json_schema"]["schema"]["properties"]["topics"]
+    enum_values = topics_schema["items"]["enum"]
     assert enum_values == list(main.TOPIC_LABELS.keys())
     assert "HISTORICAL_IMMERSION" in enum_values
+    assert topics_schema["maxItems"] == 5
 
 
 @pytest.mark.asyncio
