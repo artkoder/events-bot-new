@@ -358,16 +358,21 @@ def extract_event_ts_hint(
                 match_end = context_start + phone_match.end()
                 if match_end <= start:
                     intervening = text_low[match_end:start]
-                    if re.search(r"\s[–—-]\s", intervening):
+                    if "\n" in intervening or "\r" in intervening:
+                        continue
+                    trimmed = intervening.strip()
+                    if not trimmed:
+                        skip_candidate = True
                         break
-                    if not re.search(r"[a-zа-яё]", intervening):
-                        if "\n" in intervening or "\r" in intervening:
-                            continue
-                        normalized = intervening.replace(" ", "")
-                        normalized = normalized.lstrip(".,:;-–—")
-                        if not normalized or re.fullmatch(r"[\d()+\-–—]*", normalized):
-                            skip_candidate = True
-                            break
+                    if "," in trimmed:
+                        break
+                    if re.search(r"[a-zа-яё]", trimmed):
+                        break
+                    compact = trimmed.replace(" ", "")
+                    compact = re.sub(r"^[.,:;-–—]+", "", compact)
+                    if not compact or re.fullmatch(r"[\d()+\-–—]*", compact):
+                        skip_candidate = True
+                        break
             if skip_candidate:
                 continue
         m = candidate
