@@ -22294,11 +22294,38 @@ async def _vkrev_show_next(chat_id: int, batch_id: str, operator_id: int, db: Da
 
     async with db.raw_conn() as conn:
         cur = await conn.execute(
-            "SELECT name FROM vk_source WHERE group_id=?",
+            "SELECT name, default_time FROM vk_source WHERE group_id=?",
             (post.group_id,),
         )
         row = await cur.fetchone()
-    group_name = row[0] if row else f"group {post.group_id}"
+    group_name = f"group {post.group_id}"
+    default_time_val: str | None = None
+    if row:
+        group_name = row[0] or group_name
+        default_time_val = row[1]
+
+    recomputed_hint: int | None = None
+    try:
+        recomputed_hint = vk_intake.extract_event_ts_hint(
+            post.text or "",
+            default_time_val,
+            publish_ts=getattr(post, "date", None),
+        )
+    except Exception:  # pragma: no cover - defensive
+        logging.exception(
+            "vkrev recompute_event_ts_hint_failed inbox_id=%s", getattr(post, "id", "?")
+        )
+
+    ts_hint = getattr(post, "event_ts_hint", None)
+    if recomputed_hint and recomputed_hint > 0:
+        if recomputed_hint != ts_hint:
+            async with db.raw_conn() as conn:
+                await conn.execute(
+                    "UPDATE vk_inbox SET event_ts_hint=? WHERE id=?",
+                    (recomputed_hint, post.id),
+                )
+                await conn.commit()
+        ts_hint = recomputed_hint
 
     url = f"https://vk.com/wall-{post.group_id}_{post.post_id}"
     pending = await _vkrev_queue_size(db)
@@ -22311,7 +22338,6 @@ async def _vkrev_show_next(chat_id: int, batch_id: str, operator_id: int, db: Da
     status_line = (
         f"ключи: {matched_kw_display} | дата: {'да' if post.has_date else 'нет'} | в очереди: {pending}"
     )
-    ts_hint = getattr(post, "event_ts_hint", None)
     heading_line: str | None = None
     event_lines: list[str] = []
     if ts_hint and ts_hint > 0:
