@@ -165,6 +165,12 @@ def test_extract_event_ts_hint_recent_past():
     assert (future_dt.year, future_dt.month, future_dt.day) == (2025, 1, 7)
 
 
+def test_extract_event_ts_hint_weekday_past_event_context():
+    publish_dt = real_datetime(2024, 5, 10, tzinfo=main.LOCAL_TZ)
+    text = "В четверг в музейном зале состоялся вечер настольных игр"
+    assert extract_event_ts_hint(text, publish_ts=publish_dt) is None
+
+
 def test_extract_event_ts_hint_explicit_year_past():
     publish_dt = real_datetime(2026, 1, 1, tzinfo=main.LOCAL_TZ)
     text = "Концерт состоится 17 сентября 2025 года"
