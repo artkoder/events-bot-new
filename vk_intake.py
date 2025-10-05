@@ -220,7 +220,7 @@ HISTORICAL_YEAR_RE = re.compile(r"\b(1\d{3})\b")
 NUM_DATE_RE = re.compile(r"\b(\d{1,2})[./-](\d{1,2})(?:[./-](\d{2,4}))?\b")
 PHONE_LIKE_RE = re.compile(r"^(?:\d{2}-){2,}\d{2}$")
 PHONE_CONTEXT_RE = re.compile(
-    r"(тел(?:\.|:)?|телефон\w*|звоните|звонок\w*)",
+    r"(\bтел(?:[.:]|ефон\w*|\b)|\bзвоните\b|\bзвонок\w*)",
     re.I | re.U,
 )
 DATE_RANGE_RE = re.compile(r"\b(\d{1,2})[–-](\d{1,2})(?:[./](\d{1,2}))\b")
