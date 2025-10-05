@@ -225,6 +225,12 @@ def test_extract_event_ts_hint_phone_then_location_only():
     assert extract_event_ts_hint(text, publish_ts=publish_dt) is None
 
 
+def test_extract_event_ts_hint_phone_then_address_without_date():
+    publish_dt = real_datetime(2024, 10, 1, tzinfo=main.LOCAL_TZ)
+    text = "Телефон: 27-01-26 — ул. Ленина, 5"
+    assert extract_event_ts_hint(text, publish_ts=publish_dt) is None
+
+
 def test_extract_event_ts_hint_phone_then_location_and_date():
     publish_dt = real_datetime(2024, 10, 1, tzinfo=main.LOCAL_TZ)
     text = "Телефон: 27-01-26 — в клубе концерт 20-10-24"
@@ -255,6 +261,15 @@ def test_extract_event_ts_hint_phone_guidance_then_text_date():
 def test_extract_event_ts_hint_phone_action_then_text_date():
     publish_dt = real_datetime(2024, 10, 1, tzinfo=main.LOCAL_TZ)
     text = "Телефон: 27-01-26 — встречаемся 20-10-24"
+    ts = extract_event_ts_hint(text, publish_ts=publish_dt)
+    assert ts is not None
+    dt = real_datetime.fromtimestamp(ts, tz=main.LOCAL_TZ)
+    assert (dt.year, dt.month, dt.day) == (2024, 10, 20)
+
+
+def test_extract_event_ts_hint_phone_address_then_text_date():
+    publish_dt = real_datetime(2024, 10, 1, tzinfo=main.LOCAL_TZ)
+    text = "Телефон: 27-01-26 — ул. Ленина, 5, встречаемся 20-10-24"
     ts = extract_event_ts_hint(text, publish_ts=publish_dt)
     assert ts is not None
     dt = real_datetime.fromtimestamp(ts, tz=main.LOCAL_TZ)
