@@ -142,6 +142,68 @@ async def test_vkrev_show_next_includes_event_matches(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_vkrev_show_next_recomputes_mismatched_hint(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    publish_dt = datetime(2025, 5, 10, 12, 0, tzinfo=timezone.utc)
+    expected_dt = datetime(2025, 5, 27, 19, 45, tzinfo=main.LOCAL_TZ)
+    old_hint_dt = datetime(2025, 5, 25, 19, 45, tzinfo=main.LOCAL_TZ)
+    async with db.get_session() as session:
+        session.add(User(user_id=1))
+        await session.commit()
+    async with db.raw_conn() as conn:
+        await conn.execute(
+            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time, default_ticket_link) VALUES(?,?,?,?,?,?)",
+            (1, "club1", "Test Community", "", "19:00", None),
+        )
+        await conn.execute(
+            "INSERT INTO vk_inbox(id, group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status) VALUES(?,?,?,?,?,?,?,?,?)",
+            (
+                1,
+                1,
+                10,
+                int(publish_dt.timestamp()),
+                "Концерт состоится 27.05.2025 в 19:45!",
+                None,
+                1,
+                int(old_hint_dt.timestamp()),
+                "pending",
+            ),
+        )
+        await conn.commit()
+
+    async def fake_fetch(*args, **kwargs):
+        return []
+
+    async def fake_pick_next(db_obj, operator_id_arg, batch_id_arg):
+        return SimpleNamespace(
+            id=1,
+            group_id=1,
+            post_id=10,
+            text="Концерт состоится 27.05.2025 в 19:45!",
+            matched_kw=None,
+            has_date=True,
+            event_ts_hint=int(old_hint_dt.timestamp()),
+            date=int(publish_dt.timestamp()),
+        )
+
+    monkeypatch.setattr(main, "_vkrev_fetch_photos", fake_fetch)
+    monkeypatch.setattr(vk_review, "pick_next", fake_pick_next)
+    bot = DummyBot()
+
+    await main._vkrev_show_next(1, "batch1", 1, db, bot)
+
+    assert bot.messages, "no message sent"
+    lines = bot.messages[0].text.splitlines()
+    heading = f"{expected_dt.day:02d} {main.MONTHS[expected_dt.month - 1]} {expected_dt.strftime('%H:%M')}"
+    assert heading in lines
+    async with db.raw_conn() as conn:
+        cur = await conn.execute("SELECT event_ts_hint FROM vk_inbox WHERE id=1")
+        (stored_hint,) = await cur.fetchone()
+    assert stored_hint == int(expected_dt.timestamp())
+
+
+@pytest.mark.asyncio
 async def test_vkrev_show_next_truncates_long_text(tmp_path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
