@@ -32,7 +32,7 @@
 
 
 
-| `/stats [events]` | optional `events` | Superadmin only. Show Telegraph view counts starting from the past month and weekend pages up to all current and future ones. Includes the festivals landing page and stats for upcoming or recently ended (within a week) festivals. Use `events` to list event page stats. |
+| `/stats [events]` | optional `events` | Superadmin only. Show Telegraph view counts starting from the past month and weekend pages up to all current and future ones. Includes the festivals landing page and stats for upcoming or recently ended (within a week) festivals. The footer now fetches daily OpenAI token totals from Supabase (`token_usage_daily`, falling back to live `token_usage` or the legacy snapshot on errors). Use `events` to list event page stats. |
 | `/dumpdb` | - | Superadmin only. Download a SQL dump and `telegraph_token.txt` plus restore instructions. |
 | `/restore` | attach file | Superadmin only. Replace current database with the uploaded dump. |
 | `/tourist_export [period]` | optional `period=ГГГГ[-ММ[-ДД..ГГГГ-ММ-ДД]]` | Выгрузка событий в формате JSONL с полями `tourist_*`. Только для неблокированных модераторов и администраторов (включая суперадминов), уважается фильтр по диапазону дат. |

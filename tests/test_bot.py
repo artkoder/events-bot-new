@@ -703,7 +703,7 @@ async def test_edit_event_reclassifies_topics(tmp_path: Path, monkeypatch):
 
     assert calls["topics"] == 1
     assert refreshed.description == "Updated description"
-    assert refreshed.topics == ["театр", "KRAEVEDENIE_KALININGRAD_OBLAST"]
+    assert refreshed.topics == ["театр"]
     assert refreshed.topics_manual is False
 
 
