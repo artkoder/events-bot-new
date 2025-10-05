@@ -129,9 +129,13 @@ line under the button row. The command accepts dates like `2025-07-10`,
    export WEBHOOK_URL=https://your-app.fly.dev
    export DB_PATH=/data/db.sqlite
    export FOUR_O_TOKEN=sk-...
-  export FOUR_O_URL=https://api.openai.com/v1/chat/completions
-  export SUPABASE_URL=https://<project>.supabase.co
-  export SUPABASE_KEY=service_role_key
+   # Optional: override the OpenAI-compatible endpoint (defaults to https://api.openai.com/v1/chat/completions).
+   export FOUR_O_URL=https://api.openai.com/v1/chat/completions
+   # Optional: override the logical bot identifier used in Supabase logs (defaults to "announcements").
+   export BOT_CODE=announcements
+   # Required for token logging: service-role credentials so the bot can insert rows via supabase-py.
+   export SUPABASE_URL=https://<project>.supabase.co
+   export SUPABASE_KEY=service_role_key
   # Optional: custom bucket name (defaults to events-ics)
   export SUPABASE_BUCKET=events-ics
   # Optional: provide Telegraph token. If omitted, the bot creates an account
@@ -198,6 +202,65 @@ line under the button row. The command accepts dates like `2025-07-10`,
   ```
 
 By default the crawler uses regular-expression stems to detect event keywords.
+
+### Token usage logging
+
+Every call to the wrapper around the OpenAI-compatible API collects usage
+metadata and pushes it to Supabase via `log_token_usage`. The coroutine extracts
+`prompt_tokens`, `completion_tokens`, and `total_tokens` (normalising the
+OpenAI and Azure field names), tags the row with `BOT_CODE`, and records the
+target endpoint (`chat.completions`, `/responses`, etc.). The insert runs in a
+background task so that API calls are not delayed by Supabase network latency.
+
+#### Schema
+
+Provision the following table and indexes in Supabase (run as a privileged
+role):
+
+```sql
+create table if not exists public.token_usage (
+  id bigserial primary key,
+  bot text not null,
+  model text not null,
+  prompt_tokens integer,
+  completion_tokens integer,
+  total_tokens integer,
+  endpoint text not null,
+  request_id text,
+  meta jsonb,
+  at timestamptz not null default timezone('utc', now()),
+  created_at timestamptz not null default timezone('utc', now())
+);
+
+create index if not exists token_usage_bot_at_idx
+  on public.token_usage (bot, at desc);
+
+create index if not exists token_usage_model_at_idx
+  on public.token_usage (model, at desc);
+```
+
+Enable row level security and restrict writes to the service role while
+allowing read-only dashboards via JWT roles:
+
+```sql
+alter table public.token_usage enable row level security;
+
+create policy "service role can insert token usage"
+  on public.token_usage for insert
+  with check (auth.role() = 'service_role');
+
+create policy "authenticated users can read token usage"
+  on public.token_usage for select
+  using (auth.role() in ('authenticated', 'service_role'));
+```
+
+If you expose aggregates, define them as separate views (for example,
+`public.token_usage_daily`) so dashboards can group by `bot`/`model` without
+scanning the raw table.
+
+Operators can verify that logging works by querying the table directly or, once
+deployed, visiting the `/usage_test` diagnostic endpoint which exercises the
+logging pipeline end to end.
 Setting `VK_USE_PYMORPHY=true` (and installing `pymorphy3`) switches matching to
 lemmatised forms for better coverage of Russian morphology.
 

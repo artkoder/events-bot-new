@@ -1,6 +1,10 @@
 # Changelog
 
 ## [Unreleased]
+
+- Log OpenAI token usage through Supabase inserts (guarded by `BOT_CODE`) and ship the `/usage_test` admin self-test so operators can verify the inserts and share usage snapshots during release comms.
+
+## v0.3.16 – 2025-10-05
 - Telegraph event source pages now include a “Быстрые факты” block with date/time, location, and ticket/free status, hiding each line when the underlying data is missing so operators know it’s conditional.
 - Системный промпт автоклассификации запрещает выбирать темы `FAMILY` и `KIDS_SCHOOL`, когда у события задан возрастной ценз; см. обновления в `main.py` (`EVENT_TOPIC_SYSTEM_PROMPT`) и документации `docs/llm_topics.md`.
 - Уведомления в админ-чат для партнёров теперь включают первую фотографию события и ссылки на Telegraph и исходный VK-пост, чтобы операторы могли оперативно проверить публикацию.

@@ -5,6 +5,7 @@ sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from pathlib import Path
 
 import hashlib
+import json
 
 import pytest
 from aiogram import Bot, types
@@ -14,6 +15,7 @@ from datetime import date, timedelta, timezone, datetime, time
 from typing import Any
 import asyncio
 import time as _time
+from types import SimpleNamespace
 import main
 from telegraph.api import json_dumps
 from telegraph import TelegraphException
@@ -49,6 +51,7 @@ from main import (
     handle_exhibitions,
     handle_stats,
     handle_edit_message,
+    handle_usage_test,
     process_request,
     parse_event_via_4o,
     telegraph_test,
@@ -263,6 +266,92 @@ async def test_start_superadmin(tmp_path: Path):
     async with db.get_session() as session:
         user = await session.get(User, 1)
     assert user and user.is_superadmin
+
+
+@pytest.mark.asyncio
+async def test_usage_test_queries_supabase(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async with db.get_session() as session:
+        session.add(User(user_id=42, username="admin", is_superadmin=True))
+        await session.commit()
+
+    captured: dict[str, Any] = {}
+
+    async def fake_ask(prompt: str, **kwargs):
+        captured["prompt"] = prompt
+        captured["kwargs"] = kwargs
+        return "ok"
+
+    monkeypatch.setattr(main, "ask_4o", fake_ask)
+    monkeypatch.setattr(main, "get_last_ask_4o_request_id", lambda: "req-usage")
+
+    class FakeQuery:
+        def __init__(self, parent):
+            self.parent = parent
+            self.steps: list[tuple] = []
+
+        def select(self, fields):
+            self.steps.append(("select", fields))
+            return self
+
+        def eq(self, column, value):
+            self.steps.append(("eq", column, value))
+            return self
+
+        def order(self, column, desc=False):
+            self.steps.append(("order", column, desc))
+            return self
+
+        def limit(self, value):
+            self.steps.append(("limit", value))
+            return self
+
+        def execute(self):
+            self.parent.last_steps = list(self.steps)
+            return SimpleNamespace(
+                data=[
+                    {
+                        "prompt_tokens": 11,
+                        "completion_tokens": 5,
+                        "total_tokens": 16,
+                    }
+                ]
+            )
+
+    class FakeSupabase:
+        def __init__(self):
+            self.tables: list[str] = []
+            self.last_steps: list[tuple] = []
+
+        def table(self, name: str):
+            self.tables.append(name)
+            return FakeQuery(self)
+
+    fake_client = FakeSupabase()
+    monkeypatch.setattr(main, "get_supabase_client", lambda: fake_client)
+
+    msg = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 42, "type": "private"},
+            "from": {"id": 42, "is_bot": False, "first_name": "Admin"},
+            "text": "/usage_test",
+        }
+    )
+
+    await handle_usage_test(msg, db, bot)
+
+    assert captured["kwargs"]["model"] == "gpt-4o-mini"
+    assert fake_client.tables == ["token_usage"]
+    assert ("eq", "request_id", "req-usage") in fake_client.last_steps
+
+    assert bot.messages, "admin should receive usage summary"
+    payload = json.loads(bot.messages[-1][1])
+    assert payload == {"prompt": 11, "completion": 5, "total": 16}
 
 
 @pytest.mark.asyncio
@@ -1243,6 +1332,10 @@ async def test_ask4o_not_admin(tmp_path: Path, monkeypatch):
 @pytest.mark.asyncio
 async def test_parse_event_includes_date(monkeypatch):
     called = {}
+    calls: list[tuple] = []
+
+    async def fake_log(bot, model, usage, *, endpoint, request_id, meta=None):
+        calls.append((bot, model, usage, endpoint, request_id, meta))
 
     class DummySession:
         async def __aenter__(self):
@@ -1265,15 +1358,23 @@ async def test_parse_event_includes_date(monkeypatch):
 
     monkeypatch.setenv("FOUR_O_TOKEN", "x")
     monkeypatch.setattr("main.ClientSession", DummySession)
+    monkeypatch.setattr(main, "log_token_usage", fake_log)
 
     await parse_event_via_4o("text")
 
     assert "Today is" in called["payload"]["messages"][1]["content"]
+    assert calls == [
+        (main.BOT_CODE, "gpt-4o", {}, "chat.completions", None, None)
+    ]
 
 
 @pytest.mark.asyncio
 async def test_parse_event_includes_poster_hint(monkeypatch):
     called = {}
+    calls: list[tuple] = []
+
+    async def fake_log(bot, model, usage, *, endpoint, request_id, meta=None):
+        calls.append((bot, model, usage, endpoint, request_id, meta))
 
     class DummySession:
         async def __aenter__(self):
@@ -1296,6 +1397,7 @@ async def test_parse_event_includes_poster_hint(monkeypatch):
 
     monkeypatch.setenv("FOUR_O_TOKEN", "x")
     monkeypatch.setattr("main.ClientSession", DummySession)
+    monkeypatch.setattr(main, "log_token_usage", fake_log)
 
     await parse_event_via_4o("text", poster_texts=["Poster line"])
 
@@ -1305,6 +1407,9 @@ async def test_parse_event_includes_poster_hint(monkeypatch):
         in user_content
     )
     assert "Poster OCR:\n[1] Poster line" in user_content
+    assert calls == [
+        (main.BOT_CODE, "gpt-4o", {}, "chat.completions", None, None)
+    ]
 
 
 @pytest.mark.asyncio
@@ -2683,6 +2788,10 @@ async def test_forward_reports_ocr_usage(tmp_path: Path, monkeypatch):
 @pytest.mark.asyncio
 async def test_parse_event_alias_channel_title(monkeypatch):
     seen = {}
+    calls: list[tuple] = []
+
+    async def fake_log(bot, model, usage, *, endpoint, request_id, meta=None):
+        calls.append((bot, model, usage, endpoint, request_id, meta))
 
     class DummySession:
         async def __aenter__(self):
@@ -2705,10 +2814,14 @@ async def test_parse_event_alias_channel_title(monkeypatch):
 
     monkeypatch.setenv("FOUR_O_TOKEN", "x")
     monkeypatch.setattr("main.ClientSession", DummySession)
+    monkeypatch.setattr(main, "log_token_usage", fake_log)
 
     await main.parse_event_via_4o("t", channel_title="Name")
 
     assert "Name" in seen["payload"]["messages"][1]["content"]
+    assert calls == [
+        (main.BOT_CODE, "gpt-4o", {}, "chat.completions", None, None)
+    ]
 
 
 @pytest.mark.asyncio
