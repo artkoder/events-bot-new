@@ -24501,7 +24501,7 @@ async def _build_source_summary_block(
     if not event_summary:
         return ""
 
-    parts: list[str] = []
+    lines: list[str] = []
 
     start_date: date | None = None
     try:
@@ -24550,7 +24550,7 @@ async def _build_source_summary_block(
         date_line = ""
 
     if date_line.strip():
-        parts.append(f"<p>{html.escape(date_line.strip())}</p>")
+        lines.append(html.escape(date_line.strip()))
 
     location_parts: list[str] = []
     existing_normalized: set[str] = set()
@@ -24576,7 +24576,7 @@ async def _build_source_summary_block(
         if location_text.strip():
             location_line = f"📍 {location_text.strip()}"
     if location_line:
-        parts.append(f"<p>{html.escape(location_line)}</p>")
+        lines.append(html.escape(location_line))
 
     ticket_segments: list[str] = []
     link_value = (event_summary.ticket_link or "").strip()
@@ -24601,9 +24601,12 @@ async def _build_source_summary_block(
             ticket_segments.append(html.escape(f"🎟 Билеты {price_text}"))
 
     if ticket_segments:
-        parts.append(f"<p>{''.join(ticket_segments)}</p>")
+        lines.append("".join(ticket_segments).strip())
 
-    return "".join(parts)
+    if not lines:
+        return ""
+
+    return f"<p>{'<br/>'.join(lines)}</p>"
 
 
 async def build_source_page_content(
