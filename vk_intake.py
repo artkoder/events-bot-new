@@ -354,25 +354,37 @@ def extract_event_ts_hint(
             context_end = min(len(text_low), candidate.end() + 10)
             context_slice = text_low[context_start:context_end]
             skip_candidate = False
-            for phone_match in PHONE_CONTEXT_RE.finditer(context_slice):
-                match_end = context_start + phone_match.end()
-                if match_end <= start:
-                    intervening = text_low[match_end:start]
-                    if "\n" in intervening or "\r" in intervening:
-                        continue
-                    trimmed = intervening.strip()
-                    if not trimmed:
-                        skip_candidate = True
-                        break
-                    if "," in trimmed:
-                        break
-                    if re.search(r"[a-zа-яё]", trimmed):
-                        break
-                    compact = trimmed.replace(" ", "")
-                    compact = re.sub(r"^[.,:;-–—]+", "", compact)
-                    if not compact or re.fullmatch(r"[\d()+\-–—]*", compact):
-                        skip_candidate = True
-                        break
+            trailing_idx = candidate.end()
+            trailing_chars = " \t\r\n.;:!?()[]{}«»\"'—–-"
+            while trailing_idx < len(text_low) and text_low[trailing_idx] in trailing_chars:
+                trailing_idx += 1
+            has_event_tail = False
+            if trailing_idx < len(text_low):
+                remainder = text_low[trailing_idx:]
+                if text_low[trailing_idx].isalpha():
+                    has_event_tail = True
+                elif TIME_RE.match(remainder):
+                    has_event_tail = True
+            if not has_event_tail:
+                for phone_match in PHONE_CONTEXT_RE.finditer(context_slice):
+                    match_end = context_start + phone_match.end()
+                    if match_end <= start:
+                        intervening = text_low[match_end:start]
+                        if "\n" in intervening or "\r" in intervening:
+                            continue
+                        trimmed = intervening.strip()
+                        if not trimmed:
+                            skip_candidate = True
+                            break
+                        if "," in trimmed:
+                            break
+                        if re.search(r"[a-zа-яё]", trimmed):
+                            break
+                        compact = trimmed.replace(" ", "")
+                        compact = re.sub(r"^[.,:;-–—]+", "", compact)
+                        if not compact or re.fullmatch(r"[\d()+\-–—]*", compact):
+                            skip_candidate = True
+                            break
             if skip_candidate:
                 continue
         m = candidate
