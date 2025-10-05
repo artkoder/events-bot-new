@@ -5,7 +5,7 @@ import logging
 import os
 from datetime import datetime, timezone
 from importlib import import_module
-from typing import Any, Iterable
+from typing import Any, Awaitable, Callable, Iterable
 
 from sqlalchemy import func
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -45,6 +45,9 @@ def _today_key() -> str:
 
 
 _HTTP_CONFIGURED = False
+_USAGE_LOGGER_CONFIGURED = False
+_LOG_TOKEN_USAGE: Callable[..., Awaitable[None]] | None = None
+_BOT_CODE: str | None = None
 
 
 def _ensure_http() -> None:
@@ -56,6 +59,16 @@ def _ensure_http() -> None:
     semaphore = main_mod.HTTP_SEMAPHORE
     vision_test.ocr.configure_http(session=session, semaphore=semaphore)
     _HTTP_CONFIGURED = True
+
+
+def _ensure_usage_logger() -> None:
+    global _USAGE_LOGGER_CONFIGURED, _LOG_TOKEN_USAGE, _BOT_CODE
+    if _USAGE_LOGGER_CONFIGURED:
+        return
+    main_mod = import_module("main")
+    _LOG_TOKEN_USAGE = getattr(main_mod, "log_token_usage")
+    _BOT_CODE = getattr(main_mod, "BOT_CODE", None)
+    _USAGE_LOGGER_CONFIGURED = True
 
 
 def _ensure_bytes(item: Any) -> bytes:
@@ -169,6 +182,27 @@ async def recognize_posters(
                 "completion_tokens": int(getattr(usage, "completion_tokens", 0) or 0),
                 "total_tokens": int(getattr(usage, "total_tokens", 0) or 0),
             }
+            if count_usage:
+                _ensure_usage_logger()
+                if _LOG_TOKEN_USAGE is not None and _BOT_CODE is not None:
+                    usage_payload = dict(token_counts)
+                    meta = {
+                        "source": "poster_ocr",
+                        "detail": detail,
+                        "hash": digest,
+                        "bytes": len(data),
+                    }
+                    try:
+                        await _LOG_TOKEN_USAGE(
+                            _BOT_CODE,
+                            model,
+                            usage_payload,
+                            endpoint="chat.completions",
+                            request_id=ocr_result.request_id,
+                            meta=meta,
+                        )
+                    except Exception:  # pragma: no cover - defensive logging
+                        logger.exception("poster_ocr.log_token_usage_failed")
             created_at = datetime.now(timezone.utc)
             if entry is None:
                 entry = PosterOcrCache(
