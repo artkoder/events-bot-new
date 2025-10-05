@@ -220,7 +220,7 @@ HISTORICAL_YEAR_RE = re.compile(r"\b(1\d{3})\b")
 NUM_DATE_RE = re.compile(r"\b(\d{1,2})[./-](\d{1,2})(?:[./-](\d{2,4}))?\b")
 PHONE_LIKE_RE = re.compile(r"^(?:\d{2}-){2,}\d{2}$")
 PHONE_CONTEXT_RE = re.compile(
-    r"(\bтел(?:[.:]|ефон\w*|\b)|\bзвоните\b|\bзвонок\w*)",
+    r"(\bтел(?:[.:]|ефон\w*|\b|(?=\d))|\bзвоните\b|\bзвонок\w*)",
     re.I | re.U,
 )
 DATE_RANGE_RE = re.compile(r"\b(\d{1,2})[–-](\d{1,2})(?:[./](\d{1,2}))\b")
@@ -353,7 +353,15 @@ def extract_event_ts_hint(
             context_start = max(0, start - 30)
             context_end = min(len(text_low), candidate.end() + 10)
             context_slice = text_low[context_start:context_end]
-            if PHONE_CONTEXT_RE.search(context_slice):
+            skip_candidate = False
+            for phone_match in PHONE_CONTEXT_RE.finditer(context_slice):
+                match_end = context_start + phone_match.end()
+                if match_end <= start:
+                    intervening = text_low[match_end:start]
+                    if not re.search(r"[a-zа-яё]", intervening):
+                        skip_candidate = True
+                        break
+            if skip_candidate:
                 continue
         m = candidate
         break
