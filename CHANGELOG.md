@@ -1,6 +1,7 @@
 # Changelog
 
 ## [Unreleased]
+- Partner event notifications in the admin chat now include the first event photo plus Telegraph and VK links so operators know to review or edit the VK post.
 
 - Log OpenAI token usage through Supabase inserts (guarded by `BOT_CODE`) and ship the `/usage_test` admin self-test so operators can verify the inserts and share usage snapshots during release comms.
 
