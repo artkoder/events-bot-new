@@ -4291,7 +4291,7 @@ async def test_stats_events(tmp_path: Path, monkeypatch):
     assert "5" in lines[1]
     assert lines[-3] == "Tokens gpt-4o: 5"
     assert lines[-2] == "Tokens gpt-4o-mini: 450"
-    assert lines[-1] == "Tokens total: 1050"
+    assert lines[-1] == "Tokens total: 1250"
 
 
 @pytest.mark.asyncio

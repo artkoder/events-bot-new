@@ -19977,14 +19977,11 @@ async def handle_stats(message: types.Message, db: Database, bot: Bot):
         ocr_usage = await session.get(OcrUsage, today_key)
         if ocr_usage and ocr_usage.spent_tokens:
             ocr_tokens = max(int(ocr_usage.spent_tokens), 0)
-            usage_models["gpt-4o-mini"] = mini_snapshot + ocr_tokens
+    new_mini_total = mini_snapshot + ocr_tokens
+    usage_models["gpt-4o-mini"] = new_mini_total
 
     snapshot_total = _coerce_int(usage_snapshot.get("total", 0))
-    if ocr_tokens:
-        extra_total = max(ocr_tokens - mini_snapshot, 0)
-        tokens_total = snapshot_total + extra_total
-    else:
-        tokens_total = snapshot_total
+    tokens_total = snapshot_total - mini_snapshot + new_mini_total
 
     lines.extend(
         [
