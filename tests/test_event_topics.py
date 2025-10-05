@@ -177,7 +177,7 @@ async def test_classify_event_topics_handles_exception(monkeypatch):
 @pytest.mark.asyncio
 async def test_assign_event_topics_adds_kaliningrad_for_city(monkeypatch):
     async def fake_classify(event):
-        return []
+        return ["KRAEVEDENIE_KALININGRAD_OBLAST"]
 
     monkeypatch.setattr(main, "classify_event_topics", fake_classify)
 
@@ -203,7 +203,7 @@ async def test_assign_event_topics_adds_kaliningrad_for_city(monkeypatch):
 @pytest.mark.asyncio
 async def test_assign_event_topics_kaliningrad_uses_hashtags(monkeypatch):
     async def fake_classify(event):
-        return ["CONCERTS"]
+        return ["CONCERTS", "KRAEVEDENIE_KALININGRAD_OBLAST"]
 
     monkeypatch.setattr(main, "classify_event_topics", fake_classify)
 
@@ -289,7 +289,7 @@ async def test_assign_event_topics_preserves_urbanism(monkeypatch):
 @pytest.mark.asyncio
 async def test_assign_event_topics_adds_kaliningrad_to_urbanism(monkeypatch):
     async def fake_classify(event):
-        return ["URBANISM"]
+        return ["URBANISM", "KRAEVEDENIE_KALININGRAD_OBLAST"]
 
     monkeypatch.setattr(main, "classify_event_topics", fake_classify)
 
