@@ -4878,14 +4878,24 @@ def parse_time_range(value: str) -> tuple[time, time | None] | None:
 
 def apply_ics_link(html_content: str, url: str | None) -> str:
     """Insert or remove the ICS link block in Telegraph HTML."""
-    idx = html_content.find(ICS_LABEL)
-    if idx != -1:
-        start = html_content.rfind("<p", 0, idx)
-        end = html_content.find("</p>", idx)
-        if start != -1 and end != -1:
-            html_content = html_content[:start] + html_content[end + 4 :]
+    removal_pattern = re.compile(
+        r"\s*\U0001f4c5\s*<a\b[^>]*>\s*"
+        + re.escape(ICS_LABEL)
+        + r"\s*</a>",
+        flags=re.IGNORECASE,
+    )
+    html_content = removal_pattern.sub("", html_content)
+    html_content = re.sub(r"<p>\s*</p>", "", html_content)
     if not url:
         return html_content
+    tail_html = (
+        f' \U0001f4c5 <a href="{html.escape(url)}">{ICS_LABEL}</a>'
+    )
+    date_paragraph_re = re.compile(r"(<p[^>]*>.*?🗓.*?)(</p>)", re.DOTALL)
+    match = date_paragraph_re.search(html_content)
+    if match:
+        updated = match.group(1) + tail_html + match.group(2)
+        return html_content[: match.start()] + updated + html_content[match.end() :]
     link_html = (
         f'<p>\U0001f4c5 <a href="{html.escape(url)}">{ICS_LABEL}</a></p>'
     )
@@ -24498,6 +24508,8 @@ def _format_ticket_price(min_price: int | None, max_price: int | None) -> str:
 
 async def _build_source_summary_block(
     event_summary: SourcePageEventSummary | None,
+    *,
+    ics_url: str | None = None,
 ) -> str:
     if not event_summary:
         return ""
@@ -24550,8 +24562,14 @@ async def _build_source_summary_block(
     else:
         date_line = ""
 
-    if date_line.strip():
-        lines.append(html.escape(date_line.strip()))
+    date_line = date_line.strip()
+    if date_line:
+        escaped_date = html.escape(date_line)
+        if ics_url:
+            escaped_date += (
+                f' \U0001f4c5 <a href="{html.escape(ics_url)}">{ICS_LABEL}</a>'
+            )
+        lines.append(escaped_date)
 
     location_parts: list[str] = []
     existing_normalized: set[str] = set()
@@ -24651,19 +24669,16 @@ async def build_source_page_content(
     tail = urls[1:]
     if cover:
         html_content += f'<figure><img src="{html.escape(cover[0])}"/></figure>'
-        if ics_url:
-            html_content += (
-                f'<p>\U0001f4c5 <a href="{html.escape(ics_url)}">Добавить в календарь</a></p>'
-            )
-    else:
-        if ics_url:
-            html_content += (
-                f'<p>\U0001f4c5 <a href="{html.escape(ics_url)}">Добавить в календарь</a></p>'
-            )
-    summary_html = await _build_source_summary_block(event_summary)
+    summary_html = await _build_source_summary_block(
+        event_summary, ics_url=ics_url
+    )
     summary_added = bool(summary_html)
     if summary_html:
         html_content += summary_html
+    elif ics_url:
+        html_content += (
+            f'<p>\U0001f4c5 <a href="{html.escape(ics_url)}">{ICS_LABEL}</a></p>'
+        )
     emoji_pat = re.compile(r"<tg-emoji[^>]*>(.*?)</tg-emoji>", re.DOTALL)
     spoiler_pat = re.compile(r"<tg-spoiler[^>]*>(.*?)</tg-spoiler>", re.DOTALL)
     tg_emoji_cleaned = 0
