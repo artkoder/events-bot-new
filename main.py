@@ -1582,6 +1582,7 @@ _four_o_usage_state = {
     "used": 0,
     "models": {model: 0 for model in FOUR_O_TRACKED_MODELS},
 }
+_last_ask_4o_request_id: str | None = None
 
 
 def _reset_four_o_usage_state(today: date) -> None:
@@ -1608,6 +1609,10 @@ def _get_four_o_usage_snapshot() -> dict[str, Any]:
         "used": _four_o_usage_state.get("used", 0),
         "models": models,
     }
+
+
+def get_last_ask_4o_request_id() -> str | None:
+    return _last_ask_4o_request_id
 
 
 def _record_four_o_usage(
@@ -6056,6 +6061,10 @@ async def ask_4o(
                 return await resp.json()
 
     data = await asyncio.wait_for(_call(), FOUR_O_TIMEOUT)
+    global _last_ask_4o_request_id
+    request_id = data.get("id")
+    if isinstance(request_id, str):
+        _last_ask_4o_request_id = request_id
     usage = data.get("usage") or {}
     _record_four_o_usage(
         "ask",
@@ -20006,6 +20015,71 @@ async def handle_mem(message: types.Message, db: Database, bot: Bot):
     await bot.send_message(message.chat.id, f"RSS: {rss / (1024**2):.1f} MB")
 
 
+async def handle_usage_test(message: types.Message, db: Database, bot: Bot):
+    async with db.get_session() as session:
+        user = await session.get(User, message.from_user.id)
+    if not user or not user.is_superadmin:
+        await bot.send_message(message.chat.id, "Not authorized")
+        return
+
+    model_name = "gpt-4o-mini"
+    try:
+        await ask_4o("usage probe", model=model_name)
+    except Exception as exc:  # pragma: no cover - network failure
+        logging.exception("usage_test ask_4o failed")
+        await bot.send_message(message.chat.id, f"ask_4o failed: {exc}")
+        return
+
+    request_id = get_last_ask_4o_request_id()
+    if not request_id:
+        await bot.send_message(message.chat.id, "No request ID returned")
+        return
+
+    client = get_supabase_client()
+    if client is None:
+        await bot.send_message(message.chat.id, "Supabase disabled")
+        return
+
+    try:
+        response = (
+            client.table("token_usage")
+            .select("prompt_tokens,completion_tokens,total_tokens")
+            .eq("request_id", request_id)
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        records = getattr(response, "data", response)
+        row = (records or [{}])[0]
+        prompt_tokens = int(row.get("prompt_tokens") or 0)
+        completion_tokens = int(row.get("completion_tokens") or 0)
+        total_tokens = int(row.get("total_tokens") or (prompt_tokens + completion_tokens))
+    except Exception as exc:  # pragma: no cover - supabase failure
+        logging.exception("usage_test supabase query failed")
+        await bot.send_message(message.chat.id, f"Supabase query failed: {exc}")
+        return
+
+    bot_label = getattr(bot, "id", None)
+    if bot_label is None:
+        bot_label = bot.__class__.__name__
+    logging.info(
+        "usage_test trace bot=%s model=%s request_id=%s",
+        bot_label,
+        model_name,
+        request_id,
+    )
+
+    payload = {
+        "prompt": prompt_tokens,
+        "completion": completion_tokens,
+        "total": total_tokens,
+    }
+    await bot.send_message(
+        message.chat.id,
+        json.dumps(payload, ensure_ascii=False),
+    )
+
+
 async def handle_dumpdb(message: types.Message, db: Database, bot: Bot):
     async with db.get_session() as session:
         user = await session.get(User, message.from_user.id)
@@ -25025,6 +25099,9 @@ def create_app() -> web.Application:
     async def requests_wrapper(message: types.Message):
         await handle_requests(message, db, bot)
 
+    async def usage_test_wrapper(message: types.Message):
+        await handle_usage_test(message, db, bot)
+
     async def tz_wrapper(message: types.Message):
         await handle_tz(message, db, bot)
 
@@ -25368,6 +25445,7 @@ def create_app() -> web.Application:
     dp.message.register(start_wrapper, Command("start"))
     dp.message.register(register_wrapper, Command("register"))
     dp.message.register(requests_wrapper, Command("requests"))
+    dp.message.register(usage_test_wrapper, Command("usage_test"))
     dp.callback_query.register(
         callback_wrapper,
         lambda c: c.data.startswith("approve")
