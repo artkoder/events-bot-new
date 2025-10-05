@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-- _No unreleased changes._
+- Log OpenAI token usage through Supabase inserts (guarded by `BOT_CODE`) and ship the `/usage_test` admin self-test so operators can verify the inserts and share usage snapshots during release comms.
 
 ## v0.3.16 – 2025-10-05
 - Telegraph event source pages now include a “Быстрые факты” block with date/time, location, and ticket/free status, hiding each line when the underlying data is missing so operators know it’s conditional.

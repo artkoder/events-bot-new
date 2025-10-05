@@ -213,6 +213,27 @@ def test_extract_event_ts_hint_phone_block_with_guidance_tail():
     assert extract_event_ts_hint(text, publish_ts=publish_dt) is None
 
 
+def test_extract_event_ts_hint_phone_block_with_action_only():
+    publish_dt = real_datetime(2024, 10, 1, tzinfo=main.LOCAL_TZ)
+    text = "Телефон: 27-01-26 — встречаемся"
+    assert extract_event_ts_hint(text, publish_ts=publish_dt) is None
+
+
+def test_extract_event_ts_hint_phone_then_location_only():
+    publish_dt = real_datetime(2024, 10, 1, tzinfo=main.LOCAL_TZ)
+    text = "Телефон: 27-01-26 — в клубе «Мечта»"
+    assert extract_event_ts_hint(text, publish_ts=publish_dt) is None
+
+
+def test_extract_event_ts_hint_phone_then_location_and_date():
+    publish_dt = real_datetime(2024, 10, 1, tzinfo=main.LOCAL_TZ)
+    text = "Телефон: 27-01-26 — в клубе концерт 20-10-24"
+    ts = extract_event_ts_hint(text, publish_ts=publish_dt)
+    assert ts is not None
+    dt = real_datetime.fromtimestamp(ts, tz=main.LOCAL_TZ)
+    assert (dt.year, dt.month, dt.day) == (2024, 10, 20)
+
+
 def test_extract_event_ts_hint_phone_block_then_real_date():
     publish_dt = real_datetime(2024, 10, 1, tzinfo=main.LOCAL_TZ)
     text = "Телефон: 27-01-26 — 29-03-44, встречаемся 20-10-24"
@@ -225,6 +246,15 @@ def test_extract_event_ts_hint_phone_block_then_real_date():
 def test_extract_event_ts_hint_phone_guidance_then_text_date():
     publish_dt = real_datetime(2024, 10, 1, tzinfo=main.LOCAL_TZ)
     text = "Телефон: 27-01-26 — концерт 20-10-24"
+    ts = extract_event_ts_hint(text, publish_ts=publish_dt)
+    assert ts is not None
+    dt = real_datetime.fromtimestamp(ts, tz=main.LOCAL_TZ)
+    assert (dt.year, dt.month, dt.day) == (2024, 10, 20)
+
+
+def test_extract_event_ts_hint_phone_action_then_text_date():
+    publish_dt = real_datetime(2024, 10, 1, tzinfo=main.LOCAL_TZ)
+    text = "Телефон: 27-01-26 — встречаемся 20-10-24"
     ts = extract_event_ts_hint(text, publish_ts=publish_dt)
     assert ts is not None
     dt = real_datetime.fromtimestamp(ts, tz=main.LOCAL_TZ)
