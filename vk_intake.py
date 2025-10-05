@@ -359,8 +359,13 @@ def extract_event_ts_hint(
                 if match_end <= start:
                     intervening = text_low[match_end:start]
                     if not re.search(r"[a-zа-яё]", intervening):
-                        skip_candidate = True
-                        break
+                        if "\n" in intervening or "\r" in intervening:
+                            continue
+                        normalized = intervening.replace(" ", "")
+                        normalized = normalized.lstrip(".,:;-–—")
+                        if not normalized or re.fullmatch(r"[\d()+\-–—]*", normalized):
+                            skip_candidate = True
+                            break
             if skip_candidate:
                 continue
         m = candidate
