@@ -84,6 +84,15 @@ def test_apply_ics_link_appends_to_date_paragraph():
     )
 
 
+def test_apply_ics_link_inserts_before_br():
+    html = "<p>🗓 1 мая ⏰ 19:00<br/>📍 Место</p>"
+    res = main.apply_ics_link(html, "http://ics")
+    assert (
+        '🗓 1 мая ⏰ 19:00 📅 <a href="http://ics">Добавить в календарь</a><br/>📍 Место'
+        in res
+    )
+
+
 @pytest.mark.asyncio
 async def test_build_source_page_content_ics_with_cover():
     html, _, _ = await main.build_source_page_content(
