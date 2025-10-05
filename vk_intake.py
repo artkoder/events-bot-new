@@ -450,6 +450,8 @@ def extract_event_ts_hint(
             has_event_tail = False
             next_alpha_word = None
             following_is_phone_tail = False
+            remainder = ""
+            skip_due_to_action_tail = False
             if trailing_idx < len(text_low):
                 remainder = text_low[trailing_idx:]
                 word_match = re.match(r"[a-zа-яё]+", remainder)
@@ -480,7 +482,24 @@ def extract_event_ts_hint(
                             and next_alpha_word
                             and next_alpha_word.startswith(EVENT_ACTION_PREFIXES)
                         ):
-                            has_event_tail = True
+                            action_tail = remainder[len(next_alpha_word) :]
+                            action_tail = action_tail.lstrip(
+                                " \t\r\n.;:!?()[]{}«»\"'—–-"
+                            )
+                            if action_tail:
+                                has_action_tail_datetime = bool(
+                                    NUM_DATE_RE.search(action_tail)
+                                    or DATE_RANGE_RE.search(action_tail)
+                                    or TIME_RE.search(action_tail)
+                                    or TIME_H_RE.search(action_tail)
+                                    or TIME_RANGE_RE.search(action_tail)
+                                    or MONTH_NAME_RE.search(action_tail)
+                                )
+                                if has_action_tail_datetime:
+                                    has_event_tail = True
+                                    skip_due_to_action_tail = True
+            if skip_due_to_action_tail:
+                continue
             if not has_event_tail:
                 for phone_match in PHONE_CONTEXT_RE.finditer(context_slice):
                     match_end = context_start + phone_match.end()
@@ -495,6 +514,12 @@ def extract_event_ts_hint(
                         if "," in trimmed:
                             break
                         if re.search(r"[a-zа-яё]", trimmed):
+                            break
+                        if (
+                            re.search(r"\d", trimmed)
+                            and re.search(r"[a-zа-яё]", remainder)
+                            and not re.search(r"\d", remainder)
+                        ):
                             break
                         compact = trimmed.replace(" ", "")
                         compact = re.sub(r"^[.,:;-–—]+", "", compact)
