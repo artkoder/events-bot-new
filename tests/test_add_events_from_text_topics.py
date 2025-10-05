@@ -36,7 +36,7 @@ async def test_add_events_from_text_assigns_topics(tmp_path: Path, monkeypatch):
         return "https://t.me/test", "path", "", 0
 
     async def fake_classify(event: Event):
-        return ["CONCERTS", "FAMILY"]
+        return ["CONCERTS", "FAMILY", "KRAEVEDENIE_KALININGRAD_OBLAST"]
 
     monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
     monkeypatch.setattr(main, "schedule_event_update_tasks", fake_schedule_event_update_tasks)
@@ -79,7 +79,7 @@ async def test_add_events_from_text_multiday_inherits_topics(tmp_path: Path, mon
 
     async def fake_classify(event: Event):
         calls["classify"] += 1
-        return ["PARTIES"]
+        return ["PARTIES", "KRAEVEDENIE_KALININGRAD_OBLAST"]
 
     async def fake_schedule_event_update_tasks(
         db_obj, event_obj, drain_nav=True, skip_vk_sync=False
