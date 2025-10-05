@@ -288,6 +288,13 @@ async def test_usage_test_queries_supabase(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(main, "ask_4o", fake_ask)
     monkeypatch.setattr(main, "get_last_ask_4o_request_id", lambda: "req-usage")
 
+    sleep_calls: list[float] = []
+
+    async def fake_sleep(delay: float):
+        sleep_calls.append(delay)
+
+    monkeypatch.setattr(main.asyncio, "sleep", fake_sleep)
+
     class FakeQuery:
         def __init__(self, parent):
             self.parent = parent
@@ -311,26 +318,34 @@ async def test_usage_test_queries_supabase(tmp_path: Path, monkeypatch):
 
         def execute(self):
             self.parent.last_steps = list(self.steps)
-            return SimpleNamespace(
-                data=[
-                    {
-                        "prompt_tokens": 11,
-                        "completion_tokens": 5,
-                        "total_tokens": 16,
-                    }
-                ]
-            )
+            self.parent.executions += 1
+            index = min(self.parent.executions - 1, len(self.parent.responses) - 1)
+            return SimpleNamespace(data=self.parent.responses[index])
 
     class FakeSupabase:
-        def __init__(self):
+        def __init__(self, responses):
             self.tables: list[str] = []
             self.last_steps: list[tuple] = []
+            self.executions = 0
+            self.responses = responses
 
         def table(self, name: str):
             self.tables.append(name)
             return FakeQuery(self)
 
-    fake_client = FakeSupabase()
+    fake_client = FakeSupabase(
+        responses=[
+            [],
+            [],
+            [
+                {
+                    "prompt_tokens": 11,
+                    "completion_tokens": 5,
+                    "total_tokens": 16,
+                }
+            ],
+        ]
+    )
     monkeypatch.setattr(main, "get_supabase_client", lambda: fake_client)
 
     msg = types.Message.model_validate(
@@ -346,8 +361,10 @@ async def test_usage_test_queries_supabase(tmp_path: Path, monkeypatch):
     await handle_usage_test(msg, db, bot)
 
     assert captured["kwargs"]["model"] == "gpt-4o-mini"
-    assert fake_client.tables == ["token_usage"]
+    assert fake_client.tables == ["token_usage", "token_usage", "token_usage"]
+    assert fake_client.executions == 3
     assert ("eq", "request_id", "req-usage") in fake_client.last_steps
+    assert sleep_calls, "usage handler should wait for Supabase data"
 
     assert bot.messages, "admin should receive usage summary"
     payload = json.loads(bot.messages[-1][1])
