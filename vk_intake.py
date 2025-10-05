@@ -184,6 +184,17 @@ DATE_PATTERNS = [
 
 COMPILED_DATE_PATTERNS = [re.compile(p, re.I | re.U) for p in DATE_PATTERNS]
 
+PAST_EVENT_RE = re.compile(
+    r"\b("
+    r"состоял(?:ась|ось|ся|и|а)?|"
+    r"прош[её]л(?:и|а)?|"
+    r"проходил(?:и|а|о)?|"
+    r"завершил(?:ись|ась|ось|ся|и|а|о)?|"
+    r"отгремел(?:а|и|о)?"
+    r")\b",
+    re.I,
+)
+
 HISTORICAL_TOPONYMS = [
     "кёнигсберг",
     "кенигсберг",
@@ -375,7 +386,16 @@ def extract_event_ts_hint(
         elif "послезавтра" in text_low:
             dt = now + timedelta(days=2)
         else:
-            dow_m = DOW_RE.search(text_low)
+            dow_matches = list(DOW_RE.finditer(text_low))
+            dow_m = None
+            for candidate in dow_matches:
+                context_start = max(0, candidate.start() - 40)
+                context_end = min(len(text_low), candidate.end() + 40)
+                context_slice = text_low[context_start:context_end]
+                if PAST_EVENT_RE.search(context_slice):
+                    continue
+                dow_m = candidate
+                break
             if dow_m:
                 dow_map = {
                     "понедельник": 0,
@@ -400,6 +420,8 @@ def extract_event_ts_hint(
                     dow = dow_map.get(key[:2])
                 days_ahead = (dow - now.weekday()) % 7
                 dt = now + timedelta(days=days_ahead)
+            elif dow_matches:
+                return None
             elif WEEKEND_RE.search(text_low):
                 days_ahead = (5 - now.weekday()) % 7
                 dt = now + timedelta(days=days_ahead)
