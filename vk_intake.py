@@ -410,20 +410,45 @@ def detect_historical_context(text: str) -> bool:
 def normalize_phone_candidates(text: str) -> str:
     """Strip separators from phone-like sequences without touching valid dates."""
 
-    def is_valid_date_sequence(parts: List[str]) -> bool:
-        if len(parts) < 3:
-            return False
-        try:
-            day = int(parts[0])
-            month = int(parts[1])
-        except ValueError:
-            return False
-        if not (1 <= day <= 31 and 1 <= month <= 12):
-            return False
-        year_part = parts[2]
-        if len(year_part) < 2:
-            return False
-        return True
+    date_intervals: list[tuple[int, int]] = []
+
+    def _collect_intervals(pattern: re.Pattern[str]) -> None:
+        for match in pattern.finditer(text):
+            date_intervals.append((match.start(), match.end()))
+
+    for date_pattern in (DATE_RANGE_RE, NUM_DATE_RE, MONTH_NAME_RE):
+        _collect_intervals(date_pattern)
+
+    phone_spans: list[tuple[int, int]] = [
+        (m.start(), m.end()) for m in PHONE_CANDIDATE_RE.finditer(text)
+    ]
+
+    filtered_intervals: list[tuple[int, int]] = []
+    for start, end in date_intervals:
+        skip_interval = False
+        for p_start, p_end in phone_spans:
+            if p_start <= start and end <= p_end:
+                if p_start < start or end < p_end:
+                    skip_interval = True
+                    break
+                context_start = max(0, start - 20)
+                context = text[context_start:start]
+                if PHONE_CONTEXT_RE.search(context):
+                    skip_interval = True
+                    break
+        if not skip_interval:
+            filtered_intervals.append((start, end))
+
+    date_intervals = sorted(filtered_intervals)
+
+    def is_in_date_interval(index: int) -> bool:
+        for interval_start, interval_end in date_intervals:
+            if interval_end <= index:
+                continue
+            if interval_start > index:
+                break
+            return interval_start <= index < interval_end
+        return False
 
     result: List[str] = []
     pos = 0
@@ -442,15 +467,20 @@ def normalize_phone_candidates(text: str) -> str:
             else:
                 break
         trimmed = original[:trimmed_end]
-        if DATE_RANGE_RE.search(trimmed):
-            result.append(trimmed)
+        if trimmed_end:
+            normalized_chars: list[str] = []
+            for rel_idx, ch in enumerate(trimmed):
+                if ch.isdigit():
+                    absolute_idx = start + rel_idx
+                    if is_in_date_interval(absolute_idx):
+                        normalized_chars.append(ch)
+                    else:
+                        normalized_chars.append("x")
+                else:
+                    normalized_chars.append(ch)
+            result.append("".join(normalized_chars))
         else:
-            parts = re.findall(r"\d+", trimmed)
-            if is_valid_date_sequence(parts):
-                result.append(trimmed)
-            else:
-                normalized = re.sub(r"\d", "x", trimmed)
-                result.append(normalized)
+            result.append(trimmed)
         pos = start + trimmed_end
     result.append(text[pos:])
     return "".join(result)
