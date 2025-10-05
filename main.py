@@ -6415,7 +6415,8 @@ _EVENT_TOPIC_LISTING = "\n".join(
 EVENT_TOPIC_SYSTEM_PROMPT = textwrap.dedent(
     f"""
     Ты — ассистент, который классифицирует культурные события по темам.
-    Верни JSON с массивом `topics`: выбери от 0 до 3 подходящих идентификаторов тем.
+    Ты работаешь для Калининградской области, поэтому оценивай, связано ли событие с регионом, и при необходимости отмечай `KRAEVEDENIE_KALININGRAD_OBLAST`.
+    Верни JSON с массивом `topics`: выбери от 0 до 5 подходящих идентификаторов тем.
     Используй только идентификаторы из списка ниже, записывай их ровно так, как показано, и не добавляй другие значения.
     Не отмечай темы про скидки, «Бесплатно» или бесплатное участие и игнорируй «Фестивали», сетевые программы и серии мероприятий.
     Не повторяй одинаковые идентификаторы.
@@ -6442,7 +6443,7 @@ EVENT_TOPIC_RESPONSE_FORMAT = {
                         "type": "string",
                         "enum": list(TOPIC_LABELS.keys()),
                     },
-                    "maxItems": 3,
+                    "maxItems": 5,
                     "uniqueItems": True,
                 }
             },
@@ -6544,8 +6545,6 @@ async def classify_event_topics(event: Event) -> list[str]:
             continue
         seen.add(canonical)
         result.append(canonical)
-        if len(result) >= 3:
-            break
     return result
 
 
