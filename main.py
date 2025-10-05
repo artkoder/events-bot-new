@@ -1744,7 +1744,7 @@ async def log_token_usage(
         "total_tokens": total_tokens,
         "endpoint": endpoint,
         "request_id": request_id,
-        "meta": dict(meta) if meta else None,
+        "meta": dict(meta) if meta else {},
         "at": datetime.now(timezone.utc).isoformat(),
     }
 
