@@ -551,7 +551,8 @@ def extract_event_ts_hint(
                             and re.search(r"[a-zа-яё]", remainder)
                             and not re.search(r"\d", remainder)
                         ):
-                            break
+                            skip_candidate = True
+                            continue
                         compact = trimmed.replace(" ", "")
                         compact = re.sub(r"^[.,:;-–—]+", "", compact)
                         if not compact or re.fullmatch(r"[\d()+\-–—]*", compact):
