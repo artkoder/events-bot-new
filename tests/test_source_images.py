@@ -246,14 +246,11 @@ async def test_build_source_page_content_summary_block(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_build_source_page_content_summary_block_free(monkeypatch):
-    async def fake_location(parts):
-        return "Локация"
-
-    monkeypatch.setattr(main, "build_short_vk_location", fake_location)
-
     summary = main.SourcePageEventSummary(
         date="2024-05-02",
         location_name="Локация",
+        location_address="Адрес",
+        city="Город",
         ticket_link="https://example.org/register",
         is_free=True,
     )
@@ -268,7 +265,7 @@ async def test_build_source_page_content_summary_block_free(monkeypatch):
         event_summary=summary,
     )
     assert (
-        '<p>🗓 2 мая<br/>📍 Локация<br/>🆓 '
+        '<p>🗓 2 мая<br/>📍 Локация, Адрес, Город<br/>🆓 '
         '<a href="https://example.org/register">Бесплатно, по регистрации</a></p>'
         in html
     )
