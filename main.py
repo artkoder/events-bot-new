@@ -260,6 +260,7 @@ from models import (
     JobOutbox,
     JobTask,
     JobStatus,
+    OcrUsage,
 )
 
 
@@ -19962,10 +19963,34 @@ async def handle_stats(message: types.Message, db: Database, bot: Bot):
             lines.extend(fest_vk)
     usage_snapshot = _get_four_o_usage_snapshot()
     usage_models = usage_snapshot.get("models", {})
+
+    def _coerce_int(value: Any) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
+
+    mini_snapshot = _coerce_int(usage_models.get("gpt-4o-mini", 0))
+    ocr_tokens = 0
+    today_key = poster_ocr._today_key()
+    async with db.get_session() as session:
+        ocr_usage = await session.get(OcrUsage, today_key)
+        if ocr_usage and ocr_usage.spent_tokens:
+            ocr_tokens = max(int(ocr_usage.spent_tokens), 0)
+            usage_models["gpt-4o-mini"] = mini_snapshot + ocr_tokens
+
+    snapshot_total = _coerce_int(usage_snapshot.get("total", 0))
+    if ocr_tokens:
+        extra_total = max(ocr_tokens - mini_snapshot, 0)
+        tokens_total = snapshot_total + extra_total
+    else:
+        tokens_total = snapshot_total
+
     lines.extend(
         [
             f"Tokens gpt-4o: {usage_models.get('gpt-4o', 0)}",
             f"Tokens gpt-4o-mini: {usage_models.get('gpt-4o-mini', 0)}",
+            f"Tokens total: {tokens_total}",
         ]
     )
     await bot.send_message(message.chat.id, "\n".join(lines) if lines else "No data")
