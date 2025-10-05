@@ -20263,7 +20263,7 @@ async def handle_usage_test(message: types.Message, db: Database, bot: Bot):
                 client.table("token_usage")
                 .select("prompt_tokens,completion_tokens,total_tokens")
                 .eq("request_id", request_id)
-                .order("created_at", desc=True)
+                .order("at", desc=True)
                 .limit(1)
                 .execute()
             )

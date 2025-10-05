@@ -363,6 +363,7 @@ async def test_usage_test_queries_supabase(tmp_path: Path, monkeypatch):
     assert captured["kwargs"]["model"] == "gpt-4o-mini"
     assert fake_client.tables == ["token_usage", "token_usage", "token_usage"]
     assert fake_client.executions == 3
+    assert ("order", "at", True) in fake_client.last_steps
     assert ("eq", "request_id", "req-usage") in fake_client.last_steps
     assert sleep_calls, "usage handler should wait for Supabase data"
 
