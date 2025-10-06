@@ -727,6 +727,10 @@ async def test_vkrev_story_editor_respects_omit_instruction(monkeypatch):
     assert isinstance(editor_html, str)
     assert "футбол" not in editor_html.lower()
     assert "без спорта" in editor_html.lower()
+    final_title = captured["args"][0]
+    assert isinstance(final_title, str)
+    assert final_title
+    assert "футбол" not in final_title.casefold()
     assert main.vk_review_story_sessions.get(operator_id) is None
 
 
@@ -776,3 +780,97 @@ async def test_vkrev_story_instruction_message_flow(monkeypatch):
     keyboard = bot.messages[1][2]
     assert keyboard is not None
     assert isinstance(keyboard.inline_keyboard, list)
+
+
+@pytest.mark.asyncio
+async def test_vkrev_story_title_uses_editor_heading(monkeypatch):
+    operator_id = 135
+    inbox_id = 864
+    text = "Короткий анонс"
+    instructions = "Не упоминать футбол"
+    main.vk_review_story_sessions[operator_id] = main.VkReviewStorySession(
+        inbox_id=inbox_id,
+        batch_id="batch-title",
+        instructions=instructions,
+    )
+
+    class DummyCursor:
+        def __init__(self, row):
+            self._row = row
+
+        async def fetchone(self):
+            return self._row
+
+    class DummyRawConn:
+        def __init__(self, row):
+            self._row = row
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def execute(self, *_args):
+            return DummyCursor(self._row)
+
+    class DummyDB:
+        def __init__(self, row):
+            self._row = row
+
+        def raw_conn(self):
+            return DummyRawConn(self._row)
+
+    dummy_db = DummyDB((-inbox_id, inbox_id, text))
+
+    class DummyBot:
+        def __init__(self):
+            self.messages: list[tuple[int, str]] = []
+
+        async def send_message(self, chat_id, message):
+            self.messages.append((chat_id, message))
+
+    class DummyMessage:
+        def __init__(self, chat_id):
+            self.chat = SimpleNamespace(id=chat_id)
+            self.edited = False
+
+        async def edit_reply_markup(self):
+            self.edited = True
+
+    callback = SimpleNamespace(
+        from_user=SimpleNamespace(id=operator_id),
+        message=DummyMessage(222),
+    )
+
+    captured: dict[str, object] = {}
+
+    async def fake_create_source_page(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return ("https://telegraph", "/path", "", 0)
+
+    async def fake_fetch_photos(*_args, **_kwargs):
+        return []
+
+    async def fake_editor(*_args, **_kwargs):
+        return "<h3>Футбол под открытым небом</h3><p>Описание</p>"
+
+    async def fake_pitch(*_args, **_kwargs):
+        return ""
+
+    monkeypatch.setattr(main, "create_source_page", fake_create_source_page)
+    monkeypatch.setattr(main, "_vkrev_fetch_photos", fake_fetch_photos)
+    monkeypatch.setattr(main, "compose_story_editorial_via_4o", fake_editor)
+    monkeypatch.setattr(main, "compose_story_pitch_via_4o", fake_pitch)
+
+    bot = DummyBot()
+    await main._vkrev_handle_story_choice(callback, "end", inbox_id, dummy_db, bot)
+
+    assert "args" in captured
+    final_title = captured["args"][0]
+    assert isinstance(final_title, str)
+    assert final_title == "Под открытым небом"
+    assert "футбол" not in final_title.casefold()
+    assert final_title != text
+    assert main.vk_review_story_sessions.get(operator_id) is None

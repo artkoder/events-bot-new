@@ -23022,6 +23022,7 @@ async def _vkrev_import_flow(
 
 
 _VK_STORY_LINK_RE = re.compile(r"\[([^\[\]]+)\]")
+_VKREV_EDITOR_H3_RE = re.compile(r"<h3[^>]*>(.*?)</h3>", re.IGNORECASE | re.DOTALL)
 
 
 def _vk_story_link_label(match: re.Match[str]) -> str:
@@ -23046,6 +23047,95 @@ def _vkrev_story_title(text: str | None, group_id: int, post_id: int) -> str:
             if cleaned:
                 return cleaned[:64]
     return f"История VK {group_id}_{post_id}"
+
+
+def _vkrev_extract_editor_title(editor_html: str | None) -> str | None:
+    if not editor_html:
+        return None
+    match = _VKREV_EDITOR_H3_RE.search(editor_html)
+    candidate: str | None = None
+    if match:
+        candidate = _strip_tags(match.group(1))
+    if not candidate:
+        plain = _strip_tags(editor_html)
+        for line in plain.splitlines():
+            line_clean = line.strip()
+            if line_clean:
+                candidate = line_clean
+                break
+    if not candidate:
+        return None
+    candidate = re.sub(r"\s+", " ", candidate).strip()
+    return candidate or None
+
+
+def _vkrev_extract_forbidden_phrases(instructions: str | None) -> list[str]:
+    if not instructions:
+        return []
+    lowered = instructions.casefold()
+    phrases: set[str] = set()
+    patterns = [
+        r"не\s+(?:используй|использовать|упоминать|упоминай)\s+([^.!?\n]+)",
+        r"без\s+([^.!?\n]+)",
+    ]
+    for pattern in patterns:
+        for match in re.finditer(pattern, lowered):
+            fragment = match.group(1)
+            fragment = re.split(r"[,;]\s*", fragment, maxsplit=1)[0]
+            fragment = fragment.strip()
+            fragment = re.sub(r"^(слова?|word|emoji|эмодзи)\s+", "", fragment)
+            fragment = fragment.strip(" \"'«»“”„‹›‚‘’`()[]")
+            if fragment:
+                phrases.add(fragment)
+    ordered = sorted(phrases, key=len, reverse=True)
+    return ordered
+
+
+def _vkrev_phrase_regex(phrase: str) -> re.Pattern[str]:
+    words = [re.escape(part) for part in phrase.split() if part]
+    if not words:
+        return re.compile(r"^$")
+    pattern = r"\s+".join(words)
+    return re.compile(rf"(?i)\b{pattern}\b")
+
+
+def _vkrev_apply_title_instructions(
+    title: str | None, instructions: str | None
+) -> str:
+    candidate = (title or "").strip()
+    if not candidate:
+        return ""
+    candidate = re.sub(r"\s+", " ", candidate)
+    instructions_clean = (instructions or "").strip()
+    if instructions_clean:
+        lowered = instructions_clean.casefold()
+        if any(token in lowered for token in ("эмодзи", "emoji", "смай")):
+            candidate = _EMOJI_RE.sub("", candidate)
+            candidate = re.sub(r"\s+", " ", candidate).strip()
+        for phrase in _vkrev_extract_forbidden_phrases(instructions_clean):
+            pattern = _vkrev_phrase_regex(phrase)
+            candidate = pattern.sub("", candidate)
+            candidate = re.sub(r"\s{2,}", " ", candidate)
+            candidate = candidate.strip()
+    candidate = candidate.strip(" -–—,:;")
+    candidate = re.sub(r"\s{2,}", " ", candidate).strip()
+    if candidate and candidate[0].islower():
+        candidate = candidate[0].upper() + candidate[1:]
+    return candidate[:64]
+
+
+def _vkrev_select_story_title(
+    fallback_title: str,
+    default_title: str,
+    editor_title: str | None,
+    instructions: str | None,
+) -> str:
+    candidates = [editor_title, fallback_title, default_title, "История"]
+    for candidate in candidates:
+        cleaned = _vkrev_apply_title_instructions(candidate, instructions)
+        if cleaned:
+            return cleaned
+    return "История"
 
 
 def _vkrev_story_placement_keyboard(inbox_id: int) -> types.InlineKeyboardMarkup:
@@ -23098,18 +23188,20 @@ async def _vkrev_handle_story_choice(
         await bot.send_message(callback.message.chat.id, "Инбокс не найден")
         return
     group_id, post_id, text = row
-    title = _vkrev_story_title(text, group_id, post_id)
+    raw_title = _vkrev_story_title(text, group_id, post_id)
+    default_title = f"История VK {group_id}_{post_id}"
     source_url = f"https://vk.com/wall-{group_id}_{post_id}"
     photos = await _vkrev_fetch_photos(group_id, post_id, db, bot)
     image_mode = "inline" if placement == "middle" else "tail"
     source_text = text or ""
     editor_html: str | None = None
+    editor_title_candidate: str | None = None
     pitch_text = ""
     if source_text.strip():
         try:
             pitch_text = await compose_story_pitch_via_4o(
                 source_text,
-                title=title,
+                title=raw_title,
                 instructions=state.instructions,
             )
         except Exception as exc:  # pragma: no cover - defensive
@@ -23125,7 +23217,7 @@ async def _vkrev_handle_story_choice(
         try:
             editor_candidate = await compose_story_editorial_via_4o(
                 source_text,
-                title=title,
+                title=raw_title,
                 instructions=state.instructions,
             )
         except Exception as exc:
@@ -23141,6 +23233,7 @@ async def _vkrev_handle_story_choice(
             cleaned = editor_candidate.strip()
             if cleaned:
                 editor_html = cleaned
+                editor_title_candidate = _vkrev_extract_editor_title(cleaned)
             else:
                 logging.warning(
                     "vk_review story editor returned empty response",
@@ -23153,9 +23246,15 @@ async def _vkrev_handle_story_choice(
             editor_html = pitch_html + "\n" + editor_html
         else:
             editor_html = pitch_html
+    telegraph_title = _vkrev_select_story_title(
+        raw_title,
+        default_title,
+        editor_title_candidate,
+        state.instructions,
+    )
     try:
         result = await create_source_page(
-            title,
+            telegraph_title,
             source_text,
             source_url,
             editor_html,
