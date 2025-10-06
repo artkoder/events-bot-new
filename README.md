@@ -26,6 +26,15 @@ batch can be finished with "🧹 Завершить…" which sequentially rebui
 affected month pages. Operators can run `/vk_queue` to see current inbox counts
 and get a button to start reviewing candidates.
 
+When the reviewer taps «Создать историю», the bot first asks whether extra
+editor guidance is needed. Selecting «Да, нужны правки» opens a short reply
+prompt where the operator can describe tone, required facts or off-limit
+topics. Send the message to save it, or skip by tapping «Пропустить», leaving
+the field empty, or sending `-`. Answering «Нет, всё понятно» proceeds without
+collecting extra text. The yes/no choice and any saved instructions are then
+inserted into both 4o prompts that produce the outline and final VK story so
+the generation follows the editor’s decisions.
+
 Even terse posts—such as a single photo with an empty caption—also enter the
 queue and are marked as **Ожидает OCR** so operators know they still require
 text extraction before review.
