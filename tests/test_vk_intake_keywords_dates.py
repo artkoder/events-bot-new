@@ -153,6 +153,22 @@ def test_detect_date_and_extract():
     assert (dt.year, dt.month, dt.day) == (2024, 9, 15)
 
 
+def test_numeric_identifier_like_sequence_ignored():
+    noisy_text = "... 24-2-004430 ... в 02:00"
+    assert not detect_date(noisy_text)
+
+    publish_dt = real_datetime(2024, 1, 1, tzinfo=main.LOCAL_TZ)
+    assert extract_event_ts_hint(noisy_text, publish_ts=publish_dt) is None
+
+    valid_text = noisy_text.replace("24-2-004430", "24-2-2024")
+    assert detect_date(valid_text)
+
+    ts = extract_event_ts_hint(valid_text, publish_ts=publish_dt)
+    assert ts is not None
+    dt = real_datetime.fromtimestamp(ts, tz=main.LOCAL_TZ)
+    assert (dt.year, dt.month, dt.day) == (2024, 2, 24)
+
+
 def test_extract_event_ts_hint_recent_past():
     publish_dt = real_datetime(2024, 10, 1, tzinfo=main.LOCAL_TZ)
     past_text = "7 сентября прошла лекция"
