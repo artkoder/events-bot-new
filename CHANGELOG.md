@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Добавлен справочник сезонных праздников (`docs/HOLIDAYS.md`), промпт 4o теперь перечисляет их с алиасами и описаниями, а импорт событий автоматически создаёт и переиспользует соответствующие фестивали.
 - Log OpenAI token usage through Supabase inserts (guarded by `BOT_CODE`) and ship the `/usage_test` admin self-test so operators can verify the inserts and share usage snapshots during release comms.
 - `/stats` подтягивает сводку токенов напрямую из Supabase (`token_usage_daily`/`token_usage`) и только при ошибке падает обратно на локальный снапшот, чтобы в релизных отчётах отображались свежие значения.
 
