@@ -1745,7 +1745,15 @@ async def crawl_once(
                         )
                         if event_ts_hint is None or event_ts_hint < int(time.time()) + 2 * 3600:
                             continue
-                        matched_kw_value = ",".join(kws)
+                        seen_kws: set[str] = set()
+                        matched_kw_list: list[str] = []
+                        for kw in kws:
+                            if kw not in seen_kws:
+                                matched_kw_list.append(kw)
+                                seen_kws.add(kw)
+                        if history_hit and HISTORY_MATCHED_KEYWORD not in seen_kws:
+                            matched_kw_list.append(HISTORY_MATCHED_KEYWORD)
+                        matched_kw_value = ",".join(matched_kw_list)
                         has_date_value = int(has_date)
                     elif history_hit:
                         matched_kw_value = HISTORY_MATCHED_KEYWORD

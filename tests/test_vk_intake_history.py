@@ -67,3 +67,55 @@ async def test_crawl_enqueues_historical_posts(tmp_path, monkeypatch, post_text)
         None,
         "pending",
     )
+
+
+@pytest.mark.asyncio
+async def test_crawl_includes_history_with_other_matches(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.raw_conn() as conn:
+        await conn.execute(
+            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time, default_ticket_link) VALUES(?,?,?,?,?,?)",
+            (1, "g", "Group", "", None, None),
+        )
+        await conn.commit()
+
+    future_ts = int(time.time()) + 10_000
+
+    posts = [
+        {
+            "date": int(time.time()),
+            "post_id": 11,
+            "text": "Концерт состоится 21.05.2099. Вспомним события 1944 года.",
+            "photos": [],
+        }
+    ]
+
+    async def fake_wall_since(gid, since, count, offset=0):
+        return posts if offset == 0 else []
+
+    monkeypatch.setattr(main, "vk_wall_since", fake_wall_since)
+
+    async def no_sleep(_):
+        pass
+
+    monkeypatch.setattr(vk_intake.asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(vk_intake, "extract_event_ts_hint", lambda *_, **__: future_ts)
+
+    stats = await vk_intake.crawl_once(db)
+    assert stats["added"] == 1
+
+    async with db.raw_conn() as conn:
+        cur = await conn.execute(
+            "SELECT text, matched_kw, has_date, event_ts_hint, status FROM vk_inbox WHERE post_id=?",
+            (11,),
+        )
+        row = await cur.fetchone()
+
+    assert row[0] == posts[0]["text"]
+    assert row[2:] == (1, future_ts, "pending")
+
+    matched_values = row[1].split(",")
+    assert vk_intake.HISTORY_MATCHED_KEYWORD in matched_values
+    assert len(matched_values) >= 2
