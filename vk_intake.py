@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import calendar
 import hashlib
 import logging
 import os
@@ -9,7 +10,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, List, Sequence
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from db import Database
 from poster_media import (
@@ -1295,6 +1296,53 @@ async def persist_event_and_pages(
     assign_event_topics = main_mod.assign_event_topics
     schedule_event_update_tasks = main_mod.schedule_event_update_tasks
     rebuild_fest_nav_if_changed = main_mod.rebuild_fest_nav_if_changed
+    ensure_festival = main_mod.ensure_festival
+    get_holiday_record = getattr(main_mod, "get_holiday_record", None)
+    sync_festival_page = getattr(main_mod, "sync_festival_page", None)
+
+    def _holiday_date_range(record: Any, target_year: int) -> tuple[str | None, str | None]:
+        raw = (record.date or "").strip()
+        if not raw:
+            return None, None
+
+        tokens = [part.strip() for part in raw.split("..") if part.strip()]
+        if not tokens:
+            return None, None
+
+        def _parse_mmdd(token: str, year: int) -> date | None:
+            parts = token.split("-")
+            if len(parts) != 2:
+                return None
+            try:
+                month = int(parts[0])
+                day = int(parts[1])
+            except ValueError:
+                return None
+            if not (1 <= month <= 12):
+                return None
+            try:
+                return date(year, month, day)
+            except ValueError:
+                try:
+                    last_day = calendar.monthrange(year, month)[1]
+                except Exception:
+                    return None
+                day = min(day, last_day)
+                try:
+                    return date(year, month, day)
+                except ValueError:
+                    return None
+
+        start_date = _parse_mmdd(tokens[0], target_year)
+        end_token = tokens[-1] if len(tokens) > 1 else tokens[0]
+        end_date = _parse_mmdd(end_token, target_year)
+        if start_date and end_date and end_date < start_date and len(tokens) > 1:
+            end_date = _parse_mmdd(end_token, target_year + 1) or end_date
+
+        return (
+            start_date.isoformat() if start_date else None,
+            end_date.isoformat() if end_date else None,
+        )
 
     poster_urls = [m.catbox_url for m in draft.poster_media if m.catbox_url]
     photo_urls = poster_urls or list(photos or [])
@@ -1354,6 +1402,41 @@ async def persist_event_and_pages(
     logging.info(
         "persist_event_and_pages: source_post_url=%s", saved.source_post_url
     )
+
+    holiday_record = (
+        get_holiday_record(saved.festival) if callable(get_holiday_record) else None
+    )
+    if holiday_record:
+        canonical_name = holiday_record.canonical_name
+        start_iso, end_iso = _holiday_date_range(holiday_record, date.today().year)
+        ensure_kwargs: dict[str, Any] = {}
+        if holiday_record.description:
+            ensure_kwargs["description"] = holiday_record.description
+            ensure_kwargs["source_text"] = holiday_record.description
+        if start_iso:
+            ensure_kwargs["start_date"] = start_iso
+        if end_iso:
+            ensure_kwargs["end_date"] = end_iso
+        aliases_payload = [
+            alias for alias in getattr(holiday_record, "normalized_aliases", ()) if alias
+        ]
+        if aliases_payload:
+            ensure_kwargs["aliases"] = aliases_payload
+        fest_obj, fest_created, fest_updated = await ensure_festival(
+            db,
+            canonical_name,
+            **ensure_kwargs,
+        )
+        if saved.festival != canonical_name:
+            async with db.get_session() as session:
+                event_obj = await session.get(Event, saved.id)
+                if event_obj:
+                    event_obj.festival = canonical_name
+                    session.add(event_obj)
+                    await session.commit()
+                    saved = event_obj
+        if (fest_created or fest_updated) and callable(sync_festival_page):
+            asyncio.create_task(sync_festival_page(db, canonical_name))
 
     nav_update_needed = False
     if saved.festival:
