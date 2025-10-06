@@ -13,7 +13,14 @@ async def test_telegraph_wrappers_add_author(monkeypatch):
 
     monkeypatch.setattr(m, "telegraph_call", fake_call)
 
-    tg = object()
+    class DummyTelegraph:
+        def create_page(self, *args, **kwargs):
+            raise AssertionError("should not be called")
+
+        def edit_page(self, *args, **kwargs):
+            raise AssertionError("should not be called")
+
+    tg = DummyTelegraph()
     res = await m.telegraph_create_page(tg, title="T")
     assert res["kwargs"]["author_name"] == m.TELEGRAPH_AUTHOR_NAME
     assert res["kwargs"]["author_url"] == m.TELEGRAPH_AUTHOR_URL
@@ -27,6 +34,53 @@ async def test_telegraph_wrappers_add_author(monkeypatch):
     )
     assert res3["kwargs"]["author_name"] == "X"
     assert res3["kwargs"]["author_url"] == "Y"
+
+
+@pytest.mark.asyncio
+async def test_create_source_page_history_author_url(monkeypatch):
+    m = importlib.reload(orig_main)
+
+    async def fake_build_source_page_content(*args, **kwargs):
+        return "<p>content</p>", "", 0
+
+    monkeypatch.setattr(m, "build_source_page_content", fake_build_source_page_content)
+    monkeypatch.setattr(m, "get_telegraph_token", lambda: "token")
+    monkeypatch.setattr(m, "normalize_telegraph_url", lambda url: url)
+
+    class DummyTelegraph:
+        pass
+
+    monkeypatch.setattr(m, "Telegraph", lambda access_token: DummyTelegraph())
+
+    async def fake_create_page(tg, **kwargs):
+        fake_create_page.calls.append(kwargs)
+        return {"url": "https://telegra.ph/test", "path": "test"}
+
+    fake_create_page.calls = []
+    monkeypatch.setattr(m, "telegraph_create_page", fake_create_page)
+
+    import telegraph.utils as telegraph_utils
+
+    def fake_html_to_nodes(html):
+        return [html]
+
+    class DummyInvalidHTML(Exception):
+        pass
+
+    monkeypatch.setattr(telegraph_utils, "html_to_nodes", fake_html_to_nodes)
+    monkeypatch.setattr(telegraph_utils, "InvalidHTML", DummyInvalidHTML)
+
+    await m.create_source_page(
+        "Title",
+        "text",
+        None,
+        page_mode="history",
+    )
+
+    assert fake_create_page.calls
+    assert (
+        fake_create_page.calls[0]["author_url"] == m.HISTORY_TELEGRAPH_AUTHOR_URL
+    )
 
 
 @pytest.mark.asyncio
