@@ -10,6 +10,7 @@ def test_four_o_pitch_prompt_contains_new_guidance():
     assert "эмодзи" in prompt
     assert "огранич" in prompt
     assert "следуй инструкциям оператора" in prompt.lower()
+    assert "исходный заголовок" in prompt.lower()
 
 
 def test_four_o_editor_prompt_mentions_constraints():
@@ -17,6 +18,7 @@ def test_four_o_editor_prompt_mentions_constraints():
     assert "инструкц" in prompt
     assert "безусловно" in prompt
     assert "опустить" in prompt or "опусти" in prompt.lower()
+    assert "исходный заголовок" in prompt.lower()
 
 
 @pytest.mark.asyncio
@@ -56,13 +58,34 @@ async def test_compose_story_pitch_via_4o_includes_instructions(monkeypatch):
     monkeypatch.setattr(main, "ask_4o", fake_ask)
 
     result = await main.compose_story_pitch_via_4o(
-        "Первый абзац", instructions="Не использовать эмодзи"
+        "Первый абзац", title="Черновик", instructions="Не использовать эмодзи"
     )
 
     assert result == "Готовый ответ"
     prompt = captured["prompt"]
     assert "Дополнительные инструкции редактору" in prompt
     assert "Не использовать эмодзи" in prompt
+    assert "Исходный заголовок" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_compose_story_pitch_via_4o_marks_title_as_optional(monkeypatch):
+    captured: dict[str, str] = {}
+
+    async def fake_ask(prompt_text, *, system_prompt=None, max_tokens=None, **_kwargs):
+        captured["prompt"] = prompt_text
+        return "Готовый ответ"
+
+    monkeypatch.setattr(main, "ask_4o", fake_ask)
+
+    await main.compose_story_pitch_via_4o(
+        "Основной текст", title="Черновик"
+    )
+
+    prompt = captured["prompt"]
+    assert (
+        "Исходный заголовок (можно изменить при необходимости): Черновик" in prompt
+    )
 
 
 @pytest.mark.asyncio
@@ -76,10 +99,31 @@ async def test_compose_story_editorial_via_4o_includes_instructions(monkeypatch)
     monkeypatch.setattr(main, "ask_4o", fake_ask)
 
     result = await main.compose_story_editorial_via_4o(
-        "История", instructions="Оставить теги <b>"
+        "История", title="Черновик", instructions="Оставить теги <b>"
     )
 
     assert result == "<p>Текст</p>"
     prompt = captured["prompt"]
     assert "Дополнительные инструкции редактору" in prompt
     assert "Оставить теги <b>" in prompt
+    assert "Исходный заголовок" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_compose_story_editorial_via_4o_marks_title_as_optional(monkeypatch):
+    captured: dict[str, str] = {}
+
+    async def fake_ask(prompt_text, *, system_prompt=None, max_tokens=None, **_kwargs):
+        captured["prompt"] = prompt_text
+        return "<p>Текст</p>"
+
+    monkeypatch.setattr(main, "ask_4o", fake_ask)
+
+    await main.compose_story_editorial_via_4o(
+        "История", title="Черновик"
+    )
+
+    prompt = captured["prompt"]
+    assert (
+        "Исходный заголовок (можно изменить при необходимости): Черновик" in prompt
+    )
