@@ -9,11 +9,14 @@ def test_four_o_pitch_prompt_contains_new_guidance():
     assert "гипербол" in prompt
     assert "эмодзи" in prompt
     assert "огранич" in prompt
+    assert "следуй инструкциям оператора" in prompt.lower()
 
 
 def test_four_o_editor_prompt_mentions_constraints():
     prompt = main.FOUR_O_EDITOR_PROMPT
     assert "инструкц" in prompt
+    assert "безусловно" in prompt
+    assert "опустить" in prompt or "опусти" in prompt.lower()
 
 
 @pytest.mark.asyncio
