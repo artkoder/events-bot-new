@@ -119,11 +119,26 @@ class SBExporter:
         *,
         group_id: int,
         counters: Mapping[str, Any],
+        group_title: str | None = None,
+        group_screen_name: str | None = None,
+        ts: int | None = None,
+        match_rate: float | None = None,
+        errors: int | None = None,
     ) -> None:
         client = self._get_client()
         if client is None:
             return
         payload: dict[str, Any] = {"group_id": group_id}
+        if group_title is not None:
+            payload["group_title"] = group_title
+        if group_screen_name is not None:
+            payload["group_screen_name"] = group_screen_name
+        if ts is not None:
+            payload["ts"] = _ts_to_iso(ts) or ts
+        if match_rate is not None:
+            payload["match_rate"] = match_rate
+        if errors is not None:
+            payload["errors"] = errors
         for key, value in counters.items():
             if value is None:
                 continue

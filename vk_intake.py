@@ -1645,6 +1645,7 @@ async def crawl_once(
         group_duplicates = 0
         group_blank_single_photo_matches = 0
         group_history_matches = 0
+        group_errors = 0
         safety_cap_triggered = False
         hard_cap_triggered = False
         reached_cursor_overlap = False
@@ -1952,6 +1953,7 @@ async def crawl_once(
                         group_added += 1
             except Exception:
                 stats["errors"] += 1
+                group_errors += 1
                 continue
 
             if ts > max_ts or (ts == max_ts and pid > max_pid):
@@ -2000,8 +2002,10 @@ async def crawl_once(
             )
         except Exception:
             stats["errors"] += 1
+            group_errors += 1
         finally:
             pages_per_group.append(pages_loaded)
+            match_rate = group_matches / max(1, group_posts)
             snapshot_counters = {
                 "posts_scanned": group_posts,
                 "matches": group_matches,
@@ -2017,7 +2021,15 @@ async def crawl_once(
                 "blank_single_photo_matches": group_blank_single_photo_matches,
                 "history_matches": group_history_matches,
             }
-            exporter.write_snapshot(group_id=gid, counters=snapshot_counters)
+            exporter.write_snapshot(
+                group_id=gid,
+                group_title=group.get("name"),
+                group_screen_name=group.get("screen_name"),
+                ts=int(time.time()),
+                match_rate=match_rate,
+                errors=group_errors,
+                counters=snapshot_counters,
+            )
 
     async with db.raw_conn() as conn:
         cur = await conn.execute(
