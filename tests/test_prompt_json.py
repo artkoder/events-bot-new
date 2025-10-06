@@ -48,3 +48,14 @@ def test_aliases_bypass_cache_layer():
     ])
     data_updated = _extract_prompt_json(prompt_updated)
     assert data_updated["festival_alias_pairs"] == [["new-alias", 0]]
+
+
+def test_base_prompt_includes_known_holidays():
+    main._read_base_prompt.cache_clear()
+    main._read_holidays.cache_clear()
+    prompt = main._read_base_prompt()
+    assert "Known holidays:" in prompt
+    assert (
+        "- Хеллоуин (aliases: хэллоуин, halloween) — Костюмированное празднование с тыквами и сладостями."
+        in prompt
+    )

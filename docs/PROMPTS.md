@@ -43,6 +43,11 @@ The bot adds these markers automatically on the opening and closing dates.
 Lines from `docs/LOCATIONS.md` are appended to the system prompt so the model
 can normalise venue names. Please keep that file up to date.
 
+When `docs/HOLIDAYS.md` is present, the prompt gains a "Known holidays" section
+listing canonical seasonal festivals together with their alias hints and short
+descriptions. Treat these names as the preferred targets for the `festival`
+field and use the hints to match synonym spellings in announcements.
+
 When the database exposes festival metadata, the prompt also appends a compact
 JSON block with `{"festival_names": [...], "festival_alias_pairs": [["alias_norm", index], ...]}`.
 The system instructions explain how to compute `norm(text)` (casefold, trim,
