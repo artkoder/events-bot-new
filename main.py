@@ -419,6 +419,9 @@ TELEGRAPH_AUTHOR_NAME = os.getenv(
 TELEGRAPH_AUTHOR_URL = os.getenv(
     "TELEGRAPH_AUTHOR_URL", "https://t.me/kenigevents"
 )
+HISTORY_TELEGRAPH_AUTHOR_URL = os.getenv(
+    "HISTORY_TELEGRAPH_AUTHOR_URL", "https://t.me/kgdstories"
+)
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "events-ics")
@@ -25496,15 +25499,20 @@ async def create_source_page(
         if page_mode == "history"
         else "Полюбить Калининград Анонсы"
     )
+    author_url: str | None = None
+    if page_mode == "history":
+        author_url = HISTORY_TELEGRAPH_AUTHOR_URL
     try:
-        page = await telegraph_create_page(
-            tg,
+        kwargs = dict(
             title=title,
             author_name=author_name,
             content=nodes,
             return_content=False,
             caller="event_pipeline",
         )
+        if author_url:
+            kwargs["author_url"] = author_url
+        page = await telegraph_create_page(tg, **kwargs)
     except Exception as e:
         logging.error("Failed to create telegraph page: %s", e)
         return None
