@@ -95,23 +95,18 @@ class SBExporter:
         *,
         screen_name: str | None = None,
         name: str | None = None,
-        location: str | None = None,
-        default_time: str | None = None,
-        default_ticket_link: str | None = None,
+        **_: Any,
     ) -> None:
         client = self._get_client()
         if client is None:
             return
         payload = {
             "group_id": group_id,
-            "screen_name": screen_name,
-            "name": name,
-            "location": location,
-            "default_time": default_time,
-            "default_ticket_link": default_ticket_link,
+            "group_screen_name": screen_name,
+            "group_title": name,
         }
         try:
-            client.table("vk_group_meta").upsert(  # type: ignore[operator]
+            client.table("vk_groups").upsert(  # type: ignore[operator]
                 payload,
                 on_conflict="group_id",
             ).execute()
@@ -123,39 +118,22 @@ class SBExporter:
         self,
         *,
         group_id: int,
-        post_id: int,
-        post_ts: int | None,
-        url: str | None,
-        matched_keywords: Sequence[str] | None,
-        has_date: bool,
-        event_ts_hint: int | None,
-        photos_count: int,
-        text: str | None,
+        counters: Mapping[str, Any],
     ) -> None:
         client = self._get_client()
         if client is None:
             return
-        truncated = (text or "")[:2000]
-        keywords = list(matched_keywords or [])[:20]
-        payload = {
-            "group_id": group_id,
-            "post_id": post_id,
-            "post_ts": _ts_to_iso(post_ts),
-            "post_url": url,
-            "matched_keywords": keywords,
-            "has_date": has_date,
-            "event_ts_hint": _ts_to_iso(event_ts_hint),
-            "photos_count": photos_count,
-            "text_excerpt": truncated,
-        }
+        payload: dict[str, Any] = {"group_id": group_id}
+        for key, value in counters.items():
+            if value is None:
+                continue
+            if isinstance(value, (int, float, bool, str)):
+                payload[key] = value
+            else:
+                payload[key] = str(value)
         try:
-            client.table("vk_post_snapshots").upsert(  # type: ignore[operator]
-                payload,
-                on_conflict="group_id,post_id",
-            ).execute()
-            logger.debug(
-                "Supabase snapshot stored: group_id=%s post_id=%s", group_id, post_id
-            )
+            client.table("vk_crawl_snapshots").insert(payload).execute()  # type: ignore[operator]
+            logger.debug("Supabase snapshot stored: group_id=%s", group_id)
         except Exception as exc:  # pragma: no cover - network failure
             logger.warning("Supabase export failed: %s", exc)
 
@@ -169,6 +147,7 @@ class SBExporter:
         matched_keywords: Sequence[str] | None = None,
         post_ts: int | None = None,
         event_ts_hint: int | None = None,
+        flags: Mapping[str, Any] | None = None,
         extra: Mapping[str, Any] | None = None,
     ) -> None:
         if not self._enabled:
@@ -189,12 +168,26 @@ class SBExporter:
             "post_ts": _ts_to_iso(post_ts),
             "event_ts_hint": _ts_to_iso(event_ts_hint),
         }
+        if flags:
+            serialized_flags: dict[str, Any] = {}
+            for key, value in flags.items():
+                if value is None:
+                    continue
+                if isinstance(value, (int, float, bool, str)):
+                    serialized_flags[key] = value
+                else:
+                    serialized_flags[key] = str(value)
+            if serialized_flags:
+                payload["flags"] = serialized_flags
         if extra:
             for key, value in extra.items():
                 if value is not None:
                     payload[key] = value
         try:
-            client.table("vk_post_misses").insert(payload).execute()  # type: ignore[operator]
+            client.table("vk_misses_sample").upsert(  # type: ignore[operator]
+                payload,
+                on_conflict="group_id,post_id",
+            ).execute()
             logger.debug(
                 "Supabase miss logged: group_id=%s post_id=%s reason=%s",
                 group_id,
@@ -212,7 +205,7 @@ class SBExporter:
             return
         cutoff = datetime.now(timezone.utc) - timedelta(days=self._retention_days)
         cutoff_iso = cutoff.isoformat()
-        for table in ("vk_post_snapshots", "vk_post_misses"):
+        for table in ("vk_crawl_snapshots", "vk_misses_sample"):
             try:
                 client.table(table).delete().lt(  # type: ignore[operator]
                     "created_at", cutoff_iso

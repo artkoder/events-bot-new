@@ -1637,6 +1637,19 @@ async def crawl_once(
             default_time=default_time,
             default_ticket_link=group.get("default_ticket_link"),
         )
+        backfill = False
+        pages_loaded = 0
+        group_posts = 0
+        group_matches = 0
+        group_added = 0
+        group_duplicates = 0
+        group_blank_single_photo_matches = 0
+        group_history_matches = 0
+        safety_cap_triggered = False
+        hard_cap_triggered = False
+        reached_cursor_overlap = False
+        deep_backfill_scheduled = False
+        mode = "inc"
         try:
             async with db.raw_conn() as conn:
                 cur = await conn.execute(
@@ -1657,12 +1670,9 @@ async def crawl_once(
             backfill = force_backfill or last_seen_ts == 0 or (
                 idle_h is not None and idle_h >= VK_CRAWL_BACKFILL_AFTER_IDLE_H
             )
+            mode = "backfill" if backfill else "inc"
 
             posts: list[dict] = []
-            pages_loaded = 0
-            safety_cap_triggered = False
-            hard_cap_triggered = False
-            reached_cursor_overlap = False
 
             if backfill:
                 window_days = (
@@ -1742,12 +1752,7 @@ async def crawl_once(
                     except Exception:
                         pass
 
-            pages_per_group.append(pages_loaded)
-
-            group_posts = 0
-            group_matched = 0
             max_ts, max_pid = last_seen_ts, last_post_id
-            deep_backfill_scheduled = False
 
             for post in posts:
                 ts = post["date"]
@@ -1766,6 +1771,9 @@ async def crawl_once(
                 event_ts_hint: int | None = None
                 matched_kw_list: list[str] = []
                 is_match = False
+                history_hit = False
+                has_date = False
+                kw_ok = False
 
                 if blank_single_photo:
                     matched_kw_value = OCR_PENDING_SENTINEL
@@ -1813,6 +1821,12 @@ async def crawl_once(
                                     matched_keywords=log_keywords,
                                     post_ts=ts,
                                     event_ts_hint=event_ts_hint,
+                                    flags={
+                                        "history_hit": bool(history_hit),
+                                        "has_date": bool(has_date),
+                                        "blank_single_photo": blank_single_photo,
+                                        "backfill": backfill,
+                                    },
                                 )
                                 continue
                             fallback_applied = True
@@ -1827,6 +1841,12 @@ async def crawl_once(
                                     matched_keywords=log_keywords,
                                     post_ts=ts,
                                     event_ts_hint=event_ts_hint,
+                                    flags={
+                                        "history_hit": bool(history_hit),
+                                        "has_date": bool(has_date),
+                                        "blank_single_photo": blank_single_photo,
+                                        "backfill": backfill,
+                                    },
                                 )
                                 continue
                         matched_kw_list = log_keywords
@@ -1849,33 +1869,32 @@ async def crawl_once(
                             reason=reason,
                             matched_keywords=unique_kws,
                             post_ts=ts,
+                            flags={
+                                "history_hit": bool(history_hit),
+                                "has_date": bool(has_date),
+                                "blank_single_photo": blank_single_photo,
+                                "backfill": backfill,
+                            },
                         )
                         continue
 
-                if not is_match:
-                    continue
+            if not is_match:
+                continue
 
-                stats["matches"] += 1
-                snapshot_excerpt = (post_text or "")[:500]
-                exporter.write_snapshot(
-                    group_id=gid,
-                    post_id=pid,
-                    post_ts=ts,
-                    url=post_url,
-                    matched_keywords=matched_kw_list,
-                    has_date=bool(has_date_value),
-                    event_ts_hint=event_ts_hint,
-                    photos_count=len(photos),
-                    text=snapshot_excerpt,
-                )
-                try:
-                    async with db.raw_conn() as conn:
-                        cur = await conn.execute(
-                            """
-                            INSERT OR IGNORE INTO vk_inbox(
-                                group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')
-                            """,
+            stats["matches"] += 1
+            group_matches += 1
+            if history_hit:
+                group_history_matches += 1
+            if blank_single_photo:
+                group_blank_single_photo_matches += 1
+            try:
+                async with db.raw_conn() as conn:
+                    cur = await conn.execute(
+                        """
+                        INSERT OR IGNORE INTO vk_inbox(
+                            group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')
+                        """,
                             (
                                 gid,
                                 pid,
@@ -1885,10 +1904,11 @@ async def crawl_once(
                                 has_date_value,
                                 event_ts_hint,
                             ),
-                        )
-                        await conn.commit()
+                    )
+                    await conn.commit()
                     if cur.rowcount == 0:
                         stats["duplicates"] += 1
+                        group_duplicates += 1
                         existing_status: str | None = None
                         async with db.raw_conn() as conn:
                             cur_status = await conn.execute(
@@ -1911,17 +1931,23 @@ async def crawl_once(
                             matched_keywords=matched_kw_list,
                             post_ts=ts,
                             event_ts_hint=event_ts_hint,
-                            extra={"status": existing_status} if existing_status else None,
+                            flags={
+                                "existing_status": existing_status,
+                                "history_hit": bool(history_hit),
+                                "has_date": bool(has_date),
+                                "blank_single_photo": blank_single_photo,
+                                "backfill": backfill,
+                            },
                         )
                     else:
                         stats["added"] += 1
-                        group_matched += 1
-                except Exception:
-                    stats["errors"] += 1
-                    continue
+                        group_added += 1
+            except Exception:
+                stats["errors"] += 1
+                continue
 
-                if ts > max_ts or (ts == max_ts and pid > max_pid):
-                    max_ts, max_pid = ts, pid
+            if ts > max_ts or (ts == max_ts and pid > max_pid):
+                max_ts, max_pid = ts, pid
 
             next_cursor_ts = max_ts
             next_cursor_pid = max_pid
@@ -1960,12 +1986,30 @@ async def crawl_once(
                 "vk.crawl group=%s posts=%s matched=%s pages=%s mode=%s",
                 gid,
                 group_posts,
-                group_matched,
+                group_added,
                 pages_loaded,
                 mode,
             )
         except Exception:
             stats["errors"] += 1
+        finally:
+            pages_per_group.append(pages_loaded)
+            snapshot_counters = {
+                "posts_scanned": group_posts,
+                "matches": group_matches,
+                "added": group_added,
+                "duplicates": group_duplicates,
+                "pages_loaded": pages_loaded,
+                "backfill": backfill,
+                "mode": mode,
+                "safety_cap_triggered": safety_cap_triggered,
+                "hard_cap_triggered": hard_cap_triggered,
+                "reached_cursor_overlap": reached_cursor_overlap,
+                "deep_backfill_scheduled": deep_backfill_scheduled,
+                "blank_single_photo_matches": group_blank_single_photo_matches,
+                "history_matches": group_history_matches,
+            }
+            exporter.write_snapshot(group_id=gid, counters=snapshot_counters)
 
     async with db.raw_conn() as conn:
         cur = await conn.execute(
