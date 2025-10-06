@@ -2053,7 +2053,7 @@ async def crawl_once(
             match_rate = group_matches / max(1, group_posts)
             snapshot_counters = {
                 "posts_scanned": group_posts,
-                "matches": group_matches,
+                "matched": group_matches,
                 "added": group_added,
                 "duplicates": group_duplicates,
                 "pages_loaded": pages_loaded,
