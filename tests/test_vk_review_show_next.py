@@ -3,7 +3,7 @@ sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
 import pytest
 from types import SimpleNamespace
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from aiogram import types
 from aiogram.exceptions import TelegramBadRequest
@@ -201,6 +201,71 @@ async def test_vkrev_show_next_recomputes_mismatched_hint(tmp_path, monkeypatch)
         cur = await conn.execute("SELECT event_ts_hint FROM vk_inbox WHERE id=1")
         (stored_hint,) = await cur.fetchone()
     assert stored_hint == int(expected_dt.timestamp())
+
+
+@pytest.mark.asyncio
+async def test_vkrev_show_next_updates_timezone_from_settings(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    async with db.get_session() as session:
+        session.add(User(user_id=1))
+        await session.commit()
+    async with db.raw_conn() as conn:
+        await conn.execute(
+            "INSERT INTO setting(key, value) VALUES('tz_offset', ?)",
+            ("+02:00",),
+        )
+        await conn.execute(
+            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time, default_ticket_link) VALUES(?,?,?,?,?,?)",
+            (1, "club1", "Test Community", "", None, None),
+        )
+        await conn.commit()
+
+    dt = datetime(2025, 5, 20, 13, 15, tzinfo=timezone.utc)
+
+    async def fake_fetch(*args, **kwargs):
+        return []
+
+    async def fake_pick_next(db_obj, operator_id_arg, batch_id_arg):
+        return SimpleNamespace(
+            id=1,
+            group_id=1,
+            post_id=10,
+            text="text",
+            matched_kw=None,
+            has_date=True,
+            event_ts_hint=int(dt.timestamp()),
+        )
+
+    monkeypatch.setattr(main, "_vkrev_fetch_photos", fake_fetch)
+    monkeypatch.setattr(vk_review, "pick_next", fake_pick_next)
+
+    main.LOCAL_TZ = timezone.utc
+    if hasattr(main, "_TZ_OFFSET_CACHE"):
+        main._TZ_OFFSET_CACHE = None  # type: ignore[attr-defined]
+
+    call_count = 0
+    original_get_tz_offset = main.get_tz_offset
+
+    async def tracking_get_tz_offset(db_obj):
+        nonlocal call_count
+        call_count += 1
+        return await original_get_tz_offset(db_obj)
+
+    monkeypatch.setattr(main, "get_tz_offset", tracking_get_tz_offset)
+
+    bot = DummyBot()
+    await main._vkrev_show_next(1, "batch1", 1, db, bot)
+
+    assert call_count == 1
+    assert bot.messages, "no message sent"
+    local_dt = dt.astimezone(timezone(timedelta(hours=2)))
+    expected_heading = (
+        f"{local_dt.day:02d} {main.MONTHS[local_dt.month - 1]} {local_dt.strftime('%H:%M')}"
+    )
+    lines = bot.messages[0].text.splitlines()
+    assert expected_heading in lines
+    assert main.LOCAL_TZ.utcoffset(None) == timedelta(hours=2)
 
 
 @pytest.mark.asyncio
