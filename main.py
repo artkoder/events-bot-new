@@ -696,6 +696,8 @@ vk_review_extra_sessions: dict[int, tuple[int, str, bool]] = {}
 class VkReviewStorySession:
     inbox_id: int
     batch_id: str | None = None
+    instructions: str | None = None
+    awaiting_instructions: bool = False
 
 
 vk_review_story_sessions: dict[int, VkReviewStorySession] = {}
@@ -6179,6 +6181,7 @@ FOUR_O_EDITOR_PROMPT = textwrap.dedent(
     Сохраняй факты, даты, имена и ссылки, не добавляй новые данные.
     Используй только простой HTML или markdown, понятный Telegraph (<p>, <h3>, <ul>, <ol>, <b>, <i>, <a>, <blockquote>, <br/>).
     Не добавляй вводные комментарии, пояснения об обработке или служебные пометки — верни только готовый текст.
+    Если оператор прислал дополнительные инструкции или ограничения, они обязательны к исполнению.
     """
 )
 
@@ -6192,11 +6195,17 @@ FOUR_O_PITCH_PROMPT = textwrap.dedent(
     Можешь использовать одно уместное эмодзи, но это необязательно.
     Излагай ярко и по делу, избегай клише и упоминаний про нейросети или сам процесс написания.
     Верни только готовое предложение без кавычек, комментариев и служебных пометок.
+    Если оператор передал дополнительные ограничения, соблюдай их безусловно.
     """
 )
 
 
-async def compose_story_pitch_via_4o(text: str, *, title: str | None = None) -> str:
+async def compose_story_pitch_via_4o(
+    text: str,
+    *,
+    title: str | None = None,
+    instructions: str | None = None,
+) -> str:
     """Return a single-sentence pitch using the 4o helper with graceful fallback."""
 
     raw = (text or "").strip()
@@ -6216,6 +6225,11 @@ async def compose_story_pitch_via_4o(text: str, *, title: str | None = None) -> 
         title_clean = title.strip()
         if title_clean:
             sections.append(f"Заголовок: {title_clean}")
+    instructions_clean = (instructions or "").strip()
+    if instructions_clean:
+        sections.append(
+            "Дополнительные инструкции редактору:\n" + instructions_clean
+        )
     sections.append("Текст:\n" + raw)
     prompt_text = "\n\n".join(sections)
     try:
@@ -6243,7 +6257,12 @@ async def compose_story_pitch_via_4o(text: str, *, title: str | None = None) -> 
     return fallback
 
 
-async def compose_story_editorial_via_4o(text: str, *, title: str | None = None) -> str:
+async def compose_story_editorial_via_4o(
+    text: str,
+    *,
+    title: str | None = None,
+    instructions: str | None = None,
+) -> str:
     """Return formatted HTML/markdown for Telegraph using the 4o editor prompt."""
 
     raw = (text or "").strip()
@@ -6254,6 +6273,11 @@ async def compose_story_editorial_via_4o(text: str, *, title: str | None = None)
         title_clean = title.strip()
         if title_clean:
             sections.append(f"Заголовок: {title_clean}")
+    instructions_clean = (instructions or "").strip()
+    if instructions_clean:
+        sections.append(
+            "Дополнительные инструкции редактору:\n" + instructions_clean
+        )
     sections.append("Текст:\n" + raw)
     prompt_text = "\n\n".join(sections)
     response = await ask_4o(
@@ -23022,6 +23046,25 @@ def _vkrev_story_title(text: str | None, group_id: int, post_id: int) -> str:
     return f"История VK {group_id}_{post_id}"
 
 
+def _vkrev_story_placement_keyboard(inbox_id: int) -> types.InlineKeyboardMarkup:
+    return types.InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                types.InlineKeyboardButton(
+                    text="В конце",
+                    callback_data=f"vkrev:storypos:end:{inbox_id}",
+                )
+            ],
+            [
+                types.InlineKeyboardButton(
+                    text="Посреди текста",
+                    callback_data=f"vkrev:storypos:middle:{inbox_id}",
+                )
+            ],
+        ]
+    )
+
+
 async def _vkrev_handle_story_choice(
     callback: types.CallbackQuery,
     placement: str,
@@ -23065,6 +23108,7 @@ async def _vkrev_handle_story_choice(
             pitch_text = await compose_story_pitch_via_4o(
                 source_text,
                 title=title,
+                instructions=state.instructions,
             )
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning(
@@ -23080,6 +23124,7 @@ async def _vkrev_handle_story_choice(
             editor_candidate = await compose_story_editorial_via_4o(
                 source_text,
                 title=title,
+                instructions=state.instructions,
             )
         except Exception as exc:
             logging.warning(
@@ -23228,27 +23273,59 @@ async def handle_vk_review_cb(callback: types.CallbackQuery, db: Database, bot: 
             inbox_id=inbox_id,
             batch_id=batch_id,
         )
-        placement_keyboard = types.InlineKeyboardMarkup(
+        guidance_keyboard = types.InlineKeyboardMarkup(
             inline_keyboard=[
                 [
                     types.InlineKeyboardButton(
-                        text="В конце",
-                        callback_data=f"vkrev:storypos:end:{inbox_id}",
+                        text="Да",
+                        callback_data=f"vkrev:storyinstr:yes:{inbox_id}",
                     )
                 ],
                 [
                     types.InlineKeyboardButton(
-                        text="Посреди текста",
-                        callback_data=f"vkrev:storypos:middle:{inbox_id}",
+                        text="Нет",
+                        callback_data=f"vkrev:storyinstr:no:{inbox_id}",
                     )
                 ],
             ]
         )
         await bot.send_message(
             callback.message.chat.id,
-            "Где разместить иллюстрации?",
-            reply_markup=placement_keyboard,
+            "Нужны дополнительные инструкции редактору?",
+            reply_markup=guidance_keyboard,
         )
+        answered = True
+        await callback.answer()
+    elif action == "storyinstr":
+        choice = parts[2] if len(parts) > 2 else ""
+        inbox_id = int(parts[3]) if len(parts) > 3 else 0
+        state = vk_review_story_sessions.get(callback.from_user.id)
+        if not state:
+            await callback.answer("Нет активной истории", show_alert=True)
+            return
+        if inbox_id and inbox_id != state.inbox_id:
+            logging.info(
+                "vk_review storyinstr inbox mismatch operator=%s stored=%s hint=%s",
+                callback.from_user.id,
+                state.inbox_id,
+                inbox_id,
+            )
+        if choice == "yes":
+            state.awaiting_instructions = True
+            state.instructions = None
+            await bot.send_message(
+                callback.message.chat.id,
+                "Отправьте дополнительные инструкции редактору одним сообщением. "
+                "Если инструкций нет, отправьте «нет» или пустое сообщение.",
+            )
+        else:
+            state.awaiting_instructions = False
+            keyboard = _vkrev_story_placement_keyboard(state.inbox_id)
+            await bot.send_message(
+                callback.message.chat.id,
+                "Где разместить иллюстрации?",
+                reply_markup=keyboard,
+            )
         answered = True
         await callback.answer()
     elif action == "storypos":
@@ -23904,6 +23981,51 @@ async def handle_vk_extra_message(message: types.Message, db: Database, bot: Bot
         bot,
         operator_extra=operator_extra,
         force_festival=force_festival,
+    )
+
+
+_VK_STORY_SKIP_TOKENS = {
+    "нет",
+    "нет.",
+    "нет!",
+    "нет,",
+    "нету",
+    "не надо",
+    "не надо.",
+    "не нужно",
+    "не нужно.",
+    "skip",
+    "skip.",
+    "/skip",
+    "пропуск",
+    "no",
+}
+
+
+async def handle_vk_story_instruction_message(
+    message: types.Message, db: Database, bot: Bot
+) -> None:
+    state = vk_review_story_sessions.get(message.from_user.id)
+    if not state or not state.awaiting_instructions:
+        return
+    raw_text = extract_message_text_with_links(message)
+    cleaned = (raw_text or "").strip()
+    if cleaned.casefold() in _VK_STORY_SKIP_TOKENS or not cleaned:
+        instructions: str | None = None
+    else:
+        instructions = cleaned
+    state.instructions = instructions
+    state.awaiting_instructions = False
+    if instructions:
+        ack = "Получил инструкции, записал."
+    else:
+        ack = "Инструкций нет, продолжаем."
+    await bot.send_message(message.chat.id, ack)
+    keyboard = _vkrev_story_placement_keyboard(state.inbox_id)
+    await bot.send_message(
+        message.chat.id,
+        "Где разместить иллюстрации?",
+        reply_markup=keyboard,
     )
 
 
@@ -25910,6 +26032,9 @@ def create_app() -> web.Application:
     async def vk_extra_msg_wrapper(message: types.Message):
         await handle_vk_extra_message(message, db, bot)
 
+    async def vk_story_instr_msg_wrapper(message: types.Message):
+        await handle_vk_story_instruction_message(message, db, bot)
+
     async def tourist_note_wrapper(message: types.Message):
         await handle_tourist_note_message(message, db, bot)
 
@@ -26082,6 +26207,13 @@ def create_app() -> web.Application:
     dp.message.register(vk_queue_wrapper, lambda m: m.text == VK_BTN_QUEUE_SUMMARY)
     dp.message.register(vk_add_msg_wrapper, lambda m: m.from_user.id in vk_add_source_sessions)
     dp.message.register(vk_extra_msg_wrapper, lambda m: m.from_user.id in vk_review_extra_sessions)
+    dp.message.register(
+        vk_story_instr_msg_wrapper,
+        lambda m: (
+            (state := vk_review_story_sessions.get(m.from_user.id)) is not None
+            and state.awaiting_instructions
+        ),
+    )
     dp.message.register(
         tourist_note_wrapper, lambda m: m.from_user.id in tourist_note_sessions
     )

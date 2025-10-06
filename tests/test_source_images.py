@@ -542,6 +542,7 @@ async def test_vkrev_story_editor_includes_pitch(monkeypatch):
     main.vk_review_story_sessions[operator_id] = main.VkReviewStorySession(
         inbox_id=inbox_id,
         batch_id="batch2",
+        instructions="Не использовать эмодзи",
     )
 
     class DummyCursor:
@@ -594,6 +595,7 @@ async def test_vkrev_story_editor_includes_pitch(monkeypatch):
     )
 
     captured: dict[str, object] = {}
+    composer_calls: dict[str, dict[str, object]] = {}
 
     async def fake_create_source_page(*args, **kwargs):
         captured["args"] = args
@@ -603,10 +605,12 @@ async def test_vkrev_story_editor_includes_pitch(monkeypatch):
     async def fake_fetch_photos(*_args, **_kwargs):
         return []
 
-    async def fake_editor(*_args, **_kwargs):
+    async def fake_editor(*_args, **kwargs):
+        composer_calls["editor"] = kwargs
         return "<p>Отредактированный текст</p>"
 
-    async def fake_pitch(*_args, **_kwargs):
+    async def fake_pitch(*_args, **kwargs):
+        composer_calls["pitch"] = kwargs
         return "Приходите на главное событие недели"
 
     monkeypatch.setattr(main, "create_source_page", fake_create_source_page)
@@ -627,3 +631,53 @@ async def test_vkrev_story_editor_includes_pitch(monkeypatch):
     message_lines = bot.messages[-1][1].splitlines()
     assert message_lines[-1] == "Приходите на главное событие недели"
     assert main.vk_review_story_sessions.get(operator_id) is None
+    assert composer_calls["pitch"]["instructions"] == "Не использовать эмодзи"
+    assert composer_calls["editor"]["instructions"] == "Не использовать эмодзи"
+
+
+@pytest.mark.asyncio
+async def test_vkrev_story_instruction_message_flow(monkeypatch):
+    operator_id = 987
+    inbox_id = 654
+    state = main.VkReviewStorySession(
+        inbox_id=inbox_id,
+        batch_id="batch3",
+        awaiting_instructions=True,
+    )
+    main.vk_review_story_sessions[operator_id] = state
+
+    class DummyBot:
+        def __init__(self):
+            self.messages: list[tuple[int, str, object | None]] = []
+
+        async def send_message(self, chat_id, text, reply_markup=None):
+            self.messages.append((chat_id, text, reply_markup))
+
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=operator_id),
+        chat=SimpleNamespace(id=777),
+        text="Сохраняем хронологию и без эмодзи",
+        caption=None,
+        html_text=None,
+        caption_html=None,
+        entities=None,
+        caption_entities=None,
+    )
+
+    monkeypatch.setattr(
+        main,
+        "extract_message_text_with_links",
+        lambda m: m.text or "",
+    )
+
+    bot = DummyBot()
+    await main.handle_vk_story_instruction_message(message, db=None, bot=bot)
+
+    assert not state.awaiting_instructions
+    assert state.instructions == "Сохраняем хронологию и без эмодзи"
+    assert len(bot.messages) == 2
+    assert bot.messages[0][1].startswith("Получил инструкции")
+    assert bot.messages[1][1] == "Где разместить иллюстрации?"
+    keyboard = bot.messages[1][2]
+    assert keyboard is not None
+    assert isinstance(keyboard.inline_keyboard, list)
