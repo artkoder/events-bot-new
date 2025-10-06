@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- VK crawler telemetry now exports group metadata, crawl snapshots, and sampled misses to Supabase (`vk_groups`, `vk_crawl_snapshots`, `vk_misses_sample`) with `SUPABASE_EXPORT_ENABLED`, `SUPABASE_RETENTION_DAYS` (default 60 days), and `VK_MISSES_SAMPLE_RATE` governing exports, sampling, and automatic cleanup.
 - VK stories now ask whether to collect extra editor instructions and forward the answer plus any guidance to the 4o prompts.
 - Добавлен справочник сезонных праздников (`docs/HOLIDAYS.md`), промпт 4o теперь перечисляет их с алиасами и описаниями, а импорт событий автоматически создаёт и переиспользует соответствующие фестивали.
 - Log OpenAI token usage through Supabase inserts (guarded by `BOT_CODE`) and ship the `/usage_test` admin self-test so operators can verify the inserts and share usage snapshots during release comms.
