@@ -210,6 +210,14 @@ async def test_build_source_page_content_inline_images():
     assert paragraph_positions[4] < image_positions[3] < paragraph_positions[5]
 
 
+def test_vkrev_title_instructions_forbid_phrase():
+    instructions = "не говорить ничего о еженедельной загадке"
+    title = "О еженедельной загадке — ответы недели"
+    result = main._vkrev_apply_title_instructions(title, instructions)
+    assert "еженедельной загадке" not in result.casefold()
+    assert result == "Ответы недели"
+
+
 @pytest.mark.asyncio
 async def test_build_source_page_content_history_heading_without_spacer():
     html, _, _ = await main.build_source_page_content(
