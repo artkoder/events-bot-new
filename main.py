@@ -628,6 +628,8 @@ def fold_unicode_line(line: str, limit: int = 74) -> str:
 
 # currently active timezone offset for date calculations
 LOCAL_TZ = timezone.utc
+_TZ_OFFSET_CACHE_TTL = 60.0
+_TZ_OFFSET_CACHE: tuple[str, float] | None = None
 
 # separator inserted between versions on Telegraph source pages
 CONTENT_SEPARATOR = "🟧" * 10
@@ -2175,6 +2177,13 @@ def build_channel_post_url(ch: Channel, message_id: int) -> str:
 
 
 async def get_tz_offset(db: Database) -> str:
+    global _TZ_OFFSET_CACHE
+    cached = _TZ_OFFSET_CACHE
+    if cached is not None:
+        offset, expires_at = cached
+        if _time.monotonic() < expires_at:
+            return offset
+
     async with db.raw_conn() as conn:
         cursor = await conn.execute(
             "SELECT value FROM setting WHERE key='tz_offset'"
@@ -2183,6 +2192,7 @@ async def get_tz_offset(db: Database) -> str:
     offset = row[0] if row else "+00:00"
     global LOCAL_TZ
     LOCAL_TZ = offset_to_timezone(offset)
+    _TZ_OFFSET_CACHE = (offset, _time.monotonic() + _TZ_OFFSET_CACHE_TTL)
     return offset
 
 
@@ -2193,8 +2203,9 @@ async def set_tz_offset(db: Database, value: str):
             (value,),
         )
         await conn.commit()
-    global LOCAL_TZ
+    global LOCAL_TZ, _TZ_OFFSET_CACHE
     LOCAL_TZ = offset_to_timezone(value)
+    _TZ_OFFSET_CACHE = (value, _time.monotonic() + _TZ_OFFSET_CACHE_TTL)
     await vk_review.refresh_vk_event_ts_hints(db)
 
 
@@ -22510,6 +22521,7 @@ async def _vkrev_show_next(chat_id: int, batch_id: str, operator_id: int, db: Da
                 reply_markup=types.InlineKeyboardMarkup(inline_keyboard=inline_buttons),
             )
         return
+    await get_tz_offset(db)
     photos = await _vkrev_fetch_photos(post.group_id, post.post_id, db, bot)
     if photos:
         media = [types.InputMediaPhoto(media=p) for p in photos[:10]]
