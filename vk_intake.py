@@ -1827,6 +1827,8 @@ async def crawl_once(
                                         "blank_single_photo": blank_single_photo,
                                         "backfill": backfill,
                                     },
+                                    kw_ok=bool(kw_ok),
+                                    has_date=bool(has_date),
                                 )
                                 continue
                             fallback_applied = True
@@ -1847,6 +1849,8 @@ async def crawl_once(
                                         "blank_single_photo": blank_single_photo,
                                         "backfill": backfill,
                                     },
+                                    kw_ok=bool(kw_ok),
+                                    has_date=bool(has_date),
                                 )
                                 continue
                         matched_kw_list = log_keywords
@@ -1875,6 +1879,8 @@ async def crawl_once(
                                 "blank_single_photo": blank_single_photo,
                                 "backfill": backfill,
                             },
+                            kw_ok=bool(kw_ok),
+                            has_date=bool(has_date),
                         )
                         continue
 
@@ -1938,6 +1944,8 @@ async def crawl_once(
                                 "blank_single_photo": blank_single_photo,
                                 "backfill": backfill,
                             },
+                            kw_ok=bool(kw_ok),
+                            has_date=bool(has_date),
                         )
                     else:
                         stats["added"] += 1
