@@ -8,6 +8,7 @@ import os
 import random
 import re
 import time
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Any, List, Sequence
 from datetime import date, datetime, timedelta, timezone
@@ -43,7 +44,35 @@ VK_USE_PYMORPHY = os.getenv("VK_USE_PYMORPHY", "false").lower() == "true"
 
 # Sentinel used to flag posts awaiting poster OCR before keyword/date checks.
 OCR_PENDING_SENTINEL = "__ocr_pending__"
+
 HISTORY_MATCHED_KEYWORD = "history"
+
+
+def _normalize_group_title(value: str | None) -> str | None:
+    if not value:
+        return None
+    normalized = unicodedata.normalize("NFKC", value)
+    normalized = normalized.replace("\xa0", " ")
+    normalized = re.sub(r"\s+", " ", normalized)
+    normalized = normalized.strip()
+    if not normalized:
+        return None
+    return normalized.casefold()
+
+
+def _normalize_group_screen_name(value: str | None) -> str | None:
+    if not value:
+        return None
+    normalized = unicodedata.normalize("NFKC", value)
+    normalized = normalized.replace("\xa0", " ")
+    normalized = normalized.strip().lstrip("@")
+    if not normalized:
+        return None
+    normalized = re.sub(r"\s+", "", normalized)
+    if not normalized:
+        return None
+    return normalized.casefold()
+
 
 # optional pymorphy3 initialisation
 MORPH = None
@@ -1626,6 +1655,10 @@ async def crawl_once(
     now_ts = int(time.time())
     for group in groups:
         gid = group["group_id"]
+        group_title_norm = _normalize_group_title(group.get("name"))
+        group_screen_name_norm = _normalize_group_screen_name(
+            group.get("screen_name")
+        )
         default_time = group.get("default_time")
         stats["groups_checked"] += 1
         await asyncio.sleep(random.uniform(0.7, 1.2))  # safety pause
@@ -1816,10 +1849,13 @@ async def crawl_once(
                             if not allow_without_hint:
                                 exporter.log_miss(
                                     group_id=gid,
+                                    group_title=group_title_norm,
+                                    group_screen_name=group_screen_name_norm,
                                     post_id=pid,
                                     url=post_url,
+                                    ts=int(time.time()),
                                     reason="past_event",
-                                    matched_keywords=log_keywords,
+                                    matched_kw=log_keywords,
                                     post_ts=ts,
                                     event_ts_hint=event_ts_hint,
                                     flags={
@@ -1838,10 +1874,13 @@ async def crawl_once(
                             if event_ts_hint > far_threshold:
                                 exporter.log_miss(
                                     group_id=gid,
+                                    group_title=group_title_norm,
+                                    group_screen_name=group_screen_name_norm,
                                     post_id=pid,
                                     url=post_url,
+                                    ts=int(time.time()),
                                     reason="too_far",
-                                    matched_keywords=log_keywords,
+                                    matched_kw=log_keywords,
                                     post_ts=ts,
                                     event_ts_hint=event_ts_hint,
                                     flags={
@@ -1869,10 +1908,13 @@ async def crawl_once(
                         reason = "no_date" if kw_ok else "no_keywords"
                         exporter.log_miss(
                             group_id=gid,
+                            group_title=group_title_norm,
+                            group_screen_name=group_screen_name_norm,
                             post_id=pid,
                             url=post_url,
+                            ts=int(time.time()),
                             reason=reason,
-                            matched_keywords=unique_kws,
+                            matched_kw=unique_kws,
                             post_ts=ts,
                             flags={
                                 "history_hit": bool(history_hit),
@@ -1932,10 +1974,13 @@ async def crawl_once(
                         )
                         exporter.log_miss(
                             group_id=gid,
+                            group_title=group_title_norm,
+                            group_screen_name=group_screen_name_norm,
                             post_id=pid,
                             url=post_url,
+                            ts=int(time.time()),
                             reason=reason,
-                            matched_keywords=matched_kw_list,
+                            matched_kw=matched_kw_list,
                             post_ts=ts,
                             event_ts_hint=event_ts_hint,
                             flags={
