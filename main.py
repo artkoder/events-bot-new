@@ -22801,7 +22801,9 @@ async def _vkrev_import_flow(
     if isinstance(festival_info_raw, dict):
         fest_data = festival_info_raw
         fest_name = clean_optional_str(
-            fest_data.get("name") or fest_data.get("festival")
+            fest_data.get("name")
+            or fest_data.get("festival")
+            or fest_data.get("full_name")
         )
     else:
         fest_name = None

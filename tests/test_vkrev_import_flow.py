@@ -1522,3 +1522,90 @@ async def test_build_event_draft_handles_ocr_limit(tmp_path, monkeypatch):
     assert draft.ocr_tokens_remaining == 0
     assert draft.ocr_limit_notice is not None
     assert "лимит" in draft.ocr_limit_notice.lower()
+
+@pytest.mark.asyncio
+async def test_vkrev_import_flow_force_festival_accepts_full_name(monkeypatch, tmp_path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.raw_conn() as conn:
+        await conn.execute(
+            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time, default_ticket_link) VALUES(?,?,?,?,?,?)",
+            (1, "club1", "Test Community", "", None, None),
+        )
+        await conn.execute(
+            "INSERT INTO vk_inbox(id, group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status) VALUES(?,?,?,?,?,?,?,?,?)",
+            (1, 1, 2, 0, "text", None, 1, 0, "pending"),
+        )
+        await conn.commit()
+
+    async def fake_fetch(*_args, **_kwargs):
+        return []
+
+    draft = vk_intake.EventDraft(
+        title="T",
+        date="2025-09-02",
+        time="10:00",
+        source_text="T",
+    )
+
+    async def fake_build(
+        _text,
+        *,
+        photos=None,
+        source_name=None,
+        location_hint=None,
+        default_time=None,
+        default_ticket_link=None,
+        operator_extra=None,
+        festival_names=None,
+        festival_alias_pairs=None,
+        festival_hint=False,
+        db=None,
+    ):
+        return [draft]
+
+    captured: dict[str, Any] = {}
+
+    async def fake_mark_imported(
+        _db, _inbox_id, _batch_id, _operator_id, event_id, event_date
+    ):
+        captured["event_id"] = event_id
+        captured["event_date"] = event_date
+
+    async def fake_enqueue_job(
+        _db, _event_id, _task, depends_on=None, coalesce_key=None
+    ):
+        return "job"
+
+    async def fake_assign_event_topics(event_obj):
+        event_obj.topics = []
+        event_obj.topics_manual = False
+        return [], 0, None, False
+
+    async def fake_ensure_festival(db_, name, **kwargs):
+        captured["fest_name"] = name
+        captured["fest_full_name"] = kwargs.get("full_name")
+        return SimpleNamespace(name=name, full_name=kwargs.get("full_name")), False, False
+
+    monkeypatch.setattr(main, "_vkrev_fetch_photos", fake_fetch)
+    monkeypatch.setattr(vk_intake, "build_event_drafts", fake_build)
+    monkeypatch.setattr(vk_review, "mark_imported", fake_mark_imported)
+    monkeypatch.setattr(main, "enqueue_job", fake_enqueue_job)
+    monkeypatch.setattr(main, "assign_event_topics", fake_assign_event_topics)
+    monkeypatch.setattr(main, "ensure_festival", fake_ensure_festival)
+    monkeypatch.setattr(
+        main.parse_event_via_4o, "_festival", {"full_name": "Тестовый фестиваль"}, raising=False
+    )
+
+    bot = DummyBot()
+    await main._vkrev_import_flow(1, 1, 1, "batch1", db, bot, force_festival=True)
+
+    assert captured.get("fest_name") == "Тестовый фестиваль"
+    assert captured.get("fest_full_name") == "Тестовый фестиваль"
+    assert captured.get("event_id") is not None
+    error_messages = [
+        msg.text for msg in bot.messages if "Не удалось распознать фестиваль" in msg.text
+    ]
+    assert not error_messages
+    assert any("Событие 1" in msg.text for msg in bot.messages)
