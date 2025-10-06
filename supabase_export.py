@@ -102,8 +102,9 @@ class SBExporter:
             return
         payload = {
             "group_id": group_id,
-            "group_screen_name": screen_name,
-            "group_title": name,
+            "group_screen_name": screen_name or f"club{group_id}",
+            "group_title": name or "",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
         }
         try:
             client.table("vk_groups").upsert(  # type: ignore[operator]
