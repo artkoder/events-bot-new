@@ -350,6 +350,7 @@ line, and each line disappears when the source data is missing so operators imme
 The project uses `telegraph>=2.2.0`. `create_page` returns the page `url` and `path`;
 only `edit_page(path=...)` accepts a `path` argument when updating existing pages.
 Editing an event lets you create or delete an ICS file for calendars. The file is uploaded to Supabase when `SUPABASE_URL` and `SUPABASE_KEY` are set. Files are named `Event-<id>-dd-mm-yyyy.ics` and include a link back to the event. Set `SUPABASE_BUCKET` if you use a bucket name other than `events-ics`.
+Set `SUPABASE_EXPORT_ENABLED=1` to push VK crawl telemetry (group metadata, post snapshots, sampled misses) into Supabase. Snapshots older than `SUPABASE_RETENTION_DAYS` (default: 30) are purged automatically. Tune `VK_MISSES_SAMPLE_RATE` (default: 0.1) to control what fraction of rejected posts are exported for analysis.
 When a calendar file exists the Telegraph page shows a link right under the title image: "📅 Добавить в календарь".
 Events may note support for the Пушкинская карта, shown as a separate line in postings.
 Run `/exhibitions` to see all ongoing exhibitions (events with a start and end date).
