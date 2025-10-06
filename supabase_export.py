@@ -133,8 +133,10 @@ class SBExporter:
             payload["group_title"] = group_title
         if group_screen_name is not None:
             payload["group_screen_name"] = group_screen_name
-        if ts is not None:
-            payload["ts"] = _ts_to_iso(ts) or ts
+        timestamp_value = _ts_to_iso(ts)
+        if timestamp_value is None:
+            timestamp_value = datetime.now(timezone.utc).isoformat()
+        payload["ts"] = timestamp_value
         if match_rate is not None:
             payload["match_rate"] = match_rate
         if errors is not None:
@@ -203,8 +205,10 @@ class SBExporter:
             "post_ts": _ts_to_iso(post_ts),
             "event_ts_hint": _ts_to_iso(event_ts_hint),
         }
-        if ts is not None:
-            payload["ts"] = _ts_to_iso(ts) or ts
+        timestamp_value = _ts_to_iso(ts)
+        if timestamp_value is None:
+            timestamp_value = datetime.now(timezone.utc).isoformat()
+        payload["ts"] = timestamp_value
         if group_title is not None:
             payload["group_title"] = group_title
         if group_screen_name is not None:
@@ -250,13 +254,17 @@ class SBExporter:
             return
         cutoff = datetime.now(timezone.utc) - timedelta(days=self._retention_days)
         cutoff_iso = cutoff.isoformat()
+        timestamp_column = "ts"
         for table in ("vk_crawl_snapshots", "vk_misses_sample"):
             try:
                 client.table(table).delete().lt(  # type: ignore[operator]
-                    "created_at", cutoff_iso
+                    timestamp_column, cutoff_iso
                 ).execute()
                 logger.debug(
-                    "Supabase retention applied: table=%s cutoff=%s", table, cutoff_iso
+                    "Supabase retention applied: table=%s column=%s cutoff=%s",
+                    table,
+                    timestamp_column,
+                    cutoff_iso,
                 )
             except Exception as exc:  # pragma: no cover - network failure
                 logger.warning("Supabase export failed: %s", exc)
