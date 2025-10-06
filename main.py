@@ -3043,6 +3043,7 @@ async def ensure_festival(
     website_url: str | None = None,
     program_url: str | None = None,
     ticket_url: str | None = None,
+    description: str | None = None,
     start_date: str | None = None,
     end_date: str | None = None,
     location_name: str | None = None,
@@ -3052,6 +3053,7 @@ async def ensure_festival(
     source_post_url: str | None = None,
     source_chat_id: int | None = None,
     source_message_id: int | None = None,
+    aliases: Sequence[str] | None = None,
 ) -> tuple[Festival, bool, bool]:
     """Return festival and flags (created, updated)."""
     async with db.get_session() as session:
@@ -3086,6 +3088,9 @@ async def ensure_festival(
             if full_name and full_name != fest.full_name:
                 fest.full_name = full_name
                 updated = True
+            if description and description != fest.description:
+                fest.description = description
+                updated = True
             if start_date and start_date != fest.start_date:
                 fest.start_date = start_date
                 updated = True
@@ -3113,6 +3118,11 @@ async def ensure_festival(
             if source_message_id and source_message_id != fest.source_message_id:
                 fest.source_message_id = source_message_id
                 updated = True
+            if aliases is not None:
+                alias_list = [alias for alias in aliases if alias]
+                if alias_list != list(fest.aliases or []):
+                    fest.aliases = alias_list
+                    updated = True
             if updated:
                 session.add(fest)
                 await session.commit()
@@ -3126,6 +3136,7 @@ async def ensure_festival(
             website_url=website_url.strip() if website_url else None,
             program_url=program_url.strip() if program_url else None,
             ticket_url=ticket_url.strip() if ticket_url else None,
+            description=description,
             start_date=start_date,
             end_date=end_date,
             location_name=location_name,
@@ -3136,6 +3147,7 @@ async def ensure_festival(
             source_chat_id=source_chat_id,
             source_message_id=source_message_id,
             created_at=datetime.now(timezone.utc),
+            aliases=list(aliases) if aliases else [],
         )
         session.add(fest)
         await session.commit()
@@ -5823,6 +5835,7 @@ class HolidayRecord:
     canonical_name: str
     aliases: tuple[str, ...]
     description: str
+    normalized_aliases: tuple[str, ...] = ()
 
 
 @lru_cache(maxsize=1)
@@ -5866,22 +5879,34 @@ def _read_holidays() -> tuple[tuple[HolidayRecord, ...], tuple[str, ...], Mappin
             )
             description = description_field.strip()
 
-            record = HolidayRecord(
-                date=date_token,
-                canonical_name=canonical_name,
-                aliases=aliases,
-                description=description,
-            )
-            holidays.append(record)
+            normalized_aliases: list[str] = []
+
+            def _store_norm(value: str) -> None:
+                norm = normalize_alias(value)
+                if norm and norm not in normalized_aliases:
+                    normalized_aliases.append(norm)
+
             canonical_names.append(canonical_name)
 
             canonical_norm = normalize_alias(canonical_name)
             if canonical_norm:
                 alias_map[canonical_norm] = canonical_name
+                _store_norm(canonical_name)
             for alias in aliases:
                 alias_norm = normalize_alias(alias)
                 if alias_norm:
                     alias_map[alias_norm] = canonical_name
+                    _store_norm(alias)
+
+            holidays.append(
+                HolidayRecord(
+                    date=date_token,
+                    canonical_name=canonical_name,
+                    aliases=aliases,
+                    description=description,
+                    normalized_aliases=tuple(normalized_aliases),
+                )
+            )
 
     return tuple(holidays), tuple(canonical_names), MappingProxyType(alias_map)
 
@@ -5892,6 +5917,24 @@ def _holiday_canonical_names() -> tuple[str, ...]:
 
 def _holiday_alias_map() -> Mapping[str, str]:
     return _read_holidays()[2]
+
+
+@lru_cache(maxsize=1)
+def _holiday_record_map() -> Mapping[str, HolidayRecord]:
+    holidays, _, _ = _read_holidays()
+    return MappingProxyType({record.canonical_name: record for record in holidays})
+
+
+def get_holiday_record(value: str | None) -> HolidayRecord | None:
+    if not value:
+        return None
+    alias_norm = normalize_alias(value)
+    if not alias_norm:
+        return None
+    canonical = _holiday_alias_map().get(alias_norm)
+    if not canonical:
+        return None
+    return _holiday_record_map().get(canonical)
 
 
 @lru_cache(maxsize=1)
