@@ -137,6 +137,11 @@ class SBExporter:
         except Exception as exc:  # pragma: no cover - network failure
             logger.warning("Supabase export failed: %s", exc)
 
+    def should_log_miss(self, kw_ok: bool, has_date: bool) -> bool:
+        """Return True when a miss must be logged regardless of sampling."""
+
+        return bool(kw_ok) ^ bool(has_date)
+
     def log_miss(
         self,
         *,
@@ -149,13 +154,25 @@ class SBExporter:
         event_ts_hint: int | None = None,
         flags: Mapping[str, Any] | None = None,
         extra: Mapping[str, Any] | None = None,
+        kw_ok: bool | None = None,
+        has_date: bool | None = None,
     ) -> None:
         if not self._enabled:
             return
-        if self._miss_sample_rate <= 0:
-            return
-        if random.random() > self._miss_sample_rate:
-            return
+        mandatory = False
+        if kw_ok is not None and has_date is not None:
+            mandatory = self.should_log_miss(kw_ok, has_date)
+            if mandatory:
+                logger.debug(
+                    "Supabase miss mandatory logging triggered: kw_ok=%s has_date=%s",
+                    kw_ok,
+                    has_date,
+                )
+        if not mandatory:
+            if self._miss_sample_rate <= 0:
+                return
+            if random.random() > self._miss_sample_rate:
+                return
         client = self._get_client()
         if client is None:
             return
