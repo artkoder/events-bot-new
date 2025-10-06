@@ -6175,6 +6175,7 @@ FOUR_O_EDITOR_PROMPT = textwrap.dedent(
     """
     Ты — выпускающий редактор русскоязычного Telegram-канала о событиях.
     Прежде всего безусловно выполняй инструкции оператора, даже если для этого нужно опустить или переформулировать конфликтующие фрагменты исходного текста.
+    Исходный заголовок, если он передан, рассматривай лишь как контекст: при необходимости перепиши его или опусти.
     Переформатируй текст истории для публикации на Telegraph.
     Разбей материал на абзацы по 2–3 предложения и вставь понятные промежуточные подзаголовки.
     Делай только лёгкие правки: исправляй опечатки и очевидные неточности, не выдумывай новые детали.
@@ -6191,6 +6192,7 @@ FOUR_O_PITCH_PROMPT = textwrap.dedent(
     """
     Ты — редактор русскоязычного Telegram-канала о событиях.
     Прежде всего следуй инструкциям оператора, даже если приходится опустить или переписать элементы исходного текста, которые им противоречат.
+    Исходный заголовок служит вспомогательным контекстом: при необходимости перепиши его или опусти.
     Твоя задача — придумать одно продающее предложение для анонса истории.
     Ориентируйся на триггеры любопытства или лёгкой интриги, когда это уместно.
     Допускай лёгкую, но ниже умеренной, гиперболизацию ради выразительности.
@@ -6223,11 +6225,13 @@ async def compose_story_pitch_via_4o(
     sections: list[str] = [
         "Сделай одно энергичное предложение, чтобы читатель захотел открыть историю на Telegraph.",
     ]
+    instructions_clean = (instructions or "").strip()
     if title:
         title_clean = title.strip()
-        if title_clean:
-            sections.append(f"Заголовок: {title_clean}")
-    instructions_clean = (instructions or "").strip()
+        if title_clean and not instructions_clean:
+            sections.append(
+                f"Исходный заголовок (можно изменить при необходимости): {title_clean}"
+            )
     if instructions_clean:
         sections.append(
             "Дополнительные инструкции редактору:\n" + instructions_clean
@@ -6271,11 +6275,13 @@ async def compose_story_editorial_via_4o(
     if not raw:
         return ""
     sections: list[str] = []
+    instructions_clean = (instructions or "").strip()
     if title:
         title_clean = title.strip()
-        if title_clean:
-            sections.append(f"Заголовок: {title_clean}")
-    instructions_clean = (instructions or "").strip()
+        if title_clean and not instructions_clean:
+            sections.append(
+                f"Исходный заголовок (можно изменить при необходимости): {title_clean}"
+            )
     if instructions_clean:
         sections.append(
             "Дополнительные инструкции редактору:\n" + instructions_clean
