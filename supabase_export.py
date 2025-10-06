@@ -164,13 +164,16 @@ class SBExporter:
         post_id: int,
         url: str | None,
         reason: str,
-        matched_keywords: Sequence[str] | None = None,
+        matched_kw: Sequence[str] | None = None,
         post_ts: int | None = None,
         event_ts_hint: int | None = None,
         flags: Mapping[str, Any] | None = None,
         extra: Mapping[str, Any] | None = None,
         kw_ok: bool | None = None,
         has_date: bool | None = None,
+        ts: int | None = None,
+        group_title: str | None = None,
+        group_screen_name: str | None = None,
     ) -> None:
         if not self._enabled:
             return
@@ -194,12 +197,22 @@ class SBExporter:
         payload: dict[str, Any] = {
             "group_id": group_id,
             "post_id": post_id,
-            "post_url": url,
+            "url": url,
             "reason": reason,
-            "matched_keywords": list(matched_keywords or [])[:20],
+            "matched_kw": list(matched_kw or [])[:20],
             "post_ts": _ts_to_iso(post_ts),
             "event_ts_hint": _ts_to_iso(event_ts_hint),
         }
+        if ts is not None:
+            payload["ts"] = _ts_to_iso(ts) or ts
+        if group_title is not None:
+            payload["group_title"] = group_title
+        if group_screen_name is not None:
+            payload["group_screen_name"] = group_screen_name
+        if kw_ok is not None:
+            payload["kw_ok"] = bool(kw_ok)
+        if has_date is not None:
+            payload["has_date"] = bool(has_date)
         if flags:
             serialized_flags: dict[str, Any] = {}
             for key, value in flags.items():
