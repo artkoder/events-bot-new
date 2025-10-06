@@ -10,13 +10,13 @@ from typing import Any, Callable, Mapping, Sequence
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_RETENTION_DAYS = 30
+_DEFAULT_RETENTION_DAYS = 60
 _DEFAULT_MISS_SAMPLE_RATE = 0.1
 
 
-def _parse_bool(value: str | None) -> bool:
+def _parse_bool(value: str | None, *, default: bool = False) -> bool:
     if value is None:
-        return False
+        return default
     value = value.strip().lower()
     return value in {"1", "true", "yes", "on"}
 
@@ -60,7 +60,9 @@ class SBExporter:
     def __init__(self, client_factory: Callable[[], Any]) -> None:
         self._client_factory = client_factory
         self._client: Any | None = None
-        self._enabled = _parse_bool(os.getenv("SUPABASE_EXPORT_ENABLED"))
+        self._enabled = _parse_bool(
+            os.getenv("SUPABASE_EXPORT_ENABLED"), default=True
+        )
         self._retention_days = _parse_int(
             os.getenv("SUPABASE_RETENTION_DAYS"), _DEFAULT_RETENTION_DAYS
         )
