@@ -26,6 +26,12 @@ If `docs/LOCATIONS.md` exists, its lines are appended to the system prompt as a
 list of known venues. This helps the model normalise `location_name` to a
 standard form.
 
+If `docs/HOLIDAYS.md` exists, a "Known holidays" list is appended with the
+canonical names of seasonal festivals, their alias hints and short
+descriptions. The model should rely on these entries when filling the
+`festival` field so that holiday-related events converge on the same canonical
+records even when the source text uses synonyms.
+
 When the database stores festival metadata, the system prompt receives an extra
 JSON payload with canonical `festival_names` and normalised
 `festival_alias_pairs`. Each pair is `[alias_norm, festival_index]` where

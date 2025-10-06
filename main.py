@@ -16,6 +16,8 @@ import tempfile
 import calendar
 import math
 from collections import Counter
+from dataclasses import dataclass
+from types import MappingProxyType
 
 
 class DeduplicateFilter(logging.Filter):
@@ -5815,6 +5817,83 @@ async def tg_ics_post(event_id: int, db: Database, bot: Bot, progress=None) -> b
 
         return True
 
+@dataclass(frozen=True)
+class HolidayRecord:
+    date: str
+    canonical_name: str
+    aliases: tuple[str, ...]
+    description: str
+
+
+@lru_cache(maxsize=1)
+def _read_holidays() -> tuple[tuple[HolidayRecord, ...], tuple[str, ...], Mapping[str, str]]:
+    path = os.path.join("docs", "HOLIDAYS.md")
+    if not os.path.exists(path):
+        return (), (), {}
+
+    holidays: list[HolidayRecord] = []
+    canonical_names: list[str] = []
+    alias_map: dict[str, str] = {}
+
+    with open(path, "r", encoding="utf-8") as f:
+        for raw_line in f:
+            if "|" not in raw_line:
+                continue
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+
+            parts = [part.strip() for part in raw_line.split("|")]
+            if len(parts) < 3:
+                continue
+
+            date_token = parts[0]
+            canonical_name = parts[1]
+            if not canonical_name:
+                continue
+
+            if len(parts) == 3:
+                alias_field = ""
+                description_field = parts[2]
+            else:
+                alias_field = parts[2]
+                description_field = "|".join(parts[3:]).strip()
+
+            aliases = tuple(
+                alias.strip()
+                for alias in alias_field.split(",")
+                if alias.strip()
+            )
+            description = description_field.strip()
+
+            record = HolidayRecord(
+                date=date_token,
+                canonical_name=canonical_name,
+                aliases=aliases,
+                description=description,
+            )
+            holidays.append(record)
+            canonical_names.append(canonical_name)
+
+            canonical_norm = normalize_alias(canonical_name)
+            if canonical_norm:
+                alias_map[canonical_norm] = canonical_name
+            for alias in aliases:
+                alias_norm = normalize_alias(alias)
+                if alias_norm:
+                    alias_map[alias_norm] = canonical_name
+
+    return tuple(holidays), tuple(canonical_names), MappingProxyType(alias_map)
+
+
+def _holiday_canonical_names() -> tuple[str, ...]:
+    return _read_holidays()[1]
+
+
+def _holiday_alias_map() -> Mapping[str, str]:
+    return _read_holidays()[2]
+
+
 @lru_cache(maxsize=1)
 def _read_base_prompt() -> str:
     prompt_path = os.path.join("docs", "PROMPTS.md")
@@ -5828,6 +5907,18 @@ def _read_base_prompt() -> str:
             ]
         if locations:
             prompt += "\nKnown venues:\n" + "\n".join(locations)
+
+    holidays, _, _ = _read_holidays()
+    if holidays:
+        entries = []
+        for holiday in holidays:
+            alias_hint = (
+                f" (aliases: {', '.join(holiday.aliases)})" if holiday.aliases else ""
+            )
+            entries.append(
+                f"- {holiday.canonical_name}{alias_hint} — {holiday.description}"
+            )
+        prompt += "\nKnown holidays:\n" + "\n".join(entries)
     return prompt
 
 
