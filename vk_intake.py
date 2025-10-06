@@ -1856,6 +1856,18 @@ async def crawl_once(
                     continue
 
                 stats["matches"] += 1
+                snapshot_excerpt = (post_text or "")[:500]
+                exporter.write_snapshot(
+                    group_id=gid,
+                    post_id=pid,
+                    post_ts=ts,
+                    url=post_url,
+                    matched_keywords=matched_kw_list,
+                    has_date=bool(has_date_value),
+                    event_ts_hint=event_ts_hint,
+                    photos_count=len(photos),
+                    text=snapshot_excerpt,
+                )
                 try:
                     async with db.raw_conn() as conn:
                         cur = await conn.execute(
@@ -1904,17 +1916,6 @@ async def crawl_once(
                     else:
                         stats["added"] += 1
                         group_matched += 1
-                        exporter.write_snapshot(
-                            group_id=gid,
-                            post_id=pid,
-                            post_ts=ts,
-                            url=post_url,
-                            matched_keywords=matched_kw_list,
-                            has_date=bool(has_date_value),
-                            event_ts_hint=event_ts_hint,
-                            photos_count=len(photos),
-                            text=post_text,
-                        )
                 except Exception:
                     stats["errors"] += 1
                     continue
