@@ -23075,18 +23075,38 @@ def _vkrev_extract_forbidden_phrases(instructions: str | None) -> list[str]:
     lowered = instructions.casefold()
     phrases: set[str] = set()
     patterns = [
-        r"не\s+(?:используй|использовать|упоминать|упоминай)\s+([^.!?\n]+)",
+        r"не\s+(?:используй|использовать|упоминать|упоминай|говорить|говори|писать|пиши|употреблять|вставлять)"
+        r"(?:\s+(?:ничего|ни\s+слова))?(?:\s+(?:про|о|об))?\s+([^.!?\n]+)",
         r"без\s+([^.!?\n]+)",
+        r"чтобы\s+не\s+было\s+([^.!?\n]+)",
+        r"никаких\s+([^.!?\n]+)",
     ]
     for pattern in patterns:
         for match in re.finditer(pattern, lowered):
+            match_text = match.group(0)
             fragment = match.group(1)
             fragment = re.split(r"[,;]\s*", fragment, maxsplit=1)[0]
             fragment = fragment.strip()
+            prefix_word: str | None = None
+            if fragment:
+                index = match_text.rfind(fragment)
+                if index != -1:
+                    before_fragment = match_text[:index]
+                    prefix_match = re.search(r"(про|о|об|никаких)\s+$", before_fragment)
+                    if prefix_match:
+                        prefix_word = prefix_match.group(1)
             fragment = re.sub(r"^(слова?|word|emoji|эмодзи)\s+", "", fragment)
+            fragment = re.sub(r"^(?:про|о|об)\s+", "", fragment)
+            fragment = re.sub(r"^(?:ничего|ни\s+слова)\s+", "", fragment)
+            fragment = re.sub(r"^никаких\s+", "", fragment)
             fragment = fragment.strip(" \"'«»“”„‹›‚‘’`()[]")
             if fragment:
                 phrases.add(fragment)
+                if prefix_word:
+                    variant = f"{prefix_word} {fragment}".strip()
+                    variant = variant.strip(" \"'«»“”„‹›‚‘’`()[]")
+                    if variant:
+                        phrases.add(variant)
     ordered = sorted(phrases, key=len, reverse=True)
     return ordered
 
@@ -23117,8 +23137,10 @@ def _vkrev_apply_title_instructions(
             candidate = pattern.sub("", candidate)
             candidate = re.sub(r"\s{2,}", " ", candidate)
             candidate = candidate.strip()
-    candidate = candidate.strip(" -–—,:;")
+    candidate = candidate.strip()
+    candidate = candidate.strip(_QUOTE_CHARS + " -–—,:;")
     candidate = re.sub(r"\s{2,}", " ", candidate).strip()
+    candidate = candidate.strip(_QUOTE_CHARS)
     if candidate and candidate[0].islower():
         candidate = candidate[0].upper() + candidate[1:]
     return candidate[:64]
