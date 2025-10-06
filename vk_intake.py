@@ -24,6 +24,9 @@ import poster_ocr
 
 from sections import MONTHS_RU
 from runtime import require_main_attr
+from supabase_export import SBExporter
+
+logger = logging.getLogger(__name__)
 
 # Crawl tuning parameters
 VK_CRAWL_PAGE_SIZE = int(os.getenv("VK_CRAWL_PAGE_SIZE", "30"))
@@ -1558,6 +1561,8 @@ async def crawl_once(
     vk_wall_since = require_main_attr(
         "vk_wall_since"
     )  # imported lazily to avoid circular import
+    get_supabase_client = require_main_attr("get_supabase_client")
+    exporter = SBExporter(get_supabase_client)
 
     start = time.perf_counter()
     override_backfill_days = (
@@ -1592,8 +1597,23 @@ async def crawl_once(
             "UPDATE vk_inbox SET status='rejected' WHERE status IN ('pending','skipped') AND (event_ts_hint IS NULL OR event_ts_hint < ?)",
             (cutoff,),
         )
-        cur = await conn.execute("SELECT group_id, default_time FROM vk_source")
-        groups = [(row[0], row[1]) for row in await cur.fetchall()]
+        cur = await conn.execute(
+            """
+            SELECT group_id, screen_name, name, location, default_time, default_ticket_link
+            FROM vk_source
+            """
+        )
+        groups = [
+            {
+                "group_id": row[0],
+                "screen_name": row[1],
+                "name": row[2],
+                "location": row[3],
+                "default_time": row[4],
+                "default_ticket_link": row[5],
+            }
+            for row in await cur.fetchall()
+        ]
         await conn.commit()
 
     random.shuffle(groups)
@@ -1604,9 +1624,19 @@ async def crawl_once(
     pages_per_group: list[int] = []
 
     now_ts = int(time.time())
-    for gid, default_time in groups:
+    for group in groups:
+        gid = group["group_id"]
+        default_time = group.get("default_time")
         stats["groups_checked"] += 1
         await asyncio.sleep(random.uniform(0.7, 1.2))  # safety pause
+        exporter.upsert_group_meta(
+            gid,
+            screen_name=group.get("screen_name"),
+            name=group.get("name"),
+            location=group.get("location"),
+            default_time=default_time,
+            default_ticket_link=group.get("default_ticket_link"),
+        )
         try:
             async with db.raw_conn() as conn:
                 cur = await conn.execute(
@@ -1728,39 +1758,102 @@ async def crawl_once(
                 group_posts += 1
                 post_text = post.get("text", "")
                 photos = post.get("photos", []) or []
+                post_url = post.get("url")
                 blank_single_photo = not post_text.strip() and len(photos) == 1
 
-                history_hit = False
+                matched_kw_value = ""
+                has_date_value = 0
+                event_ts_hint: int | None = None
+                matched_kw_list: list[str] = []
+                is_match = False
+
                 if blank_single_photo:
                     matched_kw_value = OCR_PENDING_SENTINEL
-                    has_date_value = 0
-                    event_ts_hint = None
+                    matched_kw_list = [OCR_PENDING_SENTINEL]
+                    is_match = True
                 else:
                     history_hit = detect_historical_context(post_text)
                     kw_ok, kws = match_keywords(post_text)
                     has_date = detect_date(post_text)
+                    seen_kws: set[str] = set()
+                    unique_kws: list[str] = []
+                    for kw in kws:
+                        if kw not in seen_kws:
+                            seen_kws.add(kw)
+                            unique_kws.append(kw)
                     if kw_ok and has_date:
+                        log_keywords = list(unique_kws)
+                        if history_hit and HISTORY_MATCHED_KEYWORD not in seen_kws:
+                            log_keywords.append(HISTORY_MATCHED_KEYWORD)
                         event_ts_hint = extract_event_ts_hint(
                             post_text, default_time, publish_ts=ts
                         )
-                        if event_ts_hint is None or event_ts_hint < int(time.time()) + 2 * 3600:
-                            continue
-                        seen_kws: set[str] = set()
-                        matched_kw_list: list[str] = []
-                        for kw in kws:
-                            if kw not in seen_kws:
-                                matched_kw_list.append(kw)
-                                seen_kws.add(kw)
-                        if history_hit and HISTORY_MATCHED_KEYWORD not in seen_kws:
-                            matched_kw_list.append(HISTORY_MATCHED_KEYWORD)
+                        min_event_ts = int(time.time()) + 2 * 3600
+                        fallback_applied = False
+                        if event_ts_hint is None or event_ts_hint < min_event_ts:
+                            allow_without_hint = False
+                            year_match = re.search(r"\b20\d{2}\b", post_text)
+                            if year_match:
+                                try:
+                                    year_val = int(year_match.group(0))
+                                except ValueError:
+                                    year_val = None
+                                else:
+                                    publish_year = datetime.fromtimestamp(
+                                        ts, require_main_attr("LOCAL_TZ")
+                                    ).year
+                                    if year_val is not None and year_val > publish_year:
+                                        allow_without_hint = True
+                            if not allow_without_hint:
+                                exporter.log_miss(
+                                    group_id=gid,
+                                    post_id=pid,
+                                    url=post_url,
+                                    reason="past_event",
+                                    matched_keywords=log_keywords,
+                                    post_ts=ts,
+                                    event_ts_hint=event_ts_hint,
+                                )
+                                continue
+                            fallback_applied = True
+                        if not fallback_applied:
+                            far_threshold = int(time.time()) + 2 * 365 * 86400
+                            if event_ts_hint > far_threshold:
+                                exporter.log_miss(
+                                    group_id=gid,
+                                    post_id=pid,
+                                    url=post_url,
+                                    reason="too_far",
+                                    matched_keywords=log_keywords,
+                                    post_ts=ts,
+                                    event_ts_hint=event_ts_hint,
+                                )
+                                continue
+                        matched_kw_list = log_keywords
                         matched_kw_value = ",".join(matched_kw_list)
-                        has_date_value = int(has_date)
+                        has_date_value = 1
+                        if fallback_applied:
+                            event_ts_hint = None
+                        is_match = True
                     elif history_hit:
                         matched_kw_value = HISTORY_MATCHED_KEYWORD
+                        matched_kw_list = [HISTORY_MATCHED_KEYWORD]
                         has_date_value = int(has_date)
-                        event_ts_hint = None
+                        is_match = True
                     else:
+                        reason = "no_date" if kw_ok else "no_keywords"
+                        exporter.log_miss(
+                            group_id=gid,
+                            post_id=pid,
+                            url=post_url,
+                            reason=reason,
+                            matched_keywords=unique_kws,
+                            post_ts=ts,
+                        )
                         continue
+
+                if not is_match:
+                    continue
 
                 stats["matches"] += 1
                 try:
@@ -1784,11 +1877,47 @@ async def crawl_once(
                         await conn.commit()
                     if cur.rowcount == 0:
                         stats["duplicates"] += 1
+                        existing_status: str | None = None
+                        async with db.raw_conn() as conn:
+                            cur_status = await conn.execute(
+                                "SELECT status FROM vk_inbox WHERE group_id=? AND post_id=? LIMIT 1",
+                                (gid, pid),
+                            )
+                            row_status = await cur_status.fetchone()
+                        if row_status:
+                            existing_status = row_status[0]
+                        reason = (
+                            "already_inbox"
+                            if existing_status in {"pending", "locked", "skipped"}
+                            else "duplicate"
+                        )
+                        exporter.log_miss(
+                            group_id=gid,
+                            post_id=pid,
+                            url=post_url,
+                            reason=reason,
+                            matched_keywords=matched_kw_list,
+                            post_ts=ts,
+                            event_ts_hint=event_ts_hint,
+                            extra={"status": existing_status} if existing_status else None,
+                        )
                     else:
                         stats["added"] += 1
                         group_matched += 1
+                        exporter.write_snapshot(
+                            group_id=gid,
+                            post_id=pid,
+                            post_ts=ts,
+                            url=post_url,
+                            matched_keywords=matched_kw_list,
+                            has_date=bool(has_date_value),
+                            event_ts_hint=event_ts_hint,
+                            photos_count=len(photos),
+                            text=post_text,
+                        )
                 except Exception:
                     stats["errors"] += 1
+                    continue
 
                 if ts > max_ts or (ts == max_ts and pid > max_pid):
                     max_ts, max_pid = ts, pid
@@ -1903,4 +2032,5 @@ async def crawl_once(
                 await bot.send_message(int(admin_chat), msg)
             except Exception:
                 logging.exception("vk.crawl.broadcast.error")
+    exporter.retention()
     return stats
