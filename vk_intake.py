@@ -171,7 +171,7 @@ KEYWORD_LEMMAS = {
 # Date/time patterns used for quick detection
 MONTH_NAMES_DET = "|".join(sorted(re.escape(m) for m in MONTHS_RU.keys()))
 DATE_PATTERNS = [
-    r"\b\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?\b",
+    r"\b\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?(?!-\d)\b",
     r"\b\d{1,2}[–-]\d{1,2}(?:[./]\d{1,2})\b",
     rf"\b\d{{1,2}}\s+(?:{MONTH_NAMES_DET})\.?\b",
     r"\b(понед(?:ельник)?|вторник|сред(?:а)?|четверг|пятниц(?:а)?|суббот(?:а)?|воскресень(?:е|е)|пн|вт|ср|чт|пт|сб|вс)\b",
@@ -183,6 +183,8 @@ DATE_PATTERNS = [
 ]
 
 COMPILED_DATE_PATTERNS = [re.compile(p, re.I | re.U) for p in DATE_PATTERNS]
+
+DATE_PATTERN_STRONG_INDEXES = (0, 1, 2, 3, 4, 8)
 
 PAST_EVENT_RE = re.compile(
     r"\b("
@@ -217,7 +219,9 @@ HISTORICAL_TOPONYMS = [
 ]
 HISTORICAL_YEAR_RE = re.compile(r"\b(1\d{3})\b")
 
-NUM_DATE_RE = re.compile(r"\b(\d{1,2})[./-](\d{1,2})(?:[./-](\d{2,4}))?\b")
+NUM_DATE_RE = re.compile(
+    r"\b(\d{1,2})[./-](\d{1,2})(?:[./-](\d{2,4}))?(?!-\d)\b"
+)
 PHONE_LIKE_RE = re.compile(r"^(?:\d{2}-){2,}\d{2}$")
 FEDERAL_PHONE_CANDIDATE_RE = re.compile(r"(?<!\d)(?:\+7|8)\D*\d(?:\D*\d){9}")
 CITY_PHONE_CANDIDATE_RE = re.compile(r"(?<!\d)\d(?:\D*\d){5}(?!\d)")
@@ -390,7 +394,10 @@ def match_keywords(text: str) -> tuple[bool, list[str]]:
 
 def detect_date(text: str) -> bool:
     """Heuristically detect a date or time mention in the text."""
-    return any(p.search(text) for p in COMPILED_DATE_PATTERNS)
+    return any(
+        COMPILED_DATE_PATTERNS[index].search(text)
+        for index in DATE_PATTERN_STRONG_INDEXES
+    )
 
 
 def detect_historical_context(text: str) -> bool:
@@ -505,7 +512,8 @@ def extract_event_ts_hint(
             now = publish_ts.astimezone(tzinfo)
     else:
         now = datetime.fromtimestamp(publish_ts, tzinfo)
-    text_low = normalize_phone_candidates(text.lower())
+    raw_text_low = text.lower()
+    text_low = normalize_phone_candidates(raw_text_low)
 
     day = month = year = None
     m = None
@@ -522,23 +530,28 @@ def extract_event_ts_hint(
                 check_idx -= 1
             if digit_count >= 3:
                 continue
+        trailing_chars = " \t\r\n.;:!?()[]{}«»\"'—–-"
+        trailing_idx = candidate.end()
+        while trailing_idx < len(text_low) and text_low[trailing_idx] in trailing_chars:
+            trailing_idx += 1
+        if trailing_idx < len(text_low):
+            raw_remainder = raw_text_low[trailing_idx:]
+            trimmed_remainder = raw_remainder.lstrip(trailing_chars)
+            if trimmed_remainder and trimmed_remainder[0].isdigit():
+                continue
+        remainder = text_low[trailing_idx:] if trailing_idx < len(text_low) else ""
+
         if PHONE_LIKE_RE.match(candidate.group(0)):
             context_start = max(0, start - 30)
             context_end = min(len(text_low), candidate.end() + 10)
             context_slice = text_low[context_start:context_end]
             skip_candidate = False
-            trailing_idx = candidate.end()
-            trailing_chars = " \t\r\n.;:!?()[]{}«»\"'—–-"
-            while trailing_idx < len(text_low) and text_low[trailing_idx] in trailing_chars:
-                trailing_idx += 1
             has_event_tail = False
             next_alpha_word = None
             following_is_phone_tail = False
-            remainder = ""
             skip_due_to_action_tail = False
             skip_due_to_location_tail = False
             if trailing_idx < len(text_low):
-                remainder = text_low[trailing_idx:]
                 word_match = re.match(r"[a-zа-яё]+", remainder)
                 if word_match:
                     next_alpha_word = word_match.group(0)
