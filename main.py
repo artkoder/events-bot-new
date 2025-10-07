@@ -2015,6 +2015,11 @@ HELP_COMMANDS = [
         "roles": {"superadmin"},
     },
     {
+        "usage": VK_MISS_REVIEW_COMMAND,
+        "desc": "Supabase miss-review flow to process missed VK posts",
+        "roles": {"superadmin"},
+    },
+    {
         "usage": "/vk_crawl_now",
         "desc": "Run VK crawling now (admin only); reports \"добавлено N, всего M\" to the admin chat",
         "roles": {"superadmin"},
