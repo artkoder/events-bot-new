@@ -1427,7 +1427,16 @@ def _holiday_date_range(record: Any, target_year: int) -> tuple[str | None, str 
                 r"^(?P<start_day>\d{1,2})\.(?P<start_month>\d{1,2})\s*-\s*(?P<end_day>\d{1,2})\.(?P<end_month>\d{1,2})$",
                 normalized,
             )
+            partial_numeric = re.match(
+                r"^(?P<start_day>\d{1,2})\s*-\s*(?P<end_day>\d{1,2})\.(?P<month>\d{1,2})$",
+                normalized,
+            )
             text_range = _TEXT_RANGE_TWO_MONTHS_RE.match(normalized)
+            partial_text = re.match(
+                r"^(?P<start_day>\d{1,2})\s*-\s*(?P<end_day>\d{1,2})\s+(?P<month>[\wё]+)\.?$",
+                normalized,
+                flags=re.IGNORECASE,
+            )
             text_same_month = _TEXT_RANGE_SAME_MONTH_RE.match(normalized)
 
             if dot_range:
@@ -1440,6 +1449,18 @@ def _holiday_date_range(record: Any, target_year: int) -> tuple[str | None, str 
                     target_year,
                     int(dot_range.group("end_month")),
                     int(dot_range.group("end_day")),
+                )
+            elif partial_numeric:
+                month = int(partial_numeric.group("month"))
+                start = _safe_construct_date(
+                    target_year,
+                    month,
+                    int(partial_numeric.group("start_day")),
+                )
+                end = _safe_construct_date(
+                    target_year,
+                    month,
+                    int(partial_numeric.group("end_day")),
                 )
             elif text_range:
                 start_month = _month_from_token(text_range.group("start_month"))
@@ -1462,6 +1483,22 @@ def _holiday_date_range(record: Any, target_year: int) -> tuple[str | None, str 
                     if end_month is not None
                     else None
                 )
+            elif partial_text:
+                month = _month_from_token(partial_text.group("month"))
+                if month is not None:
+                    start = _safe_construct_date(
+                        target_year,
+                        month,
+                        int(partial_text.group("start_day")),
+                    )
+                    end = _safe_construct_date(
+                        target_year,
+                        month,
+                        int(partial_text.group("end_day")),
+                    )
+                else:
+                    start = None
+                    end = None
             elif text_same_month:
                 month = _month_from_token(text_same_month.group("month"))
                 if month is not None:
