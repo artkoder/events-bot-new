@@ -20847,6 +20847,493 @@ async def handle_usage_test(message: types.Message, db: Database, bot: Bot):
     )
 
 
+def _coerce_report_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            if "." in text:
+                return int(float(text))
+            return int(text)
+        except ValueError:
+            return None
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def _collect_report_metrics(
+    record: Mapping[str, Any],
+    metric_defs: Sequence[tuple[str, Sequence[str]]],
+) -> tuple[dict[str, int], set[str]]:
+    values: dict[str, int] = {}
+    used_columns: set[str] = set()
+    for label, columns in metric_defs:
+        for column in columns:
+            if column not in record:
+                continue
+            coerced = _coerce_report_int(record.get(column))
+            if coerced is None:
+                continue
+            values[label] = coerced
+            used_columns.add(column)
+            break
+    return values, used_columns
+
+
+def _collect_extra_numeric_fields(
+    record: Mapping[str, Any],
+    *,
+    skip_fields: Collection[str],
+    used_columns: Collection[str],
+) -> dict[str, int]:
+    extras: dict[str, int] = {}
+    for key, value in record.items():
+        if key in skip_fields or key in used_columns:
+            continue
+        coerced = _coerce_report_int(value)
+        if coerced is None:
+            continue
+        extras[key] = coerced
+    return extras
+
+
+def _try_parse_iso_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, date):
+        return datetime.combine(value, time.min, tzinfo=timezone.utc)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        parsed_date = parse_iso_date(text)
+        if parsed_date:
+            return datetime.combine(parsed_date, time.min, tzinfo=timezone.utc)
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        with contextlib.suppress(ValueError):
+            parsed_dt = datetime.fromisoformat(text)
+            if parsed_dt.tzinfo is None:
+                parsed_dt = parsed_dt.replace(tzinfo=timezone.utc)
+            return parsed_dt
+    return None
+
+
+def _guess_record_datetime(
+    record: Mapping[str, Any],
+    fields: Sequence[str],
+) -> datetime | None:
+    for field in fields:
+        if field not in record:
+            continue
+        candidate = _try_parse_iso_datetime(record.get(field))
+        if candidate is not None:
+            return candidate
+    return None
+
+
+def _format_imp_groups_report(
+    records: Sequence[Mapping[str, Any]],
+    *,
+    days: int,
+    max_rows: int = 25,
+) -> list[str]:
+    metric_defs: Sequence[tuple[str, Sequence[str]]] = [
+        ("Импорт", ("imported", "imported_count", "imports", "matches", "added")),
+        (
+            "На проверке",
+            (
+                "pending",
+                "pending_count",
+                "queue",
+                "queued",
+                "needs_review",
+                "needs_review_count",
+            ),
+        ),
+        (
+            "Отклонено",
+            ("rejected", "rejected_count", "missed", "misses", "total_rejected"),
+        ),
+        ("Дубликаты", ("duplicates", "duplicates_count")),
+        ("Пропущено", ("skipped", "skipped_count", "auto_skipped")),
+        ("Всего", ("total", "total_count", "posts", "events", "sum")),
+    ]
+    ts_fields = (
+        "last_import_at",
+        "last_imported_at",
+        "last_at",
+        "updated_at",
+    )
+    skip_fields: set[str] = {
+        "window_days",
+        "days",
+        "period_days",
+        "span_days",
+        "group_name",
+        "group_title",
+        "name",
+        "title",
+        "group_id",
+        "id",
+        "screen_name",
+        "vk_url",
+        "group",
+        "group_url",
+    }
+    entries: list[dict[str, Any]] = []
+    totals: dict[str, int] = {label: 0 for label, _ in metric_defs}
+    tz = ZoneInfo(VK_WEEK_EDIT_TZ)
+    for record in records:
+        metrics, used_columns = _collect_report_metrics(record, metric_defs)
+        for label, value in metrics.items():
+            totals[label] = totals.get(label, 0) + value
+        name = ""
+        for key in ("group_name", "group_title", "name", "title", "screen_name"):
+            raw = record.get(key)
+            if isinstance(raw, str) and raw.strip():
+                name = raw.strip()
+                break
+        group_id = _coerce_report_int(record.get("group_id"))
+        if group_id is None:
+            group_id = _coerce_report_int(record.get("id"))
+        display_name = name or (f"id={group_id}" if group_id is not None else "Без названия")
+        if group_id is not None and display_name and str(group_id) not in display_name:
+            display_name = f"{display_name} (id={group_id})"
+        extras = _collect_extra_numeric_fields(
+            record,
+            skip_fields=skip_fields,
+            used_columns=used_columns,
+        )
+        timestamp = _guess_record_datetime(record, ts_fields)
+        entries.append(
+            {
+                "display": display_name,
+                "metrics": metrics,
+                "extras": extras,
+                "timestamp": timestamp,
+                "sort": metrics.get("Импорт", 0),
+            }
+        )
+
+    entries.sort(
+        key=lambda item: (
+            item["sort"],
+            item["display"].casefold() if isinstance(item["display"], str) else "",
+        ),
+        reverse=True,
+    )
+
+    lines = [f"Импорт из VK по группам за последние {days} дн.:"]
+    if entries:
+        lines.append(f"Групп в отчёте: {len(entries)}")
+        summary_bits = [
+            f"{label}: {value}" for label, value in totals.items() if value
+        ]
+        if summary_bits:
+            lines.append("Итого: " + ", ".join(summary_bits))
+
+    display_entries = entries[:max_rows]
+    for idx, item in enumerate(display_entries, start=1):
+        metrics_line = [
+            f"{label}: {value}" for label, value in item["metrics"].items() if value or value == 0
+        ]
+        extras = dict(item["extras"])
+        timestamp = item.get("timestamp")
+        for label, value in extras.items():
+            metrics_line.append(f"{label}: {value}")
+        if timestamp is not None:
+            metrics_line.append(
+                "посл. импорт: "
+                + timestamp.astimezone(tz).strftime("%Y-%m-%d %H:%M")
+            )
+        if not metrics_line:
+            metrics_line.append("нет числовых данных")
+        lines.append(f"{idx}. {item['display']}: {', '.join(metrics_line)}")
+
+    if len(entries) > len(display_entries):
+        lines.append(f"… и ещё {len(entries) - len(display_entries)} групп(ы).")
+    if not entries:
+        lines.append("Нет данных за указанный период.")
+    return lines
+
+
+def _format_imp_daily_report(
+    records: Sequence[Mapping[str, Any]],
+    *,
+    days: int,
+) -> list[str]:
+    metric_defs: Sequence[tuple[str, Sequence[str]]] = [
+        ("Импорт", ("imported", "imported_count", "imports", "matches", "added")),
+        ("Отклонено", ("rejected", "rejected_count", "missed", "misses")),
+        ("Дубликаты", ("duplicates", "duplicates_count")),
+        ("Пропущено", ("skipped", "skipped_count", "auto_skipped")),
+        (
+            "На проверке",
+            (
+                "pending",
+                "pending_count",
+                "queue",
+                "queued",
+                "needs_review",
+                "needs_review_count",
+            ),
+        ),
+        ("Групп", ("groups", "groups_count", "group_count")),
+    ]
+    skip_fields: set[str] = {
+        "window_days",
+        "days",
+        "period_days",
+        "span_days",
+        "bucket",
+        "bucket_day",
+        "day",
+        "date",
+        "ts",
+        "at",
+        "label",
+    }
+    time_fields = ("day", "date", "bucket_day", "bucket", "ts", "at", "label")
+    tz = ZoneInfo(VK_WEEK_EDIT_TZ)
+    entries: list[dict[str, Any]] = []
+    totals: dict[str, int] = {label: 0 for label, _ in metric_defs}
+    for record in records:
+        metrics, used_columns = _collect_report_metrics(record, metric_defs)
+        for label, value in metrics.items():
+            totals[label] = totals.get(label, 0) + value
+        extras = _collect_extra_numeric_fields(
+            record,
+            skip_fields=skip_fields,
+            used_columns=used_columns,
+        )
+        sort_dt = _guess_record_datetime(record, time_fields)
+        label_value = None
+        if sort_dt is not None:
+            label_value = sort_dt.astimezone(tz).date().isoformat()
+        if not label_value:
+            for field in time_fields:
+                raw = record.get(field)
+                if isinstance(raw, str) and raw.strip():
+                    label_value = raw.strip()
+                    break
+        entries.append(
+            {
+                "label": label_value or "—",
+                "metrics": metrics,
+                "extras": extras,
+                "sort": sort_dt,
+            }
+        )
+
+    entries.sort(
+        key=lambda item: (
+            item["sort"] or datetime.min.replace(tzinfo=timezone.utc),
+            item["label"],
+        ),
+        reverse=True,
+    )
+
+    lines = [f"Импорт из VK по дням за последние {days} дн.:"]
+    if entries:
+        summary_bits = [
+            f"{label}: {value}" for label, value in totals.items() if value
+        ]
+        if summary_bits:
+            lines.append("Итого: " + ", ".join(summary_bits))
+
+    for item in entries:
+        bits = [
+            f"{label}: {value}" for label, value in item["metrics"].items() if value or value == 0
+        ]
+        for label, value in item["extras"].items():
+            bits.append(f"{label}: {value}")
+        if not bits:
+            bits.append("нет числовых данных")
+        lines.append(f"{item['label']}: {', '.join(bits)}")
+
+    if not entries:
+        lines.append("Нет данных за указанный период.")
+    return lines
+
+
+async def _fetch_vk_import_view(
+    view: str,
+    *,
+    days: int,
+    limit: int | None = None,
+    client: Any | None = None,
+) -> list[Mapping[str, Any]]:
+    supabase_client = client if client is not None else get_supabase_client()
+    candidate_filters: tuple[str, ...] = (
+        "window_days",
+        "days",
+        "period_days",
+        "span_days",
+    )
+    last_error: Exception | None = None
+    if supabase_client is not None:
+        for column in (*candidate_filters, None):
+            try:
+                def _query(column: str | None = column) -> list[Mapping[str, Any]]:
+                    query = supabase_client.table(view).select("*")
+                    if column:
+                        query = query.eq(column, days)
+                    if limit is not None:
+                        query = query.limit(limit)
+                    result = query.execute()
+                    data = getattr(result, "data", result)
+                    return list(data or [])
+
+                return await asyncio.to_thread(_query)
+            except Exception as exc:  # pragma: no cover - network failure
+                logging.debug(
+                    "vk_import_report.supabase_query_failed view=%s column=%s error=%s",
+                    view,
+                    column,
+                    exc,
+                    exc_info=True,
+                )
+                last_error = exc
+                continue
+
+    supabase_disabled = os.getenv("SUPABASE_DISABLED") == "1"
+    if supabase_disabled or not (SUPABASE_URL and SUPABASE_KEY):
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("Supabase client unavailable")
+
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+    }
+    base_url = SUPABASE_URL.rstrip("/")
+    url = f"{base_url}/rest/v1/{view}"
+    timeout = httpx.Timeout(HTTP_TIMEOUT)
+    async with httpx.AsyncClient(timeout=timeout) as http_client:
+        for column in (*candidate_filters, None):
+            params: dict[str, str] = {"select": "*"}
+            if column:
+                params[column] = f"eq.{days}"
+            if limit is not None:
+                params["limit"] = str(limit)
+            try:
+                response = await http_client.get(url, headers=headers, params=params)
+                response.raise_for_status()
+                data = response.json()
+                if isinstance(data, list):
+                    return data
+            except Exception as exc:  # pragma: no cover - network failure
+                logging.debug(
+                    "vk_import_report.http_query_failed view=%s column=%s error=%s",
+                    view,
+                    column,
+                    exc,
+                    exc_info=True,
+                )
+                last_error = exc
+                continue
+
+    if last_error is not None:
+        raise last_error
+    return []
+
+
+async def handle_imp_groups_30d(
+    message: types.Message, db: Database, bot: Bot
+) -> None:
+    async with db.get_session() as session:
+        user = await session.get(User, message.from_user.id)
+    if not user or not user.is_superadmin:
+        await bot.send_message(message.chat.id, "Not authorized")
+        return
+
+    client = get_supabase_client()
+    supabase_disabled = os.getenv("SUPABASE_DISABLED") == "1"
+    if client is None and (supabase_disabled or not (SUPABASE_URL and SUPABASE_KEY)):
+        logging.warning("imp_groups_30d.supabase_unavailable")
+        await bot.send_message(
+            message.chat.id,
+            "Supabase отключён или не настроен.",
+        )
+        return
+
+    try:
+        records = await _fetch_vk_import_view(
+            "vk_import_by_group",
+            days=30,
+            client=client,
+        )
+    except Exception as exc:  # pragma: no cover - network failure
+        logging.exception("imp_groups_30d.fetch_failed")
+        await bot.send_message(
+            message.chat.id,
+            f"Не удалось получить отчёт из Supabase: {exc}",
+        )
+        return
+
+    logger.info(
+        "imp_groups_30d.success user=%s groups=%s",
+        message.from_user.id,
+        len(records),
+    )
+
+    lines = _format_imp_groups_report(records, days=30)
+    await bot.send_message(message.chat.id, "\n".join(lines))
+
+
+async def handle_imp_daily_14d(
+    message: types.Message, db: Database, bot: Bot
+) -> None:
+    async with db.get_session() as session:
+        user = await session.get(User, message.from_user.id)
+    if not user or not user.is_superadmin:
+        await bot.send_message(message.chat.id, "Not authorized")
+        return
+
+    client = get_supabase_client()
+    supabase_disabled = os.getenv("SUPABASE_DISABLED") == "1"
+    if client is None and (supabase_disabled or not (SUPABASE_URL and SUPABASE_KEY)):
+        logging.warning("imp_daily_14d.supabase_unavailable")
+        await bot.send_message(
+            message.chat.id,
+            "Supabase отключён или не настроен.",
+        )
+        return
+
+    try:
+        records = await _fetch_vk_import_view(
+            "vk_import_daily",
+            days=14,
+            client=client,
+        )
+    except Exception as exc:  # pragma: no cover - network failure
+        logging.exception("imp_daily_14d.fetch_failed")
+        await bot.send_message(
+            message.chat.id,
+            f"Не удалось получить отчёт из Supabase: {exc}",
+        )
+        return
+
+    logger.info(
+        "imp_daily_14d.success user=%s rows=%s",
+        message.from_user.id,
+        len(records),
+    )
+
+    lines = _format_imp_daily_report(records, days=14)
+    await bot.send_message(message.chat.id, "\n".join(lines))
+
+
 async def handle_dumpdb(message: types.Message, db: Database, bot: Bot):
     async with db.get_session() as session:
         user = await session.get(User, message.from_user.id)
@@ -26613,6 +27100,12 @@ def create_app() -> web.Application:
     async def fest_wrapper(message: types.Message):
         await handle_fest(message, db, bot)
 
+    async def imp_groups_30d_wrapper(message: types.Message):
+        await handle_imp_groups_30d(message, db, bot)
+
+    async def imp_daily_14d_wrapper(message: types.Message):
+        await handle_imp_daily_14d(message, db, bot)
+
     async def festival_edit_wrapper(message: types.Message):
         await handle_festival_edit_message(message, db, bot)
 
@@ -27060,6 +27553,8 @@ def create_app() -> web.Application:
     dp.message.register(pages_wrapper, Command("pages"))
     dp.message.register(pages_rebuild_wrapper, Command("pages_rebuild"))
     dp.message.register(stats_wrapper, Command("stats"))
+    dp.message.register(imp_groups_30d_wrapper, Command("imp_groups_30d"))
+    dp.message.register(imp_daily_14d_wrapper, Command("imp_daily_14d"))
     dp.message.register(status_wrapper, Command("status"))
     dp.message.register(trace_wrapper, Command("trace"))
     dp.message.register(last_errors_wrapper, Command("last_errors"))
