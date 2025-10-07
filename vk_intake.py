@@ -1877,9 +1877,32 @@ async def crawl_once(
     )  # imported lazily to avoid circular import
     get_supabase_client = require_main_attr("get_supabase_client")
     get_tz_offset = require_main_attr("get_tz_offset")
+    mark_vk_import_result = require_main_attr("mark_vk_import_result")
+    VkImportRejectCode = require_main_attr("VkImportRejectCode")
     await get_tz_offset(db)
     local_tz = require_main_attr("LOCAL_TZ")
     exporter = SBExporter(get_supabase_client)
+
+    def _record_rejection(
+        group_id: int,
+        post_id: int,
+        url: str,
+        code: Any,
+        note: str | None = None,
+    ) -> None:
+        try:
+            code_value = getattr(code, "value", code)
+            mark_vk_import_result(
+                group_id=group_id,
+                post_id=post_id,
+                url=url,
+                outcome="rejected",
+                event_id=None,
+                reject_code=str(code_value),
+                reject_note=note,
+            )
+        except Exception:
+            logging.exception("vk_import_result.supabase_failed")
 
     start = time.perf_counter()
     override_backfill_days = (
@@ -2090,6 +2113,7 @@ async def crawl_once(
                 post_text = post.get("text", "")
                 photos = post.get("photos", []) or []
                 post_url = post.get("url")
+                miss_url = post_url or f"https://vk.com/wall-{gid}_{pid}"
                 blank_single_photo = not post_text.strip() and len(photos) == 1
 
                 matched_kw_value = ""
@@ -2154,6 +2178,13 @@ async def crawl_once(
                                     kw_ok=bool(kw_ok),
                                     has_date=bool(has_date),
                                 )
+                                _record_rejection(
+                                    gid,
+                                    pid,
+                                    miss_url,
+                                    VkImportRejectCode.PAST_EVENT,
+                                    "past_event",
+                                )
                                 continue
                             fallback_applied = True
                         if not fallback_applied:
@@ -2170,6 +2201,13 @@ async def crawl_once(
                                     matched_kw=log_keywords,
                                     kw_ok=bool(kw_ok),
                                     has_date=bool(has_date),
+                                )
+                                _record_rejection(
+                                    gid,
+                                    pid,
+                                    miss_url,
+                                    VkImportRejectCode.TOO_FAR,
+                                    "too_far",
                                 )
                                 continue
                         matched_kw_list = log_keywords
@@ -2197,6 +2235,12 @@ async def crawl_once(
                             kw_ok=bool(kw_ok),
                             has_date=bool(has_date),
                         )
+                        code = (
+                            VkImportRejectCode.NO_DATE
+                            if reason == "no_date"
+                            else VkImportRejectCode.NO_KEYWORDS
+                        )
+                        _record_rejection(gid, pid, miss_url, code, reason)
                         continue
 
             if not is_match:
@@ -2256,6 +2300,12 @@ async def crawl_once(
                             kw_ok=bool(kw_ok),
                             has_date=bool(has_date),
                         )
+                        code = (
+                            VkImportRejectCode.ALREADY_INBOX
+                            if reason == "already_inbox"
+                            else VkImportRejectCode.DUPLICATE
+                        )
+                        _record_rejection(gid, pid, miss_url, code, reason)
                     else:
                         stats["added"] += 1
                         group_added += 1

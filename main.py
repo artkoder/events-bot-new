@@ -16,6 +16,7 @@ import tempfile
 import calendar
 import math
 from collections import Counter
+from enum import Enum
 from dataclasses import dataclass
 from types import MappingProxyType
 
@@ -3030,6 +3031,56 @@ async def upload_vk_photo(
     except Exception as e:
         logging.error("VK photo upload failed: %s", e)
         return None
+
+
+class VkImportRejectCode(str, Enum):
+    MANUAL_REVIEW = "manual_review"
+    PAST_EVENT = "past_event"
+    TOO_FAR = "too_far"
+    NO_DATE = "no_date"
+    NO_KEYWORDS = "no_keywords"
+    ALREADY_INBOX = "already_inbox"
+    DUPLICATE = "duplicate"
+
+
+def mark_vk_import_result(
+    *,
+    group_id: int,
+    post_id: int,
+    url: str,
+    outcome: Literal["imported", "rejected"],
+    event_id: int | None = None,
+    reject_code: str | None = None,
+    reject_note: str | None = None,
+) -> None:
+    client = get_supabase_client()
+    if client is None:
+        return
+    code_value: str | None = None
+    if reject_code is not None:
+        code_raw = getattr(reject_code, "value", reject_code)
+        code_value = str(code_raw)
+    payload = {
+        "group_id": group_id,
+        "post_id": post_id,
+        "url": url,
+        "imported": outcome == "imported",
+        "rejected": outcome == "rejected",
+        "event_id": event_id,
+        "reject_code": code_value,
+        "reject_note": reject_note,
+    }
+    logging.info(
+        "vk_import_result.upsert group_id=%s post_id=%s outcome=%s event_id=%s",
+        group_id,
+        post_id,
+        outcome,
+        event_id,
+    )
+    client.table("vk_misses_sample").upsert(  # type: ignore[operator]
+        payload,
+        on_conflict="group_id,post_id",
+    ).execute()
 
 
 def get_supabase_client() -> "Client | None":  # type: ignore[name-defined]
@@ -23455,12 +23506,32 @@ async def _vkrev_import_flow(
             await _sync_festival_updates()
         else:
             await bot.send_message(chat_id, "LLM не вернул события")
+        try:
+            mark_vk_import_result(
+                group_id=group_id,
+                post_id=post_id,
+                url=source_post_url,
+                outcome="imported",
+                event_id=None,
+            )
+        except Exception:
+            logging.exception("vk_import_result.supabase_failed")
         return
 
     first_res = persist_results[0][1]
     await vk_review.mark_imported(
         db, inbox_id, batch_id, operator_id, first_res.event_id, first_res.event_date
     )
+    try:
+        mark_vk_import_result(
+            group_id=group_id,
+            post_id=post_id,
+            url=source_post_url,
+            outcome="imported",
+            event_id=first_res.event_id,
+        )
+    except Exception:
+        logging.exception("vk_import_result.supabase_failed")
     vk_review_actions_total["imported"] += 1
     link_lines: list[str] = []
     for idx, (_draft, res, _event_obj) in enumerate(persist_results, start=1):
@@ -23900,6 +23971,31 @@ async def handle_vk_review_cb(callback: types.CallbackQuery, db: Database, bot: 
         elif action == "reject":
             await vk_review.mark_rejected(db, inbox_id)
             vk_review_actions_total["rejected"] += 1
+            post_url: str | None = None
+            try:
+                async with db.raw_conn() as conn:
+                    cur = await conn.execute(
+                        "SELECT group_id, post_id FROM vk_inbox WHERE id=?",
+                        (inbox_id,),
+                    )
+                    row_ids = await cur.fetchone()
+            except Exception:
+                row_ids = None
+            if row_ids:
+                gid, pid = row_ids
+                post_url = f"https://vk.com/wall-{gid}_{pid}"
+                try:
+                    mark_vk_import_result(
+                        group_id=gid,
+                        post_id=pid,
+                        url=post_url,
+                        outcome="rejected",
+                        event_id=None,
+                        reject_code=VkImportRejectCode.MANUAL_REVIEW,
+                        reject_note=VkImportRejectCode.MANUAL_REVIEW.value,
+                    )
+                except Exception:
+                    logging.exception("vk_import_result.supabase_failed")
             await _vkrev_show_next(callback.message.chat.id, batch_id, callback.from_user.id, db, bot)
         elif action == "skip":
             await vk_review.mark_skipped(db, inbox_id)

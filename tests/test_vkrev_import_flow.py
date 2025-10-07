@@ -1609,3 +1609,181 @@ async def test_vkrev_import_flow_force_festival_accepts_full_name(monkeypatch, t
     ]
     assert not error_messages
     assert any("Событие 1" in msg.text for msg in bot.messages)
+
+
+class FakeSupabaseExecutor:
+    def __init__(self, client: "FakeSupabaseClient") -> None:
+        self._client = client
+
+    def execute(self):
+        if self._client.raise_on_execute:
+            raise RuntimeError("supabase boom")
+        self._client.executed = True
+        return {"data": []}
+
+
+class FakeSupabaseTable:
+    def __init__(self, client: "FakeSupabaseClient") -> None:
+        self._client = client
+
+    def upsert(self, payload, on_conflict=None):
+        self._client.last_payload = payload
+        self._client.last_on_conflict = on_conflict
+        return FakeSupabaseExecutor(self._client)
+
+
+class FakeSupabaseClient:
+    def __init__(self, *, raise_on_execute: bool = False) -> None:
+        self.raise_on_execute = raise_on_execute
+        self.last_payload: dict[str, Any] | None = None
+        self.last_on_conflict: str | None = None
+        self.executed = False
+
+    def table(self, name: str):
+        assert name == "vk_misses_sample"
+        return FakeSupabaseTable(self)
+
+
+@pytest.mark.asyncio
+async def test_vkrev_import_flow_marks_supabase_result(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.raw_conn() as conn:
+        await conn.execute(
+            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time, default_ticket_link) VALUES(?,?,?,?,?,?)",
+            (10, "club10", "Test", "", None, None),
+        )
+        await conn.execute(
+            "INSERT INTO vk_inbox(id, group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status) VALUES(?,?,?,?,?,?,?, ?,?)",
+            (5, 10, 20, 0, "text", None, 1, 0, "pending"),
+        )
+        await conn.commit()
+
+    draft = vk_intake.EventDraft(title="Title", date="2025-01-02", time="18:00")
+
+    async def fake_fetch(*args, **kwargs):
+        return []
+
+    async def fake_build(*args, **kwargs):
+        return [draft]
+
+    async def fake_persist(*args, **kwargs):
+        return vk_intake.PersistResult(
+            event_id=123,
+            telegraph_url="https://t",
+            ics_supabase_url="https://s",
+            ics_tg_url="https://tg",
+            event_date="2025-01-02",
+            event_end_date=None,
+            event_time="18:00",
+            event_type=None,
+            is_free=False,
+        )
+
+    async def fake_mark_imported(*args, **kwargs):
+        return None
+
+    async def fake_sync(*args, **kwargs):
+        return None
+
+    fake_client = FakeSupabaseClient()
+
+    monkeypatch.setattr(main, "_vkrev_fetch_photos", fake_fetch)
+    monkeypatch.setattr(vk_intake, "build_event_drafts", fake_build)
+    monkeypatch.setattr(vk_intake, "persist_event_and_pages", fake_persist)
+    monkeypatch.setattr(vk_review, "mark_imported", fake_mark_imported)
+    monkeypatch.setattr(main, "sync_festival_page", fake_sync)
+    monkeypatch.setattr(main, "sync_festivals_index_page", fake_sync)
+    monkeypatch.setattr(main, "sync_festival_vk_post", fake_sync)
+    monkeypatch.setattr(main, "get_supabase_client", lambda: fake_client)
+
+    bot = DummyBot()
+
+    await main._vkrev_import_flow(1, 100, 5, "batch-x", db, bot)
+
+    assert fake_client.executed is True
+    assert fake_client.last_on_conflict == "group_id,post_id"
+    assert fake_client.last_payload == {
+        "group_id": 10,
+        "post_id": 20,
+        "url": "https://vk.com/wall-10_20",
+        "imported": True,
+        "rejected": False,
+        "event_id": 123,
+        "reject_code": None,
+        "reject_note": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_vkrev_import_flow_supabase_error_does_not_abort(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.raw_conn() as conn:
+        await conn.execute(
+            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time, default_ticket_link) VALUES(?,?,?,?,?,?)",
+            (11, "club11", "Test", "", None, None),
+        )
+        await conn.execute(
+            "INSERT INTO vk_inbox(id, group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status) VALUES(?,?,?,?,?,?,?, ?,?)",
+            (6, 11, 30, 0, "text", None, 1, 0, "pending"),
+        )
+        await conn.commit()
+
+    draft = vk_intake.EventDraft(title="Title", date="2025-01-03", time="19:00")
+
+    async def fake_fetch(*args, **kwargs):
+        return []
+
+    async def fake_build(*args, **kwargs):
+        return [draft]
+
+    async def fake_persist(*args, **kwargs):
+        return vk_intake.PersistResult(
+            event_id=321,
+            telegraph_url="https://t",
+            ics_supabase_url="https://s",
+            ics_tg_url="https://tg",
+            event_date="2025-01-03",
+            event_end_date=None,
+            event_time="19:00",
+            event_type=None,
+            is_free=False,
+        )
+
+    captured: dict[str, Any] = {}
+
+    async def fake_mark_imported(_db, inbox_id, batch_id, operator_id, event_id, event_date):
+        captured["event_id"] = event_id
+
+    async def fake_sync(*args, **kwargs):
+        return None
+
+    fake_client = FakeSupabaseClient(raise_on_execute=True)
+
+    monkeypatch.setattr(main, "_vkrev_fetch_photos", fake_fetch)
+    monkeypatch.setattr(vk_intake, "build_event_drafts", fake_build)
+    monkeypatch.setattr(vk_intake, "persist_event_and_pages", fake_persist)
+    monkeypatch.setattr(vk_review, "mark_imported", fake_mark_imported)
+    monkeypatch.setattr(main, "sync_festival_page", fake_sync)
+    monkeypatch.setattr(main, "sync_festivals_index_page", fake_sync)
+    monkeypatch.setattr(main, "sync_festival_vk_post", fake_sync)
+    monkeypatch.setattr(main, "get_supabase_client", lambda: fake_client)
+
+    bot = DummyBot()
+
+    await main._vkrev_import_flow(1, 200, 6, "batch-y", db, bot)
+
+    assert captured["event_id"] == 321
+    assert fake_client.last_payload == {
+        "group_id": 11,
+        "post_id": 30,
+        "url": "https://vk.com/wall-11_30",
+        "imported": True,
+        "rejected": False,
+        "event_id": 321,
+        "reject_code": None,
+        "reject_note": None,
+    }
