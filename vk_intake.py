@@ -60,6 +60,18 @@ def _normalize_group_title(value: str | None) -> str | None:
     return normalized.casefold()
 
 
+def _display_group_title(value: str | None, gid: int) -> str:
+    if not value:
+        return f"club{gid}"
+    display = unicodedata.normalize("NFKC", value)
+    display = display.replace("\xa0", " ")
+    display = re.sub(r"\s+", " ", display)
+    display = display.strip()
+    if not display:
+        return f"club{gid}"
+    return display
+
+
 def _normalize_group_screen_name(value: str | None) -> str | None:
     if not value:
         return None
@@ -72,6 +84,20 @@ def _normalize_group_screen_name(value: str | None) -> str | None:
     if not normalized:
         return None
     return normalized.casefold()
+
+
+def _display_group_screen_name(value: str | None, gid: int) -> str:
+    if not value:
+        return f"club{gid}"
+    display = unicodedata.normalize("NFKC", value)
+    display = display.replace("\xa0", " ")
+    display = display.strip().lstrip("@")
+    if not display:
+        return f"club{gid}"
+    display = re.sub(r"\s+", "", display)
+    if not display:
+        return f"club{gid}"
+    return display
 
 
 # optional pymorphy3 initialisation
@@ -1659,6 +1685,10 @@ async def crawl_once(
         group_screen_name_norm = _normalize_group_screen_name(
             group.get("screen_name")
         )
+        group_title_display = _display_group_title(group.get("name"), gid)
+        group_screen_name_display = _display_group_screen_name(
+            group.get("screen_name"), gid
+        )
         default_time = group.get("default_time")
         stats["groups_checked"] += 1
         await asyncio.sleep(random.uniform(0.7, 1.2))  # safety pause
@@ -1849,8 +1879,8 @@ async def crawl_once(
                             if not allow_without_hint:
                                 exporter.log_miss(
                                     group_id=gid,
-                                    group_title=group_title_norm,
-                                    group_screen_name=group_screen_name_norm,
+                                    group_title=group_title_display,
+                                    group_screen_name=group_screen_name_display,
                                     post_id=pid,
                                     url=post_url,
                                     ts=int(time.time()),
@@ -1874,8 +1904,8 @@ async def crawl_once(
                             if event_ts_hint > far_threshold:
                                 exporter.log_miss(
                                     group_id=gid,
-                                    group_title=group_title_norm,
-                                    group_screen_name=group_screen_name_norm,
+                                    group_title=group_title_display,
+                                    group_screen_name=group_screen_name_display,
                                     post_id=pid,
                                     url=post_url,
                                     ts=int(time.time()),
@@ -1908,8 +1938,8 @@ async def crawl_once(
                         reason = "no_date" if kw_ok else "no_keywords"
                         exporter.log_miss(
                             group_id=gid,
-                            group_title=group_title_norm,
-                            group_screen_name=group_screen_name_norm,
+                            group_title=group_title_display,
+                            group_screen_name=group_screen_name_display,
                             post_id=pid,
                             url=post_url,
                             ts=int(time.time()),
@@ -1974,8 +2004,8 @@ async def crawl_once(
                         )
                         exporter.log_miss(
                             group_id=gid,
-                            group_title=group_title_norm,
-                            group_screen_name=group_screen_name_norm,
+                            group_title=group_title_display,
+                            group_screen_name=group_screen_name_display,
                             post_id=pid,
                             url=post_url,
                             ts=int(time.time()),
