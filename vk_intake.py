@@ -1876,6 +1876,9 @@ async def crawl_once(
         "vk_wall_since"
     )  # imported lazily to avoid circular import
     get_supabase_client = require_main_attr("get_supabase_client")
+    get_tz_offset = require_main_attr("get_tz_offset")
+    await get_tz_offset(db)
+    local_tz = require_main_attr("LOCAL_TZ")
     exporter = SBExporter(get_supabase_client)
 
     start = time.perf_counter()
@@ -2117,7 +2120,10 @@ async def crawl_once(
                         if history_hit and HISTORY_MATCHED_KEYWORD not in seen_kws:
                             log_keywords.append(HISTORY_MATCHED_KEYWORD)
                         event_ts_hint = extract_event_ts_hint(
-                            post_text, default_time, publish_ts=ts
+                            post_text,
+                            default_time,
+                            publish_ts=ts,
+                            tz=local_tz,
                         )
                         min_event_ts = int(time.time()) + 2 * 3600
                         fallback_applied = False
@@ -2131,7 +2137,7 @@ async def crawl_once(
                                     year_val = None
                                 else:
                                     publish_year = datetime.fromtimestamp(
-                                        ts, require_main_attr("LOCAL_TZ")
+                                        ts, local_tz
                                     ).year
                                     if year_val is not None and year_val > publish_year:
                                         allow_without_hint = True
