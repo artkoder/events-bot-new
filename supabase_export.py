@@ -142,13 +142,18 @@ class SBExporter:
             payload["match_rate"] = match_rate
         if errors is not None:
             payload["errors"] = errors
-        for key, value in counters.items():
+        snapshot_fields = (
+            "posts_scanned",
+            "matched",
+            "duplicates",
+            "errors",
+            "pages_loaded",
+        )
+        for key in snapshot_fields:
+            value = counters.get(key)
             if value is None:
                 continue
-            if isinstance(value, (int, float, bool, str)):
-                payload[key] = value
-            else:
-                payload[key] = str(value)
+            payload[key] = value
         try:
             client.table("vk_crawl_snapshots").insert(payload).execute()  # type: ignore[operator]
             logger.debug("Supabase snapshot stored: group_id=%s", group_id)

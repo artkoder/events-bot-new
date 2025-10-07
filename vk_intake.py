@@ -2084,17 +2084,9 @@ async def crawl_once(
             snapshot_counters = {
                 "posts_scanned": group_posts,
                 "matched": group_matches,
-                "added": group_added,
                 "duplicates": group_duplicates,
+                "errors": group_errors,
                 "pages_loaded": pages_loaded,
-                "backfill": backfill,
-                "mode": mode,
-                "safety_cap_triggered": safety_cap_triggered,
-                "hard_cap_triggered": hard_cap_triggered,
-                "reached_cursor_overlap": reached_cursor_overlap,
-                "deep_backfill_scheduled": deep_backfill_scheduled,
-                "blank_single_photo_matches": group_blank_single_photo_matches,
-                "history_matches": group_history_matches,
             }
             exporter.write_snapshot(
                 group_id=gid,
