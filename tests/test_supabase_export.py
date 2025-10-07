@@ -92,7 +92,7 @@ def test_write_snapshot_includes_expected_counters(monkeypatch):
     assert "ignored" not in payload
 
 
-def test_log_miss_preserves_flags_and_keywords(monkeypatch):
+def test_log_miss_includes_expected_fields(monkeypatch):
     _clear_env(monkeypatch)
     monkeypatch.setenv("VK_MISSES_SAMPLE_RATE", "1")
 
@@ -105,7 +105,6 @@ def test_log_miss_preserves_flags_and_keywords(monkeypatch):
         url="https://vk.com/wall99_123",
         reason="no_date",
         matched_kw=["music", "festival"],
-        post_ts=1700000000,
         ts=1700000100,
         kw_ok=True,
         has_date=False,
@@ -121,3 +120,7 @@ def test_log_miss_preserves_flags_and_keywords(monkeypatch):
     assert payload["matched_kw"] == ["music", "festival"]
     assert payload["kw_ok"] is True
     assert payload["has_date"] is False
+    assert payload["ts"] == "2023-11-14T22:15:00+00:00"
+    assert "post_ts" not in payload
+    assert "event_ts_hint" not in payload
+    assert "flags" not in payload

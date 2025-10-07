@@ -1886,14 +1886,6 @@ async def crawl_once(
                                     ts=int(time.time()),
                                     reason="past_event",
                                     matched_kw=log_keywords,
-                                    post_ts=ts,
-                                    event_ts_hint=event_ts_hint,
-                                    flags={
-                                        "history_hit": bool(history_hit),
-                                        "has_date": bool(has_date),
-                                        "blank_single_photo": blank_single_photo,
-                                        "backfill": backfill,
-                                    },
                                     kw_ok=bool(kw_ok),
                                     has_date=bool(has_date),
                                 )
@@ -1911,14 +1903,6 @@ async def crawl_once(
                                     ts=int(time.time()),
                                     reason="too_far",
                                     matched_kw=log_keywords,
-                                    post_ts=ts,
-                                    event_ts_hint=event_ts_hint,
-                                    flags={
-                                        "history_hit": bool(history_hit),
-                                        "has_date": bool(has_date),
-                                        "blank_single_photo": blank_single_photo,
-                                        "backfill": backfill,
-                                    },
                                     kw_ok=bool(kw_ok),
                                     has_date=bool(has_date),
                                 )
@@ -1945,13 +1929,6 @@ async def crawl_once(
                             ts=int(time.time()),
                             reason=reason,
                             matched_kw=unique_kws,
-                            post_ts=ts,
-                            flags={
-                                "history_hit": bool(history_hit),
-                                "has_date": bool(has_date),
-                                "blank_single_photo": blank_single_photo,
-                                "backfill": backfill,
-                            },
                             kw_ok=bool(kw_ok),
                             has_date=bool(has_date),
                         )
@@ -2011,15 +1988,6 @@ async def crawl_once(
                             ts=int(time.time()),
                             reason=reason,
                             matched_kw=matched_kw_list,
-                            post_ts=ts,
-                            event_ts_hint=event_ts_hint,
-                            flags={
-                                "existing_status": existing_status,
-                                "history_hit": bool(history_hit),
-                                "has_date": bool(has_date),
-                                "blank_single_photo": blank_single_photo,
-                                "backfill": backfill,
-                            },
                             kw_ok=bool(kw_ok),
                             has_date=bool(has_date),
                         )
