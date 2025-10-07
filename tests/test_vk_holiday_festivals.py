@@ -47,8 +47,8 @@ async def test_persist_event_creates_and_reuses_holiday(tmp_path, monkeypatch):
         if "|" not in line:
             continue
         parts = [part.strip() for part in line.split("|")]
-        if parts and parts[0].startswith("10-31"):
-            halloween_desc = parts[-1]
+        if len(parts) >= 5 and parts[2] == "Хеллоуин":
+            halloween_desc = parts[4]
             break
     assert halloween_desc
 
