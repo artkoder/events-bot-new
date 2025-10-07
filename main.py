@@ -5845,10 +5845,90 @@ async def tg_ics_post(event_id: int, db: Database, bot: Bot, progress=None) -> b
 @dataclass(frozen=True)
 class HolidayRecord:
     date: str
+    tolerance_days: int | None
     canonical_name: str
     aliases: tuple[str, ...]
     description: str
     normalized_aliases: tuple[str, ...] = ()
+
+
+_HOLIDAY_MONTH_PREFIXES: Mapping[str, int] = MappingProxyType(
+    {
+        "янв": 1,
+        "фев": 2,
+        "мар": 3,
+        "апр": 4,
+        "мая": 5,
+        "май": 5,
+        "июн": 6,
+        "июл": 7,
+        "авг": 8,
+        "сен": 9,
+        "сент": 9,
+        "окт": 10,
+        "ноя": 11,
+        "нояб": 11,
+        "дек": 12,
+    }
+)
+
+
+def _normalize_holiday_date_token(value: str) -> str:
+    token = value.strip()
+    if not token:
+        return ""
+
+    if ".." in token:
+        raw_parts = [part.strip() for part in token.split("..") if part.strip()]
+    elif re.match(r"^\d{1,2}-\d{1,2}$", token):
+        raw_parts = [token]
+    elif re.match(r"^\d{1,2}\.\d{1,2}-\d{1,2}\.\d{1,2}$", token):
+        raw_parts = [part.strip() for part in token.split("-") if part.strip()]
+    elif re.search(r"[–—]", token) or re.search(r"\s-\s", token):
+        raw_parts = [part.strip() for part in re.split(r"\s*[–—-]\s*", token) if part.strip()]
+    else:
+        raw_parts = [token]
+
+    def _convert_single(part: str) -> str:
+        part = part.strip().strip(",")
+        if not part:
+            return ""
+
+        mm_dd_match = re.match(r"^(\d{1,2})-(\d{1,2})$", part)
+        if mm_dd_match:
+            month = int(mm_dd_match.group(1))
+            day = int(mm_dd_match.group(2))
+            if 1 <= month <= 12 and 1 <= day <= 31:
+                return f"{month:02d}-{day:02d}"
+            return part
+
+        dd_mm_match = re.match(r"^(\d{1,2})\.(\d{1,2})$", part)
+        if dd_mm_match:
+            day = int(dd_mm_match.group(1))
+            month = int(dd_mm_match.group(2))
+            if 1 <= month <= 12 and 1 <= day <= 31:
+                return f"{month:02d}-{day:02d}"
+            return part
+
+        textual_match = re.match(r"^(\d{1,2})\s+([\wё]+)\.?$", part, flags=re.IGNORECASE)
+        if textual_match:
+            day = int(textual_match.group(1))
+            month_token = textual_match.group(2).casefold()
+            for prefix, month in _HOLIDAY_MONTH_PREFIXES.items():
+                if month_token.startswith(prefix):
+                    if 1 <= day <= 31:
+                        return f"{month:02d}-{day:02d}"
+                    break
+            return part
+
+        return part
+
+    converted_parts = [_convert_single(p) for p in raw_parts]
+    if not converted_parts:
+        return ""
+    if len(converted_parts) == 1:
+        return converted_parts[0]
+    return "..".join(converted_parts)
 
 
 @lru_cache(maxsize=1)
@@ -5870,20 +5950,40 @@ def _read_holidays() -> tuple[tuple[HolidayRecord, ...], tuple[str, ...], Mappin
                 continue
 
             parts = [part.strip() for part in raw_line.split("|")]
+            if not parts:
+                continue
+
+            if parts[0].casefold() == "date_or_range":
+                continue
+
             if len(parts) < 3:
                 continue
 
-            date_token = parts[0]
-            canonical_name = parts[1]
+            date_token = _normalize_holiday_date_token(parts[0])
+            tolerance_token = parts[1] if len(parts) > 1 else ""
+            canonical_name = parts[2] if len(parts) > 2 else ""
             if not canonical_name:
                 continue
 
-            if len(parts) == 3:
-                alias_field = ""
-                description_field = parts[2]
+            alias_field = parts[3] if len(parts) > 3 else ""
+            description_field = "|".join(parts[4:]).strip() if len(parts) > 4 else ""
+
+            tolerance_value = tolerance_token.strip()
+            if not tolerance_value:
+                tolerance_days: int | None = None
+            elif tolerance_value.casefold() in {"none", "null"}:
+                tolerance_days = None
             else:
-                alias_field = parts[2]
-                description_field = "|".join(parts[3:]).strip()
+                try:
+                    tolerance_days = int(tolerance_value)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"Invalid tolerance_days value {tolerance_value!r} for holiday {canonical_name!r}"
+                    ) from exc
+                if tolerance_days < 0:
+                    raise ValueError(
+                        f"Negative tolerance_days value {tolerance_days!r} for holiday {canonical_name!r}"
+                    )
 
             aliases = tuple(
                 alias.strip()
@@ -5914,6 +6014,7 @@ def _read_holidays() -> tuple[tuple[HolidayRecord, ...], tuple[str, ...], Mappin
             holidays.append(
                 HolidayRecord(
                     date=date_token,
+                    tolerance_days=tolerance_days,
                     canonical_name=canonical_name,
                     aliases=aliases,
                     description=description,
