@@ -5889,6 +5889,32 @@ def _normalize_holiday_date_token(value: str) -> str:
     else:
         raw_parts = [token]
 
+    if len(raw_parts) == 1:
+        single = raw_parts[0]
+        partial_numeric = re.match(
+            r"^(?P<start_day>\d{1,2})\s*-\s*(?P<end_day>\d{1,2})\.(?P<month>\d{1,2})$",
+            single,
+        )
+        if partial_numeric:
+            month = partial_numeric.group("month")
+            start_day = partial_numeric.group("start_day")
+            end_day = partial_numeric.group("end_day")
+            raw_parts = [f"{start_day}.{month}", f"{end_day}.{month}"]
+        else:
+            partial_textual = re.match(
+                r"^(?P<start_day>\d{1,2})\s*-\s*(?P<end_day>\d{1,2})\s+(?P<month>[\wё]+)\.?$",
+                single,
+                flags=re.IGNORECASE,
+            )
+            if partial_textual:
+                month_token = partial_textual.group("month")
+                start_day = partial_textual.group("start_day")
+                end_day = partial_textual.group("end_day")
+                raw_parts = [
+                    f"{start_day} {month_token}",
+                    f"{end_day} {month_token}",
+                ]
+
     def _convert_single(part: str) -> str:
         part = part.strip().strip(",")
         if not part:

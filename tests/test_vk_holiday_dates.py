@@ -34,6 +34,20 @@ def test_holiday_date_range_long_dash():
     assert end == "2024-11-02"
 
 
+def test_holiday_date_range_partial_numeric_month():
+    record = _record("20-31.10")
+    start, end = vk_intake._holiday_date_range(record, 2024)
+    assert start == "2024-10-20"
+    assert end == "2024-10-31"
+
+
+def test_holiday_date_range_partial_textual_month():
+    record = _record("20 -31 октября")
+    start, end = vk_intake._holiday_date_range(record, 2024)
+    assert start == "2024-10-20"
+    assert end == "2024-10-31"
+
+
 def test_holiday_date_range_textual_months():
     record = _record("31 октября — 2 ноября")
     start, end = vk_intake._holiday_date_range(record, 2024)
@@ -80,6 +94,12 @@ def test_event_date_matches_cross_year_within_tolerance():
 def test_event_date_outside_tolerance_is_skipped():
     record = _record("31.10")
     assert not vk_intake._event_date_matches_holiday(record, "2025-10-28", None, 1)
+
+
+def test_event_date_matches_partial_range_with_tolerance():
+    record = _record("20-31.10")
+    assert vk_intake._event_date_matches_holiday(record, "2024-10-19", None, 1)
+    assert vk_intake._event_date_matches_holiday(record, "2024-11-01", None, 1)
 
 
 @pytest.mark.asyncio
