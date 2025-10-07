@@ -34,6 +34,11 @@ class _DummyTable:
         self._client.last_payload = payload
         return self
 
+    def upsert(self, payload, on_conflict=None):
+        self._client.last_payload = payload
+        self._client.last_on_conflict = on_conflict
+        return self
+
     def execute(self):
         return self
 
@@ -42,6 +47,7 @@ class _DummyClient:
     def __init__(self):
         self.table_name = None
         self.last_payload = None
+        self.last_on_conflict = None
 
     def table(self, name):
         self.table_name = name
@@ -84,3 +90,34 @@ def test_write_snapshot_includes_expected_counters(monkeypatch):
     assert payload["duplicates"] == 2
     assert payload["pages_loaded"] == 5
     assert "ignored" not in payload
+
+
+def test_log_miss_preserves_flags_and_keywords(monkeypatch):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("VK_MISSES_SAMPLE_RATE", "1")
+
+    client = _DummyClient()
+    exporter = SBExporter(lambda: client)
+
+    exporter.log_miss(
+        group_id=99,
+        post_id=123,
+        url="https://vk.com/wall99_123",
+        reason="no_date",
+        matched_kw=["music", "festival"],
+        post_ts=1700000000,
+        ts=1700000100,
+        kw_ok=True,
+        has_date=False,
+        group_title="Example Club",
+        group_screen_name="exampleclub",
+    )
+
+    assert client.table_name == "vk_misses_sample"
+    payload = client.last_payload
+    assert payload is not None
+    assert payload["group_title"] == "Example Club"
+    assert payload["group_screen_name"] == "exampleclub"
+    assert payload["matched_kw"] == ["music", "festival"]
+    assert payload["kw_ok"] is True
+    assert payload["has_date"] is False
