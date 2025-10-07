@@ -1492,8 +1492,107 @@ def _holiday_date_range(record: Any, target_year: int) -> tuple[str | None, str 
     return start_iso, end_iso
 
 
+def _parse_iso_date(value: str | None) -> date | None:
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(value.strip())
+    except Exception:
+        return None
+
+
+def _event_date_range(
+    event_date: str | None, event_end_date: str | None
+) -> tuple[date | None, date | None]:
+    if not event_date:
+        return None, None
+
+    if ".." in event_date:
+        parts = [part.strip() for part in event_date.split("..") if part.strip()]
+        if not parts:
+            return None, None
+        start = _parse_iso_date(parts[0])
+        end = _parse_iso_date(parts[-1])
+    else:
+        start = _parse_iso_date(event_date.strip())
+        if event_end_date:
+            end = _parse_iso_date(event_end_date.strip())
+        else:
+            end = start
+
+    if start and end and end < start:
+        start, end = end, start
+
+    return start, end
+
+
+def _event_date_matches_holiday(
+    record: Any,
+    event_date: str | None,
+    event_end_date: str | None,
+    tolerance_days: int | None,
+) -> bool:
+    if record is None:
+        return False
+
+    start, end = _event_date_range(event_date, event_end_date)
+    if start is None and end is None:
+        return False
+
+    tolerance = tolerance_days if tolerance_days is not None else 0
+    if tolerance < 0:
+        tolerance = 0
+
+    event_start = start or end
+    event_end = end or start or event_start
+    if event_start is None or event_end is None:
+        return False
+    if event_end < event_start:
+        event_start, event_end = event_end, event_start
+
+    years: set[int] = set()
+    years.add(event_start.year)
+    years.add(event_end.year)
+    expanded_years: set[int] = set()
+    for year in years:
+        expanded_years.add(year)
+        expanded_years.add(year - 1)
+        expanded_years.add(year + 1)
+
+    tolerance_delta = timedelta(days=tolerance)
+
+    for year in sorted(expanded_years):
+        start_iso, end_iso = _holiday_date_range(record, year)
+        if not start_iso and not end_iso:
+            continue
+        holiday_start = _parse_iso_date(start_iso)
+        holiday_end = _parse_iso_date(end_iso)
+        if holiday_start is None and holiday_end is None:
+            continue
+        if holiday_start is None:
+            holiday_start = holiday_end
+        if holiday_end is None:
+            holiday_end = holiday_start
+        if holiday_start is None or holiday_end is None:
+            continue
+        if holiday_end < holiday_start:
+            holiday_start, holiday_end = holiday_end, holiday_start
+
+        window_start = holiday_start - tolerance_delta
+        window_end = holiday_end + tolerance_delta
+        if event_end >= window_start and event_start <= window_end:
+            return True
+
+    return False
+
+
 async def persist_event_and_pages(
-    draft: EventDraft, photos: list[str], db: Database, source_post_url: str | None = None
+    draft: EventDraft,
+    photos: list[str],
+    db: Database,
+    source_post_url: str | None = None,
+    *,
+    holiday_tolerance_days: int | None = None,
 ) -> PersistResult:
     """Store a drafted event and produce all public artefacts.
 
@@ -1581,7 +1680,13 @@ async def persist_event_and_pages(
     holiday_record = (
         get_holiday_record(saved.festival) if callable(get_holiday_record) else None
     )
-    if holiday_record:
+    tolerance_value = holiday_tolerance_days
+    if tolerance_value is None and holiday_record is not None:
+        tolerance_value = getattr(holiday_record, "tolerance_days", None)
+
+    if holiday_record and _event_date_matches_holiday(
+        holiday_record, saved.date, saved.end_date, tolerance_value
+    ):
         canonical_name = holiday_record.canonical_name
         start_iso, end_iso = _holiday_date_range(holiday_record, date.today().year)
         ensure_kwargs: dict[str, Any] = {}
