@@ -1331,6 +1331,167 @@ async def build_event_draft(
     return drafts[0]
 
 
+_DASH_CHAR_PATTERN = re.compile(r"[\u2010\u2011\u2012\u2013\u2014\u2015\u2212]")
+_MONTH_NAME_PATTERN = "|".join(sorted(MONTHS_RU.keys(), key=len, reverse=True))
+_TEXT_RANGE_TWO_MONTHS_RE = re.compile(
+    rf"^\s*(?P<start_day>\d{{1,2}})\s*(?P<start_month>{_MONTH_NAME_PATTERN})\s*-\s*(?P<end_day>\d{{1,2}})\s*(?P<end_month>{_MONTH_NAME_PATTERN})\s*$",
+    re.IGNORECASE,
+)
+_TEXT_RANGE_SAME_MONTH_RE = re.compile(
+    rf"^\s*(?P<start_day>\d{{1,2}})\s*-\s*(?P<end_day>\d{{1,2}})\s*(?P<month>{_MONTH_NAME_PATTERN})\s*$",
+    re.IGNORECASE,
+)
+_TEXT_SINGLE_RE = re.compile(
+    rf"^\s*(?P<day>\d{{1,2}})\s*(?P<month>{_MONTH_NAME_PATTERN})\s*$",
+    re.IGNORECASE,
+)
+
+
+def _month_from_token(token: str) -> int | None:
+    lookup = token.strip().strip(".,").casefold()
+    return MONTHS_RU.get(lookup)
+
+
+def _safe_construct_date(year: int, month: int, day: int) -> date | None:
+    if not (1 <= month <= 12):
+        return None
+    if day < 1:
+        return None
+    try:
+        return date(year, month, day)
+    except ValueError:
+        try:
+            last_day = calendar.monthrange(year, month)[1]
+        except Exception:
+            return None
+        day = min(day, last_day)
+        try:
+            return date(year, month, day)
+        except ValueError:
+            return None
+
+
+def _parse_single_date_token(token: str, target_year: int) -> date | None:
+    token = token.strip()
+    if not token:
+        return None
+
+    token = token.strip(".,")
+    dot_match = re.match(r"^(?P<day>\d{1,2})\.(?P<month>\d{1,2})$", token)
+    if dot_match:
+        day = int(dot_match.group("day"))
+        month = int(dot_match.group("month"))
+        return _safe_construct_date(target_year, month, day)
+
+    legacy_match = re.match(r"^(?P<month>\d{1,2})-(?P<day>\d{1,2})$", token)
+    if legacy_match:
+        month = int(legacy_match.group("month"))
+        day = int(legacy_match.group("day"))
+        return _safe_construct_date(target_year, month, day)
+
+    text_match = _TEXT_SINGLE_RE.match(token)
+    if text_match:
+        month = _month_from_token(text_match.group("month"))
+        day = int(text_match.group("day"))
+        if month is None:
+            return None
+        return _safe_construct_date(target_year, month, day)
+
+    return None
+
+
+def _holiday_date_range(record: Any, target_year: int) -> tuple[str | None, str | None]:
+    raw = (record.date or "").strip()
+    if not raw:
+        return None, None
+
+    normalized = _DASH_CHAR_PATTERN.sub("-", raw)
+    normalized = re.sub(r"\s+", " ", normalized.strip())
+    normalized = normalized.strip(".,")
+    if not normalized:
+        return None, None
+
+    if ".." in normalized:
+        parts = [part.strip() for part in normalized.split("..") if part.strip()]
+        if not parts:
+            return None, None
+        start = _parse_single_date_token(parts[0], target_year)
+        end_token = parts[-1]
+        end = _parse_single_date_token(end_token, target_year)
+    else:
+        if re.match(r"^\d{1,2}-\d{1,2}$", normalized):
+            start = _parse_single_date_token(normalized, target_year)
+            end = start
+        else:
+            dot_range = re.match(
+                r"^(?P<start_day>\d{1,2})\.(?P<start_month>\d{1,2})\s*-\s*(?P<end_day>\d{1,2})\.(?P<end_month>\d{1,2})$",
+                normalized,
+            )
+            text_range = _TEXT_RANGE_TWO_MONTHS_RE.match(normalized)
+            text_same_month = _TEXT_RANGE_SAME_MONTH_RE.match(normalized)
+
+            if dot_range:
+                start = _safe_construct_date(
+                    target_year,
+                    int(dot_range.group("start_month")),
+                    int(dot_range.group("start_day")),
+                )
+                end = _safe_construct_date(
+                    target_year,
+                    int(dot_range.group("end_month")),
+                    int(dot_range.group("end_day")),
+                )
+            elif text_range:
+                start_month = _month_from_token(text_range.group("start_month"))
+                end_month = _month_from_token(text_range.group("end_month"))
+                start = (
+                    _safe_construct_date(
+                        target_year,
+                        start_month,
+                        int(text_range.group("start_day")),
+                    )
+                    if start_month is not None
+                    else None
+                )
+                end = (
+                    _safe_construct_date(
+                        target_year,
+                        end_month,
+                        int(text_range.group("end_day")),
+                    )
+                    if end_month is not None
+                    else None
+                )
+            elif text_same_month:
+                month = _month_from_token(text_same_month.group("month"))
+                if month is not None:
+                    start = _safe_construct_date(
+                        target_year, month, int(text_same_month.group("start_day"))
+                    )
+                    end = _safe_construct_date(
+                        target_year, month, int(text_same_month.group("end_day"))
+                    )
+                else:
+                    start = None
+                    end = None
+            else:
+                parts = [part.strip() for part in re.split(r"\s*-\s*", normalized) if part.strip()]
+                if len(parts) >= 2:
+                    start = _parse_single_date_token(parts[0], target_year)
+                    end = _parse_single_date_token(parts[-1], target_year)
+                else:
+                    start = _parse_single_date_token(normalized, target_year)
+                    end = start
+
+    if start and end and end < start:
+        rollover = _safe_construct_date(end.year + 1, end.month, end.day)
+        end = rollover if rollover else end
+
+    start_iso = start.isoformat() if start else None
+    end_iso = end.isoformat() if end else None
+    return start_iso, end_iso
+
+
 async def persist_event_and_pages(
     draft: EventDraft, photos: list[str], db: Database, source_post_url: str | None = None
 ) -> PersistResult:
@@ -1357,50 +1518,6 @@ async def persist_event_and_pages(
     ensure_festival = main_mod.ensure_festival
     get_holiday_record = getattr(main_mod, "get_holiday_record", None)
     sync_festival_page = getattr(main_mod, "sync_festival_page", None)
-
-    def _holiday_date_range(record: Any, target_year: int) -> tuple[str | None, str | None]:
-        raw = (record.date or "").strip()
-        if not raw:
-            return None, None
-
-        tokens = [part.strip() for part in raw.split("..") if part.strip()]
-        if not tokens:
-            return None, None
-
-        def _parse_mmdd(token: str, year: int) -> date | None:
-            parts = token.split("-")
-            if len(parts) != 2:
-                return None
-            try:
-                month = int(parts[0])
-                day = int(parts[1])
-            except ValueError:
-                return None
-            if not (1 <= month <= 12):
-                return None
-            try:
-                return date(year, month, day)
-            except ValueError:
-                try:
-                    last_day = calendar.monthrange(year, month)[1]
-                except Exception:
-                    return None
-                day = min(day, last_day)
-                try:
-                    return date(year, month, day)
-                except ValueError:
-                    return None
-
-        start_date = _parse_mmdd(tokens[0], target_year)
-        end_token = tokens[-1] if len(tokens) > 1 else tokens[0]
-        end_date = _parse_mmdd(end_token, target_year)
-        if start_date and end_date and end_date < start_date and len(tokens) > 1:
-            end_date = _parse_mmdd(end_token, target_year + 1) or end_date
-
-        return (
-            start_date.isoformat() if start_date else None,
-            end_date.isoformat() if end_date else None,
-        )
 
     poster_urls = [m.catbox_url for m in draft.poster_media if m.catbox_url]
     photo_urls = poster_urls or list(photos or [])
