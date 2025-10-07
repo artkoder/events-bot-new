@@ -173,10 +173,6 @@ class SBExporter:
         url: str | None,
         reason: str,
         matched_kw: Sequence[str] | None = None,
-        post_ts: int | None = None,
-        event_ts_hint: int | None = None,
-        flags: Mapping[str, Any] | None = None,
-        extra: Mapping[str, Any] | None = None,
         kw_ok: bool | None = None,
         has_date: bool | None = None,
         ts: int | None = None,
@@ -208,8 +204,6 @@ class SBExporter:
             "url": url,
             "reason": reason,
             "matched_kw": list(matched_kw or [])[:20],
-            "post_ts": _ts_to_iso(post_ts),
-            "event_ts_hint": _ts_to_iso(event_ts_hint),
         }
         timestamp_value = _ts_to_iso(ts)
         if timestamp_value is None:
@@ -223,21 +217,6 @@ class SBExporter:
             payload["kw_ok"] = bool(kw_ok)
         if has_date is not None:
             payload["has_date"] = bool(has_date)
-        if flags:
-            serialized_flags: dict[str, Any] = {}
-            for key, value in flags.items():
-                if value is None:
-                    continue
-                if isinstance(value, (int, float, bool, str)):
-                    serialized_flags[key] = value
-                else:
-                    serialized_flags[key] = str(value)
-            if serialized_flags:
-                payload["flags"] = serialized_flags
-        if extra:
-            for key, value in extra.items():
-                if value is not None:
-                    payload[key] = value
         try:
             client.table("vk_misses_sample").upsert(  # type: ignore[operator]
                 payload,
