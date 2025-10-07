@@ -11,6 +11,7 @@ Commands:
 
 - `/vk` — add/list sources, check/review events, and open queue summary.
 - `/vk_queue` — show VK inbox summary (pending/locked/skipped/imported/rejected) and a "🔎 Проверить события" button to start the review flow.
+- `/vk_misses [N]` — superadmins review fresh misses sampled from Supabase: the bot loads the post text and up to ten images, shows the filter reason and matched keywords, and records feedback for "На доработку" to `VK_MISS_REVIEW_FILE` (default `/data/vk_miss_review.md`).
 - `/vk_crawl_now [--backfill-days=N]` — run VK crawling now (admin only); reports "добавлено N, всего постов M" to the admin chat. Passing `--backfill-days=N` forces a full backfill with a horizon of up to `N` days (capped at 60 to avoid excessive API calls); without the option the incremental mode is used.
 
 Background crawling collects posts from configured VK communities and filters
@@ -143,10 +144,13 @@ line under the button row. The command accepts dates like `2025-07-10`,
    # Optional: override the logical bot identifier used in Supabase logs (defaults to "announcements").
    export BOT_CODE=announcements
    # Required for token logging: service-role credentials so the bot can insert rows via supabase-py.
-   export SUPABASE_URL=https://<project>.supabase.co
-   export SUPABASE_KEY=service_role_key
+  export SUPABASE_URL=https://<project>.supabase.co
+  export SUPABASE_KEY=service_role_key
   # Optional: custom bucket name (defaults to events-ics)
   export SUPABASE_BUCKET=events-ics
+  # Optional: override the miss-review command and feedback file path
+  export VK_MISS_REVIEW_COMMAND=/vk_misses
+  export VK_MISS_REVIEW_FILE=/data/vk_miss_review.md
   # Optional: provide Telegraph token. If omitted, the bot creates an account
   # automatically and saves the token to /data/telegraph_token.txt.
   export TELEGRAPH_TOKEN=your_telegraph_token
