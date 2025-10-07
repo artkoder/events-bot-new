@@ -23018,8 +23018,17 @@ async def _vkrev_import_flow(
         tuple[vk_intake.EventDraft, vk_intake.PersistResult, Event | None]
     ] = []
     for draft in drafts:
+        tolerance_days: int | None = None
+        if draft.festival:
+            record = get_holiday_record(draft.festival)
+            if record is not None:
+                tolerance_days = record.tolerance_days
         res = await vk_intake.persist_event_and_pages(
-            draft, photos, db, source_post_url=source_post_url
+            draft,
+            photos,
+            db,
+            source_post_url=source_post_url,
+            holiday_tolerance_days=tolerance_days,
         )
         async with db.get_session() as session:
             event_obj = await session.get(Event, res.event_id)
