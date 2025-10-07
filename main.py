@@ -422,6 +422,8 @@ TELEGRAPH_AUTHOR_URL = os.getenv(
 HISTORY_TELEGRAPH_AUTHOR_URL = os.getenv(
     "HISTORY_TELEGRAPH_AUTHOR_URL", "https://t.me/kgdstories"
 )
+VK_MISS_REVIEW_COMMAND = os.getenv("VK_MISS_REVIEW_COMMAND", "/vk_misses")
+VK_MISS_REVIEW_FILE = os.getenv("VK_MISS_REVIEW_FILE", "/data/vk_miss_review.md")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "events-ics")
@@ -676,6 +678,22 @@ class VkDefaultLocationSession:
     message: types.Message | None = None
 
 
+@dataclass(slots=True)
+class VkMissRecord:
+    id: str
+    url: str
+    reason: str | None
+    matched_kw: str | None
+    timestamp: datetime
+
+
+@dataclass(slots=True)
+class VkMissReviewSession:
+    queue: list[VkMissRecord]
+    index: int = 0
+    last_text: str | None = None
+
+
 vk_default_time_sessions: TTLCache[int, VkDefaultTimeSession] = TTLCache(
     maxsize=64, ttl=3600
 )
@@ -690,6 +708,9 @@ vk_add_source_sessions: set[int] = set()
 
 # operator_id -> (inbox_id, batch_id) awaiting extra info during VK review
 vk_review_extra_sessions: dict[int, tuple[int, str, bool]] = {}
+
+# user_id -> review session for VK misses
+vk_miss_review_sessions: dict[int, VkMissReviewSession] = {}
 
 
 @dataclass
@@ -20552,6 +20573,70 @@ async def _collect_supabase_token_usage_lines() -> list[str] | None:
     return None
 
 
+def _parse_supabase_ts(value: Any) -> datetime:
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, str) and value:
+        text = value.strip()
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            pass
+        else:
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed
+    return datetime.now(timezone.utc)
+
+
+async def fetch_vk_miss_samples(limit: int) -> list[VkMissRecord]:
+    if limit <= 0:
+        return []
+    client = get_supabase_client()
+    if client is None:
+        logging.info("vk_miss_review.supabase_disabled")
+        return []
+
+    def _query() -> list[Mapping[str, Any]]:
+        result = (
+            client.table("vk_misses_sample")
+            .select("id,url,reason,matched_kw,ts")
+            .order("ts", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        return list(result.data or [])
+
+    try:
+        rows = await asyncio.to_thread(_query)
+    except Exception as exc:  # pragma: no cover - network failure
+        logging.exception("vk_miss_review.supabase_query_failed")
+        return []
+
+    records: list[VkMissRecord] = []
+    for row in rows:
+        raw_id = str(row.get("id") or "").strip()
+        url = str(row.get("url") or "").strip()
+        reason = row.get("reason")
+        matched_kw = row.get("matched_kw")
+        timestamp = _parse_supabase_ts(row.get("ts"))
+        records.append(
+            VkMissRecord(
+                id=raw_id,
+                url=url,
+                reason=reason if isinstance(reason, str) else None,
+                matched_kw=matched_kw if isinstance(matched_kw, str) else None,
+                timestamp=timestamp,
+            )
+        )
+    return records
+
+
+VK_MISS_CALLBACK_PREFIX = "vkmiss:"
+
+
 async def handle_stats(message: types.Message, db: Database, bot: Bot):
     parts = message.text.split()
     mode = parts[1] if len(parts) > 1 else ""
@@ -22097,7 +22182,9 @@ async def _vkrev_queue_size(db: Database) -> int:
     return cnt
 
 
-async def _vkrev_fetch_photos(group_id: int, post_id: int, db: Database, bot: Bot) -> list[str]:
+async def _vk_wall_get_items(
+    group_id: int, post_id: int, db: Database, bot: Bot
+) -> list[dict[str, Any]]:
     token: str | None = VK_SERVICE_TOKEN
     token_kind = "service"
     if not token:
@@ -22130,40 +22217,57 @@ async def _vkrev_fetch_photos(group_id: int, post_id: int, db: Database, bot: Bo
         logging.error("wall.getById failed gid=%s post=%s: %s", group_id, post_id, e)
         return []
     response = data.get("response") if isinstance(data, dict) else data
-    def best_url(sizes: list[dict]) -> str:
-        if not sizes:
-            return ""
-        best = max(sizes, key=lambda s: s.get("width", 0) * s.get("height", 0))
-        return best.get("url") or best.get("src", "")
-
     if isinstance(response, dict):
         items = response.get("items") or []
     else:
         items = response or []
+    normalized: list[dict[str, Any]] = []
+    for item in items:
+        if isinstance(item, dict):
+            normalized.append(item)
+    return normalized
+
+
+def _vk_extract_photo_urls(
+    items: Sequence[Mapping[str, Any]], limit: int = 10
+) -> list[str]:
+    def best_url(sizes: Sequence[Mapping[str, Any]]) -> str:
+        if not sizes:
+            return ""
+        best = max(
+            sizes,
+            key=lambda s: (s.get("width", 0) or 0) * (s.get("height", 0) or 0),
+        )
+        return str(best.get("url") or best.get("src") or "")
+
     photos: list[str] = []
     seen: set[str] = set()
 
-    def process_atts(atts: list[dict], source: str) -> bool:
+    def process_atts(atts: Sequence[Mapping[str, Any]], source: str) -> bool:
         counts = {"photo": 0, "link": 0, "video_thumbs": 0, "doc": 0}
         for att in atts or []:
             url = ""
             if att.get("type") == "photo":
-                url = best_url(att["photo"].get("sizes", []))
+                photo = att.get("photo") or {}
+                sizes = photo.get("sizes") or []
+                url = best_url(sizes)
                 if url:
                     counts["photo"] += 1
             elif att.get("type") == "link":
-                sizes = ((att.get("link") or {}).get("photo") or {}).get("sizes", [])
+                link = att.get("link") or {}
+                sizes = (link.get("photo") or {}).get("sizes", [])
                 url = best_url(sizes)
                 if url:
                     counts["link"] += 1
             elif att.get("type") == "video":
-                images = att["video"].get("first_frame") or att["video"].get("image", [])
+                video = att.get("video") or {}
+                images = video.get("first_frame") or video.get("image", [])
                 url = best_url(images)
                 if url:
                     counts["video_thumbs"] += 1
             elif att.get("type") == "doc":
                 sizes = (
-                    (att["doc"].get("preview") or {})
+                    ((att.get("doc") or {}).get("preview") or {})
                     .get("photo", {})
                     .get("sizes", [])
                 )
@@ -22173,7 +22277,7 @@ async def _vkrev_fetch_photos(group_id: int, post_id: int, db: Database, bot: Bo
             if url and url not in seen:
                 seen.add(url)
                 photos.append(url)
-                if len(photos) >= 10:
+                if len(photos) >= limit:
                     break
         total = sum(counts.values())
         logging.info(
@@ -22185,21 +22289,292 @@ async def _vkrev_fetch_photos(group_id: int, post_id: int, db: Database, bot: Bo
             counts["doc"],
             source,
         )
-        return len(photos) >= 10
+        return len(photos) >= limit
 
     for item in items:
-        copy = (item.get("copy_history") or [{}])[0].get("attachments")
-        if copy and process_atts(copy, "copy_history"):
+        copy_history = item.get("copy_history") or []
+        first_copy = copy_history[0] if copy_history and isinstance(copy_history[0], Mapping) else None
+        copy_atts = first_copy.get("attachments") if isinstance(first_copy, Mapping) else None
+        if copy_atts and process_atts(copy_atts, "copy_history"):
             break
-        if len(photos) >= 10:
+        if len(photos) >= limit:
             break
         atts = item.get("attachments") or []
         if process_atts(atts, "attachments"):
             break
 
+    return photos
+
+
+async def _vkrev_fetch_photos(group_id: int, post_id: int, db: Database, bot: Bot) -> list[str]:
+    items = await _vk_wall_get_items(group_id, post_id, db, bot)
+    if not items:
+        return []
+    photos = _vk_extract_photo_urls(items)
     if not photos:
         logging.info("no media found for -%s_%s", group_id, post_id)
     return photos
+
+
+async def fetch_vk_post_preview(
+    group_id: int, post_id: int, db: Database, bot: Bot
+) -> tuple[str, list[str]]:
+    items = await _vk_wall_get_items(group_id, post_id, db, bot)
+    if not items:
+        return "", []
+    text = ""
+    for item in items:
+        candidate = item.get("text")
+        if candidate:
+            text = str(candidate)
+            break
+        copy_history = item.get("copy_history") or []
+        for copy in copy_history:
+            if not isinstance(copy, Mapping):
+                continue
+            candidate = copy.get("text")
+            if candidate:
+                text = str(candidate)
+                break
+        if text:
+            break
+    photos = _vk_extract_photo_urls(items)
+    if not photos:
+        logging.info("no media found for -%s_%s", group_id, post_id)
+    return text, photos
+
+
+_VK_POST_ID_RE = re.compile(r"(-?\d+)_(\d+)")
+
+
+def _vk_miss_extract_ids(record: VkMissRecord) -> tuple[int, int] | None:
+    candidates: list[str] = []
+    if record.id:
+        candidates.append(record.id)
+    if record.url:
+        candidates.append(record.url)
+        try:
+            parsed = urlparse(record.url)
+        except Exception:
+            parsed = None
+        if parsed and parsed.path:
+            candidates.append(parsed.path)
+    for candidate in candidates:
+        if not candidate:
+            continue
+        match = _VK_POST_ID_RE.search(candidate)
+        if match:
+            owner = int(match.group(1))
+            post = int(match.group(2))
+            group_id = abs(owner)
+            if group_id > 0 and post > 0:
+                return group_id, post
+    return None
+
+
+def _vk_miss_format_timestamp(value: datetime) -> str:
+    try:
+        localized = value.astimezone(LOCAL_TZ)
+    except Exception:
+        localized = value
+    return localized.strftime("%Y-%m-%d %H:%M:%S %Z")
+
+
+async def _vk_miss_send_card(
+    bot: Bot,
+    chat_id: int,
+    session: VkMissReviewSession,
+    record: VkMissRecord,
+    text: str,
+    photos: Sequence[str],
+) -> None:
+    session.last_text = text
+    position = session.index + 1
+    total = len(session.queue)
+    header = f"Карточка {position}/{total}"
+    display_text = text.strip()
+    if not display_text:
+        display_text = "(текст поста не загружен)"
+    timestamp = _vk_miss_format_timestamp(record.timestamp)
+    lines: list[str] = [header]
+    if display_text:
+        lines.append(display_text)
+    if record.url:
+        lines.append(record.url)
+    else:
+        lines.append("URL: —")
+    lines.append("")
+    lines.append(f"Причина фильтра: {record.reason or '—'}")
+    lines.append(f"matched_kw: {record.matched_kw or '—'}")
+    lines.append(f"Дата: {timestamp}")
+    message_text = "\n".join(lines)
+
+    media_urls = [url for url in photos if url]
+    if media_urls:
+        media = [types.InputMediaPhoto(media=url) for url in media_urls[:10]]
+        try:
+            await bot.send_media_group(chat_id, media)
+        except TelegramBadRequest:
+            if len(media) == 1:
+                await bot.send_photo(chat_id, media[0].media)
+            else:
+                raise
+
+    keyboard = types.InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                types.InlineKeyboardButton(
+                    text="Отклонено верно",
+                    callback_data=f"{VK_MISS_CALLBACK_PREFIX}ok:{session.index}",
+                ),
+                types.InlineKeyboardButton(
+                    text="На доработку",
+                    callback_data=f"{VK_MISS_CALLBACK_PREFIX}redo:{session.index}",
+                ),
+            ]
+        ]
+    )
+
+    parts = split_text(message_text, TELEGRAM_MESSAGE_LIMIT)
+    for idx, part in enumerate(parts):
+        markup = keyboard if idx == len(parts) - 1 else None
+        await bot.send_message(
+            chat_id,
+            part,
+            reply_markup=markup,
+            disable_web_page_preview=True,
+        )
+
+
+async def _vk_miss_append_feedback(record: VkMissRecord, post_text: str) -> None:
+    path = VK_MISS_REVIEW_FILE
+    if not path:
+        return
+
+    def _write() -> None:
+        directory = os.path.dirname(path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        now_str = datetime.now(LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S %Z")
+        body = post_text.strip()
+        if not body:
+            body = "(текст поста не загружен)"
+        lines = [
+            f"### {now_str}",
+            f"- URL: {record.url or '—'}",
+            f"- Причина: {record.reason or '—'}",
+        ]
+        if record.matched_kw:
+            lines.append(f"- matched_kw: {record.matched_kw}")
+        lines.append("")
+        lines.append(body)
+        lines.append("")
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write("\n".join(lines) + "\n")
+
+    await asyncio.to_thread(_write)
+
+
+async def _vk_miss_show_next(
+    user_id: int, chat_id: int, db: Database, bot: Bot
+) -> None:
+    session = vk_miss_review_sessions.get(user_id)
+    if not session:
+        return
+    if session.index >= len(session.queue):
+        vk_miss_review_sessions.pop(user_id, None)
+        await bot.send_message(chat_id, "Карточки закончились")
+        return
+    record = session.queue[session.index]
+    ids = _vk_miss_extract_ids(record)
+    text = ""
+    photos: list[str] = []
+    if ids is None:
+        logging.warning(
+            "vk_miss_review.unparsable_id id=%s url=%s", record.id, record.url
+        )
+    else:
+        group_id, post_id = ids
+        text, photos = await fetch_vk_post_preview(group_id, post_id, db, bot)
+    await _vk_miss_send_card(bot, chat_id, session, record, text, photos)
+
+
+async def handle_vk_miss_review(
+    message: types.Message, db: Database, bot: Bot
+) -> None:
+    parts = (message.text or "").split()
+    limit = 10
+    if len(parts) > 1:
+        try:
+            limit = int(parts[1])
+        except ValueError:
+            await bot.send_message(message.chat.id, "Usage: /vk_misses [N]")
+            return
+    limit = max(1, min(limit, 50))
+    async with db.get_session() as session:
+        user = await session.get(User, message.from_user.id)
+    if not user or not user.is_superadmin:
+        await bot.send_message(message.chat.id, "Not authorized")
+        return
+
+    records = await fetch_vk_miss_samples(limit)
+    if not records:
+        await bot.send_message(message.chat.id, "Нет пропусков для ревизии")
+        return
+    vk_miss_review_sessions[message.from_user.id] = VkMissReviewSession(queue=records)
+    await bot.send_message(
+        message.chat.id,
+        f"Загружено карточек: {len(records)}",
+        disable_web_page_preview=True,
+    )
+    await _vk_miss_show_next(message.from_user.id, message.chat.id, db, bot)
+
+
+async def handle_vk_miss_review_callback(
+    callback: types.CallbackQuery, db: Database, bot: Bot
+) -> None:
+    data = callback.data or ""
+    if not data.startswith(VK_MISS_CALLBACK_PREFIX):
+        await callback.answer()
+        return
+    payload = data[len(VK_MISS_CALLBACK_PREFIX) :]
+    try:
+        action, idx_raw = payload.split(":", 1)
+        idx = int(idx_raw)
+    except ValueError:
+        await callback.answer()
+        return
+
+    session = vk_miss_review_sessions.get(callback.from_user.id)
+    if not session:
+        await callback.answer("Сессия завершена", show_alert=True)
+        return
+    if idx != session.index:
+        await callback.answer("Устаревшая карточка", show_alert=True)
+        return
+    if callback.message is None:
+        await callback.answer()
+        return
+
+    record = session.queue[session.index]
+
+    if action == "redo":
+        await _vk_miss_append_feedback(record, session.last_text or "")
+        await callback.answer("Отправлено на доработку")
+    elif action == "ok":
+        await callback.answer("Отмечено")
+    else:
+        await callback.answer()
+        return
+
+    session.index += 1
+    session.last_text = None
+    await _vk_miss_show_next(
+        callback.from_user.id,
+        callback.message.chat.id,
+        db,
+        bot,
+    )
 
 
 def _vkrev_collect_photo_ids(items: list[dict], max_photos: int) -> list[str]:
@@ -26294,6 +26669,9 @@ def create_app() -> web.Application:
     async def vk_review_cb_wrapper(callback: types.CallbackQuery):
         await handle_vk_review_cb(callback, db, bot)
 
+    async def vk_miss_review_cb_wrapper(callback: types.CallbackQuery):
+        await handle_vk_miss_review_callback(callback, db, bot)
+
     async def vk_extra_msg_wrapper(message: types.Message):
         await handle_vk_extra_message(message, db, bot)
 
@@ -26314,6 +26692,9 @@ def create_app() -> web.Application:
 
     async def vk_requeue_imported_wrapper(message: types.Message):
         await handle_vk_requeue_imported(message, db, bot)
+
+    async def vk_miss_review_wrapper(message: types.Message):
+        await handle_vk_miss_review(message, db, bot)
     async def status_wrapper(message: types.Message):
         await handle_status(message, db, bot, app)
 
@@ -26466,6 +26847,10 @@ def create_app() -> web.Application:
     dp.message.register(vk_crawl_now_wrapper, Command("vk_crawl_now"))
     dp.message.register(vk_queue_wrapper, Command("vk_queue"))
     dp.message.register(vk_requeue_imported_wrapper, Command("vk_requeue_imported"))
+    dp.message.register(
+        vk_miss_review_wrapper,
+        Command(VK_MISS_REVIEW_COMMAND.lstrip("/")),
+    )
     dp.message.register(vk_add_start_wrapper, lambda m: m.text == VK_BTN_ADD_SOURCE)
     dp.message.register(vk_list_wrapper, lambda m: m.text == VK_BTN_LIST_SOURCES)
     dp.message.register(vk_check_wrapper, lambda m: m.text == VK_BTN_CHECK_EVENTS)
@@ -26628,6 +27013,10 @@ def create_app() -> web.Application:
     )
     dp.callback_query.register(vk_next_wrapper, lambda c: c.data.startswith("vknext:"))
     dp.callback_query.register(vk_review_cb_wrapper, lambda c: c.data and c.data.startswith("vkrev:"))
+    dp.callback_query.register(
+        vk_miss_review_cb_wrapper,
+        lambda c: c.data and c.data.startswith(VK_MISS_CALLBACK_PREFIX),
+    )
     dp.message.register(
 
         festival_edit_wrapper, lambda m: m.from_user.id in festival_edit_sessions
