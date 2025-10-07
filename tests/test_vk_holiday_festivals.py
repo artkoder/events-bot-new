@@ -42,15 +42,53 @@ async def test_persist_event_creates_and_reuses_holiday(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "rebuild_fest_nav_if_changed", fake_rebuild)
     monkeypatch.setattr(main, "sync_festival_page", fake_sync_page)
 
-    halloween_desc = None
-    for line in Path("docs/HOLIDAYS.md").read_text(encoding="utf-8").splitlines():
-        if "|" not in line:
+    target_date_token = main._normalize_holiday_date_token("31.10")
+    halloween_doc_row = None
+    for raw_line in Path("docs/HOLIDAYS.md").read_text(encoding="utf-8").splitlines():
+        if "|" not in raw_line:
             continue
-        parts = [part.strip() for part in line.split("|")]
-        if len(parts) >= 5 and parts[2] == "Хеллоуин":
-            halloween_desc = parts[4]
-            break
-    assert halloween_desc
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        parts = [part.strip() for part in raw_line.split("|")]
+        if not parts or parts[0].casefold() == "date_or_range":
+            continue
+        date_token = main._normalize_holiday_date_token(parts[0])
+        if date_token != target_date_token:
+            continue
+
+        tolerance_token = parts[1] if len(parts) > 1 else ""
+        canonical_name = parts[2] if len(parts) > 2 else ""
+        alias_field = parts[3] if len(parts) > 3 else ""
+        description_field = "|".join(parts[4:]).strip() if len(parts) > 4 else ""
+
+        tolerance_value = tolerance_token.strip()
+        if not tolerance_value:
+            tolerance_days = None
+        elif tolerance_value.casefold() in {"none", "null"}:
+            tolerance_days = None
+        else:
+            tolerance_days = int(tolerance_value)
+
+        aliases_from_doc = [
+            alias.strip()
+            for alias in alias_field.split(",")
+            if alias.strip()
+        ]
+
+        halloween_doc_row = {
+            "canonical_name": canonical_name,
+            "description": description_field,
+            "aliases": aliases_from_doc,
+            "tolerance_days": tolerance_days,
+        }
+        break
+
+    assert halloween_doc_row is not None
+    assert halloween_doc_row["canonical_name"] == "Хеллоуин"
+    assert halloween_doc_row["aliases"] == ["хэллоуин", "halloween"]
+    assert halloween_doc_row["tolerance_days"] == 1
+    halloween_desc = halloween_doc_row["description"]
 
     draft1 = vk_intake.EventDraft(
         title="Хэллоуинская вечеринка",
@@ -80,10 +118,20 @@ async def test_persist_event_creates_and_reuses_holiday(tmp_path, monkeypatch):
     assert halloween.source_text == halloween_desc
     assert halloween.aliases == ["хеллоуин", "хэллоуин", "halloween"]
 
+    halloween_record = main.get_holiday_record("Хеллоуин")
+    assert halloween_record is not None
+    assert halloween_record.date == target_date_token
+    assert halloween_record.tolerance_days == 1
+    assert halloween_record.description == halloween_desc
+    assert list(halloween_record.aliases) == ["хэллоуин", "halloween"]
+
     current_year = date.today().year
-    expected_date = f"{current_year}-10-31"
-    assert halloween.start_date == expected_date
-    assert halloween.end_date == expected_date
+    start_iso, end_iso = vk_intake._holiday_date_range(halloween_record, current_year)
+    assert start_iso == f"{current_year}-10-31"
+    assert end_iso == f"{current_year}-10-31"
+
+    assert halloween.start_date == start_iso
+    assert halloween.end_date == end_iso
 
     assert scheduled == ["Хеллоуин"]
     assert sync_calls == ["Хеллоуин"]
