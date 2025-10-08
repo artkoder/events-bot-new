@@ -20,58 +20,34 @@ from aiogram.types import (
     Message,
 )
 
-from imagekit_poster import PosterGravity, PosterResizeMode, PosterTransformation, process_poster
+from imagekit_poster import PosterGravity, PosterProcessingMode, process_poster
 
 logger = logging.getLogger(__name__)
-
-
-def _env(name: str) -> str:
-    value = os.getenv(name)
-    if not value:
-        raise RuntimeError(f"Environment variable {name} is required for /ik_poster")
-    return value
-
-
-def _get_credentials() -> dict[str, str]:
-    return {
-        "public_key": _env("IMAGEKIT_PUBLIC_KEY"),
-        "private_key": _env("IMAGEKIT_PRIVATE_KEY"),
-        "url_endpoint": _env("IMAGEKIT_URL_ENDPOINT"),
-    }
 
 
 @dataclass(frozen=True)
 class PosterMode:
     title: str
-    transformations: tuple[PosterTransformation, ...]
+    mode: PosterProcessingMode
+    width: int
+    height: int
+    prompt: str | None = None
+    gravity: PosterGravity | None = None
 
 
 POSTER_MODES: Final[dict[str, PosterMode]] = {
     "smart": PosterMode(
         title="Smart crop 9:16",
-        transformations=(
-            PosterTransformation(
-                name="smart",
-                width=1080,
-                height=1920,
-                mode=PosterResizeMode.CROP,
-                gravity=PosterGravity.AUTO,
-                quality=90,
-            ),
-        ),
+        mode=PosterProcessingMode.SMART_CROP,
+        width=1080,
+        height=1920,
     ),
     "extend": PosterMode(
         title="Extend (GenFill) 9:16",
-        transformations=(
-            PosterTransformation(
-                name="extend",
-                width=1080,
-                height=1920,
-                mode=PosterResizeMode.PAD,
-                quality=90,
-                raw="bg-genfill",
-            ),
-        ),
+        mode=PosterProcessingMode.EXTEND_GENFILL,
+        width=1080,
+        height=1920,
+        gravity=PosterGravity.AUTO,
     ),
 }
 
@@ -146,14 +122,6 @@ async def handle_mode(callback: CallbackQuery, state: FSMContext) -> None:
         return
 
     operator_chat = os.getenv("OPERATOR_CHAT_ID")
-    try:
-        credentials = _get_credentials()
-    except RuntimeError as exc:  # pragma: no cover - configuration error
-        logger.exception("ImageKit credentials are not configured")
-        await callback.message.answer(str(exc))
-        await state.clear()
-        return
-
     await callback.message.edit_reply_markup()
     await callback.message.answer(
         f"Обрабатываю постер в режиме «{mode.title}»..."
@@ -163,8 +131,11 @@ async def handle_mode(callback: CallbackQuery, state: FSMContext) -> None:
         result_bytes = process_poster(
             image,
             file_name=filename,
-            transformations=mode.transformations,
-            **credentials,
+            mode=mode.mode,
+            width=mode.width,
+            height=mode.height,
+            prompt=mode.prompt,
+            gravity=mode.gravity,
         )
     except Exception:  # pragma: no cover - network/SDK errors
         logger.exception("Failed to process poster via ImageKit")
