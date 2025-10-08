@@ -13,6 +13,7 @@ import sqlite3
 import time as _time
 
 from db import Database
+from runtime import require_main_attr
 from vk_intake import OCR_PENDING_SENTINEL, extract_event_ts_hint
 
 
@@ -103,6 +104,8 @@ async def refresh_vk_event_ts_hints(db: Database) -> int:
     """Recompute :mod:`vk_inbox` timestamp hints for queued rows."""
 
     updates: list[tuple[int | None, int]] = []
+    get_tz_offset = require_main_attr("get_tz_offset")
+    await get_tz_offset(db)
     async with db.raw_conn() as conn:
         original_row_factory = conn.row_factory
         conn.row_factory = __import__("sqlite3").Row
