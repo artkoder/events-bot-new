@@ -443,10 +443,13 @@ class Database:
                     group_id     INTEGER PRIMARY KEY,
                     last_seen_ts INTEGER DEFAULT 0,
                     last_post_id INTEGER DEFAULT 0,
-                    updated_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    updated_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    checked_at   INTEGER
                 )
                 """
             )
+
+            await _add_column(conn, "vk_crawl_cursor", "checked_at INTEGER")
 
             await conn.execute(
                 """
