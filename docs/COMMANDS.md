@@ -10,6 +10,7 @@
 | `/addevent <text>` | event description | Parse text with model 4o and store one or several events. Poster images are uploaded to Catbox once, recognized via OCR, cached, and the extracted text is passed to 4o together with a token usage report for the operator. Forwarded messages from moderators are processed the same way. |
 | `/addevent_raw <title>|<date>|<time>|<location>` | manual fields | Add event without LLM. The bot also creates a Telegraph page with the provided text and optional attached photo. |
 | `/images` | - | Toggle uploading photos to Catbox. |
+| `/ik_poster` | - | Обработка афиш через ImageKit (Smart crop / GenFill). |
 | `/vkgroup <id|off>` | required id or `off` | Set or disable VK group for daily announcements. |
 | `/vktime today|added <HH:MM>` | required type and time | Change VK posting times (default 08:00/20:00). |
 | `/vkphotos` | - | Toggle sending images to VK posts. |
