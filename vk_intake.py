@@ -841,18 +841,62 @@ def extract_event_ts_hint(
                 minute = 0
             else:
                 bare_th = None
+                bare_hour_rejected = False
                 if date_span is not None:
+                    allowed_connector_words = {
+                        "в",
+                        "к",
+                        "ровно",
+                        "начало",
+                        "начала",
+                        "начнем",
+                        "начнём",
+                        "начнется",
+                        "начнётся",
+                        "начинаем",
+                        "старт",
+                        "стартуем",
+                        "стартует",
+                    }
+                    duration_hint_prefixes = ("жив", "длит", "продолж", "програм")
+
                     for candidate in BARE_TIME_H_RE.finditer(text_low):
                         if candidate.start() < date_span[1]:
                             continue
                         between = text_low[date_span[1] : candidate.start()]
                         if re.search(r"[.!?]", between):
                             continue
+                        between_stripped = between.strip()
+                        reject_candidate = False
+                        if between_stripped:
+                            normalized_between = between_stripped
+                            normalized_between = re.sub(r"[—–-]", " ", normalized_between)
+                            normalized_between = re.sub(r"[,;:]", " ", normalized_between)
+                            normalized_between = re.sub(r"\s+", " ", normalized_between).strip()
+                            if normalized_between:
+                                tokens = normalized_between.split(" ")
+                                if any(token not in allowed_connector_words for token in tokens):
+                                    reject_candidate = True
+                        trailing_segment = text_low[candidate.end() :]
+                        trailing_segment = trailing_segment.lstrip(
+                            " \t\r\n,.;:!?()[]{}«»\"'—–-"
+                        )
+                        if trailing_segment:
+                            next_word_match = re.match(r"[a-zа-яё]+", trailing_segment)
+                            if next_word_match and next_word_match.group(0).startswith(
+                                duration_hint_prefixes
+                            ):
+                                reject_candidate = True
+                        if reject_candidate:
+                            bare_hour_rejected = True
+                            continue
                         bare_th = candidate
                         break
                 if bare_th:
                     hour = int(bare_th.group(1))
                     minute = 0
+                elif bare_hour_rejected:
+                    return None
                 elif default_time:
                     try:
                         hour, minute = map(int, default_time.split(":"))

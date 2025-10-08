@@ -176,6 +176,9 @@ def test_extract_event_ts_hint_bare_hours_after_date():
     dt = real_datetime.fromtimestamp(ts, tz=main.LOCAL_TZ)
     assert (dt.year, dt.month, dt.day, dt.hour, dt.minute) == (2024, 10, 9, 14, 0)
 
+    noisy_bare_hour_text = "9 октября концерт 2 часа живого звука"
+    assert extract_event_ts_hint(noisy_bare_hour_text, publish_ts=publish_dt) is None
+
     duration_text = "2 часа живого звука"
     assert extract_event_ts_hint(duration_text, publish_ts=publish_dt) is None
 
