@@ -382,6 +382,47 @@ async def test_vkrev_show_next_uses_crawl_timezone_hint(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_refresh_hint_rollover_keeps_next_year(tmp_path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    publish_dt = datetime(2024, 12, 30, 12, 0, tzinfo=main.LOCAL_TZ)
+    publish_ts = int(publish_dt.timestamp())
+    past_hint_dt = datetime(2024, 1, 1, 18, 0, tzinfo=main.LOCAL_TZ)
+    expected_hint_dt = datetime(2025, 1, 1, 18, 0, tzinfo=main.LOCAL_TZ)
+
+    async with db.raw_conn() as conn:
+        await conn.execute(
+            "INSERT INTO vk_inbox(group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status) VALUES(?,?,?,?,?,?,?,?)",
+            (
+                1,
+                99,
+                publish_ts,
+                "Праздник состоится 1 января в 18:00",
+                None,
+                1,
+                int(past_hint_dt.timestamp()),
+                "pending",
+            ),
+        )
+        await conn.commit()
+
+    updated = await vk_review.refresh_vk_event_ts_hints(db)
+    assert updated == 1
+
+    async with db.raw_conn() as conn:
+        cur = await conn.execute(
+            "SELECT event_ts_hint FROM vk_inbox WHERE group_id=? AND post_id=?",
+            (1, 99),
+        )
+        (stored_hint,) = await cur.fetchone()
+
+    expected_hint = int(expected_hint_dt.timestamp())
+    assert stored_hint == expected_hint
+    assert stored_hint > publish_ts
+
+
+@pytest.mark.asyncio
 async def test_vkrev_show_next_recomputes_past_hint_with_timezone_change(
     tmp_path, monkeypatch
 ):

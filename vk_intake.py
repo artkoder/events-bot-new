@@ -815,7 +815,7 @@ def extract_event_ts_hint(
             dt = datetime(year, month, day, tzinfo=tzinfo)
         except ValueError:
             return None
-        if dt < now and not allow_past:
+        if dt < now:
             skip_year_rollover = explicit_year
             if not explicit_year and now - dt <= RECENT_PAST_THRESHOLD:
                 skip_year_rollover = True
