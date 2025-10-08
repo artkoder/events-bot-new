@@ -1,3 +1,9 @@
+import sys
+import types
+
+import pytest
+
+import main
 from supabase_export import SBExporter
 
 
@@ -124,3 +130,110 @@ def test_log_miss_includes_expected_fields(monkeypatch):
     assert "post_ts" not in payload
     assert "event_ts_hint" not in payload
     assert "flags" not in payload
+
+
+def test_get_supabase_client_normalizes_url(monkeypatch):
+    monkeypatch.setattr(main, "SUPABASE_URL", "https://proj.supabase.co/rest/v1")
+    monkeypatch.setattr(main, "SUPABASE_KEY", "secret")
+    monkeypatch.setattr(main, "_supabase_client", None)
+    monkeypatch.setattr(main, "_normalized_supabase_url", None)
+    monkeypatch.setattr(main, "_normalized_supabase_url_source", None)
+    monkeypatch.setattr(main.atexit, "register", lambda func: None)
+
+    class DummyHttpxClient:
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+
+    monkeypatch.setattr(main.httpx, "Client", DummyHttpxClient)
+
+    fake_client = object()
+
+    def fake_create_client(url, key, options):
+        assert url == "https://proj.supabase.co"
+        assert key == "secret"
+        assert isinstance(options.httpx_client, DummyHttpxClient)
+        return fake_client
+
+    class FakeClientOptions:
+        def __init__(self):
+            self.httpx_client = None
+
+    supabase_module = types.ModuleType("supabase")
+    supabase_module.create_client = fake_create_client
+    supabase_module.Client = object
+    supabase_client_module = types.ModuleType("supabase.client")
+    supabase_client_module.ClientOptions = FakeClientOptions
+
+    monkeypatch.setitem(sys.modules, "supabase", supabase_module)
+    monkeypatch.setitem(sys.modules, "supabase.client", supabase_client_module)
+
+    try:
+        client = main.get_supabase_client()
+        assert client is fake_client
+        assert main._normalized_supabase_url == "https://proj.supabase.co"
+        assert (
+            main._normalized_supabase_url_source
+            == "https://proj.supabase.co/rest/v1"
+        )
+    finally:
+        main._supabase_client = None
+
+
+class _DummyResponse:
+    def __init__(self, url):
+        self._url = url
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return []
+
+
+class _DummyAsyncClient:
+    instance: "_DummyAsyncClient | None" = None
+
+    def __init__(self, *args, **kwargs):
+        _DummyAsyncClient.instance = self
+        self.calls: list[tuple[str, dict | None, dict | None]] = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):  # pragma: no cover - unused
+        return False
+
+    async def get(self, url, headers=None, params=None):
+        self.calls.append((url, headers, params))
+        return _DummyResponse(url)
+
+
+@pytest.mark.asyncio
+async def test_fetch_vk_import_view_uses_normalized_base(monkeypatch):
+    monkeypatch.setattr(main, "SUPABASE_URL", "https://proj.supabase.co/storage/v1")
+    monkeypatch.setattr(main, "SUPABASE_KEY", "test-key")
+    monkeypatch.setattr(main, "_supabase_client", None)
+    monkeypatch.setattr(main, "_normalized_supabase_url", None)
+    monkeypatch.setattr(main, "_normalized_supabase_url_source", None)
+    monkeypatch.delenv("SUPABASE_DISABLED", raising=False)
+    monkeypatch.setattr(main.httpx, "AsyncClient", _DummyAsyncClient)
+
+    result = await main._fetch_vk_import_view(
+        "vk_import_by_group",
+        days=7,
+        client=None,
+    )
+
+    assert result == []
+    instance = _DummyAsyncClient.instance
+    assert instance is not None
+    assert instance.calls, "HTTP client was not invoked"
+    url, headers, params = instance.calls[0]
+    assert url == "https://proj.supabase.co/rest/v1/vk_import_by_group"
+    assert headers == {
+        "apikey": "test-key",
+        "Authorization": "Bearer test-key",
+    }
+    assert params is not None
+    assert params["select"] == "*"

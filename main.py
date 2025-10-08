@@ -1439,6 +1439,8 @@ VK_PHOTOS_ENABLED: bool = False
 # toggle for Telegraph image uploads (disabled by default)
 TELEGRAPH_IMAGE_UPLOAD: bool = os.getenv("TELEGRAPH_IMAGE_UPLOAD", "0") != "0"
 _supabase_client: "Client | None" = None  # type: ignore[name-defined]
+_normalized_supabase_url: str | None = None
+_normalized_supabase_url_source: str | None = None
 _vk_user_token_bad: str | None = None
 _vk_captcha_needed: bool = False
 _vk_captcha_sid: str | None = None
@@ -3084,10 +3086,38 @@ def mark_vk_import_result(
     ).execute()
 
 
+def _normalize_supabase_url(url: str | None) -> str | None:
+    if not url:
+        return None
+    parsed = urlparse(url)
+    if not parsed.scheme or not parsed.netloc:
+        return url.rstrip("/")
+    segments = [segment for segment in parsed.path.split("/") if segment]
+    while len(segments) >= 2 and segments[-1].lower() == "v1":
+        segments = segments[:-2]
+    normalized_path = "/" + "/".join(segments) if segments else ""
+    normalized = parsed._replace(
+        path=normalized_path,
+        params="",
+        query="",
+        fragment="",
+    ).geturl()
+    return normalized.rstrip("/")
+
+
+def _get_normalized_supabase_url() -> str | None:
+    global _normalized_supabase_url, _normalized_supabase_url_source
+    if _normalized_supabase_url_source != SUPABASE_URL:
+        _normalized_supabase_url = _normalize_supabase_url(SUPABASE_URL)
+        _normalized_supabase_url_source = SUPABASE_URL
+    return _normalized_supabase_url
+
+
 def get_supabase_client() -> "Client | None":  # type: ignore[name-defined]
-    if os.getenv("SUPABASE_DISABLED") == "1" or not (
-        SUPABASE_URL and SUPABASE_KEY
-    ):
+    if os.getenv("SUPABASE_DISABLED") == "1" or not SUPABASE_KEY:
+        return None
+    base_url = _get_normalized_supabase_url()
+    if not base_url:
         return None
     global _supabase_client
     if _supabase_client is None:
@@ -3096,7 +3126,7 @@ def get_supabase_client() -> "Client | None":  # type: ignore[name-defined]
 
         options = ClientOptions()
         options.httpx_client = httpx.Client(timeout=HTTP_TIMEOUT)
-        _supabase_client = create_client(SUPABASE_URL, SUPABASE_KEY, options=options)
+        _supabase_client = create_client(base_url, SUPABASE_KEY, options=options)
         atexit.register(close_supabase_client)
     return _supabase_client
 
@@ -21231,7 +21261,8 @@ async def _fetch_vk_import_view(
                 continue
 
     supabase_disabled = os.getenv("SUPABASE_DISABLED") == "1"
-    if supabase_disabled or not (SUPABASE_URL and SUPABASE_KEY):
+    base_url = _get_normalized_supabase_url()
+    if supabase_disabled or not (base_url and SUPABASE_KEY):
         if last_error is not None:
             raise last_error
         raise RuntimeError("Supabase client unavailable")
@@ -21240,7 +21271,6 @@ async def _fetch_vk_import_view(
         "apikey": SUPABASE_KEY,
         "Authorization": f"Bearer {SUPABASE_KEY}",
     }
-    base_url = SUPABASE_URL.rstrip("/")
     url = f"{base_url}/rest/v1/{view}"
     timeout = httpx.Timeout(HTTP_TIMEOUT)
     async with httpx.AsyncClient(timeout=timeout) as http_client:
