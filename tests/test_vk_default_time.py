@@ -58,8 +58,8 @@ async def test_vk_list_shows_numbers_and_default_time(tmp_path):
                 ),
             )
         await conn.execute(
-            "INSERT INTO vk_crawl_cursor(group_id, updated_at) VALUES(?, ?)",
-            (1, "2024-05-31 12:34:56"),
+            "INSERT INTO vk_crawl_cursor(group_id, updated_at, checked_at) VALUES(?, ?, ?)",
+            (1, "2024-05-31 12:34:56", 1717245296),
         )
         await conn.execute(
             "INSERT INTO vk_crawl_cursor(group_id, updated_at) VALUES(?, ?)",
@@ -95,7 +95,7 @@ async def test_vk_list_shows_numbers_and_default_time(tmp_path):
     assert lines[0].startswith("1.")
     assert "типовое время: 19:00" in lines[0]
     assert "билеты: https://tickets.example/club1" in lines[0]
-    assert "последняя проверка: 2024-05-31 12:34" in lines[0]
+    assert "последняя проверка: 2024-06-01 12:34" in lines[0]
     assert lines[1] == " Pending | Skipped | Imported | Rejected "
     assert (
         lines[2]

@@ -2002,15 +2002,18 @@ async def crawl_once(
         try:
             async with db.raw_conn() as conn:
                 cur = await conn.execute(
-                    "SELECT last_seen_ts, last_post_id, updated_at FROM vk_crawl_cursor WHERE group_id=?",
+                    "SELECT last_seen_ts, last_post_id, updated_at, checked_at FROM vk_crawl_cursor WHERE group_id=?",
                     (gid,),
                 )
                 row = await cur.fetchone()
             if row:
-                last_seen_ts, last_post_id, updated_at = row
-                updated_at_ts = int(
-                    datetime.fromisoformat(updated_at).timestamp() if isinstance(updated_at, str) else updated_at
-                )
+                last_seen_ts, last_post_id, updated_at, _checked_at = row
+                if isinstance(updated_at, str):
+                    updated_at_ts = int(datetime.fromisoformat(updated_at).timestamp())
+                elif updated_at:
+                    updated_at_ts = int(updated_at)
+                else:
+                    updated_at_ts = 0
             else:
                 last_seen_ts = last_post_id = 0
                 updated_at_ts = 0
@@ -2320,6 +2323,7 @@ async def crawl_once(
             next_cursor_ts = max_ts
             next_cursor_pid = max_pid
             cursor_updated_at = now_ts
+            cursor_checked_at = int(time.time())
             if hard_cap_triggered and max_ts > 0 and not reached_cursor_overlap:
                 deep_backfill_scheduled = True
                 next_cursor_ts = last_seen_ts
@@ -2341,11 +2345,11 @@ async def crawl_once(
                     last_seen_ts,
                     max_ts,
                 )
-            
+
             async with db.raw_conn() as conn:
                 await conn.execute(
-                    "INSERT OR REPLACE INTO vk_crawl_cursor(group_id, last_seen_ts, last_post_id, updated_at) VALUES(?,?,?,?)",
-                    (gid, next_cursor_ts, next_cursor_pid, cursor_updated_at),
+                    "INSERT OR REPLACE INTO vk_crawl_cursor(group_id, last_seen_ts, last_post_id, updated_at, checked_at) VALUES(?,?,?,?,?)",
+                    (gid, next_cursor_ts, next_cursor_pid, cursor_updated_at, cursor_checked_at),
                 )
                 await conn.commit()
 

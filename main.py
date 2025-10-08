@@ -21938,7 +21938,19 @@ async def handle_vk_add_message(message: types.Message, db: Database, bot: Bot) 
 
 async def _fetch_vk_sources(
     db: Database,
-) -> list[tuple[int, int, str, str, str | None, str | None, str | None, str | None]]:
+) -> list[
+    tuple[
+        int,
+        int,
+        str,
+        str,
+        str | None,
+        str | None,
+        str | None,
+        Any,
+        Any,
+    ]
+]:
     async with db.raw_conn() as conn:
         cursor = await conn.execute(
             """
@@ -21950,7 +21962,8 @@ async def _fetch_vk_sources(
                 s.location,
                 s.default_time,
                 s.default_ticket_link,
-                c.updated_at
+                c.updated_at,
+                c.checked_at
             FROM vk_source AS s
             LEFT JOIN vk_crawl_cursor AS c ON c.group_id = s.group_id
             ORDER BY s.id
@@ -22013,12 +22026,12 @@ async def handle_vk_list(
     page_items: list[
         tuple[
             int,
-            tuple[int, int, str, str, str | None, str | None, str | None, str | None],
+            tuple[int, int, str, str, str | None, str | None, str | None, Any, Any],
             dict[str, int],
         ]
     ] = []
     for offset, row in enumerate(page_rows, start=start + 1):
-        rid, gid, screen, name, loc, dtime, default_ticket_link, updated_at = row
+        rid, gid, screen, name, loc, dtime, default_ticket_link, updated_at, checked_at = row
         counts = inbox_counts.get(gid)
         if counts is None:
             counts = _zero_vk_status_counts()
@@ -22044,24 +22057,27 @@ async def handle_vk_list(
     lines: list[str] = []
     buttons: list[list[types.InlineKeyboardButton]] = []
     for offset, row, counts in page_items:
-        rid, gid, screen, name, loc, dtime, default_ticket_link, updated_at = row
+        rid, gid, screen, name, loc, dtime, default_ticket_link, updated_at, checked_at = row
         info_parts = [f"id={gid}"]
         if loc:
             info_parts.append(loc)
         if default_ticket_link:
             info_parts.append(f"билеты: {default_ticket_link}")
         info = ", ".join(info_parts)
-        if updated_at:
+        last_check_value = checked_at if checked_at not in (None, "", 0) else updated_at
+        if last_check_value:
             try:
-                if isinstance(updated_at, (int, float)):
-                    parsed_updated = datetime.fromtimestamp(updated_at, tz=timezone.utc)
+                if isinstance(last_check_value, (int, float)):
+                    if last_check_value <= 0:
+                        raise ValueError("non-positive timestamp")
+                    parsed_updated = datetime.fromtimestamp(last_check_value, tz=timezone.utc)
                 else:
-                    parsed_updated = datetime.fromisoformat(updated_at)
+                    parsed_updated = datetime.fromisoformat(last_check_value)
                     if parsed_updated.tzinfo is None:
                         parsed_updated = parsed_updated.replace(tzinfo=timezone.utc)
                 human_updated = parsed_updated.astimezone(LOCAL_TZ).strftime("%Y-%m-%d %H:%M")
             except (ValueError, TypeError):
-                human_updated = str(updated_at)
+                human_updated = str(last_check_value)
         else:
             human_updated = "-"
         lines.append(
