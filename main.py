@@ -693,6 +693,7 @@ class VkMissReviewSession:
     queue: list[VkMissRecord]
     index: int = 0
     last_text: str | None = None
+    last_published_at: datetime | None = None
 
 
 vk_default_time_sessions: TTLCache[int, VkDefaultTimeSession] = TTLCache(
@@ -22877,30 +22878,68 @@ async def _vkrev_fetch_photos(group_id: int, post_id: int, db: Database, bot: Bo
 
 async def fetch_vk_post_preview(
     group_id: int, post_id: int, db: Database, bot: Bot
-) -> tuple[str, list[str]]:
+) -> tuple[str, list[str], datetime | None]:
     items = await _vk_wall_get_items(group_id, post_id, db, bot)
     if not items:
-        return "", []
+        return "", [], None
     text = ""
+    published_at: datetime | None = None
+
+    def parse_date(source: Mapping[str, object] | None) -> datetime | None:
+        if not source:
+            return None
+        raw = source.get("date")
+        if isinstance(raw, datetime):
+            if raw.tzinfo is not None:
+                return raw
+            return raw.replace(tzinfo=timezone.utc)
+        timestamp: int | float | None
+        if isinstance(raw, (int, float)):
+            timestamp = raw
+        elif isinstance(raw, str):
+            try:
+                timestamp = int(raw)
+            except ValueError:
+                return None
+        else:
+            return None
+        try:
+            return datetime.fromtimestamp(timestamp, tz=timezone.utc)
+        except (OSError, ValueError, OverflowError):
+            return None
+
     for item in items:
+        item_mapping = item if isinstance(item, Mapping) else None
+        item_date = parse_date(item_mapping)
+        if published_at is None and item_date is not None:
+            published_at = item_date
         candidate = item.get("text")
         if candidate:
             text = str(candidate)
+            if item_date is not None:
+                published_at = item_date
             break
         copy_history = item.get("copy_history") or []
         for copy in copy_history:
             if not isinstance(copy, Mapping):
                 continue
+            copy_date = parse_date(copy)
+            if published_at is None and copy_date is not None:
+                published_at = copy_date
             candidate = copy.get("text")
             if candidate:
                 text = str(candidate)
+                if copy_date is not None:
+                    published_at = copy_date
+                elif item_date is not None:
+                    published_at = item_date
                 break
         if text:
             break
     photos = _vk_extract_photo_urls(items)
     if not photos:
         logging.info("no media found for -%s_%s", group_id, post_id)
-    return text, photos
+    return text, photos, published_at
 
 
 _VK_POST_ID_RE = re.compile(r"(-?\d+)_(\d+)")
@@ -22946,8 +22985,10 @@ async def _vk_miss_send_card(
     record: VkMissRecord,
     text: str,
     photos: Sequence[str],
+    published_at: datetime | None,
 ) -> None:
     session.last_text = text
+    session.last_published_at = published_at
     position = session.index + 1
     total = len(session.queue)
     header = f"Карточка {position}/{total}"
@@ -22955,6 +22996,10 @@ async def _vk_miss_send_card(
     if not display_text:
         display_text = "(текст поста не загружен)"
     timestamp = _vk_miss_format_timestamp(record.timestamp)
+    if published_at is not None:
+        published = _vk_miss_format_timestamp(published_at)
+    else:
+        published = "—"
     lines: list[str] = [header]
     if display_text:
         lines.append(display_text)
@@ -22965,6 +23010,7 @@ async def _vk_miss_send_card(
     lines.append("")
     lines.append(f"Причина фильтра: {record.reason or '—'}")
     lines.append(f"matched_kw: {record.matched_kw or '—'}")
+    lines.append(f"Дата публикации: {published}")
     lines.append(f"Дата: {timestamp}")
     message_text = "\n".join(lines)
 
@@ -23005,7 +23051,9 @@ async def _vk_miss_send_card(
         )
 
 
-async def _vk_miss_append_feedback(record: VkMissRecord, post_text: str) -> None:
+async def _vk_miss_append_feedback(
+    record: VkMissRecord, post_text: str, published_at: datetime | None = None
+) -> None:
     path = VK_MISS_REVIEW_FILE
     if not path:
         return
@@ -23023,6 +23071,9 @@ async def _vk_miss_append_feedback(record: VkMissRecord, post_text: str) -> None
             f"- URL: {record.url or '—'}",
             f"- Причина: {record.reason or '—'}",
         ]
+        if published_at is not None:
+            published = _vk_miss_format_timestamp(published_at)
+            lines.append(f"- Дата публикации: {published}")
         if record.matched_kw:
             lines.append(f"- matched_kw: {record.matched_kw}")
         lines.append("")
@@ -23048,14 +23099,19 @@ async def _vk_miss_show_next(
     ids = _vk_miss_extract_ids(record)
     text = ""
     photos: list[str] = []
+    published_at: datetime | None = None
     if ids is None:
         logging.warning(
             "vk_miss_review.unparsable_id id=%s url=%s", record.id, record.url
         )
     else:
         group_id, post_id = ids
-        text, photos = await fetch_vk_post_preview(group_id, post_id, db, bot)
-    await _vk_miss_send_card(bot, chat_id, session, record, text, photos)
+        text, photos, published_at = await fetch_vk_post_preview(
+            group_id, post_id, db, bot
+        )
+    await _vk_miss_send_card(
+        bot, chat_id, session, record, text, photos, published_at
+    )
 
 
 async def handle_vk_miss_review(
@@ -23118,7 +23174,9 @@ async def handle_vk_miss_review_callback(
     record = session.queue[session.index]
 
     if action == "redo":
-        await _vk_miss_append_feedback(record, session.last_text or "")
+        await _vk_miss_append_feedback(
+            record, session.last_text or "", session.last_published_at
+        )
         await callback.answer("Отправлено на доработку")
     elif action == "ok":
         await callback.answer("Отмечено")
@@ -23128,6 +23186,7 @@ async def handle_vk_miss_review_callback(
 
     session.index += 1
     session.last_text = None
+    session.last_published_at = None
     await _vk_miss_show_next(
         callback.from_user.id,
         callback.message.chat.id,
