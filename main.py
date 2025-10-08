@@ -23801,6 +23801,7 @@ async def _vkrev_show_next(chat_id: int, batch_id: str, operator_id: int, db: Da
             post.text or "",
             default_time_val,
             publish_ts=getattr(post, "date", None),
+            allow_past=True,
         )
     except Exception:  # pragma: no cover - defensive
         logging.exception(
