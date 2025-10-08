@@ -95,7 +95,8 @@ async def test_vk_list_shows_numbers_and_default_time(tmp_path):
     assert lines[0].startswith("1.")
     assert "типовое время: 19:00" in lines[0]
     assert "билеты: https://tickets.example/club1" in lines[0]
-    assert "последняя проверка: 2024-06-01 12:34" in lines[0]
+    assert "последнее сканирование: 2024-06-01 12:34" in lines[0]
+    assert "последний найденный пост: 2024-05-31 12:34" in lines[0]
     assert lines[1] == " Pending | Skipped | Imported | Rejected "
     assert (
         lines[2]
@@ -103,7 +104,8 @@ async def test_vk_list_shows_numbers_and_default_time(tmp_path):
     )
     assert lines[3].startswith("2.")
     assert "типовое время: -" in lines[3]
-    assert ", последняя проверка: 2024-05-31 11:54" in lines[3]
+    assert ", последнее сканирование: -" in lines[3]
+    assert "последний найденный пост: 2024-05-31 11:54" in lines[3]
     assert lines[4] == " Pending | Skipped | Imported | Rejected "
     assert (
         lines[5]
