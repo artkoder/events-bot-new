@@ -23089,10 +23089,13 @@ async def _vk_miss_append_feedback(
         body = post_text.strip()
         if not body:
             body = "(текст поста не загружен)"
+        timestamp_str = _vk_miss_format_timestamp(record.timestamp)
         lines = [
             f"### {now_str}",
             f"- URL: {record.url or '—'}",
             f"- Причина: {record.reason or '—'}",
+            "- Время фиксации пропуска: "
+            f"{timestamp_str} (время попадания в отклонённые)",
         ]
         if published_at is not None:
             published = _vk_miss_format_timestamp(published_at)
