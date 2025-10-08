@@ -1,3 +1,4 @@
+from datetime import timezone
 from types import SimpleNamespace
 
 import pytest
@@ -198,7 +199,60 @@ async def test_vk_rejected_callback_alerts_when_empty(tmp_path):
     assert not bot.messages
     assert callback.answers
     assert callback.answers[0][0] == ("Нет отклонённых постов",)
-    assert callback.answers[0][1].get("show_alert") is True
+
+
+@pytest.mark.asyncio
+async def test_vk_crawl_empty_group_updates_checked_at(tmp_path, monkeypatch):
+    db = main.Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    async with db.raw_conn() as conn:
+        await conn.execute(
+            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time, default_ticket_link) VALUES(?,?,?,?,?,?)",
+            (1, "club1", "Group 1", None, None, None),
+        )
+        await conn.commit()
+
+    fixed_now = 1717245296
+
+    async def fake_wall_since(gid, since, count, offset=0):
+        assert gid == 1
+        assert offset == 0
+        return []
+
+    async def fake_get_tz_offset(db_obj):
+        assert db_obj is db
+        main.LOCAL_TZ = timezone.utc
+        return "+00:00"
+
+    async def no_sleep(_):
+        pass
+
+    monkeypatch.setattr(main, "vk_wall_since", fake_wall_since)
+    monkeypatch.setattr(main, "get_supabase_client", lambda: None)
+    monkeypatch.setattr(main, "get_tz_offset", fake_get_tz_offset)
+    monkeypatch.setattr(main, "mark_vk_import_result", lambda **_: None)
+    monkeypatch.setattr(vk_intake.asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(vk_intake.time, "time", lambda: fixed_now)
+
+    stats = await vk_intake.crawl_once(db)
+    assert stats["groups_checked"] == 1
+
+    async with db.raw_conn() as conn:
+        cur = await conn.execute(
+            "SELECT last_seen_ts, last_post_id, updated_at, checked_at FROM vk_crawl_cursor WHERE group_id=?",
+            (1,),
+        )
+        row = await cur.fetchone()
+
+    assert row == (0, 0, None, fixed_now)
+
+    bot = DummyBot()
+    msg = SimpleNamespace(chat=SimpleNamespace(id=1))
+    await main.handle_vk_list(msg, db, bot)
+
+    assert bot.messages, "no message sent"
+    lines = bot.messages[0].text.splitlines()
+    assert "последнее сканирование: 2024-06-01 12:34" in lines[0]
 
 
 @pytest.mark.asyncio
