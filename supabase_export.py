@@ -204,6 +204,7 @@ class SBExporter:
             "url": url,
             "reason": reason,
             "matched_kw": list(matched_kw or [])[:20],
+            "checked": False,
         }
         timestamp_value = _ts_to_iso(ts)
         if timestamp_value is None:

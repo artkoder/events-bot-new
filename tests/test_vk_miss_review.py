@@ -27,6 +27,10 @@ async def test_fetch_vk_miss_samples(monkeypatch):
             state["select"] = _
             return self
 
+        def is_(self, column, value):
+            state["is_"] = (column, value)
+            return self
+
         def order(self, column, *, desc=False):
             state["order"] = (column, desc)
             return self
@@ -60,6 +64,8 @@ async def test_fetch_vk_miss_samples(monkeypatch):
     assert record.matched_kw == "concert"
     assert record.timestamp.tzinfo is not None
     assert state["table"] == "vk_misses_sample"
+    assert "checked" in state["select"][0]
+    assert state["is_"] == ("checked", False)
     assert state["limit"] == 5
     assert state["order"] == ("ts", True)
 
@@ -149,8 +155,12 @@ async def test_vk_miss_callbacks_progress(monkeypatch):
     async def fake_append(record, text, published_at=None):
         calls.append(("append", record.id, text, published_at))
 
+    async def fake_mark(record_id):
+        calls.append(("mark", record_id))
+
     monkeypatch.setattr(main, "_vk_miss_show_next", fake_show_next)
     monkeypatch.setattr(main, "_vk_miss_append_feedback", fake_append)
+    monkeypatch.setattr(main, "_vk_miss_mark_checked", fake_mark)
 
     class DummyMessage:
         def __init__(self):
@@ -173,6 +183,7 @@ async def test_vk_miss_callbacks_progress(monkeypatch):
     assert session.last_published_at is None
     appended = [c for c in calls if c[0] == "append"]
     assert appended and appended[0][1:] == (record1.id, "text1", first_published)
+    assert ("mark", record1.id) in calls
 
     calls.clear()
     session.last_text = "text2"
@@ -183,6 +194,7 @@ async def test_vk_miss_callbacks_progress(monkeypatch):
     assert session.index == 2
     assert all(call[0] != "append" for call in calls)
     assert ("show", user_id, 777) in calls
+    assert ("mark", record2.id) in calls
 
     main.vk_miss_review_sessions.pop(user_id, None)
 
