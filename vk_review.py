@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections import deque
 from dataclasses import dataclass
 from typing import Optional, Any, Awaitable, Callable
@@ -7,8 +8,9 @@ from typing import Optional, Any, Awaitable, Callable
 import logging
 import math
 import os
-import time as _time
 import random
+import sqlite3
+import time as _time
 
 from db import Database
 from vk_intake import OCR_PENDING_SENTINEL, extract_event_ts_hint
@@ -16,6 +18,54 @@ from vk_intake import OCR_PENDING_SENTINEL, extract_event_ts_hint
 
 LOCK_TIMEOUT_SECONDS = 10 * 60
 """Maximum time a row may remain locked before being returned to the queue."""
+
+try:  # pragma: no cover - optional dependency for typing only
+    from aiosqlite import Error as AioSqliteError
+except ImportError:  # pragma: no cover - optional dependency for typing only
+    AIOSQLITE_ERRORS: tuple[type[Exception], ...] = ()
+else:
+    AIOSQLITE_ERRORS = (AioSqliteError,)
+
+_LOCK_RETRY_ATTEMPTS = 5
+_LOCK_RETRY_BASE_DELAY = 0.1
+_LOCK_ERROR_CLASSES = (sqlite3.OperationalError,) + AIOSQLITE_ERRORS
+
+
+async def _retry_locked_write(
+    conn,
+    operation: Callable[[], Awaitable[Any]],
+    *,
+    attempts: int = _LOCK_RETRY_ATTEMPTS,
+    base_delay: float = _LOCK_RETRY_BASE_DELAY,
+    description: str = "operation",
+) -> Any:
+    """Retry ``operation`` when SQLite reports a locked database."""
+
+    last_exc: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            return await operation()
+        except _LOCK_ERROR_CLASSES as exc:
+            message = str(exc).lower()
+            if "database is locked" not in message:
+                raise
+            last_exc = exc
+            if attempt == attempts - 1:
+                break
+            logging.warning(
+                "vk_review locked_retry %s attempt=%s/%s", description, attempt + 1, attempts
+            )
+            if hasattr(conn, "rollback"):
+                try:
+                    await conn.rollback()
+                except Exception:  # pragma: no cover - best effort cleanup
+                    logging.debug(
+                        "vk_review locked_retry rollback_failed %s", description, exc_info=True
+                    )
+            delay = base_delay * (2**attempt)
+            await asyncio.sleep(delay)
+    assert last_exc is not None  # for type checkers
+    raise last_exc
 
 
 async def _unlock_stale(conn) -> int:
@@ -600,11 +650,18 @@ async def save_repost_url(db: Database, event_id: int, url: str) -> None:
     """Persist ``vk_repost_url`` for the event."""
 
     async with db.raw_conn() as conn:
-        await conn.execute(
-            "UPDATE event SET vk_repost_url=? WHERE id=?",
-            (url, event_id),
+        async def _update() -> None:
+            await conn.execute(
+                "UPDATE event SET vk_repost_url=? WHERE id=?",
+                (url, event_id),
+            )
+            await conn.commit()
+
+        await _retry_locked_write(
+            conn,
+            _update,
+            description=f"save_repost_url event_id={event_id}",
         )
-        await conn.commit()
 
 
 async def finish_batch(
