@@ -149,7 +149,7 @@ async def test_vkrev_show_next_includes_event_matches(tmp_path, monkeypatch):
     assert lines[heading_index - 1] == ""
     assert (
         lines[heading_index + 1]
-        == "Совпадающее событие — https://telegra.ph/test-page"
+        == '<a href="https://telegra.ph/test-page">Совпадающее событие</a>'
     )
     assert lines[heading_index + 2] == ""
 

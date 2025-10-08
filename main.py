@@ -23878,7 +23878,7 @@ async def _vkrev_show_next(chat_id: int, batch_id: str, operator_id: int, db: Da
                 f"{published_dt.year} {published_dt.strftime('%H:%M')}"
             )
     heading_line: str | None = None
-    event_lines: list[str] = []
+    event_lines: list[str | tuple[str, str | None]] = []
     if ts_hint and ts_hint > 0:
         dt = datetime.fromtimestamp(ts_hint, tz=LOCAL_TZ)
         heading_line = f"{dt.day:02d} {MONTHS[dt.month - 1]} {dt.strftime('%H:%M')}"
@@ -23895,9 +23895,7 @@ async def _vkrev_show_next(chat_id: int, batch_id: str, operator_id: int, db: Da
                 link = normalize_telegraph_url(event.telegraph_url)
                 if not link and event.telegraph_path:
                     link = f"https://telegra.ph/{event.telegraph_path.lstrip('/')}"
-                event_lines.append(
-                    f"{event.title} — {link or 'Telegraph отсутствует'}"
-                )
+                event_lines.append((event.title, link))
         else:
             event_lines.append("Совпадений нет")
     inline_keyboard = [
@@ -23955,9 +23953,25 @@ async def _vkrev_show_next(chat_id: int, batch_id: str, operator_id: int, db: Da
         lines.append(status_line)
         return lines
 
-    def format_blockquote(lines: list[str]) -> str:
-        escaped_lines = [escape(line) for line in lines]
-        return "<blockquote>" + "\n".join(escaped_lines) + "</blockquote>"
+    TailLine = str | tuple[str, str | None]
+
+    def format_blockquote(lines: Sequence[TailLine]) -> str:
+        rendered_lines: list[str] = []
+        for line in lines:
+            if isinstance(line, tuple):
+                title, link = line
+                if link:
+                    href = escape(link, quote=True)
+                    rendered_lines.append(
+                        f'<a href="{href}">{escape(title)}</a>'
+                    )
+                else:
+                    rendered_lines.append(
+                        escape(f"{title} — Telegraph отсутствует")
+                    )
+            else:
+                rendered_lines.append(escape(line))
+        return "<blockquote>" + "\n".join(rendered_lines) + "</blockquote>"
 
     def compose_message_html(post_body: str, tail_blockquote: str) -> str:
         if post_body:
