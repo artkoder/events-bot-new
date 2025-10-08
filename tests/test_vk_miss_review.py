@@ -95,6 +95,11 @@ async def test_vk_miss_append_feedback_writes_file(tmp_path, monkeypatch):
     assert "sample text" in content
     assert "https://vk.com/wall-1_2" in content
     assert "miss" in content
+    expected_recorded = main._vk_miss_format_timestamp(record.timestamp)
+    assert (
+        f"- Время фиксации пропуска: {expected_recorded} (время попадания в отклонённые)"
+        in content
+    )
     assert "Дата публикации" in content
 
 
