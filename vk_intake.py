@@ -384,6 +384,7 @@ DATE_RANGE_RE = re.compile(r"\b(\d{1,2})[–-](\d{1,2})(?:[./](\d{1,2}))\b")
 MONTH_NAME_RE = re.compile(r"\b(\d{1,2})\s+([а-яё.]+)\b", re.I)
 TIME_RE = re.compile(r"\b([01]?\d|2[0-3])[:.][0-5]\d\b")
 TIME_H_RE = re.compile(r"\bв\s*([01]?\d|2[0-3])\s*(?:ч|час(?:а|ов)?)\b")
+BARE_TIME_H_RE = re.compile(r"\b([01]?\d|2[0-3])\s*(?:ч|час(?:а|ов)?)\b")
 TIME_RANGE_RE = re.compile(
     r"\bс\s*([01]?\d|2[0-3])(?:[:.](\d{2}))?\s*до\s*([01]?\d|2[0-3])(?:[:.](\d{2}))?\b"
 )
@@ -576,6 +577,7 @@ def extract_event_ts_hint(
 
     day = month = year = None
     m = None
+    date_span: tuple[int, int] | None = None
     for candidate in NUM_DATE_RE.finditer(text_low):
         start = candidate.start()
         prev_idx = start - 1
@@ -717,6 +719,7 @@ def extract_event_ts_hint(
             if skip_candidate:
                 continue
         m = candidate
+        date_span = candidate.span()
         break
 
     if m:
@@ -724,11 +727,14 @@ def extract_event_ts_hint(
         if m.group(3):
             y = m.group(3)
             year = int("20" + y if len(y) == 2 else y)
+        if date_span is None:
+            date_span = m.span()
     else:
         m = DATE_RANGE_RE.search(text_low)
         if m:
             day = int(m.group(1))
             month = int(m.group(3))
+            date_span = m.span()
         else:
             m = MONTH_NAME_RE.search(text_low)
             if m:
@@ -738,14 +744,25 @@ def extract_event_ts_hint(
                 y = re.search(r"\b20\d{2}\b", text_low[m.end():])
                 if y:
                     year = int(y.group(0))
+                if month is not None:
+                    date_span = m.span()
 
     if day is None or month is None:
         if "сегодня" in text_low:
             dt = now
+            idx = text_low.find("сегодня")
+            if idx != -1:
+                date_span = (idx, idx + len("сегодня"))
         elif "завтра" in text_low:
             dt = now + timedelta(days=1)
+            idx = text_low.find("завтра")
+            if idx != -1:
+                date_span = (idx, idx + len("завтра"))
         elif "послезавтра" in text_low:
             dt = now + timedelta(days=2)
+            idx = text_low.find("послезавтра")
+            if idx != -1:
+                date_span = (idx, idx + len("послезавтра"))
         else:
             dow_matches = list(DOW_RE.finditer(text_low))
             dow_m = None
@@ -781,11 +798,13 @@ def extract_event_ts_hint(
                     dow = dow_map.get(key[:2])
                 days_ahead = (dow - now.weekday()) % 7
                 dt = now + timedelta(days=days_ahead)
+                date_span = (dow_m.start(), dow_m.end())
             elif dow_matches:
                 return None
-            elif WEEKEND_RE.search(text_low):
+            elif (weekend_m := WEEKEND_RE.search(text_low)):
                 days_ahead = (5 - now.weekday()) % 7
                 dt = now + timedelta(days=days_ahead)
+                date_span = (weekend_m.start(), weekend_m.end())
             else:
                 return None
     else:
@@ -819,13 +838,27 @@ def extract_event_ts_hint(
             if th:
                 hour = int(th.group(1))
                 minute = 0
-            elif default_time:
-                try:
-                    hour, minute = map(int, default_time.split(":"))
-                except Exception:
-                    hour = minute = 0
             else:
-                hour = minute = 0
+                bare_th = None
+                if date_span is not None:
+                    for candidate in BARE_TIME_H_RE.finditer(text_low):
+                        if candidate.start() < date_span[1]:
+                            continue
+                        between = text_low[date_span[1] : candidate.start()]
+                        if re.search(r"[.!?]", between):
+                            continue
+                        bare_th = candidate
+                        break
+                if bare_th:
+                    hour = int(bare_th.group(1))
+                    minute = 0
+                elif default_time:
+                    try:
+                        hour, minute = map(int, default_time.split(":"))
+                    except Exception:
+                        hour = minute = 0
+                else:
+                    hour = minute = 0
 
     dt = dt.replace(hour=hour, minute=minute, second=0, microsecond=0)
     if dt < now:

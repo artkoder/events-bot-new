@@ -169,6 +169,17 @@ def test_numeric_identifier_like_sequence_ignored():
     assert (dt.year, dt.month, dt.day) == (2024, 2, 24)
 
 
+def test_extract_event_ts_hint_bare_hours_after_date():
+    publish_dt = real_datetime(2024, 10, 1, tzinfo=main.LOCAL_TZ)
+    ts = extract_event_ts_hint("9 октября 14 часов", publish_ts=publish_dt)
+    assert ts is not None
+    dt = real_datetime.fromtimestamp(ts, tz=main.LOCAL_TZ)
+    assert (dt.year, dt.month, dt.day, dt.hour, dt.minute) == (2024, 10, 9, 14, 0)
+
+    duration_text = "2 часа живого звука"
+    assert extract_event_ts_hint(duration_text, publish_ts=publish_dt) is None
+
+
 def test_extract_event_ts_hint_recent_past():
     publish_dt = real_datetime(2024, 10, 1, tzinfo=main.LOCAL_TZ)
     past_text = "7 сентября прошла лекция"
