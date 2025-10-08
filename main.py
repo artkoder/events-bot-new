@@ -23829,6 +23829,22 @@ async def _vkrev_show_next(chat_id: int, batch_id: str, operator_id: int, db: Da
     status_line = (
         f"ключи: {matched_kw_display} | дата: {'да' if post.has_date else 'нет'} | в очереди: {pending}"
     )
+    published_line: str | None = None
+    post_date_raw = getattr(post, "date", None)
+    if post_date_raw is not None:
+        try:
+            timestamp = int(post_date_raw)
+        except (TypeError, ValueError):
+            timestamp = None
+        if timestamp and timestamp > 0:
+            published_dt = datetime.fromtimestamp(timestamp, tz=timezone.utc).astimezone(
+                LOCAL_TZ
+            )
+            published_line = (
+                "Опубликовано: "
+                f"{published_dt.day} {MONTHS[published_dt.month - 1]} "
+                f"{published_dt.year} {published_dt.strftime('%H:%M')}"
+            )
     heading_line: str | None = None
     event_lines: list[str] = []
     if ts_hint and ts_hint > 0:
@@ -23902,6 +23918,8 @@ async def _vkrev_show_next(chat_id: int, batch_id: str, operator_id: int, db: Da
         lines.append("")
         if warning:
             lines.append(warning)
+        if published_line:
+            lines.append(published_line)
         lines.append(status_line)
         return lines
 
