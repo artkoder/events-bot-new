@@ -185,3 +185,99 @@ async def test_vk_miss_callbacks_progress(monkeypatch):
     assert ("show", user_id, 777) in calls
 
     main.vk_miss_review_sessions.pop(user_id, None)
+
+
+@pytest.mark.asyncio
+async def test_vk_miss_show_next_offers_feedback_file(monkeypatch):
+    user_id = 99
+    chat_id = 555
+    main.vk_miss_review_sessions[user_id] = main.VkMissReviewSession(queue=[], index=0)
+
+    calls: list[tuple] = []
+
+    class DummyBot:
+        async def send_message(self, chat_id, text, **kwargs):
+            calls.append(("msg", chat_id, text))
+
+    async def fake_offer(bot, chat_id):
+        calls.append(("offer", chat_id))
+
+    monkeypatch.setattr(main, "_vk_miss_offer_feedback_file", fake_offer)
+
+    await main._vk_miss_show_next(user_id, chat_id, None, DummyBot())
+
+    assert any(call[0] == "offer" for call in calls)
+    assert main.vk_miss_review_sessions.get(user_id) is None
+
+
+@pytest.mark.asyncio
+async def test_vk_miss_download_sends_and_clears(tmp_path, monkeypatch):
+    path = tmp_path / "vk_miss.md"
+    path.write_text("content", encoding="utf-8")
+    monkeypatch.setattr(main, "VK_MISS_REVIEW_FILE", str(path))
+
+    async def fake_to_thread(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(main.asyncio, "to_thread", fake_to_thread)
+
+    documents: list[tuple[int, object]] = []
+    answers: list[tuple[str | None, bool]] = []
+
+    class DummyBot:
+        async def send_document(self, chat_id, document, **kwargs):
+            documents.append((chat_id, document))
+
+    class DummyMessage:
+        def __init__(self):
+            self.chat = types.SimpleNamespace(id=111)
+
+    class DummyCallback:
+        def __init__(self):
+            self.data = "vkmiss:download"
+            self.from_user = types.SimpleNamespace(id=222)
+            self.message = DummyMessage()
+
+        async def answer(self, text: str | None = None, show_alert: bool = False):
+            answers.append((text, show_alert))
+
+    callback = DummyCallback()
+    await main.handle_vk_miss_review_callback(callback, None, DummyBot())
+
+    assert documents and documents[0][0] == 111
+    assert isinstance(documents[0][1], main.types.FSInputFile)
+    assert answers and answers[-1][0] == "Файл отправлен"
+    assert path.read_text(encoding="utf-8") == ""
+
+
+@pytest.mark.asyncio
+async def test_vk_miss_download_alerts_on_empty(tmp_path, monkeypatch):
+    path = tmp_path / "vk_miss_empty.md"
+    path.write_text("", encoding="utf-8")
+    monkeypatch.setattr(main, "VK_MISS_REVIEW_FILE", str(path))
+
+    async def fake_to_thread(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(main.asyncio, "to_thread", fake_to_thread)
+
+    answers: list[tuple[str | None, bool]] = []
+
+    class DummyBot:
+        async def send_document(self, *args, **kwargs):  # pragma: no cover - not used
+            raise AssertionError("send_document should not be called")
+
+    class DummyCallback:
+        def __init__(self):
+            self.data = "vkmiss:download"
+            self.from_user = types.SimpleNamespace(id=333)
+            self.message = types.SimpleNamespace(chat=types.SimpleNamespace(id=444))
+
+        async def answer(self, text: str | None = None, show_alert: bool = False):
+            answers.append((text, show_alert))
+
+    callback = DummyCallback()
+    await main.handle_vk_miss_review_callback(callback, None, DummyBot())
+
+    assert answers == [("Файл отсутствует или пуст", True)]
+    assert path.read_text(encoding="utf-8") == ""

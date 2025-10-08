@@ -23085,6 +23085,35 @@ async def _vk_miss_append_feedback(
     await asyncio.to_thread(_write)
 
 
+async def _vk_miss_offer_feedback_file(bot: Bot, chat_id: int) -> None:
+    path = VK_MISS_REVIEW_FILE
+
+    def _has_data() -> bool:
+        try:
+            return os.path.exists(path) and os.path.getsize(path) > 0
+        except OSError:
+            return False
+
+    if not await asyncio.to_thread(_has_data):
+        return
+
+    keyboard = types.InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                types.InlineKeyboardButton(
+                    text="Скачать файл",
+                    callback_data=f"{VK_MISS_CALLBACK_PREFIX}download",
+                )
+            ]
+        ]
+    )
+    await bot.send_message(
+        chat_id,
+        "Файл с доработками готов к скачиванию",
+        reply_markup=keyboard,
+    )
+
+
 async def _vk_miss_show_next(
     user_id: int, chat_id: int, db: Database, bot: Bot
 ) -> None:
@@ -23094,6 +23123,7 @@ async def _vk_miss_show_next(
     if session.index >= len(session.queue):
         vk_miss_review_sessions.pop(user_id, None)
         await bot.send_message(chat_id, "Карточки закончились")
+        await _vk_miss_offer_feedback_file(bot, chat_id)
         return
     record = session.queue[session.index]
     ids = _vk_miss_extract_ids(record)
@@ -23112,6 +23142,45 @@ async def _vk_miss_show_next(
     await _vk_miss_send_card(
         bot, chat_id, session, record, text, photos, published_at
     )
+
+
+async def _vk_miss_send_feedback_file(
+    callback: types.CallbackQuery, bot: Bot
+) -> None:
+    path = VK_MISS_REVIEW_FILE
+
+    def _file_size() -> int | None:
+        try:
+            return os.path.getsize(path)
+        except FileNotFoundError:
+            return None
+        except OSError:
+            return None
+
+    size = await asyncio.to_thread(_file_size)
+    if not size:
+        await callback.answer("Файл отсутствует или пуст", show_alert=True)
+        return
+
+    chat_id = (
+        callback.message.chat.id
+        if callback.message is not None
+        else callback.from_user.id
+    )
+    filename = os.path.basename(path) or "vk_miss_review.md"
+    document = types.FSInputFile(path, filename=filename)
+
+    await bot.send_document(chat_id, document)
+
+    def _clear() -> None:
+        try:
+            with open(path, "w", encoding="utf-8"):
+                pass
+        except FileNotFoundError:
+            pass
+
+    await asyncio.to_thread(_clear)
+    await callback.answer("Файл отправлен")
 
 
 async def handle_vk_miss_review(
@@ -23153,6 +23222,9 @@ async def handle_vk_miss_review_callback(
         await callback.answer()
         return
     payload = data[len(VK_MISS_CALLBACK_PREFIX) :]
+    if payload == "download":
+        await _vk_miss_send_feedback_file(callback, bot)
+        return
     try:
         action, idx_raw = payload.split(":", 1)
         idx = int(idx_raw)
