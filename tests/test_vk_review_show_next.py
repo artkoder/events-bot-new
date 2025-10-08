@@ -197,6 +197,14 @@ async def test_vkrev_show_next_recomputes_mismatched_hint(tmp_path, monkeypatch)
     lines = bot.messages[0].text.splitlines()
     heading = f"{expected_dt.day:02d} {main.MONTHS[expected_dt.month - 1]} {expected_dt.strftime('%H:%M')}"
     assert heading in lines
+    status_line = next(line for line in lines if line.startswith("ключи:"))
+    published_local = publish_dt.astimezone(main.LOCAL_TZ)
+    expected_published_line = (
+        "Опубликовано: "
+        f"{published_local.day} {main.MONTHS[published_local.month - 1]} "
+        f"{published_local.year} {published_local.strftime('%H:%M')}"
+    )
+    assert expected_published_line == lines[lines.index(status_line) - 1]
     async with db.raw_conn() as conn:
         cur = await conn.execute("SELECT event_ts_hint FROM vk_inbox WHERE id=1")
         (stored_hint,) = await cur.fetchone()
@@ -358,6 +366,15 @@ async def test_vkrev_show_next_uses_crawl_timezone_hint(tmp_path, monkeypatch):
         assert local_dt.strftime("%H:%M") == "00:00"
         heading = f"{local_dt.day:02d} {main.MONTHS[local_dt.month - 1]} {local_dt.strftime('%H:%M')}"
         assert heading in bot.messages[0].text.splitlines()
+        tail_lines = bot.messages[0].text.splitlines()
+        status_line = next(line for line in tail_lines if line.startswith("ключи:"))
+        published_local = publish_dt.astimezone(main.LOCAL_TZ)
+        expected_published_line = (
+            "Опубликовано: "
+            f"{published_local.day} {main.MONTHS[published_local.month - 1]} "
+            f"{published_local.year} {published_local.strftime('%H:%M')}"
+        )
+        assert expected_published_line == tail_lines[tail_lines.index(status_line) - 1]
     finally:
         main.LOCAL_TZ = original_tz
         if hasattr(main, "_TZ_OFFSET_CACHE"):
