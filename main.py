@@ -2111,6 +2111,11 @@ HELP_COMMANDS = [
         "roles": {"superadmin"},
     },
     {
+        "usage": "/ik_poster",
+        "desc": "обработка афиш через ImageKit (Smart crop / GenFill)",
+        "roles": {"superadmin"},
+    },
+    {
         "usage": "/stats [events|shortlinks]",
         "desc": "Show Telegraph view counts and vk.cc click totals",
         "roles": {"superadmin"},
