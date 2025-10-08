@@ -483,6 +483,64 @@ async def test_vkrev_show_next_uses_crawl_timezone_hint(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_refresh_hint_uses_main_timezone_offset(tmp_path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    publish_dt = datetime(2024, 5, 20, 12, 0, tzinfo=timezone.utc)
+    publish_ts = int(publish_dt.timestamp())
+
+    async with db.raw_conn() as conn:
+        await conn.execute(
+            "INSERT INTO setting(key, value) VALUES('tz_offset', ?)",
+            ("+02:00",),
+        )
+        await conn.execute(
+            "INSERT INTO vk_inbox(id, group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status) VALUES(?,?,?,?,?,?,?,?,?)",
+            (
+                1,
+                1,
+                99,
+                publish_ts,
+                "Концерт 30 мая",
+                None,
+                1,
+                None,
+                "pending",
+            ),
+        )
+        await conn.commit()
+
+    original_tz = main.LOCAL_TZ
+    original_cache = getattr(main, "_TZ_OFFSET_CACHE", None)
+
+    try:
+        main.LOCAL_TZ = timezone.utc
+        if hasattr(main, "_TZ_OFFSET_CACHE"):
+            main._TZ_OFFSET_CACHE = None  # type: ignore[attr-defined]
+
+        updated = await vk_review.refresh_vk_event_ts_hints(db)
+        assert updated == 1
+
+        async with db.raw_conn() as conn:
+            cur = await conn.execute(
+                "SELECT event_ts_hint FROM vk_inbox WHERE id=?",
+                (1,),
+            )
+            (stored_hint,) = await cur.fetchone()
+
+        expected_tz = timezone(timedelta(hours=2))
+        expected_dt = datetime(2024, 5, 30, 0, 0, tzinfo=expected_tz)
+        assert stored_hint == int(expected_dt.timestamp())
+
+        assert main.LOCAL_TZ.utcoffset(None) == timedelta(hours=2)
+    finally:
+        main.LOCAL_TZ = original_tz
+        if hasattr(main, "_TZ_OFFSET_CACHE"):
+            main._TZ_OFFSET_CACHE = original_cache  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
 async def test_refresh_hint_rollover_keeps_next_year(tmp_path):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
