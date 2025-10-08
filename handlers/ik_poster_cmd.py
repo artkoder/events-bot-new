@@ -4,13 +4,21 @@ import logging
 import os
 from dataclasses import dataclass
 from io import BytesIO
+from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Final
 
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import (
+    CallbackQuery,
+    FSInputFile,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 
 from imagekit_poster import PosterGravity, PosterResizeMode, PosterTransformation, process_poster
 
@@ -152,7 +160,7 @@ async def handle_mode(callback: CallbackQuery, state: FSMContext) -> None:
     )
 
     try:
-        urls = process_poster(
+        result_bytes = process_poster(
             image,
             file_name=filename,
             transformations=mode.transformations,
@@ -166,18 +174,42 @@ async def handle_mode(callback: CallbackQuery, state: FSMContext) -> None:
         await state.clear()
         return
 
-    lines = [f"Готово! Режим: {mode.title}"]
-    for name, url in urls.items():
-        lines.append(f"{name}: {url}")
-    result_text = "\n".join(lines)
+    buffer = BytesIO(result_bytes)
+    buffer.seek(0)
 
-    await callback.message.answer(result_text)
+    suffix = Path(filename).suffix or ".jpg"
+    temp_file = NamedTemporaryFile(delete=False, suffix=suffix)
+    temp_path = Path(temp_file.name)
+    try:
+        temp_file.write(buffer.getvalue())
+        temp_file.flush()
+    finally:
+        temp_file.close()
 
-    if operator_chat:
+    user_caption = f"Готово! Режим: {mode.title}"
+
+    try:
+        await callback.message.answer_photo(
+            FSInputFile(temp_path, filename=filename), caption=user_caption
+        )
+
+        if operator_chat:
+            user = callback.from_user
+            author = (user.full_name if user else None) or (user.username if user else None) or "—"
+            operator_caption = f"Режим: {mode.title}\nАвтор: {author}"
+            try:
+                await callback.message.bot.send_photo(
+                    operator_chat,
+                    FSInputFile(temp_path, filename=filename),
+                    caption=operator_caption,
+                )
+            except Exception:  # pragma: no cover - network errors
+                logger.exception("Failed to send poster result to operator chat")
+    finally:
         try:
-            await callback.message.bot.send_message(operator_chat, result_text)
-        except Exception:  # pragma: no cover - network errors
-            logger.exception("Failed to send poster result to operator chat")
+            temp_path.unlink(missing_ok=True)
+        except Exception:  # pragma: no cover - filesystem errors
+            logger.exception("Failed to clean up temporary poster file")
 
     await state.clear()
 
