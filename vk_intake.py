@@ -559,6 +559,7 @@ def extract_event_ts_hint(
     *,
     tz: timezone | None = None,
     publish_ts: datetime | int | float | None = None,
+    allow_past: bool = False,
 ) -> int | None:
     """Return Unix timestamp for the nearest future datetime mentioned in text."""
     tzinfo = tz or require_main_attr("LOCAL_TZ")
@@ -814,7 +815,7 @@ def extract_event_ts_hint(
             dt = datetime(year, month, day, tzinfo=tzinfo)
         except ValueError:
             return None
-        if dt < now:
+        if dt < now and not allow_past:
             skip_year_rollover = explicit_year
             if not explicit_year and now - dt <= RECENT_PAST_THRESHOLD:
                 skip_year_rollover = True
@@ -861,7 +862,7 @@ def extract_event_ts_hint(
                     hour = minute = 0
 
     dt = dt.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    if dt < now:
+    if dt < now and not allow_past:
         return None
     return int(dt.timestamp())
 

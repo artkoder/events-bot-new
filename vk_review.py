@@ -122,7 +122,9 @@ async def refresh_vk_event_ts_hints(db: Database) -> int:
                 text = row["text"] or ""
                 publish_ts = row["date"]
                 try:
-                    hint = extract_event_ts_hint(text, publish_ts=publish_ts)
+                    hint = extract_event_ts_hint(
+                        text, publish_ts=publish_ts, allow_past=True
+                    )
                 except Exception:  # pragma: no cover - defensive
                     logging.exception(
                         "vk_review refresh_hint_failed id=%s", inbox_id

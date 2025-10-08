@@ -382,6 +382,98 @@ async def test_vkrev_show_next_uses_crawl_timezone_hint(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_vkrev_show_next_recomputes_past_hint_with_timezone_change(
+    tmp_path, monkeypatch
+):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    async with db.get_session() as session:
+        session.add(User(user_id=1))
+        await session.commit()
+
+    event_text = "Новогодний концерт 1 января 2024 в 00:00"
+    old_hint_dt = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
+    publish_dt = datetime(2024, 2, 1, 12, 0, tzinfo=timezone.utc)
+    publish_ts = int(publish_dt.timestamp())
+    new_tz = timezone(timedelta(hours=2))
+
+    async with db.raw_conn() as conn:
+        await conn.execute(
+            "INSERT INTO setting(key, value) VALUES('tz_offset', ?)",
+            ("+02:00",),
+        )
+        await conn.execute(
+            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time, default_ticket_link) VALUES(?,?,?,?,?,?)",
+            (1, "club1", "Test Community", "", None, None),
+        )
+        await conn.execute(
+            "INSERT INTO vk_inbox(id, group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status) VALUES(?,?,?,?,?,?,?,?,?)",
+            (
+                1,
+                1,
+                10,
+                publish_ts,
+                event_text,
+                None,
+                1,
+                int(old_hint_dt.timestamp()),
+                "pending",
+            ),
+        )
+        await conn.commit()
+
+    async def fake_fetch(*args, **kwargs):
+        return []
+
+    async def fake_pick_next(db_obj, operator_id_arg, batch_id_arg):
+        return SimpleNamespace(
+            id=1,
+            group_id=1,
+            post_id=10,
+            text=event_text,
+            matched_kw=None,
+            has_date=1,
+            event_ts_hint=int(old_hint_dt.timestamp()),
+            date=publish_ts,
+        )
+
+    monkeypatch.setattr(main, "_vkrev_fetch_photos", fake_fetch)
+    monkeypatch.setattr(vk_review, "pick_next", fake_pick_next)
+
+    original_tz = main.LOCAL_TZ
+    original_cache = getattr(main, "_TZ_OFFSET_CACHE", None)
+    try:
+        main.LOCAL_TZ = timezone.utc
+        if hasattr(main, "_TZ_OFFSET_CACHE"):
+            main._TZ_OFFSET_CACHE = None  # type: ignore[attr-defined]
+
+        bot = DummyBot()
+        await main._vkrev_show_next(1, "batch1", 1, db, bot)
+
+        assert bot.messages, "no message sent"
+        lines = bot.messages[0].text.splitlines()
+
+        async with db.raw_conn() as conn:
+            cur = await conn.execute(
+                "SELECT event_ts_hint FROM vk_inbox WHERE id=1",
+            )
+            (stored_hint,) = await cur.fetchone()
+
+        expected_ts = int(datetime(2024, 1, 1, 0, 0, tzinfo=new_tz).timestamp())
+        assert stored_hint == expected_ts
+        local_dt = datetime.fromtimestamp(stored_hint, tz=new_tz)
+        assert local_dt.strftime("%H:%M") == "00:00"
+        expected_heading = (
+            f"{local_dt.day:02d} {main.MONTHS[local_dt.month - 1]} {local_dt.strftime('%H:%M')}"
+        )
+        assert expected_heading in lines
+    finally:
+        main.LOCAL_TZ = original_tz
+        if hasattr(main, "_TZ_OFFSET_CACHE"):
+            main._TZ_OFFSET_CACHE = original_cache  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
 async def test_vkrev_show_next_truncates_long_text(tmp_path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
