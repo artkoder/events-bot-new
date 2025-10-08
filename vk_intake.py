@@ -2126,16 +2126,6 @@ async def crawl_once(
             for post in posts:
                 ts = post["date"]
                 pid = post["post_id"]
-                if ts < last_seen_ts or (ts == last_seen_ts and pid <= last_post_id):
-                    continue
-                stats["posts_scanned"] += 1
-                group_posts += 1
-                post_text = post.get("text", "")
-                photos = post.get("photos", []) or []
-                post_url = post.get("url")
-                miss_url = post_url or f"https://vk.com/wall-{gid}_{pid}"
-                blank_single_photo = not post_text.strip() and len(photos) == 1
-
                 matched_kw_value = ""
                 has_date_value = 0
                 event_ts_hint: int | None = None
@@ -2144,6 +2134,17 @@ async def crawl_once(
                 history_hit = False
                 has_date = False
                 kw_ok = False
+                if ts < last_seen_ts or (ts == last_seen_ts and pid <= last_post_id):
+                    continue
+                if ts > max_ts or (ts == max_ts and pid > max_pid):
+                    max_ts, max_pid = ts, pid
+                stats["posts_scanned"] += 1
+                group_posts += 1
+                post_text = post.get("text", "")
+                photos = post.get("photos", []) or []
+                post_url = post.get("url")
+                miss_url = post_url or f"https://vk.com/wall-{gid}_{pid}"
+                blank_single_photo = not post_text.strip() and len(photos) == 1
 
                 if blank_single_photo:
                     matched_kw_value = OCR_PENDING_SENTINEL
@@ -2263,23 +2264,20 @@ async def crawl_once(
                         _record_rejection(gid, pid, miss_url, code, reason)
                         continue
 
-            if not is_match:
-                continue
-
-            stats["matches"] += 1
-            group_matches += 1
-            if history_hit:
-                group_history_matches += 1
-            if blank_single_photo:
-                group_blank_single_photo_matches += 1
-            try:
-                async with db.raw_conn() as conn:
-                    cur = await conn.execute(
-                        """
-                        INSERT OR IGNORE INTO vk_inbox(
-                            group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')
-                        """,
+                stats["matches"] += 1
+                group_matches += 1
+                if history_hit:
+                    group_history_matches += 1
+                if blank_single_photo:
+                    group_blank_single_photo_matches += 1
+                try:
+                    async with db.raw_conn() as conn:
+                        cur = await conn.execute(
+                            """
+                            INSERT OR IGNORE INTO vk_inbox(
+                                group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')
+                            """,
                             (
                                 gid,
                                 pid,
@@ -2289,54 +2287,51 @@ async def crawl_once(
                                 has_date_value,
                                 event_ts_hint,
                             ),
-                    )
-                    await conn.commit()
-                    if cur.rowcount == 0:
-                        stats["duplicates"] += 1
-                        group_duplicates += 1
-                        existing_status: str | None = None
-                        async with db.raw_conn() as conn:
-                            cur_status = await conn.execute(
-                                "SELECT status FROM vk_inbox WHERE group_id=? AND post_id=? LIMIT 1",
-                                (gid, pid),
+                        )
+                        await conn.commit()
+                        if cur.rowcount == 0:
+                            stats["duplicates"] += 1
+                            group_duplicates += 1
+                            existing_status: str | None = None
+                            async with db.raw_conn() as conn:
+                                cur_status = await conn.execute(
+                                    "SELECT status FROM vk_inbox WHERE group_id=? AND post_id=? LIMIT 1",
+                                    (gid, pid),
+                                )
+                                row_status = await cur_status.fetchone()
+                            if row_status:
+                                existing_status = row_status[0]
+                            reason = (
+                                "already_inbox"
+                                if existing_status in {"pending", "locked", "skipped"}
+                                else "duplicate"
                             )
-                            row_status = await cur_status.fetchone()
-                        if row_status:
-                            existing_status = row_status[0]
-                        reason = (
-                            "already_inbox"
-                            if existing_status in {"pending", "locked", "skipped"}
-                            else "duplicate"
-                        )
-                        exporter.log_miss(
-                            group_id=gid,
-                            group_title=group_title_display,
-                            group_screen_name=group_screen_name_display,
-                            post_id=pid,
-                            url=post_url,
-                            ts=int(time.time()),
-                            reason=reason,
-                            matched_kw=matched_kw_list,
-                            kw_ok=bool(kw_ok),
-                            has_date=bool(has_date),
-                        )
-                        code = (
-                            VkImportRejectCode.ALREADY_INBOX
-                            if reason == "already_inbox"
-                            else VkImportRejectCode.DUPLICATE
-                        )
-                        _record_rejection(gid, pid, miss_url, code, reason)
-                    else:
-                        stats["added"] += 1
-                        group_added += 1
-                        has_new_posts = True
-            except Exception:
-                stats["errors"] += 1
-                group_errors += 1
-                continue
-
-            if ts > max_ts or (ts == max_ts and pid > max_pid):
-                max_ts, max_pid = ts, pid
+                            exporter.log_miss(
+                                group_id=gid,
+                                group_title=group_title_display,
+                                group_screen_name=group_screen_name_display,
+                                post_id=pid,
+                                url=post_url,
+                                ts=int(time.time()),
+                                reason=reason,
+                                matched_kw=matched_kw_list,
+                                kw_ok=bool(kw_ok),
+                                has_date=bool(has_date),
+                            )
+                            code = (
+                                VkImportRejectCode.ALREADY_INBOX
+                                if reason == "already_inbox"
+                                else VkImportRejectCode.DUPLICATE
+                            )
+                            _record_rejection(gid, pid, miss_url, code, reason)
+                        else:
+                            stats["added"] += 1
+                            group_added += 1
+                            has_new_posts = True
+                except Exception:
+                    stats["errors"] += 1
+                    group_errors += 1
+                    continue
 
             next_cursor_ts = max_ts
             next_cursor_pid = max_pid
