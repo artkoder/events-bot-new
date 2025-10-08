@@ -39,42 +39,29 @@ class PosterMode:
 
 
 POSTER_MODES: Final[dict[str, PosterMode]] = {
-    "story": PosterMode(
-        title="История 9:16",
+    "smart": PosterMode(
+        title="Smart crop 9:16",
         transformations=(
             PosterTransformation(
-                name="story",
+                name="smart",
                 width=1080,
                 height=1920,
                 mode=PosterResizeMode.CROP,
-                gravity=PosterGravity.CENTER,
+                gravity=PosterGravity.AUTO,
                 quality=90,
             ),
         ),
     ),
-    "square": PosterMode(
-        title="Квадрат 1:1",
+    "extend": PosterMode(
+        title="Extend (GenFill) 9:16",
         transformations=(
             PosterTransformation(
-                name="square",
+                name="extend",
                 width=1080,
-                height=1080,
+                height=1920,
                 mode=PosterResizeMode.PAD,
-                background="000000",
                 quality=90,
-            ),
-        ),
-    ),
-    "landscape": PosterMode(
-        title="Широкий 16:9",
-        transformations=(
-            PosterTransformation(
-                name="landscape",
-                width=1920,
-                height=1080,
-                mode=PosterResizeMode.CROP,
-                gravity=PosterGravity.CENTER,
-                quality=90,
+                raw="bg-genfill",
             ),
         ),
     ),
