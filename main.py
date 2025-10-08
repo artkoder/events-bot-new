@@ -20659,7 +20659,8 @@ async def fetch_vk_miss_samples(limit: int) -> list[VkMissRecord]:
     def _query() -> list[Mapping[str, Any]]:
         result = (
             client.table("vk_misses_sample")
-            .select("id,url,reason,matched_kw,ts")
+            .select("id,url,reason,matched_kw,ts,checked")
+            .is_("checked", False)
             .order("ts", desc=True)
             .limit(limit)
             .execute()
@@ -20689,6 +20690,28 @@ async def fetch_vk_miss_samples(limit: int) -> list[VkMissRecord]:
             )
         )
     return records
+
+
+async def _vk_miss_mark_checked(record_id: str) -> None:
+    if not record_id:
+        return
+    client = get_supabase_client()
+    if client is None:
+        logging.info("vk_miss_review.supabase_disabled")
+        return
+
+    def _update() -> None:
+        (
+            client.table("vk_misses_sample")
+            .update({"checked": True})
+            .eq("id", record_id)
+            .execute()
+        )
+
+    try:
+        await asyncio.to_thread(_update)
+    except Exception:  # pragma: no cover - network failure
+        logging.exception("vk_miss_review.supabase_update_failed")
 
 
 VK_MISS_CALLBACK_PREFIX = "vkmiss:"
@@ -23246,11 +23269,13 @@ async def handle_vk_miss_review_callback(
     record = session.queue[session.index]
 
     if action == "redo":
+        await _vk_miss_mark_checked(record.id)
         await _vk_miss_append_feedback(
             record, session.last_text or "", session.last_published_at
         )
         await callback.answer("Отправлено на доработку")
     elif action == "ok":
+        await _vk_miss_mark_checked(record.id)
         await callback.answer("Отмечено")
     else:
         await callback.answer()
