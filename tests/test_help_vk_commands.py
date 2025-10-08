@@ -55,6 +55,10 @@ async def test_help_superadmin_lists_vk_commands(tmp_path):
     assert any(line.startswith("/tourist_export [period]") for line in lines)
     assert "/ocrtest — сравнить распознавание афиш" in lines
     assert (
+        "/ik_poster — обработка афиш через ImageKit (Smart crop / GenFill)"
+        in lines
+    )
+    assert (
         "/stats [events|shortlinks] — Show Telegraph view counts and vk.cc click totals"
         in lines
     )
@@ -85,4 +89,8 @@ async def test_help_user_hides_vk_queue_and_crawl(tmp_path):
     assert any("↪️ Репостнуть в Vk" in line for line in lines)
     assert any("✂️ Сокращённый рерайт" in line for line in lines)
     assert any(line.startswith("/tourist_export [period]") for line in lines)
+    assert (
+        "/ik_poster — обработка афиш через ImageKit (Smart crop / GenFill)"
+        not in lines
+    )
 
