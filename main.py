@@ -23190,7 +23190,8 @@ async def _vk_miss_send_feedback_file(
         if callback.message is not None
         else callback.from_user.id
     )
-    filename = os.path.basename(path) or "vk_miss_review.md"
+    timestamp_suffix = datetime.now(LOCAL_TZ).strftime("%Y%m%d-%H%M%S")
+    filename = f"vk_miss_review_{timestamp_suffix}.md"
     document = types.FSInputFile(path, filename=filename)
 
     await bot.send_document(chat_id, document)

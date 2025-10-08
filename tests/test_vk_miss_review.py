@@ -1,3 +1,4 @@
+import re
 import types
 from datetime import datetime, timezone
 
@@ -258,6 +259,9 @@ async def test_vk_miss_download_sends_and_clears(tmp_path, monkeypatch):
 
     assert documents and documents[0][0] == 111
     assert isinstance(documents[0][1], main.types.FSInputFile)
+    filename = documents[0][1].filename
+    assert filename.startswith("vk_miss_review_")
+    assert re.search(r"^vk_miss_review_\d{8}-\d{6}\.md$", filename)
     assert answers and answers[-1][0] == "Файл отправлен"
     assert path.read_text(encoding="utf-8") == ""
 
