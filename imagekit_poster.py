@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from enum import Enum
 from typing import Any
+from urllib.parse import quote
 
 import requests
 
@@ -72,7 +73,7 @@ def _build_transformation(
     elif mode is PosterProcessingMode.EXTEND_GENFILL:
         raw = "bg-genfill"
         if prompt:
-            raw = f"{raw}:prompt={prompt}"
+            raw = f"bg-genfill-prompt-{quote(prompt, safe='')}"
         payload = {
             "w": width,
             "h": height,
