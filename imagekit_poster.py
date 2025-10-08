@@ -52,7 +52,7 @@ class PosterTransformation:
     gravity: PosterGravity | None = None
     quality: int | None = None
     background: str | None = None
-    raw: Mapping[str, Any] | None = None
+    raw: Mapping[str, Any] | str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         """Convert the transformation to ImageKit API format."""
@@ -70,8 +70,10 @@ class PosterTransformation:
             payload["quality"] = self.quality
         if self.background is not None:
             payload["background"] = self.background
-        if self.raw:
+        if isinstance(self.raw, Mapping):
             payload.update(self.raw)
+        elif self.raw is not None:
+            payload["raw"] = self.raw
         return payload
 
 
