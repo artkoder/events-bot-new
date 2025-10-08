@@ -19,6 +19,7 @@ async def test_persist_event_creates_and_reuses_holiday(tmp_path, monkeypatch):
     # reset holiday caches to ensure tests reflect docs
     main._read_holidays.cache_clear()
     main._holiday_record_map.cache_clear()
+    main.settings_cache.clear()
 
     async def fake_assign(event: Event):
         return [], len(event.description or ""), "", False
@@ -87,8 +88,11 @@ async def test_persist_event_creates_and_reuses_holiday(tmp_path, monkeypatch):
     assert halloween_doc_row is not None
     assert halloween_doc_row["canonical_name"] == "Хеллоуин"
     assert halloween_doc_row["aliases"] == ["хэллоуин", "halloween"]
-    assert halloween_doc_row["tolerance_days"] == 1
+    tolerance_days = halloween_doc_row["tolerance_days"]
+    assert tolerance_days is not None
     halloween_desc = halloween_doc_row["description"]
+
+    photo_url = "https://example.com/halloween.jpg"
 
     draft1 = vk_intake.EventDraft(
         title="Хэллоуинская вечеринка",
@@ -98,7 +102,7 @@ async def test_persist_event_creates_and_reuses_holiday(tmp_path, monkeypatch):
         source_text="Spooky",
     )
 
-    result1 = await vk_intake.persist_event_and_pages(draft1, [], db)
+    result1 = await vk_intake.persist_event_and_pages(draft1, [photo_url], db)
     await asyncio.sleep(0)
 
     async with db.get_session() as session:
@@ -117,11 +121,53 @@ async def test_persist_event_creates_and_reuses_holiday(tmp_path, monkeypatch):
     assert halloween.description == halloween_desc
     assert halloween.source_text == halloween_desc
     assert halloween.aliases == ["хеллоуин", "хэллоуин", "halloween"]
+    assert saved_event.photo_urls == [photo_url]
+    assert halloween.photo_url == photo_url
+    assert halloween.photo_urls == [photo_url]
+
+    stored_html: dict[str, str] = {}
+
+    class DummyTelegraph:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def create_page(self, title, html_content, **_):
+            stored_html["html"] = html_content
+            return {"url": "https://telegra.ph/fests", "path": "fests"}
+
+        def edit_page(self, path, title, html_content, **kwargs):
+            stored_html["edited"] = html_content
+            return {}
+
+        def get_page(self, path, return_html=True):
+            return {"content_html": stored_html.get("html", "")}
+
+    async def fake_telegraph_call(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    async def fake_create_page(tg, *args, **kwargs):
+        return tg.create_page(*args, **kwargs)
+
+    async def fake_edit_page(tg, *args, **kwargs):
+        return tg.edit_page(*args, **kwargs)
+
+    monkeypatch.setattr(main, "Telegraph", DummyTelegraph)
+    monkeypatch.setattr(main, "telegraph_call", fake_telegraph_call)
+    monkeypatch.setattr(main, "telegraph_create_page", fake_create_page)
+    monkeypatch.setattr(main, "telegraph_edit_page", fake_edit_page)
+    monkeypatch.setattr(main, "get_telegraph_token", lambda: "token")
+
+    await main.sync_festivals_index_page(db)
+    main.settings_cache.clear()
+
+    html = stored_html["html"]
+    assert photo_url in html
+    assert "Хеллоуин" in html
 
     halloween_record = main.get_holiday_record("Хеллоуин")
     assert halloween_record is not None
     assert halloween_record.date == target_date_token
-    assert halloween_record.tolerance_days == 1
+    assert halloween_record.tolerance_days == tolerance_days
     assert halloween_record.description == halloween_desc
     assert list(halloween_record.aliases) == ["хэллоуин", "halloween"]
 

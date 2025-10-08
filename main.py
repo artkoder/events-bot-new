@@ -24237,12 +24237,14 @@ async def _vkrev_import_flow(
             record = get_holiday_record(draft.festival)
             if record is not None:
                 tolerance_days = record.tolerance_days
+        persist_kwargs: dict[str, Any] = {"source_post_url": source_post_url}
+        if tolerance_days is not None:
+            persist_kwargs["holiday_tolerance_days"] = tolerance_days
         res = await vk_intake.persist_event_and_pages(
             draft,
             photos,
             db,
-            source_post_url=source_post_url,
-            holiday_tolerance_days=tolerance_days,
+            **persist_kwargs,
         )
         async with db.get_session() as session:
             event_obj = await session.get(Event, res.event_id)

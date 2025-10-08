@@ -1812,6 +1812,10 @@ async def persist_event_and_pages(
             ensure_kwargs["start_date"] = start_iso
         if end_iso:
             ensure_kwargs["end_date"] = end_iso
+        photo_list = list(saved.photo_urls or []) or list(photo_urls or [])
+        if photo_list:
+            ensure_kwargs["photo_url"] = photo_list[0]
+            ensure_kwargs["photo_urls"] = photo_list
         aliases_payload = [
             alias for alias in getattr(holiday_record, "normalized_aliases", ()) if alias
         ]
@@ -1838,6 +1842,7 @@ async def persist_event_and_pages(
         parts = [p.strip() for p in (saved.date or "").split("..") if p.strip()]
         start_str = parts[0] if parts else None
         end_str = parts[-1] if len(parts) > 1 else None
+        explicit_end = bool(saved.end_date) or len(parts) > 1
         if not end_str:
             end_str = saved.end_date or start_str
         if start_str or end_str:
@@ -1848,12 +1853,20 @@ async def persist_event_and_pages(
                 festival = res.scalar_one_or_none()
                 if festival is not None:
                     changed = False
-                    if start_str and festival.start_date is None:
-                        festival.start_date = start_str
-                        changed = True
-                    if end_str and festival.end_date is None:
-                        festival.end_date = end_str
-                        changed = True
+                    if start_str and explicit_end:
+                        if (
+                            festival.start_date is None
+                            or start_str < festival.start_date
+                        ):
+                            festival.start_date = start_str
+                            changed = True
+                    if end_str:
+                        if (
+                            festival.end_date is None
+                            or (explicit_end and end_str > festival.end_date)
+                        ):
+                            festival.end_date = end_str
+                            changed = True
                     if changed:
                         session.add(festival)
                         await session.commit()
