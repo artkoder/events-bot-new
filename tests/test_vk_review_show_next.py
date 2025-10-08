@@ -30,12 +30,20 @@ class DummyBot:
             from_user=SimpleNamespace(id=0, is_bot=True, first_name="B"),
             text=text,
             reply_markup=kwargs.get("reply_markup"),
+            parse_mode=kwargs.get("parse_mode"),
         )
         self.messages.append(msg)
         return msg
 
     async def send_media_group(self, chat_id, media):
         self.media = media
+
+
+def extract_footer_lines(message_text: str) -> list[str]:
+    start = message_text.index("<blockquote>")
+    end = message_text.index("</blockquote>")
+    footer = message_text[start + len("<blockquote>") : end]
+    return footer.splitlines()
 
 
 @pytest.mark.asyncio
@@ -75,10 +83,13 @@ async def test_vkrev_show_next_adds_blank_line_and_group_name(tmp_path, monkeypa
     bot = DummyBot()
     await main._vkrev_show_next(1, "batch1", 1, db, bot)
     assert bot.messages, "no message sent"
-    lines = bot.messages[0].text.splitlines()
-    assert lines[1] == "Test Community"
-    assert lines[2] == ""  # blank line before the link
-    assert lines[3] == "https://vk.com/wall-1_10"
+    message = bot.messages[0]
+    assert message.parse_mode == "HTML"
+    assert message.text.startswith("text")
+    lines = extract_footer_lines(message.text)
+    assert lines[0] == "Test Community"
+    assert lines[1] == ""  # blank line before the link
+    assert lines[2] == "https://vk.com/wall-1_10"
 
 
 @pytest.mark.asyncio
@@ -129,7 +140,9 @@ async def test_vkrev_show_next_includes_event_matches(tmp_path, monkeypatch):
     await main._vkrev_show_next(1, "batch1", 1, db, bot)
 
     assert bot.messages, "no message sent"
-    lines = bot.messages[0].text.splitlines()
+    message = bot.messages[0]
+    assert message.parse_mode == "HTML"
+    lines = extract_footer_lines(message.text)
     heading = f"{dt.day:02d} {main.MONTHS[dt.month - 1]} {dt.strftime('%H:%M')}"
     assert heading in lines
     heading_index = lines.index(heading)
@@ -194,7 +207,9 @@ async def test_vkrev_show_next_recomputes_mismatched_hint(tmp_path, monkeypatch)
     await main._vkrev_show_next(1, "batch1", 1, db, bot)
 
     assert bot.messages, "no message sent"
-    lines = bot.messages[0].text.splitlines()
+    message = bot.messages[0]
+    assert message.parse_mode == "HTML"
+    lines = extract_footer_lines(message.text)
     heading = f"{expected_dt.day:02d} {main.MONTHS[expected_dt.month - 1]} {expected_dt.strftime('%H:%M')}"
     assert heading in lines
     status_line = next(line for line in lines if line.startswith("ключи:"))
@@ -271,7 +286,9 @@ async def test_vkrev_show_next_updates_timezone_from_settings(tmp_path, monkeypa
     expected_heading = (
         f"{local_dt.day:02d} {main.MONTHS[local_dt.month - 1]} {local_dt.strftime('%H:%M')}"
     )
-    lines = bot.messages[0].text.splitlines()
+    message = bot.messages[0]
+    assert message.parse_mode == "HTML"
+    lines = extract_footer_lines(message.text)
     assert expected_heading in lines
     assert main.LOCAL_TZ.utcoffset(None) == timedelta(hours=2)
 
@@ -365,8 +382,10 @@ async def test_vkrev_show_next_uses_crawl_timezone_hint(tmp_path, monkeypatch):
         local_dt = datetime.fromtimestamp(event_ts_hint, tz=expected_tz)
         assert local_dt.strftime("%H:%M") == "00:00"
         heading = f"{local_dt.day:02d} {main.MONTHS[local_dt.month - 1]} {local_dt.strftime('%H:%M')}"
-        assert heading in bot.messages[0].text.splitlines()
-        tail_lines = bot.messages[0].text.splitlines()
+        message = bot.messages[0]
+        assert message.parse_mode == "HTML"
+        assert heading in extract_footer_lines(message.text)
+        tail_lines = extract_footer_lines(message.text)
         status_line = next(line for line in tail_lines if line.startswith("ключи:"))
         published_local = publish_dt.astimezone(main.LOCAL_TZ)
         expected_published_line = (
@@ -492,7 +511,9 @@ async def test_vkrev_show_next_recomputes_past_hint_with_timezone_change(
         await main._vkrev_show_next(1, "batch1", 1, db, bot)
 
         assert bot.messages, "no message sent"
-        lines = bot.messages[0].text.splitlines()
+        message = bot.messages[0]
+        assert message.parse_mode == "HTML"
+        lines = extract_footer_lines(message.text)
 
         async with db.raw_conn() as conn:
             cur = await conn.execute(

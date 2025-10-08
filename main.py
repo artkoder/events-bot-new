@@ -156,6 +156,7 @@ import re
 import httpx
 import hashlib
 import unicodedata
+from html import escape
 import vk_intake
 import vk_review
 import poster_ocr
@@ -23954,42 +23955,70 @@ async def _vkrev_show_next(chat_id: int, batch_id: str, operator_id: int, db: Da
         lines.append(status_line)
         return lines
 
-    tail_lines = build_tail_lines()
-    tail_str = "\n".join(tail_lines)
-    if post_text:
-        message_text = post_text + "\n" + tail_str
-    else:
-        message_text = tail_str
+    def format_blockquote(lines: list[str]) -> str:
+        escaped_lines = [escape(line) for line in lines]
+        return "<blockquote>" + "\n".join(escaped_lines) + "</blockquote>"
 
-    if len(message_text) > TELEGRAM_MESSAGE_LIMIT:
+    def compose_message_html(post_body: str, tail_blockquote: str) -> str:
+        if post_body:
+            return f"{escape(post_body)}\n{tail_blockquote}"
+        return tail_blockquote
+
+    def truncate_text_for_html(text: str, max_escaped_len: int) -> str:
+        if max_escaped_len <= 0:
+            return ""
+        ellipsis = "…"
+        ellipsis_len = len(escape(ellipsis))
+        escaped_lengths = [len(escape(ch)) for ch in text]
+        prefix: list[int] = [0]
+        for length in escaped_lengths:
+            prefix.append(prefix[-1] + length)
+        if prefix[-1] <= max_escaped_len:
+            return text
+        end_index = 0
+        for idx in range(len(text)):
+            if prefix[idx + 1] > max_escaped_len:
+                end_index = idx
+                break
+        truncated = text[:end_index].rstrip()
+        while truncated:
+            truncated_len = len(truncated)
+            escaped_len = prefix[truncated_len]
+            if escaped_len + ellipsis_len <= max_escaped_len:
+                return truncated + ellipsis
+            if escaped_len <= max_escaped_len:
+                return truncated
+            truncated = truncated[:-1].rstrip()
+        if ellipsis_len <= max_escaped_len:
+            return ellipsis
+        return ""
+
+    tail_lines = build_tail_lines()
+    tail_blockquote = format_blockquote(tail_lines)
+    message_html = compose_message_html(post_text, tail_blockquote)
+
+    if len(message_html) > TELEGRAM_MESSAGE_LIMIT:
         warning_line = (
             f"⚠️ Текст поста был обрезан до {TELEGRAM_MESSAGE_LIMIT} символов"
         )
         tail_lines = build_tail_lines(warning_line)
-        tail_str = "\n".join(tail_lines)
+        tail_blockquote = format_blockquote(tail_lines)
+        available = TELEGRAM_MESSAGE_LIMIT - len(tail_blockquote)
         if post_text:
-            available = TELEGRAM_MESSAGE_LIMIT - len(tail_str) - 1
-        else:
-            available = TELEGRAM_MESSAGE_LIMIT - len(tail_str)
+            available -= 1
         available = max(0, available)
-        if len(post_text) > available:
-            truncated_text = post_text[: max(available - 1, 0)]
-            if available > 0:
-                truncated_text = truncated_text.rstrip()
-                if truncated_text:
-                    truncated_text += "…"
-                else:
-                    truncated_text = "…"
-            post_text = truncated_text
         if post_text:
-            message_text = post_text + "\n" + tail_str
-        else:
-            message_text = tail_str
+            post_text = truncate_text_for_html(post_text, available)
+        message_html = compose_message_html(post_text, tail_blockquote)
+        if len(message_html) > TELEGRAM_MESSAGE_LIMIT and post_text:
+            post_text = ""
+            message_html = compose_message_html(post_text, tail_blockquote)
 
     await bot.send_message(
         chat_id,
-        message_text,
+        message_html,
         reply_markup=markup,
+        parse_mode="HTML",
     )
 
 
