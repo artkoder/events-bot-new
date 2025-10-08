@@ -22080,6 +22080,22 @@ async def handle_vk_list(
 
     lines: list[str] = []
     buttons: list[list[types.InlineKeyboardButton]] = []
+    def _format_timestamp(value: Any) -> str:
+        if value in (None, "", 0):
+            return "-"
+        try:
+            if isinstance(value, (int, float)):
+                if value <= 0:
+                    raise ValueError("non-positive timestamp")
+                parsed = datetime.fromtimestamp(value, tz=timezone.utc)
+            else:
+                parsed = datetime.fromisoformat(value)
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(LOCAL_TZ).strftime("%Y-%m-%d %H:%M")
+        except (ValueError, TypeError, OSError):
+            return str(value)
+
     for offset, row, counts in page_items:
         rid, gid, screen, name, loc, dtime, default_ticket_link, updated_at, checked_at = row
         info_parts = [f"id={gid}"]
@@ -22088,24 +22104,10 @@ async def handle_vk_list(
         if default_ticket_link:
             info_parts.append(f"билеты: {default_ticket_link}")
         info = ", ".join(info_parts)
-        last_check_value = checked_at if checked_at not in (None, "", 0) else updated_at
-        if last_check_value:
-            try:
-                if isinstance(last_check_value, (int, float)):
-                    if last_check_value <= 0:
-                        raise ValueError("non-positive timestamp")
-                    parsed_updated = datetime.fromtimestamp(last_check_value, tz=timezone.utc)
-                else:
-                    parsed_updated = datetime.fromisoformat(last_check_value)
-                    if parsed_updated.tzinfo is None:
-                        parsed_updated = parsed_updated.replace(tzinfo=timezone.utc)
-                human_updated = parsed_updated.astimezone(LOCAL_TZ).strftime("%Y-%m-%d %H:%M")
-            except (ValueError, TypeError):
-                human_updated = str(last_check_value)
-        else:
-            human_updated = "-"
+        human_checked = _format_timestamp(checked_at)
+        human_updated = _format_timestamp(updated_at)
         lines.append(
-            f"{offset}. {name} (vk.com/{screen}) — {info}, типовое время: {dtime or '-'}, последняя проверка: {human_updated}"
+            f"{offset}. {name} (vk.com/{screen}) — {info}, типовое время: {dtime or '-'}, последнее сканирование: {human_checked}, последний найденный пост: {human_updated}"
         )
         value_parts = [
             f" {counts[key]:^{count_widths[key]}} "

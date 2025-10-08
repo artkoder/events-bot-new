@@ -2006,10 +2006,20 @@ async def crawl_once(
                     (gid,),
                 )
                 row = await cur.fetchone()
+            cursor_updated_at_existing_raw: Any = None
             if row:
                 last_seen_ts, last_post_id, updated_at, _checked_at = row
+                cursor_updated_at_existing_raw = updated_at
                 if isinstance(updated_at, str):
-                    updated_at_ts = int(datetime.fromisoformat(updated_at).timestamp())
+                    try:
+                        updated_at_ts = int(
+                            datetime.fromisoformat(updated_at).timestamp()
+                        )
+                    except ValueError:
+                        try:
+                            updated_at_ts = int(updated_at)
+                        except (TypeError, ValueError):
+                            updated_at_ts = 0
                 elif updated_at:
                     updated_at_ts = int(updated_at)
                 else:
@@ -2017,6 +2027,7 @@ async def crawl_once(
             else:
                 last_seen_ts = last_post_id = 0
                 updated_at_ts = 0
+                cursor_updated_at_existing_raw = None
 
             idle_h = (now_ts - updated_at_ts) / 3600 if updated_at_ts else None
             backfill = force_backfill or last_seen_ts == 0 or (
@@ -2025,6 +2036,12 @@ async def crawl_once(
             mode = "backfill" if backfill else "inc"
 
             posts: list[dict] = []
+
+            next_cursor_ts = last_seen_ts
+            next_cursor_pid = last_post_id
+            cursor_updated_at_override: int | None = None
+            cursor_payload: tuple[int, int, Any, int] | None = None
+            has_new_posts = False
 
             if backfill:
                 window_days = (
@@ -2312,6 +2329,7 @@ async def crawl_once(
                     else:
                         stats["added"] += 1
                         group_added += 1
+                        has_new_posts = True
             except Exception:
                 stats["errors"] += 1
                 group_errors += 1
@@ -2322,14 +2340,12 @@ async def crawl_once(
 
             next_cursor_ts = max_ts
             next_cursor_pid = max_pid
-            cursor_updated_at = now_ts
-            cursor_checked_at = int(time.time())
             if hard_cap_triggered and max_ts > 0 and not reached_cursor_overlap:
                 deep_backfill_scheduled = True
                 next_cursor_ts = last_seen_ts
                 next_cursor_pid = last_post_id
                 idle_threshold = VK_CRAWL_BACKFILL_AFTER_IDLE_H * 3600
-                cursor_updated_at = max(0, now_ts - idle_threshold - 60)
+                cursor_updated_at_override = max(0, now_ts - idle_threshold - 60)
             elif safety_cap_triggered and max_ts > 0:
                 adjusted_ts = max(last_seen_ts, max_ts - VK_CRAWL_OVERLAP_SEC)
                 if adjusted_ts < next_cursor_ts:
@@ -2346,13 +2362,6 @@ async def crawl_once(
                     max_ts,
                 )
 
-            async with db.raw_conn() as conn:
-                await conn.execute(
-                    "INSERT OR REPLACE INTO vk_crawl_cursor(group_id, last_seen_ts, last_post_id, updated_at, checked_at) VALUES(?,?,?,?,?)",
-                    (gid, next_cursor_ts, next_cursor_pid, cursor_updated_at, cursor_checked_at),
-                )
-                await conn.commit()
-
             mode = "backfill" if backfill else "inc"
             logging.info(
                 "vk.crawl group=%s posts=%s matched=%s pages=%s mode=%s",
@@ -2362,9 +2371,31 @@ async def crawl_once(
                 pages_loaded,
                 mode,
             )
+            cursor_checked_at = int(time.time())
+            if cursor_updated_at_override is not None:
+                cursor_updated_at = cursor_updated_at_override
+            elif has_new_posts:
+                cursor_updated_at = now_ts
+            else:
+                cursor_updated_at = cursor_updated_at_existing_raw
+            cursor_payload = (
+                next_cursor_ts,
+                next_cursor_pid,
+                cursor_updated_at,
+                cursor_checked_at,
+            )
         except Exception:
             stats["errors"] += 1
             group_errors += 1
+            cursor_payload = None
+        else:
+            if cursor_payload is not None:
+                async with db.raw_conn() as conn:
+                    await conn.execute(
+                        "INSERT OR REPLACE INTO vk_crawl_cursor(group_id, last_seen_ts, last_post_id, updated_at, checked_at) VALUES(?,?,?,?,?)",
+                        (gid, *cursor_payload),
+                    )
+                    await conn.commit()
         finally:
             pages_per_group.append(pages_loaded)
             match_rate = group_matches / max(1, group_posts)
