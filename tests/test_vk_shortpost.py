@@ -3,6 +3,7 @@ import os, sys
 import pytest
 import os, sys
 import re
+import sqlite3
 from types import SimpleNamespace
 from datetime import date as real_date
 
@@ -13,6 +14,7 @@ import main
 from main import Database
 from models import Event
 from aiogram import types
+import vk_review
 
 class DummyBot:
     def __init__(self):
@@ -93,6 +95,76 @@ async def test_vkrev_fetch_photos_no_tokens(monkeypatch):
     photos = await main._vkrev_fetch_photos(1, 2, None, None)
 
     assert photos == []
+
+
+@pytest.mark.asyncio
+async def test_save_repost_url_retry_on_locked(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.get_session() as session:
+        session.add(
+            Event(
+                id=1,
+                title="T",
+                description="d",
+                date="2025-09-27",
+                time="19:00",
+                location_name="Place",
+                source_text="src",
+            )
+        )
+        await session.commit()
+
+    original_raw_conn = db.raw_conn
+    commit_calls = 0
+    rollback_calls = 0
+
+    class LockingConnWrapper:
+        def __init__(self, conn):
+            self._conn = conn
+
+        async def execute(self, *args, **kwargs):
+            return await self._conn.execute(*args, **kwargs)
+
+        async def commit(self):
+            nonlocal commit_calls
+            commit_calls += 1
+            if commit_calls == 1:
+                raise sqlite3.OperationalError("database is locked")
+            return await self._conn.commit()
+
+        async def rollback(self):
+            nonlocal rollback_calls
+            rollback_calls += 1
+            return await self._conn.rollback()
+
+        def __getattr__(self, item):
+            return getattr(self._conn, item)
+
+    def locking_raw_conn():
+        context = original_raw_conn()
+
+        class _Ctx:
+            async def __aenter__(self_nonlocal):
+                conn = await context.__aenter__()
+                return LockingConnWrapper(conn)
+
+            async def __aexit__(self_nonlocal, exc_type, exc, tb):
+                return await context.__aexit__(exc_type, exc, tb)
+
+        return _Ctx()
+
+    monkeypatch.setattr(db, "raw_conn", locking_raw_conn)
+
+    await vk_review.save_repost_url(db, 1, "https://vk.com/wall-1_1")
+
+    assert commit_calls >= 2
+    assert rollback_calls >= 1
+
+    async with db.get_session() as session:
+        event = await session.get(Event, 1)
+        assert event.vk_repost_url == "https://vk.com/wall-1_1"
 
 
 @pytest.mark.asyncio
