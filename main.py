@@ -23752,6 +23752,7 @@ async def build_short_vk_location(parts: Sequence[str]) -> str:
 
 
 async def _vkrev_show_next(chat_id: int, batch_id: str, operator_id: int, db: Database, bot: Bot) -> None:
+    await get_tz_offset(db)
     post = await vk_review.pick_next(db, operator_id, batch_id)
     if not post:
         buttons = [
@@ -23807,7 +23808,6 @@ async def _vkrev_show_next(chat_id: int, batch_id: str, operator_id: int, db: Da
                 reply_markup=types.InlineKeyboardMarkup(inline_keyboard=inline_buttons),
             )
         return
-    await get_tz_offset(db)
     photos = await _vkrev_fetch_photos(post.group_id, post.post_id, db, bot)
     if photos:
         media = [types.InputMediaPhoto(media=p) for p in photos[:10]]

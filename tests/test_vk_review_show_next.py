@@ -294,6 +294,88 @@ async def test_vkrev_show_next_updates_timezone_from_settings(tmp_path, monkeypa
 
 
 @pytest.mark.asyncio
+async def test_vkrev_show_next_preserves_local_midnight_for_dedup(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    async with db.get_session() as session:
+        session.add(User(user_id=1))
+        await session.commit()
+    async with db.raw_conn() as conn:
+        await conn.execute(
+            "INSERT INTO setting(key, value) VALUES('tz_offset', ?)",
+            ("+02:00",),
+        )
+        await conn.execute(
+            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time, default_ticket_link) VALUES(?,?,?,?,?,?)",
+            (1, "club1", "Test Community", "", None, None),
+        )
+        publish_dt = datetime(2099, 5, 20, 12, 0, tzinfo=timezone.utc)
+        locked_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        await conn.execute(
+            """
+            INSERT INTO vk_inbox(
+                group_id, post_id, date, text, matched_kw, has_date,
+                event_ts_hint, status, locked_by, locked_at, review_batch
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                1,
+                10,
+                int(publish_dt.timestamp()),
+                "30 мая лекция",
+                "лекция",
+                1,
+                None,
+                "locked",
+                1,
+                locked_at,
+                "oldbatch",
+            ),
+        )
+        await conn.commit()
+
+    async def fake_fetch(*args, **kwargs):
+        return []
+
+    monkeypatch.setattr(main, "_vkrev_fetch_photos", fake_fetch)
+
+    original_tz = main.LOCAL_TZ
+    original_cache = getattr(main, "_TZ_OFFSET_CACHE", None)
+
+    try:
+        main.LOCAL_TZ = timezone.utc
+        if hasattr(main, "_TZ_OFFSET_CACHE"):
+            main._TZ_OFFSET_CACHE = None  # type: ignore[attr-defined]
+
+        bot = DummyBot()
+        await main._vkrev_show_next(1, "batch1", 1, db, bot)
+
+        assert bot.messages, "no message sent"
+        message = bot.messages[0]
+        assert message.parse_mode == "HTML"
+        lines = extract_footer_lines(message.text)
+
+        expected_tz = timezone(timedelta(hours=2))
+        expected_dt = datetime(2099, 5, 30, 0, 0, tzinfo=expected_tz)
+        expected_heading = (
+            f"{expected_dt.day:02d} {main.MONTHS[expected_dt.month - 1]} {expected_dt.strftime('%H:%M')}"
+        )
+        assert expected_heading in lines
+
+        async with db.raw_conn() as conn:
+            cur = await conn.execute(
+                "SELECT event_ts_hint FROM vk_inbox WHERE group_id=? AND post_id=?",
+                (1, 10),
+            )
+            (stored_hint,) = await cur.fetchone()
+        assert stored_hint == int(expected_dt.timestamp())
+    finally:
+        main.LOCAL_TZ = original_tz
+        if hasattr(main, "_TZ_OFFSET_CACHE"):
+            main._TZ_OFFSET_CACHE = original_cache  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
 async def test_vkrev_show_next_uses_crawl_timezone_hint(tmp_path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
