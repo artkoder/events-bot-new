@@ -121,7 +121,14 @@ async def handle_mode(callback: CallbackQuery, state: FSMContext) -> None:
         await state.clear()
         return
 
-    operator_chat = os.getenv("OPERATOR_CHAT_ID")
+    operator_chat_raw = os.getenv("OPERATOR_CHAT_ID")
+    operator_chat: int | None = None
+    if operator_chat_raw:
+        try:
+            operator_chat = int(operator_chat_raw)
+        except ValueError:
+            logger.warning("Invalid OPERATOR_CHAT_ID value: %s", operator_chat_raw)
+            operator_chat = None
     await callback.message.edit_reply_markup()
     await callback.message.answer(
         f"Обрабатываю постер в режиме «{mode.title}»..."
@@ -164,7 +171,7 @@ async def handle_mode(callback: CallbackQuery, state: FSMContext) -> None:
             FSInputFile(temp_path, filename=filename), caption=user_caption
         )
 
-        if operator_chat:
+        if operator_chat and operator_chat > 0:
             user = callback.from_user
             author = (user.full_name if user else None) or (user.username if user else None) or "—"
             operator_caption = f"Режим: {mode.title}\nАвтор: {author}"
