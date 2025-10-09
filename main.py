@@ -743,6 +743,7 @@ vk_shortpost_edit_sessions: dict[int, tuple[int, int]] = {}
 partner_info_sessions: TTLCache[int, int] = TTLCache(maxsize=64, ttl=3600)
 # user_id -> (festival_id, field?) for festival editing
 festival_edit_sessions: TTLCache[int, tuple[int, str | None]] = TTLCache(maxsize=64, ttl=3600)
+FESTIVAL_EDIT_FIELD_IMAGE = "image"
 
 # user_id -> cached festival inference for makefest flow
 makefest_sessions: TTLCache[int, dict[str, Any]] = TTLCache(maxsize=64, ttl=3600)
@@ -8138,6 +8139,21 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
         )
         msg = "Обложка обновлена" if ok else "Картинка не найдена"
         await callback.message.answer(msg)
+        await callback.answer()
+    elif data.startswith("festimgadd:"):
+        fid = int(data.split(":")[1])
+        async with db.get_session() as session:
+            fest = await session.get(Festival, fid)
+        if not fest:
+            await callback.answer("Festival not found", show_alert=True)
+            return
+        festival_edit_sessions[callback.from_user.id] = (
+            fid,
+            FESTIVAL_EDIT_FIELD_IMAGE,
+        )
+        await callback.message.answer(
+            "Пришлите фото, изображение-документ или ссылку на картинку."
+        )
         await callback.answer()
     elif data.startswith("festimgs:"):
         fid = int(data.split(":")[1])
@@ -18562,6 +18578,12 @@ async def show_festival_edit_menu(user_id: int, fest: Festival, bot: Bot):
         ],
         [
             types.InlineKeyboardButton(
+                text="Добавить иллюстрацию",
+                callback_data=f"festimgadd:{fest.id}",
+            )
+        ],
+        [
+            types.InlineKeyboardButton(
                 text="Иллюстрации / обложка",
                 callback_data=f"festimgs:{fest.id}",
             )
@@ -18576,6 +18598,27 @@ async def show_festival_edit_menu(user_id: int, fest: Festival, bot: Bot):
     ]
     markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard)
     await bot.send_message(user_id, "\n".join(lines), reply_markup=markup)
+
+
+def add_festival_photo(fest: Festival, url: str, *, make_cover: bool = False) -> bool:
+    """Append a photo URL to the festival album and optionally make it the cover."""
+
+    url = (url or "").strip()
+    if not url:
+        return False
+    existing_urls = list(fest.photo_urls or [])
+    changed = False
+    if url not in existing_urls:
+        existing_urls.append(url)
+        fest.photo_urls = existing_urls
+        changed = True
+    else:
+        fest.photo_urls = existing_urls
+    if make_cover or not fest.photo_url:
+        if fest.photo_url != url:
+            fest.photo_url = url
+            changed = True
+    return changed
 
 
 FEST_MERGE_PAGE_SIZE = 12
@@ -25688,6 +25731,92 @@ async def handle_festival_edit_message(message: types.Message, db: Database, bot
         return
     fid, field = state
     if field is None:
+        return
+    if field == FESTIVAL_EDIT_FIELD_IMAGE:
+        async with db.get_session() as session:
+            fest = await session.get(Festival, fid)
+            if not fest:
+                await bot.send_message(message.chat.id, "Festival not found")
+                festival_edit_sessions.pop(message.from_user.id, None)
+                return
+            images: list[tuple[bytes, str]] = []
+            if message.photo:
+                photo = message.photo[-1]
+                bio = BytesIO()
+                async with span("tg-send"):
+                    await bot.download(photo.file_id, destination=bio)
+                data, name = ensure_jpeg(bio.getvalue(), "photo.jpg")
+                images.append((data, name))
+            if message.document:
+                mime = message.document.mime_type or ""
+                if mime.startswith("image/"):
+                    bio = BytesIO()
+                    async with span("tg-send"):
+                        await bot.download(message.document.file_id, destination=bio)
+                    doc_name = message.document.file_name or "image.jpg"
+                    data, doc_name = ensure_jpeg(bio.getvalue(), doc_name)
+                    images.append((data, doc_name))
+                else:
+                    await bot.send_message(
+                        message.chat.id,
+                        "Документ должен быть изображением (image/*).",
+                    )
+                    return
+            new_urls: list[str] = []
+            catbox_msg = ""
+            if images:
+                poster_items, catbox_msg = await process_media(
+                    images, need_catbox=True, need_ocr=False
+                )
+                new_urls = [item.catbox_url for item in poster_items if item.catbox_url]
+            else:
+                text_candidate = (message.text or message.caption or "").strip()
+                if text_candidate.lower().startswith(("http://", "https://")):
+                    new_urls = [text_candidate]
+            if not new_urls:
+                await bot.send_message(
+                    message.chat.id,
+                    "Не удалось получить изображение. Пришлите фото, документ или ссылку на картинку.",
+                )
+                return
+            appended_count = 0
+            cover_changed = False
+            for idx, url in enumerate(new_urls):
+                was_cover = fest.photo_url
+                already_present = url in (fest.photo_urls or [])
+                changed = add_festival_photo(fest, url, make_cover=(idx == 0))
+                if not changed:
+                    continue
+                if not already_present and url in (fest.photo_urls or []):
+                    appended_count += 1
+                if fest.photo_url == url and was_cover != url:
+                    cover_changed = True
+            if not appended_count and not cover_changed:
+                await bot.send_message(
+                    message.chat.id,
+                    "Эта иллюстрация уже есть в альбоме фестиваля.",
+                )
+                return
+            await session.commit()
+            await session.refresh(fest)
+            fest_view = Festival(**fest.model_dump())  # type: ignore[arg-type]
+            fest_name = fest.name
+        festival_edit_sessions[message.from_user.id] = (fid, None)
+        response_lines: list[str] = []
+        if appended_count:
+            if appended_count == 1:
+                response_lines.append("Добавлена новая иллюстрация.")
+            else:
+                response_lines.append(f"Добавлено иллюстраций: {appended_count}.")
+        if cover_changed:
+            response_lines.append("Обложка обновлена.")
+        if catbox_msg:
+            response_lines.append(catbox_msg)
+        if response_lines:
+            await bot.send_message(message.chat.id, "\n".join(response_lines))
+        await show_festival_edit_menu(message.from_user.id, fest_view, bot)
+        await sync_festival_page(db, fest_name)
+        await sync_festivals_index_page(db)
         return
     text = (message.text or "").strip()
     async with db.get_session() as session:

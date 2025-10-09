@@ -1,5 +1,8 @@
-import pytest
+from datetime import datetime, timezone
 from pathlib import Path
+
+import pytest
+from aiogram import types
 
 import main
 from db import Database
@@ -140,3 +143,59 @@ async def test_build_festival_page_content_shows_album(tmp_path: Path):
 
     srcs = _collect_img_srcs(nodes)
     assert srcs == [urls[1], urls[0], urls[2]]
+
+
+@pytest.mark.asyncio
+async def test_handle_festival_edit_message_adds_image_link(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async def nop(*a, **k):
+        return None
+
+    monkeypatch.setattr(main, "sync_festival_page", nop)
+    monkeypatch.setattr(main, "sync_festivals_index_page", nop)
+
+    async with db.get_session() as session:
+        fest = Festival(name="Fest")
+        session.add(fest)
+        await session.commit()
+        fid = fest.id
+
+    user_id = 123
+    main.festival_edit_sessions[user_id] = (fid, main.FESTIVAL_EDIT_FIELD_IMAGE)
+
+    class DummyBot:
+        def __init__(self):
+            self.sent: list[dict[str, object]] = []
+
+        async def send_message(self, chat_id, text, reply_markup=None, **kwargs):
+            self.sent.append(
+                {"chat_id": chat_id, "text": text, "reply_markup": reply_markup}
+            )
+
+        async def download(self, *a, **k):  # pragma: no cover - guard
+            raise AssertionError("download should not be called")
+
+    bot = DummyBot()
+
+    message = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": datetime.now(timezone.utc),
+            "chat": {"id": 999, "type": "private"},
+            "from": {"id": user_id, "is_bot": False, "first_name": "Tester"},
+            "text": "https://catbox.moe/new.jpg",
+        }
+    )
+
+    await main.handle_festival_edit_message(message, db, bot)
+
+    assert main.festival_edit_sessions[user_id] == (fid, None)
+
+    async with db.get_session() as session:
+        fest = await session.get(Festival, fid)
+        assert fest.photo_urls == ["https://catbox.moe/new.jpg"]
+        assert fest.photo_url == "https://catbox.moe/new.jpg"
+
+    main.festival_edit_sessions.pop(user_id, None)
