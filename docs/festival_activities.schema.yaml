@@ -1,0 +1,85 @@
+# Festival activities YAML schema (v2).
+#
+# Copy this template into a new file when you prepare a bulk upload.
+# Remove comment lines once the document is ready.
+# All date values use ISO format YYYY-MM-DD. Times are 24-hour HH:MM.
+
+version: 2  # Schema version. Leave as-is unless the bot announces an update.
+
+festival:
+  slug: "<festival-slug>"  # Required. Use the slug from /fest or the admin UI.
+  name: "<Festival name>"  # Optional human-readable label for quick sanity checks.
+  period:
+    start: "YYYY-MM-DD"  # Inclusive festival start. Required for new uploads.
+    end: "YYYY-MM-DD"    # Inclusive festival end. Required even for one-day runs.
+  timezone: "Europe/Kaliningrad"  # IANA timezone for schedule rendering.
+  program_url: "https://example.com/program"  # Optional public landing page.
+  contacts:
+    email: "info@example.com"  # Optional. Remove unused keys.
+    phone: "+7 4012 00-00-00"
+    telegram: "@festival"
+    vk: "https://vk.com/fest"
+    instagram: "https://instagram.com/fest"
+
+activities:
+  - slug: "<activity-slug>"  # Required. Lowercase, words separated by dashes.
+    title: "<Activity title>"  # Required public title.
+    type: "daily_anytime"  # Required. One of: daily_anytime | on_request | scheduled.
+    venue: "<Normalised venue name>"  # Required. See docs/festival_activities.md.
+    address: "<Street, city>"  # Optional free-form address. Drop if redundant.
+    summary: >-
+      Short paragraph for cards and teasers (max 240 chars recommended).
+    description: |-
+      Full description. Keep paragraphs separated by blank lines.
+    topics: ["kids", "art"]  # Optional tags for filtering/search.
+    age_restriction: "6+"  # Optional age gate. Omit when not stated.
+    is_free: false  # true if entry is free. When true you can drop pricing.
+    pricing:
+      amount: 500  # Optional numeric cost. Skip for complex tariffs.
+      currency: "RUB"
+      note: "Семейный билет — 1200 ₽."
+    booking:
+      mode: "walk_in"  # walk_in | phone | web_form | ticketing | email.
+      instructions: "Запись не требуется — приходите к открытию."
+      url: "https://example.com/booking"  # Optional when mode=web_form|ticketing.
+      phone: "+7 4012 11-22-33"  # Optional direct booking phone.
+    contacts:
+      email: "team@example.com"
+      phone: "+7 4012 11-22-33"
+      telegram: "@contact"
+      vk: "https://vk.com/example"
+    assets:
+      cover_image: "https://cdn.example.com/cover.jpg"  # Optional override.
+      gallery:  # Optional list of supplementary images.
+        - "https://cdn.example.com/extra-1.jpg"
+        - "https://cdn.example.com/extra-2.jpg"
+    schedule:
+      daily_anytime:
+        days: ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]  # Required for daily_anytime.
+        start: "10:00"  # Optional open time. Drop for all-day access.
+        end: "19:00"  # Optional close time.
+        closed: ["mon"]  # Optional list of weekdays closed even if listed above.
+      on_request:
+        lead_time_hours: 48  # Required for on_request. Minimum notice for booking.
+        request_window: "09:00-18:00"  # Optional operator hours.
+        instructions: "Заявки принимаются по телефону и в Telegram."
+      scheduled:
+        occurrences:
+          - date: "YYYY-MM-DD"  # Individual runs for scheduled type.
+            start: "HH:MM"
+            end: "HH:MM"
+            seats: 30  # Optional seat count.
+    notes: >-
+      Internal operator notes. Not published. Remove before sending to partners.
+
+  - slug: "<second-activity-slug>"
+    title: "<Another activity>"
+    type: "on_request"
+    venue: "<Normalised venue name>"
+    schedule:
+      on_request:
+        lead_time_hours: 24
+        instructions: "Напишите за сутки, чтобы подобрать время."
+    summary: "..."
+    description: "..."
+    # Repeat blocks above as needed for more activities.
