@@ -6258,6 +6258,19 @@ def _build_prompt(
     return prompt
 
 
+class ParsedEvents(list):
+    """List-like container that also exposes festival metadata."""
+
+    def __init__(
+        self,
+        events: Sequence[dict[str, Any]] | None = None,
+        *,
+        festival: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(events or [])
+        self.festival = festival
+
+
 async def parse_event_via_4o(
     text: str,
     source_channel: str | None = None,
@@ -6267,7 +6280,7 @@ async def parse_event_via_4o(
     poster_texts: Sequence[str] | None = None,
     poster_summary: str | None = None,
     **extra: str | None,
-) -> list[dict]:
+) -> ParsedEvents:
     token = os.getenv("FOUR_O_TOKEN")
     if not token:
         raise RuntimeError("FOUR_O_TOKEN is missing")
@@ -6401,15 +6414,12 @@ async def parse_event_via_4o(
         ):
             if k in data and fest is not None and fest.get(k) in (None, ""):
                 fest[k] = data[k]
-        parse_event_via_4o._festival = fest
         if "events" in data and isinstance(data["events"], list):
-            return data["events"]
-        return [data]
+            return ParsedEvents(data["events"], festival=fest)
+        return ParsedEvents([data], festival=fest)
     if isinstance(data, list):
-        parse_event_via_4o._festival = None
-        return data
+        return ParsedEvents(data)
     logging.error("Unexpected 4o format: %s", data)
-    parse_event_via_4o._festival = None
     raise RuntimeError("bad 4o response")
 
 
@@ -10248,7 +10258,7 @@ async def add_events_from_text(
 
         if DEBUG:
             mem_info("LLM after")
-        festival_info = getattr(parse_event_via_4o, "_festival", None)
+        festival_info = getattr(parsed, "festival", None)
         if isinstance(festival_info, str):
             festival_info = {"name": festival_info}
         logging.info("LLM returned %d events", len(parsed))
@@ -24115,7 +24125,7 @@ async def _vkrev_import_flow(
     if source:
         source_name_val, location_hint_val, default_time_val, default_ticket_link_val = source
 
-    drafts = await vk_intake.build_event_drafts(
+    drafts, festival_info_raw = await vk_intake.build_event_drafts(
         text,
         photos=photos,
         source_name=source_name_val,
@@ -24129,8 +24139,6 @@ async def _vkrev_import_flow(
         db=db,
     )
     source_post_url = f"https://vk.com/wall-{group_id}_{post_id}"
-    festival_info_raw = getattr(parse_event_via_4o, "_festival", None)
-    setattr(parse_event_via_4o, "_festival", None)
     if isinstance(festival_info_raw, str):
         festival_info_raw = {"name": festival_info_raw}
 

@@ -200,7 +200,7 @@ async def test_vkrev_import_flow_persists_url_and_skips_vk_sync(tmp_path, monkey
         captured["festival_alias_pairs"] = festival_alias_pairs
         captured["festival_hint"] = festival_hint
         captured["default_ticket_link"] = default_ticket_link
-        return [draft]
+        return [draft], None
 
     captured = {}
 
@@ -311,7 +311,7 @@ async def test_vkrev_import_flow_reports_ocr_usage(tmp_path, monkeypatch):
         festival_hint=False,
         db=None,
     ):
-        return [draft]
+        return [draft], None
 
     async def fake_mark_imported(db_, inbox_id, batch_id, operator_id, event_id, event_date):
         pass
@@ -363,7 +363,7 @@ async def test_vkrev_import_flow_reports_ocr_limit(tmp_path, monkeypatch):
     )
 
     async def fake_build(*args, **kwargs):
-        return [draft]
+        return [draft], None
 
     async def fake_mark_imported(*args, **kwargs):
         pass
@@ -506,7 +506,7 @@ async def test_vkrev_import_flow_handles_multiple_events(tmp_path, monkeypatch):
     )
 
     async def fake_build(*args, **kwargs):
-        return [draft1, draft2]
+        return [draft1, draft2], None
 
     captured_mark_id: dict[str, int] = {}
 
@@ -568,8 +568,17 @@ async def test_vkrev_import_flow_creates_festival_without_events(tmp_path, monke
     async def fake_fetch(*args, **kwargs):
         return []
 
+    festival_payload = {
+        "name": "Fest Solo",
+        "start_date": "2025-07-01",
+        "end_date": "2025-07-07",
+        "location_name": "Main Park",
+        "city": "Kaliningrad",
+        "website_url": "https://fest.example",
+    }
+
     async def fake_build(*args, **kwargs):
-        return []
+        return [], festival_payload
 
     sync_calls: list[tuple[str, str]] = []
 
@@ -593,14 +602,6 @@ async def test_vkrev_import_flow_creates_festival_without_events(tmp_path, monke
     monkeypatch.setattr(main, "sync_festivals_index_page", fake_sync_index)
     monkeypatch.setattr(main, "sync_festival_vk_post", fake_sync_vk)
     monkeypatch.setattr(main, "rebuild_fest_nav_if_changed", fake_rebuild_nav)
-    monkeypatch.setattr(main.parse_event_via_4o, "_festival", {
-        "name": "Fest Solo",
-        "start_date": "2025-07-01",
-        "end_date": "2025-07-07",
-        "location_name": "Main Park",
-        "city": "Kaliningrad",
-        "website_url": "https://fest.example",
-    }, raising=False)
 
     bot = DummyBot()
     await main._vkrev_import_flow(1, 1, 1, "batch1", db, bot)
@@ -668,10 +669,7 @@ async def test_vkrev_import_flow_creates_festival_without_events_from_llm(
     }
 
     async def fake_parse(*args, **kwargs):
-        setattr(fake_parse, "_festival", festival_payload)
-        return []
-
-    fake_parse._festival = None
+        return main.ParsedEvents([], festival=festival_payload)
 
     async def fake_rebuild_nav(db_obj):
         return False
@@ -714,7 +712,6 @@ async def test_vkrev_import_flow_creates_festival_without_events_from_llm(
     assert ("page", ("Fest Solo",)) in sync_calls
     assert ("index", tuple()) in sync_calls
     assert ("vk", ("Fest Solo", True)) in sync_calls
-    assert getattr(main.parse_event_via_4o, "_festival", None) is None
 
 @pytest.mark.asyncio
 async def test_vkrev_import_flow_requires_festival_when_forced(tmp_path, monkeypatch):
@@ -743,7 +740,7 @@ async def test_vkrev_import_flow_requires_festival_when_forced(tmp_path, monkeyp
     )
 
     async def fake_build(*args, **kwargs):
-        return [draft]
+        return [draft], None
 
     mark_called = False
 
@@ -759,8 +756,6 @@ async def test_vkrev_import_flow_requires_festival_when_forced(tmp_path, monkeyp
     monkeypatch.setattr(vk_review, "mark_imported", fake_mark_imported)
     monkeypatch.setattr(vk_intake, "persist_event_and_pages", fake_persist)
 
-    setattr(main.parse_event_via_4o, "_festival", None)
-
     bot = DummyBot()
     await main._vkrev_import_flow(
         1,
@@ -774,7 +769,6 @@ async def test_vkrev_import_flow_requires_festival_when_forced(tmp_path, monkeyp
 
     assert mark_called is False
     assert bot.messages[-1].text == "❌ Не удалось распознать фестиваль, импорт остановлен."
-    assert getattr(main.parse_event_via_4o, "_festival", None) is None
 
 
 @pytest.mark.asyncio
@@ -806,7 +800,7 @@ async def test_vkrev_import_flow_creates_festival_and_reports_status(tmp_path, m
     )
 
     async def fake_build(*args, **kwargs):
-        return [draft]
+        return [draft], fest_payload
 
     async def fake_mark_imported(*args, **kwargs):
         pass
@@ -846,8 +840,6 @@ async def test_vkrev_import_flow_creates_festival_and_reports_status(tmp_path, m
     monkeypatch.setattr(main, "sync_festivals_index_page", fake_sync_index)
     monkeypatch.setattr(main, "rebuild_festivals_index_if_needed", fake_sync_index)
     monkeypatch.setattr(main, "sync_festival_vk_post", fake_sync_vk)
-
-    setattr(main.parse_event_via_4o, "_festival", fest_payload)
 
     bot = DummyBot()
     await main._vkrev_import_flow(
@@ -1010,7 +1002,7 @@ async def test_build_event_draft_uses_cached_text_when_limit(monkeypatch, tmp_pa
     monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
     monkeypatch.setattr(vk_intake, "_download_photo_media", fake_download)
 
-    draft = await vk_intake.build_event_draft(
+    draft, festival_payload = await vk_intake.build_event_draft(
         "text",
         photos=["one", "two"],
         source_name="Test",
@@ -1022,6 +1014,7 @@ async def test_build_event_draft_uses_cached_text_when_limit(monkeypatch, tmp_pa
     assert draft.poster_media[1].ocr_text is None
     assert draft.ocr_tokens_spent == 0
     assert draft.ocr_tokens_remaining == 0
+    assert festival_payload is None
 
 
 @pytest.mark.asyncio
@@ -1094,11 +1087,12 @@ async def test_build_event_payload_includes_operator_extra(monkeypatch):
 
     monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
 
-    draft = await vk_intake.build_event_payload_from_vk(
+    draft, festival_payload = await vk_intake.build_event_payload_from_vk(
         "Original announcement", operator_extra=" Extra context "
     )
 
     assert draft.source_text == "Original announcement\n\nExtra context"
+    assert festival_payload is None
 
 
 @pytest.mark.asyncio
@@ -1117,11 +1111,12 @@ async def test_build_event_payload_uses_extra_when_text_missing(monkeypatch):
 
     monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
 
-    draft = await vk_intake.build_event_payload_from_vk(
+    draft, festival_payload = await vk_intake.build_event_payload_from_vk(
         "", operator_extra="  Only extra  "
     )
 
     assert draft.source_text == "Only extra"
+    assert festival_payload is None
 
 
 @pytest.mark.asyncio
@@ -1184,7 +1179,7 @@ async def test_handle_vk_extra_message_exposes_text_links(monkeypatch):
     assert operator_extra == "Check this [link](https://example.com)"
     assert captured.get("force_festival") is False
 
-    draft = await vk_intake.build_event_payload_from_vk(
+    draft, festival_payload = await vk_intake.build_event_payload_from_vk(
         "Original announcement",
         operator_extra=operator_extra,
     )
@@ -1192,6 +1187,7 @@ async def test_handle_vk_extra_message_exposes_text_links(monkeypatch):
     assert "Check this [link](https://example.com)" in draft.source_text
     html = linkify_for_telegraph(draft.source_text)
     assert '<a href="https://example.com">link</a>' in html
+    assert festival_payload is None
 
 
 @pytest.mark.asyncio
@@ -1256,7 +1252,7 @@ async def test_handle_vk_extra_message_exposes_text_links_with_parentheses(monke
     assert operator_extra == f"Check this [link]({escaped_url})"
     assert captured.get("force_festival") is False
 
-    draft = await vk_intake.build_event_payload_from_vk(
+    draft, festival_payload = await vk_intake.build_event_payload_from_vk(
         "Original announcement",
         operator_extra=operator_extra,
     )
@@ -1264,6 +1260,7 @@ async def test_handle_vk_extra_message_exposes_text_links_with_parentheses(monke
     assert f"Check this [link]({escaped_url})" in draft.source_text
     html = linkify_for_telegraph(draft.source_text)
     assert '<a href="https://example.com/foo(bar)">link</a>' in html
+    assert festival_payload is None
 
 
 @pytest.mark.asyncio
@@ -1323,7 +1320,7 @@ async def test_handle_vk_extra_message_preserves_emoji_offsets(monkeypatch):
     assert operator_extra == "Check 😄 [link](https://emoji.example)"
     assert captured.get("force_festival") is False
 
-    draft = await vk_intake.build_event_payload_from_vk(
+    draft, festival_payload = await vk_intake.build_event_payload_from_vk(
         "Original announcement",
         operator_extra=operator_extra,
     )
@@ -1331,6 +1328,7 @@ async def test_handle_vk_extra_message_preserves_emoji_offsets(monkeypatch):
     assert "Check 😄 [link](https://emoji.example)" in draft.source_text
     html = linkify_for_telegraph(draft.source_text)
     assert '<a href="https://emoji.example">link</a>' in html
+    assert festival_payload is None
 
 
 @pytest.mark.asyncio
@@ -1515,13 +1513,16 @@ async def test_build_event_draft_handles_ocr_limit(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
     monkeypatch.setattr(poster_ocr, "recognize_posters", fake_recognize)
 
-    draft = await vk_intake.build_event_draft("text", photos=["url"], db=db)
+    draft, festival_payload = await vk_intake.build_event_draft(
+        "text", photos=["url"], db=db
+    )
 
     assert draft.poster_media
     assert draft.ocr_tokens_spent == 0
     assert draft.ocr_tokens_remaining == 0
     assert draft.ocr_limit_notice is not None
     assert "лимит" in draft.ocr_limit_notice.lower()
+    assert festival_payload is None
 
 @pytest.mark.asyncio
 async def test_vkrev_import_flow_force_festival_accepts_full_name(monkeypatch, tmp_path):
@@ -1563,7 +1564,7 @@ async def test_vkrev_import_flow_force_festival_accepts_full_name(monkeypatch, t
         festival_hint=False,
         db=None,
     ):
-        return [draft]
+        return [draft], {"full_name": "Тестовый фестиваль"}
 
     captured: dict[str, Any] = {}
 
@@ -1594,9 +1595,6 @@ async def test_vkrev_import_flow_force_festival_accepts_full_name(monkeypatch, t
     monkeypatch.setattr(main, "enqueue_job", fake_enqueue_job)
     monkeypatch.setattr(main, "assign_event_topics", fake_assign_event_topics)
     monkeypatch.setattr(main, "ensure_festival", fake_ensure_festival)
-    monkeypatch.setattr(
-        main.parse_event_via_4o, "_festival", {"full_name": "Тестовый фестиваль"}, raising=False
-    )
 
     bot = DummyBot()
     await main._vkrev_import_flow(1, 1, 1, "batch1", db, bot, force_festival=True)
@@ -1666,7 +1664,7 @@ async def test_vkrev_import_flow_marks_supabase_result(tmp_path, monkeypatch):
         return []
 
     async def fake_build(*args, **kwargs):
-        return [draft]
+        return [draft], None
 
     async def fake_persist(*args, **kwargs):
         return vk_intake.PersistResult(
@@ -1738,7 +1736,7 @@ async def test_vkrev_import_flow_supabase_error_does_not_abort(tmp_path, monkeyp
         return []
 
     async def fake_build(*args, **kwargs):
-        return [draft]
+        return [draft], None
 
     async def fake_persist(*args, **kwargs):
         return vk_intake.PersistResult(

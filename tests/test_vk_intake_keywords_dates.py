@@ -413,11 +413,12 @@ async def test_build_drafts_library_defaults_to_free(monkeypatch):
 
     monkeypatch.setattr(main, "parse_event_via_4o", fake_parse, raising=False)
 
-    drafts = await vk_intake.build_event_drafts_from_vk(
+    drafts, festival_payload = await vk_intake.build_event_drafts_from_vk(
         "Встреча читателей в уютной библиотеке"
     )
 
     assert drafts and drafts[0].is_free is True
+    assert festival_payload is None
 
 
 @pytest.mark.asyncio
@@ -433,8 +434,9 @@ async def test_build_drafts_library_respects_paid_keywords(monkeypatch):
 
     monkeypatch.setattr(main, "parse_event_via_4o", fake_parse, raising=False)
 
-    drafts = await vk_intake.build_event_drafts_from_vk(
+    drafts, festival_payload = await vk_intake.build_event_drafts_from_vk(
         "Встреча читателей в библиотеке, вход 300 руб."
     )
 
     assert drafts and drafts[0].is_free is False
+    assert festival_payload is None

@@ -15,7 +15,7 @@ async def test_vk_intake_processing_time_metric(tmp_path, monkeypatch):
         assert kwargs.get("festival_names") == []
         assert kwargs.get("festival_alias_pairs") is None
         assert kwargs.get("festival_hint") is False
-        return [vk_intake.EventDraft(title="T")]
+        return [vk_intake.EventDraft(title="T")], None
 
     async def fake_persist(draft, photos, db):
         return vk_intake.PersistResult(
