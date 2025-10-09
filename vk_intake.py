@@ -1082,7 +1082,7 @@ async def build_event_drafts_from_vk(
     poster_media: Sequence[PosterMedia] | None = None,
     ocr_tokens_spent: int = 0,
     ocr_tokens_remaining: int | None = None,
-) -> list[EventDraft]:
+) -> tuple[list[EventDraft], dict[str, Any] | None]:
     """Return normalised event drafts extracted from a VK post.
 
     The function delegates parsing to the same LLM helper used by ``/add`` and
@@ -1095,7 +1095,9 @@ async def build_event_drafts_from_vk(
 
     The resulting :class:`EventDraft` contains normalised event attributes such
     as title, schedule, venue, ticket details and other metadata needed by the
-    import pipeline.
+    import pipeline.  The function returns a tuple ``(drafts, festival_payload)``
+    where ``festival_payload`` is the raw festival structure, if any, provided
+    by :func:`main.parse_event_via_4o`.
     """
     parse_event_via_4o = require_main_attr("parse_event_via_4o")
 
@@ -1145,8 +1147,8 @@ async def build_event_drafts_from_vk(
     parsed = await parse_event_via_4o(
         llm_text, festival_names=festival_names, **extra, **parse_kwargs
     )
-    festival_payload = getattr(parse_event_via_4o, "_festival", None)
-    parsed_events = list(parsed) if parsed else []
+    festival_payload = getattr(parsed, "festival", None)
+    parsed_events = list(parsed or [])
     if not parsed_events and not festival_payload:
         raise RuntimeError("LLM returned no event")
 
@@ -1256,7 +1258,7 @@ async def build_event_drafts_from_vk(
         if not draft.is_free:
             draft.is_free = True
 
-    return drafts
+    return drafts, festival_payload
 
 
 async def build_event_payload_from_vk(
@@ -1271,8 +1273,8 @@ async def build_event_payload_from_vk(
     poster_media: Sequence[PosterMedia] | None = None,
     ocr_tokens_spent: int = 0,
     ocr_tokens_remaining: int | None = None,
-) -> EventDraft:
-    drafts = await build_event_drafts_from_vk(
+) -> tuple[EventDraft, dict[str, Any] | None]:
+    drafts, festival_payload = await build_event_drafts_from_vk(
         text,
         source_name=source_name,
         location_hint=location_hint,
@@ -1286,7 +1288,7 @@ async def build_event_payload_from_vk(
     )
     if not drafts:
         raise RuntimeError("LLM returned no event")
-    return drafts[0]
+    return drafts[0], festival_payload
 
 
 async def build_event_drafts(
@@ -1302,8 +1304,12 @@ async def build_event_drafts(
     festival_alias_pairs: list[tuple[str, int]] | None = None,
     festival_hint: bool = False,
     db: Database,
-) -> list[EventDraft]:
-    """Download posters, run OCR and return event drafts for a VK post."""
+) -> tuple[list[EventDraft], dict[str, Any] | None]:
+    """Download posters, run OCR and return event drafts for a VK post.
+
+    Returns a tuple ``(drafts, festival_payload)`` mirroring
+    :func:`build_event_drafts_from_vk`.
+    """
     photo_bytes = await _download_photo_media(photos or [])
     poster_items: list[PosterMedia] = []
     ocr_tokens_spent = 0
@@ -1358,7 +1364,7 @@ async def build_event_drafts(
         _, _, ocr_tokens_remaining = await poster_ocr.recognize_posters(
             db, [], log_context=ocr_log_context
         )
-    drafts = await build_event_drafts_from_vk(
+    drafts, festival_payload = await build_event_drafts_from_vk(
         text,
         source_name=source_name,
         location_hint=location_hint,
@@ -1374,7 +1380,7 @@ async def build_event_drafts(
     )
     for draft in drafts:
         draft.ocr_limit_notice = ocr_limit_notice
-    return drafts
+    return drafts, festival_payload
 
 
 async def build_event_draft(
@@ -1390,8 +1396,8 @@ async def build_event_draft(
     festival_alias_pairs: list[tuple[str, int]] | None = None,
     festival_hint: bool = False,
     db: Database,
-) -> EventDraft:
-    drafts = await build_event_drafts(
+) -> tuple[EventDraft, dict[str, Any] | None]:
+    drafts, festival_payload = await build_event_drafts(
         text,
         photos=photos,
         source_name=source_name,
@@ -1406,7 +1412,7 @@ async def build_event_draft(
     )
     if not drafts:
         raise RuntimeError("LLM returned no event")
-    return drafts[0]
+    return drafts[0], festival_payload
 
 
 _DASH_CHAR_PATTERN = re.compile(r"[\u2010\u2011\u2012\u2013\u2014\u2015\u2212]")
@@ -1909,7 +1915,7 @@ async def process_event(
     async with db.get_session() as session:
         res_f = await session.execute(select(Festival.name))
         festival_names = [row[0] for row in res_f.fetchall()]
-    drafts = await build_event_drafts(
+    drafts, _ = await build_event_drafts(
         text,
         photos=photos or [],
         source_name=source_name,

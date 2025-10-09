@@ -13,8 +13,7 @@ async def test_add_events_from_text_autofills_program_url(tmp_path: Path, monkey
     await db.init()
 
     async def fake_parse(text, *args, **kwargs):
-        main.parse_event_via_4o._festival = {"name": "Fest"}
-        return []
+        return main.ParsedEvents([], festival={"name": "Fest"})
 
     async def fake_upload(images):
         return [], ""

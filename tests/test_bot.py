@@ -8206,15 +8206,19 @@ async def test_add_festival_without_events(tmp_path: Path, monkeypatch):
     bot = DummyBot("123:abc")
 
     async def fake_parse(*args, **kwargs):
-        main.parse_event_via_4o._festival = {
-            "name": "Jazz",
-            "full_name": "Jazz Fest",
-            "start_date": FUTURE_DATE,
-            "end_date": (date.fromisoformat(FUTURE_DATE) + timedelta(days=1)).isoformat(),
-            "location_name": "Hall",
-            "city": "Town",
-        }
-        return []
+        return main.ParsedEvents(
+            [],
+            festival={
+                "name": "Jazz",
+                "full_name": "Jazz Fest",
+                "start_date": FUTURE_DATE,
+                "end_date": (
+                    date.fromisoformat(FUTURE_DATE) + timedelta(days=1)
+                ).isoformat(),
+                "location_name": "Hall",
+                "city": "Town",
+            },
+        )
 
     monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
 

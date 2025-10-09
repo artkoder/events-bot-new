@@ -422,11 +422,14 @@ async def test_build_event_payload_includes_default_time(monkeypatch):
 
     monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
 
-    draft = await vk_intake.build_event_payload_from_vk("text", default_time="19:00")
+    draft, festival_payload = await vk_intake.build_event_payload_from_vk(
+        "text", default_time="19:00"
+    )
 
     assert "19:00" in captured["text"]
     assert captured["festival_names"] is None
     assert draft.time == "19:00"
+    assert festival_payload is None
 
 
 @pytest.mark.asyncio
@@ -439,12 +442,13 @@ async def test_build_event_payload_uses_default_ticket_link(monkeypatch):
 
     monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
 
-    draft = await vk_intake.build_event_payload_from_vk(
+    draft, festival_payload = await vk_intake.build_event_payload_from_vk(
         "text", default_ticket_link="https://tickets.example"
     )
 
     assert "https://tickets.example" in captured["text"]
     assert draft.links == ["https://tickets.example"]
+    assert festival_payload is None
 
 
 @pytest.mark.asyncio
@@ -463,9 +467,10 @@ async def test_build_event_payload_preserves_llm_ticket_link(monkeypatch):
 
     monkeypatch.setattr(main, "parse_event_via_4o", fake_parse)
 
-    draft = await vk_intake.build_event_payload_from_vk(
+    draft, festival_payload = await vk_intake.build_event_payload_from_vk(
         "text", default_ticket_link="https://tickets.example"
     )
 
     assert "https://tickets.example" in captured["text"]
     assert draft.links == ["https://real.example"]
+    assert festival_payload is None
