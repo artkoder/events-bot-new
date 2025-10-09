@@ -12,6 +12,7 @@ from sqlalchemy import (
     UniqueConstraint,
     text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.types import Enum as SAEnum
 
 
@@ -469,6 +470,10 @@ class Festival(SQLModel, table=True):
     location_name: Optional[str] = None
     location_address: Optional[str] = None
     city: Optional[str] = None
+    activities_json: list[dict] = Field(
+        default_factory=list,
+        sa_column=Column(JSONB, nullable=False, server_default="[]"),
+    )
     source_text: Optional[str] = None
     source_post_url: Optional[str] = None
     source_chat_id: Optional[int] = None
