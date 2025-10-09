@@ -6,6 +6,7 @@
 - `/vk_misses` superadmins review fresh Supabase samples: the bot pulls post text, up to ten images, filter reasons, and matched keywords from `vk_misses_sample`, adds «Отклонено верно»/«На доработку» buttons, and records revision notes for the latter in `VK_MISS_REVIEW_FILE` (defaults to `/data/vk_miss_review.md`).
 - Добавили `/ik_poster`, вынесли логику в новый модуль `imagekit_poster.py`, подключили зависимости ImageKit и пересылаем результаты в операторский чат.
 - Фестивальные редакторы загружают кастомные обложки через кнопку «Добавить иллюстрацию»: фича опирается на Telegram-поток `festimgadd` в `main.py`, бот пересылает туда файлы, автоматически разворачивает обложку в альбомную ориентацию и сохраняет обновления.
+- Исправили кросс-базовую совместимость `festival.activities_json`: SQLite снова работает и не падает при чтении поля, закрывая регрессию с крэшем.
 
 ## v0.3.17 – 2025-10-07
 
