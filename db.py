@@ -335,6 +335,14 @@ class Database:
             await _add_column(conn, "festival", "source_post_url TEXT")
             await _add_column(conn, "festival", "source_chat_id INTEGER")
             await _add_column(conn, "festival", "source_message_id INTEGER")
+            await _add_column(
+                conn,
+                "festival",
+                "activities_json JSON NOT NULL DEFAULT '[]'",
+            )
+            await conn.execute(
+                "UPDATE festival SET activities_json = '[]' WHERE activities_json IS NULL"
+            )
 
             festival_cursor = await conn.execute("PRAGMA table_info('festival')")
             festival_columns = await festival_cursor.fetchall()
