@@ -115,7 +115,22 @@ def process_poster(
     resolved_name = file_name or "poster.jpg"
     upload_response = client.upload_file(file=bytes(image_bytes), file_name=resolved_name)
 
-    file_path = upload_response.get("file_path")
+    file_path = None
+    if hasattr(upload_response, "file_path"):
+        file_path = getattr(upload_response, "file_path")
+    else:
+        for key in ("file_path", "filePath"):
+            candidate = None
+            try:
+                candidate = upload_response.get(key)  # type: ignore[union-attr]
+            except AttributeError:
+                try:
+                    candidate = upload_response[key]  # type: ignore[index]
+                except (KeyError, TypeError):
+                    candidate = None
+            if candidate:
+                file_path = candidate
+                break
     if not file_path:
         raise RuntimeError("ImageKit upload response did not include file_path")
 
