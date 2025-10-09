@@ -3,6 +3,8 @@
 from typing import Sequence, Union
 
 from alembic import op
+import sqlalchemy as sa
+from sqlalchemy.dialects.postgresql import JSONB
 
 
 # revision identifiers, used by Alembic.
@@ -13,11 +15,16 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.execute(
-        "ALTER TABLE festival "
-        "ADD COLUMN activities_json JSONB NOT NULL DEFAULT '[]'"
+    op.add_column(
+        "festival",
+        sa.Column(
+            "activities_json",
+            sa.JSON().with_variant(JSONB, "postgresql"),
+            nullable=False,
+            server_default=sa.text("'[]'"),
+        ),
     )
 
 
 def downgrade() -> None:
-    op.execute("ALTER TABLE festival DROP COLUMN activities_json")
+    op.drop_column("festival", "activities_json")

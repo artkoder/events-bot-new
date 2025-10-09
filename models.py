@@ -472,7 +472,11 @@ class Festival(SQLModel, table=True):
     city: Optional[str] = None
     activities_json: list[dict] = Field(
         default_factory=list,
-        sa_column=Column(JSONB, nullable=False, server_default="[]"),
+        sa_column=Column(
+            JSON().with_variant(JSONB, "postgresql"),
+            nullable=False,
+            server_default=text("'[]'"),
+        ),
     )
     source_text: Optional[str] = None
     source_post_url: Optional[str] = None
