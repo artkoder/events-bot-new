@@ -250,6 +250,7 @@ async def test_vkrev_import_flow_persists_url_and_skips_vk_sync(tmp_path, monkey
     assert "Дата окончания: —" in message_lines
     assert "Время: 10:00" in message_lines
     assert "Бесплатное: нет" in message_lines
+    assert "Фестиваль/праздник: —" in message_lines
     expected_topics_line = (
         f"Темы: {TOPIC_LABELS['THEATRE']}, {TOPIC_LABELS['FASHION']}"
     )
@@ -883,6 +884,7 @@ async def test_vkrev_import_flow_creates_festival_and_reports_status(tmp_path, m
     assert ("vk", ("Fest Alpha", True)) in sync_calls
 
     detail_text = bot.messages[-1].text
+    assert "Фестиваль/праздник: Fest Alpha" in detail_text
     assert "Фестиваль: Fest Alpha (создан)" in detail_text
 
 @pytest.mark.asyncio

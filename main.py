@@ -24350,6 +24350,11 @@ async def _vkrev_import_flow(
             f"Бесплатное: {'да' if res.is_free else 'нет'}",
         ]
         if event_obj:
+            festival_line = f"Фестиваль/праздник: {_display(getattr(event_obj, 'festival', None))}"
+        else:
+            festival_line = f"Фестиваль/праздник: {_display(getattr(draft, 'festival', None))}"
+        detail_lines.append(festival_line)
+        if event_obj:
             detail_lines.append(
                 _format_topics_line(
                     getattr(event_obj, "topics", None),
