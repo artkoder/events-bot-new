@@ -18,6 +18,7 @@ async def test_festival_page_program_block(tmp_path: Path):
             name="Fest",
             program_url="https://prog",
             website_url="https://site",
+            activities_json=[{"title": "Opening", "time": "10:00"}],
         )
         session.add(fest)
         await session.commit()
