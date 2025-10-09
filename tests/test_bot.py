@@ -8473,6 +8473,66 @@ async def test_festimgs_handles_missing_photo_urls(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_festimgs_includes_telegraph_link(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async with db.get_session() as session:
+        fest = Festival(name="Jazz")
+        session.add(fest)
+        await session.commit()
+        fid = fest.id
+        fest.photo_urls = ["https://example.com/image.jpg"]
+        fest.photo_url = "https://example.com/image.jpg"
+        fest.telegraph_url = "https://t.me/jazzfest"
+        await session.commit()
+
+    cb = types.CallbackQuery.model_validate(
+        {
+            "id": "1",
+            "data": f"festimgs:{fid}",
+            "from": {"id": 1, "is_bot": False, "first_name": "U"},
+            "chat_instance": "1",
+            "message": {
+                "message_id": 1,
+                "date": 0,
+                "chat": {"id": 1, "type": "private"},
+                "from": BOT_SENDER,
+                "text": "stub",
+            },
+        }
+    ).as_(bot)
+
+    responses: list[tuple[str | None, dict[str, Any]]] = []
+
+    async def dummy_message_answer(text=None, **kwargs):
+        responses.append((text, kwargs))
+        return None
+
+    acknowledgements: list[str | None] = []
+
+    async def dummy_callback_answer(text=None, **kwargs):
+        acknowledgements.append(text)
+        return None
+
+    object.__setattr__(cb.message, "answer", dummy_message_answer)
+    object.__setattr__(cb, "answer", dummy_callback_answer)
+
+    await process_request(cb, db, bot)
+
+    assert responses, "callback message.answer was not invoked"
+    text, _ = responses[-1]
+    assert text is not None
+    lines = text.splitlines()
+    assert lines[0] == "Иллюстрации фестиваля"
+    expected_link = main.normalize_telegraph_url("https://t.me/jazzfest")
+    assert lines[1] == expected_link
+    assert lines[2].startswith("Всего: ")
+    assert acknowledgements == [None]
+
+
+@pytest.mark.asyncio
 async def test_festdays_single_day_copies_source(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
