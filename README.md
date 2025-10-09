@@ -154,6 +154,13 @@ line under the button row. The command accepts dates like `2025-07-10`,
   # Optional: provide Telegraph token. If omitted, the bot creates an account
   # automatically and saves the token to /data/telegraph_token.txt.
   export TELEGRAPH_TOKEN=your_telegraph_token
+  # ImageKit credentials for poster uploads (as provided in the dashboard)
+  export IMAGEKIT_PUBLIC_KEY=public_xxx          # base64-like public API key
+  export IMAGEKIT_PRIVATE_KEY=private_xxx        # secret API key for server calls
+  export IMAGEKIT_URL_ENDPOINT=https://ik.imagekit.io/<folder>
+  # Telegram chat that receives operator alerts; use the numeric ID
+  export OPERATOR_CHAT_ID=123456789
+  # Set OPERATOR_CHAT_ID=0 to disable forwarding operator notifications
   # User access token for VK posts (scopes: wall,groups,offline)
   export VK_USER_TOKEN=vk_user_token
   # IDs of VK groups (without @)
