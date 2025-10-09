@@ -13,3 +13,4 @@ APScheduler>=3.10.4
 Pillow>=10.0.0
 imagekitio>=3.0.0
 requests>=2.31.0
+PyYAML>=6.0.1
