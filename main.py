@@ -14154,6 +14154,7 @@ def format_exhibition_md(e: Event) -> str:
 
 # --- split-loader: executes the continuation in main_part2.py into the same module namespace ---
 import os as _os
+_code = None
 _g = globals()
 try:
     _dir = _os.path.dirname(__file__)
@@ -14162,5 +14163,7 @@ try:
         _code = compile(_f.read(), "main_part2.py", "exec")
     exec(_code, _g, _g)
 finally:
-    del _os, _g, _dir, _path, _code
+    del _os, _g, _dir, _path
+    if _code is not None:
+        del _code
 # --- end split-loader ---
