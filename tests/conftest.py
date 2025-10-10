@@ -5,9 +5,11 @@ import sys
 import pytest
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+sys.path.append(os.path.dirname(__file__))
 import main
 import poster_ocr
 from models import PosterOcrCache
+from _helpers.no_network import no_network  # noqa: F401
 
 
 @pytest.fixture(autouse=True)
