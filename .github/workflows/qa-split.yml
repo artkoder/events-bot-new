@@ -1,0 +1,149 @@
+name: QA Split Verification
+
+on:
+  push:
+    branches:
+      - qa/split-main-verification
+  pull_request:
+    branches:
+      - qa/split-main-verification
+
+jobs:
+  qa-split:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONUNBUFFERED: "1"
+      TELEGRAM_BOT_TOKEN: "123:ABC"
+      WEBHOOK_URL: "https://example.invalid/webhook"
+      DB_PATH: "${{ github.workspace }}/qa-split.sqlite"
+      SUPABASE_DISABLED: "1"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install ruff flake8 vulture mypy
+
+      - name: File size and syntax sanity checks
+        run: |
+          mkdir -p qa-artifacts
+          python - <<'PY' > qa-artifacts/sanity.log
+import json
+from pathlib import Path
+import py_compile
+
+main_path = Path("main.py")
+limit_bytes = 900 * 1024
+size = main_path.stat().st_size
+
+results = {
+    "file": str(main_path),
+    "size_bytes": size,
+    "size_limit": limit_bytes,
+    "within_limit": size < limit_bytes,
+}
+
+if not results["within_limit"]:
+    raise SystemExit(f"{main_path} is {size} bytes which exceeds the {limit_bytes}-byte limit")
+
+py_compile.compile(str(main_path), doraise=True)
+results["py_compile"] = "ok"
+
+print(json.dumps(results, indent=2))
+PY
+          cat qa-artifacts/sanity.log
+
+      - name: Collect handler counts
+        env:
+          HANDLER_DB_PATH: "${{ github.workspace }}/qa-artifacts/handlers.sqlite"
+        run: |
+          mkdir -p qa-artifacts
+          python - <<'PY' > qa-artifacts/handlers.json
+import json
+import os
+
+import aiogram.webhook.aiohttp_server as server
+import main
+
+os.environ.setdefault("DB_PATH", os.getenv("HANDLER_DB_PATH", "handlers.sqlite"))
+os.environ.setdefault("TELEGRAM_BOT_TOKEN", "123:ABC")
+os.environ.setdefault("WEBHOOK_URL", "https://example.invalid/webhook")
+
+captured = {}
+original = server.SimpleRequestHandler.register
+
+
+def capture(self, app, *args, **kwargs):  # type: ignore[override]
+    captured['dispatcher'] = self.dispatcher
+    return original(self, app, *args, **kwargs)
+
+
+server.SimpleRequestHandler.register = capture
+try:
+    main.create_app()
+finally:
+    server.SimpleRequestHandler.register = original
+
+dispatcher = captured.get('dispatcher')
+if dispatcher is None:
+    raise SystemExit("Dispatcher was not captured while creating the application")
+
+payload = {
+    "message": len(dispatcher.message.handlers),
+    "callback": len(dispatcher.callback_query.handlers),
+    "chat_member": len(dispatcher.my_chat_member.handlers),
+}
+
+print(json.dumps(payload, indent=2))
+PY
+          cat qa-artifacts/handlers.json
+
+      - name: Detect mypy configuration
+        id: mypy
+        run: |
+          if [ -f mypy.ini ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          elif [ -f setup.cfg ] && grep -q "\[mypy\]" setup.cfg; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          elif [ -f tox.ini ] && grep -q "\[mypy\]" tox.ini; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          elif [ -f pyproject.toml ] && grep -q "\[tool.mypy\]" pyproject.toml; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run ruff
+        run: ruff check .
+
+      - name: Run flake8
+        run: flake8
+
+      - name: Run mypy
+        if: steps.mypy.outputs.run == 'true'
+        run: mypy .
+
+      - name: Run vulture
+        run: vulture .
+
+      - name: Run pytest
+        run: |
+          mkdir -p qa-artifacts
+          set -o pipefail
+          pytest -q --disable-warnings | tee qa-artifacts/pytest.log
+
+      - name: Upload QA artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-split-logs
+          path: qa-artifacts
+          if-no-files-found: error
+
