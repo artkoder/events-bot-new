@@ -40,22 +40,26 @@ import json
 from pathlib import Path
 import py_compile
 
-main_path = Path("main.py")
+files = [Path("main.py"), Path("main_part2.py")]
 limit_bytes = 900 * 1024
-size = main_path.stat().st_size
 
-results = {
-    "file": str(main_path),
-    "size_bytes": size,
-    "size_limit": limit_bytes,
-    "within_limit": size < limit_bytes,
-}
+results: list[dict[str, object]] = []
 
-if not results["within_limit"]:
-    raise SystemExit(f"{main_path} is {size} bytes which exceeds the {limit_bytes}-byte limit")
-
-py_compile.compile(str(main_path), doraise=True)
-results["py_compile"] = "ok"
+for path in files:
+    size = path.stat().st_size
+    entry = {
+        "file": str(path),
+        "size_bytes": size,
+        "size_limit": limit_bytes,
+        "within_limit": size < limit_bytes,
+    }
+    if not entry["within_limit"]:
+        raise SystemExit(
+            f"{path} is {size} bytes which exceeds the {limit_bytes}-byte limit"
+        )
+    py_compile.compile(str(path), doraise=True)
+    entry["py_compile"] = "ok"
+    results.append(entry)
 
 print(json.dumps(results, indent=2))
 PY

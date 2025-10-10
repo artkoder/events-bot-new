@@ -134,10 +134,12 @@ def test_split_loader_propagates_syntax_error(monkeypatch):
 async def test_boot_split_smoke(tmp_path, monkeypatch):
     repo_root = Path(__file__).resolve().parents[1]
     main_path = repo_root / "main.py"
+    main_part2_path = repo_root / "main_part2.py"
 
     # Sanity checks to catch accidental regressions early.
-    assert main_path.stat().st_size < 900 * 1024, "main.py grew past 900KB"
-    py_compile.compile(str(main_path), doraise=True)
+    for path in (main_path, main_part2_path):
+        assert path.stat().st_size < 900 * 1024, f"{path.name} grew past 900KB"
+        py_compile.compile(str(path), doraise=True)
 
     env = dict(os.environ)
     env.update(
