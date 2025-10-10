@@ -1,5 +1,7 @@
-import html, re
-from typing import List
+import html
+import logging
+import re
+from functools import lru_cache
 
 MD_BOLD   = re.compile(r'(?<!\w)(\*\*|__)(.+?)\1(?!\w)', re.S)
 MD_ITALIC = re.compile(r'(?<!\w)(\*|_)(.+?)\1(?!\w)', re.S)
@@ -11,6 +13,9 @@ _BARE_LINK_RE = re.compile(r'(?<!href=["\'])(https?://[^\s<>)]+)')
 _TEXT_LINK_RE = re.compile(r'([^<\[]+?)\s*\((https?://(?:\\\)|[^)])+)\)')
 _VK_LINK_RE = re.compile(r'\[([^|\]]+)\|([^\]]+)\]')
 _TG_MENTION_RE = re.compile(r'(?<![\w/@])@([a-zA-Z0-9_]{4,32})')
+
+_TG_TAG_RE = re.compile(r"</?tg-(?:emoji|spoiler)[^>]*?>", re.IGNORECASE)
+_ESCAPED_TG_TAG_RE = re.compile(r"&lt;/?tg-(?:emoji|spoiler).*?&gt;", re.IGNORECASE)
 
 
 def _unescape_md_url(url: str) -> str:
@@ -134,6 +139,105 @@ def sanitize_for_vk(text_or_html: str) -> str:
     s = "\n".join(cleaned)
     s = re.sub(r"\n{3,}", "\n\n", s).strip()
     return s
+
+
+def sanitize_telegram_html(html_text: str) -> str:
+    """Remove Telegram-specific HTML wrappers while keeping inner text."""
+
+    raw = len(_TG_TAG_RE.findall(html_text))
+    escaped = len(_ESCAPED_TG_TAG_RE.findall(html_text))
+    if raw or escaped:
+        logging.info("telegraph:sanitize tg-tags raw=%d escaped=%d", raw, escaped)
+    cleaned = _TG_TAG_RE.sub("", html_text)
+    cleaned = _ESCAPED_TG_TAG_RE.sub("", cleaned)
+    return cleaned
+
+
+@lru_cache(maxsize=8)
+def md_to_html(text: str) -> str:
+    html_text = simple_md_to_html(text)
+    html_text = linkify_for_telegraph(html_text)
+    html_text = sanitize_telegram_html(html_text)
+    if not re.match(r"^<(?:h\d|p|ul|ol|blockquote|pre|table)", html_text):
+        html_text = f"<p>{html_text}</p>"
+    # Telegraph API does not allow h1/h2 or Telegram-specific tags
+    html_text = re.sub(r"<(\/?)h[12]>", r"<\1h3>", html_text)
+    html_text = sanitize_telegram_html(html_text)
+    return html_text
+
+
+def extract_link_from_html(html_text: str) -> str | None:
+    """Return a registration or ticket link from HTML if present."""
+
+    pattern = re.compile(
+        r"<a[^>]+href=['\"]([^'\"]+)['\"][^>]*>(.*?)</a>",
+        re.IGNORECASE | re.DOTALL,
+    )
+    matches = list(pattern.finditer(html_text))
+
+    # prefer anchors whose text mentions registration or tickets
+    for match in matches:
+        href, label = match.group(1), match.group(2)
+        text = label.lower()
+        if any(word in text for word in ["регистра", "ticket", "билет"]):
+            return href
+
+    # otherwise look for anchors located near the word "регистрация"
+    lower_html = html_text.lower()
+    for match in matches:
+        href = match.group(1)
+        start, end = match.span()
+        context_before = lower_html[max(0, start - 60) : start]
+        context_after = lower_html[end : end + 60]
+        if "регистра" in context_before or "регистра" in context_after:
+            return href
+
+    if matches:
+        return matches[0].group(1)
+    return None
+
+
+def extract_links_from_html(html_text: str) -> list[str]:
+    """Return all registration or ticket links in order of appearance."""
+
+    pattern = re.compile(
+        r"<a[^>]+href=['\"]([^'\"]+)['\"][^>]*>(.*?)</a>",
+        re.IGNORECASE | re.DOTALL,
+    )
+    matches = list(pattern.finditer(html_text))
+    lower_html = html_text.lower()
+    skip_phrases = ["полюбить 39"]
+
+    def qualifies(label: str, start: int, end: int) -> bool:
+        text = label.lower()
+        if any(word in text for word in ["регистра", "ticket", "билет"]):
+            return True
+        context_before = lower_html[max(0, start - 60) : start]
+        context_after = lower_html[end : end + 60]
+        return (
+            "регистра" in context_before
+            or "регистра" in context_after
+            or "билет" in context_before
+            or "билет" in context_after
+        )
+
+    prioritized: list[tuple[int, str]] = []
+    others: list[tuple[int, str]] = []
+    for match in matches:
+        href, label = match.group(1), match.group(2)
+        context_before = lower_html[max(0, match.start() - 60) : match.start()]
+        if any(phrase in context_before for phrase in skip_phrases):
+            continue
+        if qualifies(label, *match.span()):
+            prioritized.append((match.start(), href))
+        else:
+            others.append((match.start(), href))
+
+    prioritized.sort(key=lambda item: item[0])
+    others.sort(key=lambda item: item[0])
+    links = [href for _, href in prioritized]
+    links.extend(href for _, href in others)
+    return links
 
 def telegraph_br() -> list[dict]:
     """Return a safe blank line for Telegraph rendering."""

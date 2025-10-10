@@ -3,8 +3,89 @@ import logging
 import hashlib
 import unicodedata
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, List, Tuple
+
+
+MONTHS = [
+    "января",
+    "февраля",
+    "марта",
+    "апреля",
+    "мая",
+    "июня",
+    "июля",
+    "августа",
+    "сентября",
+    "октября",
+    "ноября",
+    "декабря",
+]
+
+MONTHS_PREP = [
+    "январе",
+    "феврале",
+    "марте",
+    "апреле",
+    "мае",
+    "июне",
+    "июле",
+    "августе",
+    "сентябре",
+    "октябре",
+    "ноябре",
+    "декабре",
+]
+
+MONTHS_NOM = [
+    "январь",
+    "февраль",
+    "март",
+    "апрель",
+    "май",
+    "июнь",
+    "июль",
+    "август",
+    "сентябрь",
+    "октябрь",
+    "ноябрь",
+    "декабрь",
+]
+
+_MONTH_TZ = timezone.utc
+
+
+def set_month_timezone(tz: timezone) -> None:
+    """Configure timezone used for month helper functions."""
+
+    global _MONTH_TZ
+    _MONTH_TZ = tz
+
+
+def month_name(month: str) -> str:
+    y, m = month.split("-")
+    return f"{MONTHS[int(m) - 1]} {y}"
+
+
+def month_name_prepositional(month: str) -> str:
+    y, m = month.split("-")
+    return f"{MONTHS_PREP[int(m) - 1]} {y}"
+
+
+def month_name_nominative(month: str) -> str:
+    """Return month name in nominative case, add year if different from current."""
+
+    y, m = month.split("-")
+    name = MONTHS_NOM[int(m) - 1]
+    if int(y) != datetime.now(_MONTH_TZ).year:
+        return f"{name} {y}"
+    return name
+
+
+def next_month(month: str) -> str:
+    d = datetime.fromisoformat(month + "-01")
+    n = (d.replace(day=28) + timedelta(days=4)).replace(day=1)
+    return n.strftime("%Y-%m")
 
 
 def ensure_footer_nav_with_hr(
