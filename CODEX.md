@@ -4,6 +4,9 @@
 - **ALWAYS** review this CODEX before starting any task on this repository.
 - **ALWAYS** keep documentation and automation artifacts synchronized with code changes.
 - **ALWAYS** run and update relevant smoke tests before requesting review or completing work.
+- **ALWAYS** update user-facing documentation (READMEs, help text, runbooks) when behavior changes or explicitly document why no update is required.
+- **ALWAYS** append relevant entries to the CHANGELOG describing user-impacting fixes and features.
+- **ALWAYS** verify new or modified functionality has appropriate logging coverage in place, consistent with the Definition of Done below.
 - **NEVER** merge or submit changes without passing smoke tests and linting checks.
 - **NEVER** introduce fixtures or test data that persist outside their intended scope.
 
