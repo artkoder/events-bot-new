@@ -8178,12 +8178,18 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
             if fest.photo_url in photo_urls
             else 0
         )
-        text = (
-            "Иллюстрации фестиваля\n"
-            f"Всего: {total}\n"
-            f"Текущая обложка: #{current}\n"
-            "Выберите новое изображение обложки:"
+        telegraph_url = _festival_telegraph_url(fest)
+        lines = ["Иллюстрации фестиваля"]
+        if telegraph_url:
+            lines.append(telegraph_url)
+        lines.extend(
+            [
+                f"Всего: {total}",
+                f"Текущая обложка: #{current}",
+                "Выберите новое изображение обложки:",
+            ]
         )
+        text = "\n".join(lines)
         buttons = [
             types.InlineKeyboardButton(
                 text=f"#{i+1}", callback_data=f"festsetcover:{fid}:{i+1}"
