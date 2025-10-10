@@ -8473,6 +8473,57 @@ async def test_festimgs_handles_missing_photo_urls(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_festimgs_includes_telegraph_link(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async with db.get_session() as session:
+        fest = Festival(name="Jazz", telegraph_path="My-Page", photo_urls=["http://img/1"])
+        session.add(fest)
+        await session.commit()
+        fid = fest.id
+
+    cb = types.CallbackQuery.model_validate(
+        {
+            "id": "1",
+            "data": f"festimgs:{fid}",
+            "from": {"id": 1, "is_bot": False, "first_name": "U"},
+            "chat_instance": "1",
+            "message": {
+                "message_id": 1,
+                "date": 0,
+                "chat": {"id": 1, "type": "private"},
+                "from": BOT_SENDER,
+                "text": "stub",
+            },
+        }
+    ).as_(bot)
+
+    responses: list[str] = []
+
+    async def dummy_message_answer(text=None, **kwargs):
+        if text is not None:
+            responses.append(text)
+        return None
+
+    async def dummy_callback_answer(text=None, **kwargs):
+        return None
+
+    object.__setattr__(cb.message, "answer", dummy_message_answer)
+    object.__setattr__(cb, "answer", dummy_callback_answer)
+
+    await process_request(cb, db, bot)
+
+    assert responses, "callback message.answer was not invoked"
+    text = responses[-1]
+    lines = text.splitlines()
+    assert lines[0] == "Иллюстрации фестиваля"
+    assert lines[1] == "https://telegra.ph/My-Page"
+    assert "Всего:" in lines[2]
+
+
+@pytest.mark.asyncio
 async def test_festdays_single_day_copies_source(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
