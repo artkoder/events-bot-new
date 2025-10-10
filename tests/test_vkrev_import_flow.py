@@ -551,6 +551,94 @@ async def test_vkrev_import_flow_handles_multiple_events(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_vkrev_import_flow_notifies_on_persist_failure(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    async with db.raw_conn() as conn:
+        await conn.execute(
+            "INSERT INTO vk_source(group_id, screen_name, name, location, default_time, default_ticket_link) VALUES(?,?,?,?,?,?)",
+            (1, "club1", "Test Community", "", None, None),
+        )
+        await conn.execute(
+            "INSERT INTO vk_inbox(id, group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status) VALUES(?,?,?,?,?,?,?,?,?)",
+            (1, 1, 2, 0, "text", None, 1, 0, "pending"),
+        )
+        await conn.commit()
+
+    async def fake_fetch(*args, **kwargs):
+        return []
+
+    draft1 = vk_intake.EventDraft(
+        title="First",
+        date="2025-09-02",
+        time="10:00",
+        source_text="First",
+    )
+    draft2 = vk_intake.EventDraft(
+        title="Second",
+        date="2025-09-03",
+        time="12:00",
+        source_text="Second",
+    )
+
+    async def fake_build(*args, **kwargs):
+        return [draft1, draft2], None
+
+    persist_calls = 0
+
+    async def fake_persist(draft, photos, db_, **kwargs):
+        nonlocal persist_calls
+        persist_calls += 1
+        if persist_calls == 1:
+            return vk_intake.PersistResult(
+                event_id=101,
+                telegraph_url="https://t",
+                ics_supabase_url="https://s",
+                ics_tg_url="https://tg",
+                event_date="2025-09-02",
+                event_end_date=None,
+                event_time="10:00",
+                event_type=None,
+                is_free=False,
+            )
+        raise RuntimeError("persist failed")
+
+    mark_calls: list[tuple[Any, Any]] = []
+
+    async def fake_mark_imported(*args, **kwargs):
+        mark_calls.append((args, kwargs))
+
+    monkeypatch.setattr(main, "_vkrev_fetch_photos", fake_fetch)
+    monkeypatch.setattr(vk_intake, "build_event_drafts", fake_build)
+    monkeypatch.setattr(vk_intake, "persist_event_and_pages", fake_persist)
+    monkeypatch.setattr(vk_review, "mark_imported", fake_mark_imported)
+    monkeypatch.setenv("ADMIN_CHAT_ID", "1234")
+
+    bot = DummyBot()
+    await main._vkrev_import_flow(1, 1, 1, "batch1", db, bot)
+
+    assert persist_calls == 2
+    assert mark_calls == []
+    assert len(bot.messages) == 5
+
+    admin_summary, operator_summary, detail_message, failure_operator, failure_admin = bot.messages
+
+    assert admin_summary.chat_id == 1234
+    assert "Событие 1: ID 101" in admin_summary.text
+    assert operator_summary.chat_id == 1
+    assert operator_summary.text == admin_summary.text
+    assert detail_message.chat_id == 1
+    assert detail_message.text.startswith("Импортировано")
+    assert failure_operator.chat_id == 1
+    assert "❌ Импорт остановлен на событии 2" in failure_operator.text
+    assert "Название: Second" in failure_operator.text
+    assert "Успешно импортировано: 1" in failure_operator.text
+    assert failure_admin.chat_id == 1234
+    assert failure_admin.text == failure_operator.text
+
+
+@pytest.mark.asyncio
 async def test_vkrev_import_flow_creates_festival_without_events(tmp_path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
