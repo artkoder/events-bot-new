@@ -27738,7 +27738,7 @@ def create_app() -> web.Application:
 
     async def festmerge_wrapper(callback: types.CallbackQuery):
         await handle_festmerge_callback(callback, db, bot)
-
+ 
     async def backfill_topics_wrapper(message: types.Message):
         await handle_backfill_topics(message, db, bot)
 
