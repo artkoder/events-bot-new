@@ -1,0 +1,14 @@
+python_version: "3.11"
+dependencies:
+  install:
+    - pip install -r requirements.txt
+run:
+  command: pytest -m smoke
+  environment:
+    PYTHONPATH: "."
+fixtures:
+  paths:
+    - tests/_helpers
+constraints:
+  - "Smoke run must avoid all network access."
+  - "Do not read or emit secrets during smoke testing."
