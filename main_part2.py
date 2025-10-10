@@ -10134,7 +10134,96 @@ async def _vkrev_import_flow(
     persist_results: list[
         tuple[vk_intake.EventDraft, vk_intake.PersistResult, Event | None]
     ] = []
-    for draft in drafts:
+    admin_chat = os.getenv("ADMIN_CHAT_ID")
+
+    async def _send_persist_summary_messages() -> None:
+        if not persist_results:
+            return
+        link_lines: list[str] = []
+        for idx, (_draft, res, _event_obj) in enumerate(persist_results, start=1):
+            link_lines.append(f"Событие {idx}: ID {res.event_id}")
+            link_lines.append(f"✅ Telegraph — {res.telegraph_url}")
+            link_lines.append(f"✅ Календарь (ICS) — {res.ics_supabase_url}")
+            link_lines.append(f"✅ ICS (Telegram) — {res.ics_tg_url}")
+            if idx != len(persist_results):
+                link_lines.append("")
+        links = "\n".join(link_lines)
+        if admin_chat:
+            await bot.send_message(int(admin_chat), links)
+        await bot.send_message(chat_id, links)
+
+    async def _send_persist_detail_messages() -> None:
+        for idx, (draft, res, event_obj) in enumerate(persist_results, start=1):
+            base_keyboard = [
+                [
+                    types.InlineKeyboardButton(
+                        text="↪️ Репостнуть в Vk",
+                        callback_data=f"vkrev:repost:{res.event_id}",
+                    ),
+                    types.InlineKeyboardButton(
+                        text="✂️ Сокращённый рерайт",
+                        callback_data=f"vkrev:shortpost:{res.event_id}",
+                    ),
+                ],
+                [
+                    types.InlineKeyboardButton(
+                        text="Редактировать",
+                        callback_data=f"edit:{res.event_id}",
+                    )
+                ],
+            ]
+            if event_obj:
+                inline_keyboard = append_tourist_block(base_keyboard, event_obj, "vk")
+            else:
+                inline_keyboard = base_keyboard
+            markup = types.InlineKeyboardMarkup(inline_keyboard=inline_keyboard)
+
+            def _display(value: str | None) -> str:
+                return value if value else "—"
+
+            detail_lines = [
+                f"Тип: {_display(res.event_type)}",
+                f"Дата начала: {_display(res.event_date)}",
+                f"Дата окончания: {_display(res.event_end_date)}",
+                f"Время: {_display(res.event_time)}",
+                f"Бесплатное: {'да' if res.is_free else 'нет'}",
+            ]
+            if event_obj:
+                festival_line = f"Фестиваль/праздник: {_display(getattr(event_obj, 'festival', None))}"
+            else:
+                festival_line = f"Фестиваль/праздник: {_display(getattr(draft, 'festival', None))}"
+            detail_lines.append(festival_line)
+            if event_obj:
+                detail_lines.append(
+                    _format_topics_line(
+                        getattr(event_obj, "topics", None),
+                        bool(getattr(event_obj, "topics_manual", False)),
+                    )
+                )
+            if fest_status_line:
+                detail_lines.append(fest_status_line)
+            if draft.poster_media and draft.ocr_tokens_remaining is not None:
+                if getattr(draft, "ocr_limit_notice", None):
+                    detail_lines.append(draft.ocr_limit_notice)
+                detail_lines.append(
+                    f"OCR: потрачено {draft.ocr_tokens_spent}, осталось {draft.ocr_tokens_remaining}"
+                )
+
+            header = "Импортировано"
+            if len(persist_results) > 1:
+                header = f"Импортировано #{idx}"
+
+            if event_obj:
+                message_text = build_event_card_message(
+                    header, event_obj, detail_lines
+                )
+            else:
+                message_text = "\n".join([header, *detail_lines])
+
+            await bot.send_message(chat_id, message_text, reply_markup=markup)
+
+    total_drafts = len(drafts)
+    for idx, draft in enumerate(drafts, start=1):
         tolerance_days: int | None = None
         if draft.festival:
             record = get_holiday_record(draft.festival)
@@ -10143,12 +10232,47 @@ async def _vkrev_import_flow(
         persist_kwargs: dict[str, Any] = {"source_post_url": source_post_url}
         if tolerance_days is not None:
             persist_kwargs["holiday_tolerance_days"] = tolerance_days
-        res = await vk_intake.persist_event_and_pages(
-            draft,
-            photos,
-            db,
-            **persist_kwargs,
-        )
+        start_time = _time.monotonic()
+        try:
+            res = await vk_intake.persist_event_and_pages(
+                draft,
+                photos,
+                db,
+                **persist_kwargs,
+            )
+        except Exception:
+            elapsed = _time.monotonic() - start_time
+            logging.exception(
+                "vkrev.persist_event.failed idx=%s title=%r elapsed=%.2fs successes=%s total=%s",
+                idx,
+                getattr(draft, "title", None),
+                elapsed,
+                len(persist_results),
+                total_drafts,
+            )
+            if persist_results:
+                await _send_persist_summary_messages()
+                await _sync_festival_updates()
+                await _send_persist_detail_messages()
+            failure_title = (
+                getattr(draft, "title", None)
+                or getattr(draft, "name", None)
+                or "—"
+            )
+            failure_lines = [
+                f"❌ Импорт остановлен на событии {idx} из {total_drafts}.",
+            ]
+            if failure_title and failure_title != "—":
+                failure_lines.append(f"Название: {failure_title}")
+            failure_lines.append(
+                f"Успешно импортировано: {len(persist_results)}."
+            )
+            failure_lines.append("Проверьте логи и попробуйте ещё раз.")
+            failure_message = "\n".join(failure_lines)
+            await bot.send_message(chat_id, failure_message)
+            if admin_chat:
+                await bot.send_message(int(admin_chat), failure_message)
+            return
         async with db.get_session() as session:
             event_obj = await session.get(Event, res.event_id)
         persist_results.append((draft, res, event_obj))
@@ -10195,90 +10319,12 @@ async def _vkrev_import_flow(
     except Exception:
         logging.exception("vk_import_result.supabase_failed")
     vk_review_actions_total["imported"] += 1
-    link_lines: list[str] = []
-    for idx, (_draft, res, _event_obj) in enumerate(persist_results, start=1):
-        link_lines.append(f"Событие {idx}: ID {res.event_id}")
-        link_lines.append(f"✅ Telegraph — {res.telegraph_url}")
-        link_lines.append(f"✅ Календарь (ICS) — {res.ics_supabase_url}")
-        link_lines.append(f"✅ ICS (Telegram) — {res.ics_tg_url}")
-        if idx != len(persist_results):
-            link_lines.append("")
-    links = "\n".join(link_lines)
-    admin_chat = os.getenv("ADMIN_CHAT_ID")
-    if admin_chat:
-        await bot.send_message(int(admin_chat), links)
-    await bot.send_message(chat_id, links)
+
+    await _send_persist_summary_messages()
 
     await _sync_festival_updates()
 
-    for idx, (draft, res, event_obj) in enumerate(persist_results, start=1):
-        base_keyboard = [
-            [
-                types.InlineKeyboardButton(
-                    text="↪️ Репостнуть в Vk",
-                    callback_data=f"vkrev:repost:{res.event_id}",
-                ),
-                types.InlineKeyboardButton(
-                    text="✂️ Сокращённый рерайт",
-                    callback_data=f"vkrev:shortpost:{res.event_id}",
-                ),
-            ],
-            [
-                types.InlineKeyboardButton(
-                    text="Редактировать",
-                    callback_data=f"edit:{res.event_id}",
-                )
-            ],
-        ]
-        if event_obj:
-            inline_keyboard = append_tourist_block(base_keyboard, event_obj, "vk")
-        else:
-            inline_keyboard = base_keyboard
-        markup = types.InlineKeyboardMarkup(inline_keyboard=inline_keyboard)
-
-        def _display(value: str | None) -> str:
-            return value if value else "—"
-
-        detail_lines = [
-            f"Тип: {_display(res.event_type)}",
-            f"Дата начала: {_display(res.event_date)}",
-            f"Дата окончания: {_display(res.event_end_date)}",
-            f"Время: {_display(res.event_time)}",
-            f"Бесплатное: {'да' if res.is_free else 'нет'}",
-        ]
-        if event_obj:
-            festival_line = f"Фестиваль/праздник: {_display(getattr(event_obj, 'festival', None))}"
-        else:
-            festival_line = f"Фестиваль/праздник: {_display(getattr(draft, 'festival', None))}"
-        detail_lines.append(festival_line)
-        if event_obj:
-            detail_lines.append(
-                _format_topics_line(
-                    getattr(event_obj, "topics", None),
-                    bool(getattr(event_obj, "topics_manual", False)),
-                )
-            )
-        if fest_status_line:
-            detail_lines.append(fest_status_line)
-        if draft.poster_media and draft.ocr_tokens_remaining is not None:
-            if getattr(draft, "ocr_limit_notice", None):
-                detail_lines.append(draft.ocr_limit_notice)
-            detail_lines.append(
-                f"OCR: потрачено {draft.ocr_tokens_spent}, осталось {draft.ocr_tokens_remaining}"
-            )
-
-        header = "Импортировано"
-        if len(persist_results) > 1:
-            header = f"Импортировано #{idx}"
-
-        if event_obj:
-            message_text = build_event_card_message(
-                header, event_obj, detail_lines
-            )
-        else:
-            message_text = "\n".join([header, *detail_lines])
-
-        await bot.send_message(chat_id, message_text, reply_markup=markup)
+    await _send_persist_detail_messages()
 
 
 _VK_STORY_LINK_RE = re.compile(r"\[([^\[\]]+)\]")
