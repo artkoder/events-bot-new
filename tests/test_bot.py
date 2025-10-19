@@ -1850,6 +1850,39 @@ async def test_addevent_strips_command(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_handle_add_event_reports_missing_fields(tmp_path: Path, monkeypatch):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    bot = DummyBot("123:abc")
+
+    async def fake_add_events(*args, **kwargs):
+        return main.AddEventsResult(
+            [(None, False, ["location_name"], "missing")],
+            0,
+            None,
+        )
+
+    monkeypatch.setattr(main, "add_events_from_text", fake_add_events)
+
+    msg = types.Message.model_validate(
+        {
+            "message_id": 1,
+            "date": 0,
+            "chat": {"id": 1, "type": "private"},
+            "from": {"id": 1, "is_bot": False, "first_name": "A"},
+            "text": "/addevent Some info",
+        }
+    )
+
+    await handle_add_event(msg, db, bot)
+
+    assert any(
+        "отсутствуют поля" in text and "location_name" in text
+        for _, text, _ in bot.messages
+    )
+
+
+@pytest.mark.asyncio
 async def test_add_event_reports_ocr_usage(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
