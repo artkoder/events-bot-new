@@ -10810,6 +10810,17 @@ async def handle_add_event(
     grouped: dict[int, tuple[Event, bool]] = {}
     fest_msgs: list[tuple[Festival, bool, list[str]]] = []
     for saved, added, lines, status in results:
+        if saved is None or status == "missing":
+            missing_fields_text = ", ".join(lines) if lines else "обязательные поля"
+            text_out = (
+                "Не удалось сохранить событие: отсутствуют поля — "
+                f"{missing_fields_text}"
+            )
+            if ocr_line:
+                text_out = f"{text_out}\n{ocr_line}"
+                ocr_line = None
+            await bot.send_message(message.chat.id, text_out)
+            continue
         if isinstance(saved, Festival):
             fest_msgs.append((saved, added, lines))
             continue
