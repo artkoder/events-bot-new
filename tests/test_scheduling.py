@@ -3,6 +3,10 @@ from __future__ import annotations
 import sys
 from zoneinfo import ZoneInfo
 
+import importlib
+
+import pytest
+
 import scheduling
 import vk_intake
 
@@ -76,4 +80,23 @@ def test_scheduler_and_extract_do_not_import_main(monkeypatch):
             sys.modules["main"] = original_main
         else:
             sys.modules.pop("main", None)
+
+
+@pytest.mark.asyncio
+async def test_fest_nav_rebuild_job_wrapper_handles_run_id(monkeypatch):
+    calls: list[object] = []
+
+    main = importlib.import_module("main")
+
+    async def fake_build(db):
+        calls.append(db)
+        return "", [], False
+
+    monkeypatch.setattr(main, "build_festivals_nav_block", fake_build)
+
+    job = scheduling._job_wrapper("fest_nav_rebuild", main.rebuild_fest_nav_if_changed)
+    result = await job(object())
+
+    assert result is False
+    assert len(calls) == 1
 
