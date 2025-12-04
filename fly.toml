@@ -9,6 +9,7 @@ app = "events-bot-new-wngqia"
   PORT = "8080"
   PYTHONOPTIMIZE = "2"
   ENABLE_NIGHTLY_PAGE_SYNC = "1"
+  GROUNDED_ANSWER_MODEL_ID = "gemini-2.5-flash-lite"
 
 
 [[mounts]]
