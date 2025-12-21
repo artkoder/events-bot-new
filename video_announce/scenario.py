@@ -7,7 +7,7 @@ import logging
 import os
 import shutil
 import tempfile
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from io import BytesIO
 from typing import Sequence
 from pathlib import Path
@@ -54,6 +54,8 @@ from .types import (
 
 logger = logging.getLogger(__name__)
 CHANNEL_SETTING_KEY = "videoannounce_channels"
+DEFAULT_PRIMARY_WINDOW_DAYS = 3
+DEFAULT_FALLBACK_WINDOW_DAYS = 10
 
 
 def read_positive_int_env(env_key: str, default: int) -> int:
@@ -201,6 +203,58 @@ class VideoAnnounceScenario:
             await self.bot.send_message(self.chat_id, "Not authorized")
             return False
         return True
+
+    def _default_selection_params(self) -> dict[str, int | str]:
+        now_local = datetime.now(LOCAL_TZ)
+        target = (now_local + timedelta(days=1)).date()
+        return {
+            "target_date": target.isoformat(),
+            "primary_window_days": DEFAULT_PRIMARY_WINDOW_DAYS,
+            "fallback_window_days": DEFAULT_FALLBACK_WINDOW_DAYS,
+        }
+
+    def _parse_target_date(self, raw: str | None) -> date | None:
+        if not raw:
+            return None
+        try:
+            return date.fromisoformat(raw)
+        except ValueError:
+            return None
+
+    def _get_selection_params(self, session_obj: VideoAnnounceSession) -> dict[str, int | str]:
+        params = self._default_selection_params()
+        stored = session_obj.selection_params if isinstance(session_obj.selection_params, dict) else {}
+        params.update({k: v for k, v in (stored or {}).items() if v is not None})
+        return params
+
+    async def _resolve_profile(self, profile_key: str | None) -> VideoProfile:
+        profiles = await fetch_profiles()
+        if profile_key:
+            for profile in profiles:
+                if profile.key == profile_key:
+                    return profile
+        return VideoProfile(profile_key or "default", profile_key or "", "")
+
+    def _selection_ctx_from_params(
+        self, profile: VideoProfile | None, params: dict[str, int | str]
+    ) -> SelectionContext:
+        primary = int(params.get("primary_window_days", DEFAULT_PRIMARY_WINDOW_DAYS) or 0)
+        fallback = int(params.get("fallback_window_days", DEFAULT_FALLBACK_WINDOW_DAYS) or 0)
+        target_date = self._parse_target_date(str(params.get("target_date")))
+        return SelectionContext(
+            tz=LOCAL_TZ,
+            target_date=target_date,
+            profile=profile,
+            primary_window_days=primary,
+            fallback_window_days=fallback,
+        )
+
+    async def _build_selection_context(
+        self, session_obj: VideoAnnounceSession
+    ) -> SelectionContext:
+        params = self._get_selection_params(session_obj)
+        profile = await self._resolve_profile(session_obj.profile_key)
+        return self._selection_ctx_from_params(profile, params)
 
     async def has_rendering(self) -> VideoAnnounceSession | None:
         async with self.db.get_session() as session:
@@ -369,18 +423,16 @@ class VideoAnnounceScenario:
             )
             return
 
-        now_local = datetime.now(LOCAL_TZ)
-        ctx = SelectionContext(
-            tz=LOCAL_TZ,
-            target_date=(now_local + timedelta(days=1)).date(),
-            profile=VideoProfile(profile_key, "", ""),
-        )
+        params = self._default_selection_params()
+        profile = await self._resolve_profile(profile_key)
+        ctx = self._selection_ctx_from_params(profile, params)
         test_chat_id, main_chat_id = await self._get_profile_channels(profile_key)
         ranked = await build_selection(self.db, ctx, client=KaggleClient())
         async with self.db.get_session() as session:
             obj = VideoAnnounceSession(
                 status=VideoAnnounceSessionStatus.SELECTED,
                 profile_key=profile_key,
+                selection_params=params,
                 test_chat_id=test_chat_id,
                 main_chat_id=main_chat_id,
             )
@@ -500,6 +552,51 @@ class VideoAnnounceScenario:
             session_obj, ranked, tz=timezone.utc, items=ready_items
         )
 
+    async def _refresh_selection_items(
+        self, session_obj: VideoAnnounceSession, ranked: Sequence[RankedEvent]
+    ) -> None:
+        async with self.db.get_session() as session:
+            res = await session.execute(
+                select(VideoAnnounceItem).where(
+                    VideoAnnounceItem.session_id == session_obj.id
+                )
+            )
+            existing = res.scalars().all()
+            existing_map = {item.event_id: item for item in existing}
+            preserved_status = {
+                item.event_id: item.status
+                for item in existing
+                if item.status in {VideoAnnounceItemStatus.READY, VideoAnnounceItemStatus.SKIPPED}
+            }
+            new_ids = {r.event.id for r in ranked}
+            for item in existing:
+                if item.event_id not in new_ids:
+                    await session.delete(item)
+
+            for idx, r in enumerate(ranked, start=1):
+                item = existing_map.get(r.event.id) or VideoAnnounceItem(
+                    session_id=session_obj.id, event_id=r.event.id
+                )
+                item.position = idx
+                saved_status = preserved_status.get(r.event.id)
+                if saved_status:
+                    item.status = saved_status
+                elif item.status not in {
+                    VideoAnnounceItemStatus.READY,
+                    VideoAnnounceItemStatus.SKIPPED,
+                }:
+                    item.status = VideoAnnounceItemStatus.READY
+                session.add(item)
+            await session.commit()
+
+    async def _recalculate_selection(
+        self, session_obj: VideoAnnounceSession
+    ) -> list[RankedEvent]:
+        ctx = await self._build_selection_context(session_obj)
+        ranked = await build_selection(self.db, ctx, client=KaggleClient())
+        await self._refresh_selection_items(session_obj, ranked)
+        return ranked
+
     async def _selection_view(
         self, session_id: int
     ) -> tuple[str, types.InlineKeyboardMarkup]:
@@ -507,12 +604,38 @@ class VideoAnnounceScenario:
         if not session_obj:
             return ("Сессия не найдена", types.InlineKeyboardMarkup(inline_keyboard=[]))
         pairs = await self._load_items_with_events(session_id)
+        params = self._get_selection_params(session_obj)
+        target = self._parse_target_date(str(params.get("target_date")))
+        primary = int(params.get("primary_window_days", DEFAULT_PRIMARY_WINDOW_DAYS) or 0)
+        fallback = int(params.get("fallback_window_days", DEFAULT_FALLBACK_WINDOW_DAYS) or 0)
         lines = [
             f"Сессия #{session_id}: {session_obj.status.value}",
+            f"Базовая дата: {(target.isoformat() if target else 'не задана')} · окно +{primary}/+{fallback} дней",
             "Выберите события для рендера:",
         ]
         keyboard: list[list[types.InlineKeyboardButton]] = []
         allow_edit = session_obj.status == VideoAnnounceSessionStatus.SELECTED
+        if allow_edit:
+            keyboard.append(
+                [
+                    types.InlineKeyboardButton(
+                        text="+1 день", callback_data=f"vidsel:{session_id}:plus1"
+                    ),
+                    types.InlineKeyboardButton(
+                        text="+3 дня", callback_data=f"vidsel:{session_id}:plus3"
+                    ),
+                ]
+            )
+            keyboard.append(
+                [
+                    types.InlineKeyboardButton(
+                        text="Сброс к завтра", callback_data=f"vidsel:{session_id}:reset"
+                    ),
+                    types.InlineKeyboardButton(
+                        text="Пересчитать", callback_data=f"vidsel:{session_id}:recalc"
+                    ),
+                ]
+            )
         for item, ev in pairs:
             marker = "✅" if item.status == VideoAnnounceItemStatus.READY else "⬜"
             title = html.escape(ev.title[:40])
@@ -551,6 +674,37 @@ class VideoAnnounceScenario:
     ) -> None:
         text, markup = await self._selection_view(session_id)
         await message.edit_text(text, reply_markup=markup)
+
+    async def adjust_selection_params(
+        self, session_id: int, action: str, message: types.Message
+    ) -> str:
+        if not await self._has_access():
+            return "Not authorized"
+        async with self.db.get_session() as session:
+            sess = await session.get(VideoAnnounceSession, session_id)
+            if not sess:
+                return "Сессия не найдена"
+            if sess.status != VideoAnnounceSessionStatus.SELECTED:
+                return "Сессия уже запущена"
+            params = self._get_selection_params(sess)
+            base_date = self._parse_target_date(str(params.get("target_date"))) or (
+                datetime.now(LOCAL_TZ).date() + timedelta(days=1)
+            )
+            if action == "plus1":
+                params["target_date"] = (base_date + timedelta(days=1)).isoformat()
+            elif action == "plus3":
+                params["target_date"] = (base_date + timedelta(days=3)).isoformat()
+            elif action == "reset":
+                params = self._default_selection_params()
+            elif action != "recalc":
+                return "Неизвестное действие"
+            sess.selection_params = params
+            session.add(sess)
+            await session.commit()
+            await session.refresh(sess)
+        await self._recalculate_selection(sess)
+        await self._update_selection_message(message, session_id)
+        return "Обновлено"
 
     async def toggle_item(self, session_id: int, event_id: int, message: types.Message) -> str:
         if not await self._has_access():

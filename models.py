@@ -430,6 +430,7 @@ class VideoAnnounceSession(SQLModel, table=True):
         sa_column=Column(SAEnum(VideoAnnounceSessionStatus)),
     )
     profile_key: Optional[str] = None
+    selection_params: dict | None = Field(default=None, sa_column=Column(JSON))
     created_at: datetime = Field(
         default_factory=utc_now, sa_column=Column(DateTime(timezone=True))
     )
