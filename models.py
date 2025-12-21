@@ -407,6 +407,8 @@ class VideoAnnounceSessionStatus(str, Enum):
     RENDERING = "RENDERING"
     DONE = "DONE"
     FAILED = "FAILED"
+    PUBLISHED_TEST = "PUBLISHED_TEST"
+    PUBLISHED_MAIN = "PUBLISHED_MAIN"
 
 
 class VideoAnnounceSession(SQLModel, table=True):
@@ -435,6 +437,11 @@ class VideoAnnounceSession(SQLModel, table=True):
     finished_at: Optional[datetime] = Field(
         default=None, sa_column=Column(DateTime(timezone=True))
     )
+    published_at: Optional[datetime] = Field(
+        default=None, sa_column=Column(DateTime(timezone=True))
+    )
+    kaggle_dataset: Optional[str] = None
+    kaggle_kernel_ref: Optional[str] = None
     error: Optional[str] = None
     video_url: Optional[str] = None
 
