@@ -171,8 +171,6 @@ def _parse_llm_ranking(raw: str, known_ids: set[int]) -> list[RankedChoice]:
                 event_id=event_id,
                 score=score,
                 reason=item.get("reason"),
-                use_ocr=item.get("use_ocr"),
-                poster_source=item.get("poster_source"),
             )
         )
     return parsed
@@ -261,10 +259,9 @@ async def _rank_with_llm(
         parsed = []
     ranked: list[RankedEvent] = []
     if parsed:
-        score_map = {row.event_id: row.score for row in parsed}
-        reason_map = {row.event_id: row.reason for row in parsed}
-        ordering = {row.event_id: idx for idx, row in enumerate(parsed)}
-        missing = [ev.id for ev in events if ev.id not in ordering]
+        event_map = {ev.id: ev for ev in events}
+        parsed_ids = {row.event_id for row in parsed}
+        missing = [ev.id for ev in events if ev.id not in parsed_ids]
         if missing:
             logger.warning(
                 "video_announce: ranking_incomplete returned=%d expected=%d missing=%s",
@@ -272,14 +269,17 @@ async def _rank_with_llm(
                 len(events),
                 missing,
             )
-        for ev in sorted(events, key=lambda e: ordering.get(e.id, len(events))):
+        for idx, row in enumerate(parsed):
+            event = event_map.get(row.event_id)
+            if not event:
+                continue
             ranked.append(
                 RankedEvent(
-                    event=ev,
-                    score=score_map.get(ev.id, 0.0),
-                    position=len(ranked) + 1,
-                    reason=reason_map.get(ev.id),
-                    mandatory=ev.id in mandatory_ids,
+                    event=event,
+                    score=row.score,
+                    position=idx + 1,
+                    reason=row.reason,
+                    mandatory=event.id in mandatory_ids,
                 )
             )
     else:
@@ -292,21 +292,6 @@ async def _rank_with_llm(
             )
             for idx, row in enumerate(_score_events(client, events))
         ]
-    if len(ranked) < len(events):
-        existing_ids = {r.event.id for r in ranked}
-        remainder = [ev for ev in events if ev.id not in existing_ids]
-        if remainder:
-            fallback = _score_events(client, remainder)
-            ranked.extend(
-                RankedEvent(
-                    event=row.event,
-                    score=row.score,
-                    position=len(ranked) + idx + 1,
-                    reason="fallback: missing in llm response",
-                    mandatory=row.event.id in mandatory_ids,
-                )
-                for idx, row in enumerate(fallback)
-            )
     return ranked
 
 

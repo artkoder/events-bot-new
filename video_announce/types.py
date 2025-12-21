@@ -30,8 +30,6 @@ class RankedChoice:
     event_id: int
     score: float
     reason: str | None = None
-    use_ocr: bool | None = None
-    poster_source: str | None = None
 
 
 @dataclass
