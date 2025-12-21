@@ -597,6 +597,13 @@ class Database:
                 )
                 """
             )
+            await _add_column(conn, "videoannounce_item", "final_title TEXT")
+            await _add_column(conn, "videoannounce_item", "final_description TEXT")
+            await _add_column(conn, "videoannounce_item", "poster_text TEXT")
+            await _add_column(conn, "videoannounce_item", "poster_source TEXT")
+            await _add_column(
+                conn, "videoannounce_item", "use_ocr INTEGER NOT NULL DEFAULT 0"
+            )
             await conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS videoannounce_eventhit(
