@@ -1,10 +1,23 @@
+def _normalize_title_and_emoji(title: str, emoji: str | None) -> tuple[str, str]:
+    """Normalize emoji placement so it appears only once per rendered line."""
+
+    if not emoji:
+        return title, ""
+
+    trimmed_title = title.lstrip()
+    if trimmed_title.startswith(emoji):
+        trimmed_title = trimmed_title[len(emoji) :].lstrip()
+
+    return trimmed_title or title.strip(), f"{emoji} "
+
+
 def event_title_nodes(e: Event) -> list:
     nodes: list = []
     if is_recent(e):
         nodes.append("\U0001f6a9 ")
-    if e.emoji and not e.title.strip().startswith(e.emoji):
-        nodes.append(f"{e.emoji} ")
-    title_text = e.title
+    title_text, emoji_part = _normalize_title_and_emoji(e.title, e.emoji)
+    if emoji_part:
+        nodes.append(emoji_part)
     url = e.telegraph_url
     if not url and e.telegraph_path:
         url = f"https://telegra.ph/{e.telegraph_path.lstrip('/')}"
@@ -121,9 +134,9 @@ def exhibition_title_nodes(e: Event) -> list:
     nodes: list = []
     if is_recent(e):
         nodes.append("\U0001f6a9 ")
-    if e.emoji and not e.title.strip().startswith(e.emoji):
-        nodes.append(f"{e.emoji} ")
-    title_text = e.title
+    title_text, emoji_part = _normalize_title_and_emoji(e.title, e.emoji)
+    if emoji_part:
+        nodes.append(emoji_part)
     url = e.telegraph_url
     if not url and e.telegraph_path:
         url = f"https://telegra.ph/{e.telegraph_path.lstrip('/')}"
