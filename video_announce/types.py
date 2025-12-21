@@ -21,6 +21,8 @@ class RankedEvent:
     event: Event
     score: float
     position: int
+    reason: str | None = None
+    mandatory: bool = False
 
 
 @dataclass
@@ -73,10 +75,19 @@ class SelectionContext:
     tz: timezone
     target_date: date | None = None
     profile: VideoProfile | None = None
-    limit: int = 20
+    candidate_limit: int = 20
+    default_selected_min: int = 6
+    default_selected_max: int = 8
     primary_window_days: int = 3
     fallback_window_days: int = 10
     promoted_event_ids: set[int] | None = None
+
+
+@dataclass
+class SelectionBuildResult:
+    ranked: list[RankedEvent]
+    default_ready_ids: set[int]
+    mandatory_ids: set[int]
 
 
 @dataclass

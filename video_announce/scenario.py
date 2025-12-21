@@ -47,6 +47,7 @@ from .selection import (
 from .types import (
     RankedEvent,
     RenderPayload,
+    SelectionBuildResult,
     SelectionContext,
     SessionOverview,
     VideoProfile,
@@ -56,6 +57,9 @@ logger = logging.getLogger(__name__)
 CHANNEL_SETTING_KEY = "videoannounce_channels"
 DEFAULT_PRIMARY_WINDOW_DAYS = 3
 DEFAULT_FALLBACK_WINDOW_DAYS = 10
+DEFAULT_CANDIDATE_LIMIT = 20
+DEFAULT_SELECTED_MIN = 6
+DEFAULT_SELECTED_MAX = 8
 
 
 def read_positive_int_env(env_key: str, default: int) -> int:
@@ -211,6 +215,9 @@ class VideoAnnounceScenario:
             "target_date": target.isoformat(),
             "primary_window_days": DEFAULT_PRIMARY_WINDOW_DAYS,
             "fallback_window_days": DEFAULT_FALLBACK_WINDOW_DAYS,
+            "candidate_limit": DEFAULT_CANDIDATE_LIMIT,
+            "default_selected_min": DEFAULT_SELECTED_MIN,
+            "default_selected_max": DEFAULT_SELECTED_MAX,
         }
 
     def _parse_target_date(self, raw: str | None) -> date | None:
@@ -220,6 +227,36 @@ class VideoAnnounceScenario:
             return date.fromisoformat(raw)
         except ValueError:
             return None
+
+    def _format_event_date(self, raw_date: str) -> str:
+        try:
+            return date.fromisoformat(raw_date.split("..", 1)[0]).strftime("%d.%m")
+        except ValueError:
+            return raw_date.split("..", 1)[0]
+
+    def _normalize_emoji(self, emoji: str | None) -> str:
+        if not emoji:
+            return ""
+        tokens = [part for part in emoji.strip().split() if part]
+        seen = set()
+        unique: list[str] = []
+        for token in tokens:
+            if token in seen:
+                continue
+            seen.add(token)
+            unique.append(token)
+        return unique[0] if unique else ""
+
+    def _format_title(self, ev: Event) -> str:
+        url = ev.telegraph_url or ev.source_post_url
+        title = html.escape(ev.title[:80])
+        if url:
+            safe_url = html.escape(url)
+            return f'<a href="{safe_url}">{title}</a>'
+        return title
+
+    def _chunk_buttons(self, buttons: list[types.InlineKeyboardButton], size: int = 3) -> list[list[types.InlineKeyboardButton]]:
+        return [buttons[i : i + size] for i in range(0, len(buttons), size)]
 
     def _get_selection_params(self, session_obj: VideoAnnounceSession) -> dict[str, int | str]:
         params = self._default_selection_params()
@@ -240,6 +277,13 @@ class VideoAnnounceScenario:
     ) -> SelectionContext:
         primary = int(params.get("primary_window_days", DEFAULT_PRIMARY_WINDOW_DAYS) or 0)
         fallback = int(params.get("fallback_window_days", DEFAULT_FALLBACK_WINDOW_DAYS) or 0)
+        candidate_limit = int(params.get("candidate_limit", DEFAULT_CANDIDATE_LIMIT) or 0)
+        default_selected_min = int(
+            params.get("default_selected_min", DEFAULT_SELECTED_MIN) or 0
+        )
+        default_selected_max = int(
+            params.get("default_selected_max", DEFAULT_SELECTED_MAX) or 0
+        )
         target_date = self._parse_target_date(str(params.get("target_date")))
         return SelectionContext(
             tz=LOCAL_TZ,
@@ -247,6 +291,9 @@ class VideoAnnounceScenario:
             profile=profile,
             primary_window_days=primary,
             fallback_window_days=fallback,
+            candidate_limit=max(candidate_limit, DEFAULT_SELECTED_MAX),
+            default_selected_min=max(default_selected_min, 1),
+            default_selected_max=max(default_selected_max, default_selected_min),
         )
 
     async def _build_selection_context(
@@ -427,7 +474,6 @@ class VideoAnnounceScenario:
         profile = await self._resolve_profile(profile_key)
         ctx = self._selection_ctx_from_params(profile, params)
         test_chat_id, main_chat_id = await self._get_profile_channels(profile_key)
-        ranked = await build_selection(self.db, ctx, client=KaggleClient())
         async with self.db.get_session() as session:
             obj = VideoAnnounceSession(
                 status=VideoAnnounceSessionStatus.SELECTED,
@@ -439,7 +485,12 @@ class VideoAnnounceScenario:
             session.add(obj)
             await session.commit()
             await session.refresh(obj)
-            await prepare_session_items(self.db, obj, ranked)
+        result = await build_selection(
+            self.db, ctx, client=KaggleClient(), session_id=obj.id
+        )
+        await prepare_session_items(
+            self.db, obj, result.ranked, default_ready_ids=result.default_ready_ids
+        )
         await self._send_selection_ui(obj.id)
 
     async def _render_and_notify(self, session_obj: VideoAnnounceSession, ranked) -> None:
@@ -522,7 +573,15 @@ class VideoAnnounceScenario:
             ev = events.get(item.event_id)
             if not ev:
                 continue
-            ranked.append(RankedEvent(event=ev, score=0.0, position=item.position))
+            ranked.append(
+                RankedEvent(
+                    event=ev,
+                    score=item.llm_score or 0.0,
+                    position=item.position,
+                    reason=item.llm_reason,
+                    mandatory=bool(item.is_mandatory),
+                )
+            )
         return sorted(ranked, key=lambda r: r.position)
 
     async def _load_items_with_events(
@@ -553,7 +612,7 @@ class VideoAnnounceScenario:
         )
 
     async def _refresh_selection_items(
-        self, session_obj: VideoAnnounceSession, ranked: Sequence[RankedEvent]
+        self, session_obj: VideoAnnounceSession, result: SelectionBuildResult
     ) -> None:
         async with self.db.get_session() as session:
             res = await session.execute(
@@ -568,12 +627,12 @@ class VideoAnnounceScenario:
                 for item in existing
                 if item.status in {VideoAnnounceItemStatus.READY, VideoAnnounceItemStatus.SKIPPED}
             }
-            new_ids = {r.event.id for r in ranked}
+            new_ids = {r.event.id for r in result.ranked}
             for item in existing:
                 if item.event_id not in new_ids:
                     await session.delete(item)
 
-            for idx, r in enumerate(ranked, start=1):
+            for idx, r in enumerate(result.ranked, start=1):
                 item = existing_map.get(r.event.id) or VideoAnnounceItem(
                     session_id=session_obj.id, event_id=r.event.id
                 )
@@ -585,7 +644,15 @@ class VideoAnnounceScenario:
                     VideoAnnounceItemStatus.READY,
                     VideoAnnounceItemStatus.SKIPPED,
                 }:
-                    item.status = VideoAnnounceItemStatus.READY
+                    item.status = (
+                        VideoAnnounceItemStatus.READY
+                        if r.event.id in result.default_ready_ids
+                        else VideoAnnounceItemStatus.SKIPPED
+                    )
+                item.llm_score = r.score
+                item.llm_reason = r.reason
+                item.is_mandatory = r.mandatory
+                item.include_count = getattr(r.event, "video_include_count", 0) or 0
                 session.add(item)
             await session.commit()
 
@@ -593,9 +660,11 @@ class VideoAnnounceScenario:
         self, session_obj: VideoAnnounceSession
     ) -> list[RankedEvent]:
         ctx = await self._build_selection_context(session_obj)
-        ranked = await build_selection(self.db, ctx, client=KaggleClient())
-        await self._refresh_selection_items(session_obj, ranked)
-        return ranked
+        result = await build_selection(
+            self.db, ctx, client=KaggleClient(), session_id=session_obj.id
+        )
+        await self._refresh_selection_items(session_obj, result)
+        return result.ranked
 
     async def _selection_view(
         self, session_id: int
@@ -608,12 +677,25 @@ class VideoAnnounceScenario:
         target = self._parse_target_date(str(params.get("target_date")))
         primary = int(params.get("primary_window_days", DEFAULT_PRIMARY_WINDOW_DAYS) or 0)
         fallback = int(params.get("fallback_window_days", DEFAULT_FALLBACK_WINDOW_DAYS) or 0)
+        default_selected_max = int(
+            params.get("default_selected_max", DEFAULT_SELECTED_MAX) or DEFAULT_SELECTED_MAX
+        )
         lines = [
             f"Сессия #{session_id}: {session_obj.status.value}",
             f"Базовая дата: {(target.isoformat() if target else 'не задана')} · окно +{primary}/+{fallback} дней",
             "Выберите события для рендера:",
         ]
+        mandatory_total = sum(
+            1
+            for item, ev in pairs
+            if (item.include_count or getattr(ev, "video_include_count", 0) or 0) > 0
+        )
+        if mandatory_total > default_selected_max:
+            lines.append(
+                f"⚠️ Обязательных {mandatory_total}, это больше лимита {default_selected_max}"
+            )
         keyboard: list[list[types.InlineKeyboardButton]] = []
+        toggle_buttons: list[types.InlineKeyboardButton] = []
         allow_edit = session_obj.status == VideoAnnounceSessionStatus.SELECTED
         if allow_edit:
             keyboard.append(
@@ -638,19 +720,34 @@ class VideoAnnounceScenario:
             )
         for item, ev in pairs:
             marker = "✅" if item.status == VideoAnnounceItemStatus.READY else "⬜"
-            title = html.escape(ev.title[:40])
+            emoji = self._normalize_emoji(ev.emoji)
+            date_label = self._format_event_date(ev.date)
+            pin = ""
+            include_count = item.include_count or getattr(ev, "video_include_count", 0) or 0
+            if include_count > 0:
+                pin = f" 📌{include_count}"
+            score = f" · {item.llm_score:.1f}" if item.llm_score is not None else ""
+            reason = (
+                f" · {html.escape(item.llm_reason[:140])}"
+                if item.llm_reason
+                else ""
+            )
+            title = self._format_title(ev)
             lines.append(
-                f"{marker} #{item.position} · {ev.date.split('..', 1)[0]} · {ev.emoji or ''} {title}"
+                f"{marker} #{item.position} · {date_label} · {emoji} {title}{pin}{score}{reason}"
             )
             if allow_edit:
-                keyboard.append(
-                    [
-                        types.InlineKeyboardButton(
-                            text=f"{marker} #{item.position}",
-                            callback_data=f"vidtoggle:{session_id}:{ev.id}",
-                        )
-                    ]
+                toggle_buttons.append(
+                    types.InlineKeyboardButton(
+                        text=f"{marker} #{item.position}",
+                        callback_data=f"vidtoggle:{session_id}:{ev.id}",
+                    )
                 )
+        ready_count = sum(1 for item, _ in pairs if item.status == VideoAnnounceItemStatus.READY)
+        if ready_count:
+            lines.insert(3, f"По умолчанию выбрано: {ready_count} из {len(pairs)}")
+        if allow_edit and toggle_buttons:
+            keyboard.extend(self._chunk_buttons(toggle_buttons, size=3))
         if allow_edit:
             keyboard.append(
                 [
@@ -667,13 +764,15 @@ class VideoAnnounceScenario:
 
     async def _send_selection_ui(self, session_id: int) -> None:
         text, markup = await self._selection_view(session_id)
-        await self.bot.send_message(self.chat_id, text, reply_markup=markup)
+        await self.bot.send_message(
+            self.chat_id, text, reply_markup=markup, parse_mode="HTML"
+        )
 
     async def _update_selection_message(
         self, message: types.Message, session_id: int
     ) -> None:
         text, markup = await self._selection_view(session_id)
-        await message.edit_text(text, reply_markup=markup)
+        await message.edit_text(text, reply_markup=markup, parse_mode="HTML")
 
     async def adjust_selection_params(
         self, session_id: int, action: str, message: types.Message

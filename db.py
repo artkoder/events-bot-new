@@ -605,6 +605,16 @@ class Database:
             await _add_column(
                 conn, "videoannounce_item", "use_ocr INTEGER NOT NULL DEFAULT 0"
             )
+            await _add_column(conn, "videoannounce_item", "llm_score REAL")
+            await _add_column(conn, "videoannounce_item", "llm_reason TEXT")
+            await _add_column(
+                conn,
+                "videoannounce_item",
+                "is_mandatory BOOLEAN NOT NULL DEFAULT 0",
+            )
+            await _add_column(
+                conn, "videoannounce_item", "include_count INTEGER NOT NULL DEFAULT 0"
+            )
             await conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS videoannounce_eventhit(
@@ -638,6 +648,23 @@ class Database:
             )
             await conn.execute(
                 "CREATE INDEX IF NOT EXISTS ix_videoannounce_eventhit_session ON videoannounce_eventhit(session_id)"
+            )
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS videoannounce_llm_trace(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id INTEGER,
+                    stage TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    request_json TEXT NOT NULL,
+                    response_json TEXT NOT NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(session_id) REFERENCES videoannounce_session(id) ON DELETE SET NULL
+                )
+                """
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_videoannounce_llm_trace_session ON videoannounce_llm_trace(session_id)"
             )
 
             await conn.commit()

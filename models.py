@@ -8,6 +8,8 @@ from sqlalchemy import (
     DateTime,
     Index,
     JSON,
+    Boolean,
+    Integer,
     SmallInteger,
     UniqueConstraint,
     text,
@@ -485,6 +487,10 @@ class VideoAnnounceItem(SQLModel, table=True):
     poster_text: Optional[str] = None
     poster_source: Optional[str] = None
     use_ocr: bool = False
+    llm_score: Optional[float] = None
+    llm_reason: Optional[str] = None
+    is_mandatory: bool = Field(default=False, sa_column=Column(Boolean, default=False))
+    include_count: int = Field(default=0, sa_column=Column(Integer, default=0))
     error: Optional[str] = None
     created_at: datetime = Field(
         default_factory=utc_now, sa_column=Column(DateTime(timezone=True))
@@ -507,6 +513,19 @@ class VideoAnnounceEventHit(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     session_id: int = Field(foreign_key="videoannounce_session.id")
     event_id: int = Field(foreign_key="event.id")
+    created_at: datetime = Field(
+        default_factory=utc_now, sa_column=Column(DateTime(timezone=True))
+    )
+
+
+class VideoAnnounceLLMTrace(SQLModel, table=True):
+    __tablename__ = "videoannounce_llm_trace"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    session_id: Optional[int] = Field(default=None, foreign_key="videoannounce_session.id")
+    stage: str
+    model: str
+    request_json: str
+    response_json: str
     created_at: datetime = Field(
         default_factory=utc_now, sa_column=Column(DateTime(timezone=True))
     )
