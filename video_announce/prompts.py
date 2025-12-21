@@ -17,22 +17,15 @@ RANKING_RESPONSE_FORMAT = {
             "properties": {
                 "items": {
                     "type": "array",
+                    "maxItems": 8,
                     "items": {
                         "type": "object",
                         "properties": {
                             "event_id": {"type": "integer"},
                             "score": {"type": "number"},
                             "reason": {"type": ["string", "null"]},
-                            "use_ocr": {"type": ["boolean", "null"]},
-                            "poster_source": {"type": ["string", "null"]},
                         },
-                        "required": [
-                            "event_id",
-                            "score",
-                            "reason",
-                            "use_ocr",
-                            "poster_source",
-                        ],
+                        "required": ["event_id", "score", "reason"],
                         "additionalProperties": False,
                     },
                 }
@@ -100,9 +93,11 @@ def available_prompts() -> list[str]:
 def ranking_prompt() -> str:
     return (
         "Ты ассистент видеоредактора. Получишь JSON с событиями и должен"
-        " выбрать порядок показа для короткого ролика. Оцени свежесть,"
-        " разнообразие тематик, наличие постера и отмеченных продвигаемых"
-        " событий. Ответь строго JSON со списком items без пояснений."
+        " выбрать порядок показа (только на русском) для короткого ролика."
+        " Всегда включай отмеченные продвигаемые события, верни не более N=8"
+        " позиций и укажи краткие русские причины. Не учитывай количество"
+        " постеров как критерий. Ответ строго JSON со списком items без"
+        " пояснений."
     )
 
 
