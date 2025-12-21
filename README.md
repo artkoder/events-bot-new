@@ -199,6 +199,16 @@ line under the button row. The command accepts dates like `2025-07-10`,
   export VK_WEEK_EDIT_SCHEDULE=02:10
   export VK_WEEK_EDIT_TZ=Europe/Kaliningrad
 
+  # Video announcement rendering (Kaggle kernel)
+  # Place kaggle.json (or another set of Kaggle credentials) on the server so the kernel can pull datasets.
+  export KAGGLE_USERNAME=your_username          # Kaggle user used for API calls
+  export KAGGLE_KEY=your_key                    # API token matching the Kaggle user
+  export KAGGLE_KERNEL_ID=author/kernel-name    # Kernel to run for video generation
+  export KAGGLE_DATASET_PREFIX=your_prefix      # Optional: dataset owner/prefix for uploads, defaults to the username
+  export VIDEO_MAX_MB=20                        # Maximum rendered video size; larger files are rejected
+  export VIDEO_STATUS_UPDATE_MINUTES=3          # How often to poll Kaggle and refresh the UI while rendering
+  export VIDEO_KAGGLE_TIMEOUT_MINUTES=20        # Upper bound on kernel execution before the session is marked failed
+
   # Captcha handling parameters
   export CAPTCHA_WAIT_S=600
   export CAPTCHA_MAX_ATTEMPTS=2
