@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Callable, Iterable
+from dataclasses import dataclass, field
 
 import re
 
