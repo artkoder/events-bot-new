@@ -10,7 +10,13 @@ from models import Event, User
 from .kaggle_client import KaggleClient
 
 from db import Database
-from .scenario import VideoAnnounceScenario, handle_prefix_action
+from .scenario import (
+    PendingInstruction,
+    VideoAnnounceScenario,
+    handle_prefix_action,
+    is_waiting_instruction,
+    take_pending_instruction,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -184,3 +190,20 @@ async def handle_video_callback(
     if handled:
         return
     await callback.answer("Неизвестное действие", show_alert=False)
+
+
+async def handle_instruction_message(
+    message: types.Message, db: Database, bot
+) -> None:
+    pending: PendingInstruction | None = take_pending_instruction(message.from_user.id)
+    if not pending:
+        return
+    scenario = VideoAnnounceScenario(db, bot, message.chat.id, message.from_user.id)
+    text = (message.text or message.caption or "").strip()
+    msg = await scenario.apply_instruction(
+        pending.session_id,
+        text or None,
+        reuse_candidates=pending.reuse_candidates,
+        pending=pending,
+    )
+    await bot.send_message(message.chat.id, msg or "Готово")
