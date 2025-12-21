@@ -501,6 +501,18 @@ def payload_as_json(payload: RenderPayload, tz: timezone) -> str:
         pretty_end = format_day_pretty(end)
         return f"Афиша {pretty_start} – {pretty_end}"
 
+    def _format_scene_date(ev: Event) -> str:
+        base_date = ev.date.split("..", 1)[0]
+        try:
+            pretty_date = format_day_pretty(date.fromisoformat(base_date))
+        except Exception:
+            pretty_date = base_date
+        time_text = (ev.time or "").strip()
+        if time_text:
+            short_time = time_text[:5] if ":" in time_text else time_text
+            return f"{pretty_date} {short_time}"
+        return pretty_date
+
     event_map = {ev.id: ev for ev in payload.events}
     scenes = []
     for item in sorted(payload.items, key=lambda it: it.position):
@@ -510,8 +522,8 @@ def payload_as_json(payload: RenderPayload, tz: timezone) -> str:
         location = ", ".join(part for part in [ev.city, ev.location_name] if part)
         scene = {
             "title": item.final_title or ev.title,
-            "description": item.final_description or ev.description,
-            "date": ev.date.split("..", 1)[0],
+            "description": item.final_description or "",
+            "date": _format_scene_date(ev),
             "location": location,
             "images": [_poster_name(item, ev)],
         }
