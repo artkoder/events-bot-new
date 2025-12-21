@@ -50,14 +50,14 @@ FINAL_TEXT_RESPONSE_FORMAT = {
                         "type": "object",
                         "properties": {
                             "event_id": {"type": "integer"},
-                            "title": {"type": "string"},
+                            "final_title": {"type": "string"},
                             "description": {"type": "string"},
                             "use_ocr": {"type": ["boolean", "null"]},
                             "poster_source": {"type": ["string", "null"]},
                         },
                         "required": [
                             "event_id",
-                            "title",
+                            "final_title",
                             "description",
                             "use_ocr",
                             "poster_source",
@@ -104,8 +104,10 @@ def ranking_prompt() -> str:
 def finalize_prompt() -> str:
     return (
         "Ты помогаешь составить финальные заголовки и описания для афиши"
-        " видеоролика. На входе события с краткими фактами и текстом постера."
-        " Подбери цепляющий заголовок (до 8 слов) и одно предложение-описание"
-        " о формате, времени или площадке. Не повторяй точные формулировки"
-        " постера, но учитывай его смысл. Ответ строго в JSON."
+        " видеоролика. У каждого события есть базовый title/description,"
+        " выдержки из OCR постера и из статьи Telegraph. Сформулируй"
+        " цепляющий русский final_title до 12 слов, опираясь на эти источники,"
+        " но не копируя текст постера дословно. Верни одно предложение-описание"
+        " о формате, времени или площадке. Ответ строго в JSON с полем"
+        " final_title."
     )
