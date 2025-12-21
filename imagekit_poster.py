@@ -4,18 +4,41 @@ from __future__ import annotations
 
 import os
 from enum import Enum
+import logging
 from typing import Any
 from urllib.parse import quote
 
 import requests
 
-try:  # pragma: no cover - optional dependency for tests
-    from imagekitio import ImageKit
-except ModuleNotFoundError as exc:  # pragma: no cover - handled at runtime
-    ImageKit = None  # type: ignore[assignment]
-    _IMAGEKIT_IMPORT_ERROR = exc
-else:
-    _IMAGEKIT_IMPORT_ERROR = None
+logger = logging.getLogger(__name__)
+
+ImageKit = None  # type: ignore[assignment]
+_IMAGEKIT_IMPORT_ERROR: Exception | None = None
+
+
+def _import_imagekitio() -> None:
+    """Attempt to import ImageKit and record any failure for later reporting."""
+
+    global ImageKit, _IMAGEKIT_IMPORT_ERROR
+
+    if ImageKit is not None:
+        return
+
+    try:  # pragma: no cover - optional dependency for tests
+        from imagekitio import ImageKit as ImportedImageKit
+    except Exception as exc:  # pragma: no cover - handled at runtime
+        _IMAGEKIT_IMPORT_ERROR = exc
+        logger.warning(
+            "ImageKit import failed: %s. To enable poster processing, install compatible "
+            "dependencies (e.g. imagekitio>=3.0,<4.0 with pydantic<2).",
+            exc,
+        )
+    else:
+        ImageKit = ImportedImageKit  # type: ignore[assignment]
+        _IMAGEKIT_IMPORT_ERROR = None
+
+
+_import_imagekitio()
 
 __all__ = [
     "PosterProcessingMode",
@@ -103,8 +126,18 @@ def process_poster(
     if not isinstance(image_bytes, (bytes, bytearray)):
         raise TypeError("image_bytes must be raw bytes")
 
+    _import_imagekitio()
+
     if ImageKit is None:  # pragma: no cover - configuration error
-        raise RuntimeError("imagekitio package is required to process posters") from _IMAGEKIT_IMPORT_ERROR
+        logger.error(
+            "ImageKit integration is unavailable (%s). Update dependencies to proceed (e.g. "
+            "pip install 'imagekitio>=3.0,<4.0' 'pydantic<2').",
+            _IMAGEKIT_IMPORT_ERROR,
+        )
+        raise RuntimeError(
+            "ImageKit integration is unavailable. Install compatible imagekitio/pydantic "
+            "versions to process posters."
+        ) from _IMAGEKIT_IMPORT_ERROR
 
     client = ImageKit(
         public_key=_require_env("IMAGEKIT_PUBLIC_KEY"),
