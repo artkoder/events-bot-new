@@ -3985,6 +3985,10 @@ async def build_events_message(db: Database, target_date: date, tz: timezone, cr
                 text=f"{icon} Рерайт {e.id}",
                 callback_data=f"vkrev:shortpost:{e.id}",
             ),
+            types.InlineKeyboardButton(
+                text=f"\ud83c\udfac {e.video_include_count}",
+                callback_data=f"vidcnt:{e.id}",
+            ),
         ]
         keyboard.append(row)
 
@@ -13262,6 +13266,7 @@ def create_app() -> web.Application:
     dp = Dispatcher()
     dp.include_router(ik_poster_router)
     db = Database(DB_PATH)
+    import video_announce.handlers as video_handlers
 
     async def start_wrapper(message: types.Message):
         await handle_start(message, db, bot)
@@ -13436,6 +13441,19 @@ def create_app() -> web.Application:
 
     async def restore_wrapper(message: types.Message):
         await handle_restore(message, db, bot)
+
+    async def video_cmd_wrapper(message: types.Message):
+        await video_handlers.handle_video_command(message, db, bot)
+
+    async def video_cb_wrapper(callback: types.CallbackQuery):
+        await video_handlers.handle_video_callback(
+            callback,
+            db,
+            bot,
+            build_events_message=build_events_message,
+            get_tz_offset=get_tz_offset,
+            offset_to_timezone=offset_to_timezone,
+        )
 
     async def edit_message_wrapper(message: types.Message):
         await handle_edit_message(message, db, bot)
@@ -13646,6 +13664,7 @@ def create_app() -> web.Application:
     dp.message.register(start_wrapper, Command("start"))
     dp.message.register(register_wrapper, Command("register"))
     dp.message.register(requests_wrapper, Command("requests"))
+    dp.message.register(video_cmd_wrapper, Command("v"))
     dp.message.register(usage_test_wrapper, Command("usage_test"))
     dp.callback_query.register(
         callback_wrapper,
@@ -13694,6 +13713,9 @@ def create_app() -> web.Application:
         or c.data.startswith("requeue:")
         or c.data.startswith("tourist:")
     ,
+    )
+    dp.callback_query.register(
+        video_cb_wrapper, lambda c: c.data and c.data.startswith("vid")
     )
     dp.callback_query.register(
         festmerge_do_wrapper, lambda c: c.data and c.data.startswith("festmerge_do:")
