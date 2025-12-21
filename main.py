@@ -6596,9 +6596,18 @@ async def ask_4o(
     async def _call():
         async with span("http"):
             async with HTTP_SEMAPHORE:
-                resp = await session.post(url, json=payload, headers=headers)
-                resp.raise_for_status()
-                return await resp.json()
+                async with session.post(url, json=payload, headers=headers) as resp:
+                    if resp.status >= 400:
+                        try:
+                            body = await resp.json()
+                        except Exception:
+                            body = await resp.text()
+                        logging.error("4o request failed with status %s: %s", resp.status, body)
+                        raise RuntimeError(
+                            f"4o request failed with status {resp.status}: {body}"
+                        )
+                    resp.raise_for_status()
+                    return await resp.json()
 
     data = await asyncio.wait_for(_call(), FOUR_O_TIMEOUT)
     global _last_ask_4o_request_id
