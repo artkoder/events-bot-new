@@ -126,6 +126,8 @@ class KaggleClient:
 
     def kaggle_test(self) -> str:
         api = self._get_api()
-        datasets = api.dataset_list(page=1, max_size="10MB") or []
+        datasets = api.dataset_list(page=1) or []
         titles = [d.title for d in datasets if getattr(d, "title", None)]
-        return titles[0] if titles else "ok"
+        if titles:
+            return titles[0]
+        return f"ok (datasets={len(datasets)})"

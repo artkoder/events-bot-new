@@ -4,6 +4,7 @@ import asyncio
 import html
 import json
 import logging
+import os
 import shutil
 import tempfile
 from datetime import datetime, timezone
@@ -29,7 +30,7 @@ from models import (
 from main import HTTP_SEMAPHORE, get_http_session, get_setting_value, set_setting_value
 from .finalize import prepare_final_texts
 from .kaggle_client import DEFAULT_KERNEL_PATH, KaggleClient
-from .poller import run_kernel_poller
+from .poller import VIDEO_MAX_MB, run_kernel_poller
 from .selection import (
     build_payload,
     build_selection,
@@ -47,6 +48,34 @@ from .types import (
 
 logger = logging.getLogger(__name__)
 CHANNEL_SETTING_KEY = "videoannounce_channels"
+
+
+def read_positive_int_env(env_key: str, default: int) -> int:
+    raw_value = os.getenv(env_key)
+    if raw_value is None:
+        return default
+    try:
+        value = int(raw_value)
+        if value <= 0:
+            raise ValueError
+        return value
+    except ValueError:
+        logger.warning(
+            "video_announce: invalid %s=%r, falling back to default %s",
+            env_key,
+            raw_value,
+            default,
+        )
+        return default
+
+
+DATASET_PAYLOAD_MAX_MB = read_positive_int_env("VIDEO_ANNOUNCE_DATASET_MAX_MB", 50)
+
+logger.info(
+    "video_announce: limits configured dataset_max_mb=%s video_max_mb=%s",
+    DATASET_PAYLOAD_MAX_MB,
+    VIDEO_MAX_MB,
+)
 
 
 class VideoAnnounceScenario:
@@ -759,8 +788,10 @@ class VideoAnnounceScenario:
             total_size = sum(
                 f.stat().st_size for f in tmp_path.glob("**/*") if f.is_file()
             )
-            if total_size > 50 * 1024 * 1024:
-                raise RuntimeError("dataset payload exceeds 50MB")
+            if total_size > DATASET_PAYLOAD_MAX_MB * 1024 * 1024:
+                raise RuntimeError(
+                    f"dataset payload exceeds {DATASET_PAYLOAD_MAX_MB}MB"
+                )
             client = KaggleClient()
             try:
                 await asyncio.to_thread(client.create_dataset, tmp_path)

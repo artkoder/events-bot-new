@@ -34,9 +34,11 @@ async def handle_kaggle_test(message: types.Message, db: Database, bot) -> None:
     client = KaggleClient()
     try:
         title = client.kaggle_test()
-    except Exception:
+    except Exception as e:
         logger.exception("kaggletest failed")
-        await bot.send_message(message.chat.id, "Kaggle API error")
+        await bot.send_message(
+            message.chat.id, f"Kaggle API error: {type(e).__name__}: {e}"
+        )
         return
     await bot.send_message(message.chat.id, f"Kaggle OK: {title}")
 
