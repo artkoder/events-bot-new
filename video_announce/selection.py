@@ -15,11 +15,19 @@ from models import (
     VideoAnnounceEventHit,
     VideoAnnounceItem,
     VideoAnnounceItemStatus,
+    VideoAnnounceLLMTrace,
     VideoAnnounceSession,
 )
 from .kaggle_client import KaggleClient
 from .prompts import RANKING_RESPONSE_FORMAT, ranking_prompt
-from .types import RankedChoice, RankedEvent, RenderPayload, SelectionContext, VideoProfile
+from .types import (
+    RankedChoice,
+    RankedEvent,
+    RenderPayload,
+    SelectionBuildResult,
+    SelectionContext,
+    VideoProfile,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -77,8 +85,8 @@ async def fetch_candidates(db: Database, ctx: SelectionContext) -> list[Event]:
             flexible.append(e)
     combined = filtered + flexible
     if not combined:
-        return events[: ctx.limit]
-    return combined[: max(ctx.limit * 2, ctx.limit)]
+        return events[: ctx.candidate_limit]
+    return combined[: max(ctx.candidate_limit * 2, ctx.candidate_limit)]
 
 
 def _score_events(client: KaggleClient, events: Iterable[Event]) -> list[RankedEvent]:
@@ -170,8 +178,41 @@ def _parse_llm_ranking(raw: str, known_ids: set[int]) -> list[RankedChoice]:
     return parsed
 
 
+async def _store_llm_trace(
+    db: Database,
+    *,
+    session_id: int | None,
+    stage: str,
+    model: str,
+    request_json: str,
+    response_json: str,
+) -> None:
+    trimmed_request = request_json[:8000]
+    trimmed_response = response_json[:8000]
+    try:
+        async with db.get_session() as session:
+            session.add(
+                VideoAnnounceLLMTrace(
+                    session_id=session_id,
+                    stage=stage,
+                    model=model,
+                    request_json=trimmed_request,
+                    response_json=trimmed_response,
+                )
+            )
+            await session.commit()
+    except Exception:
+        logger.exception("video_announce: failed to store llm trace")
+
+
 async def _rank_with_llm(
-    client: KaggleClient, events: Sequence[Event], *, promoted: set[int]
+    db: Database,
+    client: KaggleClient,
+    events: Sequence[Event],
+    *,
+    promoted: set[int],
+    mandatory_ids: set[int],
+    session_id: int | None = None,
 ) -> list[RankedEvent]:
     if not events:
         return []
@@ -192,37 +233,78 @@ async def _rank_with_llm(
             }
         )
     try:
+        serialized_payload = json.dumps(payload, ensure_ascii=False)
+        preview = json.dumps(payload[:3], ensure_ascii=False)
+        logger.info(
+            "video_announce: llm ranking request items=%d promoted=%d preview=%s",
+            len(payload),
+            len(promoted),
+            preview,
+        )
         raw = await ask_4o(
-            json.dumps(payload, ensure_ascii=False),
+            serialized_payload,
             system_prompt=ranking_prompt(),
             response_format=RANKING_RESPONSE_FORMAT,
-            meta={"source": "video_announce.ranking"},
+            meta={"source": "video_announce.ranking", "count": len(payload)},
         )
         parsed = _parse_llm_ranking(raw, {e.id for e in events})
+        await _store_llm_trace(
+            db,
+            session_id=session_id,
+            stage="ranking",
+            model="gpt-4o",
+            request_json=serialized_payload,
+            response_json=raw,
+        )
     except Exception:
         logger.exception("video_announce: llm ranking failed")
         parsed = []
     ranked: list[RankedEvent] = []
     if parsed:
         score_map = {row.event_id: row.score for row in parsed}
+        reason_map = {row.event_id: row.reason for row in parsed}
         ordering = {row.event_id: idx for idx, row in enumerate(parsed)}
+        missing = [ev.id for ev in events if ev.id not in ordering]
+        if missing:
+            logger.warning(
+                "video_announce: ranking_incomplete returned=%d expected=%d missing=%s",
+                len(parsed),
+                len(events),
+                missing,
+            )
         for ev in sorted(events, key=lambda e: ordering.get(e.id, len(events))):
             ranked.append(
                 RankedEvent(
                     event=ev,
                     score=score_map.get(ev.id, 0.0),
                     position=len(ranked) + 1,
+                    reason=reason_map.get(ev.id),
+                    mandatory=ev.id in mandatory_ids,
                 )
             )
     else:
-        ranked = _score_events(client, events)
+        ranked = [
+            RankedEvent(
+                event=row.event,
+                score=row.score,
+                position=idx + 1,
+                mandatory=row.event.id in mandatory_ids,
+            )
+            for idx, row in enumerate(_score_events(client, events))
+        ]
     if len(ranked) < len(events):
         existing_ids = {r.event.id for r in ranked}
         remainder = [ev for ev in events if ev.id not in existing_ids]
         if remainder:
             fallback = _score_events(client, remainder)
             ranked.extend(
-                RankedEvent(event=row.event, score=row.score, position=len(ranked) + idx + 1)
+                RankedEvent(
+                    event=row.event,
+                    score=row.score,
+                    position=len(ranked) + idx + 1,
+                    reason="fallback: missing in llm response",
+                    mandatory=row.event.id in mandatory_ids,
+                )
                 for idx, row in enumerate(fallback)
             )
     return ranked
@@ -232,15 +314,26 @@ async def prepare_session_items(
     db: Database,
     session_obj: VideoAnnounceSession,
     ranked: Iterable[RankedEvent],
+    *,
+    default_ready_ids: set[int],
 ) -> list[VideoAnnounceItem]:
     stored: list[VideoAnnounceItem] = []
     async with db.get_session() as session:
         for r in ranked:
+            event = r.event
             item = VideoAnnounceItem(
                 session_id=session_obj.id,
-                event_id=r.event.id,
+                event_id=event.id,
                 position=r.position,
-                status=VideoAnnounceItemStatus.READY,
+                status=(
+                    VideoAnnounceItemStatus.READY
+                    if event.id in default_ready_ids
+                    else VideoAnnounceItemStatus.SKIPPED
+                ),
+                llm_score=r.score,
+                llm_reason=r.reason,
+                is_mandatory=r.mandatory,
+                include_count=getattr(event, "video_include_count", 0) or 0,
             )
             session.add(item)
             stored.append(item)
@@ -254,7 +347,7 @@ def build_payload(
     *,
     tz: timezone,
     items: Sequence[VideoAnnounceItem] | None = None,
-) -> RenderPayload:
+    ) -> RenderPayload:
     events = [r.event for r in ranked]
     scores = {r.event.id: r.score for r in ranked}
     payload_items = list(items) if items is not None else [
@@ -325,22 +418,81 @@ def payload_as_json(payload: RenderPayload, tz: timezone) -> str:
     return json.dumps(obj, ensure_ascii=False, indent=2)
 
 
+def _choose_default_ready(
+    ranked: Sequence[RankedEvent],
+    mandatory_ids: set[int],
+    *,
+    min_count: int,
+    max_count: int,
+) -> set[int]:
+    ready: set[int] = set(mandatory_ids)
+    target_max = max(min_count, max_count)
+    for row in ranked:
+        if len(ready) >= target_max:
+            break
+        if row.event.id in ready:
+            continue
+        ready.add(row.event.id)
+    if len(ready) < min_count:
+        for row in ranked:
+            if len(ready) >= min_count:
+                break
+            ready.add(row.event.id)
+    return ready
+
+
 async def build_selection(
     db: Database,
     ctx: SelectionContext,
     *,
     client: KaggleClient | None = None,
-) -> list[RankedEvent]:
+    session_id: int | None = None,
+) -> SelectionBuildResult:
     client = client or KaggleClient()
     events = await fetch_candidates(db, ctx)
+    mandatory_ids = {
+        e.id
+        for e in events
+        if (getattr(e, "video_include_count", 0) or 0) > 0
+    }
+    promoted = set(ctx.promoted_event_ids or set()) | set(mandatory_ids)
+    mandatory_ids = mandatory_ids | set(ctx.promoted_event_ids or set())
     hits = await _load_hits(db, [e.id for e in events])
-    promoted = set(ctx.promoted_event_ids or set())
-    selected = _apply_repeat_limit(events, limit=ctx.limit, hits=hits, promoted=promoted)
-    ranked = await _rank_with_llm(client, selected, promoted=promoted)
+    selected = _apply_repeat_limit(
+        events, limit=ctx.candidate_limit, hits=hits, promoted=promoted
+    )
+    ranked = await _rank_with_llm(
+        db,
+        client,
+        selected,
+        promoted=promoted,
+        mandatory_ids=mandatory_ids,
+        session_id=session_id,
+    )
+    default_ready_ids = _choose_default_ready(
+        ranked,
+        mandatory_ids,
+        min_count=ctx.default_selected_min,
+        max_count=ctx.default_selected_max,
+    )
     logger.info(
-        "video_announce ranked events=%d selected=%d top=%s",
+        "video_announce ranked events=%d candidates=%d ready=%d mandatory=%d top=%s",
         len(events),
         len(ranked),
+        len(default_ready_ids),
+        len(mandatory_ids),
         [r.event.id for r in ranked[:3]],
     )
-    return ranked
+    for row in ranked:
+        status = "READY" if row.event.id in default_ready_ids else "CANDIDATE"
+        logger.info(
+            "video_announce selection %s id=%s score=%.2f mandatory=%s reason=%s",
+            status,
+            row.event.id,
+            row.score,
+            row.mandatory,
+            (row.reason or "")[0:200],
+        )
+    return SelectionBuildResult(
+        ranked=ranked, default_ready_ids=default_ready_ids, mandatory_ids=mandatory_ids
+    )

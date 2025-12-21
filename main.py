@@ -6590,7 +6590,19 @@ async def ask_4o(
     }
     if response_format is not None:
         payload["response_format"] = response_format
-    logging.info("Sending 4o ask request to %s", url)
+    response_schema = None
+    if isinstance(response_format, dict):
+        response_schema = response_format.get("json_schema", {}).get("name")
+    payload_preview = text[:800]
+    logging.info(
+        "Sending 4o ask request to %s model=%s schema=%s size=%d meta=%s preview=%s",
+        url,
+        payload.get("model"),
+        response_schema,
+        len(text.encode("utf-8")),
+        dict(meta or {}),
+        payload_preview,
+    )
     session = get_http_session()
 
     async def _call():
