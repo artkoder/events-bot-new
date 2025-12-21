@@ -13,6 +13,7 @@ APScheduler>=3.10.4
 Pillow>=10.0.0
 kaggle>=1.8.2
 imagekitio>=3.0.0
-pydantic<2.0
+# aiogram 3.2.0 requires pydantic>=2.4.1,<2.6
+pydantic>=2.4.1,<2.6
 requests>=2.31.0
 PyYAML>=6.0
