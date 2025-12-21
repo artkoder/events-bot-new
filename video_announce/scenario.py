@@ -17,6 +17,7 @@ from models import (
     VideoAnnounceSession,
     VideoAnnounceSessionStatus,
 )
+from .finalize import prepare_final_texts
 from .kaggle_client import KaggleClient
 from .selection import (
     build_payload,
@@ -150,6 +151,10 @@ class VideoAnnounceScenario:
         asyncio.create_task(self._render_and_notify(obj, ranked))
 
     async def _render_and_notify(self, session_obj: VideoAnnounceSession, ranked) -> None:
+        try:
+            await prepare_final_texts(self.db, session_obj.id, ranked)
+        except Exception:
+            logger.exception("video_announce: failed to prepare final texts")
         payload = build_payload(session_obj, ranked, tz=timezone.utc)
         json_text = payload_as_json(payload, timezone.utc)
         preview_lines = []

@@ -24,6 +24,15 @@ class RankedEvent:
 
 
 @dataclass
+class RankedChoice:
+    event_id: int
+    score: float
+    reason: str | None = None
+    use_ocr: bool | None = None
+    poster_source: str | None = None
+
+
+@dataclass
 class RenderPayload:
     """Structured payload sent to operators for video generation."""
 
@@ -65,9 +74,28 @@ class SelectionContext:
     target_date: date | None = None
     profile: VideoProfile | None = None
     limit: int = 20
+    primary_window_days: int = 3
+    fallback_window_days: int = 10
+    promoted_event_ids: set[int] | None = None
 
 
 @dataclass
 class SelectionResult:
     events: list[RankedEvent]
     session: VideoAnnounceSession
+
+
+@dataclass
+class PosterEnrichment:
+    event_id: int
+    text: str | None
+    source: str | None = None
+
+
+@dataclass
+class FinalizedItem:
+    event_id: int
+    title: str
+    description: str
+    use_ocr: bool = False
+    poster_source: str | None = None
