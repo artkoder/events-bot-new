@@ -129,6 +129,17 @@ async def handle_video_callback(
         return
     data = callback.data
     scenario = VideoAnnounceScenario(db, bot, callback.message.chat.id, callback.from_user.id)
+    if data.startswith("vidsel:"):
+        try:
+            _, session_id, action = data.split(":", 2)
+            msg = await scenario.adjust_selection_params(
+                int(session_id), action, callback.message
+            )
+        except Exception:
+            logger.exception("video_announce: selection adjust failed")
+            msg = "Ошибка"
+        await callback.answer(msg or "Обновлено", show_alert=msg not in {"Обновлено"})
+        return
     if data.startswith("vidtoggle:"):
         try:
             _, session_id, event_id = data.split(":", 2)

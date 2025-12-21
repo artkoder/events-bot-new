@@ -576,6 +576,7 @@ class Database:
                 """
             )
             await _add_column(conn, "videoannounce_session", "profile_key TEXT")
+            await _add_column(conn, "videoannounce_session", "selection_params JSON")
             await _add_column(conn, "videoannounce_session", "test_chat_id BIGINT")
             await _add_column(conn, "videoannounce_session", "main_chat_id BIGINT")
             await _add_column(conn, "videoannounce_session", "published_at TIMESTAMP")
