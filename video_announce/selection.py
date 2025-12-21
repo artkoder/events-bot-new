@@ -38,6 +38,7 @@ logger = logging.getLogger(__name__)
 
 TELEGRAPH_EXCERPT_LIMIT = 1200
 POSTER_OCR_EXCERPT_LIMIT = 800
+TRACE_MAX_LEN = 100_000
 
 
 async def fetch_profiles() -> list[VideoProfile]:
@@ -239,6 +240,22 @@ def _parse_llm_ranking(raw: str, known_ids: set[int]) -> list[RankedChoice]:
     return parsed
 
 
+def _describe_period(events: Sequence[Event]) -> str | None:
+    dates: list[date] = []
+    for ev in events:
+        try:
+            start = ev.date.split("..", 1)[0]
+            dates.append(date.fromisoformat(start))
+        except Exception:
+            continue
+    if not dates:
+        return None
+    start, end = min(dates), max(dates)
+    if start == end:
+        return start.isoformat()
+    return f"{start.isoformat()}..{end.isoformat()}"
+
+
 async def _store_llm_trace(
     db: Database,
     *,
@@ -248,8 +265,22 @@ async def _store_llm_trace(
     request_json: str,
     response_json: str,
 ) -> None:
-    trimmed_request = request_json[:8000]
-    trimmed_response = response_json[:8000]
+    trimmed_request = request_json
+    trimmed_response = response_json
+    if len(trimmed_request) > TRACE_MAX_LEN:
+        logger.warning(
+            "video_announce: request_json too long len=%d limit=%d, trimming",  # noqa: G004
+            len(trimmed_request),
+            TRACE_MAX_LEN,
+        )
+        trimmed_request = trimmed_request[:TRACE_MAX_LEN]
+    if len(trimmed_response) > TRACE_MAX_LEN:
+        logger.warning(
+            "video_announce: response_json too long len=%d limit=%d, trimming",  # noqa: G004
+            len(trimmed_response),
+            TRACE_MAX_LEN,
+        )
+        trimmed_response = trimmed_response[:TRACE_MAX_LEN]
     try:
         async with db.get_session() as session:
             session.add(
@@ -329,15 +360,19 @@ async def _rank_with_llm(
             response_format=RANKING_RESPONSE_FORMAT,
             meta={"source": "video_announce.ranking", "count": len(payload)},
         )
+        request_details = {
+            "instruction": instruction,
+            "period": _describe_period(events),
+            "candidate_ids": event_ids,
+            "items": payload,
+        }
         parsed = _parse_llm_ranking(raw, {e.id for e in events})
         await _store_llm_trace(
             db,
             session_id=session_id,
             stage="ranking",
             model="gpt-4o",
-            request_json=json.dumps(
-                {"instruction": instruction, "items": payload}, ensure_ascii=False
-            ),
+            request_json=json.dumps(request_details, ensure_ascii=False),
             response_json=raw,
         )
     except Exception:
