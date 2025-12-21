@@ -45,13 +45,16 @@ class VideoAnnounceScenario:
         self.chat_id = chat_id
         self.user_id = user_id
 
+    async def _has_access(self) -> bool:
+        user = await self._load_user()
+        return bool(user and user.is_superadmin)
+
     async def _load_user(self) -> User | None:
         async with self.db.get_session() as session:
             return await session.get(User, self.user_id)
 
     async def ensure_access(self) -> bool:
-        user = await self._load_user()
-        if not user or not user.is_superadmin:
+        if not await self._has_access():
             await self.bot.send_message(self.chat_id, "Not authorized")
             return False
         return True
@@ -64,6 +67,10 @@ class VideoAnnounceScenario:
                 )
             )
             return res.scalars().first()
+
+    async def _load_session(self, session_id: int) -> VideoAnnounceSession | None:
+        async with self.db.get_session() as session:
+            return await session.get(VideoAnnounceSession, session_id)
 
     async def _summaries(self) -> list[SessionOverview]:
         async with self.db.get_session() as session:
@@ -158,17 +165,13 @@ class VideoAnnounceScenario:
         ranked = await build_selection(self.db, ctx, client=KaggleClient())
         async with self.db.get_session() as session:
             obj = VideoAnnounceSession(
-                status=VideoAnnounceSessionStatus.RENDERING,
-                started_at=datetime.now(timezone.utc),
+                status=VideoAnnounceSessionStatus.SELECTED,
             )
             session.add(obj)
             await session.commit()
             await session.refresh(obj)
             await prepare_session_items(self.db, obj, ranked)
-        await self.bot.send_message(
-            self.chat_id, f"Сессия #{obj.id} запущена, собираем материалы"
-        )
-        asyncio.create_task(self._render_and_notify(obj, ranked))
+        await self._send_selection_ui(obj.id)
 
     async def _render_and_notify(self, session_obj: VideoAnnounceSession, ranked) -> None:
         client = KaggleClient()
@@ -219,13 +222,18 @@ class VideoAnnounceScenario:
             )
         )
 
-    async def _load_ranked_events(self, session_id: int) -> list[RankedEvent]:
+    async def _load_ranked_events(
+        self, session_id: int, *, ready_only: bool = False
+    ) -> list[RankedEvent]:
         async with self.db.get_session() as session:
-            res_items = await session.execute(
+            query = (
                 select(VideoAnnounceItem)
                 .where(VideoAnnounceItem.session_id == session_id)
                 .order_by(VideoAnnounceItem.position)
             )
+            if ready_only:
+                query = query.where(VideoAnnounceItem.status == VideoAnnounceItemStatus.READY)
+            res_items = await session.execute(query)
             items = res_items.scalars().all()
             if not items:
                 return []
@@ -240,10 +248,155 @@ class VideoAnnounceScenario:
             ranked.append(RankedEvent(event=ev, score=0.0, position=item.position))
         return sorted(ranked, key=lambda r: r.position)
 
+    async def _load_items_with_events(
+        self, session_id: int
+    ) -> list[tuple[VideoAnnounceItem, Event]]:
+        async with self.db.get_session() as session:
+            res = await session.execute(
+                select(VideoAnnounceItem, Event)
+                .join(Event, VideoAnnounceItem.event_id == Event.id)
+                .where(VideoAnnounceItem.session_id == session_id)
+                .order_by(VideoAnnounceItem.position)
+            )
+            return list(res.all())
+
+    async def _selection_view(
+        self, session_id: int
+    ) -> tuple[str, types.InlineKeyboardMarkup]:
+        session_obj = await self._load_session(session_id)
+        if not session_obj:
+            return ("Сессия не найдена", types.InlineKeyboardMarkup(inline_keyboard=[]))
+        pairs = await self._load_items_with_events(session_id)
+        lines = [
+            f"Сессия #{session_id}: {session_obj.status.value}",
+            "Выберите события для рендера:",
+        ]
+        keyboard: list[list[types.InlineKeyboardButton]] = []
+        allow_edit = session_obj.status == VideoAnnounceSessionStatus.SELECTED
+        for item, ev in pairs:
+            marker = "✅" if item.status == VideoAnnounceItemStatus.READY else "⬜"
+            title = html.escape(ev.title[:40])
+            lines.append(
+                f"{marker} #{item.position} · {ev.date.split('..', 1)[0]} · {ev.emoji or ''} {title}"
+            )
+            if allow_edit:
+                keyboard.append(
+                    [
+                        types.InlineKeyboardButton(
+                            text=f"{marker} #{item.position}",
+                            callback_data=f"vidtoggle:{session_id}:{ev.id}",
+                        )
+                    ]
+                )
+        if allow_edit:
+            keyboard.append(
+                [
+                    types.InlineKeyboardButton(
+                        text="📄 Сформировать JSON", callback_data=f"vidjson:{session_id}"
+                    ),
+                    types.InlineKeyboardButton(
+                        text="🚀 Запустить рендер", callback_data=f"vidrender:{session_id}"
+                    ),
+                ]
+            )
+        markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard)
+        return ("\n".join(lines), markup)
+
+    async def _send_selection_ui(self, session_id: int) -> None:
+        text, markup = await self._selection_view(session_id)
+        await self.bot.send_message(self.chat_id, text, reply_markup=markup)
+
+    async def _update_selection_message(
+        self, message: types.Message, session_id: int
+    ) -> None:
+        text, markup = await self._selection_view(session_id)
+        await message.edit_text(text, reply_markup=markup)
+
+    async def toggle_item(self, session_id: int, event_id: int, message: types.Message) -> str:
+        if not await self._has_access():
+            return "Not authorized"
+        async with self.db.get_session() as session:
+            sess = await session.get(VideoAnnounceSession, session_id)
+            if not sess:
+                return "Сессия не найдена"
+            if sess.status != VideoAnnounceSessionStatus.SELECTED:
+                return "Сессия уже запущена"
+            res = await session.execute(
+                select(VideoAnnounceItem)
+                .where(VideoAnnounceItem.session_id == session_id)
+                .where(VideoAnnounceItem.event_id == event_id)
+            )
+            item = res.scalars().first()
+            if not item:
+                return "Событие не найдено"
+            item.status = (
+                VideoAnnounceItemStatus.SKIPPED
+                if item.status == VideoAnnounceItemStatus.READY
+                else VideoAnnounceItemStatus.READY
+            )
+            session.add(item)
+            await session.commit()
+        await self._update_selection_message(message, session_id)
+        return "Обновлено"
+
+    async def preview_json(self, session_id: int) -> str:
+        if not await self.ensure_access():
+            return ""
+        session_obj = await self._load_session(session_id)
+        if not session_obj:
+            return "Сессия не найдена"
+        if session_obj.status != VideoAnnounceSessionStatus.SELECTED:
+            return "Сессия уже запущена"
+        ranked = await self._load_ranked_events(session_id, ready_only=True)
+        if not ranked:
+            return "Нет выбранных событий"
+        payload = build_payload(session_obj, ranked, tz=timezone.utc)
+        json_text = payload_as_json(payload, timezone.utc)
+        preview_lines = []
+        for r in ranked:
+            dt = r.event.date.split("..", 1)[0]
+            preview_lines.append(
+                f"#{r.position} · {dt} · {r.event.emoji or ''} {r.event.title} ({r.score})"
+            )
+        await self.bot.send_message(
+            self.chat_id,
+            "<b>Текущий JSON:</b>\n<pre>" + html.escape(json_text) + "</pre>",
+            parse_mode="HTML",
+        )
+        await self.bot.send_message(self.chat_id, "\n".join(preview_lines) or "Нет событий")
+        return "Сформировано"
+
+    async def start_render(self, session_id: int, message: types.Message | None = None) -> str:
+        if not await self._has_access():
+            return "Not authorized"
+        if await self.has_rendering():
+            return "Уже есть активный рендер"
+        ranked = await self._load_ranked_events(session_id, ready_only=True)
+        if not ranked:
+            return "Нет выбранных событий"
+        async with self.db.get_session() as session:
+            sess = await session.get(VideoAnnounceSession, session_id)
+            if not sess:
+                return "Сессия не найдена"
+            if sess.status != VideoAnnounceSessionStatus.SELECTED:
+                return "Сессия уже запущена"
+            sess.status = VideoAnnounceSessionStatus.RENDERING
+            sess.started_at = datetime.now(timezone.utc)
+            session.add(sess)
+            await session.commit()
+            await session.refresh(sess)
+        if message:
+            await self._update_selection_message(message, session_id)
+        await self.bot.send_message(
+            self.chat_id, f"Сессия #{session_id} запущена, собираем материалы"
+        )
+        asyncio.create_task(self._render_and_notify(sess, ranked))
+        return "Рендеринг запущен"
+
     async def restart_session(self, session_id: int) -> None:
         if not await self.ensure_access():
             return
-        ranked = await self._load_ranked_events(session_id)
+        ranked = await self._load_ranked_events(session_id, ready_only=True)
         if not ranked:
             await self.bot.send_message(self.chat_id, "Не удалось собрать события для рестарта")
             return

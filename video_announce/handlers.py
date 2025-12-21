@@ -126,6 +126,34 @@ async def handle_video_callback(
     if not callback.data:
         return
     data = callback.data
+    scenario = VideoAnnounceScenario(db, bot, callback.message.chat.id, callback.from_user.id)
+    if data.startswith("vidtoggle:"):
+        try:
+            _, session_id, event_id = data.split(":", 2)
+            msg = await scenario.toggle_item(int(session_id), int(event_id), callback.message)
+        except Exception:
+            logger.exception("video_announce: toggle failed")
+            msg = "Ошибка"
+        await callback.answer(msg, show_alert=msg != "Обновлено")
+        return
+    if data.startswith("vidjson:"):
+        try:
+            _, session_id = data.split(":", 1)
+            msg = await scenario.preview_json(int(session_id)) or ""
+        except Exception:
+            logger.exception("video_announce: json preview failed")
+            msg = "Ошибка"
+        await callback.answer(msg or "Готово", show_alert=bool(msg and msg != "Сформировано"))
+        return
+    if data.startswith("vidrender:"):
+        try:
+            _, session_id = data.split(":", 1)
+            msg = await scenario.start_render(int(session_id), message=callback.message)
+        except Exception:
+            logger.exception("video_announce: render start failed")
+            msg = "Ошибка"
+        await callback.answer(msg or "Готово", show_alert=msg not in {"Рендеринг запущен", "Готово"})
+        return
     if data.startswith("vidcnt:"):
         handled = await handle_video_count(
             callback,
@@ -138,7 +166,6 @@ async def handle_video_callback(
         if handled:
             return
 
-    scenario = VideoAnnounceScenario(db, bot, callback.message.chat.id, callback.from_user.id)
     prefix = data.split(":", 1)[0]
     handled = await handle_prefix_action(prefix, callback, scenario)
     if handled:
