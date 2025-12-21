@@ -5753,11 +5753,22 @@ def _strip_tags(text: str) -> str:
     return html.unescape(_TAG_RE.sub("", text))
 
 
+def _normalize_title_and_emoji(title: str, emoji: str | None) -> tuple[str, str]:
+    """Ensure the emoji prefix is applied only once per rendered line."""
+
+    if not emoji:
+        return title, ""
+
+    trimmed_title = title.lstrip()
+    if trimmed_title.startswith(emoji):
+        trimmed_title = trimmed_title[len(emoji) :].lstrip()
+
+    return trimmed_title or title.strip(), f"{emoji} "
+
+
 def format_event_caption(ev: Event, *, style: str = "ics") -> tuple[str, str | None]:
-    emoji_part = ""
-    if ev.emoji and not ev.title.strip().startswith(ev.emoji):
-        emoji_part = f"{ev.emoji} "
-    title = f"{emoji_part}{ev.title}".strip()
+    title_text, emoji_part = _normalize_title_and_emoji(ev.title, ev.emoji)
+    title = f"{emoji_part}{title_text}".strip()
 
     date_part = ev.date.split("..", 1)[0]
     d = parse_iso_date(date_part)
@@ -13778,10 +13789,8 @@ def format_event_md(
     prefix = ""
     if is_recent(e):
         prefix += "\U0001f6a9 "
-    emoji_part = ""
-    if e.emoji and not e.title.strip().startswith(e.emoji):
-        emoji_part = f"{e.emoji} "
-    lines = [f"{prefix}{emoji_part}{e.title}".strip()]
+    title_text, emoji_part = _normalize_title_and_emoji(e.title, e.emoji)
+    lines = [f"{prefix}{emoji_part}{title_text}".strip()]
     if festival:
         link = festival.telegraph_url
         if link:
@@ -13863,9 +13872,7 @@ def format_event_vk(
         prefix += "\U0001f449 "
     if is_recent(e):
         prefix += "\U0001f6a9 "
-    emoji_part = ""
-    if e.emoji and not e.title.strip().startswith(e.emoji):
-        emoji_part = f"{e.emoji} "
+    title_text_raw, emoji_part = _normalize_title_and_emoji(e.title, e.emoji)
 
     partner_creator_ids = partner_creator_ids or ()
     is_partner_creator = (
@@ -13884,7 +13891,7 @@ def format_event_vk(
     if not vk_link and is_vk_wall_url(e.source_vk_post_url):
         vk_link = e.source_vk_post_url
 
-    title_text = f"{emoji_part}{e.title.upper()}".strip()
+    title_text = f"{emoji_part}{title_text_raw.upper()}".strip()
     if vk_link:
         title = f"{prefix}[{vk_link}|{title_text}]".strip()
     else:
@@ -13995,13 +14002,11 @@ def format_event_daily(
         prefix += "\U0001f449 "
     if is_recent(e):
         prefix += "\U0001f6a9 "
-    emoji_part = ""
-    if e.emoji and not e.title.strip().startswith(e.emoji):
-        emoji_part = f"{e.emoji} "
+    title_text, emoji_part = _normalize_title_and_emoji(e.title, e.emoji)
 
     partner_creator_ids = partner_creator_ids or ()
     is_partner_creator = e.creator_id in partner_creator_ids if e.creator_id is not None else False
-    title = html.escape(e.title)
+    title = html.escape(title_text)
     link_href: str | None = None
     if is_partner_creator and is_vk_wall_url(e.source_post_url):
         link_href = e.source_post_url
@@ -14117,15 +14122,13 @@ def format_event_daily_inline(
         markers.append("🟡")
     prefix = "".join(f"{m} " for m in markers)
 
-    emoji_part = ""
-    if e.emoji and not e.title.strip().startswith(e.emoji):
-        emoji_part = f"{e.emoji} "
+    title_text, emoji_part = _normalize_title_and_emoji(e.title, e.emoji)
 
     partner_creator_ids = partner_creator_ids or ()
     is_partner_creator = (
         e.creator_id in partner_creator_ids if e.creator_id is not None else False
     )
-    title = html.escape(e.title)
+    title = html.escape(title_text)
     link_href: str | None = None
     if is_partner_creator and is_vk_wall_url(e.source_post_url):
         link_href = e.source_post_url
@@ -14147,10 +14150,8 @@ def format_exhibition_md(e: Event) -> str:
     prefix = ""
     if is_recent(e):
         prefix += "\U0001f6a9 "
-    emoji_part = ""
-    if e.emoji and not e.title.strip().startswith(e.emoji):
-        emoji_part = f"{e.emoji} "
-    lines = [f"{prefix}{emoji_part}{e.title}".strip(), e.description.strip()]
+    title_text, emoji_part = _normalize_title_and_emoji(e.title, e.emoji)
+    lines = [f"{prefix}{emoji_part}{title_text}".strip(), e.description.strip()]
     if e.pushkin_card:
         lines.append("\u2705 Пушкинская карта")
     if e.is_free:
