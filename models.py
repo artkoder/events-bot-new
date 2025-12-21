@@ -393,12 +393,106 @@ class Event(SQLModel, table=True):
     tourist_label_source: Optional[str] = None
     photo_urls: list[str] = Field(default_factory=list, sa_column=Column(JSON))
     photo_count: int = 0
+    video_include_count: int = 0
     topics: list[str] = Field(default_factory=list, sa_column=Column(JSON))
     topics_manual: bool = False
     added_at: datetime = Field(
         default_factory=utc_now, sa_column=Column(DateTime(timezone=True))
     )
     content_hash: Optional[str] = None
+
+
+class VideoAnnounceSessionStatus(str, Enum):
+    CREATED = "CREATED"
+    RENDERING = "RENDERING"
+    DONE = "DONE"
+    FAILED = "FAILED"
+
+
+class VideoAnnounceSession(SQLModel, table=True):
+    __tablename__ = "videoannounce_session"
+    __table_args__ = (
+        Index("ix_videoannounce_session_status_created_at", "status", "created_at"),
+        Index(
+            "ux_videoannounce_session_rendering",
+            "status",
+            unique=True,
+            sqlite_where=text("status = 'RENDERING'"),
+        ),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    status: VideoAnnounceSessionStatus = Field(
+        default=VideoAnnounceSessionStatus.CREATED,
+        sa_column=Column(SAEnum(VideoAnnounceSessionStatus)),
+    )
+    created_at: datetime = Field(
+        default_factory=utc_now, sa_column=Column(DateTime(timezone=True))
+    )
+    started_at: Optional[datetime] = Field(
+        default=None, sa_column=Column(DateTime(timezone=True))
+    )
+    finished_at: Optional[datetime] = Field(
+        default=None, sa_column=Column(DateTime(timezone=True))
+    )
+    error: Optional[str] = None
+    video_url: Optional[str] = None
+
+
+class VideoAnnounceItemStatus(str, Enum):
+    PENDING = "PENDING"
+    READY = "READY"
+    FAILED = "FAILED"
+    SKIPPED = "SKIPPED"
+
+
+class VideoAnnounceItem(SQLModel, table=True):
+    __tablename__ = "videoannounce_item"
+    __table_args__ = (
+        Index("ix_videoannounce_item_session", "session_id"),
+        Index("ix_videoannounce_item_event", "event_id"),
+        Index("ix_videoannounce_item_status", "status"),
+        Index(
+            "ux_videoannounce_item_session_event",
+            "session_id",
+            "event_id",
+            unique=True,
+        ),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    session_id: int = Field(foreign_key="videoannounce_session.id")
+    event_id: int = Field(foreign_key="event.id")
+    status: VideoAnnounceItemStatus = Field(
+        default=VideoAnnounceItemStatus.PENDING,
+        sa_column=Column(SAEnum(VideoAnnounceItemStatus)),
+    )
+    position: int = 0
+    error: Optional[str] = None
+    created_at: datetime = Field(
+        default_factory=utc_now, sa_column=Column(DateTime(timezone=True))
+    )
+
+
+class VideoAnnounceEventHit(SQLModel, table=True):
+    __tablename__ = "videoannounce_eventhit"
+    __table_args__ = (
+        Index("ix_videoannounce_eventhit_event", "event_id"),
+        Index("ix_videoannounce_eventhit_session", "session_id"),
+        Index(
+            "ux_videoannounce_eventhit_session_event",
+            "session_id",
+            "event_id",
+            unique=True,
+        ),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    session_id: int = Field(foreign_key="videoannounce_session.id")
+    event_id: int = Field(foreign_key="event.id")
+    created_at: datetime = Field(
+        default_factory=utc_now, sa_column=Column(DateTime(timezone=True))
+    )
 
 
 class EventPoster(SQLModel, table=True):
