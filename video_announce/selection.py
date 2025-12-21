@@ -1,17 +1,22 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import math
+from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from typing import Iterable, Sequence
+from urllib.parse import urlparse
 
 from sqlalchemy import select
 
 from db import Database
 from main import ask_4o, format_day_pretty
+from main_part2 import get_source_page_text
 from models import (
     Event,
+    EventPoster,
     VideoAnnounceEventHit,
     VideoAnnounceItem,
     VideoAnnounceItemStatus,
@@ -30,6 +35,9 @@ from .types import (
 )
 
 logger = logging.getLogger(__name__)
+
+TELEGRAPH_EXCERPT_LIMIT = 1200
+POSTER_OCR_EXCERPT_LIMIT = 800
 
 
 async def fetch_profiles() -> list[VideoProfile]:
@@ -110,6 +118,61 @@ async def _load_hits(db: Database, event_ids: Sequence[int]) -> set[int]:
         )
         rows = result.scalars().all()
     return set(rows)
+
+
+async def _fetch_telegraph_excerpt(ev: Event) -> str | None:
+    path = (ev.telegraph_path or "").strip()
+    url = (ev.telegraph_url or "").strip()
+    resolved_path = ""
+    if path:
+        resolved_path = path.lstrip("/")
+    elif url:
+        parsed = urlparse(url)
+        resolved_path = parsed.path.lstrip("/")
+    if not resolved_path:
+        return None
+    try:
+        text = await get_source_page_text(resolved_path)
+    except Exception:
+        logger.exception("video_announce: failed to fetch telegraph text event=%s", ev.id)
+        return None
+    excerpt = (text or "").strip()
+    if not excerpt:
+        return None
+    return excerpt[:TELEGRAPH_EXCERPT_LIMIT]
+
+
+async def _load_poster_ocr_texts(
+    db: Database, event_ids: Sequence[int]
+) -> dict[int, str]:
+    if not event_ids:
+        return {}
+    async with db.get_session() as session:
+        result = await session.execute(
+            select(EventPoster)
+            .where(EventPoster.event_id.in_(list(event_ids)))
+            .order_by(EventPoster.updated_at.desc(), EventPoster.id.desc())
+        )
+        posters = result.scalars().all()
+    grouped: dict[int, list[str]] = defaultdict(list)
+    for poster in posters:
+        text = (poster.ocr_text or "").strip()
+        if text:
+            grouped[poster.event_id].append(text)
+    excerpts: dict[int, str] = {}
+    for event_id, texts in grouped.items():
+        combined: list[str] = []
+        remaining = POSTER_OCR_EXCERPT_LIMIT
+        for text in texts:
+            if remaining <= 0:
+                break
+            snippet = text[:remaining]
+            combined.append(snippet)
+            remaining -= len(snippet)
+        excerpt = "\n\n".join(combined).strip()
+        if excerpt:
+            excerpts[event_id] = excerpt
+    return excerpts
 
 
 def _apply_repeat_limit(
@@ -214,6 +277,18 @@ async def _rank_with_llm(
 ) -> list[RankedEvent]:
     if not events:
         return []
+    event_ids = [e.id for e in events]
+    poster_texts = await _load_poster_ocr_texts(db, event_ids)
+    telegraph_tasks: dict[int, asyncio.Task[str | None]] = {}
+    for ev in events:
+        if ev.telegraph_url or ev.telegraph_path:
+            telegraph_tasks[ev.id] = asyncio.create_task(_fetch_telegraph_excerpt(ev))
+    telegraph_texts: dict[int, str] = {}
+    if telegraph_tasks:
+        results = await asyncio.gather(*telegraph_tasks.values())
+        for event_id, text in zip(telegraph_tasks.keys(), results):
+            if text:
+                telegraph_texts[event_id] = text
     payload = []
     for ev in sorted(events, key=lambda e: (e.date, e.time, e.id)):
         payload.append(
@@ -226,8 +301,10 @@ async def _rank_with_llm(
                 "location": ev.location_name,
                 "topics": getattr(ev, "topics", []),
                 "is_free": ev.is_free,
-                "poster_count": ev.photo_count,
+                "include_count": getattr(ev, "video_include_count", 0) or 0,
                 "promoted": ev.id in promoted,
+                "telegraph_text": telegraph_texts.get(ev.id),
+                "poster_ocr_text": poster_texts.get(ev.id),
             }
         )
     try:
