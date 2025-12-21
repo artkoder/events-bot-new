@@ -9,7 +9,7 @@ from typing import Iterable, Sequence
 from sqlalchemy import select
 
 from db import Database
-from main import ask_4o
+from main import ask_4o, format_day_pretty
 from models import (
     Event,
     VideoAnnounceEventHit,
@@ -17,7 +17,6 @@ from models import (
     VideoAnnounceItemStatus,
     VideoAnnounceSession,
 )
-from markup import format_day_pretty
 from .kaggle_client import KaggleClient
 from .prompts import RANKING_RESPONSE_FORMAT, ranking_prompt
 from .types import RankedChoice, RankedEvent, RenderPayload, SelectionContext, VideoProfile
