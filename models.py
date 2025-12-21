@@ -468,6 +468,11 @@ class VideoAnnounceItem(SQLModel, table=True):
         sa_column=Column(SAEnum(VideoAnnounceItemStatus)),
     )
     position: int = 0
+    final_title: Optional[str] = None
+    final_description: Optional[str] = None
+    poster_text: Optional[str] = None
+    poster_source: Optional[str] = None
+    use_ocr: bool = False
     error: Optional[str] = None
     created_at: datetime = Field(
         default_factory=utc_now, sa_column=Column(DateTime(timezone=True))
