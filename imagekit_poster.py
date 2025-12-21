@@ -30,7 +30,7 @@ def _import_imagekitio() -> None:
         _IMAGEKIT_IMPORT_ERROR = exc
         logger.warning(
             "ImageKit import failed: %s. To enable poster processing, install compatible "
-            "dependencies (e.g. imagekitio>=3.0,<4.0 with pydantic<2).",
+            "dependencies (e.g. imagekitio>=3.0,<4.0 with pydantic>=2.4).",
             exc,
         )
     else:
@@ -131,7 +131,7 @@ def process_poster(
     if ImageKit is None:  # pragma: no cover - configuration error
         logger.error(
             "ImageKit integration is unavailable (%s). Update dependencies to proceed (e.g. "
-            "pip install 'imagekitio>=3.0,<4.0' 'pydantic<2').",
+            "pip install 'imagekitio>=3.0,<4.0' 'pydantic>=2.4').",
             _IMAGEKIT_IMPORT_ERROR,
         )
         raise RuntimeError(
