@@ -14318,4 +14318,8 @@ if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "test_telegraph":
         asyncio.run(telegraph_test())
     else:
-        web.run_app(create_app(), port=int(os.getenv("PORT", 8080)))
+        web.run_app(
+            create_app(),
+            host=os.getenv("HOST", "0.0.0.0"),
+            port=int(os.getenv("PORT", 8080)),
+        )
