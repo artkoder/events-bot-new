@@ -32,6 +32,7 @@ from models import (
 from main import (
     HTTP_SEMAPHORE,
     LOCAL_TZ,
+    format_day_pretty,
     get_http_session,
     get_setting_value,
     set_setting_value,
@@ -277,6 +278,39 @@ class VideoAnnounceScenario:
             seen.add(token)
             unique.append(token)
         return unique[0] if unique else ""
+
+    def _date_range_label(self, params: dict[str, int | str]) -> str:
+        primary = int(params.get("primary_window_days", DEFAULT_PRIMARY_WINDOW_DAYS) or 0)
+        fallback = int(params.get("fallback_window_days", DEFAULT_FALLBACK_WINDOW_DAYS) or 0)
+        base = self._parse_target_date(str(params.get("target_date"))) or datetime.now(LOCAL_TZ).date()
+        end = base + timedelta(days=fallback)
+        pretty_start = format_day_pretty(base)
+        pretty_end = format_day_pretty(end)
+        if base == end:
+            return f"{pretty_start} (окно +{primary}/+{fallback})"
+        return f"{pretty_start} – {pretty_end} (окно +{primary}/+{fallback})"
+
+    def _visible_pairs(
+        self,
+        pairs: Sequence[tuple[VideoAnnounceItem, Event]],
+        *,
+        visible_limit: int,
+    ) -> list[tuple[VideoAnnounceItem, Event]]:
+        if visible_limit <= 0:
+            return list(pairs)
+        ordered: list[tuple[VideoAnnounceItem, Event]] = []
+        seen: set[int] = set()
+        for item, ev in pairs:
+            if len(ordered) >= visible_limit:
+                break
+            ordered.append((item, ev))
+            seen.add(item.event_id)
+        for item, ev in pairs:
+            include_count = item.include_count or getattr(ev, "video_include_count", 0) or 0
+            if (item.is_mandatory or include_count > 0) and item.event_id not in seen:
+                ordered.append((item, ev))
+                seen.add(item.event_id)
+        return ordered
 
     def _format_title(self, ev: Event) -> str:
         url = ev.telegraph_url or ev.source_post_url
@@ -583,6 +617,54 @@ class VideoAnnounceScenario:
             )
         return result.ranked
 
+    def _build_input_message(
+        self, session_obj: VideoAnnounceSession, ranked: Sequence[RankedEvent]
+    ) -> str:
+        params = self._get_selection_params(session_obj)
+        instruction = (str(params.get("instruction") or "").strip())
+        lines = [
+            f"Сессия #{session_obj.id}: INPUT",
+            f"Диапазон: {self._date_range_label(params)}",
+            f"Инструкция: {html.escape(instruction[:300]) if instruction else '—'}",
+            f"Всего кандидатов: {len(ranked)}",
+            "<tg-spoiler>",
+            "📥 Кандидаты:",
+        ]
+        for r in ranked:
+            ev = r.event
+            emoji = self._normalize_emoji(ev.emoji)
+            date_label = self._format_event_date(ev.date)
+            include_count = getattr(ev, "video_include_count", 0) or 0
+            promo_marker = " · 🔥PROMO" if r.mandatory or include_count > 0 else ""
+            score = f" · {r.score:.1f}" if r.score is not None else ""
+            reason = (
+                f" · {html.escape(r.reason[:140])}" if r.reason else ""
+            )
+            lines.append(
+                f"{r.position}. {date_label} · {emoji} {self._format_title(ev)}{promo_marker}{score}{reason}"
+            )
+        lines.append("</tg-spoiler>")
+        return "\n".join(lines)
+
+    async def _send_input_overview(
+        self, session_obj: VideoAnnounceSession, ranked: Sequence[RankedEvent]
+    ) -> None:
+        text = self._build_input_message(session_obj, ranked)
+        await self.bot.send_message(self.chat_id, text, parse_mode="HTML")
+
+    async def _send_selection_posts(
+        self,
+        session_obj: VideoAnnounceSession,
+        ranked: Sequence[RankedEvent],
+        *,
+        selection_message: types.Message | None = None,
+    ) -> None:
+        await self._send_input_overview(session_obj, ranked)
+        if selection_message:
+            await self._update_selection_message(selection_message, session_obj.id)
+        else:
+            await self._send_selection_ui(session_obj.id)
+
     async def apply_instruction(
         self,
         session_id: int,
@@ -631,7 +713,7 @@ class VideoAnnounceScenario:
             candidates=candidates,
             preserve_existing=preserve_existing,
         )
-        await self._send_selection_ui(session_id)
+        await self._send_selection_posts(sess, ranked)
         if pending and reuse_candidates:
             return "Инструкция обновлена"
         if pending:
@@ -840,31 +922,20 @@ class VideoAnnounceScenario:
             return ("Сессия не найдена", types.InlineKeyboardMarkup(inline_keyboard=[]))
         pairs = await self._load_items_with_events(session_id)
         params = self._get_selection_params(session_obj)
-        target = self._parse_target_date(str(params.get("target_date")))
-        primary = int(params.get("primary_window_days", DEFAULT_PRIMARY_WINDOW_DAYS) or 0)
-        fallback = int(params.get("fallback_window_days", DEFAULT_FALLBACK_WINDOW_DAYS) or 0)
         default_selected_max = int(
             params.get("default_selected_max", DEFAULT_SELECTED_MAX) or DEFAULT_SELECTED_MAX
         )
         instruction = (str(params.get("instruction") or "").strip())
         lines = [
-            f"Сессия #{session_id}: {session_obj.status.value}",
-            f"Базовая дата: {(target.isoformat() if target else 'не задана')} · окно +{primary}/+{fallback} дней",
+            f"Сессия #{session_id}: SELECTED",
+            f"Диапазон: {self._date_range_label(params)}",
             "Выберите события для рендера:",
+            f"Показываем топ-{default_selected_max} + промо (всего {len(pairs)})",
         ]
         if instruction:
             lines.append(f"Инструкция: {html.escape(instruction[:300])}")
         else:
             lines.append("Инструкция: —")
-        mandatory_total = sum(
-            1
-            for item, ev in pairs
-            if (item.include_count or getattr(ev, "video_include_count", 0) or 0) > 0
-        )
-        if mandatory_total > default_selected_max:
-            lines.append(
-                f"⚠️ Обязательных {mandatory_total}, это больше лимита {default_selected_max}"
-            )
         keyboard: list[list[types.InlineKeyboardButton]] = []
         toggle_buttons: list[types.InlineKeyboardButton] = []
         allow_edit = session_obj.status == VideoAnnounceSessionStatus.SELECTED
@@ -896,7 +967,8 @@ class VideoAnnounceScenario:
                     ),
                 ]
             )
-        for item, ev in pairs:
+        visible_pairs = self._visible_pairs(pairs, visible_limit=default_selected_max)
+        for item, ev in visible_pairs:
             marker = "✅" if item.status == VideoAnnounceItemStatus.READY else "⬜"
             emoji = self._normalize_emoji(ev.emoji)
             date_label = self._format_event_date(ev.date)
@@ -904,6 +976,7 @@ class VideoAnnounceScenario:
             include_count = item.include_count or getattr(ev, "video_include_count", 0) or 0
             if include_count > 0:
                 pin = f" 📌{include_count}"
+            promo_marker = " 🔥PROMO" if item.is_mandatory or include_count > 0 else ""
             score = f" · {item.llm_score:.1f}" if item.llm_score is not None else ""
             reason = (
                 f" · {html.escape(item.llm_reason[:140])}"
@@ -912,7 +985,7 @@ class VideoAnnounceScenario:
             )
             title = self._format_title(ev)
             lines.append(
-                f"{marker} #{item.position} · {date_label} · {emoji} {title}{pin}{score}{reason}"
+                f"{marker} #{item.position} · {date_label} · {emoji} {title}{pin}{promo_marker}{score}{reason}"
             )
             if allow_edit:
                 toggle_buttons.append(
@@ -921,9 +994,11 @@ class VideoAnnounceScenario:
                         callback_data=f"vidtoggle:{session_id}:{ev.id}",
                     )
                 )
-        ready_count = sum(1 for item, _ in pairs if item.status == VideoAnnounceItemStatus.READY)
+        ready_count = sum(
+            1 for item, _ in visible_pairs if item.status == VideoAnnounceItemStatus.READY
+        )
         if ready_count:
-            lines.insert(3, f"По умолчанию выбрано: {ready_count} из {len(pairs)}")
+            lines.insert(3, f"По умолчанию выбрано: {ready_count} из {len(visible_pairs)}")
         if allow_edit and toggle_buttons:
             keyboard.extend(self._chunk_buttons(toggle_buttons, size=3))
         if allow_edit:
@@ -979,8 +1054,8 @@ class VideoAnnounceScenario:
             session.add(sess)
             await session.commit()
             await session.refresh(sess)
-        await self._recalculate_selection(sess)
-        await self._update_selection_message(message, session_id)
+        ranked = await self._recalculate_selection(sess)
+        await self._send_selection_posts(sess, ranked, selection_message=message)
         return "Обновлено"
 
     async def toggle_item(self, session_id: int, event_id: int, message: types.Message) -> str:
