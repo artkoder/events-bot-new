@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import html
+import json
 import logging
+import os
+import tempfile
 from datetime import datetime, timezone
+from pathlib import Path
 
 from aiogram import types
 from sqlalchemy import select
@@ -18,7 +22,8 @@ from models import (
     VideoAnnounceSessionStatus,
 )
 from .finalize import prepare_final_texts
-from .kaggle_client import KaggleClient
+from .kaggle_client import DEFAULT_KERNEL_PATH, KaggleClient
+from .poller import run_kernel_poller
 from .selection import (
     build_payload,
     build_selection,
@@ -26,9 +31,11 @@ from .selection import (
     payload_as_json,
     prepare_session_items,
 )
-from .types import SelectionContext, SessionOverview, VideoProfile
+from .types import RankedEvent, SelectionContext, SessionOverview, VideoProfile
 
 logger = logging.getLogger(__name__)
+VIDEO_TEST_CHAT_ID = int(os.getenv("VIDEO_ANNOUNCE_TEST_CHAT_ID", "0") or 0)
+VIDEO_MAIN_CHAT_ID = int(os.getenv("VIDEO_ANNOUNCE_MAIN_CHAT_ID", "0") or 0)
 
 
 class VideoAnnounceScenario:
@@ -110,8 +117,21 @@ class VideoAnnounceScenario:
             ]
         )
 
+        summaries = await self._summaries()
+        failed_sessions = [
+            ov.session for ov in summaries if ov.session.status == VideoAnnounceSessionStatus.FAILED
+        ]
+        if failed_sessions and not rendering:
+            keyboard.append(
+                [
+                    types.InlineKeyboardButton(
+                        text="🔁 Перезапустить последнюю", callback_data=f"vidrestart:{failed_sessions[0].id}"
+                    )
+                ]
+            )
+
         overview_lines: list[str] = []
-        for ov in await self._summaries():
+        for ov in summaries:
             overview_lines.append(
                 f"Сессия #{ov.session.id}: {ov.session.status.value} ({ov.count} событий)"
             )
@@ -151,34 +171,178 @@ class VideoAnnounceScenario:
         asyncio.create_task(self._render_and_notify(obj, ranked))
 
     async def _render_and_notify(self, session_obj: VideoAnnounceSession, ranked) -> None:
+        client = KaggleClient()
+        finalized = []
         try:
-            await prepare_final_texts(self.db, session_obj.id, ranked)
+            finalized = await prepare_final_texts(self.db, session_obj.id, ranked)
         except Exception:
             logger.exception("video_announce: failed to prepare final texts")
-        payload = build_payload(session_obj, ranked, tz=timezone.utc)
-        json_text = payload_as_json(payload, timezone.utc)
-        preview_lines = []
-        for r in ranked[:5]:
-            dt = r.event.date.split("..", 1)[0]
-            preview_lines.append(
-                f"#{r.position} · {dt} · {r.event.emoji or ''} {r.event.title} ({r.score})"
-            )
-        preview = "\n".join(preview_lines)
         try:
+            payload = build_payload(session_obj, ranked, tz=timezone.utc)
+            json_text = payload_as_json(payload, timezone.utc)
+            preview_lines = []
+            for r in ranked[:5]:
+                dt = r.event.date.split("..", 1)[0]
+                preview_lines.append(
+                    f"#{r.position} · {dt} · {r.event.emoji or ''} {r.event.title} ({r.score})"
+                )
+            preview = "\n".join(preview_lines)
             await self.bot.send_message(
                 self.chat_id,
-                "<b>Черновик JSON для видеоролика:</b>\n<pre>" + html.escape(json_text) + "</pre>",
+                "<b>Черновик JSON для видеоролика:</b>\n<pre>"
+                + html.escape(json_text)
+                + "</pre>",
                 parse_mode="HTML",
             )
             await self.bot.send_message(self.chat_id, preview or "Нет событий")
-        finally:
-            async with self.db.get_session() as session:
-                fresh = await session.get(VideoAnnounceSession, session_obj.id)
-                if fresh:
-                    fresh.status = VideoAnnounceSessionStatus.DONE
-                    fresh.finished_at = datetime.now(timezone.utc)
-                    fresh.video_url = fresh.video_url or "pending_delivery"
-                    await session.commit()
+            dataset_slug = await self._create_dataset(session_obj, json_text, finalized)
+            kernel_ref = await self._push_kernel(client, dataset_slug)
+            session_obj.kaggle_dataset = dataset_slug
+            session_obj.kaggle_kernel_ref = kernel_ref
+            await self._store_kaggle_meta(session_obj.id, dataset_slug, kernel_ref)
+        except Exception:
+            logger.exception("video_announce: failed to push kaggle job")
+            await self._mark_failed(session_obj.id, "kaggle push failed")
+            return
+        asyncio.create_task(
+            run_kernel_poller(
+                self.db,
+                client,
+                session_obj,
+                bot=self.bot,
+                notify_chat_id=self.chat_id,
+                test_chat_id=VIDEO_TEST_CHAT_ID or None,
+                main_chat_id=VIDEO_MAIN_CHAT_ID or None,
+                poll_interval=60,
+                timeout_minutes=40,
+                dataset_slug=dataset_slug,
+            )
+        )
+
+    async def _load_ranked_events(self, session_id: int) -> list[RankedEvent]:
+        async with self.db.get_session() as session:
+            res_items = await session.execute(
+                select(VideoAnnounceItem)
+                .where(VideoAnnounceItem.session_id == session_id)
+                .order_by(VideoAnnounceItem.position)
+            )
+            items = res_items.scalars().all()
+            if not items:
+                return []
+            event_ids = [it.event_id for it in items]
+            ev_res = await session.execute(select(Event).where(Event.id.in_(event_ids)))
+            events = {ev.id: ev for ev in ev_res.scalars().all()}
+        ranked: list[RankedEvent] = []
+        for item in items:
+            ev = events.get(item.event_id)
+            if not ev:
+                continue
+            ranked.append(RankedEvent(event=ev, score=0.0, position=item.position))
+        return sorted(ranked, key=lambda r: r.position)
+
+    async def restart_session(self, session_id: int) -> None:
+        if not await self.ensure_access():
+            return
+        ranked = await self._load_ranked_events(session_id)
+        if not ranked:
+            await self.bot.send_message(self.chat_id, "Не удалось собрать события для рестарта")
+            return
+        async with self.db.get_session() as session:
+            obj = await session.get(VideoAnnounceSession, session_id)
+            if not obj:
+                await self.bot.send_message(self.chat_id, "Сессия не найдена")
+                return
+            if obj.status != VideoAnnounceSessionStatus.FAILED:
+                await self.bot.send_message(self.chat_id, "Сессию можно рестартовать только после ошибки")
+                return
+            obj.status = VideoAnnounceSessionStatus.RENDERING
+            obj.started_at = datetime.now(timezone.utc)
+            obj.finished_at = None
+            obj.error = None
+            obj.video_url = None
+            obj.kaggle_dataset = None
+            obj.kaggle_kernel_ref = None
+            session.add(obj)
+            await session.commit()
+            await session.refresh(obj)
+        await self.bot.send_message(
+            self.chat_id, f"Сессия #{session_id} перезапущена, готовим материалы"
+        )
+        asyncio.create_task(self._render_and_notify(obj, ranked))
+
+    async def _store_kaggle_meta(
+        self, session_id: int, dataset_slug: str, kernel_ref: str | None
+    ) -> None:
+        async with self.db.get_session() as session:
+            obj = await session.get(VideoAnnounceSession, session_id)
+            if not obj:
+                return
+            obj.kaggle_dataset = dataset_slug
+            obj.kaggle_kernel_ref = kernel_ref
+            await session.commit()
+
+    async def _mark_failed(self, session_id: int, error: str) -> None:
+        async with self.db.get_session() as session:
+            obj = await session.get(VideoAnnounceSession, session_id)
+            if not obj:
+                return
+            obj.status = VideoAnnounceSessionStatus.FAILED
+            obj.finished_at = datetime.now(timezone.utc)
+            obj.error = error
+            await session.commit()
+
+    async def _create_dataset(
+        self, session_obj: VideoAnnounceSession, json_text: str, finalized
+    ) -> str:
+        username = os.getenv("KAGGLE_USERNAME", "video-afisha")
+        slug = f"video-afisha-session-{session_obj.id}"
+        dataset_id = f"{username}/{slug}"
+        meta = {
+            "title": f"Video Afisha Session {session_obj.id}",
+            "id": dataset_id,
+            "licenses": [{"name": "CC0-1.0"}],
+        }
+        final_payload = [
+            {
+                "event_id": item.event_id,
+                "title": item.title,
+                "description": item.description,
+                "use_ocr": item.use_ocr,
+                "poster_source": item.poster_source,
+            }
+            for item in finalized
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            (tmp_path / "dataset-metadata.json").write_text(
+                json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            (tmp_path / "payload.json").write_text(json_text, encoding="utf-8")
+            (tmp_path / "final_texts.json").write_text(
+                json.dumps(final_payload, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            total_size = sum(f.stat().st_size for f in tmp_path.iterdir())
+            if total_size > 50 * 1024 * 1024:
+                raise RuntimeError("dataset payload exceeds 50MB")
+            client = KaggleClient()
+            try:
+                await asyncio.to_thread(client.create_dataset, tmp_path)
+            except Exception:
+                logger.exception("video_announce: failed to create dataset, retry after delete")
+                await asyncio.to_thread(client.delete_dataset, dataset_id, no_confirm=True)
+                await asyncio.to_thread(client.create_dataset, tmp_path)
+        return dataset_id
+
+    async def _push_kernel(self, client: KaggleClient, dataset_slug: str) -> str:
+        await asyncio.to_thread(
+            client.push_kernel, dataset_sources=[dataset_slug], timeout="300"
+        )
+        meta_path = DEFAULT_KERNEL_PATH / "kernel-metadata.json"
+        meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else {}
+        kernel_ref = str(meta.get("id") or meta.get("slug") or "")
+        if not kernel_ref:
+            raise RuntimeError("kernel reference missing after push")
+        return kernel_ref
 
     async def refresh_status(self) -> None:
         lines = ["Статусы сессий:"]
@@ -198,5 +362,13 @@ async def handle_prefix_action(prefix: str, callback: types.CallbackQuery, scena
     if prefix == "vidstatus":
         await scenario.refresh_status()
         await callback.answer("Обновлено")
+        return True
+    if prefix == "vidrestart":
+        try:
+            _, session_id = callback.data.split(":", 1)
+            await scenario.restart_session(int(session_id))
+        except Exception:
+            logger.exception("video_announce: restart failed")
+        await callback.answer("Рестарт")
         return True
     return False

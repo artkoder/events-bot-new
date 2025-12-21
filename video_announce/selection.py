@@ -243,9 +243,7 @@ async def prepare_session_items(
                 position=r.position,
                 status=VideoAnnounceItemStatus.READY,
             )
-            hit = VideoAnnounceEventHit(session_id=session_obj.id, event_id=r.event.id)
             session.add(item)
-            session.add(hit)
             stored.append(item)
         await session.commit()
     return stored
