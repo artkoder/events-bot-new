@@ -205,6 +205,7 @@ class Database:
                     creator_id INTEGER,
                     photo_urls JSON,
                     photo_count INTEGER DEFAULT 0,
+                    video_include_count INTEGER NOT NULL DEFAULT 0,
                     topics TEXT DEFAULT '[]',
                     topics_manual BOOLEAN DEFAULT 0,
                     added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -231,6 +232,9 @@ class Database:
             await _add_column(conn, "event", "tourist_label_by INTEGER")
             await _add_column(conn, "event", "tourist_label_at TIMESTAMP")
             await _add_column(conn, "event", "tourist_label_source TEXT")
+            await _add_column(
+                conn, "event", "video_include_count INTEGER NOT NULL DEFAULT 0"
+            )
             await conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_event_tourist_label ON event(tourist_label)"
             )
@@ -554,6 +558,69 @@ class Database:
             )
             await conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_event_festival_date_time ON event(festival, date, time)"
+            )
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS videoannounce_session(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    status TEXT NOT NULL DEFAULT 'CREATED',
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    started_at TIMESTAMP,
+                    finished_at TIMESTAMP,
+                    error TEXT,
+                    video_url TEXT
+                )
+                """
+            )
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS videoannounce_item(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id INTEGER NOT NULL,
+                    event_id INTEGER NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'PENDING',
+                    position INTEGER NOT NULL DEFAULT 0,
+                    error TEXT,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(session_id) REFERENCES videoannounce_session(id) ON DELETE CASCADE,
+                    FOREIGN KEY(event_id) REFERENCES event(id) ON DELETE CASCADE,
+                    UNIQUE(session_id, event_id)
+                )
+                """
+            )
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS videoannounce_eventhit(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id INTEGER NOT NULL,
+                    event_id INTEGER NOT NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(session_id) REFERENCES videoannounce_session(id) ON DELETE CASCADE,
+                    FOREIGN KEY(event_id) REFERENCES event(id) ON DELETE CASCADE,
+                    UNIQUE(session_id, event_id)
+                )
+                """
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_videoannounce_session_status_created_at ON videoannounce_session(status, created_at)"
+            )
+            await conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ux_videoannounce_session_rendering ON videoannounce_session(status) WHERE status = 'RENDERING'"
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_videoannounce_item_session ON videoannounce_item(session_id)"
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_videoannounce_item_event ON videoannounce_item(event_id)"
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_videoannounce_item_status ON videoannounce_item(status)"
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_videoannounce_eventhit_event ON videoannounce_eventhit(event_id)"
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_videoannounce_eventhit_session ON videoannounce_eventhit(session_id)"
             )
 
             await conn.commit()
