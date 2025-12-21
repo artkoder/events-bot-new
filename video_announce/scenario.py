@@ -7,6 +7,7 @@ import logging
 import os
 import tempfile
 from datetime import datetime, timezone
+from typing import Sequence
 from pathlib import Path
 
 from aiogram import types
@@ -31,7 +32,13 @@ from .selection import (
     payload_as_json,
     prepare_session_items,
 )
-from .types import RankedEvent, SelectionContext, SessionOverview, VideoProfile
+from .types import (
+    RankedEvent,
+    RenderPayload,
+    SelectionContext,
+    SessionOverview,
+    VideoProfile,
+)
 
 logger = logging.getLogger(__name__)
 VIDEO_TEST_CHAT_ID = int(os.getenv("VIDEO_ANNOUNCE_TEST_CHAT_ID", "0") or 0)
@@ -181,13 +188,20 @@ class VideoAnnounceScenario:
         except Exception:
             logger.exception("video_announce: failed to prepare final texts")
         try:
-            payload = build_payload(session_obj, ranked, tz=timezone.utc)
+            payload = await self._build_render_payload(session_obj, ranked)
             json_text = payload_as_json(payload, timezone.utc)
             preview_lines = []
+            event_map = {ev.id: ev for ev in payload.events}
+            item_map = {it.event_id: it for it in payload.items}
             for r in ranked[:5]:
-                dt = r.event.date.split("..", 1)[0]
+                ev = event_map.get(r.event.id)
+                item = item_map.get(r.event.id)
+                if not ev or not item:
+                    continue
+                dt = ev.date.split("..", 1)[0]
+                title = item.final_title or ev.title
                 preview_lines.append(
-                    f"#{r.position} · {dt} · {r.event.emoji or ''} {r.event.title} ({r.score})"
+                    f"#{r.position} · {dt} · {ev.emoji or ''} {title} ({r.score})"
                 )
             preview = "\n".join(preview_lines)
             await self.bot.send_message(
@@ -259,6 +273,21 @@ class VideoAnnounceScenario:
                 .order_by(VideoAnnounceItem.position)
             )
             return list(res.all())
+
+    async def _build_render_payload(
+        self, session_obj: VideoAnnounceSession, ranked: Sequence[RankedEvent]
+    ) -> RenderPayload:
+        ranked_ids = {r.event.id for r in ranked}
+        pairs = await self._load_items_with_events(session_obj.id)
+        ready_items = [
+            item
+            for item, _ in pairs
+            if item.status == VideoAnnounceItemStatus.READY
+            and item.event_id in ranked_ids
+        ]
+        return build_payload(
+            session_obj, ranked, tz=timezone.utc, items=ready_items
+        )
 
     async def _selection_view(
         self, session_id: int
@@ -350,13 +379,20 @@ class VideoAnnounceScenario:
         ranked = await self._load_ranked_events(session_id, ready_only=True)
         if not ranked:
             return "Нет выбранных событий"
-        payload = build_payload(session_obj, ranked, tz=timezone.utc)
+        payload = await self._build_render_payload(session_obj, ranked)
         json_text = payload_as_json(payload, timezone.utc)
+        event_map = {ev.id: ev for ev in payload.events}
+        item_map = {it.event_id: it for it in payload.items}
         preview_lines = []
         for r in ranked:
-            dt = r.event.date.split("..", 1)[0]
+            ev = event_map.get(r.event.id)
+            item = item_map.get(r.event.id)
+            if not ev or not item:
+                continue
+            dt = ev.date.split("..", 1)[0]
+            title = item.final_title or ev.title
             preview_lines.append(
-                f"#{r.position} · {dt} · {r.event.emoji or ''} {r.event.title} ({r.score})"
+                f"#{r.position} · {dt} · {ev.emoji or ''} {title} ({r.score})"
             )
         await self.bot.send_message(
             self.chat_id,

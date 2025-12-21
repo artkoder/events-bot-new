@@ -254,8 +254,11 @@ def build_payload(
     ranked: list[RankedEvent],
     *,
     tz: timezone,
+    items: Sequence[VideoAnnounceItem] | None = None,
 ) -> RenderPayload:
-    items = [
+    events = [r.event for r in ranked]
+    scores = {r.event.id: r.score for r in ranked}
+    payload_items = list(items) if items is not None else [
         VideoAnnounceItem(
             session_id=session.id,
             event_id=r.event.id,
@@ -264,39 +267,61 @@ def build_payload(
         )
         for r in ranked
     ]
-    events = [r.event for r in ranked]
-    scores = {r.event.id: r.score for r in ranked}
-    return RenderPayload(session=session, items=items, events=events, scores=scores)
+    return RenderPayload(
+        session=session, items=payload_items, events=events, scores=scores
+    )
 
 
 def payload_as_json(payload: RenderPayload, tz: timezone) -> str:
-    def _format_event(ev: Event) -> dict:
-        dt = ev.date.split("..", 1)[0]
-        d = date.fromisoformat(dt)
-        pretty = format_day_pretty(d)
-        return {
-            "id": ev.id,
-            "title": ev.title,
-            "emoji": ev.emoji,
-            "time": ev.time,
-            "date": ev.date,
-            "pretty_date": pretty,
-            "location": ev.location_name,
-            "city": ev.city,
-            "topics": getattr(ev, "topics", []),
-            "is_free": ev.is_free,
-            "score": payload.scores.get(ev.id, 0.0),
-            "video_include_count": ev.video_include_count,
+    def _poster_name(item: VideoAnnounceItem, ev: Event) -> str:
+        ext = ".jpg"
+        for url in getattr(ev, "photo_urls", []) or []:
+            low_path = url.lower().split("?", 1)[0]
+            for candidate in (".png", ".jpg", ".jpeg", ".webp"):
+                if low_path.endswith(candidate):
+                    ext = candidate
+                    break
+            if ext != ".jpg":
+                break
+        return f"{item.position}{ext}"
+
+    def _intro_text(events: Sequence[Event]) -> str:
+        dates: list[date] = []
+        for ev in events:
+            try:
+                dt = ev.date.split("..", 1)[0]
+                dates.append(date.fromisoformat(dt))
+            except ValueError:
+                continue
+        if not dates:
+            return "Видео афиша"
+        start = min(dates)
+        end = max(dates)
+        pretty_start = format_day_pretty(start)
+        if start == end:
+            return f"Афиша на {pretty_start}"
+        pretty_end = format_day_pretty(end)
+        return f"Афиша {pretty_start} – {pretty_end}"
+
+    event_map = {ev.id: ev for ev in payload.events}
+    scenes = []
+    for item in sorted(payload.items, key=lambda it: it.position):
+        ev = event_map.get(item.event_id)
+        if not ev:
+            continue
+        location = ", ".join(part for part in [ev.city, ev.location_name] if part)
+        scene = {
+            "title": item.final_title or ev.title,
+            "description": item.final_description or ev.description,
+            "date": ev.date.split("..", 1)[0],
+            "location": location,
+            "images": [_poster_name(item, ev)],
         }
+        scenes.append(scene)
 
     obj = {
-        "session_id": payload.session.id,
-        "prepared_at": payload.prepared_at.isoformat(),
-        "items": [
-            {"event_id": it.event_id, "position": it.position}
-            for it in payload.items
-        ],
-        "events": [_format_event(e) for e in payload.events],
+        "intro": {"count": len(scenes), "text": _intro_text(payload.events)},
+        "scenes": scenes,
     }
     return json.dumps(obj, ensure_ascii=False, indent=2)
 
