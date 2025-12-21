@@ -1,3 +1,6 @@
+from models import Event, Festival
+
+
 def _normalize_title_and_emoji(title: str, emoji: str | None) -> tuple[str, str]:
     """Normalize emoji placement so it appears only once per rendered line."""
 
