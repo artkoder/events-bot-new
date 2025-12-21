@@ -404,6 +404,7 @@ class Event(SQLModel, table=True):
 
 class VideoAnnounceSessionStatus(str, Enum):
     CREATED = "CREATED"
+    SELECTED = "SELECTED"
     RENDERING = "RENDERING"
     DONE = "DONE"
     FAILED = "FAILED"
