@@ -33,6 +33,7 @@ RANKING_RESPONSE_FORMAT = {
                             "use_ocr",
                             "poster_source",
                         ],
+                        "additionalProperties": False,
                     },
                 }
             },
@@ -68,6 +69,7 @@ FINAL_TEXT_RESPONSE_FORMAT = {
                             "use_ocr",
                             "poster_source",
                         ],
+                        "additionalProperties": False,
                     },
                 }
             },
