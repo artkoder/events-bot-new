@@ -566,12 +566,21 @@ class Database:
                     status TEXT NOT NULL DEFAULT 'CREATED',
                     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     started_at TIMESTAMP,
+                    published_at TIMESTAMP,
                     finished_at TIMESTAMP,
+                    kaggle_dataset TEXT,
+                    kaggle_kernel_ref TEXT,
                     error TEXT,
                     video_url TEXT
                 )
                 """
             )
+            await _add_column(conn, "videoannounce_session", "profile_key TEXT")
+            await _add_column(conn, "videoannounce_session", "test_chat_id BIGINT")
+            await _add_column(conn, "videoannounce_session", "main_chat_id BIGINT")
+            await _add_column(conn, "videoannounce_session", "published_at TIMESTAMP")
+            await _add_column(conn, "videoannounce_session", "kaggle_dataset TEXT")
+            await _add_column(conn, "videoannounce_session", "kaggle_kernel_ref TEXT")
             await conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS videoannounce_item(
