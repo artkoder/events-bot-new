@@ -572,6 +572,9 @@ class Database:
                 )
                 """
             )
+            await _add_column(conn, "videoannounce_session", "profile_key TEXT")
+            await _add_column(conn, "videoannounce_session", "test_chat_id BIGINT")
+            await _add_column(conn, "videoannounce_session", "main_chat_id BIGINT")
             await conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS videoannounce_item(
