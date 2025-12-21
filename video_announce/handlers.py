@@ -7,6 +7,7 @@ from typing import Callable
 
 from aiogram import types
 from models import Event, User
+from .kaggle_client import KaggleClient
 
 from db import Database
 from .scenario import VideoAnnounceScenario, handle_prefix_action
@@ -22,6 +23,22 @@ async def _load_user(db: Database, user_id: int) -> User | None:
 async def handle_video_command(message: types.Message, db: Database, bot) -> None:
     scenario = VideoAnnounceScenario(db, bot, message.chat.id, message.from_user.id)
     await scenario.show_menu()
+
+
+async def handle_kaggle_test(message: types.Message, db: Database, bot) -> None:
+    async with db.get_session() as session:
+        user = await session.get(User, message.from_user.id)
+    if not user or not user.is_superadmin:
+        await bot.send_message(message.chat.id, "Not authorized")
+        return
+    client = KaggleClient()
+    try:
+        title = client.kaggle_test()
+    except Exception:
+        logger.exception("kaggletest failed")
+        await bot.send_message(message.chat.id, "Kaggle API error")
+        return
+    await bot.send_message(message.chat.id, f"Kaggle OK: {title}")
 
 
 async def _rerender_events(
