@@ -7,7 +7,7 @@ import logging
 import os
 import shutil
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from typing import Sequence
 from pathlib import Path
@@ -27,7 +27,13 @@ from models import (
     VideoAnnounceSession,
     VideoAnnounceSessionStatus,
 )
-from main import HTTP_SEMAPHORE, get_http_session, get_setting_value, set_setting_value
+from main import (
+    HTTP_SEMAPHORE,
+    LOCAL_TZ,
+    get_http_session,
+    get_setting_value,
+    set_setting_value,
+)
 from .finalize import prepare_final_texts
 from .kaggle_client import DEFAULT_KERNEL_PATH, KaggleClient
 from .poller import VIDEO_MAX_MB, run_kernel_poller
@@ -363,7 +369,12 @@ class VideoAnnounceScenario:
             )
             return
 
-        ctx = SelectionContext(tz=timezone.utc, profile=VideoProfile(profile_key, "", ""))
+        now_local = datetime.now(LOCAL_TZ)
+        ctx = SelectionContext(
+            tz=LOCAL_TZ,
+            target_date=(now_local + timedelta(days=1)).date(),
+            profile=VideoProfile(profile_key, "", ""),
+        )
         test_chat_id, main_chat_id = await self._get_profile_channels(profile_key)
         ranked = await build_selection(self.db, ctx, client=KaggleClient())
         async with self.db.get_session() as session:
