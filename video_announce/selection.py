@@ -274,6 +274,7 @@ async def _rank_with_llm(
     promoted: set[int],
     mandatory_ids: set[int],
     session_id: int | None = None,
+    instruction: str | None = None,
 ) -> list[RankedEvent]:
     if not events:
         return []
@@ -309,15 +310,21 @@ async def _rank_with_llm(
         )
     try:
         serialized_payload = json.dumps(payload, ensure_ascii=False)
+        request_text = (
+            serialized_payload
+            if not instruction
+            else f"Инструкция оператора: {instruction}\n\n{serialized_payload}"
+        )
         preview = json.dumps(payload[:3], ensure_ascii=False)
         logger.info(
-            "video_announce: llm ranking request items=%d promoted=%d preview=%s",
+            "video_announce: llm ranking request items=%d promoted=%d preview=%s instruction=%s",
             len(payload),
             len(promoted),
             preview,
+            bool(instruction),
         )
         raw = await ask_4o(
-            serialized_payload,
+            request_text,
             system_prompt=ranking_prompt(),
             response_format=RANKING_RESPONSE_FORMAT,
             meta={"source": "video_announce.ranking", "count": len(payload)},
@@ -328,7 +335,9 @@ async def _rank_with_llm(
             session_id=session_id,
             stage="ranking",
             model="gpt-4o",
-            request_json=serialized_payload,
+            request_json=json.dumps(
+                {"instruction": instruction, "items": payload}, ensure_ascii=False
+            ),
             response_json=raw,
         )
     except Exception:
@@ -509,9 +518,10 @@ async def build_selection(
     *,
     client: KaggleClient | None = None,
     session_id: int | None = None,
+    candidates: Sequence[Event] | None = None,
 ) -> SelectionBuildResult:
     client = client or KaggleClient()
-    events = await fetch_candidates(db, ctx)
+    events = list(candidates) if candidates is not None else await fetch_candidates(db, ctx)
     mandatory_ids = {
         e.id
         for e in events
@@ -520,8 +530,12 @@ async def build_selection(
     promoted = set(ctx.promoted_event_ids or set()) | set(mandatory_ids)
     mandatory_ids = mandatory_ids | set(ctx.promoted_event_ids or set())
     hits = await _load_hits(db, [e.id for e in events])
-    selected = _apply_repeat_limit(
-        events, limit=ctx.candidate_limit, hits=hits, promoted=promoted
+    selected = (
+        list(events)
+        if candidates is not None
+        else _apply_repeat_limit(
+            events, limit=ctx.candidate_limit, hits=hits, promoted=promoted
+        )
     )
     ranked = await _rank_with_llm(
         db,
@@ -530,6 +544,7 @@ async def build_selection(
         promoted=promoted,
         mandatory_ids=mandatory_ids,
         session_id=session_id,
+        instruction=ctx.instruction,
     )
     default_ready_ids = _choose_default_ready(
         ranked,

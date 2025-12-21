@@ -7,11 +7,13 @@ import logging
 import os
 import shutil
 import tempfile
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from io import BytesIO
-from typing import Sequence
 from pathlib import Path
+from typing import Sequence
 
+from cachetools import TTLCache
 from aiogram import types
 from sqlalchemy import select
 from PIL import Image
@@ -60,6 +62,35 @@ DEFAULT_FALLBACK_WINDOW_DAYS = 10
 DEFAULT_CANDIDATE_LIMIT = 20
 DEFAULT_SELECTED_MIN = 6
 DEFAULT_SELECTED_MAX = 8
+PENDING_INSTRUCTION_TTL = 15 * 60
+
+
+@dataclass
+class PendingInstruction:
+    session_id: int
+    reuse_candidates: bool = False
+
+
+_pending_instructions: TTLCache[int, PendingInstruction] = TTLCache(
+    maxsize=64, ttl=PENDING_INSTRUCTION_TTL
+)
+
+
+def set_pending_instruction(user_id: int, pending: PendingInstruction) -> None:
+    _pending_instructions[user_id] = pending
+
+
+def take_pending_instruction(
+    user_id: int, session_id: int | None = None
+) -> PendingInstruction | None:
+    pending = _pending_instructions.get(user_id)
+    if pending and (session_id is None or pending.session_id == session_id):
+        return _pending_instructions.pop(user_id, None)
+    return None
+
+
+def is_waiting_instruction(user_id: int) -> bool:
+    return user_id in _pending_instructions
 
 
 def read_positive_int_env(env_key: str, default: int) -> int:
@@ -285,6 +316,7 @@ class VideoAnnounceScenario:
             params.get("default_selected_max", DEFAULT_SELECTED_MAX) or 0
         )
         target_date = self._parse_target_date(str(params.get("target_date")))
+        instruction = (str(params.get("instruction") or "").strip()) or None
         return SelectionContext(
             tz=LOCAL_TZ,
             target_date=target_date,
@@ -294,6 +326,7 @@ class VideoAnnounceScenario:
             candidate_limit=max(candidate_limit, DEFAULT_SELECTED_MAX),
             default_selected_min=max(default_selected_min, 1),
             default_selected_max=max(default_selected_max, default_selected_min),
+            instruction=instruction,
         )
 
     async def _build_selection_context(
@@ -476,7 +509,7 @@ class VideoAnnounceScenario:
         test_chat_id, main_chat_id = await self._get_profile_channels(profile_key)
         async with self.db.get_session() as session:
             obj = VideoAnnounceSession(
-                status=VideoAnnounceSessionStatus.SELECTED,
+                status=VideoAnnounceSessionStatus.CREATED,
                 profile_key=profile_key,
                 selection_params=params,
                 test_chat_id=test_chat_id,
@@ -485,13 +518,149 @@ class VideoAnnounceScenario:
             session.add(obj)
             await session.commit()
             await session.refresh(obj)
+        set_pending_instruction(
+            self.user_id, PendingInstruction(session_id=obj.id, reuse_candidates=False)
+        )
+        await self._prompt_instruction(obj, ctx)
+
+    async def _prompt_instruction(
+        self,
+        session_obj: VideoAnnounceSession,
+        ctx: SelectionContext | None = None,
+        *,
+        reuse: bool = False,
+    ) -> None:
+        if ctx is None:
+            ctx = await self._build_selection_context(session_obj)
+        action_hint = (
+            "новую инструкцию для пересчёта текущего списка"
+            if reuse
+            else "инструкцию для подбора афиши"
+        )
+        lines = [
+            f"Сессия #{session_obj.id}: отправьте {action_hint}.",
+            "Можно прислать текстом или нажмите пропустить.",
+        ]
+        if ctx.profile:
+            lines.append(f"Профиль: {ctx.profile.title}")
+        keyboard = types.InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    types.InlineKeyboardButton(
+                        text="Пропустить", callback_data=f"vidinstr:{session_obj.id}:skip"
+                    ),
+                    types.InlineKeyboardButton(
+                        text="Отмена", callback_data=f"vidinstr:{session_obj.id}:cancel"
+                    ),
+                ]
+            ]
+        )
+        await self.bot.send_message(self.chat_id, "\n".join(lines), reply_markup=keyboard)
+
+    async def _build_and_store_selection(
+        self,
+        session_obj: VideoAnnounceSession,
+        *,
+        candidates: Sequence[Event] | None = None,
+        preserve_existing: bool = False,
+    ) -> list[RankedEvent]:
+        ctx = await self._build_selection_context(session_obj)
         result = await build_selection(
-            self.db, ctx, client=KaggleClient(), session_id=obj.id
+            self.db,
+            ctx,
+            client=KaggleClient(),
+            session_id=session_obj.id,
+            candidates=candidates,
         )
-        await prepare_session_items(
-            self.db, obj, result.ranked, default_ready_ids=result.default_ready_ids
+        if preserve_existing:
+            await self._refresh_selection_items(session_obj, result)
+        else:
+            await prepare_session_items(
+                self.db,
+                session_obj,
+                result.ranked,
+                default_ready_ids=result.default_ready_ids,
+            )
+        return result.ranked
+
+    async def apply_instruction(
+        self,
+        session_id: int,
+        instruction: str | None,
+        *,
+        reuse_candidates: bool,
+        pending: PendingInstruction | None = None,
+    ) -> str:
+        if not await self._has_access():
+            return "Not authorized"
+        pending = pending or take_pending_instruction(self.user_id, session_id)
+        reuse_candidates = reuse_candidates or bool(
+            pending and pending.reuse_candidates
         )
-        await self._send_selection_ui(obj.id)
+        sess: VideoAnnounceSession | None = None
+        async with self.db.get_session() as session:
+            sess = await session.get(VideoAnnounceSession, session_id)
+            if not sess:
+                return "Сессия не найдена"
+            if sess.status not in {
+                VideoAnnounceSessionStatus.CREATED,
+                VideoAnnounceSessionStatus.SELECTED,
+            }:
+                return "Сессия уже запущена"
+            params = self._get_selection_params(sess)
+            if instruction:
+                params["instruction"] = instruction
+            else:
+                params.pop("instruction", None)
+            sess.selection_params = params
+            if sess.status == VideoAnnounceSessionStatus.CREATED:
+                sess.status = VideoAnnounceSessionStatus.SELECTED
+            session.add(sess)
+            await session.commit()
+            await session.refresh(sess)
+        preserve_existing = False
+        if not sess:
+            return "Сессия не найдена"
+        candidates: Sequence[Event] | None = None
+        if reuse_candidates:
+            pairs = await self._load_items_with_events(session_id)
+            candidates = [ev for _, ev in pairs]
+            preserve_existing = bool(candidates)
+        ranked = await self._build_and_store_selection(
+            sess,
+            candidates=candidates,
+            preserve_existing=preserve_existing,
+        )
+        await self._send_selection_ui(session_id)
+        if pending and reuse_candidates:
+            return "Инструкция обновлена"
+        if pending:
+            return "Инструкция сохранена"
+        return "Готово"
+
+    async def request_new_instruction(self, session_id: int) -> str:
+        session_obj = await self._load_session(session_id)
+        if not session_obj:
+            return "Сессия не найдена"
+        if session_obj.status != VideoAnnounceSessionStatus.SELECTED:
+            return "Сессия уже запущена"
+        set_pending_instruction(
+            self.user_id, PendingInstruction(session_id=session_id, reuse_candidates=True)
+        )
+        await self._prompt_instruction(session_obj, reuse=True)
+        return "Запрос обновлён"
+
+    async def cancel_instruction(self, session_id: int) -> str:
+        pending = take_pending_instruction(self.user_id, session_id)
+        if not pending:
+            return "Запрос инструкций устарел"
+        async with self.db.get_session() as session:
+            sess = await session.get(VideoAnnounceSession, session_id)
+            if sess and sess.status == VideoAnnounceSessionStatus.CREATED:
+                await session.delete(sess)
+                await session.commit()
+                return "Сессия отменена"
+        return "Обновление отменено"
 
     async def _render_and_notify(self, session_obj: VideoAnnounceSession, ranked) -> None:
         client = KaggleClient()
@@ -659,12 +828,9 @@ class VideoAnnounceScenario:
     async def _recalculate_selection(
         self, session_obj: VideoAnnounceSession
     ) -> list[RankedEvent]:
-        ctx = await self._build_selection_context(session_obj)
-        result = await build_selection(
-            self.db, ctx, client=KaggleClient(), session_id=session_obj.id
+        return await self._build_and_store_selection(
+            session_obj, preserve_existing=True
         )
-        await self._refresh_selection_items(session_obj, result)
-        return result.ranked
 
     async def _selection_view(
         self, session_id: int
@@ -680,11 +846,16 @@ class VideoAnnounceScenario:
         default_selected_max = int(
             params.get("default_selected_max", DEFAULT_SELECTED_MAX) or DEFAULT_SELECTED_MAX
         )
+        instruction = (str(params.get("instruction") or "").strip())
         lines = [
             f"Сессия #{session_id}: {session_obj.status.value}",
             f"Базовая дата: {(target.isoformat() if target else 'не задана')} · окно +{primary}/+{fallback} дней",
             "Выберите события для рендера:",
         ]
+        if instruction:
+            lines.append(f"Инструкция: {html.escape(instruction[:300])}")
+        else:
+            lines.append("Инструкция: —")
         mandatory_total = sum(
             1
             for item, ev in pairs
@@ -698,6 +869,13 @@ class VideoAnnounceScenario:
         toggle_buttons: list[types.InlineKeyboardButton] = []
         allow_edit = session_obj.status == VideoAnnounceSessionStatus.SELECTED
         if allow_edit:
+            keyboard.append(
+                [
+                    types.InlineKeyboardButton(
+                        text="📝 Новая инструкция", callback_data=f"vidinstr:{session_id}:new"
+                    )
+                ]
+            )
             keyboard.append(
                 [
                     types.InlineKeyboardButton(
@@ -1117,5 +1295,36 @@ async def handle_prefix_action(prefix: str, callback: types.CallbackQuery, scena
         except Exception:
             logger.exception("video_announce: restart failed")
         await callback.answer("Рестарт")
+        return True
+    if prefix == "vidinstr":
+        try:
+            _, session_id, action = callback.data.split(":", 2)
+            session_id_int = int(session_id)
+        except Exception:
+            return False
+        if action == "skip":
+            pending = take_pending_instruction(callback.from_user.id, session_id_int)
+            msg = await scenario.apply_instruction(
+                session_id_int,
+                None,
+                reuse_candidates=bool(pending and pending.reuse_candidates),
+                pending=pending,
+            )
+        elif action == "cancel":
+            msg = await scenario.cancel_instruction(session_id_int)
+        elif action == "new":
+            msg = await scenario.request_new_instruction(session_id_int)
+        else:
+            msg = "Неизвестное действие"
+        await callback.answer(
+            msg or "Готово",
+            show_alert=msg
+            not in {
+                "Готово",
+                "Инструкция сохранена",
+                "Инструкция обновлена",
+                "Запрос обновлён",
+            },
+        )
         return True
     return False

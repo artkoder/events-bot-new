@@ -13458,6 +13458,9 @@ def create_app() -> web.Application:
             offset_to_timezone=offset_to_timezone,
         )
 
+    async def video_instruction_wrapper(message: types.Message):
+        await video_handlers.handle_instruction_message(message, db, bot)
+
     async def edit_message_wrapper(message: types.Message):
         await handle_edit_message(message, db, bot)
 
@@ -13749,6 +13752,10 @@ def create_app() -> web.Application:
         vk_rejected_cb_wrapper, lambda c: c.data and c.data.startswith("vkrejected:")
     )
     dp.message.register(tz_wrapper, Command("tz"))
+    dp.message.register(
+        video_instruction_wrapper,
+        lambda m: video_handlers.is_waiting_instruction(m.from_user.id),
+    )
     dp.message.register(
         add_event_session_wrapper, lambda m: m.from_user.id in add_event_sessions
     )
