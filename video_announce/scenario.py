@@ -4,7 +4,6 @@ import asyncio
 import html
 import json
 import logging
-import os
 import shutil
 import tempfile
 from datetime import datetime, timezone
@@ -18,6 +17,7 @@ from PIL import Image
 
 from db import Database
 from models import (
+    Channel,
     User,
     Event,
     EventPoster,
@@ -26,7 +26,7 @@ from models import (
     VideoAnnounceSession,
     VideoAnnounceSessionStatus,
 )
-from main import HTTP_SEMAPHORE, get_http_session
+from main import HTTP_SEMAPHORE, get_http_session, get_setting_value, set_setting_value
 from .finalize import prepare_final_texts
 from .kaggle_client import DEFAULT_KERNEL_PATH, KaggleClient
 from .poller import run_kernel_poller
@@ -46,8 +46,7 @@ from .types import (
 )
 
 logger = logging.getLogger(__name__)
-VIDEO_TEST_CHAT_ID = int(os.getenv("VIDEO_ANNOUNCE_TEST_CHAT_ID", "0") or 0)
-VIDEO_MAIN_CHAT_ID = int(os.getenv("VIDEO_ANNOUNCE_MAIN_CHAT_ID", "0") or 0)
+CHANNEL_SETTING_KEY = "videoannounce_channels"
 
 
 class VideoAnnounceScenario:
@@ -56,6 +55,103 @@ class VideoAnnounceScenario:
         self.bot = bot
         self.chat_id = chat_id
         self.user_id = user_id
+
+    async def _load_admin_channels(self) -> list[Channel]:
+        async with self.db.get_session() as session:
+            result = await session.execute(
+                select(Channel)
+                .where(Channel.is_admin.is_(True))
+                .order_by(Channel.title, Channel.username, Channel.channel_id)
+            )
+            return result.scalars().all()
+
+    def _format_channel_label(self, channel: Channel) -> str:
+        if channel.username:
+            return f"@{channel.username}"
+        if channel.title:
+            return channel.title
+        return str(channel.channel_id)
+
+    async def _load_channel_config(self) -> dict[str, dict[str, int]]:
+        raw = await get_setting_value(self.db, CHANNEL_SETTING_KEY)
+        if not raw:
+            return {}
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            logger.warning("video_announce: failed to parse channel config")
+            return {}
+        parsed: dict[str, dict[str, int]] = {}
+        for key, value in data.items():
+            if not isinstance(value, dict):
+                continue
+            profile_cfg: dict[str, int] = {}
+            for kind in ("test", "main"):
+                raw_val = value.get(kind)
+                try:
+                    int_val = int(raw_val)
+                except Exception:
+                    continue
+                profile_cfg[kind] = int_val
+            if profile_cfg:
+                parsed[str(key)] = profile_cfg
+        return parsed
+
+    async def _save_channel_config(self, data: dict[str, dict[str, int]]) -> None:
+        await set_setting_value(self.db, CHANNEL_SETTING_KEY, json.dumps(data))
+
+    async def _get_profile_channels(self, profile_key: str) -> tuple[int | None, int | None]:
+        config = await self._load_channel_config()
+        profile_cfg = config.get(profile_key, {})
+        return (profile_cfg.get("test"), profile_cfg.get("main"))
+
+    async def _set_profile_channel(
+        self, profile_key: str, chat_id: int, kind: str
+    ) -> None:
+        if kind not in {"test", "main"}:
+            return
+        channels = await self._load_admin_channels()
+        allowed_ids = {ch.channel_id for ch in channels}
+        if chat_id not in allowed_ids:
+            logger.warning("video_announce: unknown channel %s for profile %s", chat_id, profile_key)
+            return
+        config = await self._load_channel_config()
+        profile_cfg = dict(config.get(profile_key, {}))
+        current = profile_cfg.get(kind)
+        if current == chat_id:
+            profile_cfg.pop(kind, None)
+        else:
+            profile_cfg[kind] = chat_id
+        if profile_cfg:
+            config[profile_key] = profile_cfg
+        else:
+            config.pop(profile_key, None)
+        await self._save_channel_config(config)
+
+    async def _resolve_session_channels(
+        self, session_obj: VideoAnnounceSession
+    ) -> tuple[int | None, int | None]:
+        if session_obj.test_chat_id or session_obj.main_chat_id:
+            return session_obj.test_chat_id, session_obj.main_chat_id
+        if not session_obj.profile_key:
+            return None, None
+        test_chat_id, main_chat_id = await self._get_profile_channels(
+            session_obj.profile_key
+        )
+        if test_chat_id or main_chat_id:
+            async with self.db.get_session() as session:
+                fresh = await session.get(VideoAnnounceSession, session_obj.id)
+                if fresh:
+                    fresh.test_chat_id = test_chat_id
+                    fresh.main_chat_id = main_chat_id
+                    await session.commit()
+                    await session.refresh(fresh)
+                    session_obj.test_chat_id = fresh.test_chat_id
+                    session_obj.main_chat_id = fresh.main_chat_id
+                    return fresh.test_chat_id, fresh.main_chat_id
+        session_obj.test_chat_id = test_chat_id
+        session_obj.main_chat_id = main_chat_id
+        return test_chat_id, main_chat_id
 
     async def _has_access(self) -> bool:
         user = await self._load_user()
@@ -110,11 +206,76 @@ class VideoAnnounceScenario:
                 overviews.append(SessionOverview(session=sess, items=items, events=events))
             return overviews
 
+    async def show_profile_channels(
+        self, profile_key: str, message: types.Message | None = None
+    ) -> None:
+        if not await self.ensure_access():
+            return
+        profiles = await fetch_profiles()
+        profile = next((p for p in profiles if p.key == profile_key), None)
+        if not profile:
+            await self.bot.send_message(self.chat_id, "Профиль не найден")
+            return
+        channels = await self._load_admin_channels()
+        test_chat_id, main_chat_id = await self._get_profile_channels(profile_key)
+        channel_names = {
+            ch.channel_id: self._format_channel_label(ch)
+            for ch in channels
+            if ch.channel_id is not None
+        }
+        lines = [
+            f"🎬 {profile.title}",
+            "Настройте каналы публикации для этой рубрики.",
+        ]
+        if not channels:
+            lines.append("Бот не найден в админках каналов — отправим в операторский чат.")
+        test_label = channel_names.get(test_chat_id) if test_chat_id else None
+        main_label = channel_names.get(main_chat_id) if main_chat_id else None
+        lines.append(
+            f"Тестовый: {test_label or 'не выбран (отправим в операторский чат)'}"
+        )
+        lines.append(
+            f"Основной: {main_label or 'не выбран (только тестовая публикация)'}"
+        )
+        keyboard: list[list[types.InlineKeyboardButton]] = []
+        for ch in channels:
+            label = self._format_channel_label(ch)
+            test_marker = "✅" if ch.channel_id == test_chat_id else "➕"
+            main_marker = "✅" if ch.channel_id == main_chat_id else "➕"
+            keyboard.append(
+                [
+                    types.InlineKeyboardButton(
+                        text=f"Тест {test_marker} · {label}",
+                        callback_data=f"vidchan:{profile_key}:{ch.channel_id}:test",
+                    ),
+                    types.InlineKeyboardButton(
+                        text=f"Осн. {main_marker}",
+                        callback_data=f"vidchan:{profile_key}:{ch.channel_id}:main",
+                    ),
+                ]
+            )
+        keyboard.append(
+            [
+                types.InlineKeyboardButton(
+                    text="🚀 Запустить подбор", callback_data=f"vidstart:{profile_key}"
+                )
+            ]
+        )
+        markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard)
+        text = "\n".join(lines)
+        if message:
+            await message.edit_text(text, reply_markup=markup)
+        else:
+            await self.bot.send_message(self.chat_id, text, reply_markup=markup)
+
     async def show_menu(self) -> None:
         if not await self.ensure_access():
             return
         rendering = await self.has_rendering()
-        text_parts = ["Меню видео-анонсов"]
+        text_parts = [
+            "Меню видео-анонсов",
+            "Выберите профиль, отметьте каналы и запустите подбор.",
+        ]
         if rendering:
             text_parts.append("\nРендеринг уже запущен, UI временно заблокирован.")
         keyboard: list[list[types.InlineKeyboardButton]] = []
@@ -174,10 +335,14 @@ class VideoAnnounceScenario:
             return
 
         ctx = SelectionContext(tz=timezone.utc, profile=VideoProfile(profile_key, "", ""))
+        test_chat_id, main_chat_id = await self._get_profile_channels(profile_key)
         ranked = await build_selection(self.db, ctx, client=KaggleClient())
         async with self.db.get_session() as session:
             obj = VideoAnnounceSession(
                 status=VideoAnnounceSessionStatus.SELECTED,
+                profile_key=profile_key,
+                test_chat_id=test_chat_id,
+                main_chat_id=main_chat_id,
             )
             session.add(obj)
             await session.commit()
@@ -226,6 +391,7 @@ class VideoAnnounceScenario:
             logger.exception("video_announce: failed to push kaggle job")
             await self._mark_failed(session_obj.id, "kaggle push failed")
             return
+        test_chat_id, main_chat_id = await self._resolve_session_channels(session_obj)
         asyncio.create_task(
             run_kernel_poller(
                 self.db,
@@ -233,8 +399,8 @@ class VideoAnnounceScenario:
                 session_obj,
                 bot=self.bot,
                 notify_chat_id=self.chat_id,
-                test_chat_id=VIDEO_TEST_CHAT_ID or None,
-                main_chat_id=VIDEO_MAIN_CHAT_ID or None,
+                test_chat_id=test_chat_id,
+                main_chat_id=main_chat_id,
                 poll_interval=60,
                 timeout_minutes=40,
                 dataset_slug=dataset_slug,
@@ -627,8 +793,23 @@ class VideoAnnounceScenario:
 async def handle_prefix_action(prefix: str, callback: types.CallbackQuery, scenario: VideoAnnounceScenario) -> bool:
     if prefix == "vidprofile":
         _, profile = callback.data.split(":", 1)
-        await scenario.start_session(profile)
+        await scenario.show_profile_channels(profile, message=callback.message)
         await callback.answer("Профиль выбран")
+        return True
+    if prefix == "vidchan":
+        try:
+            _, profile, chat_id, kind = callback.data.split(":", 3)
+            await scenario._set_profile_channel(profile, int(chat_id), kind)
+            await scenario.show_profile_channels(profile, message=callback.message)
+            await callback.answer("Настройки сохранены")
+        except Exception:
+            logger.exception("video_announce: update channels failed")
+            await callback.answer("Не удалось сохранить", show_alert=True)
+        return True
+    if prefix == "vidstart":
+        _, profile = callback.data.split(":", 1)
+        await scenario.start_session(profile)
+        await callback.answer("Сбор профиля")
         return True
     if prefix == "vidstatus":
         await scenario.refresh_status()
