@@ -26,7 +26,13 @@ RANKING_RESPONSE_FORMAT = {
                             "use_ocr": {"type": ["boolean", "null"]},
                             "poster_source": {"type": ["string", "null"]},
                         },
-                        "required": ["event_id", "score"],
+                        "required": [
+                            "event_id",
+                            "score",
+                            "reason",
+                            "use_ocr",
+                            "poster_source",
+                        ],
                     },
                 }
             },
@@ -55,7 +61,13 @@ FINAL_TEXT_RESPONSE_FORMAT = {
                             "use_ocr": {"type": ["boolean", "null"]},
                             "poster_source": {"type": ["string", "null"]},
                         },
-                        "required": ["event_id", "title", "description"],
+                        "required": [
+                            "event_id",
+                            "title",
+                            "description",
+                            "use_ocr",
+                            "poster_source",
+                        ],
                     },
                 }
             },
