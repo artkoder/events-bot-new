@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Callable, Iterable
 
+import re
+
 from models import Event, Festival
 
 
