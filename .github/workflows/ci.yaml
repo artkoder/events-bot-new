@@ -10,5 +10,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      - name: Install dependencies
+        run: pip install -r requirements.txt
       - name: Syntax check
         run: python -m compileall -q .
+      - name: Import smoke test
+        run: python -m pytest tests/test_import_main.py
