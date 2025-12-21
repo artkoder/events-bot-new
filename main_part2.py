@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+from typing import Callable, Iterable
+
 from models import Event, Festival
 
 
