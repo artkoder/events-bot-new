@@ -22,6 +22,35 @@ from .kaggle_client import KaggleClient
 logger = logging.getLogger(__name__)
 
 
+def _read_positive_int(env_key: str, default: int) -> int:
+    raw_value = os.getenv(env_key)
+    if raw_value is None:
+        return default
+    try:
+        value = int(raw_value)
+        if value <= 0:
+            raise ValueError
+        return value
+    except ValueError:
+        logger.warning(
+            "video_announce: invalid %s=%r, falling back to default %s",
+            env_key,
+            raw_value,
+            default,
+        )
+        return default
+
+
+VIDEO_MAX_MB = _read_positive_int("VIDEO_MAX_MB", 50)
+VIDEO_KAGGLE_TIMEOUT_MINUTES = _read_positive_int("VIDEO_KAGGLE_TIMEOUT_MINUTES", 40)
+
+logger.info(
+    "video_announce: limits configured max_video_mb=%s kaggle_timeout_min=%s",
+    VIDEO_MAX_MB,
+    VIDEO_KAGGLE_TIMEOUT_MINUTES,
+)
+
+
 def _find_video(files: Iterable[Path]) -> Path | None:
     for file in files:
         if file.suffix.lower() in {".mp4", ".mov", ".mkv", ".webm"}:
@@ -113,7 +142,7 @@ async def run_kernel_poller(
     test_chat_id: int | None,
     main_chat_id: int | None,
     poll_interval: int = 60,
-    timeout_minutes: int = 40,
+    timeout_minutes: int = VIDEO_KAGGLE_TIMEOUT_MINUTES,
     download_dir: Path | None = None,
     dataset_slug: str | None = None,
 ) -> None:
@@ -184,16 +213,16 @@ async def run_kernel_poller(
             )
             await bot.send_message(notify_chat_id, "Видео не найдено в выводе kernel")
             return
-        if video_path.stat().st_size > 50 * 1024 * 1024:
+        if video_path.stat().st_size > VIDEO_MAX_MB * 1024 * 1024:
             await _update_status(
                 db,
                 session_obj.id,
                 status=VideoAnnounceSessionStatus.FAILED,
-                error="video exceeds 50MB",
+                error=f"video exceeds {VIDEO_MAX_MB}MB",
             )
             await bot.send_message(
                 notify_chat_id,
-                f"Видео из сессии #{session_obj.id} превышает 50 MB",
+                f"Видео из сессии #{session_obj.id} превышает {VIDEO_MAX_MB} MB",
             )
             return
         await _update_status(
