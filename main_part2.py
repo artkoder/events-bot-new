@@ -13445,6 +13445,9 @@ def create_app() -> web.Application:
     async def video_cmd_wrapper(message: types.Message):
         await video_handlers.handle_video_command(message, db, bot)
 
+    async def kaggle_test_wrapper(message: types.Message):
+        await video_handlers.handle_kaggle_test(message, db, bot)
+
     async def video_cb_wrapper(callback: types.CallbackQuery):
         await video_handlers.handle_video_callback(
             callback,
@@ -13664,6 +13667,7 @@ def create_app() -> web.Application:
     dp.message.register(start_wrapper, Command("start"))
     dp.message.register(register_wrapper, Command("register"))
     dp.message.register(requests_wrapper, Command("requests"))
+    dp.message.register(kaggle_test_wrapper, Command("kaggletest"))
     dp.message.register(video_cmd_wrapper, Command("v"))
     dp.message.register(usage_test_wrapper, Command("usage_test"))
     dp.callback_query.register(

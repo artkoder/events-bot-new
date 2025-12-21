@@ -11,6 +11,7 @@ icalendar==6.0.1
 cachetools>=5.3.1
 APScheduler>=3.10.4
 Pillow>=10.0.0
+kaggle>=1.8.2
 imagekitio>=3.0.0
 requests>=2.31.0
 PyYAML>=6.0

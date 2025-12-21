@@ -2056,6 +2056,11 @@ HELP_COMMANDS = [
         "roles": {"superadmin"},
     },
     {
+        "usage": "/kaggletest",
+        "desc": "Ping Kaggle API to verify credentials",
+        "roles": {"superadmin"},
+    },
+    {
         "usage": "/setchannel",
         "desc": "Register announcement or asset channel",
         "roles": {"superadmin"},
