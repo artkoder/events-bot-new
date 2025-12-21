@@ -5,23 +5,28 @@ import html
 import json
 import logging
 import os
+import shutil
 import tempfile
 from datetime import datetime, timezone
+from io import BytesIO
 from typing import Sequence
 from pathlib import Path
 
 from aiogram import types
 from sqlalchemy import select
+from PIL import Image
 
 from db import Database
 from models import (
     User,
     Event,
+    EventPoster,
     VideoAnnounceItem,
     VideoAnnounceItemStatus,
     VideoAnnounceSession,
     VideoAnnounceSessionStatus,
 )
+from main import HTTP_SEMAPHORE, get_http_session
 from .finalize import prepare_final_texts
 from .kaggle_client import DEFAULT_KERNEL_PATH, KaggleClient
 from .poller import run_kernel_poller
@@ -480,6 +485,56 @@ class VideoAnnounceScenario:
             obj.error = error
             await session.commit()
 
+    async def _download_poster_bytes(self, poster: EventPoster) -> bytes | None:
+        if not poster.catbox_url:
+            return None
+        session = get_http_session()
+        try:
+            async with HTTP_SEMAPHORE:
+                resp = await session.get(poster.catbox_url)
+                resp.raise_for_status()
+                return await resp.read()
+        except Exception:
+            logger.warning(
+                "video_announce: failed to download poster url=%s", poster.catbox_url
+            )
+            return None
+
+    async def _export_posters(
+        self,
+        tmp_path: Path,
+        items: Sequence[VideoAnnounceItem],
+        poster_map: dict[int, EventPoster],
+    ) -> None:
+        if not items:
+            return
+        for item in items:
+            poster = poster_map.get(item.event_id)
+            if not poster:
+                continue
+            data = await self._download_poster_bytes(poster)
+            if not data:
+                continue
+            try:
+                with Image.open(BytesIO(data)) as img:
+                    img.convert("RGB").save(tmp_path / f"{item.position}.png", format="PNG")
+            except Exception:
+                logger.exception(
+                    "video_announce: failed to convert poster event_id=%s", poster.event_id
+                )
+
+    def _copy_assets(self, tmp_path: Path) -> None:
+        assets_dir = Path(__file__).resolve().parent / "assets"
+        assets = [
+            (assets_dir / "Oswald-VariableFont_wght.ttf", tmp_path / "font.ttf"),
+            (assets_dir / "Pulsarium.mp3", tmp_path / "Pulsarium.mp3"),
+        ]
+        for src, dest in assets:
+            if not src.exists():
+                logger.warning("video_announce: asset not found %s", src)
+                continue
+            shutil.copy2(src, dest)
+
     async def _create_dataset(
         self, session_obj: VideoAnnounceSession, json_text: str, finalized
     ) -> str:
@@ -503,6 +558,29 @@ class VideoAnnounceScenario:
         ]
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
+            ready_items: list[VideoAnnounceItem] = []
+            poster_map: dict[int, EventPoster] = {}
+            async with self.db.get_session() as session:
+                res_items = await session.execute(
+                    select(VideoAnnounceItem)
+                    .where(VideoAnnounceItem.session_id == session_obj.id)
+                    .where(VideoAnnounceItem.status == VideoAnnounceItemStatus.READY)
+                    .order_by(VideoAnnounceItem.position)
+                )
+                ready_items = list(res_items.scalars().all())
+                if ready_items:
+                    res_posters = await session.execute(
+                        select(EventPoster)
+                        .where(
+                            EventPoster.event_id.in_(
+                                [item.event_id for item in ready_items]
+                            )
+                        )
+                        .order_by(EventPoster.updated_at.desc(), EventPoster.id.desc())
+                    )
+                    for poster in res_posters.scalars().all():
+                        if poster.event_id not in poster_map and poster.catbox_url:
+                            poster_map[poster.event_id] = poster
             (tmp_path / "dataset-metadata.json").write_text(
                 json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
             )
@@ -510,7 +588,11 @@ class VideoAnnounceScenario:
             (tmp_path / "final_texts.json").write_text(
                 json.dumps(final_payload, ensure_ascii=False, indent=2), encoding="utf-8"
             )
-            total_size = sum(f.stat().st_size for f in tmp_path.iterdir())
+            await self._export_posters(tmp_path, ready_items, poster_map)
+            self._copy_assets(tmp_path)
+            total_size = sum(
+                f.stat().st_size for f in tmp_path.glob("**/*") if f.is_file()
+            )
             if total_size > 50 * 1024 * 1024:
                 raise RuntimeError("dataset payload exceeds 50MB")
             client = KaggleClient()
