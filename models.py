@@ -429,6 +429,7 @@ class VideoAnnounceSession(SQLModel, table=True):
         default=VideoAnnounceSessionStatus.CREATED,
         sa_column=Column(SAEnum(VideoAnnounceSessionStatus)),
     )
+    profile_key: Optional[str] = None
     created_at: datetime = Field(
         default_factory=utc_now, sa_column=Column(DateTime(timezone=True))
     )
@@ -441,6 +442,8 @@ class VideoAnnounceSession(SQLModel, table=True):
     published_at: Optional[datetime] = Field(
         default=None, sa_column=Column(DateTime(timezone=True))
     )
+    test_chat_id: Optional[int] = None
+    main_chat_id: Optional[int] = None
     kaggle_dataset: Optional[str] = None
     kaggle_kernel_ref: Optional[str] = None
     error: Optional[str] = None
