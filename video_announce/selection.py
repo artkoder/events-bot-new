@@ -732,11 +732,29 @@ async def build_selection(
     notify_chat_id: int | None = None,
 ) -> SelectionBuildResult:
     client = client or KaggleClient()
+    expanded_ctx = ctx
     events = (
         _filter_events_with_posters(list(candidates))
         if candidates is not None
-        else await fetch_candidates(db, ctx)
+        else await fetch_candidates(db, expanded_ctx)
     )
+
+    while candidates is None and len(events) < ctx.default_selected_min:
+        next_ctx = replace(
+            expanded_ctx,
+            fallback_window_days=expanded_ctx.fallback_window_days + 3,
+        )
+        more_events = await fetch_candidates(db, next_ctx)
+        if len(more_events) <= len(events):
+            break
+        logger.info(
+            "video_announce: expanding selection window fallback_days=%d -> %d due to low candidate count=%d",
+            expanded_ctx.fallback_window_days,
+            next_ctx.fallback_window_days,
+            len(events),
+        )
+        events = more_events
+        expanded_ctx = next_ctx
 
     async def _rank_events(current_events: Sequence[Event]) -> tuple[list[RankedEvent], set[int]]:
         _log_event_selection_stats(current_events)
@@ -773,27 +791,6 @@ async def build_selection(
         return ranked_local, mandatory_ids_local
 
     ranked, mandatory_ids = await _rank_events(events)
-    expanded_ctx = ctx
-    while (
-        candidates is None
-        and len(ranked) < ctx.default_selected_min
-    ):
-        next_ctx = replace(
-            expanded_ctx,
-            fallback_window_days=expanded_ctx.fallback_window_days + 3,
-        )
-        more_events = await fetch_candidates(db, next_ctx)
-        if len(more_events) <= len(events):
-            break
-        logger.info(
-            "video_announce: expanding selection window fallback_days=%d -> %d due to low ranked count=%d",
-            expanded_ctx.fallback_window_days,
-            next_ctx.fallback_window_days,
-            len(ranked),
-        )
-        events = more_events
-        expanded_ctx = next_ctx
-        ranked, mandatory_ids = await _rank_events(events)
     default_ready_ids = _choose_default_ready(
         ranked,
         mandatory_ids,
