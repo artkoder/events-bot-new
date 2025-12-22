@@ -91,6 +91,8 @@ class SelectionBuildResult:
     ranked: list[RankedEvent]
     default_ready_ids: set[int]
     mandatory_ids: set[int]
+    candidates: list[Event]
+    selected_ids: set[int]
 
 
 @dataclass

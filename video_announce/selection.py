@@ -756,7 +756,9 @@ async def build_selection(
         events = more_events
         expanded_ctx = next_ctx
 
-    async def _rank_events(current_events: Sequence[Event]) -> tuple[list[RankedEvent], set[int]]:
+    async def _rank_events(
+        current_events: Sequence[Event],
+    ) -> tuple[list[RankedEvent], set[int], set[int]]:
         _log_event_selection_stats(current_events)
         filtered_events = list(current_events)
         mandatory_ids_local = {
@@ -777,6 +779,7 @@ async def build_selection(
                 promoted=promoted_local,
             )
         )
+        selected_ids_local = {ev.id for ev in selected_local}
         ranked_local = await _rank_with_llm(
             db,
             client,
@@ -788,9 +791,9 @@ async def build_selection(
             bot=bot,
             notify_chat_id=notify_chat_id,
         )
-        return ranked_local, mandatory_ids_local
+        return ranked_local, mandatory_ids_local, selected_ids_local
 
-    ranked, mandatory_ids = await _rank_events(events)
+    ranked, mandatory_ids, selected_ids = await _rank_events(events)
     default_ready_ids = _choose_default_ready(
         ranked,
         mandatory_ids,
@@ -816,5 +819,9 @@ async def build_selection(
             (row.reason or "")[0:200],
         )
     return SelectionBuildResult(
-        ranked=ranked, default_ready_ids=default_ready_ids, mandatory_ids=mandatory_ids
+        ranked=ranked,
+        default_ready_ids=default_ready_ids,
+        mandatory_ids=mandatory_ids,
+        candidates=events,
+        selected_ids=selected_ids,
     )

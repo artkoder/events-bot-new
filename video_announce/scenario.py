@@ -880,8 +880,8 @@ class VideoAnnounceScenario:
             session_obj = fresh
         reuse = session_obj.status == VideoAnnounceSessionStatus.SELECTED
         if reuse:
-            ranked = await self._recalculate_selection(session_obj)
-            await self._send_selection_posts(session_obj, ranked)
+            result = await self._recalculate_selection(session_obj)
+            await self._send_selection_posts(session_obj, result)
         await self._prompt_instruction(session_obj, reuse=reuse, message=message)
         return "Период применён"
 
@@ -891,7 +891,7 @@ class VideoAnnounceScenario:
         *,
         candidates: Sequence[Event] | None = None,
         preserve_existing: bool = False,
-    ) -> list[RankedEvent]:
+    ) -> SelectionBuildResult:
         ctx = await self._build_selection_context(session_obj)
         result = await build_selection(
             self.db,
@@ -911,52 +911,53 @@ class VideoAnnounceScenario:
                 result.ranked,
                 default_ready_ids=result.default_ready_ids,
             )
-        return result.ranked
+        return result
 
     def _build_input_message(
-        self, session_obj: VideoAnnounceSession, ranked: Sequence[RankedEvent]
+        self, session_obj: VideoAnnounceSession, result: SelectionBuildResult
     ) -> str:
         params = self._get_selection_params(session_obj)
         instruction = (str(params.get("instruction") or "").strip())
+        ranked_map = {r.event.id: r for r in result.ranked}
         lines = [
             f"Сессия #{session_obj.id}: INPUT",
             f"Диапазон: {self._date_range_label(params)}",
             f"Инструкция: {html.escape(instruction[:300]) if instruction else '—'}",
-            f"Всего кандидатов: {len(ranked)}",
+            f"Всего кандидатов: {len(result.candidates)}",
             "📥 Кандидаты:",
             "<blockquote expandable>",
         ]
-        sorted_ranked = sorted(ranked, key=self._event_sort_key)
-        for r in sorted_ranked:
-            ev = r.event
+        sorted_candidates = sorted(result.candidates, key=self._event_sort_key)
+        for ev in sorted_candidates:
+            r = ranked_map.get(ev.id)
+            marker = "✅" if ev.id in result.selected_ids else "⬜"
             emoji = self._normalize_emoji(ev.emoji)
             date_label = self._format_event_datetime(ev)
             include_count = getattr(ev, "video_include_count", 0) or 0
-            promo_marker = " · 🔥PROMO" if r.mandatory or include_count > 0 else ""
-            score = f" · {r.score:.1f}" if r.score is not None else ""
-            reason = (
-                f" · {html.escape(r.reason[:140])}" if r.reason else ""
-            )
+            promo_marker = " · 🔥PROMO" if (r and r.mandatory) or include_count > 0 else ""
+            score = f" · {r.score:.1f}" if r and r.score is not None else ""
+            reason = f" · {html.escape(r.reason[:140])}" if r and r.reason else ""
+            ranking_label = f"#{r.position}" if r else "—"
             lines.append(
-                f"{r.position}. {date_label} · {emoji} {self._format_title(ev)}{promo_marker}{score}{reason}"
+                f"{marker} {ranking_label} · {date_label} · {emoji} {self._format_title(ev)}{promo_marker}{score}{reason}"
             )
         lines.append("</blockquote>")
         return "\n".join(lines)
 
     async def _send_input_overview(
-        self, session_obj: VideoAnnounceSession, ranked: Sequence[RankedEvent]
+        self, session_obj: VideoAnnounceSession, result: SelectionBuildResult
     ) -> None:
-        text = self._build_input_message(session_obj, ranked)
+        text = self._build_input_message(session_obj, result)
         await self.bot.send_message(self.chat_id, text, parse_mode="HTML")
 
     async def _send_selection_posts(
         self,
         session_obj: VideoAnnounceSession,
-        ranked: Sequence[RankedEvent],
+        result: SelectionBuildResult,
         *,
         selection_message: types.Message | None = None,
     ) -> None:
-        await self._send_input_overview(session_obj, ranked)
+        await self._send_input_overview(session_obj, result)
         if selection_message:
             await self._update_selection_message(selection_message, session_obj.id)
         else:
@@ -1005,12 +1006,12 @@ class VideoAnnounceScenario:
             pairs = await self._load_items_with_events(session_id)
             candidates = [ev for _, ev in pairs]
             preserve_existing = bool(candidates)
-        ranked = await self._build_and_store_selection(
+        result = await self._build_and_store_selection(
             sess,
             candidates=candidates,
             preserve_existing=preserve_existing,
         )
-        await self._send_selection_posts(sess, ranked)
+        await self._send_selection_posts(sess, result)
         if pending and reuse_candidates:
             return "Инструкция обновлена"
         if pending:
@@ -1262,7 +1263,7 @@ class VideoAnnounceScenario:
 
     async def _recalculate_selection(
         self, session_obj: VideoAnnounceSession
-    ) -> list[RankedEvent]:
+    ) -> SelectionBuildResult:
         return await self._build_and_store_selection(
             session_obj, preserve_existing=True
         )
@@ -1407,8 +1408,8 @@ class VideoAnnounceScenario:
             session.add(sess)
             await session.commit()
             await session.refresh(sess)
-        ranked = await self._recalculate_selection(sess)
-        await self._send_selection_posts(sess, ranked, selection_message=message)
+        result = await self._recalculate_selection(sess)
+        await self._send_selection_posts(sess, result, selection_message=message)
         return "Обновлено"
 
     async def toggle_item(self, session_id: int, event_id: int, message: types.Message) -> str:
