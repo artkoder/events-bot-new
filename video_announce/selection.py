@@ -8,9 +8,10 @@ import re
 from collections import defaultdict
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
-from typing import Iterable, Sequence
+from typing import Any, Iterable, Sequence
 from urllib.parse import urlparse
 
+from aiogram import types
 from sqlalchemy import select
 
 from db import Database
@@ -186,7 +187,7 @@ async def _load_hits(db: Database, event_ids: Sequence[int]) -> set[int]:
     return set(rows)
 
 
-async def _fetch_telegraph_excerpt(ev: Event) -> str | None:
+async def _fetch_telegraph_text(ev: Event) -> str | None:
     path = (ev.telegraph_path or "").strip()
     url = (ev.telegraph_url or "").strip()
     resolved_path = ""
@@ -202,10 +203,7 @@ async def _fetch_telegraph_excerpt(ev: Event) -> str | None:
     except Exception:
         logger.exception("video_announce: failed to fetch telegraph text event=%s", ev.id)
         return None
-    excerpt = (text or "").strip()
-    if not excerpt:
-        return None
-    return excerpt[:TELEGRAPH_EXCERPT_LIMIT]
+    return (text or "").strip() or None
 
 
 async def _load_poster_ocr_texts(
@@ -393,6 +391,8 @@ async def _rank_with_llm(
     mandatory_ids: set[int],
     session_id: int | None = None,
     instruction: str | None = None,
+    bot: Any | None = None,
+    notify_chat_id: int | None = None,
 ) -> list[RankedEvent]:
     if not events:
         return []
@@ -401,13 +401,15 @@ async def _rank_with_llm(
     telegraph_tasks: dict[int, asyncio.Task[str | None]] = {}
     for ev in events:
         if ev.telegraph_url or ev.telegraph_path:
-            telegraph_tasks[ev.id] = asyncio.create_task(_fetch_telegraph_excerpt(ev))
+            telegraph_tasks[ev.id] = asyncio.create_task(_fetch_telegraph_text(ev))
     telegraph_texts: dict[int, str] = {}
+    telegraph_full_texts: dict[int, str] = {}
     if telegraph_tasks:
         results = await asyncio.gather(*telegraph_tasks.values())
         for event_id, text in zip(telegraph_tasks.keys(), results):
             if text:
-                telegraph_texts[event_id] = text
+                telegraph_full_texts[event_id] = text
+                telegraph_texts[event_id] = text[:TELEGRAPH_EXCERPT_LIMIT]
     payload = []
     for ev in sorted(events, key=lambda e: (e.date, e.time, e.id)):
         payload.append(
@@ -423,6 +425,7 @@ async def _rank_with_llm(
                 "include_count": getattr(ev, "video_include_count", 0) or 0,
                 "promoted": ev.id in promoted,
                 "telegraph_text": telegraph_texts.get(ev.id),
+                "telegraph_full_text": telegraph_full_texts.get(ev.id),
                 "poster_ocr_text": poster_texts.get(ev.id),
             }
         )
@@ -433,6 +436,15 @@ async def _rank_with_llm(
             if not instruction
             else f"Инструкция оператора: {instruction}\n\n{serialized_payload}"
         )
+        request_details = {
+            "instruction": instruction,
+            "system_prompt": ranking_prompt(),
+            "user_message": request_text,
+            "period": _describe_period(events),
+            "candidate_ids": event_ids,
+            "items": payload,
+        }
+        request_details_json = json.dumps(request_details, ensure_ascii=False, indent=2)
         preview = json.dumps(payload[:3], ensure_ascii=False)
         logger.info(
             "video_announce: llm ranking request items=%d promoted=%d preview=%s instruction=%s",
@@ -441,25 +453,34 @@ async def _rank_with_llm(
             preview,
             bool(instruction),
         )
+        if instruction and bot and notify_chat_id:
+            try:
+                filename = f"ranking_request_{session_id or 'session'}.json"
+                document = types.BufferedInputFile(
+                    request_details_json.encode("utf-8"),
+                    filename=filename,
+                )
+                await bot.send_document(
+                    notify_chat_id,
+                    document,
+                    caption="Запрос на ранжирование после инструкции",
+                    disable_notification=True,
+                )
+            except Exception:
+                logger.exception("video_announce: failed to send ranking request document")
         raw = await ask_4o(
             request_text,
             system_prompt=ranking_prompt(),
             response_format=RANKING_RESPONSE_FORMAT,
             meta={"source": "video_announce.ranking", "count": len(payload)},
         )
-        request_details = {
-            "instruction": instruction,
-            "period": _describe_period(events),
-            "candidate_ids": event_ids,
-            "items": payload,
-        }
         parsed = _parse_llm_ranking(raw, {e.id for e in events})
         await _store_llm_trace(
             db,
             session_id=session_id,
             stage="ranking",
             model="gpt-4o",
-            request_json=json.dumps(request_details, ensure_ascii=False),
+            request_json=request_details_json,
             response_json=raw,
         )
     except Exception:
@@ -654,6 +675,8 @@ async def build_selection(
     client: KaggleClient | None = None,
     session_id: int | None = None,
     candidates: Sequence[Event] | None = None,
+    bot: Any | None = None,
+    notify_chat_id: int | None = None,
 ) -> SelectionBuildResult:
     client = client or KaggleClient()
     events = (
@@ -735,6 +758,8 @@ async def build_selection(
             mandatory_ids=mandatory_ids_local,
             session_id=session_id,
             instruction=ctx.instruction,
+            bot=bot,
+            notify_chat_id=notify_chat_id,
         )
         return ranked_local, mandatory_ids_local
 

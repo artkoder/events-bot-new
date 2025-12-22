@@ -599,6 +599,7 @@ class Database:
                 """
             )
             await _add_column(conn, "videoannounce_item", "final_title TEXT")
+            await _add_column(conn, "videoannounce_item", "final_about TEXT")
             await _add_column(conn, "videoannounce_item", "final_description TEXT")
             await _add_column(conn, "videoannounce_item", "poster_text TEXT")
             await _add_column(conn, "videoannounce_item", "poster_source TEXT")
