@@ -433,14 +433,12 @@ async def _rank_with_llm(
     for ev in events:
         if ev.telegraph_url or ev.telegraph_path:
             telegraph_tasks[ev.id] = asyncio.create_task(_fetch_telegraph_text(ev))
-    telegraph_texts: dict[int, str] = {}
     telegraph_full_texts: dict[int, str] = {}
     if telegraph_tasks:
         results = await asyncio.gather(*telegraph_tasks.values())
         for event_id, text in zip(telegraph_tasks.keys(), results):
             if text:
                 telegraph_full_texts[event_id] = text
-                telegraph_texts[event_id] = text[:TELEGRAPH_EXCERPT_LIMIT]
     payload = []
     for ev in sorted(events, key=lambda e: (e.date, e.time, e.id)):
         payload.append(
@@ -455,8 +453,7 @@ async def _rank_with_llm(
                 "is_free": ev.is_free,
                 "include_count": getattr(ev, "video_include_count", 0) or 0,
                 "promoted": ev.id in promoted,
-                "telegraph_text": telegraph_texts.get(ev.id),
-                "telegraph_full_text": telegraph_full_texts.get(ev.id),
+                "full_event_description": telegraph_full_texts.get(ev.id),
                 "poster_ocr_text": poster_texts.get(ev.id),
             }
         )
