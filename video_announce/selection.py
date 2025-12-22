@@ -843,5 +843,5 @@ async def build_selection(
         default_ready_ids=default_ready_ids,
         mandatory_ids=mandatory_ids,
         candidates=events,
-        selected_ids=selected_ids,
+        selected_ids=default_ready_ids,
     )

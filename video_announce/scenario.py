@@ -931,7 +931,7 @@ class VideoAnnounceScenario:
         sorted_candidates = sorted(result.candidates, key=self._event_sort_key)
         for ev in sorted_candidates:
             r = ranked_map.get(ev.id)
-            marker = "✅" if ev.id in result.selected_ids else "⬜"
+            marker = "✅" if ev.id in result.default_ready_ids else "⬜"
             emoji = self._normalize_emoji(ev.emoji)
             date_label = self._format_event_datetime(ev)
             include_count = getattr(ev, "video_include_count", 0) or 0
