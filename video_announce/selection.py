@@ -78,7 +78,7 @@ INSTRUCTION_FILTER_RESPONSE_FORMAT = {
                             "include": {"type": "boolean"},
                             "reason": {"type": "string"},
                         },
-                        "required": ["event_id", "include"],
+                        "required": ["event_id", "include", "reason"],
                         "additionalProperties": False,
                     },
                 }

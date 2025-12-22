@@ -12523,7 +12523,12 @@ async def get_source_page_text(path: str) -> str:
         normalized_path = raw_path
     normalized_path = (normalized_path or "").lstrip("/")
 
-    token_info = get_telegraph_token_info()
+    try:
+        token_info_fn = get_telegraph_token_info
+    except NameError:  # Module imported without main namespace
+        from main import get_telegraph_token_info as token_info_fn
+
+    token_info = token_info_fn()
 
     logging.info(
         "telegraph_fetch start path=%s token_source=%s token_file=%s token_file_exists=%s token_file_readable=%s",
