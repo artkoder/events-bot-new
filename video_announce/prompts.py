@@ -51,6 +51,7 @@ FINAL_TEXT_RESPONSE_FORMAT = {
                         "properties": {
                             "event_id": {"type": "integer"},
                             "final_title": {"type": "string"},
+                            "about": {"type": "string"},
                             "description": {"type": "string"},
                             "use_ocr": {"type": ["boolean", "null"]},
                             "poster_source": {"type": ["string", "null"]},
@@ -58,6 +59,7 @@ FINAL_TEXT_RESPONSE_FORMAT = {
                         "required": [
                             "event_id",
                             "final_title",
+                            "about",
                             "description",
                             "use_ocr",
                             "poster_source",
@@ -108,8 +110,12 @@ def finalize_prompt() -> str:
         "Ты помогаешь составить финальные заголовки и описания для афиши"
         " видеоролика. У каждого события есть базовый title/description,"
         " выдержки из OCR постера и из статьи Telegraph. Сформулируй"
-        " цепляющий русский final_title из контекста постера и описания," 
+        " цепляющий русский final_title из контекста постера и описания,"
         " уложенный в 12 символов (обрежь, если нужно), не копируя текст"
-        " постера дословно. Верни одно предложение-описание о формате, времени"
-        " или площадке. Ответ строго в JSON с полем final_title."
+        " постера дословно. Отдельно верни компактное поле about без эмодзи"
+        " — одно"
+        " предложение до 12 слов, синтезированное из title/description/OCR без"
+        " дословных повторений, рассказывающее о сути события. Верни одно"
+        " предложение-описание о формате, времени или площадке. Ответ строго в"
+        " JSON с полем final_title."
     )

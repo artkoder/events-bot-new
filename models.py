@@ -483,6 +483,7 @@ class VideoAnnounceItem(SQLModel, table=True):
     )
     position: int = 0
     final_title: Optional[str] = None
+    final_about: Optional[str] = None
     final_description: Optional[str] = None
     poster_text: Optional[str] = None
     poster_source: Optional[str] = None

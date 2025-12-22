@@ -1431,7 +1431,7 @@ class VideoAnnounceScenario:
         final_payload = [
             {
                 "event_id": item.event_id,
-                "title": item.title,
+                "about": item.about,
                 "description": item.description,
                 "use_ocr": item.use_ocr,
                 "poster_source": item.poster_source,
