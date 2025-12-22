@@ -474,13 +474,13 @@ async def _rank_with_llm(
         }
         request_details_json = json.dumps(request_details, ensure_ascii=False, indent=2)
         preview = json.dumps(payload[:3], ensure_ascii=False)
-            logger.info(
-                "video_announce: llm selection request items=%d promoted=%d preview=%s instruction=%s",
-                len(payload),
-                len(promoted),
-                preview,
-                bool(instruction),
-            )
+        logger.info(
+            "video_announce: llm selection request items=%d promoted=%d preview=%s instruction=%s",
+            len(payload),
+            len(promoted),
+            preview,
+            bool(instruction),
+        )
         if instruction and bot and notify_chat_id:
             try:
                 filename = f"selection_request_{session_id or 'session'}.json"
