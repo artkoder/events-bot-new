@@ -106,6 +106,7 @@ class PosterEnrichment:
 class FinalizedItem:
     event_id: int
     title: str
+    about: str
     description: str
     use_ocr: bool = False
     poster_source: str | None = None

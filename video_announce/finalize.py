@@ -196,6 +196,23 @@ def _normalize_title(title: str | None, limit: int = 12) -> str:
     return trimmed
 
 
+def _normalize_about(text: str | None, word_limit: int = 12) -> str:
+    collapsed = " ".join(str(text or "").replace("\n", " ").split())
+    trimmed = collapsed.strip("«»\"' <>.,!?:;")
+    words: list[str] = []
+    seen: set[str] = set()
+    for raw in trimmed.split():
+        word = raw.strip("«»\"' <>.,!?:;")
+        low = word.lower()
+        if not word or low in seen:
+            continue
+        seen.add(low)
+        words.append(word)
+        if len(words) >= word_limit:
+            break
+    return " ".join(words)
+
+
 def _parse_final_response(raw: str, known_ids: set[int]) -> list[FinalizedItem]:
     try:
         data = json.loads(raw)
@@ -213,13 +230,15 @@ def _parse_final_response(raw: str, known_ids: set[int]) -> list[FinalizedItem]:
         if not isinstance(event_id, int) or event_id not in known_ids:
             continue
         title = _normalize_title(item.get("final_title") or item.get("title"))
+        about = _normalize_about(item.get("about"))
         description = str(item.get("description") or "").strip()
-        if not title or not description:
+        if not title or not about or not description:
             continue
         parsed.append(
             FinalizedItem(
                 event_id=event_id,
                 title=title,
+                about=about,
                 description=description,
                 use_ocr=bool(item.get("use_ocr")) if "use_ocr" in item else False,
                 poster_source=item.get("poster_source"),
@@ -269,6 +288,7 @@ async def prepare_final_texts(
                 continue
             enrichment = enrich_map.get(fin.event_id)
             item.final_title = fin.title
+            item.final_about = fin.about
             item.final_description = fin.description
             item.use_ocr = fin.use_ocr or bool(enrichment and enrichment.text)
             item.poster_text = enrichment.text if enrichment else None

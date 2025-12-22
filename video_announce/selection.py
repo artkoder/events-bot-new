@@ -588,7 +588,7 @@ def payload_as_json(payload: RenderPayload, tz: timezone) -> str:
             continue
         location = ", ".join(part for part in [ev.city, ev.location_name] if part)
         scene = {
-            "title": item.final_title or ev.title,
+            "title": item.final_about or item.final_title or ev.title,
             "description": item.final_description or "",
             "date": _format_scene_date(ev),
             "location": location,
