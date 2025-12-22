@@ -29,6 +29,21 @@ async def _load_user(db: Database, user_id: int) -> User | None:
 
 
 async def handle_video_command(message: types.Message, db: Database, bot) -> None:
+    import os
+
+    token_file = os.getenv("TELEGRAPH_TOKEN_FILE", "telegraph_token")
+    logging.info(
+        "telegraph_token_diagnostics",
+        extra={
+            "env_present": bool(os.getenv("TELEGRAPH_ACCESS_TOKEN")),
+            "token_file_path": token_file,
+            "token_file_exists": os.path.exists(token_file),
+            "token_file_readable": os.access(token_file, os.R_OK)
+            if os.path.exists(token_file)
+            else False,
+        },
+    )
+
     scenario = VideoAnnounceScenario(db, bot, message.chat.id, message.from_user.id)
     await scenario.show_menu()
 

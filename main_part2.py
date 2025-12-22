@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import re
 import time as _time
+import logging
+import html
 from dataclasses import dataclass, field
 from typing import Callable, Iterable
 
@@ -12513,17 +12515,83 @@ async def update_source_page_ics(event_id: int, db: Database, url: str | None):
 
 async def get_source_page_text(path: str) -> str:
     """Return plain text from a Telegraph page."""
+    import os
+    from urllib.parse import urlparse
+
+    token_source = "none"
+    if os.getenv("TELEGRAPH_ACCESS_TOKEN"):
+        token_source = "env"
+    elif os.getenv("TELEGRAPH_TOKEN_FILE"):
+        token_source = "file"
+
+    normalized_path = path.strip().lstrip("/")
+    if normalized_path.startswith("http"):
+        normalized_path = urlparse(normalized_path).path.lstrip("/")
+
+    logging.info(
+        "telegraph_fetch start",
+        extra={
+            "path": normalized_path,
+            "token_source": token_source,
+        },
+    )
+
     token = get_telegraph_token()
     if not token:
-        logging.error("Telegraph token unavailable")
+        logging.warning(
+            "telegraph_fetch no_token",
+            extra={
+                "path": normalized_path,
+                "token_source": "none",
+                "token_file_exists": os.path.exists(
+                    os.getenv("TELEGRAPH_TOKEN_FILE", "telegraph_token")
+                )
+                if os.getenv("TELEGRAPH_TOKEN_FILE")
+                else False,
+            },
+        )
         return ""
     tg = Telegraph(access_token=token)
     try:
         page = await telegraph_call(tg.get_page, path, return_html=True)
+        resp_keys = list(page.keys()) if isinstance(page, dict) else []
+        len_html = len(page.get("content") or page.get("content_html") or "")
+        # Note: 'content' is list of nodes, 'content_html' is string.
+        # len_text is approximation.
+        len_text = len(page.get("content") or "") if page.get("content") else 0
+        logging.debug(
+            "telegraph_fetch response",
+            extra={
+                "path": normalized_path,
+                "resp_keys": resp_keys,
+                "len_html": len_html,
+                "len_text": len_text,
+            },
+        )
     except Exception as e:
-        logging.error("Failed to fetch telegraph page: %s", e)
+        logging.exception(
+            "telegraph_fetch exception",
+            extra={
+                "path": normalized_path,
+                "token_source": token_source,
+                "exception_type": type(e).__name__,
+            },
+        )
         return ""
     html_content = page.get("content") or page.get("content_html") or ""
+
+    if not html_content:
+        logging.warning(
+            "telegraph_fetch empty_content",
+            extra={
+                "path": normalized_path,
+                "token_source": token_source,
+                "resp_keys": list(page.keys()) if isinstance(page, dict) else [],
+                "len_html": 0,
+                "len_text": 0,
+            },
+        )
+
     html_content = apply_ics_link(html_content, None)
     html_content = apply_month_nav(html_content, None)
     html_content = html_content.replace(FOOTER_LINK_HTML, "")

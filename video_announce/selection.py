@@ -191,20 +191,56 @@ async def _load_hits(db: Database, event_ids: Sequence[int]) -> set[int]:
 async def _fetch_telegraph_text(ev: Event) -> str | None:
     path = (ev.telegraph_path or "").strip()
     url = (ev.telegraph_url or "").strip()
+
     resolved_path = ""
     if path:
         resolved_path = path.lstrip("/")
     elif url:
         parsed = urlparse(url)
         resolved_path = parsed.path.lstrip("/")
+
+    logger.info(
+        "telegraph_event_fetch start",
+        extra={
+            "event_id": ev.id,
+            "telegraph_url": url,
+            "telegraph_path": path,
+            "resolved_path": resolved_path,
+        },
+    )
+
     if not resolved_path:
+        logger.warning(
+            "telegraph_event_fetch no_path",
+            extra={
+                "event_id": ev.id,
+                "telegraph_url": url,
+                "telegraph_path": path,
+            },
+        )
         return None
     try:
         text = await get_source_page_text(resolved_path)
     except Exception:
-        logger.exception("video_announce: failed to fetch telegraph text event=%s", ev.id)
+        logger.exception(
+            "video_announce: failed to fetch telegraph text event=%s", ev.id
+        )
         return None
-    return (text or "").strip() or None
+
+    result = (text or "").strip() or None
+
+    if not result:
+        logger.warning(
+            "telegraph_text_empty",
+            extra={
+                "event_id": ev.id,
+                "telegraph_url": url,
+                "telegraph_path": path,
+                "resolved_path": resolved_path,
+                "text_len": 0,
+            },
+        )
+    return result
 
 
 async def _load_poster_ocr_texts(
