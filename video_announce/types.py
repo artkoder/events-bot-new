@@ -23,6 +23,8 @@ class RankedEvent:
     position: int
     reason: str | None = None
     mandatory: bool = False
+    selected: bool | None = None
+    selected_reason: str | None = None
 
 
 @dataclass
@@ -30,6 +32,8 @@ class RankedChoice:
     event_id: int
     score: float
     reason: str | None = None
+    selected: bool | None = None
+    selected_reason: str | None = None
 
 
 @dataclass

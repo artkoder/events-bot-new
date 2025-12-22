@@ -8,7 +8,7 @@ _DEFAULT_PROMPT = (
     " привяжи хронометраж, упомяни площадку и время."
 )
 
-RANKING_RESPONSE_FORMAT = {
+SELECTION_RESPONSE_FORMAT = {
     "type": "json_schema",
     "json_schema": {
         "name": "VideoAnnounceRanking",
@@ -24,8 +24,10 @@ RANKING_RESPONSE_FORMAT = {
                             "event_id": {"type": "integer"},
                             "score": {"type": "number"},
                             "reason": {"type": ["string", "null"]},
+                            "selected": {"type": ["boolean", "null"]},
+                            "selected_reason": {"type": ["string", "null"]},
                         },
-                        "required": ["event_id", "score", "reason"],
+                        "required": ["event_id", "score", "reason", "selected"],
                         "additionalProperties": False,
                     },
                 }
@@ -92,7 +94,7 @@ def available_prompts() -> list[str]:
     return sorted(set(prompts + ["script"]))
 
 
-def ranking_prompt() -> str:
+def selection_prompt() -> str:
     return (
         "Ты ассистент видеоредактора. Получишь JSON с событиями и должен"
         " выбрать порядок показа (только на русском) для короткого ролика."
@@ -102,7 +104,10 @@ def ranking_prompt() -> str:
         " противоречащие ей события. Стремись к разнообразию тематик и форматов,"
         " выделяй интерес, уникальность, свежесть, семейную ценность, пригодность"
         " OCR/Telegraph контекста. Не используй количество постеров как критерий."
-        " Ответ строго JSON со списком items без пояснений."
+        " В ответе для каждого события верни score, reason, а также"
+        " selected=true/false и короткое selected_reason, отражающие вывод"
+        " о попадании события в итоговый ролик. Ответ строго JSON со списком"
+        " items без пояснений."
     )
 
 

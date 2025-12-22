@@ -28,7 +28,7 @@ from models import (
     VideoAnnounceSession,
 )
 from .kaggle_client import KaggleClient
-from .prompts import RANKING_RESPONSE_FORMAT, ranking_prompt
+from .prompts import SELECTION_RESPONSE_FORMAT, selection_prompt
 from .types import (
     RankedChoice,
     RankedEvent,
@@ -98,35 +98,6 @@ def _log_event_selection_stats(events: Sequence[Event]) -> None:
         period,
         breakdown,
     )
-
-
-INSTRUCTION_FILTER_RESPONSE_FORMAT = {
-    "type": "json_schema",
-    "json_schema": {
-        "name": "instruction_filter",
-        "schema": {
-            "type": "object",
-            "properties": {
-                "items": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "event_id": {"type": "integer"},
-                            "include": {"type": "boolean"},
-                            "reason": {"type": "string"},
-                        },
-                        "required": ["event_id", "include", "reason"],
-                        "additionalProperties": False,
-                    },
-                }
-            },
-            "required": ["items"],
-            "additionalProperties": False,
-        },
-        "strict": True,
-    },
-}
 
 
 def _filter_events_with_posters(events: Sequence[Event]) -> list[Event]:
@@ -362,36 +333,19 @@ def _parse_llm_ranking(raw: str, known_ids: set[int]) -> list[RankedChoice]:
         if not isinstance(event_id, int) or event_id not in known_ids:
             continue
         score = float(item.get("score") or 0)
+        selected = item.get("selected")
+        if not isinstance(selected, bool):
+            selected = None
         parsed.append(
             RankedChoice(
                 event_id=event_id,
                 score=score,
                 reason=item.get("reason"),
+                selected=selected,
+                selected_reason=item.get("selected_reason"),
             )
         )
     return parsed
-
-
-def _parse_instruction_filter(raw: str, known_ids: set[int]) -> set[int]:
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        logger.warning("video_announce: failed to parse instruction filter JSON")
-        return set()
-    items = data.get("items") if isinstance(data, dict) else None
-    allowed: set[int] = set()
-    if not isinstance(items, list):
-        return allowed
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        event_id = item.get("event_id")
-        include = item.get("include")
-        if not isinstance(event_id, int) or event_id not in known_ids:
-            continue
-        if include is True:
-            allowed.add(event_id)
-    return allowed
 
 
 def _describe_period(events: Sequence[Event]) -> str | None:
@@ -504,14 +458,14 @@ async def _rank_with_llm(
         )
         created_at = datetime.now(timezone.utc).isoformat()
         llm_input_digest = hashlib.sha256(request_text.encode("utf-8")).hexdigest()
-        request_version = "ranking_v2"
+        request_version = "selection_v1"
         request_details = {
             "request_version": request_version,
             "created_at": created_at,
             "instruction": instruction,
             "user_message": instruction,
-            "system_prompt_id": "ranking_prompt_v1",
-            "system_prompt_name": "video_announce_ranking",
+            "system_prompt_id": "selection_prompt_v1",
+            "system_prompt_name": "video_announce_selection",
             "period": _describe_period(events),
             "candidate_ids": event_ids,
             "items": payload,
@@ -521,7 +475,7 @@ async def _rank_with_llm(
         request_details_json = json.dumps(request_details, ensure_ascii=False, indent=2)
         preview = json.dumps(payload[:3], ensure_ascii=False)
         logger.info(
-            "video_announce: llm ranking request items=%d promoted=%d preview=%s instruction=%s",
+            "video_announce: llm selection request items=%d promoted=%d preview=%s instruction=%s",
             len(payload),
             len(promoted),
             preview,
@@ -529,7 +483,7 @@ async def _rank_with_llm(
         )
         if instruction and bot and notify_chat_id:
             try:
-                filename = f"ranking_request_{session_id or 'session'}.json"
+                filename = f"selection_request_{session_id or 'session'}.json"
                 document = types.BufferedInputFile(
                     request_details_json.encode("utf-8"),
                     filename=filename,
@@ -537,20 +491,20 @@ async def _rank_with_llm(
                 await bot.send_document(
                     notify_chat_id,
                     document,
-                    caption="Запрос на ранжирование после инструкции",
+                    caption="Запрос на выборку и ранжирование",
                     disable_notification=True,
                 )
             except Exception:
                 logger.exception("video_announce: failed to send ranking request document")
         raw = await ask_4o(
             request_text,
-            system_prompt=ranking_prompt(),
-            response_format=RANKING_RESPONSE_FORMAT,
-            meta={"source": "video_announce.ranking", "count": len(payload)},
+            system_prompt=selection_prompt(),
+            response_format=SELECTION_RESPONSE_FORMAT,
+            meta={"source": "video_announce.selection", "count": len(payload)},
         )
         if instruction and bot and notify_chat_id:
             try:
-                filename = f"ranking_response_{session_id or 'session'}.json"
+                filename = f"selection_response_{session_id or 'session'}.json"
                 document = types.BufferedInputFile(
                     raw.encode("utf-8"),
                     filename=filename,
@@ -558,7 +512,7 @@ async def _rank_with_llm(
                 await bot.send_document(
                     notify_chat_id,
                     document,
-                    caption="Ответ LLM на ранжирование",
+                    caption="Ответ LLM на выборку и ранжирование",
                     disable_notification=True,
                 )
             except Exception:
@@ -568,13 +522,13 @@ async def _rank_with_llm(
         await _store_llm_trace(
             db,
             session_id=session_id,
-            stage="ranking",
+            stage="selection",
             model="gpt-4o",
             request_json=request_details_json,
             response_json=raw,
         )
     except Exception:
-        logger.exception("video_announce: llm ranking failed")
+        logger.exception("video_announce: llm selection failed")
         parsed = []
     ranked: list[RankedEvent] = []
     if parsed:
@@ -599,6 +553,8 @@ async def _rank_with_llm(
                     position=idx + 1,
                     reason=row.reason,
                     mandatory=event.id in mandatory_ids,
+                    selected=row.selected,
+                    selected_reason=row.selected_reason,
                 )
             )
     else:
@@ -749,6 +705,13 @@ def _choose_default_ready(
             break
         if row.event.id in ready:
             continue
+        if row.selected is True:
+            ready.add(row.event.id)
+    for row in ranked:
+        if len(ready) >= target_max:
+            break
+        if row.event.id in ready:
+            continue
         ready.add(row.event.id)
     if len(ready) < min_count:
         for row in ranked:
@@ -778,67 +741,6 @@ async def build_selection(
     async def _rank_events(current_events: Sequence[Event]) -> tuple[list[RankedEvent], set[int]]:
         _log_event_selection_stats(current_events)
         filtered_events = list(current_events)
-        if ctx.instruction:
-            try:
-                serialized = json.dumps(
-                    [
-                        {
-                            "event_id": ev.id,
-                            "title": ev.title,
-                            "date": ev.date,
-                            "city": ev.city,
-                            "topics": getattr(ev, "topics", []),
-                            "is_free": ev.is_free,
-                        }
-                        for ev in sorted(current_events, key=lambda e: (e.date, e.time, e.id))
-                    ],
-                    ensure_ascii=False,
-                )
-                request_text = (
-                    "Список событий в формате JSON."
-                    " Оставь только те, что строго соответствуют инструкции оператора,"
-                    " и верни их идентификаторы с флагом include=true."
-                    " Не включай несоответствующие события в итоговый список."
-                    f" Инструкция: {ctx.instruction}\n\n{serialized}"
-                )
-                raw = await ask_4o(
-                    request_text,
-                    system_prompt=(
-                        "Ты фильтруешь события для видеосборки."
-                        " Удали все, что не соответствует инструкции."
-                        " Ответ строго JSON по схеме."
-                    ),
-                    response_format=INSTRUCTION_FILTER_RESPONSE_FORMAT,
-                    meta={"source": "video_announce.instruction_filter", "count": len(current_events)},
-                )
-                if bot and notify_chat_id:
-                    try:
-                        filename = f"filter_response_{session_id or 'session'}.json"
-                        document = types.BufferedInputFile(
-                            raw.encode("utf-8"),
-                            filename=filename,
-                        )
-                        await bot.send_document(
-                            notify_chat_id,
-                            document,
-                            caption="Ответ LLM на фильтрацию инструкцией",
-                            disable_notification=True,
-                        )
-                    except Exception:
-                        logger.exception("video_announce: failed to send filter response document")
-
-                allowed_ids = _parse_instruction_filter(raw, {e.id for e in current_events})
-                filtered_events = [ev for ev in current_events if ev.id in allowed_ids]
-                await _store_llm_trace(
-                    db,
-                    session_id=session_id,
-                    stage="instruction_filter",
-                    model="gpt-4o",
-                    request_json=request_text,
-                    response_json=raw,
-                )
-            except Exception:
-                logger.exception("video_announce: instruction filtering failed")
         mandatory_ids_local = {
             e.id
             for e in filtered_events
