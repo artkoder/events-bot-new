@@ -755,6 +755,9 @@ class VideoAnnounceScenario:
             )
             return
 
+        # Диагностика токена Telegraph на старте пайплайна /v
+        await self._log_telegraph_token_diagnostics()
+
         params = self._default_selection_params()
         profile = await self._resolve_profile(profile_key)
         params = await self._pick_default_required_period(profile, params)
@@ -775,6 +778,38 @@ class VideoAnnounceScenario:
             self.user_id, PendingInstruction(session_id=obj.id, reuse_candidates=False)
         )
         await self._prompt_instruction(obj, ctx)
+
+    async def _log_telegraph_token_diagnostics(self) -> None:
+        """Логирование диагностики токена Telegraph на старте /v пайплайна."""
+        import os
+        
+        env_present = bool(os.getenv("TELEGRAPH_TOKEN"))
+        token_file_path = os.getenv("TELEGRAPH_TOKEN_FILE", "/data/telegraph_token.txt")
+        token_file_exists = os.path.exists(token_file_path)
+        token_file_readable = False
+        token_file_empty = False
+        
+        if token_file_exists:
+            try:
+                with open(token_file_path, "r", encoding="utf-8") as f:
+                    content = f.read().strip()
+                    token_file_readable = True
+                    if not content:
+                        token_file_empty = True
+            except Exception:
+                token_file_readable = False
+                token_file_empty = False
+        
+        logger.info(
+            "telegraph_token_diagnostics",
+            extra={
+                "env_present": env_present,
+                "token_file_path": token_file_path,
+                "token_file_exists": token_file_exists,
+                "token_file_readable": token_file_readable,
+                "token_file_empty": token_file_empty,
+            }
+        )
 
     async def _prompt_instruction(
         self,

@@ -1,11 +1,26 @@
 from __future__ import annotations
 
+import html
+import logging
+import os
 import re
 import time as _time
 from dataclasses import dataclass, field
 from typing import Callable, Iterable
+from urllib.parse import urlparse
+
+from telegraph import Telegraph, TelegraphException
 
 from models import Event, Festival
+from main import (
+    get_telegraph_token, 
+    telegraph_call, 
+    apply_ics_link, 
+    apply_month_nav,
+    FOOTER_LINK_HTML,
+    CONTENT_SEPARATOR,
+    TELEGRAPH_TOKEN_FILE
+)
 
 
 def _normalize_title_and_emoji(title: str, emoji: str | None) -> tuple[str, str]:
@@ -12513,27 +12528,146 @@ async def update_source_page_ics(event_id: int, db: Database, url: str | None):
 
 async def get_source_page_text(path: str) -> str:
     """Return plain text from a Telegraph page."""
-    token = get_telegraph_token()
-    if not token:
-        logging.error("Telegraph token unavailable")
+    # Нормализация path: убрать leading / и домен если пришёл url
+    normalized_path = path.strip()
+    if normalized_path.startswith("/"):
+        normalized_path = normalized_path.lstrip("/")
+    if normalized_path.startswith("http"):
+        parsed = urlparse(normalized_path)
+        normalized_path = parsed.path.lstrip("/")
+
+    # Диагностика токена - сначала определяем источник
+    token_source = "none"
+    has_token = False
+    token_file_exists = False
+    token_file_path = TELEGRAPH_TOKEN_FILE
+    token = None
+    
+    # Проверяем источник токена
+    env_token = os.getenv("TELEGRAPH_TOKEN")
+    if env_token:
+        token_source = "env"
+        has_token = True
+        token = env_token
+    elif os.path.exists(TELEGRAPH_TOKEN_FILE):
+        token_file_exists = True
+        token_source = "file"
+        has_token = True
+        try:
+            with open(TELEGRAPH_TOKEN_FILE, "r", encoding="utf-8") as f:
+                token = f.read().strip()
+                if not token:
+                    token = None
+                    has_token = False
+                    token_source = "file_empty"
+        except Exception:
+            token = None
+            has_token = False
+            token_source = "file_error"
+    else:
+        # Пробуем создать новый токен
+        try:
+            tg = Telegraph()
+            data = tg.create_account(short_name="eventsbot")
+            token = data["access_token"]
+            os.makedirs(os.path.dirname(TELEGRAPH_TOKEN_FILE), exist_ok=True)
+            with open(TELEGRAPH_TOKEN_FILE, "w", encoding="utf-8") as f:
+                f.write(token)
+            token_source = "created"
+            has_token = True
+            logging.info(
+                "Created Telegraph account; token stored at %s", TELEGRAPH_TOKEN_FILE
+            )
+        except Exception as e:
+            logging.error("Failed to create Telegraph token: %s", e)
+            token_source = "created_failed"
+            has_token = False
+
+    # Лог на старте fetch
+    logging.info(
+        "telegraph_fetch start",
+        extra={
+            "path": normalized_path,
+            "token_source": token_source,
+            "has_token": has_token,
+            "token_file_path": token_file_path,
+            "token_file_exists": token_file_exists,
+        }
+    )
+
+    if not has_token or not token:
+        logging.warning(
+            "telegraph_fetch no_token",
+            extra={
+                "path": normalized_path,
+                "token_source": token_source,
+                "token_file_exists": token_file_exists,
+                "token_file_path": token_file_path,
+            }
+        )
         return ""
+
     tg = Telegraph(access_token=token)
     try:
         page = await telegraph_call(tg.get_page, path, return_html=True)
+        
+        # Лог после ответа API (DEBUG)
+        resp_type = type(page).__name__
+        resp_keys = list(page.keys()) if isinstance(page, dict) else []
+        html_content = page.get("content") or page.get("content_html") or ""
+        text_content = ""
+        
+        # Обработка контента
+        html_content = apply_ics_link(html_content, None)
+        html_content = apply_month_nav(html_content, None)
+        html_content = html_content.replace(FOOTER_LINK_HTML, "")
+        html_content = html_content.replace(f"<p>{CONTENT_SEPARATOR}</p>", f"\n{CONTENT_SEPARATOR}\n")
+        html_content = html_content.replace("<br/>", "\n").replace("<br>", "\n")
+        html_content = re.sub(r"</p>\s*<p>", "\n", html_content)
+        html_content = re.sub(r"<[^>]+>", "", html_content)
+        text_content = html.unescape(html_content)
+        text_content = text_content.replace(CONTENT_SEPARATOR, "").replace("\xa0", " ")
+        
+        len_html = len(html_content)
+        len_text = len(text_content)
+        
+        logging.debug(
+            "telegraph_fetch response",
+            extra={
+                "path": normalized_path,
+                "resp_type": resp_type,
+                "resp_keys": resp_keys,
+                "len_html": len_html,
+                "len_text": len_text,
+            }
+        )
+        
+        # Проверка пустого контента
+        if len_html == 0 and len_text == 0:
+            logging.warning(
+                "telegraph_fetch empty_content",
+                extra={
+                    "path": normalized_path,
+                    "token_source": token_source,
+                    "resp_keys": resp_keys,
+                    "len_html": len_html,
+                    "len_text": len_text,
+                }
+            )
+        
+        return text_content.strip()
+        
     except Exception as e:
-        logging.error("Failed to fetch telegraph page: %s", e)
+        logging.error(
+            "telegraph_fetch exception",
+            extra={
+                "path": normalized_path,
+                "token_source": token_source,
+                "exception_type": type(e).__name__,
+            },
+            exc_info=True
+        )
         return ""
-    html_content = page.get("content") or page.get("content_html") or ""
-    html_content = apply_ics_link(html_content, None)
-    html_content = apply_month_nav(html_content, None)
-    html_content = html_content.replace(FOOTER_LINK_HTML, "")
-    html_content = html_content.replace(f"<p>{CONTENT_SEPARATOR}</p>", f"\n{CONTENT_SEPARATOR}\n")
-    html_content = html_content.replace("<br/>", "\n").replace("<br>", "\n")
-    html_content = re.sub(r"</p>\s*<p>", "\n", html_content)
-    html_content = re.sub(r"<[^>]+>", "", html_content)
-    text = html.unescape(html_content)
-    text = text.replace(CONTENT_SEPARATOR, "").replace("\xa0", " ")
-    return text.strip()
 
 
 async def update_event_description(event: Event, db: Database) -> None:
