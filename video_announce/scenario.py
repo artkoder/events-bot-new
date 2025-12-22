@@ -842,7 +842,10 @@ class VideoAnnounceScenario:
         if message:
             try:
                 await self.bot.edit_message_text(
-                    text, chat_id=message.chat.id, message_id=message.message_id, reply_markup=keyboard
+                    text=text,
+                    chat_id=message.chat.id,
+                    message_id=message.message_id,
+                    reply_markup=keyboard,
                 )
                 return
             except Exception:
