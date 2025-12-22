@@ -627,8 +627,8 @@ class VideoAnnounceScenario:
             f"Диапазон: {self._date_range_label(params)}",
             f"Инструкция: {html.escape(instruction[:300]) if instruction else '—'}",
             f"Всего кандидатов: {len(ranked)}",
-            "<tg-spoiler>",
             "📥 Кандидаты:",
+            "<blockquote>",
         ]
         for r in ranked:
             ev = r.event
@@ -643,7 +643,7 @@ class VideoAnnounceScenario:
             lines.append(
                 f"{r.position}. {date_label} · {emoji} {self._format_title(ev)}{promo_marker}{score}{reason}"
             )
-        lines.append("</tg-spoiler>")
+        lines.append("</blockquote>")
         return "\n".join(lines)
 
     async def _send_input_overview(
