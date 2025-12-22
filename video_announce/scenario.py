@@ -482,12 +482,6 @@ class VideoAnnounceScenario:
         except ValueError:
             return datetime.combine(day, datetime.min.time(), tzinfo=LOCAL_TZ)
 
-    def _event_sort_key(self, ranked: RankedEvent) -> tuple[datetime, int]:
-        parsed_dt = self._parse_event_datetime(ranked.event)
-        if parsed_dt is None:
-            parsed_dt = datetime.max.replace(tzinfo=timezone.utc)
-        return (parsed_dt, ranked.position or 0)
-
     def _normalize_emoji(self, emoji: str | None) -> str:
         if not emoji:
             return ""
@@ -928,7 +922,19 @@ class VideoAnnounceScenario:
             "📥 Кандидаты:",
             "<blockquote expandable>",
         ]
-        sorted_candidates = sorted(result.candidates, key=self._event_sort_key)
+
+        def candidate_sort_key(ev: Event) -> tuple[datetime, int]:
+            parsed_dt = self._parse_event_datetime(ev)
+            if parsed_dt is None:
+                parsed_dt = datetime.max.replace(tzinfo=timezone.utc)
+            r = ranked_map.get(ev.id)
+            # Use large number for unranked to put them at the end of the day list
+            # or 0 if we want them first. Assuming ranked have positions 1..N.
+            # Using 999999 to put unranked last.
+            pos = r.position if r and r.position else 999999
+            return (parsed_dt, pos)
+
+        sorted_candidates = sorted(result.candidates, key=candidate_sort_key)
         for ev in sorted_candidates:
             r = ranked_map.get(ev.id)
             marker = "✅" if ev.id in result.default_ready_ids else "⬜"

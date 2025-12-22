@@ -34,6 +34,7 @@ SELECTION_RESPONSE_FORMAT = {
                             "score",
                             "reason",
                             "selected",
+                            "selected_reason",
                             "about",
                             "description",
                         ],
