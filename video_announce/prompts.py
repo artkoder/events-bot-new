@@ -26,8 +26,17 @@ SELECTION_RESPONSE_FORMAT = {
                             "reason": {"type": ["string", "null"]},
                             "selected": {"type": ["boolean", "null"]},
                             "selected_reason": {"type": ["string", "null"]},
+                            "about": {"type": ["string", "null"]},
+                            "description": {"type": ["string", "null"]},
                         },
-                        "required": ["event_id", "score", "reason", "selected"],
+                        "required": [
+                            "event_id",
+                            "score",
+                            "reason",
+                            "selected",
+                            "about",
+                            "description",
+                        ],
                         "additionalProperties": False,
                     },
                 }
@@ -104,10 +113,11 @@ def selection_prompt() -> str:
         " противоречащие ей события. Стремись к разнообразию тематик и форматов,"
         " выделяй интерес, уникальность, свежесть, семейную ценность, пригодность"
         " OCR/Telegraph контекста. Не используй количество постеров как критерий."
-        " В ответе для каждого события верни score, reason, а также"
-        " selected=true/false и короткое selected_reason, отражающие вывод"
-        " о попадании события в итоговый ролик. Ответ строго JSON со списком"
-        " items без пояснений."
+        " Для каждого события верни score, reason, selected=true/false и"
+        " короткое selected_reason. Добавь поле about (до 12 слов, без эмодзи и"
+        " кавычек) и одно предложение description, которые помогут вывести"
+        " узнаваемое название + формат/место/время. Ответ строго JSON со"
+        " списком items без пояснений."
     )
 
 

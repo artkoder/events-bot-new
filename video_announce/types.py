@@ -25,6 +25,9 @@ class RankedEvent:
     mandatory: bool = False
     selected: bool | None = None
     selected_reason: str | None = None
+    about: str | None = None
+    description: str | None = None
+    poster_ocr_text: str | None = None
 
 
 @dataclass
@@ -34,6 +37,8 @@ class RankedChoice:
     reason: str | None = None
     selected: bool | None = None
     selected_reason: str | None = None
+    about: str | None = None
+    description: str | None = None
 
 
 @dataclass
