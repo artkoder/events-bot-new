@@ -40,6 +40,49 @@ logger = logging.getLogger(__name__)
 TELEGRAPH_EXCERPT_LIMIT = 1200
 POSTER_OCR_EXCERPT_LIMIT = 800
 TRACE_MAX_LEN = 100_000
+INSTRUCTION_FILTER_RESPONSE_FORMAT = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "instruction_filter",
+        "schema": {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "event_id": {"type": "integer"},
+                            "include": {"type": "boolean"},
+                            "reason": {"type": "string"},
+                        },
+                        "required": ["event_id", "include"],
+                        "additionalProperties": False,
+                    },
+                }
+            },
+            "required": ["items"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    },
+}
+
+
+def _filter_events_with_posters(events: Sequence[Event]) -> list[Event]:
+    filtered = [
+        e
+        for e in events
+        if (getattr(e, "photo_count", 0) or 0) > 0
+        and any((getattr(e, "photo_urls", []) or []))
+    ]
+    if len(filtered) != len(events):
+        logger.info(
+            "video_announce: dropped events without posters total=%d filtered=%d",  # noqa: G004
+            len(events),
+            len(filtered),
+        )
+    return filtered
 
 
 async def fetch_profiles() -> list[VideoProfile]:
@@ -81,6 +124,7 @@ async def fetch_candidates(db: Database, ctx: SelectionContext) -> list[Event]:
             .order_by(Event.date, Event.time, Event.id)
         )
         events = result.scalars().all()
+    events = _filter_events_with_posters(events)
     promoted_ids = set(ctx.promoted_event_ids or set())
     filtered: list[Event] = []
     flexible: list[Event] = []
@@ -239,6 +283,28 @@ def _parse_llm_ranking(raw: str, known_ids: set[int]) -> list[RankedChoice]:
             )
         )
     return parsed
+
+
+def _parse_instruction_filter(raw: str, known_ids: set[int]) -> set[int]:
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        logger.warning("video_announce: failed to parse instruction filter JSON")
+        return set()
+    items = data.get("items") if isinstance(data, dict) else None
+    allowed: set[int] = set()
+    if not isinstance(items, list):
+        return allowed
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        event_id = item.get("event_id")
+        include = item.get("include")
+        if not isinstance(event_id, int) or event_id not in known_ids:
+            continue
+        if include is True:
+            allowed.add(event_id)
+    return allowed
 
 
 def _describe_period(events: Sequence[Event]) -> str | None:
@@ -569,22 +635,72 @@ async def build_selection(
     candidates: Sequence[Event] | None = None,
 ) -> SelectionBuildResult:
     client = client or KaggleClient()
-    events = list(candidates) if candidates is not None else await fetch_candidates(db, ctx)
+    events = (
+        _filter_events_with_posters(list(candidates))
+        if candidates is not None
+        else await fetch_candidates(db, ctx)
+    )
 
     async def _rank_events(current_events: Sequence[Event]) -> tuple[list[RankedEvent], set[int]]:
+        filtered_events = list(current_events)
+        if ctx.instruction:
+            try:
+                serialized = json.dumps(
+                    [
+                        {
+                            "event_id": ev.id,
+                            "title": ev.title,
+                            "date": ev.date,
+                            "city": ev.city,
+                            "topics": getattr(ev, "topics", []),
+                            "is_free": ev.is_free,
+                        }
+                        for ev in sorted(current_events, key=lambda e: (e.date, e.time, e.id))
+                    ],
+                    ensure_ascii=False,
+                )
+                request_text = (
+                    "Список событий в формате JSON."
+                    " Оставь только те, что строго соответствуют инструкции оператора,"
+                    " и верни их идентификаторы с флагом include=true."
+                    " Не включай несоответствующие события в итоговый список."
+                    f" Инструкция: {ctx.instruction}\n\n{serialized}"
+                )
+                raw = await ask_4o(
+                    request_text,
+                    system_prompt=(
+                        "Ты фильтруешь события для видеосборки."
+                        " Удали все, что не соответствует инструкции."
+                        " Ответ строго JSON по схеме."
+                    ),
+                    response_format=INSTRUCTION_FILTER_RESPONSE_FORMAT,
+                    meta={"source": "video_announce.instruction_filter", "count": len(current_events)},
+                )
+                allowed_ids = _parse_instruction_filter(raw, {e.id for e in current_events})
+                filtered_events = [ev for ev in current_events if ev.id in allowed_ids]
+                await _store_llm_trace(
+                    db,
+                    session_id=session_id,
+                    stage="instruction_filter",
+                    model="gpt-4o",
+                    request_json=request_text,
+                    response_json=raw,
+                )
+            except Exception:
+                logger.exception("video_announce: instruction filtering failed")
         mandatory_ids_local = {
             e.id
-            for e in current_events
+            for e in filtered_events
             if (getattr(e, "video_include_count", 0) or 0) > 0
         }
         promoted_local = set(ctx.promoted_event_ids or set()) | set(mandatory_ids_local)
         mandatory_ids_local = mandatory_ids_local | set(ctx.promoted_event_ids or set())
-        hits_local = await _load_hits(db, [e.id for e in current_events])
+        hits_local = await _load_hits(db, [e.id for e in filtered_events])
         selected_local = (
-            list(current_events)
+            list(filtered_events)
             if candidates is not None
             else _apply_repeat_limit(
-                current_events,
+                filtered_events,
                 limit=ctx.candidate_limit,
                 hits=hits_local,
                 promoted=promoted_local,
