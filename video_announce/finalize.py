@@ -100,7 +100,7 @@ async def _ensure_ocr_cached(db: Database, grouped: dict[int, list[EventPoster]]
 
 
 
-_PUNCT_STRIP_RE = re.compile(r"[«»"' <>.,!?:;()\[\]{}]")
+_PUNCT_STRIP_RE = re.compile(r"[«»\"' <>.,!?:;()\[\]{}]")
 
 
 def _strip_ocr_tokens(text: str) -> str:

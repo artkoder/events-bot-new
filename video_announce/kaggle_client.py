@@ -9,7 +9,18 @@ import tempfile
 from pathlib import Path
 from typing import Iterable
 
-from kaggle.api.kaggle_api_extended import KaggleApi
+KaggleApi = None  # type: ignore[assignment]
+_KAGGLE_IMPORT_ERROR: Exception | None = None
+
+try:  # pragma: no cover - optional dependency
+    from kaggle.api.kaggle_api_extended import KaggleApi as ImportedKaggleApi
+except SystemExit as exc:  # pragma: no cover - missing credentials trigger sys.exit
+    _KAGGLE_IMPORT_ERROR = exc
+except Exception as exc:  # pragma: no cover - handled at runtime
+    _KAGGLE_IMPORT_ERROR = exc
+else:
+    KaggleApi = ImportedKaggleApi  # type: ignore[assignment]
+    _KAGGLE_IMPORT_ERROR = None
 
 from models import Event
 
@@ -53,6 +64,10 @@ class KaggleClient:
     # --- Kaggle API helpers ---
     def _get_api(self) -> KaggleApi:
         if self._api is None:
+            if KaggleApi is None:
+                raise RuntimeError(
+                    "Kaggle API is unavailable. Install kaggle and configure credentials."
+                ) from _KAGGLE_IMPORT_ERROR
             api = KaggleApi()
             api.authenticate()
             self._api = api
