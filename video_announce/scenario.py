@@ -334,7 +334,15 @@ class VideoAnnounceScenario:
                     or self._format_required_preset_label(title, params, preset)
                     or self._date_range_label(preset)
                 )
-                normalized.append({"params": preset, "label": label, "raw_index": raw_idx})
+                normalized.append(
+                    {
+                        "params": preset,
+                        "label": label,
+                        "raw_index": raw_idx,
+                        "title": title,
+                        "explicit_label": explicit_label,
+                    }
+                )
         return normalized
 
     def _find_weekend_period_index(self, periods: list[dict[str, Any]]) -> int | None:
@@ -793,7 +801,12 @@ class VideoAnnounceScenario:
         for idx, preset in enumerate(required_periods):
             merged_params = dict(params)
             merged_params.update(preset["params"])
-            label = str(preset.get("label") or self._date_range_label(merged_params))
+            label = preset.get("label")
+            if not label:
+                title_hint = preset.get("explicit_label") or preset.get("title")
+                label = self._format_required_preset_label(title_hint, params, preset["params"])
+            if not label:
+                label = self._date_range_label(merged_params)
             checkbox = "☑️ " if idx == selected_idx else "⬜ "
             period_buttons.append(
                 types.InlineKeyboardButton(
