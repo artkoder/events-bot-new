@@ -99,6 +99,20 @@ async def _ensure_ocr_cached(db: Database, grouped: dict[int, list[EventPoster]]
         await session.commit()
 
 
+
+_PUNCT_STRIP_RE = re.compile(r"[«»"' <>.,!?:;()\[\]{}]")
+
+
+def _strip_ocr_tokens(text: str) -> str:
+    words: list[str] = []
+    for raw in text.split():
+        normalized = _PUNCT_STRIP_RE.sub("", raw).casefold()
+        if not normalized or "ocr" in normalized:
+            continue
+        words.append(raw)
+    return " ".join(words)
+
+
 def _build_enrichments(grouped: dict[int, list[EventPoster]]) -> dict[int, PosterEnrichment]:
     enrichments: dict[int, PosterEnrichment] = {}
     for event_id, posters in grouped.items():
@@ -214,7 +228,8 @@ _EMOJI_RE = re.compile(
 
 def _normalize_about(text: str | None, word_limit: int = 12) -> str:
     raw_text = _EMOJI_RE.sub("", str(text or ""))
-    collapsed = " ".join(raw_text.replace("\n", " ").split())
+    without_ocr = _strip_ocr_tokens(raw_text)
+    collapsed = " ".join(without_ocr.replace("\n", " ").split())
     trimmed = collapsed.strip("«»\"' <>.,!?:;")
     words: list[str] = []
     seen: set[str] = set()
@@ -249,7 +264,7 @@ def _parse_final_response(raw: str, known_ids: set[int]) -> list[FinalizedItem]:
         title = _normalize_title(item.get("final_title") or item.get("title"))
         about = _normalize_about(item.get("about"))
         description = str(item.get("description") or "").strip()
-        if not title or not about or not description:
+        if not title or not description:
             continue
         parsed.append(
             FinalizedItem(
@@ -271,6 +286,7 @@ async def prepare_final_texts(
         return []
     event_ids = [r.event.id for r in ranked]
     events = [r.event for r in ranked]
+    event_map = {ev.id: ev for ev in events}
     grouped_posters = await _load_posters(db, event_ids)
     await _ensure_ocr_cached(db, grouped_posters)
     enrichments = _build_enrichments(grouped_posters)
@@ -293,6 +309,20 @@ async def prepare_final_texts(
         logger.exception("video_announce: finalize prompt failed")
         return []
     finalized = _parse_final_response(raw, set(event_ids))
+    for fin in finalized:
+        event = event_map.get(fin.event_id)
+        cleaned_about = _normalize_about(fin.about)
+        if not cleaned_about:
+            fallback_parts = [
+                _normalize_title(fin.title or getattr(event, "title", None)),
+            ]
+            if event:
+                fallback_parts.extend(
+                    part for part in (getattr(event, "location_name", None), getattr(event, "city", None))
+                )
+            fallback = " ".join(part for part in fallback_parts if part)
+            cleaned_about = _normalize_about(fallback)
+        fin.about = cleaned_about
     enrich_map = {en.event_id: en for en in enrichments.values()}
     async with db.get_session() as session:
         result = await session.execute(
