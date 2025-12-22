@@ -37,6 +37,7 @@ from main import (
     get_setting_value,
     set_setting_value,
 )
+from .about import normalize_about_with_fallback
 from .finalize import prepare_final_texts
 from .kaggle_client import DEFAULT_KERNEL_PATH, KaggleClient
 from .poller import (
@@ -1258,6 +1259,17 @@ class VideoAnnounceScenario:
                 item.llm_reason = r.reason
                 item.is_mandatory = r.mandatory
                 item.include_count = getattr(r.event, "video_include_count", 0) or 0
+                about_text = normalize_about_with_fallback(
+                    r.about,
+                    title=getattr(r.event, "title", None),
+                    ocr_text=r.poster_ocr_text,
+                    fallback_parts=(getattr(r.event, "location_name", None), getattr(r.event, "city", None)),
+                )
+                description_text = (r.description or "").strip()
+                if item.status == VideoAnnounceItemStatus.READY:
+                    item.final_about = about_text
+                    if description_text:
+                        item.final_description = description_text
                 session.add(item)
             await session.commit()
 

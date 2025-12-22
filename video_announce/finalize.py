@@ -1,9 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
-import asyncio
-import re
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Iterable, Sequence
@@ -16,6 +15,7 @@ from main import HTTP_SEMAPHORE, ask_4o, get_http_session
 from models import EventPoster, VideoAnnounceItem
 from poster_ocr import recognize_posters
 from main_part2 import get_source_page_text
+from .about import normalize_about_text, normalize_about_with_fallback
 from .prompts import FINAL_TEXT_RESPONSE_FORMAT, finalize_prompt
 from .types import FinalizedItem, PosterEnrichment, RankedEvent
 
@@ -98,19 +98,6 @@ async def _ensure_ocr_cached(db: Database, grouped: dict[int, list[EventPoster]]
             session.add(poster)
         await session.commit()
 
-
-
-_PUNCT_STRIP_RE = re.compile(r"[«»\"' <>.,!?:;()\[\]{}]")
-
-
-def _strip_ocr_tokens(text: str) -> str:
-    words: list[str] = []
-    for raw in text.split():
-        normalized = _PUNCT_STRIP_RE.sub("", raw).casefold()
-        if not normalized or "ocr" in normalized:
-            continue
-        words.append(raw)
-    return " ".join(words)
 
 
 def _build_enrichments(grouped: dict[int, list[EventPoster]]) -> dict[int, PosterEnrichment]:
@@ -238,38 +225,7 @@ def _normalize_title(title: str | None, limit: int = 12) -> str:
     return trimmed
 
 
-_EMOJI_RE = re.compile(
-    "["
-    "\U0001F600-\U0001F64F"
-    "\U0001F300-\U0001F5FF"
-    "\U0001F680-\U0001F6FF"
-    "\U0001F1E0-\U0001F1FF"
-    "\U00002700-\U000027BF"
-    "\U0001F900-\U0001FAFF"
-    "\U00002600-\U000026FF"
-    "\U00002B00-\U00002BFF"
-    "\U00002300-\U000023FF"
-    "]+"
-)
 
-
-def _normalize_about(text: str | None, word_limit: int = 12) -> str:
-    raw_text = _EMOJI_RE.sub("", str(text or ""))
-    without_ocr = _strip_ocr_tokens(raw_text)
-    collapsed = " ".join(without_ocr.replace("\n", " ").split())
-    trimmed = collapsed.strip("«»\"' <>.,!?:;")
-    words: list[str] = []
-    seen: set[str] = set()
-    for raw in trimmed.split():
-        word = raw.strip("«»\"' <>.,!?:;")
-        low = word.lower()
-        if not word or low in seen:
-            continue
-        seen.add(low)
-        words.append(word)
-        if len(words) >= word_limit:
-            break
-    return " ".join(words)
 
 
 def _parse_final_response(raw: str, known_ids: set[int]) -> list[FinalizedItem]:
@@ -289,7 +245,7 @@ def _parse_final_response(raw: str, known_ids: set[int]) -> list[FinalizedItem]:
         if not isinstance(event_id, int) or event_id not in known_ids:
             continue
         title = _normalize_title(item.get("final_title") or item.get("title"))
-        about = _normalize_about(item.get("about"))
+        about = normalize_about_text(item.get("about"), title=title)
         description = str(item.get("description") or "").strip()
         if not title or not description:
             continue
@@ -338,18 +294,13 @@ async def prepare_final_texts(
     finalized = _parse_final_response(raw, set(event_ids))
     for fin in finalized:
         event = event_map.get(fin.event_id)
-        cleaned_about = _normalize_about(fin.about)
-        if not cleaned_about:
-            fallback_parts = [
-                _normalize_title(fin.title or getattr(event, "title", None)),
-            ]
-            if event:
-                fallback_parts.extend(
-                    part for part in (getattr(event, "location_name", None), getattr(event, "city", None))
-                )
-            fallback = " ".join(part for part in fallback_parts if part)
-            cleaned_about = _normalize_about(fallback)
-        fin.about = cleaned_about
+        enrichment = enrichments.get(fin.event_id)
+        fin.about = normalize_about_with_fallback(
+            fin.about,
+            title=fin.title or getattr(event, "title", None),
+            ocr_text=enrichment.text if enrichment else None,
+            fallback_parts=(getattr(event, "location_name", None), getattr(event, "city", None)),
+        )
     enrich_map = {en.event_id: en for en in enrichments.values()}
     async with db.get_session() as session:
         result = await session.execute(

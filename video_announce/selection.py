@@ -5,7 +5,6 @@ import hashlib
 import json
 import logging
 import math
-import re
 from collections import defaultdict
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
@@ -27,6 +26,7 @@ from models import (
     VideoAnnounceLLMTrace,
     VideoAnnounceSession,
 )
+from .about import normalize_about_with_fallback
 from .kaggle_client import KaggleClient
 from .prompts import SELECTION_RESPONSE_FORMAT, selection_prompt
 from .types import (
@@ -43,23 +43,20 @@ logger = logging.getLogger(__name__)
 TELEGRAPH_EXCERPT_LIMIT = 1200
 POSTER_OCR_EXCERPT_LIMIT = 800
 TRACE_MAX_LEN = 100_000
-_EMOJI_RE = re.compile(
-    "["
-    "\U0001F600-\U0001F64F"
-    "\U0001F300-\U0001F5FF"
-    "\U0001F680-\U0001F6FF"
-    "\U0001F1E0-\U0001F1FF"
-    "\U00002700-\U000027BF"
-    "\U0001F900-\U0001FAFF"
-    "\U00002600-\U000026FF"
-    "\U00002B00-\U00002BFF"
-    "\U00002300-\U000023FF"
-    "]+"
-)
 
-
-def _strip_emoji(text: str) -> str:
-    return _EMOJI_RE.sub("", text)
+def _build_about(
+    *,
+    about: str | None,
+    event: Event,
+    ocr_text: str | None = None,
+    title: str | None = None,
+) -> str:
+    return normalize_about_with_fallback(
+        about,
+        title=title or getattr(event, "title", None),
+        ocr_text=ocr_text,
+        fallback_parts=(getattr(event, "location_name", None), getattr(event, "city", None)),
+    )
 
 
 def _log_event_selection_stats(events: Sequence[Event]) -> None:
@@ -336,6 +333,8 @@ def _parse_llm_ranking(raw: str, known_ids: set[int]) -> list[RankedChoice]:
         selected = item.get("selected")
         if not isinstance(selected, bool):
             selected = None
+        about = item.get("about") if isinstance(item.get("about"), str) else None
+        description_raw = item.get("description") if "description" in item else None
         parsed.append(
             RankedChoice(
                 event_id=event_id,
@@ -343,6 +342,8 @@ def _parse_llm_ranking(raw: str, known_ids: set[int]) -> list[RankedChoice]:
                 reason=item.get("reason"),
                 selected=selected,
                 selected_reason=item.get("selected_reason"),
+                about=about,
+                description=str(description_raw).strip() if description_raw else None,
             )
         )
     return parsed
@@ -555,6 +556,9 @@ async def _rank_with_llm(
                     mandatory=event.id in mandatory_ids,
                     selected=row.selected,
                     selected_reason=row.selected_reason,
+                    about=row.about,
+                    description=row.description,
+                    poster_ocr_text=poster_texts.get(event.id),
                 )
             )
     else:
@@ -564,6 +568,7 @@ async def _rank_with_llm(
                 score=row.score,
                 position=idx + 1,
                 mandatory=row.event.id in mandatory_ids,
+                poster_ocr_text=poster_texts.get(row.event.id),
             )
             for idx, row in enumerate(_score_events(client, events))
         ]
@@ -595,6 +600,16 @@ async def prepare_session_items(
                 is_mandatory=r.mandatory,
                 include_count=getattr(event, "video_include_count", 0) or 0,
             )
+            about_text = _build_about(
+                about=r.about,
+                event=event,
+                ocr_text=r.poster_ocr_text,
+            )
+            description_text = (r.description or "").strip()
+            if item.status == VideoAnnounceItemStatus.READY:
+                item.final_about = about_text
+                if description_text:
+                    item.final_description = description_text
             session.add(item)
             stored.append(item)
         await session.commit()
@@ -674,9 +689,14 @@ def payload_as_json(payload: RenderPayload, tz: timezone) -> str:
         if not ev:
             continue
         location = ", ".join(part for part in [ev.city, ev.location_name] if part)
-        about_text = item.final_about or item.final_title or ev.title
+        about_text = _build_about(
+            about=item.final_about,
+            event=ev,
+            ocr_text=item.poster_text,
+            title=item.final_title or ev.title,
+        )
         scene = {
-            "about": _strip_emoji(about_text or ""),
+            "about": about_text,
             "description": item.final_description or "",
             "date": _format_scene_date(ev),
             "location": location,
