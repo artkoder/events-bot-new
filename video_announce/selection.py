@@ -62,6 +62,44 @@ def _strip_emoji(text: str) -> str:
     return _EMOJI_RE.sub("", text)
 
 
+def _log_event_selection_stats(events: Sequence[Event]) -> None:
+    if not events:
+        logger.info("video_announce: selection stats count=0")
+        return
+
+    dates: list[date] = []
+    by_date = defaultdict(int)
+    for ev in events:
+        try:
+            raw_date = ev.date.split("..", 1)[0]
+            d = date.fromisoformat(raw_date)
+            dates.append(d)
+            by_date[raw_date] += 1
+        except (ValueError, AttributeError, IndexError):
+            continue
+
+    if not dates:
+        return
+
+    min_date = min(dates)
+    max_date = max(dates)
+    period = (
+        f"{min_date.isoformat()}..{max_date.isoformat()}"
+        if min_date != max_date
+        else min_date.isoformat()
+    )
+
+    sorted_keys = sorted(by_date.keys())
+    breakdown = ", ".join(f"{d}={by_date[d]}" for d in sorted_keys)
+
+    logger.info(
+        "video_announce: selection stats count=%d period=%s breakdown={%s}",
+        len(events),
+        period,
+        breakdown,
+    )
+
+
 INSTRUCTION_FILTER_RESPONSE_FORMAT = {
     "type": "json_schema",
     "json_schema": {
@@ -738,6 +776,7 @@ async def build_selection(
     )
 
     async def _rank_events(current_events: Sequence[Event]) -> tuple[list[RankedEvent], set[int]]:
+        _log_event_selection_stats(current_events)
         filtered_events = list(current_events)
         if ctx.instruction:
             try:
