@@ -176,7 +176,24 @@ async def _fetch_telegraph_excerpt(ev) -> str | None:
         parsed = urlparse(url)
         resolved_path = parsed.path.lstrip("/")
     if not resolved_path:
+        logger.warning(
+            "telegraph_event_fetch no_path",
+            extra={
+                "event_id": getattr(ev, "id", None),
+                "telegraph_url": url,
+                "telegraph_path": path,
+            },
+        )
         return None
+    logger.info(
+        "telegraph_event_fetch start",
+        extra={
+            "event_id": getattr(ev, "id", None),
+            "telegraph_url": url,
+            "telegraph_path": path,
+            "resolved_path": resolved_path,
+        },
+    )
     try:
         text = await get_source_page_text(resolved_path)
     except Exception:
@@ -184,6 +201,16 @@ async def _fetch_telegraph_excerpt(ev) -> str | None:
         return None
     excerpt = (text or "").strip()
     if not excerpt:
+        logger.warning(
+            "telegraph_text_empty",
+            extra={
+                "event_id": getattr(ev, "id", None),
+                "telegraph_url": url,
+                "telegraph_path": path,
+                "resolved_path": resolved_path,
+                "text_len": 0,
+            },
+        )
         return None
     return excerpt[:TELEGRAPH_EXCERPT_LIMIT]
 

@@ -8,6 +8,7 @@ from typing import Callable
 
 from aiogram import types
 from models import Event, User, VideoAnnounceSession
+from main import TELEGRAPH_TOKEN_FILE, get_telegraph_token_info
 from .kaggle_client import KaggleClient
 from .poller import remember_status_message, update_status_message
 
@@ -29,6 +30,17 @@ async def _load_user(db: Database, user_id: int) -> User | None:
 
 
 async def handle_video_command(message: types.Message, db: Database, bot) -> None:
+    token_info = get_telegraph_token_info(create_if_missing=False)
+    logger.info(
+        "telegraph_token_diagnostics",
+        extra={
+            "env_present": token_info.env_present,
+            "token_file_path": TELEGRAPH_TOKEN_FILE,
+            "token_file_exists": token_info.token_file_exists,
+            "token_file_readable": token_info.token_file_readable,
+            "token_source": token_info.source,
+        },
+    )
     scenario = VideoAnnounceScenario(db, bot, message.chat.id, message.from_user.id)
     await scenario.show_menu()
 
