@@ -7229,15 +7229,61 @@ async def check_duplicate_via_4o(ev: Event, new: Event) -> Tuple[bool, str, str]
     return dup, title, desc
 
 
-def get_telegraph_token() -> str | None:
-    token = os.getenv("TELEGRAPH_TOKEN")
-    if token:
-        return token
-    if os.path.exists(TELEGRAPH_TOKEN_FILE):
-        with open(TELEGRAPH_TOKEN_FILE, "r", encoding="utf-8") as f:
-            saved = f.read().strip()
-            if saved:
-                return saved
+@dataclass(slots=True)
+class TelegraphTokenInfo:
+    token: str | None
+    source: str
+    token_file: str
+    token_file_exists: bool
+    token_file_readable: bool
+    env_present: bool
+
+
+def get_telegraph_token_info(*, create_if_missing: bool = True) -> TelegraphTokenInfo:
+    env_value = os.getenv("TELEGRAPH_TOKEN")
+    env_present = env_value is not None
+    token_file_exists = os.path.exists(TELEGRAPH_TOKEN_FILE)
+    token_file_readable = False
+    file_value: str | None = None
+
+    if token_file_exists:
+        try:
+            with open(TELEGRAPH_TOKEN_FILE, "r", encoding="utf-8") as f:
+                file_value = f.read().strip()
+                token_file_readable = True
+        except OSError:
+            file_value = None
+
+    if env_value:
+        return TelegraphTokenInfo(
+            token=env_value,
+            source="env",
+            token_file=TELEGRAPH_TOKEN_FILE,
+            token_file_exists=token_file_exists,
+            token_file_readable=token_file_readable,
+            env_present=env_present,
+        )
+
+    if file_value:
+        return TelegraphTokenInfo(
+            token=file_value,
+            source="file",
+            token_file=TELEGRAPH_TOKEN_FILE,
+            token_file_exists=token_file_exists,
+            token_file_readable=token_file_readable,
+            env_present=env_present,
+        )
+
+    if not create_if_missing:
+        return TelegraphTokenInfo(
+            token=None,
+            source="none",
+            token_file=TELEGRAPH_TOKEN_FILE,
+            token_file_exists=token_file_exists,
+            token_file_readable=token_file_readable,
+            env_present=env_present,
+        )
+
     try:
         tg = Telegraph()
         data = tg.create_account(short_name="eventsbot")
@@ -7248,10 +7294,29 @@ def get_telegraph_token() -> str | None:
         logging.info(
             "Created Telegraph account; token stored at %s", TELEGRAPH_TOKEN_FILE
         )
-        return token
+        return TelegraphTokenInfo(
+            token=token,
+            source="created",
+            token_file=TELEGRAPH_TOKEN_FILE,
+            token_file_exists=True,
+            token_file_readable=True,
+            env_present=env_present,
+        )
     except Exception as e:
         logging.error("Failed to create Telegraph token: %s", e)
-        return None
+        return TelegraphTokenInfo(
+            token=None,
+            source="none",
+            token_file=TELEGRAPH_TOKEN_FILE,
+            token_file_exists=token_file_exists,
+            token_file_readable=token_file_readable,
+            env_present=env_present,
+        )
+
+
+def get_telegraph_token() -> str | None:
+    info = get_telegraph_token_info()
+    return info.token
 
 
 async def send_main_menu(bot: Bot, user: User | None, chat_id: int) -> None:

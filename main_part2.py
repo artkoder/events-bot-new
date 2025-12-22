@@ -12513,16 +12513,66 @@ async def update_source_page_ics(event_id: int, db: Database, url: str | None):
 
 async def get_source_page_text(path: str) -> str:
     """Return plain text from a Telegraph page."""
-    token = get_telegraph_token()
-    if not token:
-        logging.error("Telegraph token unavailable")
-        return ""
-    tg = Telegraph(access_token=token)
+    raw_path = (path or "").strip()
+    normalized_path = raw_path
     try:
-        page = await telegraph_call(tg.get_page, path, return_html=True)
-    except Exception as e:
-        logging.error("Failed to fetch telegraph page: %s", e)
+        parsed = urlparse(raw_path)
+        if parsed.scheme or parsed.netloc:
+            normalized_path = parsed.path
+    except Exception:
+        normalized_path = raw_path
+    normalized_path = (normalized_path or "").lstrip("/")
+
+    token_info = get_telegraph_token_info()
+
+    logging.info(
+        "telegraph_fetch start path=%s token_source=%s token_file=%s token_file_exists=%s token_file_readable=%s",
+        normalized_path,
+        token_info.source,
+        token_info.token_file,
+        token_info.token_file_exists,
+        token_info.token_file_readable,
+    )
+
+    if not token_info.token:
+        logging.warning(
+            "telegraph_fetch no_token path=%s token_source=%s token_file_exists=%s",
+            normalized_path,
+            token_info.source,
+            token_info.token_file_exists,
+        )
         return ""
+
+    fetch_path = normalized_path or path
+    tg = Telegraph(access_token=token_info.token)
+    try:
+        page = await telegraph_call(tg.get_page, fetch_path, return_html=True)
+    except Exception as e:
+        logging.exception(
+            "telegraph_fetch exception path=%s token_source=%s error=%s",
+            normalized_path,
+            token_info.source,
+            type(e).__name__,
+        )
+        return ""
+    resp_keys: list[str] | None = None
+    len_html = 0
+    len_text_raw = 0
+    if isinstance(page, dict):
+        resp_keys = list(page.keys())
+        html_field = page.get("content_html") or page.get("content")
+        if isinstance(html_field, str):
+            len_html = len(html_field)
+        raw_text_field = page.get("content")
+        if isinstance(raw_text_field, str):
+            len_text_raw = len(raw_text_field)
+    logging.debug(
+        "telegraph_fetch response path=%s resp_keys=%s len_html=%d len_text=%d",
+        normalized_path,
+        resp_keys,
+        len_html,
+        len_text_raw,
+    )
     html_content = page.get("content") or page.get("content_html") or ""
     html_content = apply_ics_link(html_content, None)
     html_content = apply_month_nav(html_content, None)
@@ -12533,7 +12583,17 @@ async def get_source_page_text(path: str) -> str:
     html_content = re.sub(r"<[^>]+>", "", html_content)
     text = html.unescape(html_content)
     text = text.replace(CONTENT_SEPARATOR, "").replace("\xa0", " ")
-    return text.strip()
+    cleaned = text.strip()
+    if not cleaned:
+        logging.warning(
+            "telegraph_fetch empty_content path=%s token_source=%s resp_keys=%s len_html=%d len_text=%d",
+            normalized_path,
+            token_info.source,
+            resp_keys,
+            len_html,
+            len(cleaned),
+        )
+    return cleaned
 
 
 async def update_event_description(event: Event, db: Database) -> None:
