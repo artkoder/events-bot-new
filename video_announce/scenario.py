@@ -302,8 +302,12 @@ class VideoAnnounceScenario:
             explicit_label: str | None = None
             preset: dict[str, int | str] | None = None
             if isinstance(item, dict):
-                title = (str(item.get("title")) or "").strip() or None
-                explicit_label = (str(item.get("label")) or "").strip() or None
+                raw_title = item.get("title")
+                raw_label = item.get("label")
+                title = raw_title.strip() if isinstance(raw_title, str) else None
+                explicit_label = (
+                    raw_label.strip() if isinstance(raw_label, str) else None
+                )
                 params_candidate = item.get("params") if isinstance(item.get("params"), dict) else item
                 preset = {
                     k: v
