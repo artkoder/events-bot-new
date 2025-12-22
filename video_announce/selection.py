@@ -17,7 +17,7 @@ from sqlalchemy import select
 
 from db import Database
 from main import ask_4o, format_day_pretty
-from main_part2 import get_source_page_text
+from main import get_source_page_text
 from models import (
     Event,
     EventPoster,
