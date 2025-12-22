@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable
 
+from aiogram import types
 from sqlalchemy import select
 
 from db import Database
@@ -20,6 +21,9 @@ from models import (
 from .kaggle_client import KaggleClient
 
 logger = logging.getLogger(__name__)
+
+_status_messages: dict[int, tuple[int, int]] = {}
+_status_locks: dict[int, asyncio.Lock] = {}
 
 
 def _read_positive_int(env_key: str, default: int) -> int:
@@ -49,6 +53,97 @@ logger.info(
     VIDEO_MAX_MB,
     VIDEO_KAGGLE_TIMEOUT_MINUTES,
 )
+
+
+def _status_keyboard(session_id: int) -> types.InlineKeyboardMarkup:
+    return types.InlineKeyboardMarkup(
+        inline_keyboard=
+        [[types.InlineKeyboardButton(text="🔄 Обновить статус", callback_data=f"vidkstat:{session_id}")]]
+    )
+
+
+def remember_status_message(session_id: int, chat_id: int, message_id: int) -> None:
+    _status_messages[session_id] = (chat_id, message_id)
+
+
+def get_status_message(session_id: int) -> tuple[int, int] | None:
+    return _status_messages.get(session_id)
+
+
+def _get_status_lock(session_id: int) -> asyncio.Lock:
+    lock = _status_locks.get(session_id)
+    if not lock:
+        lock = asyncio.Lock()
+        _status_locks[session_id] = lock
+    return lock
+
+
+def _format_kaggle_status(status: dict | None) -> str:
+    if not status:
+        return "неизвестен"
+    state = status.get("status")
+    if not state:
+        return "неизвестен"
+    return str(state)
+
+
+def _status_text(
+    session_obj: VideoAnnounceSession,
+    kaggle_status: dict | None,
+    *,
+    note: str | None = None,
+) -> str:
+    lines = [
+        f"Сессия #{session_obj.id}: {session_obj.status}",
+        f"Kernel: {session_obj.kaggle_kernel_ref or '—'}",
+        f"Dataset: {session_obj.kaggle_dataset or '—'}",
+        f"Статус Kaggle: {_format_kaggle_status(kaggle_status)}",
+    ]
+    if session_obj.video_url:
+        lines.append(f"Видео: {session_obj.video_url}")
+    if session_obj.error:
+        lines.append(f"Ошибка: {session_obj.error}")
+    if note:
+        lines.append(note)
+    return "\n".join(lines)
+
+
+async def update_status_message(
+    bot,
+    session_obj: VideoAnnounceSession,
+    kaggle_status: dict | None,
+    *,
+    chat_id: int | None = None,
+    message_id: int | None = None,
+    allow_send: bool = False,
+    note: str | None = None,
+) -> tuple[int, int] | None:
+    text = _status_text(session_obj, kaggle_status, note=note)
+    markup = _status_keyboard(session_obj.id)
+    lock = _get_status_lock(session_obj.id)
+    async with lock:
+        stored = get_status_message(session_obj.id)
+        if stored and (chat_id is None or message_id is None):
+            chat_id, message_id = stored
+        if message_id is None and not allow_send:
+            return stored
+        try:
+            if message_id is None and chat_id is not None:
+                sent = await bot.send_message(chat_id, text, reply_markup=markup)
+                remember_status_message(session_obj.id, sent.chat.id, sent.message_id)
+                return (sent.chat.id, sent.message_id)
+            if chat_id is not None and message_id is not None:
+                await bot.edit_message_text(
+                    text, chat_id, message_id, reply_markup=markup
+                )
+                remember_status_message(session_obj.id, chat_id, message_id)
+                return (chat_id, message_id)
+        except Exception:
+            logger.exception(
+                "video_announce: failed to update status message session_id=%s",
+                session_obj.id,
+            )
+        return stored
 
 
 def _find_video(files: Iterable[Path]) -> Path | None:
@@ -141,6 +236,8 @@ async def run_kernel_poller(
     notify_chat_id: int,
     test_chat_id: int | None,
     main_chat_id: int | None,
+    status_chat_id: int | None = None,
+    status_message_id: int | None = None,
     poll_interval: int = 60,
     timeout_minutes: int = VIDEO_KAGGLE_TIMEOUT_MINUTES,
     download_dir: Path | None = None,
@@ -157,21 +254,50 @@ async def run_kernel_poller(
         )
         await bot.send_message(notify_chat_id, "Не указан kernel для сессии")
         return
+    status_message = await update_status_message(
+        bot,
+        session_obj,
+        {},
+        chat_id=status_chat_id,
+        message_id=status_message_id,
+        allow_send=True,
+        note="Старт отслеживания Kaggle",
+    )
+    if status_message:
+        status_chat_id, status_message_id = status_message
     while datetime.now(timezone.utc) < deadline:
         try:
             status = await asyncio.to_thread(client.get_kernel_status, kernel_ref)
         except Exception:
             logger.exception("video_announce: kernel status failed")
             status = {}
+        await update_status_message(
+            bot,
+            session_obj,
+            status,
+            chat_id=status_chat_id,
+            message_id=status_message_id,
+            allow_send=True,
+        )
         state = str(status.get("status") or "").lower()
         if state == "complete":
             break
         if state in {"error", "failed"}:
-            await _update_status(
+            session_obj = await _update_status(
                 db,
                 session_obj.id,
                 status=VideoAnnounceSessionStatus.FAILED,
                 error=str(status),
+            )
+            if not session_obj:
+                return
+            await update_status_message(
+                bot,
+                session_obj,
+                status,
+                chat_id=status_chat_id,
+                message_id=status_message_id,
+                allow_send=True,
             )
             await bot.send_message(
                 notify_chat_id, f"Сессия #{session_obj.id} завершилась ошибкой Kaggle"
@@ -179,11 +305,21 @@ async def run_kernel_poller(
             return
         await asyncio.sleep(poll_interval)
     else:
-        await _update_status(
+        session_obj = await _update_status(
             db,
             session_obj.id,
             status=VideoAnnounceSessionStatus.FAILED,
             error="timeout",
+        )
+        if not session_obj:
+            return
+        await update_status_message(
+            bot,
+            session_obj,
+            status,
+            chat_id=status_chat_id,
+            message_id=status_message_id,
+            allow_send=True,
         )
         await bot.send_message(
             notify_chat_id, f"Сессия #{session_obj.id} не завершилась за отведённое время"
@@ -205,46 +341,98 @@ async def run_kernel_poller(
         video_path = _find_video(paths)
         log_files = _find_logs(paths)
         if not video_path:
-            await _update_status(
+            session_obj = await _update_status(
                 db,
                 session_obj.id,
                 status=VideoAnnounceSessionStatus.FAILED,
                 error="missing video output",
             )
+            if not session_obj:
+                return
+            await update_status_message(
+                bot,
+                session_obj,
+                status,
+                chat_id=status_chat_id,
+                message_id=status_message_id,
+                allow_send=True,
+            )
             await bot.send_message(notify_chat_id, "Видео не найдено в выводе kernel")
             return
         if video_path.stat().st_size > VIDEO_MAX_MB * 1024 * 1024:
-            await _update_status(
+            session_obj = await _update_status(
                 db,
                 session_obj.id,
                 status=VideoAnnounceSessionStatus.FAILED,
                 error=f"video exceeds {VIDEO_MAX_MB}MB",
+            )
+            if not session_obj:
+                return
+            await update_status_message(
+                bot,
+                session_obj,
+                status,
+                chat_id=status_chat_id,
+                message_id=status_message_id,
+                allow_send=True,
             )
             await bot.send_message(
                 notify_chat_id,
                 f"Видео из сессии #{session_obj.id} превышает {VIDEO_MAX_MB} MB",
             )
             return
-        await _update_status(
+        session_obj = await _update_status(
             db,
             session_obj.id,
             status=VideoAnnounceSessionStatus.DONE,
             video_url=video_path.name,
+        )
+        if not session_obj:
+            return
+        await update_status_message(
+            bot,
+            session_obj,
+            status,
+            chat_id=status_chat_id,
+            message_id=status_message_id,
+            allow_send=True,
         )
         caption = f"Видео-анонс #{session_obj.id}"
         target_test = test_chat_id or notify_chat_id
         with open(video_path, "rb") as handle:
             await bot.send_video(target_test, handle, caption=caption)
         await _send_logs(bot, notify_chat_id, log_files)
-        await _update_status(
+        session_obj = await _update_status(
             db,
             session_obj.id,
             status=VideoAnnounceSessionStatus.PUBLISHED_TEST,
         )
+        if session_obj:
+            await update_status_message(
+                bot,
+                session_obj,
+                status,
+                chat_id=status_chat_id,
+                message_id=status_message_id,
+                allow_send=True,
+                note="Отправлено в тестовый канал",
+            )
         if main_chat_id:
             with open(video_path, "rb") as handle:
                 await bot.send_video(main_chat_id, handle, caption=caption)
             await _mark_published_main(db, session_obj)
+            async with db.get_session() as session:
+                refreshed = await session.get(VideoAnnounceSession, session_obj.id)
+            if refreshed:
+                await update_status_message(
+                    bot,
+                    refreshed,
+                    status,
+                    chat_id=status_chat_id,
+                    message_id=status_message_id,
+                    allow_send=True,
+                    note="Опубликовано в основном канале",
+                )
     finally:
         if dataset_slug:
             try:

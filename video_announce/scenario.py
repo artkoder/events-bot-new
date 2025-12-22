@@ -39,7 +39,12 @@ from main import (
 )
 from .finalize import prepare_final_texts
 from .kaggle_client import DEFAULT_KERNEL_PATH, KaggleClient
-from .poller import VIDEO_MAX_MB, run_kernel_poller
+from .poller import (
+    VIDEO_MAX_MB,
+    remember_status_message,
+    run_kernel_poller,
+    update_status_message,
+)
 from .selection import (
     build_payload,
     build_selection,
@@ -1030,8 +1035,30 @@ class VideoAnnounceScenario:
                 return "Сессия отменена"
         return "Обновление отменено"
 
-    async def _render_and_notify(self, session_obj: VideoAnnounceSession, ranked) -> None:
+    async def _render_and_notify(
+        self,
+        session_obj: VideoAnnounceSession,
+        ranked,
+        *,
+        status_message: tuple[int, int] | None = None,
+    ) -> None:
         client = KaggleClient()
+        status_chat_id = status_message[0] if status_message else self.chat_id
+        status_message_id = status_message[1] if status_message else None
+        if not status_message:
+            status_message = await update_status_message(
+                self.bot,
+                session_obj,
+                {},
+                chat_id=status_chat_id,
+                allow_send=True,
+                note="Готовим Kaggle",
+            )
+            if status_message:
+                status_chat_id, status_message_id = status_message
+                remember_status_message(
+                    session_obj.id, status_chat_id, status_message_id
+                )
         finalized = []
         try:
             finalized = await prepare_final_texts(self.db, session_obj.id, ranked)
@@ -1067,9 +1094,41 @@ class VideoAnnounceScenario:
             session_obj.kaggle_dataset = dataset_slug
             session_obj.kaggle_kernel_ref = kernel_ref
             await self._store_kaggle_meta(session_obj.id, dataset_slug, kernel_ref)
+            try:
+                kaggle_status = await asyncio.to_thread(
+                    client.get_kernel_status, kernel_ref
+                )
+            except Exception:
+                logger.exception("video_announce: failed to fetch initial status")
+                kaggle_status = {}
+            status_message = await update_status_message(
+                self.bot,
+                session_obj,
+                kaggle_status,
+                chat_id=status_chat_id,
+                message_id=status_message_id,
+                allow_send=True,
+                note="Kernel запущен",
+            )
+            if status_message:
+                status_chat_id, status_message_id = status_message
+                remember_status_message(
+                    session_obj.id, status_chat_id, status_message_id
+                )
         except Exception:
             logger.exception("video_announce: failed to push kaggle job")
             await self._mark_failed(session_obj.id, "kaggle push failed")
+            failed = await self._load_session(session_obj.id)
+            if failed:
+                await update_status_message(
+                    self.bot,
+                    failed,
+                    {},
+                    chat_id=status_chat_id,
+                    message_id=status_message_id,
+                    allow_send=True,
+                    note="Ошибка запуска Kaggle",
+                )
             return
         test_chat_id, main_chat_id = await self._resolve_session_channels(session_obj)
         asyncio.create_task(
@@ -1081,6 +1140,8 @@ class VideoAnnounceScenario:
                 notify_chat_id=self.chat_id,
                 test_chat_id=test_chat_id,
                 main_chat_id=main_chat_id,
+                status_chat_id=status_chat_id,
+                status_message_id=status_message_id,
                 poll_interval=60,
                 timeout_minutes=40,
                 dataset_slug=dataset_slug,
@@ -1429,7 +1490,21 @@ class VideoAnnounceScenario:
         await self.bot.send_message(
             self.chat_id, f"Сессия #{session_id} запущена, собираем материалы"
         )
-        asyncio.create_task(self._render_and_notify(sess, ranked))
+        status_message = await update_status_message(
+            self.bot,
+            sess,
+            {},
+            chat_id=self.chat_id,
+            allow_send=True,
+            note="Готовим Kaggle",
+        )
+        asyncio.create_task(
+            self._render_and_notify(
+                sess,
+                ranked,
+                status_message=status_message,
+            )
+        )
         return "Рендеринг запущен"
 
     async def restart_session(self, session_id: int) -> None:
@@ -1460,7 +1535,21 @@ class VideoAnnounceScenario:
         await self.bot.send_message(
             self.chat_id, f"Сессия #{session_id} перезапущена, готовим материалы"
         )
-        asyncio.create_task(self._render_and_notify(obj, ranked))
+        status_message = await update_status_message(
+            self.bot,
+            obj,
+            {},
+            chat_id=self.chat_id,
+            allow_send=True,
+            note="Готовим Kaggle",
+        )
+        asyncio.create_task(
+            self._render_and_notify(
+                obj,
+                ranked,
+                status_message=status_message,
+            )
+        )
 
     async def _store_kaggle_meta(
         self, session_id: int, dataset_slug: str, kernel_ref: str | None

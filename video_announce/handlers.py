@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 import html
 import logging
 from datetime import date
 from typing import Callable
 
 from aiogram import types
-from models import Event, User
+from models import Event, User, VideoAnnounceSession
 from .kaggle_client import KaggleClient
+from .poller import remember_status_message, update_status_message
 
 from db import Database
 from .scenario import (
@@ -135,6 +137,41 @@ async def handle_video_callback(
         return
     data = callback.data
     scenario = VideoAnnounceScenario(db, bot, callback.message.chat.id, callback.from_user.id)
+    if data.startswith("vidkstat:"):
+        try:
+            _, raw_session_id = data.split(":", 1)
+            session_id = int(raw_session_id)
+        except ValueError:
+            await callback.answer("Некорректный идентификатор", show_alert=True)
+            return
+        async with db.get_session() as session:
+            session_obj = await session.get(VideoAnnounceSession, session_id)
+        if not session_obj:
+            await callback.answer("Сессия не найдена", show_alert=True)
+            return
+        client = KaggleClient()
+        status: dict | None = {}
+        if session_obj.kaggle_kernel_ref:
+            try:
+                status = await asyncio.to_thread(
+                    client.get_kernel_status, session_obj.kaggle_kernel_ref
+                )
+            except Exception:
+                logger.exception("video_announce: manual status fetch failed")
+                status = {}
+        remember_status_message(
+            session_id, callback.message.chat.id, callback.message.message_id
+        )
+        await update_status_message(
+            bot,
+            session_obj,
+            status,
+            chat_id=callback.message.chat.id,
+            message_id=callback.message.message_id,
+            allow_send=True,
+        )
+        await callback.answer("Обновлено")
+        return
     if data.startswith("vidsel:"):
         try:
             _, session_id, action = data.split(":", 2)
