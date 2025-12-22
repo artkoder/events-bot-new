@@ -797,7 +797,7 @@ class VideoAnnounceScenario:
             f"Инструкция: {html.escape(instruction[:300]) if instruction else '—'}",
             f"Всего кандидатов: {len(ranked)}",
             "📥 Кандидаты:",
-            "<blockquote>",
+            "<blockquote expandable>",
         ]
         sorted_ranked = sorted(ranked, key=self._event_sort_key)
         for r in sorted_ranked:
