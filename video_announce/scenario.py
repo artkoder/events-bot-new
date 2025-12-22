@@ -315,6 +315,32 @@ class VideoAnnounceScenario:
             return f"{date_label} {short_time}"
         return date_label
 
+    def _parse_event_datetime(self, ev: Event) -> datetime | None:
+        try:
+            day = date.fromisoformat(ev.date.split("..", 1)[0])
+        except ValueError:
+            return None
+        time_text = (ev.time or "").strip()
+        time_part = time_text
+        for sep in ("-", "–", "—"):
+            time_part = time_part.split(sep, 1)[0]
+        time_part = time_part.split()[0] if time_part else ""
+        try:
+            if time_part and ":" in time_part:
+                hours, minutes = time_part.split(":", 1)
+                parsed_time = datetime.strptime(f"{hours}:{minutes}", "%H:%M").time()
+            else:
+                parsed_time = datetime.min.time()
+            return datetime.combine(day, parsed_time, tzinfo=LOCAL_TZ)
+        except ValueError:
+            return datetime.combine(day, datetime.min.time(), tzinfo=LOCAL_TZ)
+
+    def _event_sort_key(self, ranked: RankedEvent) -> tuple[datetime, int]:
+        parsed_dt = self._parse_event_datetime(ranked.event)
+        if parsed_dt is None:
+            parsed_dt = datetime.max.replace(tzinfo=timezone.utc)
+        return (parsed_dt, ranked.position or 0)
+
     def _normalize_emoji(self, emoji: str | None) -> str:
         if not emoji:
             return ""
@@ -722,7 +748,8 @@ class VideoAnnounceScenario:
             "📥 Кандидаты:",
             "<blockquote>",
         ]
-        for r in ranked:
+        sorted_ranked = sorted(ranked, key=self._event_sort_key)
+        for r in sorted_ranked:
             ev = r.event
             emoji = self._normalize_emoji(ev.emoji)
             date_label = self._format_event_datetime(ev)
