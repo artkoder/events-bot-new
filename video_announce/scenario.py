@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 from cachetools import TTLCache
 from aiogram import types
@@ -240,7 +240,40 @@ class VideoAnnounceScenario:
             return False
         return True
 
-    def _default_selection_params(self) -> dict[str, int | str]:
+    def _default_required_periods(self, base_day: date | None = None) -> list[dict[str, int | str]]:
+        today_local = base_day or datetime.now(LOCAL_TZ).date()
+        tomorrow = today_local + timedelta(days=1)
+        weekend_offset = (5 - tomorrow.weekday()) % 7
+        saturday = tomorrow + timedelta(days=weekend_offset)
+        return [
+            {
+                "title": "Завтра",
+                "target_date": tomorrow.isoformat(),
+                "fallback_window_days": 0,
+            },
+            {
+                "title": "3 дня",
+                "target_date": tomorrow.isoformat(),
+                "fallback_window_days": 2,
+            },
+            {
+                "title": "Выходные",
+                "target_date": saturday.isoformat(),
+                "fallback_window_days": 1,
+            },
+            {
+                "title": "Неделя",
+                "target_date": tomorrow.isoformat(),
+                "fallback_window_days": 6,
+            },
+            {
+                "title": "10 дней",
+                "target_date": tomorrow.isoformat(),
+                "fallback_window_days": 9,
+            },
+        ]
+
+    def _default_selection_params(self) -> dict[str, Any]:
         now_local = datetime.now(LOCAL_TZ)
         target = (now_local + timedelta(days=1)).date()
         return {
@@ -250,25 +283,29 @@ class VideoAnnounceScenario:
             "candidate_limit": DEFAULT_CANDIDATE_LIMIT,
             "default_selected_min": DEFAULT_SELECTED_MIN,
             "default_selected_max": DEFAULT_SELECTED_MAX,
+            "required_periods": self._default_required_periods(target),
         }
 
-    def _normalize_required_periods(
-        self, params: dict[str, int | str]
-    ) -> list[dict[str, int | str]]:
+    def _normalize_required_periods(self, params: dict[str, Any]) -> list[dict[str, Any]]:
         raw_periods = params.get("required_periods")
         if not isinstance(raw_periods, list):
             return []
-        normalized: list[dict[str, int | str]] = []
+        normalized: list[dict[str, Any]] = []
         fallback_default = int(
             params.get("fallback_window_days", DEFAULT_FALLBACK_WINDOW_DAYS)
             or DEFAULT_FALLBACK_WINDOW_DAYS
         )
         for item in raw_periods:
+            title: str | None = None
+            explicit_label: str | None = None
             preset: dict[str, int | str] | None = None
             if isinstance(item, dict):
+                title = (str(item.get("title")) or "").strip() or None
+                explicit_label = (str(item.get("label")) or "").strip() or None
+                params_candidate = item.get("params") if isinstance(item.get("params"), dict) else item
                 preset = {
                     k: v
-                    for k, v in item.items()
+                    for k, v in params_candidate.items()
                     if k
                     in {
                         "target_date",
@@ -290,8 +327,22 @@ class VideoAnnounceScenario:
                         "fallback_window_days": max(fallback_default, delta_days),
                     }
             if preset:
-                normalized.append(preset)
+                label = (
+                    explicit_label
+                    or self._format_required_preset_label(title, params, preset)
+                )
+                normalized.append({"params": preset, "label": label})
         return normalized
+
+    def _format_required_preset_label(
+        self, title: str | None, base_params: dict[str, Any], preset_params: dict[str, Any]
+    ) -> str:
+        merged_params = dict(base_params)
+        merged_params.update(preset_params)
+        range_label = self._date_range_label(merged_params)
+        if title:
+            return f"{title} · {range_label}"
+        return range_label
 
     def _parse_target_date(self, raw: str | None) -> date | None:
         if not raw:
@@ -398,7 +449,7 @@ class VideoAnnounceScenario:
     def _chunk_buttons(self, buttons: list[types.InlineKeyboardButton], size: int = 3) -> list[list[types.InlineKeyboardButton]]:
         return [buttons[i : i + size] for i in range(0, len(buttons), size)]
 
-    def _get_selection_params(self, session_obj: VideoAnnounceSession) -> dict[str, int | str]:
+    def _get_selection_params(self, session_obj: VideoAnnounceSession) -> dict[str, Any]:
         params = self._default_selection_params()
         stored = session_obj.selection_params if isinstance(session_obj.selection_params, dict) else {}
         params.update({k: v for k, v in (stored or {}).items() if v is not None})
@@ -657,8 +708,8 @@ class VideoAnnounceScenario:
         period_buttons: list[types.InlineKeyboardButton] = []
         for idx, preset in enumerate(required_periods):
             merged_params = dict(params)
-            merged_params.update(preset)
-            label = self._date_range_label(merged_params)
+            merged_params.update(preset["params"])
+            label = preset.get("label") or self._date_range_label(merged_params)
             period_buttons.append(
                 types.InlineKeyboardButton(
                     text=label,
@@ -692,7 +743,7 @@ class VideoAnnounceScenario:
         presets = self._normalize_required_periods(params)
         if not presets or preset_idx < 0 or preset_idx >= len(presets):
             return "Период не найден"
-        params.update(presets[preset_idx])
+        params.update(presets[preset_idx]["params"])
         async with self.db.get_session() as session:
             fresh = await session.get(VideoAnnounceSession, session_id)
             if not fresh:
