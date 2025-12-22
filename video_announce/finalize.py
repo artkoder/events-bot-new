@@ -188,6 +188,14 @@ async def _load_telegraph_excerpts(events: Sequence) -> dict[int, str]:
     return excerpts
 
 
+def _normalize_title(title: str | None, limit: int = 12) -> str:
+    collapsed = " ".join(str(title or "").replace("\n", " ").split())
+    trimmed = collapsed.strip("«»\"' <>.,!?:;")
+    if len(trimmed) > limit:
+        trimmed = trimmed[:limit].rstrip()
+    return trimmed
+
+
 def _parse_final_response(raw: str, known_ids: set[int]) -> list[FinalizedItem]:
     try:
         data = json.loads(raw)
@@ -204,7 +212,7 @@ def _parse_final_response(raw: str, known_ids: set[int]) -> list[FinalizedItem]:
         event_id = item.get("event_id")
         if not isinstance(event_id, int) or event_id not in known_ids:
             continue
-        title = str(item.get("final_title") or item.get("title") or "").strip()
+        title = _normalize_title(item.get("final_title") or item.get("title"))
         description = str(item.get("description") or "").strip()
         if not title or not description:
             continue
