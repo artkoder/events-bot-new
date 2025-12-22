@@ -7,9 +7,10 @@ import math
 from collections import defaultdict
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
-from typing import Iterable, Sequence
+from typing import Any, Iterable, Sequence
 from urllib.parse import urlparse
 
+from aiogram import types
 from sqlalchemy import select
 
 from db import Database
@@ -373,6 +374,8 @@ async def _rank_with_llm(
     mandatory_ids: set[int],
     session_id: int | None = None,
     instruction: str | None = None,
+    bot: Any | None = None,
+    notify_chat_id: int | None = None,
 ) -> list[RankedEvent]:
     if not events:
         return []
@@ -408,6 +411,13 @@ async def _rank_with_llm(
         )
     try:
         serialized_payload = json.dumps(payload, ensure_ascii=False)
+        request_details = {
+            "instruction": instruction,
+            "period": _describe_period(events),
+            "candidate_ids": event_ids,
+            "items": payload,
+        }
+        request_details_json = json.dumps(request_details, ensure_ascii=False, indent=2)
         request_text = (
             serialized_payload
             if not instruction
@@ -421,25 +431,34 @@ async def _rank_with_llm(
             preview,
             bool(instruction),
         )
+        if instruction and bot and notify_chat_id:
+            try:
+                filename = f"ranking_request_{session_id or 'session'}.json"
+                document = types.BufferedInputFile(
+                    request_details_json.encode("utf-8"),
+                    filename=filename,
+                )
+                await bot.send_document(
+                    notify_chat_id,
+                    document,
+                    caption="Запрос на ранжирование после инструкции",
+                    disable_notification=True,
+                )
+            except Exception:
+                logger.exception("video_announce: failed to send ranking request document")
         raw = await ask_4o(
             request_text,
             system_prompt=ranking_prompt(),
             response_format=RANKING_RESPONSE_FORMAT,
             meta={"source": "video_announce.ranking", "count": len(payload)},
         )
-        request_details = {
-            "instruction": instruction,
-            "period": _describe_period(events),
-            "candidate_ids": event_ids,
-            "items": payload,
-        }
         parsed = _parse_llm_ranking(raw, {e.id for e in events})
         await _store_llm_trace(
             db,
             session_id=session_id,
             stage="ranking",
             model="gpt-4o",
-            request_json=json.dumps(request_details, ensure_ascii=False),
+            request_json=request_details_json,
             response_json=raw,
         )
     except Exception:
@@ -633,6 +652,8 @@ async def build_selection(
     client: KaggleClient | None = None,
     session_id: int | None = None,
     candidates: Sequence[Event] | None = None,
+    bot: Any | None = None,
+    notify_chat_id: int | None = None,
 ) -> SelectionBuildResult:
     client = client or KaggleClient()
     events = (
@@ -714,6 +735,8 @@ async def build_selection(
             mandatory_ids=mandatory_ids_local,
             session_id=session_id,
             instruction=ctx.instruction,
+            bot=bot,
+            notify_chat_id=notify_chat_id,
         )
         return ranked_local, mandatory_ids_local
 

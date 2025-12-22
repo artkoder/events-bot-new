@@ -774,6 +774,8 @@ class VideoAnnounceScenario:
             client=KaggleClient(),
             session_id=session_obj.id,
             candidates=candidates,
+            bot=self.bot,
+            notify_chat_id=self.chat_id,
         )
         if preserve_existing:
             await self._refresh_selection_items(session_obj, result)
