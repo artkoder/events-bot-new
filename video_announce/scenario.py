@@ -307,6 +307,14 @@ class VideoAnnounceScenario:
         except ValueError:
             return raw_date.split("..", 1)[0]
 
+    def _format_event_datetime(self, ev: Event) -> str:
+        date_label = self._format_event_date(ev.date)
+        time_text = (ev.time or "").strip()
+        if time_text:
+            short_time = time_text[:5] if ":" in time_text else time_text
+            return f"{date_label} {short_time}"
+        return date_label
+
     def _normalize_emoji(self, emoji: str | None) -> str:
         if not emoji:
             return ""
@@ -717,7 +725,7 @@ class VideoAnnounceScenario:
         for r in ranked:
             ev = r.event
             emoji = self._normalize_emoji(ev.emoji)
-            date_label = self._format_event_date(ev.date)
+            date_label = self._format_event_datetime(ev)
             include_count = getattr(ev, "video_include_count", 0) or 0
             promo_marker = " · 🔥PROMO" if r.mandatory or include_count > 0 else ""
             score = f" · {r.score:.1f}" if r.score is not None else ""
@@ -1055,7 +1063,7 @@ class VideoAnnounceScenario:
         for item, ev in visible_pairs:
             marker = "✅" if item.status == VideoAnnounceItemStatus.READY else "⬜"
             emoji = self._normalize_emoji(ev.emoji)
-            date_label = self._format_event_date(ev.date)
+            date_label = self._format_event_datetime(ev)
             pin = ""
             include_count = item.include_count or getattr(ev, "video_include_count", 0) or 0
             if include_count > 0:
