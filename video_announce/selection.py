@@ -5,6 +5,7 @@ import json
 import logging
 import math
 from collections import defaultdict
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from typing import Iterable, Sequence
 from urllib.parse import urlparse
@@ -569,30 +570,59 @@ async def build_selection(
 ) -> SelectionBuildResult:
     client = client or KaggleClient()
     events = list(candidates) if candidates is not None else await fetch_candidates(db, ctx)
-    mandatory_ids = {
-        e.id
-        for e in events
-        if (getattr(e, "video_include_count", 0) or 0) > 0
-    }
-    promoted = set(ctx.promoted_event_ids or set()) | set(mandatory_ids)
-    mandatory_ids = mandatory_ids | set(ctx.promoted_event_ids or set())
-    hits = await _load_hits(db, [e.id for e in events])
-    selected = (
-        list(events)
-        if candidates is not None
-        else _apply_repeat_limit(
-            events, limit=ctx.candidate_limit, hits=hits, promoted=promoted
+
+    async def _rank_events(current_events: Sequence[Event]) -> tuple[list[RankedEvent], set[int]]:
+        mandatory_ids_local = {
+            e.id
+            for e in current_events
+            if (getattr(e, "video_include_count", 0) or 0) > 0
+        }
+        promoted_local = set(ctx.promoted_event_ids or set()) | set(mandatory_ids_local)
+        mandatory_ids_local = mandatory_ids_local | set(ctx.promoted_event_ids or set())
+        hits_local = await _load_hits(db, [e.id for e in current_events])
+        selected_local = (
+            list(current_events)
+            if candidates is not None
+            else _apply_repeat_limit(
+                current_events,
+                limit=ctx.candidate_limit,
+                hits=hits_local,
+                promoted=promoted_local,
+            )
         )
-    )
-    ranked = await _rank_with_llm(
-        db,
-        client,
-        selected,
-        promoted=promoted,
-        mandatory_ids=mandatory_ids,
-        session_id=session_id,
-        instruction=ctx.instruction,
-    )
+        ranked_local = await _rank_with_llm(
+            db,
+            client,
+            selected_local,
+            promoted=promoted_local,
+            mandatory_ids=mandatory_ids_local,
+            session_id=session_id,
+            instruction=ctx.instruction,
+        )
+        return ranked_local, mandatory_ids_local
+
+    ranked, mandatory_ids = await _rank_events(events)
+    expanded_ctx = ctx
+    while (
+        candidates is None
+        and len(ranked) < ctx.default_selected_min
+    ):
+        next_ctx = replace(
+            expanded_ctx,
+            fallback_window_days=expanded_ctx.fallback_window_days + 3,
+        )
+        more_events = await fetch_candidates(db, next_ctx)
+        if len(more_events) <= len(events):
+            break
+        logger.info(
+            "video_announce: expanding selection window fallback_days=%d -> %d due to low ranked count=%d",
+            expanded_ctx.fallback_window_days,
+            next_ctx.fallback_window_days,
+            len(ranked),
+        )
+        events = more_events
+        expanded_ctx = next_ctx
+        ranked, mandatory_ids = await _rank_events(events)
     default_ready_ids = _choose_default_ready(
         ranked,
         mandatory_ids,
