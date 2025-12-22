@@ -510,6 +510,22 @@ async def _rank_with_llm(
             response_format=RANKING_RESPONSE_FORMAT,
             meta={"source": "video_announce.ranking", "count": len(payload)},
         )
+        if instruction and bot and notify_chat_id:
+            try:
+                filename = f"ranking_response_{session_id or 'session'}.json"
+                document = types.BufferedInputFile(
+                    raw.encode("utf-8"),
+                    filename=filename,
+                )
+                await bot.send_document(
+                    notify_chat_id,
+                    document,
+                    caption="Ответ LLM на ранжирование",
+                    disable_notification=True,
+                )
+            except Exception:
+                logger.exception("video_announce: failed to send ranking response document")
+
         parsed = _parse_llm_ranking(raw, {e.id for e in events})
         await _store_llm_trace(
             db,
@@ -756,6 +772,22 @@ async def build_selection(
                     response_format=INSTRUCTION_FILTER_RESPONSE_FORMAT,
                     meta={"source": "video_announce.instruction_filter", "count": len(current_events)},
                 )
+                if bot and notify_chat_id:
+                    try:
+                        filename = f"filter_response_{session_id or 'session'}.json"
+                        document = types.BufferedInputFile(
+                            raw.encode("utf-8"),
+                            filename=filename,
+                        )
+                        await bot.send_document(
+                            notify_chat_id,
+                            document,
+                            caption="Ответ LLM на фильтрацию инструкцией",
+                            disable_notification=True,
+                        )
+                    except Exception:
+                        logger.exception("video_announce: failed to send filter response document")
+
                 allowed_ids = _parse_instruction_filter(raw, {e.id for e in current_events})
                 filtered_events = [ev for ev in current_events if ev.id in allowed_ids]
                 await _store_llm_trace(
