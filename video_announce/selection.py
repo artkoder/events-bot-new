@@ -718,26 +718,25 @@ def _choose_default_ready(
     min_count: int,
     max_count: int,
 ) -> set[int]:
-    ready: set[int] = set(mandatory_ids)
-    target_max = max(min_count, max_count)
-    for row in ranked:
-        if len(ready) >= target_max:
-            break
-        if row.event.id in ready:
-            continue
-        if row.selected is True:
+    ready: set[int] = set()
+    selected_rows = [
+        row for row in ranked if row.selected is True or row.event.id in mandatory_ids
+    ]
+
+    # Always include mandatory/promoted events even if that exceeds the max target
+    for row in selected_rows:
+        if row.event.id in mandatory_ids:
             ready.add(row.event.id)
-    for row in ranked:
-        if len(ready) >= target_max:
+
+    target_count = min(max_count, len(selected_rows))
+    if len(selected_rows) >= min_count:
+        target_count = max(target_count, min_count)
+
+    for row in selected_rows:
+        if len(ready) >= target_count:
             break
-        if row.event.id in ready:
-            continue
         ready.add(row.event.id)
-    if len(ready) < min_count:
-        for row in ranked:
-            if len(ready) >= min_count:
-                break
-            ready.add(row.event.id)
+
     return ready
 
 
