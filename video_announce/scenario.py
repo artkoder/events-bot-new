@@ -252,6 +252,47 @@ class VideoAnnounceScenario:
             "default_selected_max": DEFAULT_SELECTED_MAX,
         }
 
+    def _normalize_required_periods(
+        self, params: dict[str, int | str]
+    ) -> list[dict[str, int | str]]:
+        raw_periods = params.get("required_periods")
+        if not isinstance(raw_periods, list):
+            return []
+        normalized: list[dict[str, int | str]] = []
+        fallback_default = int(
+            params.get("fallback_window_days", DEFAULT_FALLBACK_WINDOW_DAYS)
+            or DEFAULT_FALLBACK_WINDOW_DAYS
+        )
+        for item in raw_periods:
+            preset: dict[str, int | str] | None = None
+            if isinstance(item, dict):
+                preset = {
+                    k: v
+                    for k, v in item.items()
+                    if k
+                    in {
+                        "target_date",
+                        "primary_window_days",
+                        "fallback_window_days",
+                        "candidate_limit",
+                        "default_selected_min",
+                        "default_selected_max",
+                    }
+                }
+            elif isinstance(item, str):
+                start_raw, end_raw = (item.split("..", 1) + [item])[:2]
+                start_date = self._parse_target_date(start_raw)
+                end_date = self._parse_target_date(end_raw) or start_date
+                if start_date:
+                    delta_days = max((end_date - start_date).days, 0) if end_date else 0
+                    preset = {
+                        "target_date": start_date.isoformat(),
+                        "fallback_window_days": max(fallback_default, delta_days),
+                    }
+            if preset:
+                normalized.append(preset)
+        return normalized
+
     def _parse_target_date(self, raw: str | None) -> date | None:
         if not raw:
             return None
@@ -566,6 +607,8 @@ class VideoAnnounceScenario:
     ) -> None:
         if ctx is None:
             ctx = await self._build_selection_context(session_obj)
+        params = self._get_selection_params(session_obj)
+        required_periods = self._normalize_required_periods(params)
         action_hint = (
             "новую инструкцию для пересчёта текущего списка"
             if reuse
@@ -577,19 +620,60 @@ class VideoAnnounceScenario:
         ]
         if ctx.profile:
             lines.append(f"Профиль: {ctx.profile.title}")
-        keyboard = types.InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    types.InlineKeyboardButton(
-                        text="Пропустить", callback_data=f"vidinstr:{session_obj.id}:skip"
-                    ),
-                    types.InlineKeyboardButton(
-                        text="Отмена", callback_data=f"vidinstr:{session_obj.id}:cancel"
-                    ),
-                ]
-            ]
-        )
+        period_buttons: list[types.InlineKeyboardButton] = []
+        for idx, preset in enumerate(required_periods):
+            merged_params = dict(params)
+            merged_params.update(preset)
+            label = self._date_range_label(merged_params)
+            period_buttons.append(
+                types.InlineKeyboardButton(
+                    text=label,
+                    callback_data=f"vidinstr:{session_obj.id}:preset:{idx}",
+                )
+            )
+        if period_buttons:
+            lines.append("Или выберите один из обязательных периодов:")
+        action_buttons = [
+            types.InlineKeyboardButton(
+                text="Пропустить", callback_data=f"vidinstr:{session_obj.id}:skip"
+            ),
+            types.InlineKeyboardButton(
+                text="Отмена", callback_data=f"vidinstr:{session_obj.id}:cancel"
+            ),
+        ]
+        inline_keyboard: list[list[types.InlineKeyboardButton]] = []
+        if period_buttons:
+            inline_keyboard.extend(self._chunk_buttons(period_buttons, size=2))
+        inline_keyboard.append(action_buttons)
+        keyboard = types.InlineKeyboardMarkup(inline_keyboard=inline_keyboard)
         await self.bot.send_message(self.chat_id, "\n".join(lines), reply_markup=keyboard)
+
+    async def apply_period_preset(self, session_id: int, preset_idx: int) -> str:
+        if not await self._has_access():
+            return "Not authorized"
+        session_obj = await self._load_session(session_id)
+        if not session_obj:
+            return "Сессия не найдена"
+        params = self._get_selection_params(session_obj)
+        presets = self._normalize_required_periods(params)
+        if not presets or preset_idx < 0 or preset_idx >= len(presets):
+            return "Период не найден"
+        params.update(presets[preset_idx])
+        async with self.db.get_session() as session:
+            fresh = await session.get(VideoAnnounceSession, session_id)
+            if not fresh:
+                return "Сессия не найдена"
+            fresh.selection_params = params
+            session.add(fresh)
+            await session.commit()
+            await session.refresh(fresh)
+            session_obj = fresh
+        reuse = session_obj.status == VideoAnnounceSessionStatus.SELECTED
+        if reuse:
+            ranked = await self._recalculate_selection(session_obj)
+            await self._send_selection_posts(session_obj, ranked)
+        await self._prompt_instruction(session_obj, reuse=reuse)
+        return "Период применён"
 
     async def _build_and_store_selection(
         self,
@@ -1389,6 +1473,13 @@ async def handle_prefix_action(prefix: str, callback: types.CallbackQuery, scena
             msg = await scenario.cancel_instruction(session_id_int)
         elif action == "new":
             msg = await scenario.request_new_instruction(session_id_int)
+        elif action.startswith("preset:"):
+            try:
+                preset_idx = int(action.split(":", 1)[1])
+            except Exception:
+                msg = "Период не найден"
+            else:
+                msg = await scenario.apply_period_preset(session_id_int, preset_idx)
         else:
             msg = "Неизвестное действие"
         await callback.answer(
@@ -1399,6 +1490,7 @@ async def handle_prefix_action(prefix: str, callback: types.CallbackQuery, scena
                 "Инструкция сохранена",
                 "Инструкция обновлена",
                 "Запрос обновлён",
+                "Период применён",
             },
         )
         return True
