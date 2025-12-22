@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import math
+import re
 from collections import defaultdict
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
@@ -41,6 +42,25 @@ logger = logging.getLogger(__name__)
 TELEGRAPH_EXCERPT_LIMIT = 1200
 POSTER_OCR_EXCERPT_LIMIT = 800
 TRACE_MAX_LEN = 100_000
+_EMOJI_RE = re.compile(
+    "["
+    "\U0001F600-\U0001F64F"
+    "\U0001F300-\U0001F5FF"
+    "\U0001F680-\U0001F6FF"
+    "\U0001F1E0-\U0001F1FF"
+    "\U00002700-\U000027BF"
+    "\U0001F900-\U0001FAFF"
+    "\U00002600-\U000026FF"
+    "\U00002B00-\U00002BFF"
+    "\U00002300-\U000023FF"
+    "]+"
+)
+
+
+def _strip_emoji(text: str) -> str:
+    return _EMOJI_RE.sub("", text)
+
+
 INSTRUCTION_FILTER_RESPONSE_FORMAT = {
     "type": "json_schema",
     "json_schema": {
@@ -608,8 +628,9 @@ def payload_as_json(payload: RenderPayload, tz: timezone) -> str:
         if not ev:
             continue
         location = ", ".join(part for part in [ev.city, ev.location_name] if part)
+        about_text = item.final_about or item.final_title or ev.title
         scene = {
-            "title": item.final_about or item.final_title or ev.title,
+            "about": _strip_emoji(about_text or ""),
             "description": item.final_description or "",
             "date": _format_scene_date(ev),
             "location": location,

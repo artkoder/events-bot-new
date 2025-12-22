@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import asyncio
+import re
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Iterable, Sequence
@@ -196,8 +197,24 @@ def _normalize_title(title: str | None, limit: int = 12) -> str:
     return trimmed
 
 
+_EMOJI_RE = re.compile(
+    "["
+    "\U0001F600-\U0001F64F"
+    "\U0001F300-\U0001F5FF"
+    "\U0001F680-\U0001F6FF"
+    "\U0001F1E0-\U0001F1FF"
+    "\U00002700-\U000027BF"
+    "\U0001F900-\U0001FAFF"
+    "\U00002600-\U000026FF"
+    "\U00002B00-\U00002BFF"
+    "\U00002300-\U000023FF"
+    "]+"
+)
+
+
 def _normalize_about(text: str | None, word_limit: int = 12) -> str:
-    collapsed = " ".join(str(text or "").replace("\n", " ").split())
+    raw_text = _EMOJI_RE.sub("", str(text or ""))
+    collapsed = " ".join(raw_text.replace("\n", " ").split())
     trimmed = collapsed.strip("«»\"' <>.,!?:;")
     words: list[str] = []
     seen: set[str] = set()
