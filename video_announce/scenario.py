@@ -43,6 +43,7 @@ from .poller import VIDEO_MAX_MB, run_kernel_poller
 from .selection import (
     build_payload,
     build_selection,
+    fetch_candidates,
     fetch_profiles,
     payload_as_json,
     prepare_session_items,
@@ -284,6 +285,7 @@ class VideoAnnounceScenario:
             "default_selected_min": DEFAULT_SELECTED_MIN,
             "default_selected_max": DEFAULT_SELECTED_MAX,
             "required_periods": self._default_required_periods(target),
+            "selected_required_period": None,
         }
 
     def _normalize_required_periods(self, params: dict[str, Any]) -> list[dict[str, Any]]:
@@ -295,7 +297,7 @@ class VideoAnnounceScenario:
             params.get("fallback_window_days", DEFAULT_FALLBACK_WINDOW_DAYS)
             or DEFAULT_FALLBACK_WINDOW_DAYS
         )
-        for item in raw_periods:
+        for raw_idx, item in enumerate(raw_periods):
             title: str | None = None
             explicit_label: str | None = None
             preset: dict[str, int | str] | None = None
@@ -330,9 +332,82 @@ class VideoAnnounceScenario:
                 label = (
                     explicit_label
                     or self._format_required_preset_label(title, params, preset)
+                    or self._date_range_label(preset)
                 )
-                normalized.append({"params": preset, "label": label})
+                normalized.append({"params": preset, "label": label, "raw_index": raw_idx})
         return normalized
+
+    def _find_weekend_period_index(self, periods: list[dict[str, Any]]) -> int | None:
+        for idx, raw in enumerate(periods):
+            if isinstance(raw, dict):
+                title = str(raw.get("title") or "").lower()
+                if title.startswith("выходн"):
+                    return idx
+        return None
+
+    def _infer_selected_required_period(
+        self, params: dict[str, Any], presets: list[dict[str, Any]]
+    ) -> int:
+        comparison_keys = {
+            "target_date",
+            "primary_window_days",
+            "fallback_window_days",
+            "candidate_limit",
+            "default_selected_min",
+            "default_selected_max",
+        }
+        for idx, preset in enumerate(presets):
+            preset_params = preset.get("params", {})
+            if all(params.get(k) == preset_params.get(k) for k in comparison_keys):
+                return idx
+        return -1
+
+    async def _candidate_count_for_period(
+        self, profile: VideoProfile | None, base_params: dict[str, Any], preset: dict[str, Any]
+    ) -> int:
+        merged = dict(base_params)
+        merged.update(preset)
+        ctx = self._selection_ctx_from_params(profile, merged)
+        try:
+            events = await fetch_candidates(self.db, ctx)
+        except Exception:
+            logger.exception("video_announce: failed to fetch candidates for preset")
+            return 0
+        return len(events)
+
+    async def _pick_default_required_period(
+        self, profile: VideoProfile | None, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        periods = self._normalize_required_periods(params)
+        if not periods:
+            return params
+
+        selected_idx = params.get("selected_required_period")
+        if isinstance(selected_idx, int) and 0 <= selected_idx < len(periods):
+            return params
+
+        tomorrow = self._parse_target_date(str(params.get("target_date"))) or datetime.now(
+            LOCAL_TZ
+        ).date()
+        weekend_idx = self._find_weekend_period_index(params.get("required_periods") or [])
+        if tomorrow.weekday() >= 5 and weekend_idx is not None:
+            params.update(periods[weekend_idx]["params"])
+            params["selected_required_period"] = weekend_idx
+            return params
+
+        first_count = await self._candidate_count_for_period(
+            profile, params, periods[0]["params"]
+        )
+        target_idx = 0
+        if first_count < 8 and len(periods) > 1:
+            three_day_count = await self._candidate_count_for_period(
+                profile, params, periods[1]["params"]
+            )
+            if three_day_count >= 8:
+                target_idx = 1
+        params.update(periods[target_idx]["params"])
+        params["selected_required_period"] = target_idx
+        return params
 
     def _format_required_preset_label(
         self, title: str | None, base_params: dict[str, Any], preset_params: dict[str, Any]
@@ -665,6 +740,7 @@ class VideoAnnounceScenario:
 
         params = self._default_selection_params()
         profile = await self._resolve_profile(profile_key)
+        params = await self._pick_default_required_period(profile, params)
         ctx = self._selection_ctx_from_params(profile, params)
         test_chat_id, main_chat_id = await self._get_profile_channels(profile_key)
         async with self.db.get_session() as session:
@@ -689,11 +765,19 @@ class VideoAnnounceScenario:
         ctx: SelectionContext | None = None,
         *,
         reuse: bool = False,
+        message: types.Message | None = None,
     ) -> None:
         if ctx is None:
             ctx = await self._build_selection_context(session_obj)
         params = self._get_selection_params(session_obj)
         required_periods = self._normalize_required_periods(params)
+        selected_idx = (
+            params.get("selected_required_period")
+            if isinstance(params.get("selected_required_period"), int)
+            else -1
+        )
+        if (selected_idx < 0 or selected_idx >= len(required_periods)) and required_periods:
+            selected_idx = self._infer_selected_required_period(params, required_periods)
         action_hint = (
             "новую инструкцию для пересчёта текущего списка"
             if reuse
@@ -709,10 +793,11 @@ class VideoAnnounceScenario:
         for idx, preset in enumerate(required_periods):
             merged_params = dict(params)
             merged_params.update(preset["params"])
-            label = preset.get("label") or self._date_range_label(merged_params)
+            label = str(preset.get("label") or self._date_range_label(merged_params))
+            checkbox = "☑️ " if idx == selected_idx else "⬜ "
             period_buttons.append(
                 types.InlineKeyboardButton(
-                    text=label,
+                    text=f"{checkbox}{label}",
                     callback_data=f"vidinstr:{session_obj.id}:preset:{idx}",
                 )
             )
@@ -731,9 +816,20 @@ class VideoAnnounceScenario:
             inline_keyboard.extend(self._chunk_buttons(period_buttons, size=2))
         inline_keyboard.append(action_buttons)
         keyboard = types.InlineKeyboardMarkup(inline_keyboard=inline_keyboard)
-        await self.bot.send_message(self.chat_id, "\n".join(lines), reply_markup=keyboard)
+        text = "\n".join(lines)
+        if message:
+            try:
+                await self.bot.edit_message_text(
+                    text, chat_id=message.chat.id, message_id=message.message_id, reply_markup=keyboard
+                )
+                return
+            except Exception:
+                logger.exception("video_announce: failed to edit instruction prompt")
+        await self.bot.send_message(self.chat_id, text, reply_markup=keyboard)
 
-    async def apply_period_preset(self, session_id: int, preset_idx: int) -> str:
+    async def apply_period_preset(
+        self, session_id: int, preset_idx: int, message: types.Message | None = None
+    ) -> str:
         if not await self._has_access():
             return "Not authorized"
         session_obj = await self._load_session(session_id)
@@ -744,6 +840,7 @@ class VideoAnnounceScenario:
         if not presets or preset_idx < 0 or preset_idx >= len(presets):
             return "Период не найден"
         params.update(presets[preset_idx]["params"])
+        params["selected_required_period"] = preset_idx
         async with self.db.get_session() as session:
             fresh = await session.get(VideoAnnounceSession, session_id)
             if not fresh:
@@ -757,7 +854,7 @@ class VideoAnnounceScenario:
         if reuse:
             ranked = await self._recalculate_selection(session_obj)
             await self._send_selection_posts(session_obj, ranked)
-        await self._prompt_instruction(session_obj, reuse=reuse)
+        await self._prompt_instruction(session_obj, reuse=reuse, message=message)
         return "Период применён"
 
     async def _build_and_store_selection(
@@ -1568,7 +1665,9 @@ async def handle_prefix_action(prefix: str, callback: types.CallbackQuery, scena
             except Exception:
                 msg = "Период не найден"
             else:
-                msg = await scenario.apply_period_preset(session_id_int, preset_idx)
+                msg = await scenario.apply_period_preset(
+                    session_id_int, preset_idx, message=callback.message
+                )
         else:
             msg = "Неизвестное действие"
         await callback.answer(
