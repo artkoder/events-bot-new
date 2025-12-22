@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import math
@@ -436,13 +437,21 @@ async def _rank_with_llm(
             if not instruction
             else f"Инструкция оператора: {instruction}\n\n{serialized_payload}"
         )
+        created_at = datetime.now(timezone.utc).isoformat()
+        llm_input_digest = hashlib.sha256(request_text.encode("utf-8")).hexdigest()
+        request_version = "ranking_v2"
         request_details = {
+            "request_version": request_version,
+            "created_at": created_at,
             "instruction": instruction,
-            "system_prompt": ranking_prompt(),
-            "user_message": request_text,
+            "user_message": instruction,
+            "system_prompt_id": "ranking_prompt_v1",
+            "system_prompt_name": "video_announce_ranking",
             "period": _describe_period(events),
             "candidate_ids": event_ids,
             "items": payload,
+            "llm_input_digest": llm_input_digest,
+            "llm_input_preview": request_text[:200],
         }
         request_details_json = json.dumps(request_details, ensure_ascii=False, indent=2)
         preview = json.dumps(payload[:3], ensure_ascii=False)
