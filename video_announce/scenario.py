@@ -256,16 +256,19 @@ class VideoAnnounceScenario:
                 "title": "Завтра",
                 "target_date": tomorrow.isoformat(),
                 "fallback_window_days": 0,
+                "primary_window_days": 0,
             },
             {
                 "title": "3 дня",
                 "target_date": tomorrow.isoformat(),
                 "fallback_window_days": 2,
+                "primary_window_days": 2,
             },
             {
                 "title": "Выходные",
                 "target_date": saturday.isoformat(),
                 "fallback_window_days": 1,
+                "primary_window_days": 1,
             },
             {
                 "title": "Неделя",
@@ -289,7 +292,7 @@ class VideoAnnounceScenario:
             "candidate_limit": DEFAULT_CANDIDATE_LIMIT,
             "default_selected_min": DEFAULT_SELECTED_MIN,
             "default_selected_max": DEFAULT_SELECTED_MAX,
-            "required_periods": self._default_required_periods(target),
+            "required_periods": self._default_required_periods(now_local.date()),
             "selected_required_period": None,
         }
 
