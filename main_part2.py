@@ -13550,6 +13550,9 @@ def create_app() -> web.Application:
     async def video_instruction_wrapper(message: types.Message):
         await video_handlers.handle_instruction_message(message, db, bot)
 
+    async def video_intro_wrapper(message: types.Message):
+        await video_handlers.handle_intro_message(message, db, bot)
+
     async def edit_message_wrapper(message: types.Message):
         await handle_edit_message(message, db, bot)
 
@@ -13844,6 +13847,10 @@ def create_app() -> web.Application:
     dp.message.register(
         video_instruction_wrapper,
         lambda m: video_handlers.is_waiting_instruction(m.from_user.id),
+    )
+    dp.message.register(
+        video_intro_wrapper,
+        lambda m: video_handlers.is_waiting_intro_text(m.from_user.id),
     )
     dp.message.register(
         add_event_session_wrapper, lambda m: m.from_user.id in add_event_sessions
