@@ -84,6 +84,16 @@ _pending_instructions: TTLCache[int, PendingInstruction] = TTLCache(
 )
 
 
+@dataclass
+class PendingIntroText:
+    session_id: int
+
+
+_pending_intro_texts: TTLCache[int, PendingIntroText] = TTLCache(
+    maxsize=64, ttl=PENDING_INSTRUCTION_TTL
+)
+
+
 def set_pending_instruction(user_id: int, pending: PendingInstruction) -> None:
     _pending_instructions[user_id] = pending
 
@@ -99,6 +109,23 @@ def take_pending_instruction(
 
 def is_waiting_instruction(user_id: int) -> bool:
     return user_id in _pending_instructions
+
+
+def set_pending_intro_text(user_id: int, pending: PendingIntroText) -> None:
+    _pending_intro_texts[user_id] = pending
+
+
+def take_pending_intro_text(
+    user_id: int, session_id: int | None = None
+) -> PendingIntroText | None:
+    pending = _pending_intro_texts.get(user_id)
+    if pending and (session_id is None or pending.session_id == session_id):
+        return _pending_intro_texts.pop(user_id, None)
+    return None
+
+
+def is_waiting_intro_text(user_id: int) -> bool:
+    return user_id in _pending_intro_texts
 
 
 def read_positive_int_env(env_key: str, default: int) -> int:
@@ -539,6 +566,12 @@ class VideoAnnounceScenario:
     def _chunk_buttons(self, buttons: list[types.InlineKeyboardButton], size: int = 3) -> list[list[types.InlineKeyboardButton]]:
         return [buttons[i : i + size] for i in range(0, len(buttons), size)]
 
+    def _intro_texts(self, params: dict[str, Any]) -> tuple[str | None, str | None, str | None]:
+        intro_override = (str(params.get("intro_text_override") or "").strip()) or None
+        intro_llm = (str(params.get("intro_text") or "").strip()) or None
+        intro = intro_override or intro_llm
+        return intro, intro_override, intro_llm
+
     def _get_selection_params(self, session_obj: VideoAnnounceSession) -> dict[str, Any]:
         params = self._default_selection_params()
         stored = session_obj.selection_params if isinstance(session_obj.selection_params, dict) else {}
@@ -927,6 +960,84 @@ class VideoAnnounceScenario:
             await session.refresh(fresh)
             session_obj.selection_params = params
 
+    async def _send_intro_controls(self, session_obj: VideoAnnounceSession) -> None:
+        if session_obj.status != VideoAnnounceSessionStatus.SELECTED:
+            return
+        params = self._get_selection_params(session_obj)
+        intro, intro_override, intro_llm = self._intro_texts(params)
+        if not intro and not intro_llm:
+            intro_text = "LLM не предложило интро — задайте его вручную."
+        elif intro_override:
+            intro_text = f"Текущее интро: {html.escape(intro_override)}"
+            if intro_llm and intro_llm != intro_override:
+                intro_text += "\nПредложение LLM: " + html.escape(intro_llm)
+        else:
+            intro_text = f"Предложение LLM: {html.escape(intro or intro_llm or '')}"
+        lines = [
+            f"Сессия #{session_obj.id}: интро для ролика",
+            intro_text,
+            "Нажмите изменить, чтобы отправить свой текст.",
+        ]
+        keyboard = types.InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    types.InlineKeyboardButton(
+                        text="✏️ Изменить интро",
+                        callback_data=f"vidintro:{session_obj.id}:edit",
+                    )
+                ],
+                [
+                    types.InlineKeyboardButton(
+                        text="📄 Показать JSON", callback_data=f"vidjson:{session_obj.id}"
+                    ),
+                    types.InlineKeyboardButton(
+                        text="🚀 Запустить Kaggle",
+                        callback_data=f"vidrender:{session_obj.id}",
+                    ),
+                ],
+            ]
+        )
+        await self.bot.send_message(
+            self.chat_id, "\n".join(lines), reply_markup=keyboard, parse_mode="HTML"
+        )
+
+    async def prompt_intro_override(self, session_id: int) -> str:
+        if not await self.ensure_access():
+            return "Not authorized"
+        session_obj = await self._load_session(session_id)
+        if not session_obj:
+            return "Сессия не найдена"
+        if session_obj.status != VideoAnnounceSessionStatus.SELECTED:
+            return "Сессия уже запущена"
+        set_pending_intro_text(self.user_id, PendingIntroText(session_id=session_id))
+        await self.bot.send_message(
+            self.chat_id,
+            "Пришлите текст интро для ролика. Пустое сообщение вернёт вариант LLM.",
+        )
+        return "Ожидаю интро"
+
+    async def save_intro_override(
+        self, session_id: int, intro_text: str | None
+    ) -> str:
+        intro = (intro_text or "").strip()
+        async with self.db.get_session() as session:
+            sess = await session.get(VideoAnnounceSession, session_id)
+            if not sess:
+                return "Сессия не найдена"
+            if sess.status != VideoAnnounceSessionStatus.SELECTED:
+                return "Сессия уже запущена"
+            params = self._get_selection_params(sess)
+            if intro:
+                params["intro_text_override"] = intro
+            else:
+                params.pop("intro_text_override", None)
+            sess.selection_params = params
+            session.add(sess)
+            await session.commit()
+            await session.refresh(sess)
+        await self._send_intro_controls(sess)
+        return "Интро обновлено"
+
     def _build_input_message(
         self, session_obj: VideoAnnounceSession, result: SelectionBuildResult
     ) -> str:
@@ -988,6 +1099,7 @@ class VideoAnnounceScenario:
             await self._update_selection_message(selection_message, session_obj.id)
         else:
             await self._send_selection_ui(session_obj.id)
+        await self._send_intro_controls(session_obj)
 
     async def apply_instruction(
         self,
@@ -1074,6 +1186,8 @@ class VideoAnnounceScenario:
         ranked,
         *,
         status_message: tuple[int, int] | None = None,
+        payload: RenderPayload | None = None,
+        payload_json: str | None = None,
     ) -> None:
         client = KaggleClient()
         status_chat_id = status_message[0] if status_message else self.chat_id
@@ -1098,8 +1212,8 @@ class VideoAnnounceScenario:
         except Exception:
             logger.exception("video_announce: failed to prepare final texts")
         try:
-            payload = await self._build_render_payload(session_obj, ranked)
-            json_text = payload_as_json(payload, timezone.utc)
+            payload = payload or await self._build_render_payload(session_obj, ranked)
+            json_text = payload_json or payload_as_json(payload, timezone.utc)
             preview_lines = []
             event_map = {ev.id: ev for ev in payload.events}
             item_map = {it.event_id: it for it in payload.items}
@@ -1240,6 +1354,15 @@ class VideoAnnounceScenario:
         ]
         return build_payload(
             session_obj, ranked, tz=timezone.utc, items=ready_items
+        )
+
+    async def _send_payload_file(
+        self, session_obj: VideoAnnounceSession, json_text: str, *, caption: str
+    ) -> None:
+        filename = f"video_payload_{session_obj.id}.json"
+        document = types.BufferedInputFile(json_text.encode("utf-8"), filename=filename)
+        await self.bot.send_document(
+            self.chat_id, document, caption=caption, disable_notification=True
         )
 
     async def _refresh_selection_items(
@@ -1502,10 +1625,10 @@ class VideoAnnounceScenario:
             preview_lines.append(
                 f"#{r.position} · {dt} · {ev.emoji or ''} {title} ({r.score})"
             )
-        await self.bot.send_message(
-            self.chat_id,
-            "<b>Текущий JSON:</b>\n<pre>" + html.escape(json_text) + "</pre>",
-            parse_mode="HTML",
+        await self._send_payload_file(
+            session_obj,
+            json_text,
+            caption="Файл с текущим Kaggle JSON", 
         )
         await self.bot.send_message(self.chat_id, "\n".join(preview_lines) or "Нет событий")
         return "Сформировано"
@@ -1518,12 +1641,16 @@ class VideoAnnounceScenario:
         ranked = await self._load_ranked_events(session_id, ready_only=True)
         if not ranked:
             return "Нет выбранных событий"
+        payload: RenderPayload | None = None
+        payload_json: str | None = None
         async with self.db.get_session() as session:
             sess = await session.get(VideoAnnounceSession, session_id)
             if not sess:
                 return "Сессия не найдена"
             if sess.status != VideoAnnounceSessionStatus.SELECTED:
                 return "Сессия уже запущена"
+            payload = await self._build_render_payload(sess, ranked)
+            payload_json = payload_as_json(payload, timezone.utc)
             sess.status = VideoAnnounceSessionStatus.RENDERING
             sess.started_at = datetime.now(timezone.utc)
             session.add(sess)
@@ -1534,6 +1661,10 @@ class VideoAnnounceScenario:
         await self.bot.send_message(
             self.chat_id, f"Сессия #{session_id} запущена, собираем материалы"
         )
+        if payload_json:
+            await self._send_payload_file(
+                sess, payload_json, caption="Payload JSON перед запуском Kaggle"
+            )
         status_message = await update_status_message(
             self.bot,
             sess,
@@ -1547,6 +1678,8 @@ class VideoAnnounceScenario:
                 sess,
                 ranked,
                 status_message=status_message,
+                payload=payload,
+                payload_json=payload_json,
             )
         )
         return "Рендеринг запущен"
@@ -1558,6 +1691,8 @@ class VideoAnnounceScenario:
         if not ranked:
             await self.bot.send_message(self.chat_id, "Не удалось собрать события для рестарта")
             return
+        payload: RenderPayload | None = None
+        payload_json: str | None = None
         async with self.db.get_session() as session:
             obj = await session.get(VideoAnnounceSession, session_id)
             if not obj:
@@ -1566,6 +1701,8 @@ class VideoAnnounceScenario:
             if obj.status != VideoAnnounceSessionStatus.FAILED:
                 await self.bot.send_message(self.chat_id, "Сессию можно рестартовать только после ошибки")
                 return
+            payload = await self._build_render_payload(obj, ranked)
+            payload_json = payload_as_json(payload, timezone.utc)
             obj.status = VideoAnnounceSessionStatus.RENDERING
             obj.started_at = datetime.now(timezone.utc)
             obj.finished_at = None
@@ -1579,6 +1716,10 @@ class VideoAnnounceScenario:
         await self.bot.send_message(
             self.chat_id, f"Сессия #{session_id} перезапущена, готовим материалы"
         )
+        if payload_json:
+            await self._send_payload_file(
+                obj, payload_json, caption="Payload JSON перед запуском Kaggle"
+            )
         status_message = await update_status_message(
             self.bot,
             obj,
@@ -1592,6 +1733,8 @@ class VideoAnnounceScenario:
                 obj,
                 ranked,
                 status_message=status_message,
+                payload=payload,
+                payload_json=payload_json,
             )
         )
 

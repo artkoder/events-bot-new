@@ -15,10 +15,13 @@ from .poller import remember_status_message, update_status_message
 from db import Database
 from .scenario import (
     PendingInstruction,
+    PendingIntroText,
     VideoAnnounceScenario,
     handle_prefix_action,
     is_waiting_instruction,
+    is_waiting_intro_text,
     take_pending_instruction,
+    take_pending_intro_text,
 )
 
 logger = logging.getLogger(__name__)
@@ -204,6 +207,18 @@ async def handle_video_callback(
             msg = "Ошибка"
         await callback.answer(msg, show_alert=msg != "Обновлено")
         return
+    if data.startswith("vidintro:"):
+        try:
+            _, session_id, action = data.split(":", 2)
+            if action != "edit":
+                await callback.answer("Неизвестное действие", show_alert=True)
+                return
+            msg = await scenario.prompt_intro_override(int(session_id))
+        except Exception:
+            logger.exception("video_announce: intro prompt failed")
+            msg = "Ошибка"
+        await callback.answer(msg or "Готово", show_alert=msg not in {"Ожидаю интро", "Готово"})
+        return
     if data.startswith("vidjson:"):
         try:
             _, session_id = data.split(":", 1)
@@ -255,4 +270,14 @@ async def handle_instruction_message(
         reuse_candidates=pending.reuse_candidates,
         pending=pending,
     )
+    await bot.send_message(message.chat.id, msg or "Готово")
+
+
+async def handle_intro_message(message: types.Message, db: Database, bot) -> None:
+    pending: PendingIntroText | None = take_pending_intro_text(message.from_user.id)
+    if not pending:
+        return
+    scenario = VideoAnnounceScenario(db, bot, message.chat.id, message.from_user.id)
+    text = (message.text or message.caption or "").strip()
+    msg = await scenario.save_intro_override(pending.session_id, text or None)
     await bot.send_message(message.chat.id, msg or "Готово")
