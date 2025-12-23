@@ -16,7 +16,6 @@ from typing import Any, Sequence
 from cachetools import TTLCache
 from aiogram import types
 from sqlalchemy import select
-from PIL import Image
 
 from db import Database
 from models import (
@@ -991,7 +990,7 @@ class VideoAnnounceScenario:
                         text="📄 Показать JSON", callback_data=f"vidjson:{session_obj.id}"
                     ),
                     types.InlineKeyboardButton(
-                        text="🚀 Запустить Kaggle",
+                        text="🚀 Выбрать Kernel",
                         callback_data=f"vidrender:{session_obj.id}",
                     ),
                 ],
@@ -1208,12 +1207,40 @@ class VideoAnnounceScenario:
                 )
         finalized = []
         try:
+            # We still might want finalized texts for debugging, but not for dataset export as per requirement 3
             finalized = await prepare_final_texts(self.db, session_obj.id, ranked)
         except Exception:
             logger.exception("video_announce: failed to prepare final texts")
         try:
             payload = payload or await self._build_render_payload(session_obj, ranked)
             json_text = payload_json or payload_as_json(payload, timezone.utc)
+
+            # Validation Step: Check for photo_urls presence
+            missing_photos = []
+            for item in payload.items:
+                 ev = next((e for e in payload.events if e.id == item.event_id), None)
+                 if ev and item.status == VideoAnnounceItemStatus.READY:
+                     urls = getattr(ev, "photo_urls", []) or []
+                     if not any(urls):
+                         missing_photos.append(ev.id)
+
+            if missing_photos:
+                 error_msg = f"Ошибка: у событий {missing_photos} отсутствуют photo_urls, запуск Kaggle отменён."
+                 await self.bot.send_message(self.chat_id, error_msg)
+                 await self._mark_failed(session_obj.id, error_msg)
+                 failed = await self._load_session(session_obj.id)
+                 if failed:
+                    await update_status_message(
+                        self.bot,
+                        failed,
+                        {},
+                        chat_id=status_chat_id,
+                        message_id=status_message_id,
+                        allow_send=True,
+                        note="Ошибка: нет фото",
+                    )
+                 return
+
             preview_lines = []
             event_map = {ev.id: ev for ev in payload.events}
             item_map = {it.event_id: it for it in payload.items}
@@ -1237,7 +1264,17 @@ class VideoAnnounceScenario:
             )
             await self.bot.send_message(self.chat_id, preview or "Нет событий")
             dataset_slug = await self._create_dataset(session_obj, json_text, finalized)
-            kernel_ref = await self._push_kernel(client, dataset_slug)
+
+            kernel_ref = session_obj.kaggle_kernel_ref
+            if not kernel_ref:
+                 # Fallback if not selected, though UI should enforce it
+                 kernel_ref = "video-afisha/video-announce-renderer"
+
+            actual_ref = await self._push_kernel(client, dataset_slug, kernel_ref)
+            if actual_ref != kernel_ref:
+                logger.info("Kernel ref changed from %s to %s", kernel_ref, actual_ref)
+                kernel_ref = actual_ref
+
             session_obj.kaggle_dataset = dataset_slug
             session_obj.kaggle_kernel_ref = kernel_ref
             await self._store_kaggle_meta(session_obj.id, dataset_slug, kernel_ref)
@@ -1633,6 +1670,71 @@ class VideoAnnounceScenario:
         await self.bot.send_message(self.chat_id, "\n".join(preview_lines) or "Нет событий")
         return "Сформировано"
 
+    async def show_kernel_selection(self, session_id: int, message: types.Message | None = None) -> str:
+        if not await self._has_access():
+            return "Not authorized"
+
+        username = os.getenv("KAGGLE_USERNAME", "video-afisha")
+        client = KaggleClient()
+        try:
+            kernels = await asyncio.to_thread(client.kernels_list, user=username, page_size=10)
+        except Exception:
+            logger.exception("video_announce: failed to list kernels")
+            return "Ошибка списка kernels"
+
+        if not kernels:
+             return "Нет доступных kernels"
+
+        keyboard: list[list[types.InlineKeyboardButton]] = []
+        for k in kernels:
+            ref = k.get("ref") or ""
+            title = k.get("title") or ref
+            if not ref:
+                continue
+            keyboard.append(
+                [
+                     types.InlineKeyboardButton(
+                        text=f"📓 {title}",
+                        callback_data=f"vidkernel:{session_id}:{ref}",
+                    )
+                ]
+            )
+        keyboard.append(
+             [
+                types.InlineKeyboardButton(
+                     text="🔄 Обновить список",
+                     callback_data=f"vidrender:{session_id}", # Re-trigger this function basically
+                )
+             ]
+        )
+
+        text = "Выберите Kaggle Notebook для запуска:"
+        if message:
+             # If we are reusing a message (e.g. from the 'Render' button)
+             try:
+                await message.edit_text(text, reply_markup=types.InlineKeyboardMarkup(inline_keyboard=keyboard))
+             except Exception:
+                await self.bot.send_message(self.chat_id, text, reply_markup=types.InlineKeyboardMarkup(inline_keyboard=keyboard))
+        else:
+             await self.bot.send_message(self.chat_id, text, reply_markup=types.InlineKeyboardMarkup(inline_keyboard=keyboard))
+
+        return "Выбор kernel"
+
+
+    async def save_kernel_and_start(self, session_id: int, kernel_ref: str, message: types.Message | None = None) -> str:
+        if not await self._has_access():
+             return "Not authorized"
+
+        async with self.db.get_session() as session:
+            sess = await session.get(VideoAnnounceSession, session_id)
+            if not sess:
+                return "Сессия не найдена"
+            sess.kaggle_kernel_ref = kernel_ref
+            session.add(sess)
+            await session.commit()
+
+        return await self.start_render(session_id, message=message)
+
     async def start_render(self, session_id: int, message: types.Message | None = None) -> str:
         if not await self._has_access():
             return "Not authorized"
@@ -1647,6 +1749,11 @@ class VideoAnnounceScenario:
             sess = await session.get(VideoAnnounceSession, session_id)
             if not sess:
                 return "Сессия не найдена"
+
+            if not sess.kaggle_kernel_ref:
+                # If for some reason we got here without a kernel ref (should be caught by UI flow)
+                return "Kernel не выбран"
+
             if sess.status != VideoAnnounceSessionStatus.SELECTED:
                 return "Сессия уже запущена"
             payload = await self._build_render_payload(sess, ranked)
@@ -1657,9 +1764,12 @@ class VideoAnnounceScenario:
             await session.commit()
             await session.refresh(sess)
         if message:
-            await self._update_selection_message(message, session_id)
+            try:
+                await self._update_selection_message(message, session_id)
+            except Exception:
+                pass
         await self.bot.send_message(
-            self.chat_id, f"Сессия #{session_id} запущена, собираем материалы"
+            self.chat_id, f"Сессия #{session_id} запущена, собираем материалы. Kernel: {sess.kaggle_kernel_ref}"
         )
         if payload_json:
             await self._send_payload_file(
@@ -1759,48 +1869,13 @@ class VideoAnnounceScenario:
             obj.error = error
             await session.commit()
 
-    async def _download_poster_bytes(self, poster: EventPoster) -> bytes | None:
-        if not poster.catbox_url:
-            return None
-        session = get_http_session()
-        try:
-            async with HTTP_SEMAPHORE:
-                resp = await session.get(poster.catbox_url)
-                resp.raise_for_status()
-                return await resp.read()
-        except Exception:
-            logger.warning(
-                "video_announce: failed to download poster url=%s", poster.catbox_url
-            )
-            return None
-
-    async def _export_posters(
-        self,
-        tmp_path: Path,
-        items: Sequence[VideoAnnounceItem],
-        poster_map: dict[int, EventPoster],
-    ) -> None:
-        if not items:
-            return
-        for item in items:
-            poster = poster_map.get(item.event_id)
-            if not poster:
-                continue
-            data = await self._download_poster_bytes(poster)
-            if not data:
-                continue
-            try:
-                with Image.open(BytesIO(data)) as img:
-                    img.convert("RGB").save(tmp_path / f"{item.position}.png", format="PNG")
-            except Exception:
-                logger.exception(
-                    "video_announce: failed to convert poster event_id=%s", poster.event_id
-                )
-
     def _copy_assets(self, tmp_path: Path) -> None:
         assets_dir = Path(__file__).resolve().parent / "assets"
+        # Requirement: "Kaggle dataset contains only: payload.json, original *.ttf, Pulsarium.mp3, dataset-metadata.json"
+        # We need to find the font. The example says "Oswald-VariableFont_wght.ttf"
+        font_name = "Oswald-VariableFont_wght.ttf"
         assets = [
-            (assets_dir / "Oswald-VariableFont_wght.ttf", tmp_path / "font.ttf"),
+            (assets_dir / font_name, tmp_path / font_name),
             (assets_dir / "Pulsarium.mp3", tmp_path / "Pulsarium.mp3"),
         ]
         for src, dest in assets:
@@ -1820,49 +1895,14 @@ class VideoAnnounceScenario:
             "id": dataset_id,
             "licenses": [{"name": "CC0-1.0"}],
         }
-        final_payload = [
-            {
-                "event_id": item.event_id,
-                "about": item.about,
-                "description": item.description,
-                "use_ocr": item.use_ocr,
-                "poster_source": item.poster_source,
-            }
-            for item in finalized
-        ]
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
-            ready_items: list[VideoAnnounceItem] = []
-            poster_map: dict[int, EventPoster] = {}
-            async with self.db.get_session() as session:
-                res_items = await session.execute(
-                    select(VideoAnnounceItem)
-                    .where(VideoAnnounceItem.session_id == session_obj.id)
-                    .where(VideoAnnounceItem.status == VideoAnnounceItemStatus.READY)
-                    .order_by(VideoAnnounceItem.position)
-                )
-                ready_items = list(res_items.scalars().all())
-                if ready_items:
-                    res_posters = await session.execute(
-                        select(EventPoster)
-                        .where(
-                            EventPoster.event_id.in_(
-                                [item.event_id for item in ready_items]
-                            )
-                        )
-                        .order_by(EventPoster.updated_at.desc(), EventPoster.id.desc())
-                    )
-                    for poster in res_posters.scalars().all():
-                        if poster.event_id not in poster_map and poster.catbox_url:
-                            poster_map[poster.event_id] = poster
             (tmp_path / "dataset-metadata.json").write_text(
                 json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
             )
             (tmp_path / "payload.json").write_text(json_text, encoding="utf-8")
-            (tmp_path / "final_texts.json").write_text(
-                json.dumps(final_payload, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
-            await self._export_posters(tmp_path, ready_items, poster_map)
+            # Removed final_texts.json and images as per Requirement 3
+
             self._copy_assets(tmp_path)
             total_size = sum(
                 f.stat().st_size for f in tmp_path.glob("**/*") if f.is_file()
@@ -1880,16 +1920,16 @@ class VideoAnnounceScenario:
                 await asyncio.to_thread(client.create_dataset, tmp_path)
         return dataset_id
 
-    async def _push_kernel(self, client: KaggleClient, dataset_slug: str) -> str:
-        await asyncio.to_thread(
-            client.push_kernel, dataset_sources=[dataset_slug], timeout="300"
-        )
-        meta_path = DEFAULT_KERNEL_PATH / "kernel-metadata.json"
-        meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else {}
-        kernel_ref = str(meta.get("id") or meta.get("slug") or "")
+    async def _push_kernel(
+        self, client: KaggleClient, dataset_slug: str, kernel_ref: str | None = None
+    ) -> str:
         if not kernel_ref:
-            raise RuntimeError("kernel reference missing after push")
-        return kernel_ref
+            # Fallback (old behavior) should be avoided if we enforce selection
+            raise RuntimeError("Kernel reference not provided")
+
+        return await asyncio.to_thread(
+            client.deploy_kernel_update, kernel_ref, dataset_slug
+        )
 
     async def refresh_status(self) -> None:
         lines = ["Статусы сессий:"]

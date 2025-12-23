@@ -649,17 +649,13 @@ def build_payload(
 
 
 def payload_as_json(payload: RenderPayload, tz: timezone) -> str:
-    def _poster_name(item: VideoAnnounceItem, ev: Event) -> str:
-        ext = ".jpg"
+    def _poster_urls(ev: Event) -> list[str]:
+        urls = []
         for url in getattr(ev, "photo_urls", []) or []:
-            low_path = url.lower().split("?", 1)[0]
-            for candidate in (".png", ".jpg", ".jpeg", ".webp"):
-                if low_path.endswith(candidate):
-                    ext = candidate
-                    break
-            if ext != ".jpg":
-                break
-        return f"{item.position}{ext}"
+            if url.startswith("http:"):
+                url = "https:" + url[5:]
+            urls.append(url)
+        return urls[:1]
 
     def _intro_text(events: Sequence[Event]) -> str:
         dates: list[date] = []
@@ -722,7 +718,7 @@ def payload_as_json(payload: RenderPayload, tz: timezone) -> str:
             "description": item.final_description or "",
             "date": _format_scene_date(ev),
             "location": location,
-            "images": [_poster_name(item, ev)],
+            "images": _poster_urls(ev),
             "is_free": bool(getattr(ev, "is_free", False)),
         }
         scenes.append(scene)

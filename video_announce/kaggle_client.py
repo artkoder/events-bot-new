@@ -126,6 +126,51 @@ class KaggleClient:
                 meta_path.write_text(json.dumps(meta_data, ensure_ascii=False, indent=2))
             api.kernels_push(str(tmp_path), timeout=timeout)
 
+    def kernels_list(self, user: str, page_size: int = 20) -> list[dict]:
+        api = self._get_api()
+        # api.kernels_list returns a list of objects, convert to dict for easier usage
+        kernels = api.kernels_list(user=user, page_size=page_size)
+        return [
+            {
+                "ref": getattr(k, "ref", ""),
+                "title": getattr(k, "title", ""),
+                "slug": getattr(k, "slug", ""),
+                "lastRunTime": getattr(k, "lastRunTime", None),
+            }
+            for k in kernels
+        ]
+
+    def kernels_pull(
+        self, kernel_ref: str, path: Path | str, metadata: bool = True
+    ) -> None:
+        api = self._get_api()
+        api.kernels_pull(kernel_ref, path=str(path), metadata=metadata)
+
+    def deploy_kernel_update(self, kernel_ref: str, dataset_slug: str) -> str:
+        api = self._get_api()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            api.kernels_pull(kernel_ref, path=str(tmp_path), metadata=True)
+            meta_path = tmp_path / "kernel-metadata.json"
+            if not meta_path.exists():
+                raise FileNotFoundError(f"kernel-metadata.json not found in {kernel_ref}")
+
+            meta_data = json.loads(meta_path.read_text(encoding="utf-8"))
+            # Preserve existing sources, or just overwrite?
+            # Requirement: "dataset_sources = [<dataset_slug>]"
+            meta_data["dataset_sources"] = [dataset_slug]
+
+            # Ensure id/slug is correct (kernels_pull should have set it)
+            # We push back from this tmp folder which contains only metadata (and maybe code if pulled?
+            # api.kernels_pull with metadata=True pulls everything or just metadata?
+            # Documentation says: "Download kernel files and metadata".
+            # Requirement says: "pull -> change metadata -> push".
+            # This ensures we don't overwrite code with local files.
+            meta_path.write_text(json.dumps(meta_data, ensure_ascii=False, indent=2))
+
+            api.kernels_push(str(tmp_path))
+            return str(meta_data.get("id") or meta_data.get("slug") or kernel_ref)
+
     def get_kernel_status(self, kernel_ref: str) -> dict:
         api = self._get_api()
         return api.kernels_status(kernel_ref)
