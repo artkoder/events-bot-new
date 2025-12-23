@@ -231,9 +231,20 @@ async def handle_video_callback(
     if data.startswith("vidrender:"):
         try:
             _, session_id = data.split(":", 1)
-            msg = await scenario.start_render(int(session_id), message=callback.message)
+            # Old: msg = await scenario.start_render(int(session_id), message=callback.message)
+            # New: Show kernel selection first
+            msg = await scenario.show_kernel_selection(int(session_id), message=callback.message)
         except Exception:
             logger.exception("video_announce: render start failed")
+            msg = "Ошибка"
+        await callback.answer(msg or "Готово", show_alert=msg != "Выбор kernel")
+        return
+    if data.startswith("vidkernel:"):
+        try:
+            _, session_id, kernel_ref = data.split(":", 2)
+            msg = await scenario.save_kernel_and_start(int(session_id), kernel_ref, message=callback.message)
+        except Exception:
+            logger.exception("video_announce: kernel save failed")
             msg = "Ошибка"
         await callback.answer(msg or "Готово", show_alert=msg not in {"Рендеринг запущен", "Готово"})
         return
