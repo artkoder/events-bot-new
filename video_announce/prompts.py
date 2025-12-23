@@ -42,6 +42,7 @@ def selection_response_format(candidate_count: int) -> dict:
                                 "selected_reason",
                                 "about",
                                 "description",
+                                "final_title",
                             ],
                             "additionalProperties": False,
                         },
