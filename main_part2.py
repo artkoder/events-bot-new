@@ -7639,7 +7639,9 @@ async def handle_edit_message(message: types.Message, db: Database, bot: Bot):
                 await bot.send_message(message.chat.id, "Invalid number")
                 return
         else:
-            if field in {"is_free", "pushkin_card", "silent"}:
+            if field == "search_digest":
+                event.search_digest = value.strip() or None
+            elif field in {"is_free", "pushkin_card", "silent"}:
                 bool_val = parse_bool_text(value)
                 if bool_val is None:
                     await bot.send_message(message.chat.id, "Invalid boolean")

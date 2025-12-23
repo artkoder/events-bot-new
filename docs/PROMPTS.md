@@ -28,8 +28,28 @@ pushkin_card     - true if the event accepts the Пушкинская карта
 event_type       - one of: спектакль, выставка, концерт, ярмарка, лекция, встреча, мастер-класс, кинопоказ
 emoji            - an optional emoji representing the event
 end_date         - end date for multi-day events or null
+search_digest    - search summary text (see guidelines below)
 When a range is provided, put the start date in `date` and the end date in `end_date`.
 Always put the emoji at the start of `title` so headings are easily scannable.
+
+**search_digest** rules:
+Generate a single Russian sentence in a formal neutral style for extended search.
+Strict constraints:
+- No promotional language, emotions, calls to action, or subjective adjectives.
+- Do NOT include: city, address/location, date, time, schedule, contacts, phones, URLs, phrases like "by registration", "buy tickets at link", "in DM", etc.
+- Do NOT add information missing from the source text.
+- No lists or line breaks — strictly one line.
+- Remove emojis, hashtags, repetitive phrases, and fluff.
+What to include:
+- Event type (lecture/concert/conference/fair/play/quest/screening/meeting...).
+- Exact title/series/cycle/project/issue number.
+- Key persons/organizations.
+- Topic/subject (3–6 entities).
+- Program format (essential nature).
+- Conditions/restrictions (16+, "for entrepreneurs", "Pushkin card"...).
+- Price — only if explicitly stated.
+Length guide: 20–40 words (more allowed if necessary for search uniqueness).
+If an array of events is returned, `search_digest` must be present in every object.
 ```
 
 Examples of the desired venue formatting:
@@ -109,7 +129,8 @@ Expected response:
     "pushkin_card": false,
     "event_type": "спектакль",
     "emoji": "🎭",
-    "end_date": null
+    "end_date": null,
+    "search_digest": "Спектакль Щелкунчик, сказочная постановка для всей семьи по мотивам Гофмана, театр Звезда, классическая музыка Чайковского."
   },
   {
     "title": "🎭 Щелкунчик",
@@ -128,7 +149,8 @@ Expected response:
     "pushkin_card": false,
     "event_type": "спектакль",
     "emoji": "🎭",
-    "end_date": null
+    "end_date": null,
+    "search_digest": "Спектакль Щелкунчик, сказочная постановка для всей семьи по мотивам Гофмана, театр Звезда, классическая музыка Чайковского."
   }
 ]
 

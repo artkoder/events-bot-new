@@ -935,6 +935,7 @@ class EventDraft:
     ocr_tokens_spent: int = 0
     ocr_tokens_remaining: int | None = None
     ocr_limit_notice: str | None = None
+    search_digest: str | None = None
 
 
 @dataclass
@@ -1239,6 +1240,7 @@ async def build_event_drafts_from_vk(
                 poster_summary=poster_summary,
                 ocr_tokens_spent=ocr_tokens_spent,
                 ocr_tokens_remaining=ocr_tokens_remaining,
+                search_digest=clean_str(data.get("search_digest")),
             )
         )
 
@@ -1763,6 +1765,7 @@ async def persist_event_and_pages(
         photo_urls=photo_urls,
         photo_count=len(photo_urls),
         source_post_url=source_post_url,
+        search_digest=draft.search_digest,
     )
 
     topics, text_length, error_text, manual_flag = await assign_event_topics(event)
