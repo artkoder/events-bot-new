@@ -9,14 +9,12 @@ from collections import defaultdict
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Iterable, Sequence
-from urllib.parse import urlparse
 
 from aiogram import types
 from sqlalchemy import select
 
 from db import Database
 from main import ask_4o, format_day_pretty
-from main import get_source_page_text
 from models import (
     Event,
     EventPoster,
@@ -192,55 +190,6 @@ async def _load_hits(db: Database, event_ids: Sequence[int]) -> set[int]:
         )
         rows = result.scalars().all()
     return set(rows)
-
-
-async def _fetch_telegraph_text(ev: Event) -> str | None:
-    path = (ev.telegraph_path or "").strip()
-    url = (ev.telegraph_url or "").strip()
-    resolved_path = ""
-    if path:
-        resolved_path = path.lstrip("/")
-    elif url:
-        parsed = urlparse(url)
-        resolved_path = parsed.path.lstrip("/")
-    if not resolved_path:
-        logger.warning(
-            "telegraph_event_fetch no_path",
-            extra={
-                "event_id": ev.id,
-                "telegraph_url": url,
-                "telegraph_path": path,
-            },
-        )
-        return None
-    logger.info(
-        "telegraph_event_fetch start",
-        extra={
-            "event_id": ev.id,
-            "telegraph_url": url,
-            "telegraph_path": path,
-            "resolved_path": resolved_path,
-        },
-    )
-    try:
-        text = await get_source_page_text(resolved_path)
-    except Exception:
-        logger.exception("video_announce: failed to fetch telegraph text event=%s", ev.id)
-        return None
-    cleaned = (text or "").strip()
-    if not cleaned:
-        logger.warning(
-            "telegraph_text_empty",
-            extra={
-                "event_id": ev.id,
-                "telegraph_url": url,
-                "telegraph_path": path,
-                "resolved_path": resolved_path,
-                "text_len": 0,
-            },
-        )
-        return None
-    return cleaned
 
 
 async def _load_poster_ocr_texts(
@@ -426,16 +375,6 @@ async def _rank_with_llm(
         return ([], None)
     event_ids = [e.id for e in events]
     poster_texts = await _load_poster_ocr_texts(db, event_ids)
-    telegraph_tasks: dict[int, asyncio.Task[str | None]] = {}
-    for ev in events:
-        if ev.telegraph_url or ev.telegraph_path:
-            telegraph_tasks[ev.id] = asyncio.create_task(_fetch_telegraph_text(ev))
-    telegraph_full_texts: dict[int, str] = {}
-    if telegraph_tasks:
-        results = await asyncio.gather(*telegraph_tasks.values())
-        for event_id, text in zip(telegraph_tasks.keys(), results):
-            if text:
-                telegraph_full_texts[event_id] = text
     payload = []
     for ev in sorted(events, key=lambda e: (e.date, e.time, e.id)):
         payload.append(
@@ -450,7 +389,7 @@ async def _rank_with_llm(
                 "is_free": ev.is_free,
                 "include_count": getattr(ev, "video_include_count", 0) or 0,
                 "promoted": ev.id in promoted,
-                "full_event_description": telegraph_full_texts.get(ev.id),
+                "search_digest": getattr(ev, "search_digest", None),
                 "poster_ocr_text": poster_texts.get(ev.id),
             }
         )
