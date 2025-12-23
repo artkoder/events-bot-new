@@ -42,6 +42,7 @@ TELEGRAPH_EXCERPT_LIMIT = 1200
 POSTER_OCR_EXCERPT_LIMIT = 800
 TRACE_MAX_LEN = 100_000
 
+
 def _build_about(
     *,
     about: str | None,
@@ -276,27 +277,25 @@ def _parse_llm_ranking(raw: str, known_ids: set[int]) -> tuple[str | None, list[
     parsed: list[RankedChoice] = []
     if not isinstance(items, list):
         return intro_text, parsed
+
+    seen_ids = set()
     for item in items:
         if not isinstance(item, dict):
             continue
         event_id = item.get("event_id")
-        if not isinstance(event_id, int) or event_id not in known_ids:
+        if not isinstance(event_id, int) or event_id not in known_ids or event_id in seen_ids:
             continue
-        score = float(item.get("score") or 0)
-        selected = item.get("selected")
-        if not isinstance(selected, bool):
-            selected = None
-        about = item.get("about") if isinstance(item.get("about"), str) else None
-        description_raw = item.get("description") if "description" in item else None
+        seen_ids.add(event_id)
+
+        score_val = item.get("score")
+        score = float(score_val) if isinstance(score_val, (int, float)) else None
+
         parsed.append(
             RankedChoice(
                 event_id=event_id,
-                score=score,
+                score=score if score is not None else 0.0,
                 reason=item.get("reason"),
-                selected=selected,
-                selected_reason=item.get("selected_reason"),
-                about=about,
-                description=str(description_raw).strip() if description_raw else None,
+                selected=True,  # Explicitly selected by LLM
             )
         )
     return intro_text, parsed
@@ -370,12 +369,20 @@ async def _rank_with_llm(
     instruction: str | None = None,
     bot: Any | None = None,
     notify_chat_id: int | None = None,
+    limit: int = 8,
 ) -> tuple[list[RankedEvent], str | None]:
     if not events:
         return ([], None)
+
+    # Pre-calculate base ranking
+    base_ranked = _score_events(client, events)
+    base_map = {r.event.id: r for r in base_ranked}
+
     event_ids = [e.id for e in events]
     poster_texts = await _load_poster_ocr_texts(db, event_ids)
+
     payload = []
+    # Sort for consistent LLM input
     for ev in sorted(events, key=lambda e: (e.date, e.time, e.id)):
         payload.append(
             {
@@ -387,49 +394,50 @@ async def _rank_with_llm(
                 "location": ev.location_name,
                 "topics": getattr(ev, "topics", []),
                 "is_free": ev.is_free,
-                "include_count": getattr(ev, "video_include_count", 0) or 0,
                 "promoted": ev.id in promoted,
                 "search_digest": getattr(ev, "search_digest", None),
+                # "poster_ocr_text": poster_texts.get(ev.id), # Removed to save tokens if digest is enough, or keep it?
+                # User said "Упростить контракт LLM... вход... убрать лишние мета-поля".
+                # Prompt says "При оценке опирайся на search_digest (если есть) и poster_ocr_text" -> better keep OCR text if it fits
                 "poster_ocr_text": poster_texts.get(ev.id),
             }
         )
+
     intro_text: str | None = None
+    parsed: list[RankedChoice] = []
+
     try:
         created_at = datetime.now(timezone.utc).isoformat()
-        request_version = "selection_v1"
+        request_version = "selection_v2"
         system_prompt_text = selection_prompt()
-        response_format = selection_response_format(len(payload))
+        response_format = selection_response_format(max_items=limit)
+
         meta = {
             "source": "video_announce.selection",
             "count": len(payload),
-            "system_prompt_id": "selection_prompt_v1",
-            "system_prompt_name": "video_announce_selection",
+            "system_prompt_id": "selection_prompt_v2",
             "period": _describe_period(events),
-            "candidate_ids": event_ids,
         }
+
+        # User requested simplified input structure
         request_details = {
-            "request_version": request_version,
-            "created_at": created_at,
-            "system_prompt": system_prompt_text,
-            "user_instruction": instruction,
-            "user_message": instruction,
-            "response_format": response_format,
-            "meta": meta,
+            "instruction": instruction,
             "candidates": payload,
+            "meta": meta, # Optional but useful for debugging
         }
+
         request_json = json.dumps(request_details, ensure_ascii=False)
-        llm_input_digest = hashlib.sha256(request_json.encode("utf-8")).hexdigest()
-        request_details["meta"]["llm_input_digest"] = llm_input_digest
-        request_details["meta"]["llm_input_preview"] = request_json[:200]
-        request_json = json.dumps(request_details, ensure_ascii=False, indent=2)
-        preview = json.dumps(payload[:3], ensure_ascii=False)
+
+        # Logging
+        llm_input_preview = request_json[:200]
         logger.info(
-            "video_announce: llm selection request items=%d promoted=%d preview=%s instruction=%s",
+            "video_announce: llm selection request items=%d promoted=%d limit=%d preview=%s",
             len(payload),
             len(promoted),
-            preview,
-            bool(instruction),
+            limit,
+            llm_input_preview,
         )
+
         if bot and notify_chat_id:
             try:
                 filename = f"selection_request_{session_id or 'session'}.json"
@@ -440,17 +448,19 @@ async def _rank_with_llm(
                 await bot.send_document(
                     notify_chat_id,
                     document,
-                    caption="Запрос на выборку и ранжирование",
+                    caption="Запрос на выборку и ранжирование (v2)",
                     disable_notification=True,
                 )
             except Exception:
                 logger.exception("video_announce: failed to send ranking request document")
+
         raw = await ask_4o(
             request_json,
             system_prompt=system_prompt_text,
             response_format=response_format,
             meta=meta,
         )
+
         if bot and notify_chat_id:
             try:
                 filename = f"selection_response_{session_id or 'session'}.json"
@@ -461,13 +471,14 @@ async def _rank_with_llm(
                 await bot.send_document(
                     notify_chat_id,
                     document,
-                    caption="Ответ LLM на выборку и ранжирование",
+                    caption="Ответ LLM на выборку (v2)",
                     disable_notification=True,
                 )
             except Exception:
                 logger.exception("video_announce: failed to send ranking response document")
 
         intro_text, parsed = _parse_llm_ranking(raw, {e.id for e in events})
+
         await _store_llm_trace(
             db,
             session_id=session_id,
@@ -479,48 +490,61 @@ async def _rank_with_llm(
     except Exception:
         logger.exception("video_announce: llm selection failed")
         parsed = []
-    ranked: list[RankedEvent] = []
-    if parsed:
-        event_map = {ev.id: ev for ev in events}
-        parsed_ids = {row.event_id for row in parsed}
-        missing = [ev.id for ev in events if ev.id not in parsed_ids]
-        if missing:
-            logger.warning(
-                "video_announce: ranking_incomplete returned=%d expected=%d missing=%s",
-                len(parsed),
-                len(events),
-                missing,
-            )
-        for idx, row in enumerate(parsed):
-            event = event_map.get(row.event_id)
-            if not event:
-                continue
-            ranked.append(
-                RankedEvent(
-                    event=event,
-                    score=row.score,
-                    position=idx + 1,
-                    reason=row.reason,
-                    mandatory=event.id in mandatory_ids,
-                    selected=row.selected,
-                    selected_reason=row.selected_reason,
-                    about=row.about,
-                    description=row.description,
-                    poster_ocr_text=poster_texts.get(event.id),
+
+    # Construction of final ranked list
+    final_ranked: list[RankedEvent] = []
+    seen_ids: set[int] = set()
+
+    # 1. Add LLM selections
+    for choice in parsed:
+        if choice.event_id in seen_ids:
+            continue
+        base = base_map.get(choice.event_id)
+        if base:
+            final_ranked.append(
+                replace(
+                    base,
+                    score=choice.score if choice.score is not None else base.score,
+                    reason=choice.reason,
+                    selected=True,
+                    position=len(final_ranked) + 1,
+                    poster_ocr_text=poster_texts.get(base.event.id),
                 )
             )
-    else:
-        ranked = [
-            RankedEvent(
-                event=row.event,
-                score=row.score,
-                position=idx + 1,
-                mandatory=row.event.id in mandatory_ids,
-                poster_ocr_text=poster_texts.get(row.event.id),
+            seen_ids.add(choice.event_id)
+
+    # Fallback if empty selection from LLM (Variant B)
+    if not final_ranked and parsed == []: # Empty because LLM returned nothing or failed
+        logger.warning("video_announce: LLM returned empty selection, using fallback top-N")
+        fallback_candidates = sorted(base_ranked, key=lambda r: -r.score) # Sort by base score
+        for base in fallback_candidates[:limit]:
+             if base.event.id in seen_ids: continue
+             final_ranked.append(
+                 replace(
+                     base,
+                     selected=True, # Auto-select
+                     reason="Fallback selection",
+                     position=len(final_ranked) + 1,
+                     poster_ocr_text=poster_texts.get(base.event.id),
+                 )
+             )
+             seen_ids.add(base.event.id)
+
+    # 2. Add remaining candidates
+    # We use base_ranked order for remaining items
+    for base in base_ranked:
+        if base.event.id not in seen_ids:
+            final_ranked.append(
+                replace(
+                    base,
+                    selected=False,
+                    position=len(final_ranked) + 1,
+                    poster_ocr_text=poster_texts.get(base.event.id),
+                )
             )
-            for idx, row in enumerate(_score_events(client, events))
-        ]
-    return ranked, intro_text
+            seen_ids.add(base.event.id)
+
+    return final_ranked, intro_text
 
 
 async def prepare_session_items(
@@ -680,23 +704,35 @@ def _choose_default_ready(
     max_count: int,
 ) -> set[int]:
     ready: set[int] = set()
-    selected_rows = [
+    # Prioritize LLM selected (which are first in 'ranked' list and have selected=True)
+
+    # Filter only those marked as selected or mandatory
+    candidates = [
         row for row in ranked if row.selected is True or row.event.id in mandatory_ids
     ]
 
-    # Always include mandatory/promoted events even if that exceeds the max target
-    for row in selected_rows:
+    # If no one is selected (should not happen with fallback, but still), take from top
+    if not candidates and ranked:
+        candidates = list(ranked[:max_count])
+
+    # First pass: Mandatory
+    for row in candidates:
         if row.event.id in mandatory_ids:
             ready.add(row.event.id)
 
-    target_count = min(max_count, len(selected_rows))
-    if len(selected_rows) >= min_count:
-        target_count = max(target_count, min_count)
-
-    for row in selected_rows:
-        if len(ready) >= target_count:
+    # Second pass: Fill up to max_count with selected
+    for row in candidates:
+        if len(ready) >= max_count:
             break
         ready.add(row.event.id)
+
+    # If still below min_count, force add from ranked (even if not selected)
+    # This ensures we respect min_count even if LLM selected fewer
+    if len(ready) < min_count and len(ranked) > len(ready):
+        for row in ranked:
+            if len(ready) >= min_count:
+                break
+            ready.add(row.event.id)
 
     return ready
 
@@ -712,29 +748,13 @@ async def build_selection(
     notify_chat_id: int | None = None,
 ) -> SelectionBuildResult:
     client = client or KaggleClient()
-    expanded_ctx = ctx
+
+    # Removed auto-expansion loop (Task Requirement: Отключить любое авторасширение дат/периодов)
     events = (
         _filter_events_with_posters(list(candidates))
         if candidates is not None
-        else await fetch_candidates(db, expanded_ctx)
+        else await fetch_candidates(db, ctx)
     )
-
-    while candidates is None and len(events) < ctx.default_selected_min:
-        next_ctx = replace(
-            expanded_ctx,
-            fallback_window_days=expanded_ctx.fallback_window_days + 3,
-        )
-        more_events = await fetch_candidates(db, next_ctx)
-        if len(more_events) <= len(events):
-            break
-        logger.info(
-            "video_announce: expanding selection window fallback_days=%d -> %d due to low candidate count=%d",
-            expanded_ctx.fallback_window_days,
-            next_ctx.fallback_window_days,
-            len(events),
-        )
-        events = more_events
-        expanded_ctx = next_ctx
 
     async def _rank_events(
         current_events: Sequence[Event],
@@ -770,6 +790,7 @@ async def build_selection(
             instruction=ctx.instruction,
             bot=bot,
             notify_chat_id=notify_chat_id,
+            limit=ctx.default_selected_max,
         )
         return ranked_local, mandatory_ids_local, selected_ids_local, intro_text_local
 
@@ -790,14 +811,16 @@ async def build_selection(
     )
     for row in ranked:
         status = "READY" if row.event.id in default_ready_ids else "CANDIDATE"
-        logger.info(
-            "video_announce selection %s id=%s score=%.2f mandatory=%s reason=%s",
-            status,
-            row.event.id,
-            row.score,
-            row.mandatory,
-            (row.reason or "")[0:200],
-        )
+        # Only log first few or it spams
+        if row.position <= 10:
+             logger.info(
+                "video_announce selection %s id=%s score=%.2f mandatory=%s reason=%s",
+                status,
+                row.event.id,
+                row.score,
+                row.mandatory,
+                (row.reason or "")[0:200],
+            )
     return SelectionBuildResult(
         ranked=ranked,
         default_ready_ids=default_ready_ids,

@@ -442,16 +442,9 @@ class VideoAnnounceScenario:
             params["selected_required_period"] = weekend_idx
             return params
 
-        first_count = await self._candidate_count_for_period(
-            profile, params, periods[0]["params"]
-        )
+        # Strict behavior: always pick the first period (usually "Tomorrow") by default
+        # without auto-extending to 3 days even if event count is low.
         target_idx = 0
-        if first_count < 8 and len(periods) > 1:
-            three_day_count = await self._candidate_count_for_period(
-                profile, params, periods[1]["params"]
-            )
-            if three_day_count >= 8:
-                target_idx = 1
         params.update(periods[target_idx]["params"])
         params["selected_required_period"] = target_idx
         return params
