@@ -36,19 +36,19 @@ Always put the emoji at the start of `title` so headings are easily scannable.
 Generate a single Russian sentence in a formal neutral style for extended search.
 Strict constraints:
 - No promotional language, emotions, calls to action, or subjective adjectives.
-- Do NOT include: city, address/location, date, time, schedule, contacts, phones, URLs, phrases like "by registration", "buy tickets at link", "in DM", etc.
+- Do NOT include: city, address/location, date, time (HH:MM), schedule, contacts, phones, URLs, phrases like "by registration", "buy tickets at link", "in DM", etc.
 - Do NOT add information missing from the source text.
 - No lists or line breaks — strictly one line.
 - Remove emojis, hashtags, repetitive phrases, and fluff.
 What to include:
-- Event type (lecture/concert/conference/fair/play/quest/screening/meeting...).
-- Exact title/series/cycle/project/issue number.
+- Genre and subgenre.
+- Key highlights of format and program (extract 1-2 highlights like "musical warm-up", "guided route" without time).
+- Neutral summary of reviews (if source contains "Отзывы", include as "по отзывам — ...", without names or "best/magnificent").
+- Useful labels from Poster OCR if available.
 - Key persons/organizations.
-- Topic/subject (3–6 entities).
-- Program format (essential nature).
+- Topic/subject.
 - Conditions/restrictions (16+, "for entrepreneurs", "Pushkin card"...).
-- Price — only if explicitly stated.
-Length guide: 20–40 words (more allowed if necessary for search uniqueness).
+Length guide: 25–55 words (20-80 allowed if necessary for search uniqueness).
 If an array of events is returned, `search_digest` must be present in every object.
 ```
 
