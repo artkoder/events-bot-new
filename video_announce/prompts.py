@@ -8,46 +8,51 @@ _DEFAULT_PROMPT = (
     " привяжи хронометраж, упомяни площадку и время."
 )
 
-SELECTION_RESPONSE_FORMAT = {
-    "type": "json_schema",
-    "json_schema": {
-        "name": "VideoAnnounceRanking",
-        "schema": {
-            "type": "object",
-            "properties": {
-                "items": {
-                    "type": "array",
-                    "maxItems": 15,
+def selection_response_format(candidate_count: int) -> dict:
+    max_items = max(1, int(candidate_count or 0))
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "VideoAnnounceRanking",
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "intro_text": {"type": "string"},
                     "items": {
-                        "type": "object",
-                        "properties": {
-                            "event_id": {"type": "integer"},
-                            "score": {"type": "number"},
-                            "reason": {"type": ["string", "null"]},
-                            "selected": {"type": ["boolean", "null"]},
-                            "selected_reason": {"type": ["string", "null"]},
-                            "about": {"type": ["string", "null"]},
-                            "description": {"type": ["string", "null"]},
+                        "type": "array",
+                        "maxItems": max_items,
+                        "minItems": max_items,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "event_id": {"type": "integer"},
+                                "score": {"type": "number"},
+                                "reason": {"type": ["string", "null"]},
+                                "selected": {"type": ["boolean", "null"]},
+                                "selected_reason": {"type": ["string", "null"]},
+                                "about": {"type": ["string", "null"]},
+                                "description": {"type": ["string", "null"]},
+                                "final_title": {"type": ["string", "null"]},
+                            },
+                            "required": [
+                                "event_id",
+                                "score",
+                                "reason",
+                                "selected",
+                                "selected_reason",
+                                "about",
+                                "description",
+                            ],
+                            "additionalProperties": False,
                         },
-                        "required": [
-                            "event_id",
-                            "score",
-                            "reason",
-                            "selected",
-                            "selected_reason",
-                            "about",
-                            "description",
-                        ],
-                        "additionalProperties": False,
                     },
-                }
+                },
+                "required": ["intro_text", "items"],
+                "additionalProperties": False,
             },
-            "required": ["items"],
-            "additionalProperties": False,
+            "strict": True,
         },
-        "strict": True,
-    },
-}
+    }
 
 FINAL_TEXT_RESPONSE_FORMAT = {
     "type": "json_schema",
@@ -108,17 +113,19 @@ def selection_prompt() -> str:
     return (
         "Ты ассистент видеоредактора. Получишь JSON с событиями и должен"
         " выбрать порядок показа (только на русском) для короткого ролика."
-        " Отбери 12–15 самых вовлекающих событий, оцени каждое по шкале 0–10"
-        " с краткой русской причиной. Обязательно включай все"
-        " promoted=true, следуй инструкции оператора, не добавляй"
-        " противоречащие ей события. Стремись к разнообразию тематик и форматов,"
-        " выделяй интерес, уникальность, свежесть, семейную ценность, пригодность"
+        " Приоритетно выполни инструкцию оператора: если правила конфликта"
+        " — следуй ей. Оцени и упомяни КАЖДОЕ событие по одному разу,"
+        " выставь score 0–10 и краткую причину. Обязательно включай все"
+        " promoted=true в итоговый выбор даже если это превышает лимиты."
+        " Отбери 6–8 событий (максимум 8) как selected=true для ролика,"
+        " остальные отмечай selected=false с коротким selected_reason."
+        " Стремись к разнообразию тематик и форматов, выделяй интерес,"
+        " уникальность, свежесть, семейную ценность и пригодность"
         " OCR/Telegraph контекста. Не используй количество постеров как критерий."
-        " Для каждого события верни score, reason, selected=true/false и"
-        " короткое selected_reason. Добавь поле about (до 12 слов, без эмодзи и"
-        " кавычек) и одно предложение description, которые помогут вывести"
-        " узнаваемое название + формат/место/время. Ответ строго JSON со"
-        " списком items без пояснений."
+        " Добавь intro_text — лаконичное вступление в 1–2 предложения."
+        " Для каждого события верни about (до 12 слов, без эмодзи и кавычек)"
+        " и одно предложение description с узнаваемым названием +"
+        " формат/место/время. Ответ строго JSON со списком items без пояснений."
     )
 
 

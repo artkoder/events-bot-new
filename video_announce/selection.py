@@ -28,7 +28,7 @@ from models import (
 )
 from .about import normalize_about_with_fallback
 from .kaggle_client import KaggleClient
-from .prompts import SELECTION_RESPONSE_FORMAT, selection_prompt
+from .prompts import selection_prompt, selection_response_format
 from .types import (
     RankedChoice,
     RankedEvent,
@@ -500,7 +500,7 @@ async def _rank_with_llm(
         raw = await ask_4o(
             request_text,
             system_prompt=selection_prompt(),
-            response_format=SELECTION_RESPONSE_FORMAT,
+            response_format=selection_response_format(len(payload)),
             meta={"source": "video_announce.selection", "count": len(payload)},
         )
         if instruction and bot and notify_chat_id:
