@@ -906,7 +906,26 @@ class VideoAnnounceScenario:
                 result.ranked,
                 default_ready_ids=result.default_ready_ids,
             )
+        await self._persist_intro_text(session_obj, result.intro_text)
         return result
+
+    async def _persist_intro_text(
+        self, session_obj: VideoAnnounceSession, intro_text: str | None
+    ) -> None:
+        intro = (intro_text or "").strip()
+        if not intro:
+            return
+        async with self.db.get_session() as session:
+            fresh = await session.get(VideoAnnounceSession, session_obj.id)
+            if not fresh:
+                return
+            params = self._get_selection_params(fresh)
+            params["intro_text"] = intro
+            fresh.selection_params = params
+            session.add(fresh)
+            await session.commit()
+            await session.refresh(fresh)
+            session_obj.selection_params = params
 
     def _build_input_message(
         self, session_obj: VideoAnnounceSession, result: SelectionBuildResult
