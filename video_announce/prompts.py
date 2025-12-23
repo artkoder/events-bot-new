@@ -17,7 +17,7 @@ def selection_response_format(max_items: int = 8) -> dict:
             "schema": {
                 "type": "object",
                 "properties": {
-                    "intro_text": {"type": ["string", "null"]},
+                    "intro_text": {"type": ["string", "null"], "maxLength": 32},
                     "items": {
                         "type": "array",
                         "maxItems": max_items,
@@ -110,7 +110,8 @@ def selection_prompt() -> str:
         " Верни event_id, score (0–10) и причину выбора (reason, до 120 символов)."
         " НЕ выдумывай событий, используй только предоставленные candidates."
         " Если события не подходят, верни пустой список items или меньше 8."
-        " Ответ строго JSON, содержащий intro_text (вступление 1-2 предложения) и items."
+        " Ответ строго JSON."
+        " intro_text — ОЧЕНЬ КОРОТКИЙ ЗАГОЛОВОК ДЛЯ ОБЛОЖКИ (2–4 слова, КАПСОМ, ≤32 символов с пробелами, без эмодзи и без знаков препинания). Это название ролика, а не предложение. Не начинай с “Мы выбрали/Представляем”."
     )
 
 

@@ -263,12 +263,12 @@ def _apply_repeat_limit(
     return selected
 
 
-def _parse_llm_ranking(raw: str, known_ids: set[int]) -> tuple[str | None, list[RankedChoice]]:
+def _parse_llm_ranking(raw: str, known_ids: set[int]) -> tuple[bool, str | None, list[RankedChoice]]:
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
         logger.warning("video_announce: failed to parse ranking JSON")
-        return (None, [])
+        return (False, None, [])
     intro_text = None
     if isinstance(data, dict):
         raw_intro = data.get("intro_text")
@@ -276,7 +276,7 @@ def _parse_llm_ranking(raw: str, known_ids: set[int]) -> tuple[str | None, list[
     items = data.get("items") if isinstance(data, dict) else None
     parsed: list[RankedChoice] = []
     if not isinstance(items, list):
-        return intro_text, parsed
+        return (False, intro_text, parsed)
 
     seen_ids = set()
     for item in items:
@@ -298,7 +298,7 @@ def _parse_llm_ranking(raw: str, known_ids: set[int]) -> tuple[str | None, list[
                 selected=True,  # Explicitly selected by LLM
             )
         )
-    return intro_text, parsed
+    return True, intro_text, parsed
 
 
 def _describe_period(events: Sequence[Event]) -> str | None:
@@ -405,6 +405,7 @@ async def _rank_with_llm(
 
     intro_text: str | None = None
     parsed: list[RankedChoice] = []
+    parse_ok = False
 
     try:
         created_at = datetime.now(timezone.utc).isoformat()
@@ -477,7 +478,7 @@ async def _rank_with_llm(
             except Exception:
                 logger.exception("video_announce: failed to send ranking response document")
 
-        intro_text, parsed = _parse_llm_ranking(raw, {e.id for e in events})
+        parse_ok, intro_text, parsed = _parse_llm_ranking(raw, {e.id for e in events})
 
         await _store_llm_trace(
             db,
@@ -514,8 +515,9 @@ async def _rank_with_llm(
             seen_ids.add(choice.event_id)
 
     # Fallback if empty selection from LLM (Variant B)
-    if not final_ranked and parsed == []: # Empty because LLM returned nothing or failed
-        logger.warning("video_announce: LLM returned empty selection, using fallback top-N")
+    # We trigger fallback only if parsing FAILED. Valid empty selection (parse_ok=True, items=[]) is respected.
+    if not final_ranked and not parse_ok:
+        logger.warning("video_announce: LLM selection failed, using fallback top-N")
         fallback_candidates = sorted(base_ranked, key=lambda r: -r.score) # Sort by base score
         for base in fallback_candidates[:limit]:
              if base.event.id in seen_ids: continue
@@ -704,16 +706,11 @@ def _choose_default_ready(
     max_count: int,
 ) -> set[int]:
     ready: set[int] = set()
-    # Prioritize LLM selected (which are first in 'ranked' list and have selected=True)
 
     # Filter only those marked as selected or mandatory
     candidates = [
         row for row in ranked if row.selected is True or row.event.id in mandatory_ids
     ]
-
-    # If no one is selected (should not happen with fallback, but still), take from top
-    if not candidates and ranked:
-        candidates = list(ranked[:max_count])
 
     # First pass: Mandatory
     for row in candidates:
@@ -725,14 +722,6 @@ def _choose_default_ready(
         if len(ready) >= max_count:
             break
         ready.add(row.event.id)
-
-    # If still below min_count, force add from ranked (even if not selected)
-    # This ensures we respect min_count even if LLM selected fewer
-    if len(ready) < min_count and len(ranked) > len(ready):
-        for row in ranked:
-            if len(ready) >= min_count:
-                break
-            ready.add(row.event.id)
 
     return ready
 
