@@ -544,6 +544,7 @@ class EventPoster(SQLModel, table=True):
     catbox_url: Optional[str] = None
     poster_hash: str
     ocr_text: Optional[str] = None
+    ocr_title: Optional[str] = None
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
@@ -677,6 +678,7 @@ class PosterOcrCache(SQLModel, table=True):
     detail: str = Field(primary_key=True)
     model: str = Field(primary_key=True)
     text: str
+    title: Optional[str] = None
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0

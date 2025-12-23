@@ -9553,6 +9553,7 @@ async def upsert_event_posters(
                     catbox_url=item.catbox_url,
                     poster_hash=digest,
                     ocr_text=item.ocr_text,
+                    ocr_title=item.ocr_title,
                     prompt_tokens=int(prompt_tokens or 0),
                     completion_tokens=int(completion_tokens or 0),
                     total_tokens=int(total_tokens or 0),

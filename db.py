@@ -66,6 +66,7 @@ class Database:
                         detail TEXT NOT NULL,
                         model TEXT NOT NULL,
                         text TEXT NOT NULL,
+                        title TEXT,
                         prompt_tokens INTEGER NOT NULL DEFAULT 0,
                         completion_tokens INTEGER NOT NULL DEFAULT 0,
                         total_tokens INTEGER NOT NULL DEFAULT 0,
@@ -82,9 +83,13 @@ class Database:
                 model_expr = "COALESCE(model, ?)" if model_exists else "?"
                 created_at_expr = "created_at" if created_at_exists else "CURRENT_TIMESTAMP"
 
+                # Check if 'title' column exists in the old table to copy it
+                title_exists = any(col[1] == "title" for col in poster_ocr_columns)
+                title_expr = "title" if title_exists else "NULL"
+
                 insert_sql = f"""
                     INSERT INTO posterocrcache_new (
-                        hash, detail, model, text,
+                        hash, detail, model, text, title,
                         prompt_tokens, completion_tokens, total_tokens, created_at
                     )
                     SELECT
@@ -92,6 +97,7 @@ class Database:
                         {detail_expr},
                         {model_expr},
                         text,
+                        {title_expr},
                         prompt_tokens,
                         completion_tokens,
                         total_tokens,
@@ -248,6 +254,7 @@ class Database:
                     catbox_url TEXT,
                     poster_hash TEXT NOT NULL,
                     ocr_text TEXT,
+                    ocr_title TEXT,
                     prompt_tokens INTEGER NOT NULL DEFAULT 0,
                     completion_tokens INTEGER NOT NULL DEFAULT 0,
                     total_tokens INTEGER NOT NULL DEFAULT 0,
@@ -257,6 +264,7 @@ class Database:
                 )
                 """
             )
+            await _add_column(conn, "eventposter", "ocr_title TEXT")
             await conn.execute(
                 "CREATE INDEX IF NOT EXISTS ix_eventposter_event ON eventposter(event_id)"
             )
@@ -509,6 +517,7 @@ class Database:
                     detail TEXT NOT NULL,
                     model TEXT NOT NULL,
                     text TEXT NOT NULL,
+                    title TEXT,
                     prompt_tokens INTEGER NOT NULL DEFAULT 0,
                     completion_tokens INTEGER NOT NULL DEFAULT 0,
                     total_tokens INTEGER NOT NULL DEFAULT 0,
@@ -517,6 +526,7 @@ class Database:
                 )
                 """
             )
+            await _add_column(conn, "posterocrcache", "title TEXT")
 
             await conn.execute(
                 """
