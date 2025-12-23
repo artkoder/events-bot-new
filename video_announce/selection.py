@@ -456,29 +456,33 @@ async def _rank_with_llm(
         )
     intro_text: str | None = None
     try:
-        serialized_payload = json.dumps(payload, ensure_ascii=False)
-        request_text = (
-            serialized_payload
-            if not instruction
-            else f"Инструкция оператора: {instruction}\n\n{serialized_payload}"
-        )
         created_at = datetime.now(timezone.utc).isoformat()
-        llm_input_digest = hashlib.sha256(request_text.encode("utf-8")).hexdigest()
         request_version = "selection_v1"
-        request_details = {
-            "request_version": request_version,
-            "created_at": created_at,
-            "instruction": instruction,
-            "user_message": instruction,
+        system_prompt_text = selection_prompt()
+        response_format = selection_response_format(len(payload))
+        meta = {
+            "source": "video_announce.selection",
+            "count": len(payload),
             "system_prompt_id": "selection_prompt_v1",
             "system_prompt_name": "video_announce_selection",
             "period": _describe_period(events),
             "candidate_ids": event_ids,
-            "items": payload,
-            "llm_input_digest": llm_input_digest,
-            "llm_input_preview": request_text[:200],
         }
-        request_details_json = json.dumps(request_details, ensure_ascii=False, indent=2)
+        request_details = {
+            "request_version": request_version,
+            "created_at": created_at,
+            "system_prompt": system_prompt_text,
+            "user_instruction": instruction,
+            "user_message": instruction,
+            "response_format": response_format,
+            "meta": meta,
+            "candidates": payload,
+        }
+        request_json = json.dumps(request_details, ensure_ascii=False)
+        llm_input_digest = hashlib.sha256(request_json.encode("utf-8")).hexdigest()
+        request_details["meta"]["llm_input_digest"] = llm_input_digest
+        request_details["meta"]["llm_input_preview"] = request_json[:200]
+        request_json = json.dumps(request_details, ensure_ascii=False, indent=2)
         preview = json.dumps(payload[:3], ensure_ascii=False)
         logger.info(
             "video_announce: llm selection request items=%d promoted=%d preview=%s instruction=%s",
@@ -487,11 +491,11 @@ async def _rank_with_llm(
             preview,
             bool(instruction),
         )
-        if instruction and bot and notify_chat_id:
+        if bot and notify_chat_id:
             try:
                 filename = f"selection_request_{session_id or 'session'}.json"
                 document = types.BufferedInputFile(
-                    request_details_json.encode("utf-8"),
+                    request_json.encode("utf-8"),
                     filename=filename,
                 )
                 await bot.send_document(
@@ -503,12 +507,12 @@ async def _rank_with_llm(
             except Exception:
                 logger.exception("video_announce: failed to send ranking request document")
         raw = await ask_4o(
-            request_text,
-            system_prompt=selection_prompt(),
-            response_format=selection_response_format(len(payload)),
-            meta={"source": "video_announce.selection", "count": len(payload)},
+            request_json,
+            system_prompt=system_prompt_text,
+            response_format=response_format,
+            meta=meta,
         )
-        if instruction and bot and notify_chat_id:
+        if bot and notify_chat_id:
             try:
                 filename = f"selection_response_{session_id or 'session'}.json"
                 document = types.BufferedInputFile(
@@ -530,7 +534,7 @@ async def _rank_with_llm(
             session_id=session_id,
             stage="selection",
             model="gpt-4o",
-            request_json=request_details_json,
+            request_json=request_json,
             response_json=raw,
         )
     except Exception:
