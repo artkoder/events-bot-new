@@ -134,7 +134,7 @@ async def update_status_message(
                 return (sent.chat.id, sent.message_id)
             if chat_id is not None and message_id is not None:
                 await bot.edit_message_text(
-                    text, chat_id, message_id, reply_markup=markup
+                    text=text, chat_id=chat_id, message_id=message_id, reply_markup=markup
                 )
                 remember_status_message(session_obj.id, chat_id, message_id)
                 return (chat_id, message_id)
