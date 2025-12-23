@@ -30,6 +30,7 @@ class PosterMedia:
     catbox_url: str | None = None
     digest: str | None = None
     ocr_text: str | None = None
+    ocr_title: str | None = None
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
     total_tokens: int | None = None
@@ -95,6 +96,12 @@ async def _run_ocr(poster: PosterMedia, model: str, detail: str) -> None:
         logging.warning("poster ocr failed name=%s error=%s", poster.name, exc)
         return
     poster.ocr_text = result.text
+    poster.ocr_title = result.title
+    logging.info(
+        "poster_ocr success hash=%s ocr_title=%r source=from_llm",
+        poster.digest,
+        (poster.ocr_title or "")[:120],
+    )
     usage = result.usage
     poster.prompt_tokens = usage.prompt_tokens
     poster.completion_tokens = usage.completion_tokens
@@ -225,6 +232,12 @@ def apply_ocr_results_to_media(
         if cache_hash:
             poster.digest = cache_hash
         poster.ocr_text = getattr(cache, "text", None)
+        poster.ocr_title = getattr(cache, "title", None)
+        logging.info(
+            "poster_ocr success hash=%s ocr_title=%r source=from_cache",
+            cache_hash,
+            (poster.ocr_title or "")[:120],
+        )
         poster.prompt_tokens = getattr(cache, "prompt_tokens", None)
         poster.completion_tokens = getattr(cache, "completion_tokens", None)
         poster.total_tokens = getattr(cache, "total_tokens", None)

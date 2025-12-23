@@ -37,6 +37,7 @@ class OcrUsage:
 class OcrResult:
     text: str
     usage: OcrUsage
+    title: str | None = None
     request_id: str | None = None
 
 
@@ -90,11 +91,11 @@ async def run_ocr(image_bytes: bytes, *, model: str, detail: str) -> OcrResult:
     payload = {
         "model": model,
         "messages": [
-            {"role": "system", "content": "верни только распознанный текст"},
+            {"role": "system", "content": 'верни JSON: {"poster_ocr_text": "...", "ocr_title": "..."}. ocr_title - самый крупный заголовок.'},
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": "Распознай текст на изображении."},
+                    {"type": "text", "text": "Распознай текст на изображении. Верни JSON с полями poster_ocr_text (весь текст) и ocr_title (самый крупный заголовок/доминирующий блок). Если заголовка нет или это мета-информация (год/дата) - пустая строка."},
                     {
                         "type": "image_url",
                         "image_url": {
@@ -105,6 +106,7 @@ async def run_ocr(image_bytes: bytes, *, model: str, detail: str) -> OcrResult:
                 ],
             },
         ],
+        "response_format": {"type": "json_object"},
         "temperature": 0,
     }
     headers = {
@@ -162,22 +164,39 @@ async def run_ocr(image_bytes: bytes, *, model: str, detail: str) -> OcrResult:
     try:
         choice = data.get("choices", [{}])[0]
         message = choice.get("message", {})
-        text = (message.get("content") or "").strip()
+        content = (message.get("content") or "").strip()
         usage_data = data.get("usage", {}) or {}
         request_id = data.get("id")
     except (AttributeError, IndexError, TypeError) as exc:  # pragma: no cover - unexpected
         logging.error("Invalid OCR response: data=%s", data)
         raise RuntimeError("Incomplete OCR response") from exc
 
-    if not text:
-        raise RuntimeError("Empty OCR response")
+    text = content
+    title: str | None = None
+    parsed_successfully = False
+    if content.startswith("{"):
+        import json
+        try:
+            parsed = json.loads(content)
+            text = parsed.get("poster_ocr_text") or ""
+            title = parsed.get("ocr_title") or ""
+            parsed_successfully = True
+        except json.JSONDecodeError:
+            logging.warning("OCR returned invalid JSON, falling back to raw content")
+
+    if not text and not title and not parsed_successfully:
+        # Fallback if both empty and parsing failed or wasn't attempted.
+        # If raw content was empty string, we raise error.
+        if not content:
+            raise RuntimeError("Empty OCR response")
+        text = content
 
     usage = OcrUsage(
         prompt_tokens=int(usage_data.get("prompt_tokens", 0) or 0),
         completion_tokens=int(usage_data.get("completion_tokens", 0) or 0),
         total_tokens=int(usage_data.get("total_tokens", 0) or 0),
     )
-    return OcrResult(text=text, usage=usage, request_id=request_id)
+    return OcrResult(text=text, title=title, usage=usage, request_id=request_id)
 
 
 def _detect_image_mime(data: bytes) -> str:
