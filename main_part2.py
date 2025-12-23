@@ -4261,17 +4261,18 @@ async def show_edit_menu(
                 hash_display = poster.poster_hash[:10]
                 poster_lines.append(f"{idx}. hash={hash_display}{token_info}")
                 poster_lines.append(f"    ocr_title: {poster.ocr_title or ''}")
+                poster_lines.append("    ocr_text:")
                 raw_lines = (poster.ocr_text or "").splitlines()
                 cleaned_lines = [line.strip() for line in raw_lines if line.strip()]
                 if not cleaned_lines:
                     cleaned_lines = ["<пусто>"]
                 for text_line in cleaned_lines:
-                    poster_lines.append(f"    {text_line}")
+                    poster_lines.append(f"        {text_line}")
                 if poster.catbox_url:
                     url = poster.catbox_url
                     if len(url) > 120:
                         url = url[:117] + "..."
-                    poster_lines.append(f"    {url}")
+                    poster_lines.append(f"    catbox_url: {url}")
             poster_lines.append("---")
 
     lines = []
