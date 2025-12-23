@@ -20,6 +20,14 @@ _EMOJI_RE = re.compile(
 _PUNCT_STRIP_RE = re.compile(r"[«»\"' <>.,!?:;()\[\]{}]")
 
 
+def _clean_primary_about(text: str | None, *, strip_emojis: bool) -> str:
+    cleaned = str(text or "")
+    if strip_emojis:
+        cleaned = _EMOJI_RE.sub("", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
+
 def _tokenize(text: str | None) -> list[str]:
     cleaned = _EMOJI_RE.sub("", str(text or "")).replace("\n", " ")
     tokens: list[str] = []
@@ -38,7 +46,7 @@ def _prepare_drop_sets(title: str | None, ocr_text: str | None, anchor_limit: in
     return anchors, drop_tokens
 
 
-def normalize_about_text(
+def _shorten_about_text(
     text: str | None,
     *,
     title: str | None = None,
@@ -47,8 +55,6 @@ def normalize_about_text(
     char_limit: int = 60,
     anchor_limit: int = 2,
 ) -> str:
-    """Normalize a short about string with OCR-aware de-duplication."""
-
     anchors, drop_tokens = _prepare_drop_sets(title, ocr_text, anchor_limit)
     normalized: list[str] = []
     seen: set[str] = set()
@@ -68,6 +74,21 @@ def normalize_about_text(
     return " ".join(normalized)
 
 
+def normalize_about_text(
+    text: str | None,
+    *,
+    title: str | None = None,
+    ocr_text: str | None = None,
+    word_limit: int = 12,
+    char_limit: int = 60,
+    anchor_limit: int = 2,
+    strip_emojis: bool = True,
+) -> str:
+    """Lightly clean LLM-provided about text without dropping tokens."""
+
+    return _clean_primary_about(text, strip_emojis=strip_emojis)
+
+
 def normalize_about_with_fallback(
     primary: str | None,
     *,
@@ -77,6 +98,7 @@ def normalize_about_with_fallback(
     word_limit: int = 12,
     char_limit: int = 60,
     anchor_limit: int = 2,
+    strip_emojis: bool = True,
 ) -> str:
     normalized = normalize_about_text(
         primary,
@@ -85,16 +107,18 @@ def normalize_about_with_fallback(
         word_limit=word_limit,
         char_limit=char_limit,
         anchor_limit=anchor_limit,
+        strip_emojis=strip_emojis,
     )
     if normalized:
         return normalized
 
     fallback = " ".join(part for part in (title, *fallback_parts) if part)
-    return normalize_about_text(
+    return _shorten_about_text(
         fallback,
         title=title,
         ocr_text=ocr_text,
         word_limit=word_limit,
         char_limit=char_limit,
         anchor_limit=anchor_limit,
+        
     )
