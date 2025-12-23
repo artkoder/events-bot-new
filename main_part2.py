@@ -9991,14 +9991,14 @@ async def _vkrev_import_flow(
 ) -> None:
     async with db.raw_conn() as conn:
         cur = await conn.execute(
-            "SELECT group_id, post_id, text FROM vk_inbox WHERE id=?",
+            "SELECT group_id, post_id, text, date, event_ts_hint FROM vk_inbox WHERE id=?",
             (inbox_id,),
         )
         row = await cur.fetchone()
     if not row:
         await bot.send_message(chat_id, "Инбокс не найден")
         return
-    group_id, post_id, text = row
+    group_id, post_id, text, publish_ts, event_ts_hint = row
     async with db.raw_conn() as conn:
         cur = await conn.execute(
             "SELECT name, location, default_time, default_ticket_link FROM vk_source WHERE group_id=?",
@@ -10061,6 +10061,8 @@ async def _vkrev_import_flow(
         festival_names=festival_names,
         festival_alias_pairs=festival_alias_pairs or None,
         festival_hint=festival_hint,
+        publish_ts=publish_ts,
+        event_ts_hint=event_ts_hint,
         db=db,
     )
     source_post_url = f"https://vk.com/wall-{group_id}_{post_id}"

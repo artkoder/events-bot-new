@@ -85,8 +85,7 @@ The user message will start with the current date, e.g. "Today is
 include any event whose date is earlier than today.**
 
 Guidelines:
-- If the event text does not specify a year, assume it happens in the current
-  year.
+- If the year is missing, choose the nearest future date relative to ‘Today’ (from the system header). If the day/month has already passed this year, roll the year forward.
 - Omit any events dated before today.
 - When a festival period is mentioned but only some performances are described,
   include just those individual events with their own dates and set the
