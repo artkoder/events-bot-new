@@ -4,7 +4,7 @@ sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 import asyncio
 import hashlib
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import pytest
@@ -191,6 +191,8 @@ async def test_vkrev_import_flow_persists_url_and_skips_vk_sync(tmp_path, monkey
         default_time=None,
         default_ticket_link=None,
         operator_extra=None,
+        publish_ts=None,
+        event_ts_hint=None,
         festival_names=None,
         festival_alias_pairs=None,
         festival_hint=False,
@@ -306,7 +308,7 @@ async def test_vkrev_import_flow_reports_ocr_usage(tmp_path, monkeypatch):
         location_hint=None,
         default_time=None,
         default_ticket_link=None,
-        operator_extra=None,
+        operator_extra=None, publish_ts=None, event_ts_hint=None,
         festival_names=None,
         festival_alias_pairs=None,
         festival_hint=False,
@@ -431,7 +433,7 @@ async def test_vkrev_import_flow_passes_festival_hint(tmp_path, monkeypatch):
         ]
 
     def fake_require(name: str):
-        assert name == "parse_event_via_4o"
+        if name == "LOCAL_TZ": return timezone.utc; assert name == "parse_event_via_4o"
         return fake_parse
 
     async def fake_persist(draft, photos, db_, source_post_url=None):
@@ -1221,7 +1223,7 @@ async def test_handle_vk_extra_message_exposes_text_links(monkeypatch):
         db,
         bot,
         *,
-        operator_extra=None,
+        operator_extra=None, publish_ts=None, event_ts_hint=None,
         force_festival=False,
     ):
         captured["chat_id"] = chat_id
@@ -1292,7 +1294,7 @@ async def test_handle_vk_extra_message_exposes_text_links_with_parentheses(monke
         db,
         bot,
         *,
-        operator_extra=None,
+        operator_extra=None, publish_ts=None, event_ts_hint=None,
         force_festival=False,
     ):
         captured["chat_id"] = chat_id
@@ -1365,7 +1367,7 @@ async def test_handle_vk_extra_message_preserves_emoji_offsets(monkeypatch):
         db,
         bot,
         *,
-        operator_extra=None,
+        operator_extra=None, publish_ts=None, event_ts_hint=None,
         force_festival=False,
     ):
         captured["operator_extra"] = operator_extra
@@ -1433,7 +1435,7 @@ async def test_handle_vk_extra_message_forces_festival(monkeypatch):
         db,
         bot,
         *,
-        operator_extra=None,
+        operator_extra=None, publish_ts=None, event_ts_hint=None,
         force_festival=False,
     ):
         captured["force_festival"] = force_festival
@@ -1495,7 +1497,7 @@ async def test_handle_vk_review_accept_fest_forces_flag(tmp_path, monkeypatch):
         db_,
         bot_,
         *,
-        operator_extra=None,
+        operator_extra=None, publish_ts=None, event_ts_hint=None,
         force_festival=False,
     ):
         captured["force_festival"] = force_festival
@@ -1648,7 +1650,7 @@ async def test_vkrev_import_flow_force_festival_accepts_full_name(monkeypatch, t
         location_hint=None,
         default_time=None,
         default_ticket_link=None,
-        operator_extra=None,
+        operator_extra=None, publish_ts=None, event_ts_hint=None,
         festival_names=None,
         festival_alias_pairs=None,
         festival_hint=False,

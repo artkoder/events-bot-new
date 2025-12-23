@@ -1077,6 +1077,8 @@ async def build_event_drafts_from_vk(
     default_time: str | None = None,
     default_ticket_link: str | None = None,
     operator_extra: str | None = None,
+    publish_ts: datetime | int | float | None = None,
+    event_ts_hint: int | None = None,
     festival_names: list[str] | None = None,
     festival_alias_pairs: Sequence[tuple[str, int]] | None = None,
     festival_hint: bool = False,
@@ -1159,6 +1161,36 @@ async def build_event_drafts_from_vk(
         trimmed = combined_text.rstrip()
         combined_text = f"{trimmed}\n\n{extra_clean}" if trimmed else extra_clean
 
+    # Date normalization logic
+    tzinfo = require_main_attr("LOCAL_TZ")
+    if publish_ts is None:
+        anchor_dt = datetime.now(tzinfo)
+    elif isinstance(publish_ts, datetime):
+        anchor_dt = publish_ts.astimezone(tzinfo) if publish_ts.tzinfo else publish_ts.replace(tzinfo=tzinfo)
+    else:
+        anchor_dt = datetime.fromtimestamp(publish_ts, tzinfo)
+
+    effective_ts_hint = event_ts_hint
+    if operator_extra or effective_ts_hint is None:
+        computed = extract_event_ts_hint(
+            combined_text,
+            default_time,
+            publish_ts=publish_ts,
+            allow_past=False,
+            tz=tzinfo
+        )
+        if computed:
+            effective_ts_hint = computed
+
+    hint_dt = None
+    if effective_ts_hint:
+        hint_dt = datetime.fromtimestamp(effective_ts_hint, tzinfo)
+
+    _numeric_year_re = re.compile(r"\b\d{1,2}[./-]\d{1,2}[./-](19|20)\d{2}\b")
+    _month_names_patt = "|".join(sorted(MONTHS_RU.keys(), key=len, reverse=True))
+    _textual_year_re = re.compile(rf"\b\d{{1,2}}\s+(?:{_month_names_patt})\s+(?:19|20)\d{{2}}\b", re.IGNORECASE)
+    has_explicit_year_in_text = bool(_numeric_year_re.search(combined_text) or _textual_year_re.search(combined_text))
+
     def clean_int(value: Any) -> int | None:
         if value in (None, ""):
             return None
@@ -1217,11 +1249,49 @@ async def build_event_drafts_from_vk(
             links = [fallback_ticket_link]
         else:
             links = None
+
+        raw_date = clean_str(data.get("date"))
+        raw_time = clean_str(data.get("time")) or default_time
+        final_date = raw_date
+        final_time = raw_time
+
+        if raw_date and not has_explicit_year_in_text:
+            try:
+                d = date.fromisoformat(raw_date)
+                if d < anchor_dt.date():
+                    candidate = d
+                    for _ in range(5):
+                        if candidate >= anchor_dt.date():
+                            break
+                        new_year = candidate.year + 1
+                        new_d = _safe_construct_date(new_year, candidate.month, candidate.day)
+                        if not new_d:
+                            try:
+                                new_d = date(new_year, 3, 1)
+                            except ValueError:
+                                break
+                        candidate = new_d
+                    if candidate >= anchor_dt.date():
+                        final_date = candidate.isoformat()
+
+                if hint_dt:
+                    try:
+                        d_check = date.fromisoformat(final_date or raw_date)
+                        if (d_check.month, d_check.day) == (hint_dt.month, hint_dt.day):
+                            if d_check.year != hint_dt.year:
+                                final_date = hint_dt.date().isoformat()
+                            if not final_time:
+                                final_time = hint_dt.strftime("%H:%M")
+                    except ValueError:
+                        pass
+            except ValueError:
+                pass
+
         drafts.append(
             EventDraft(
                 title=data.get("title", ""),
-                date=data.get("date"),
-                time=data.get("time") or default_time,
+                date=final_date,
+                time=final_time,
                 venue=data.get("location_name"),
                 description=data.get("short_description"),
                 festival=clean_str(data.get("festival")),
@@ -1302,6 +1372,8 @@ async def build_event_drafts(
     default_time: str | None = None,
     default_ticket_link: str | None = None,
     operator_extra: str | None = None,
+    publish_ts: datetime | int | float | None = None,
+    event_ts_hint: int | None = None,
     festival_names: list[str] | None = None,
     festival_alias_pairs: list[tuple[str, int]] | None = None,
     festival_hint: bool = False,
@@ -1373,6 +1445,8 @@ async def build_event_drafts(
         default_time=default_time,
         default_ticket_link=default_ticket_link,
         operator_extra=operator_extra,
+        publish_ts=publish_ts,
+        event_ts_hint=event_ts_hint,
         festival_names=festival_names,
         festival_alias_pairs=festival_alias_pairs,
         festival_hint=festival_hint,
@@ -1394,6 +1468,8 @@ async def build_event_draft(
     default_time: str | None = None,
     default_ticket_link: str | None = None,
     operator_extra: str | None = None,
+    publish_ts: datetime | int | float | None = None,
+    event_ts_hint: int | None = None,
     festival_names: list[str] | None = None,
     festival_alias_pairs: list[tuple[str, int]] | None = None,
     festival_hint: bool = False,
