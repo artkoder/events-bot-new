@@ -173,6 +173,12 @@ async def recognize_posters(
                 continue
 
             ocr_result = await run_ocr(data, model=model, detail=detail)
+            logger.info(
+                "poster_ocr.llm_result hash=%s ocr_title=%r",
+                digest,
+                (ocr_result.title or "")[:120],
+                extra=log_extra,
+            )
             usage = ocr_result.usage
             entry = cache_map.get(cache_key)
             if entry is None:
@@ -210,6 +216,7 @@ async def recognize_posters(
                     detail=detail,
                     model=model,
                     text=ocr_result.text,
+                    title=ocr_result.title,
                     created_at=created_at,
                     **token_counts,
                 )
@@ -230,6 +237,7 @@ async def recognize_posters(
                     "detail": entry.detail,
                     "model": entry.model,
                     "text": entry.text,
+                    "title": entry.title,
                     "prompt_tokens": entry.prompt_tokens,
                     "completion_tokens": entry.completion_tokens,
                     "total_tokens": entry.total_tokens,
@@ -277,6 +285,7 @@ async def recognize_posters(
                 ],
                 set_={
                     "text": insert_stmt.excluded.text,
+                    "title": insert_stmt.excluded.title,
                     "prompt_tokens": insert_stmt.excluded.prompt_tokens,
                     "completion_tokens": insert_stmt.excluded.completion_tokens,
                     "total_tokens": insert_stmt.excluded.total_tokens,

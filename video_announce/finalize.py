@@ -92,6 +92,7 @@ async def _ensure_ocr_cached(db: Database, grouped: dict[int, list[EventPoster]]
             if cache is None:
                 continue
             poster.ocr_text = cache.text
+            poster.ocr_title = cache.title
             poster.prompt_tokens = cache.prompt_tokens
             poster.completion_tokens = cache.completion_tokens
             poster.total_tokens = cache.total_tokens
