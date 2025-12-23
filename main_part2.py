@@ -6,6 +6,8 @@ import time as _time
 from dataclasses import dataclass, field
 from typing import Callable, Iterable
 
+from telegraph import Telegraph
+
 from models import Event, Festival
 
 
