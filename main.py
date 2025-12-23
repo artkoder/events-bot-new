@@ -9539,6 +9539,8 @@ async def upsert_event_posters(
                 row.catbox_url = item.catbox_url
             if item.ocr_text is not None:
                 row.ocr_text = item.ocr_text
+            if item.ocr_title is not None:
+                row.ocr_title = item.ocr_title
             if prompt_tokens is not None:
                 row.prompt_tokens = int(prompt_tokens)
             if completion_tokens is not None:
