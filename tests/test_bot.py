@@ -1083,6 +1083,7 @@ async def test_show_edit_menu_displays_poster_ocr_preview(tmp_path: Path):
             EventPoster(
                 event_id=event.id,
                 poster_hash="1234567890abcdef",
+                ocr_title="Заголовок теста",
                 ocr_text="Строка один\nСтрока два\nСтрока три\nСтрока четыре",
                 catbox_url="https://cat.box/a",
                 prompt_tokens=2,
@@ -1099,6 +1100,7 @@ async def test_show_edit_menu_displays_poster_ocr_preview(tmp_path: Path):
     message_text = bot.messages[-1][1]
     assert "Poster OCR:" in message_text
     assert "hash=1234567890" in message_text
+    assert "ocr_title: Заголовок теста" in message_text
     assert "prompt=2" in message_text
     assert "completion=3" in message_text
     assert "total=5" in message_text
