@@ -4236,6 +4236,9 @@ async def show_edit_menu(
     database = db_obj or globals().get("db")
     poster_lines: list[str] = []
     if database and event.id:
+        from sqlmodel import select
+        from models import EventPoster
+
         async with database.get_session() as session:
             posters = (
                 await session.execute(
@@ -4257,6 +4260,7 @@ async def show_edit_menu(
                 token_info = f" ({', '.join(token_parts)})" if token_parts else ""
                 hash_display = poster.poster_hash[:10]
                 poster_lines.append(f"{idx}. hash={hash_display}{token_info}")
+                poster_lines.append(f"    ocr_title: {poster.ocr_title or ''}")
                 raw_lines = (poster.ocr_text or "").splitlines()
                 cleaned_lines = [line.strip() for line in raw_lines if line.strip()]
                 if not cleaned_lines:
