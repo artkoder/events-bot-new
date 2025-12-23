@@ -8,8 +8,8 @@ _DEFAULT_PROMPT = (
     " привяжи хронометраж, упомяни площадку и время."
 )
 
-def selection_response_format(candidate_count: int) -> dict:
-    max_items = max(1, int(candidate_count or 0))
+
+def selection_response_format(max_items: int = 8) -> dict:
     return {
         "type": "json_schema",
         "json_schema": {
@@ -17,32 +17,22 @@ def selection_response_format(candidate_count: int) -> dict:
             "schema": {
                 "type": "object",
                 "properties": {
-                    "intro_text": {"type": "string"},
+                    "intro_text": {"type": ["string", "null"]},
                     "items": {
                         "type": "array",
                         "maxItems": max_items,
-                        "minItems": max_items,
+                        "minItems": 0,
                         "items": {
                             "type": "object",
                             "properties": {
                                 "event_id": {"type": "integer"},
-                                "score": {"type": "number"},
+                                "score": {"type": ["number", "null"]},
                                 "reason": {"type": ["string", "null"]},
-                                "selected": {"type": ["boolean", "null"]},
-                                "selected_reason": {"type": ["string", "null"]},
-                                "about": {"type": ["string", "null"]},
-                                "description": {"type": ["string", "null"]},
-                                "final_title": {"type": ["string", "null"]},
                             },
                             "required": [
                                 "event_id",
                                 "score",
                                 "reason",
-                                "selected",
-                                "selected_reason",
-                                "about",
-                                "description",
-                                "final_title",
                             ],
                             "additionalProperties": False,
                         },
@@ -54,6 +44,7 @@ def selection_response_format(candidate_count: int) -> dict:
             "strict": True,
         },
     }
+
 
 FINAL_TEXT_RESPONSE_FORMAT = {
     "type": "json_schema",
@@ -113,21 +104,13 @@ def available_prompts() -> list[str]:
 def selection_prompt() -> str:
     return (
         "Ты ассистент видеоредактора. Получишь JSON с событиями и должен"
-        " выбрать порядок показа (только на русском) для короткого ролика."
+        " выбрать события (только на русском) для короткого ролика."
         " Приоритетно выполни инструкцию оператора: если правила конфликта"
-        " — следуй ей. Оцени и упомяни КАЖДОЕ событие по одному разу,"
-        " выставь score 0–10 и краткую причину. Обязательно включай все"
-        " promoted=true в итоговый выбор даже если это превышает лимиты."
-        " Отбери 6–8 событий (максимум 8) как selected=true для ролика,"
-        " остальные отмечай selected=false с коротким selected_reason."
-        " Стремись к разнообразию тематик и форматов, выделяй интерес,"
-        " уникальность, свежесть, семейную ценность и пригодность"
-        " OCR/Telegraph контекста. Не используй количество постеров как критерий."
-        " При оценке опирайся на search_digest (если есть) и poster_ocr_text."
-        " Добавь intro_text — лаконичное вступление в 1–2 предложения."
-        " Для каждого события верни about (до 12 слов, без эмодзи и кавычек)"
-        " и одно предложение description с узнаваемым названием +"
-        " формат/место/время. Ответ строго JSON со списком items без пояснений."
+        " — следуй ей. Выбери до 8 лучших событий, которые подходят под инструкцию и критерии."
+        " Верни event_id, score (0–10) и причину выбора (reason, до 120 символов)."
+        " НЕ выдумывай событий, используй только предоставленные candidates."
+        " Если события не подходят, верни пустой список items или меньше 8."
+        " Ответ строго JSON, содержащий intro_text (вступление 1-2 предложения) и items."
     )
 
 
