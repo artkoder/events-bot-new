@@ -10739,7 +10739,34 @@ async def add_events_from_text(
                 week=f"{d.year}-{week:02d}" if week else None,
                 weekend=w_start.isoformat() if w_start else None,
             )
-            saved.search_digest = (data.get("search_digest") or "").strip() or None
+            from digest_helper import clean_search_digest
+            raw_digest = (data.get("search_digest") or "").strip()
+            saved.search_digest = clean_search_digest(raw_digest)
+
+            if saved.search_digest:
+                digest_words = len(saved.search_digest.split())
+                digest_chars = len(saved.search_digest)
+                has_reviews = "Отзывы" in (saved.source_text or "")
+                has_schedule = "РАСПИСАНИЕ" in (saved.source_text or "")
+                logging.info(
+                    "digest_quality event_id=%s words=%d chars=%d reviews=%s schedule=%s digest='%s'",
+                    saved.id,
+                    digest_words,
+                    digest_chars,
+                    has_reviews,
+                    has_schedule,
+                    saved.search_digest,
+                )
+                if digest_words < 20:
+                    logging.warning(
+                        "digest_short event_id=%s words=%d digest='%s'",
+                        saved.id,
+                        digest_words,
+                        saved.search_digest,
+                    )
+            else:
+                logging.warning("digest_empty event_id=%s", saved.id)
+
             lines = [
                 f"title: {saved.title}",
                 f"date: {saved.date}",
