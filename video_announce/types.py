@@ -98,6 +98,7 @@ class SelectionBuildResult:
     mandatory_ids: set[int]
     candidates: list[Event]
     selected_ids: set[int]
+    intro_text: str | None = None
 
 
 @dataclass

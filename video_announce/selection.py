@@ -313,16 +313,20 @@ def _apply_repeat_limit(
     return selected
 
 
-def _parse_llm_ranking(raw: str, known_ids: set[int]) -> list[RankedChoice]:
+def _parse_llm_ranking(raw: str, known_ids: set[int]) -> tuple[str | None, list[RankedChoice]]:
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
         logger.warning("video_announce: failed to parse ranking JSON")
-        return []
+        return (None, [])
+    intro_text = None
+    if isinstance(data, dict):
+        raw_intro = data.get("intro_text")
+        intro_text = raw_intro.strip() if isinstance(raw_intro, str) else None
     items = data.get("items") if isinstance(data, dict) else None
     parsed: list[RankedChoice] = []
     if not isinstance(items, list):
-        return parsed
+        return intro_text, parsed
     for item in items:
         if not isinstance(item, dict):
             continue
@@ -346,7 +350,7 @@ def _parse_llm_ranking(raw: str, known_ids: set[int]) -> list[RankedChoice]:
                 description=str(description_raw).strip() if description_raw else None,
             )
         )
-    return parsed
+    return intro_text, parsed
 
 
 def _describe_period(events: Sequence[Event]) -> str | None:
@@ -417,9 +421,9 @@ async def _rank_with_llm(
     instruction: str | None = None,
     bot: Any | None = None,
     notify_chat_id: int | None = None,
-) -> list[RankedEvent]:
+) -> tuple[list[RankedEvent], str | None]:
     if not events:
-        return []
+        return ([], None)
     event_ids = [e.id for e in events]
     poster_texts = await _load_poster_ocr_texts(db, event_ids)
     telegraph_tasks: dict[int, asyncio.Task[str | None]] = {}
@@ -450,6 +454,7 @@ async def _rank_with_llm(
                 "poster_ocr_text": poster_texts.get(ev.id),
             }
         )
+    intro_text: str | None = None
     try:
         serialized_payload = json.dumps(payload, ensure_ascii=False)
         request_text = (
@@ -519,7 +524,7 @@ async def _rank_with_llm(
             except Exception:
                 logger.exception("video_announce: failed to send ranking response document")
 
-        parsed = _parse_llm_ranking(raw, {e.id for e in events})
+        intro_text, parsed = _parse_llm_ranking(raw, {e.id for e in events})
         await _store_llm_trace(
             db,
             session_id=session_id,
@@ -572,7 +577,7 @@ async def _rank_with_llm(
             )
             for idx, row in enumerate(_score_events(client, events))
         ]
-    return ranked
+    return ranked, intro_text
 
 
 async def prepare_session_items(
@@ -682,6 +687,19 @@ def payload_as_json(payload: RenderPayload, tz: timezone) -> str:
             return f"{pretty_date} {short_time}"
         return pretty_date
 
+    selection_params = (
+        payload.session.selection_params
+        if isinstance(payload.session.selection_params, dict)
+        else {}
+    )
+    intro_text_override = None
+    if isinstance(selection_params, dict):
+        intro_text_override = (
+            str(selection_params.get("intro_text_override") or "").strip()
+            or str(selection_params.get("intro_text") or "").strip()
+            or None
+        )
+
     event_map = {ev.id: ev for ev in payload.events}
     scenes = []
     for item in sorted(payload.items, key=lambda it: it.position):
@@ -701,11 +719,15 @@ def payload_as_json(payload: RenderPayload, tz: timezone) -> str:
             "date": _format_scene_date(ev),
             "location": location,
             "images": [_poster_name(item, ev)],
+            "is_free": bool(getattr(ev, "is_free", False)),
         }
         scenes.append(scene)
 
     obj = {
-        "intro": {"count": len(scenes), "text": _intro_text(payload.events)},
+        "intro": {
+            "count": len(scenes),
+            "text": intro_text_override or _intro_text(payload.events),
+        },
         "scenes": scenes,
     }
     return json.dumps(obj, ensure_ascii=False, indent=2)
@@ -777,7 +799,7 @@ async def build_selection(
 
     async def _rank_events(
         current_events: Sequence[Event],
-    ) -> tuple[list[RankedEvent], set[int], set[int]]:
+    ) -> tuple[list[RankedEvent], set[int], set[int], str | None]:
         _log_event_selection_stats(current_events)
         filtered_events = list(current_events)
         mandatory_ids_local = {
@@ -799,7 +821,7 @@ async def build_selection(
             )
         )
         selected_ids_local = {ev.id for ev in selected_local}
-        ranked_local = await _rank_with_llm(
+        ranked_local, intro_text_local = await _rank_with_llm(
             db,
             client,
             selected_local,
@@ -810,9 +832,9 @@ async def build_selection(
             bot=bot,
             notify_chat_id=notify_chat_id,
         )
-        return ranked_local, mandatory_ids_local, selected_ids_local
+        return ranked_local, mandatory_ids_local, selected_ids_local, intro_text_local
 
-    ranked, mandatory_ids, selected_ids = await _rank_events(events)
+    ranked, mandatory_ids, selected_ids, intro_text = await _rank_events(events)
     default_ready_ids = _choose_default_ready(
         ranked,
         mandatory_ids,
@@ -843,4 +865,5 @@ async def build_selection(
         mandatory_ids=mandatory_ids,
         candidates=events,
         selected_ids=default_ready_ids,
+        intro_text=intro_text,
     )
