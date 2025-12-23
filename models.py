@@ -347,6 +347,7 @@ class Event(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     title: str
     description: str
+    search_digest: Optional[str] = None
     festival: Optional[str] = None
     date: str
     time: str

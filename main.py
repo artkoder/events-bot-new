@@ -10736,6 +10736,7 @@ async def add_events_from_text(
                 week=f"{d.year}-{week:02d}" if week else None,
                 weekend=w_start.isoformat() if w_start else None,
             )
+            saved.search_digest = (data.get("search_digest") or "").strip() or None
             lines = [
                 f"title: {saved.title}",
                 f"date: {saved.date}",
@@ -10750,6 +10751,8 @@ async def add_events_from_text(
                 lines.append(f"festival: {saved.festival}")
             if saved.description:
                 lines.append(f"description: {saved.description}")
+            if saved.search_digest:
+                lines.append(f"search_digest: {saved.search_digest}")
             if saved.event_type:
                 lines.append(f"type: {saved.event_type}")
             if saved.ticket_price_min is not None:
@@ -10805,6 +10808,8 @@ def _event_lines(ev: Event) -> list[str]:
         lines.append(f"festival: {ev.festival}")
     if ev.description:
         lines.append(f"description: {ev.description}")
+    if ev.search_digest:
+        lines.append(f"search_digest: {ev.search_digest}")
     if ev.event_type:
         lines.append(f"type: {ev.event_type}")
     if ev.ticket_price_min is not None:
@@ -11052,6 +11057,7 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
         location_name=location,
         source_text=source_clean,
         creator_id=creator_id,
+        search_digest=None,
     )
     async with db.get_session() as session:
         event, added = await upsert_event(session, event)
