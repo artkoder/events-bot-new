@@ -934,21 +934,27 @@ class VideoAnnounceScenario:
                 result.ranked,
                 default_ready_ids=result.default_ready_ids,
             )
-        await self._persist_intro_text(session_obj, result.intro_text)
+        await self._persist_intro_text(session_obj, result.intro_text, valid=result.intro_text_valid)
         return result
 
     async def _persist_intro_text(
-        self, session_obj: VideoAnnounceSession, intro_text: str | None
+        self, session_obj: VideoAnnounceSession, intro_text: str | None, valid: bool = True
     ) -> None:
         intro = (intro_text or "").strip()
-        if not intro:
-            return
         async with self.db.get_session() as session:
             fresh = await session.get(VideoAnnounceSession, session_obj.id)
             if not fresh:
                 return
             params = self._get_selection_params(fresh)
-            params["intro_text"] = intro
+            if intro:
+                 params["intro_text"] = intro
+            if not valid:
+                 params["intro_text_valid"] = False
+            else:
+                 # If valid (or defaulting to True), remove the invalid flag if present?
+                 # Or explicitly set True?
+                 params["intro_text_valid"] = True
+
             fresh.selection_params = params
             session.add(fresh)
             await session.commit()
@@ -960,14 +966,21 @@ class VideoAnnounceScenario:
             return
         params = self._get_selection_params(session_obj)
         intro, intro_override, intro_llm = self._intro_texts(params)
+
+        # Check validity flag
+        is_valid = params.get("intro_text_valid", True)
+
         if not intro and not intro_llm:
-            intro_text = "LLM не предложило интро — задайте его вручную."
+            intro_text = "⚠️ LLM не предложило интро — задайте его вручную."
         elif intro_override:
             intro_text = f"Текущее интро: {html.escape(intro_override)}"
             if intro_llm and intro_llm != intro_override:
                 intro_text += "\nПредложение LLM: " + html.escape(intro_llm)
         else:
             intro_text = f"Предложение LLM: {html.escape(intro or intro_llm or '')}"
+            if not is_valid:
+                 intro_text = "⚠️ " + intro_text + "\n(Формат не соблюден, исправьте вручную)"
+
         lines = [
             f"Сессия #{session_obj.id}: интро для ролика",
             intro_text,
@@ -1026,6 +1039,12 @@ class VideoAnnounceScenario:
                 params["intro_text_override"] = intro
             else:
                 params.pop("intro_text_override", None)
+
+            # Reset validity flag if manual override or clearing override (assuming user fixes it or reverts to LLM which might be flagged invalid but that's ok)
+            # Actually if user types, we assume it's valid for now, or we could re-validate?
+            # Requirements say "don't retry LLM", "operator fixes manually".
+            # So if manual override is present, we consider it "valid" (or at least don't show the warning derived from LLM output).
+
             sess.selection_params = params
             session.add(sess)
             await session.commit()
