@@ -1,19 +1,77 @@
-name: Enable Auto-merge
+name: Auto ready + enable auto-merge
+
 on:
-  pull_request:
-    types: [opened, reopened, ready_for_review, synchronize]
+  workflow_run:
+    workflows: ["CI"]   # имя workflow из ci.yaml: name: CI
+    types: [completed]
+
+permissions:
+  actions: read
+  pull-requests: write
+  contents: write
 
 jobs:
   enable:
-    if: >
-      github.event.pull_request.base.ref == 'main' &&
-      github.event.pull_request.draft == false
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
-    permissions:
-      pull-requests: write
-      contents: write
     steps:
-      - uses: peter-evans/enable-pull-request-automerge@v3
+      - name: Mark PR ready (if draft) and enable auto-merge
+        uses: actions/github-script@v7
         with:
-          merge-method: squash
-          pull-request-number: ${{ github.event.pull_request.number }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const sha = context.payload.workflow_run.head_sha;
+
+            // (Опционально) ставьте метку "automerge" только на те PR, которые можно мержить автоматически.
+            // Если хотите автомержить ВСЕ PR после CI — закомментируйте requiredLabel.
+            const requiredLabel = "automerge";
+
+            const { data: prs } = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+              owner, repo, commit_sha: sha,
+            });
+
+            if (!prs.length) {
+              core.info(`No PR associated with sha ${sha}`);
+              return;
+            }
+
+            for (const pr of prs) {
+              if (pr.base.ref !== "main") {
+                core.info(`Skip PR #${pr.number}: base is ${pr.base.ref}`);
+                continue;
+              }
+
+              if (requiredLabel) {
+                const labels = (pr.labels || []).map(l => l.name);
+                if (!labels.includes(requiredLabel)) {
+                  core.info(`Skip PR #${pr.number}: missing label "${requiredLabel}"`);
+                  continue;
+                }
+              }
+
+              // 1) Mark ready if draft
+              if (pr.draft) {
+                core.info(`Mark ready: PR #${pr.number}`);
+                await github.graphql(
+                  `mutation($id:ID!) {
+                    markPullRequestReadyForReview(input:{pullRequestId:$id}) { clientMutationId }
+                  }`,
+                  { id: pr.node_id }
+                );
+              }
+
+              // 2) Enable auto-merge (squash)
+              core.info(`Enable auto-merge: PR #${pr.number}`);
+              await github.graphql(
+                `mutation($id:ID!) {
+                  enablePullRequestAutoMerge(input:{
+                    pullRequestId:$id,
+                    mergeMethod:SQUASH
+                  }) {
+                    pullRequest { number }
+                  }
+                }`,
+                { id: pr.node_id }
+              );
