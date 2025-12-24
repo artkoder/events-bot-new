@@ -167,7 +167,7 @@ async def fetch_candidates(db: Database, ctx: SelectionContext) -> list[Event]:
     combined = filtered + flexible
     if not combined:
         return events[: ctx.candidate_limit]
-    return combined[: max(ctx.candidate_limit * 2, ctx.candidate_limit)]
+    return combined[: ctx.candidate_limit]
 
 
 def _score_events(client: KaggleClient, events: Iterable[Event]) -> list[RankedEvent]:

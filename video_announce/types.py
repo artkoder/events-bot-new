@@ -82,7 +82,7 @@ class SelectionContext:
     tz: timezone
     target_date: date | None = None
     profile: VideoProfile | None = None
-    candidate_limit: int = 20
+    candidate_limit: int = 80
     default_selected_min: int = 6
     default_selected_max: int = 8
     primary_window_days: int = 3
