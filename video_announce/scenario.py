@@ -66,7 +66,8 @@ logger = logging.getLogger(__name__)
 CHANNEL_SETTING_KEY = "videoannounce_channels"
 DEFAULT_PRIMARY_WINDOW_DAYS = 3
 DEFAULT_FALLBACK_WINDOW_DAYS = 10
-DEFAULT_CANDIDATE_LIMIT = 20
+DEFAULT_CANDIDATE_LIMIT = 80
+MAX_CANDIDATE_LIMIT = 80
 DEFAULT_SELECTED_MIN = 6
 DEFAULT_SELECTED_MAX = 8
 PENDING_INSTRUCTION_TTL = 15 * 60
@@ -598,7 +599,9 @@ class VideoAnnounceScenario:
             profile=profile,
             primary_window_days=primary,
             fallback_window_days=fallback,
-            candidate_limit=max(candidate_limit, DEFAULT_SELECTED_MAX),
+            candidate_limit=min(
+                max(candidate_limit, DEFAULT_SELECTED_MAX), MAX_CANDIDATE_LIMIT
+            ),
             default_selected_min=max(default_selected_min, 1),
             default_selected_max=max(default_selected_max, default_selected_min),
             instruction=instruction,
