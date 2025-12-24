@@ -622,7 +622,28 @@ def payload_as_json(payload: RenderPayload, tz: timezone) -> str:
             urls.append(url)
         return urls[:1]
 
-    def _intro_text(events: Sequence[Event]) -> str:
+    # Date helpers
+    _MONTHS_GEN_UPPER = {
+        1: "ЯНВАРЯ", 2: "ФЕВРАЛЯ", 3: "МАРТА", 4: "АПРЕЛЯ", 5: "МАЯ", 6: "ИЮНЯ",
+        7: "ИЮЛЯ", 8: "АВГУСТА", 9: "СЕНТЯБРЯ", 10: "ОКТЯБРЯ", 11: "НОЯБРЯ", 12: "ДЕКАБРЯ"
+    }
+    _MONTHS_ABBR_UPPER = {
+        1: "ЯНВ", 2: "ФЕВ", 3: "МАР", 4: "АПР", 5: "МАЯ", 6: "ИЮН",
+        7: "ИЮЛ", 8: "АВГ", 9: "СЕН", 10: "ОКТ", 11: "НОЯ", 12: "ДЕК"
+    }
+
+    def _format_range_compact(start: date, end: date) -> str:
+        d1 = start.day
+        d2 = end.day
+        m1 = start.month
+        m2 = end.month
+        if start == end:
+            return f"{d1} {_MONTHS_GEN_UPPER.get(m1, '')}"
+        if m1 == m2:
+            return f"{d1}–{d2} {_MONTHS_GEN_UPPER.get(m1, '')}"
+        return f"{d1} {_MONTHS_ABBR_UPPER.get(m1, '')}–{d2} {_MONTHS_ABBR_UPPER.get(m2, '')}"
+
+    def _intro_date_prefix(events: Sequence[Event]) -> str:
         dates: list[date] = []
         for ev in events:
             try:
@@ -631,14 +652,74 @@ def payload_as_json(payload: RenderPayload, tz: timezone) -> str:
             except ValueError:
                 continue
         if not dates:
-            return "Видео афиша"
-        start = min(dates)
-        end = max(dates)
-        pretty_start = format_day_pretty(start)
-        if start == end:
-            return f"Афиша на {pretty_start}"
-        pretty_end = format_day_pretty(end)
-        return f"Афиша {pretty_start} – {pretty_end}"
+            return ""
+        return _format_range_compact(min(dates), max(dates))
+
+    def _contains_date(text: str) -> bool:
+        # Simple check for day + month or range
+        # Regex for "DD MONTH" or "DD-DD MONTH" or "DD MON - DD MON"
+        import re
+        pat = r"\d{1,2}\s*[\-–]\s*\d{1,2}" # Range like 24-26
+        if re.search(pat, text):
+            return True
+        # Check for month names
+        months = ["ЯНВ", "ФЕВ", "МАР", "АПР", "МАЙ", "ИЮН", "ИЮЛ", "АВГ", "СЕН", "ОКТ", "НОЯ", "ДЕК"]
+        upper = text.upper()
+        if any(m in upper for m in months):
+             if re.search(r"\d{1,2}", text):
+                 return True
+        return False
+
+    def _sanitize_theme(text: str) -> str:
+        import re
+        # Strip emojis (simplified regex or just non-ascii logic if desired, but we can reuse regex from about or local)
+        # Using a broad approach: remove non-alphanumeric/space/hyphen/punctuation, but keep russian letters
+        # Actually just strip emojis and common punctuation.
+
+        # Simple punct strip
+        cleaned = re.sub(r"[«»\"'<>!?:;()\[\]{}]", "", text)
+        # Strip emojis (unicode ranges) - reuse simplified range from about.py concept
+        emoji_pattern = re.compile("[\U00010000-\U0010ffff]", flags=re.UNICODE)
+        cleaned = emoji_pattern.sub(r"", cleaned)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip().upper()
+        return cleaned
+
+    def _fit_intro(date_part: str, theme: str, max_len: int = 32) -> str:
+        if not theme:
+            return date_part[:max_len]
+
+        full = f"{date_part} {theme}"
+        if len(full) <= max_len:
+            return full
+
+        # Need to shorten theme
+        # Try word by word
+        available = max_len - len(date_part) - 1 # space
+        if available <= 3:
+             # Too small for meaningful theme, just date? Or strict truncation
+             return full[:max_len].strip()
+
+        words = theme.split()
+        fitted = []
+        current_len = 0
+        for w in words:
+            if current_len + (1 if fitted else 0) + len(w) <= available:
+                fitted.append(w)
+                current_len += (1 if fitted else 0) + len(w)
+            else:
+                break
+
+        if fitted:
+            return f"{date_part} {' '.join(fitted)}"
+
+        # Fallback: strict cut if even first word doesn't fit
+        return full[:max_len].strip()
+
+    def _is_missing_time(t: str) -> bool:
+        if not t:
+            return True
+        first = t.strip().split(" ")[0].split("-")[0].split("–")[0]
+        return first in ("00:00", "0:00")
 
     def _format_scene_date(ev: Event) -> str:
         base_date = ev.date.split("..", 1)[0]
@@ -646,8 +727,9 @@ def payload_as_json(payload: RenderPayload, tz: timezone) -> str:
             pretty_date = format_day_pretty(date.fromisoformat(base_date))
         except Exception:
             pretty_date = base_date
+
         time_text = (ev.time or "").strip()
-        if time_text:
+        if time_text and not _is_missing_time(time_text):
             short_time = time_text[:5] if ":" in time_text else time_text
             return f"{pretty_date} {short_time}"
         return pretty_date
@@ -657,13 +739,21 @@ def payload_as_json(payload: RenderPayload, tz: timezone) -> str:
         if isinstance(payload.session.selection_params, dict)
         else {}
     )
-    intro_text_override = None
-    if isinstance(selection_params, dict):
-        intro_text_override = (
-            str(selection_params.get("intro_text_override") or "").strip()
-            or str(selection_params.get("intro_text") or "").strip()
-            or None
-        )
+
+    # New Intro Logic
+    date_part = _intro_date_prefix(payload.events)
+    intro_text_override = (
+        str(selection_params.get("intro_text_override") or "").strip()
+        or str(selection_params.get("intro_text") or "").strip()
+        or None
+    )
+    theme_raw = intro_text_override or ""
+    theme = _sanitize_theme(theme_raw) or "АФИША"
+
+    if _contains_date(theme):
+        intro_str = theme[:32]
+    else:
+        intro_str = _fit_intro(date_part, theme, max_len=32)
 
     event_map = {ev.id: ev for ev in payload.events}
     scenes = []
@@ -691,7 +781,7 @@ def payload_as_json(payload: RenderPayload, tz: timezone) -> str:
     obj = {
         "intro": {
             "count": len(scenes),
-            "text": intro_text_override or _intro_text(payload.events),
+            "text": intro_str,
         },
         "scenes": scenes,
     }
