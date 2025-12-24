@@ -110,6 +110,7 @@ class SelectionResult:
 @dataclass
 class PosterEnrichment:
     event_id: int
+    title: str | None
     text: str | None
     source: str | None = None
 

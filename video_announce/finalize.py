@@ -37,6 +37,8 @@ class _PromptItem:
     topics: list[str]
     is_free: bool
     poster_text: str | None
+    ocr_title: str | None
+    search_digest: str | None
     telegraph_text: str | None
     promoted: bool
 
@@ -104,15 +106,18 @@ async def _ensure_ocr_cached(db: Database, grouped: dict[int, list[EventPoster]]
 def _build_enrichments(grouped: dict[int, list[EventPoster]]) -> dict[int, PosterEnrichment]:
     enrichments: dict[int, PosterEnrichment] = {}
     for event_id, posters in grouped.items():
+        title = None
         text = None
         source = None
         for poster in posters:
-            raw = (poster.ocr_text or "").strip()
-            if raw:
-                text = raw
+            raw_text = (poster.ocr_text or "").strip()
+            raw_title = (poster.ocr_title or "").strip()
+            if raw_text or raw_title:
+                text = raw_text
+                title = raw_title
                 source = poster.catbox_url or "ocr_cache"
                 break
-        enrichments[event_id] = PosterEnrichment(event_id=event_id, text=text, source=source)
+        enrichments[event_id] = PosterEnrichment(event_id=event_id, title=title, text=text, source=source)
     return enrichments
 
 
@@ -140,6 +145,8 @@ def _build_prompt_items(
                 topics=list(getattr(e, "topics", []) or []),
                 is_free=bool(getattr(e, "is_free", False)),
                 poster_text=enrich.text if enrich else None,
+                ocr_title=enrich.title if enrich else None,
+                search_digest=getattr(e, "search_digest", None),
                 telegraph_text=telegraph_text,
                 promoted=bool((e.video_include_count or 0) > 3),
             )
@@ -296,10 +303,12 @@ async def prepare_final_texts(
     for fin in finalized:
         event = event_map.get(fin.event_id)
         enrichment = enrichments.get(fin.event_id)
+        # Use ocr_title (enrichment.title) as filter key for deduplication
+        ocr_key = (enrichment.title if enrichment else None) or (enrichment.text if enrichment else None)
         fin.about = normalize_about_with_fallback(
             fin.about,
             title=fin.title or getattr(event, "title", None),
-            ocr_text=enrichment.text if enrichment else None,
+            ocr_text=ocr_key,
             fallback_parts=(getattr(event, "location_name", None), getattr(event, "city", None)),
         )
     enrich_map = {en.event_id: en for en in enrichments.values()}
@@ -317,7 +326,8 @@ async def prepare_final_texts(
             item.final_about = fin.about
             item.final_description = fin.description
             item.use_ocr = fin.use_ocr or bool(enrichment and enrichment.text)
-            item.poster_text = enrichment.text if enrichment else None
+            # Store enrichment.title (ocr_title) in poster_text for reuse in render
+            item.poster_text = enrichment.title if enrichment else None
             item.poster_source = fin.poster_source or (enrichment.source if enrichment else None)
             session.add(item)
         await session.commit()

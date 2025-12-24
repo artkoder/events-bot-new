@@ -39,10 +39,15 @@ def _tokenize(text: str | None) -> list[str]:
 
 
 def _prepare_drop_sets(title: str | None, ocr_text: str | None, anchor_limit: int) -> tuple[set[str], set[str]]:
+    drop_tokens = {tok.lower() for tok in _tokenize(ocr_text)}
     title_tokens = _tokenize(title)
-    anchors = {tok.lower() for tok in title_tokens[:anchor_limit] if tok}
-    drop_tokens = {tok.lower() for tok in title_tokens if tok}
-    drop_tokens |= {tok.lower() for tok in _tokenize(ocr_text)}
+    anchors = set()
+    for tok in title_tokens:
+        if len(anchors) >= anchor_limit:
+            break
+        low = tok.lower()
+        if low not in drop_tokens:
+            anchors.add(low)
     return anchors, drop_tokens
 
 
@@ -59,11 +64,14 @@ def _shorten_about_text(
     normalized: list[str] = []
     seen: set[str] = set()
     total_len = 0
-    for token in _tokenize(text):
+    input_tokens = _tokenize(text)
+
+    # First pass: collect valid tokens from input text
+    for token in input_tokens:
         low = token.lower()
         if low in seen:
             continue
-        if low in drop_tokens and low not in anchors:
+        if low in drop_tokens:
             continue
         projected = total_len + (1 if normalized else 0) + len(token)
         if len(normalized) >= word_limit or projected > char_limit:
@@ -71,6 +79,43 @@ def _shorten_about_text(
         normalized.append(token)
         seen.add(low)
         total_len = projected
+
+    # Second pass: ensure at least some anchor tokens are present if missing
+    # We only prepend anchors if NO anchor is present in the normalized list.
+    has_anchor = any(tok.lower() in anchors for tok in normalized)
+    if not has_anchor and anchors:
+        # Try to prepend 1-2 anchors if they fit (replacing if needed or just adding)
+        # Simplified strategy: take best anchor, see if it fits by removing from end
+        best_anchor = next(iter(anchors)) # anchors is set but iteration order roughly insertion in python 3.7+
+        # But we need original casing for best_anchor?
+        # Actually _tokenize returns original casing, but anchors set is lower.
+        # Let's find original casing from title if possible
+        best_anchor_orig = best_anchor.upper() # Fallback
+        title_tokens = _tokenize(title)
+        for t in title_tokens:
+            if t.lower() == best_anchor:
+                best_anchor_orig = t
+                break
+
+        # If adding best_anchor exceeds limits, we might need to truncate `normalized`
+        # But for simplicity, let's just prepend if it fits after clearing enough space
+        # Or just Prepend and Slice.
+
+        # New approach: rebuild
+        new_normalized = [best_anchor_orig]
+        current_len = len(best_anchor_orig)
+        seen = {best_anchor}
+
+        for token in normalized:
+            low = token.lower()
+            if low in seen: continue
+            projected = current_len + 1 + len(token)
+            if len(new_normalized) >= word_limit or projected > char_limit:
+                break
+            new_normalized.append(token)
+            current_len = projected
+        normalized = new_normalized
+
     return " ".join(normalized)
 
 
@@ -84,9 +129,16 @@ def normalize_about_text(
     anchor_limit: int = 2,
     strip_emojis: bool = True,
 ) -> str:
-    """Lightly clean LLM-provided about text without dropping tokens."""
-
-    return _clean_primary_about(text, strip_emojis=strip_emojis)
+    """Clean and enforce limits on LLM-provided about text."""
+    cleaned = _clean_primary_about(text, strip_emojis=strip_emojis)
+    return _shorten_about_text(
+        cleaned,
+        title=title,
+        ocr_text=ocr_text,
+        word_limit=word_limit,
+        char_limit=char_limit,
+        anchor_limit=anchor_limit,
+    )
 
 
 def normalize_about_with_fallback(
