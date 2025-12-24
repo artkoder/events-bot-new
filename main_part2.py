@@ -3870,7 +3870,7 @@ async def vk_poll_scheduler(db: Database, bot: Bot, run_id: str | None = None):
 
 
 async def init_db_and_scheduler(
-    app: web.Application, db: Database, bot: Bot, webhook: str
+    app: web.Application, db: Database, bot: Bot, webhook: str | None
 ) -> None:
     logging.info("Initializing database")
     await db.init()
@@ -3880,15 +3880,21 @@ async def init_db_and_scheduler(
     logging.info("CATBOX_ENABLED resolved to %s", CATBOX_ENABLED)
     global VK_PHOTOS_ENABLED
     VK_PHOTOS_ENABLED = await get_vk_photos_enabled(db)
-    hook = webhook.rstrip("/") + "/webhook"
-    logging.info("Setting webhook to %s", hook)
-    try:
-        await bot.set_webhook(
-            hook,
-            allowed_updates=["message", "callback_query", "my_chat_member"],
-        )
-    except Exception as e:
-        logging.error("Failed to set webhook: %s", e)
+    
+    # Only set webhook if webhook URL is provided (production mode)
+    if webhook:
+        hook = webhook.rstrip("/") + "/webhook"
+        logging.info("Setting webhook to %s", hook)
+        try:
+            await bot.set_webhook(
+                hook,
+                allowed_updates=["message", "callback_query", "my_chat_member"],
+            )
+        except Exception as e:
+            logging.error("Failed to set webhook: %s", e)
+    else:
+        logging.info("No webhook URL provided, skipping webhook setup (dev mode)")
+    
     try:
         scheduler_startup(db, bot)
     except Exception:
@@ -13356,8 +13362,8 @@ def create_app() -> web.Application:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is missing")
 
     webhook = os.getenv("WEBHOOK_URL")
-    if not webhook:
-        raise RuntimeError("WEBHOOK_URL is missing")
+    # Webhook is optional - only required for production mode
+    # In dev mode, we'll skip webhook setup
 
     session = IPv4AiohttpSession(timeout=ClientTimeout(total=HTTP_TIMEOUT))
     bot = SafeBot(token, session=session)
@@ -14081,6 +14087,10 @@ def create_app() -> web.Application:
     app = web.Application()
     SimpleRequestHandler(dp, bot).register(app, path="/webhook")
     setup_application(app, dp, bot=bot)
+    
+    # Store bot and dispatcher in app context for dev mode
+    app["bot"] = bot
+    app["dispatcher"] = dp
 
     async def health_handler(request: web.Request) -> web.Response:
         async with span("healthz"):
@@ -14427,13 +14437,109 @@ async def handle_digest_select_movies(
     )
 
 
+async def run_dev_mode():
+    """Run bot in development mode with polling (no webhooks)."""
+    logging.info("="*60)
+    logging.info("BOT STARTING IN DEVELOPMENT MODE")
+    logging.info("Mode: DEV_MODE | Connection: POLLING | Webhook: DISABLED")
+    logging.info("="*60)
+    
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    if not token:
+        raise RuntimeError("TELEGRAM_BOT_TOKEN is missing")
+    
+    # Create the application (this sets up all handlers)
+    # WEBHOOK_URL is optional now, so this will work
+    app = create_app()
+    
+    # Extract bot and dispatcher from the application context
+    # They were stored in app in lines 14092-14093 of create_app()
+    bot = app.get("bot")
+    dp = app.get("dispatcher")
+    
+    if not bot or not dp:
+        logging.error("Could not extract bot/dp from app")
+        raise RuntimeError("Failed to extract bot and dispatcher from app")
+    
+    global db
+    # db was already initialized in create_app
+    
+    # Initialize database and start background tasks
+    # This is normally called in on_startup for prod mode, but we need to call it manually for dev mode
+    await init_db_and_scheduler(app, db, bot, None)  # None webhook for dev mode
+    
+    # Delete any existing webhook
+    logging.info("Deleting webhook for dev mode")
+    try:
+        await bot.delete_webhook(drop_pending_updates=True)
+        logging.info("Webhook deleted successfully")
+    except Exception as e:
+        logging.warning("Failed to delete webhook: %s", e)
+    
+    logging.info("="*60)
+    logging.info("✓ DEV MODE READY: Bot is now polling for updates")
+    logging.info("="*60)
+    
+    try:
+        # Start polling
+        await dp.start_polling(bot, allowed_updates=["message", "callback_query", "my_chat_member"])
+    finally:
+        # Cleanup - use the on_shutdown from app
+        await app["bot"].session.close()
+        if "add_event_watch" in app:
+            app["add_event_watch"].cancel()
+            with contextlib.suppress(Exception):
+                await app["add_event_watch"]
+        if "add_event_worker" in app:
+            app["add_event_worker"].cancel()
+            with contextlib.suppress(Exception):
+                await app["add_event_worker"]
+        if "daily_scheduler" in app:
+            app["daily_scheduler"].cancel()
+            with contextlib.suppress(Exception):
+                await app["daily_scheduler"]
+        scheduler_cleanup()
+        await close_vk_session()
+        close_supabase_client()
+
+
+
+
+def run_prod_mode():
+    """Run bot in production mode with webhooks."""
+    logging.info("="*60)
+    logging.info("BOT STARTING IN PRODUCTION MODE")
+    logging.info("Mode: PROD_MODE | Connection: WEBHOOK | Polling: DISABLED")
+    logging.info("="*60)
+    
+    host = os.getenv("HOST", "0.0.0.0")
+    port = int(os.getenv("PORT", 8080))
+    
+    logging.info("Starting aiohttp server on %s:%s", host, port)
+    web.run_app(
+        create_app(),
+        host=host,
+        port=port,
+    )
+    logging.info("="*60)
+    logging.info("✓ PROD MODE READY: Bot is listening for webhooks")
+    logging.info("="*60)
+
+
 if __name__ == "__main__":
     import sys
+    
+    # Check for special test mode
     if len(sys.argv) > 1 and sys.argv[1] == "test_telegraph":
         asyncio.run(telegraph_test())
     else:
-        web.run_app(
-            create_app(),
-            host=os.getenv("HOST", "0.0.0.0"),
-            port=int(os.getenv("PORT", 8080)),
-        )
+        # Check DEV_MODE environment variable
+        dev_mode = os.getenv("DEV_MODE") == "1"
+        
+        if dev_mode:
+            # Run in development mode with polling
+            asyncio.run(run_dev_mode())
+        else:
+            # Run in production mode with webhooks
+            run_prod_mode()
+
