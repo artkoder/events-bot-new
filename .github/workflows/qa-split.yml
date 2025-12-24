@@ -74,31 +74,18 @@ PY
 import json
 import os
 
-import aiogram.webhook.aiohttp_server as server
 import main
 
 os.environ.setdefault("DB_PATH", os.getenv("HANDLER_DB_PATH", "handlers.sqlite"))
 os.environ.setdefault("TELEGRAM_BOT_TOKEN", "123:ABC")
 os.environ.setdefault("WEBHOOK_URL", "https://example.invalid/webhook")
 
-captured = {}
-original = server.SimpleRequestHandler.register
+# Create app - dispatcher is now stored in app["dispatcher"]
+app = main.create_app()
 
-
-def capture(self, app, *args, **kwargs):  # type: ignore[override]
-    captured['dispatcher'] = self.dispatcher
-    return original(self, app, *args, **kwargs)
-
-
-server.SimpleRequestHandler.register = capture
-try:
-    main.create_app()
-finally:
-    server.SimpleRequestHandler.register = original
-
-dispatcher = captured.get('dispatcher')
+dispatcher = app.get('dispatcher')
 if dispatcher is None:
-    raise SystemExit("Dispatcher was not captured while creating the application")
+    raise SystemExit("Dispatcher was not found in application context")
 
 payload = {
     "message": len(dispatcher.message.handlers),
