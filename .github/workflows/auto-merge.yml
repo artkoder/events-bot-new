@@ -2,7 +2,7 @@ name: Auto ready + enable auto-merge
 
 on:
   workflow_run:
-    workflows: ["CI"]   # имя workflow из ci.yaml: name: CI
+    workflows: ["CI"]     # должно совпасть с `name:` вашего CI workflow
     types: [completed]
 
 permissions:
@@ -22,36 +22,25 @@ jobs:
           script: |
             const owner = context.repo.owner;
             const repo = context.repo.repo;
-            const sha = context.payload.workflow_run.head_sha;
 
-            // (Опционально) ставьте метку "automerge" только на те PR, которые можно мержить автоматически.
-            // Если хотите автомержить ВСЕ PR после CI — закомментируйте requiredLabel.
-            const requiredLabel = "automerge";
-
-            const { data: prs } = await github.rest.repos.listPullRequestsAssociatedWithCommit({
-              owner, repo, commit_sha: sha,
-            });
-
-            if (!prs.length) {
-              core.info(`No PR associated with sha ${sha}`);
+            const prs = context.payload.workflow_run.pull_requests || [];
+            if (prs.length === 0) {
+              core.info("No PRs in workflow_run payload; nothing to do.");
               return;
             }
 
-            for (const pr of prs) {
+            for (const prRef of prs) {
+              const { data: pr } = await github.rest.pulls.get({
+                owner,
+                repo,
+                pull_number: prRef.number,
+              });
+
               if (pr.base.ref !== "main") {
-                core.info(`Skip PR #${pr.number}: base is ${pr.base.ref}`);
+                core.info(`Skip PR #${pr.number}: base=${pr.base.ref}`);
                 continue;
               }
 
-              if (requiredLabel) {
-                const labels = (pr.labels || []).map(l => l.name);
-                if (!labels.includes(requiredLabel)) {
-                  core.info(`Skip PR #${pr.number}: missing label "${requiredLabel}"`);
-                  continue;
-                }
-              }
-
-              // 1) Mark ready if draft
               if (pr.draft) {
                 core.info(`Mark ready: PR #${pr.number}`);
                 await github.graphql(
@@ -60,16 +49,14 @@ jobs:
                   }`,
                   { id: pr.node_id }
                 );
+              } else {
+                core.info(`Already ready: PR #${pr.number}`);
               }
 
-              // 2) Enable auto-merge (squash)
               core.info(`Enable auto-merge: PR #${pr.number}`);
               await github.graphql(
                 `mutation($id:ID!) {
-                  enablePullRequestAutoMerge(input:{
-                    pullRequestId:$id,
-                    mergeMethod:SQUASH
-                  }) {
+                  enablePullRequestAutoMerge(input:{pullRequestId:$id, mergeMethod:SQUASH}) {
                     pullRequest { number }
                   }
                 }`,
