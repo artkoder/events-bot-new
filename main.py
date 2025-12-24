@@ -2197,6 +2197,25 @@ class IPv4AiohttpSession(AiohttpSession):
             ttl_dns_cache=300,
             keepalive_timeout=30,
         )
+    
+    @property
+    def timeout(self):
+        """Return numeric timeout for aiogram polling compatibility.
+        
+        aiogram dispatcher tries to add ClientTimeout + int which fails.
+        This property returns the numeric value instead of the ClientTimeout object.
+        """
+        if hasattr(self, '_timeout') and hasattr(self._timeout, 'total'):
+            return self._timeout.total
+        return getattr(super(), 'timeout', 60)
+    
+    @timeout.setter
+    def timeout(self, value):
+        """Allow setting timeout from parent class init."""
+        # Store the original ClientTimeout object in _timeout
+        # The getter will extract the numeric value
+        if hasattr(self, '__dict__'):
+            self.__dict__['_timeout'] = value
 
     async def create_session(self) -> ClientSession:
         self._session = get_shared_session()

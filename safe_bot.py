@@ -22,6 +22,13 @@ class SafeBot(Bot):
         super().__init__(*args, **kwargs)
         # cache chat_id/message_id -> (text, markup_repr, date)
         self._cache: TTLCache = TTLCache(maxsize=64, ttl=3 * 24 * 3600)
+        # Patch session timeout to work with aiogram polling
+        # aiogram expects session.timeout to be numeric but gets ClientTimeout
+        if hasattr(self.session, '_timeout'):
+            original_timeout = self.session._timeout
+            if hasattr(original_timeout, 'total'):
+                # Override timeout attribute with numeric value
+                self.session.timeout = original_timeout.total
 
     async def _call(self, func, *args, **kwargs):
         last_exc: Exception | None = None
