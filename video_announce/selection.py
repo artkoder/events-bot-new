@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import math
+import re
 from collections import defaultdict
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
@@ -48,12 +49,13 @@ def _build_about(
     about: str | None,
     event: Event,
     ocr_text: str | None = None,
+    ocr_title: str | None = None,
     title: str | None = None,
 ) -> str:
     return normalize_about_with_fallback(
         about,
         title=title or getattr(event, "title", None),
-        ocr_text=ocr_text,
+        ocr_text=ocr_title, # Pass ocr_title as ocr_text for deduplication as per requirements
         fallback_parts=(getattr(event, "location_name", None), getattr(event, "city", None)),
     )
 
@@ -195,9 +197,9 @@ async def _load_hits(db: Database, event_ids: Sequence[int]) -> set[int]:
 
 async def _load_poster_ocr_texts(
     db: Database, event_ids: Sequence[int]
-) -> dict[int, str]:
+) -> tuple[dict[int, str], dict[int, str]]:
     if not event_ids:
-        return {}
+        return {}, {}
     async with db.get_session() as session:
         result = await session.execute(
             select(EventPoster)
@@ -205,13 +207,19 @@ async def _load_poster_ocr_texts(
             .order_by(EventPoster.updated_at.desc(), EventPoster.id.desc())
         )
         posters = result.scalars().all()
-    grouped: dict[int, list[str]] = defaultdict(list)
+    grouped_text: dict[int, list[str]] = defaultdict(list)
+    titles: dict[int, str] = {}
+
     for poster in posters:
         text = (poster.ocr_text or "").strip()
+        title = (poster.ocr_title or "").strip()
         if text:
-            grouped[poster.event_id].append(text)
+            grouped_text[poster.event_id].append(text)
+        if title and poster.event_id not in titles:
+            titles[poster.event_id] = title
+
     excerpts: dict[int, str] = {}
-    for event_id, texts in grouped.items():
+    for event_id, texts in grouped_text.items():
         combined: list[str] = []
         remaining = POSTER_OCR_EXCERPT_LIMIT
         for text in texts:
@@ -223,7 +231,8 @@ async def _load_poster_ocr_texts(
         excerpt = "\n\n".join(combined).strip()
         if excerpt:
             excerpts[event_id] = excerpt
-    return excerpts
+
+    return excerpts, titles
 
 
 def _apply_repeat_limit(
@@ -263,6 +272,39 @@ def _apply_repeat_limit(
     return selected
 
 
+def _validate_intro_text(text: str | None) -> bool:
+    if not text:
+        return False
+    # Check for date patterns: "24 ДЕКАБРЯ", "24-26 ДЕКАБРЯ", "С 29 ДЕКАБРЯ ПО 3 ЯНВАРЯ"
+    # Months allowed: ЯНВАРЯ..ДЕКАБРЯ (full names)
+    months = r"(ЯНВАРЯ|ФЕВРАЛЯ|МАРТА|АПРЕЛЯ|МАЯ|ИЮНЯ|ИЮЛЯ|АВГУСТА|СЕНТЯБРЯ|ОКТЯБРЯ|НОЯБРЯ|ДЕКАБРЯ)"
+
+    # Pattern 1: Simple date "24 ДЕКАБРЯ"
+    p1 = rf"\b\d{{1,2}}\s+{months}\b"
+    # Pattern 2: Range "24-26 ДЕКАБРЯ" or "24–26 ДЕКАБРЯ"
+    p2 = rf"\b\d{{1,2}}\s*[\-–]\s*\d{{1,2}}\s+{months}\b"
+    # Pattern 3: Range across months "С 29 ДЕКАБРЯ ПО 3 ЯНВАРЯ"
+    p3 = rf"\bС\s+\d{{1,2}}\s+{months}\s+ПО\s+\d{{1,2}}\s+{months}\b"
+    # Also allow "29 ДЕКАБРЯ - 3 ЯНВАРЯ" just in case
+    p4 = rf"\b\d{{1,2}}\s+{months}\s*[\-–]\s*\d{{1,2}}\s+{months}\b"
+
+    combined = f"({p1})|({p2})|({p3})|({p4})"
+    return bool(re.search(combined, text, re.IGNORECASE))
+
+def _validate_about(text: str | None) -> bool:
+    if not text:
+        return False
+    # Max 12 words
+    # Clean first
+    cleaned = text.strip()
+    words = cleaned.split()
+    if len(words) > 12:
+        return False
+    if not cleaned:
+        return False
+    return True
+
+
 def _parse_llm_ranking(raw: str, known_ids: set[int]) -> tuple[bool, str | None, list[RankedChoice]]:
     try:
         data = json.loads(raw)
@@ -290,11 +332,19 @@ def _parse_llm_ranking(raw: str, known_ids: set[int]) -> tuple[bool, str | None,
         score_val = item.get("score")
         score = float(score_val) if isinstance(score_val, (int, float)) else None
 
+        # Parse about
+        about = item.get("about")
+        if isinstance(about, str):
+            about = about.strip()
+        else:
+            about = None
+
         parsed.append(
             RankedChoice(
                 event_id=event_id,
                 score=score if score is not None else 0.0,
                 reason=item.get("reason"),
+                about=about,
                 selected=True,  # Explicitly selected by LLM
             )
         )
@@ -370,16 +420,16 @@ async def _rank_with_llm(
     bot: Any | None = None,
     notify_chat_id: int | None = None,
     limit: int = 8,
-) -> tuple[list[RankedEvent], str | None]:
+) -> tuple[list[RankedEvent], str | None, bool]:
     if not events:
-        return ([], None)
+        return ([], None, True)
 
     # Pre-calculate base ranking
     base_ranked = _score_events(client, events)
     base_map = {r.event.id: r for r in base_ranked}
 
     event_ids = [e.id for e in events]
-    poster_texts = await _load_poster_ocr_texts(db, event_ids)
+    poster_texts, poster_titles = await _load_poster_ocr_texts(db, event_ids)
 
     payload = []
     # Sort for consistent LLM input
@@ -396,14 +446,13 @@ async def _rank_with_llm(
                 "is_free": ev.is_free,
                 "promoted": ev.id in promoted,
                 "search_digest": getattr(ev, "search_digest", None),
-                # "poster_ocr_text": poster_texts.get(ev.id), # Removed to save tokens if digest is enough, or keep it?
-                # User said "Упростить контракт LLM... вход... убрать лишние мета-поля".
-                # Prompt says "При оценке опирайся на search_digest (если есть) и poster_ocr_text" -> better keep OCR text if it fits
                 "poster_ocr_text": poster_texts.get(ev.id),
+                "poster_ocr_title": poster_titles.get(ev.id),
             }
         )
 
     intro_text: str | None = None
+    intro_valid: bool = True
     parsed: list[RankedChoice] = []
     parse_ok = False
 
@@ -480,6 +529,14 @@ async def _rank_with_llm(
 
         parse_ok, intro_text, parsed = _parse_llm_ranking(raw, {e.id for e in events})
 
+        # Validation
+        intro_valid = _validate_intro_text(intro_text)
+        if not intro_valid:
+            logger.warning("video_announce: invalid intro_text format: %r", intro_text)
+            # Do NOT fix, pass as is or empty? Requirement says: "simply save as comes (or save empty - see recommendation... use flag)"
+            # Recommendation: "intro_text_is_valid flag... do not change intro_text"
+            pass
+
         await _store_llm_trace(
             db,
             session_id=session_id,
@@ -491,6 +548,7 @@ async def _rank_with_llm(
     except Exception:
         logger.exception("video_announce: llm selection failed")
         parsed = []
+        intro_valid = False
 
     # Construction of final ranked list
     final_ranked: list[RankedEvent] = []
@@ -507,9 +565,11 @@ async def _rank_with_llm(
                     base,
                     score=choice.score if choice.score is not None else base.score,
                     reason=choice.reason,
+                    about=choice.about, # Store raw about from LLM
                     selected=True,
                     position=len(final_ranked) + 1,
                     poster_ocr_text=poster_texts.get(base.event.id),
+                    poster_ocr_title=poster_titles.get(base.event.id),
                 )
             )
             seen_ids.add(choice.event_id)
@@ -528,6 +588,7 @@ async def _rank_with_llm(
                      reason="Fallback selection",
                      position=len(final_ranked) + 1,
                      poster_ocr_text=poster_texts.get(base.event.id),
+                     poster_ocr_title=poster_titles.get(base.event.id),
                  )
              )
              seen_ids.add(base.event.id)
@@ -542,11 +603,12 @@ async def _rank_with_llm(
                     selected=False,
                     position=len(final_ranked) + 1,
                     poster_ocr_text=poster_texts.get(base.event.id),
+                    poster_ocr_title=poster_titles.get(base.event.id),
                 )
             )
             seen_ids.add(base.event.id)
 
-    return final_ranked, intro_text
+    return final_ranked, intro_text, intro_valid
 
 
 async def prepare_session_items(
@@ -574,11 +636,20 @@ async def prepare_session_items(
                 is_mandatory=r.mandatory,
                 include_count=getattr(event, "video_include_count", 0) or 0,
             )
+
+            # Validate about text logic
+            # "Check about after normalization for non-empty and <= 12 words"
+            # Note: _build_about calls normalize_about_with_fallback, which enforces limits.
+            # But the requirement says "If after dedup/limits about becomes empty... simply save empty"
+            # So _build_about needs to respect that.
+
             about_text = _build_about(
                 about=r.about,
                 event=event,
                 ocr_text=r.poster_ocr_text,
+                ocr_title=r.poster_ocr_title, # Pass title for dedup
             )
+
             description_text = (r.description or "").strip()
             if item.status == VideoAnnounceItemStatus.READY:
                 item.final_about = about_text
@@ -622,99 +693,6 @@ def payload_as_json(payload: RenderPayload, tz: timezone) -> str:
             urls.append(url)
         return urls[:1]
 
-    # Date helpers
-    _MONTHS_GEN_UPPER = {
-        1: "ЯНВАРЯ", 2: "ФЕВРАЛЯ", 3: "МАРТА", 4: "АПРЕЛЯ", 5: "МАЯ", 6: "ИЮНЯ",
-        7: "ИЮЛЯ", 8: "АВГУСТА", 9: "СЕНТЯБРЯ", 10: "ОКТЯБРЯ", 11: "НОЯБРЯ", 12: "ДЕКАБРЯ"
-    }
-    _MONTHS_ABBR_UPPER = {
-        1: "ЯНВ", 2: "ФЕВ", 3: "МАР", 4: "АПР", 5: "МАЯ", 6: "ИЮН",
-        7: "ИЮЛ", 8: "АВГ", 9: "СЕН", 10: "ОКТ", 11: "НОЯ", 12: "ДЕК"
-    }
-
-    def _format_range_compact(start: date, end: date) -> str:
-        d1 = start.day
-        d2 = end.day
-        m1 = start.month
-        m2 = end.month
-        if start == end:
-            return f"{d1} {_MONTHS_GEN_UPPER.get(m1, '')}"
-        if m1 == m2:
-            return f"{d1}–{d2} {_MONTHS_GEN_UPPER.get(m1, '')}"
-        return f"{d1} {_MONTHS_ABBR_UPPER.get(m1, '')}–{d2} {_MONTHS_ABBR_UPPER.get(m2, '')}"
-
-    def _intro_date_prefix(events: Sequence[Event]) -> str:
-        dates: list[date] = []
-        for ev in events:
-            try:
-                dt = ev.date.split("..", 1)[0]
-                dates.append(date.fromisoformat(dt))
-            except ValueError:
-                continue
-        if not dates:
-            return ""
-        return _format_range_compact(min(dates), max(dates))
-
-    def _contains_date(text: str) -> bool:
-        # Simple check for day + month or range
-        # Regex for "DD MONTH" or "DD-DD MONTH" or "DD MON - DD MON"
-        import re
-        pat = r"\d{1,2}\s*[\-–]\s*\d{1,2}" # Range like 24-26
-        if re.search(pat, text):
-            return True
-        # Check for month names
-        months = ["ЯНВ", "ФЕВ", "МАР", "АПР", "МАЙ", "ИЮН", "ИЮЛ", "АВГ", "СЕН", "ОКТ", "НОЯ", "ДЕК"]
-        upper = text.upper()
-        if any(m in upper for m in months):
-             if re.search(r"\d{1,2}", text):
-                 return True
-        return False
-
-    def _sanitize_theme(text: str) -> str:
-        import re
-        # Strip emojis (simplified regex or just non-ascii logic if desired, but we can reuse regex from about or local)
-        # Using a broad approach: remove non-alphanumeric/space/hyphen/punctuation, but keep russian letters
-        # Actually just strip emojis and common punctuation.
-
-        # Simple punct strip
-        cleaned = re.sub(r"[«»\"'<>!?:;()\[\]{}]", "", text)
-        # Strip emojis (unicode ranges) - reuse simplified range from about.py concept
-        emoji_pattern = re.compile("[\U00010000-\U0010ffff]", flags=re.UNICODE)
-        cleaned = emoji_pattern.sub(r"", cleaned)
-        cleaned = re.sub(r"\s+", " ", cleaned).strip().upper()
-        return cleaned
-
-    def _fit_intro(date_part: str, theme: str, max_len: int = 32) -> str:
-        if not theme:
-            return date_part[:max_len]
-
-        full = f"{date_part} {theme}"
-        if len(full) <= max_len:
-            return full
-
-        # Need to shorten theme
-        # Try word by word
-        available = max_len - len(date_part) - 1 # space
-        if available <= 3:
-             # Too small for meaningful theme, just date? Or strict truncation
-             return full[:max_len].strip()
-
-        words = theme.split()
-        fitted = []
-        current_len = 0
-        for w in words:
-            if current_len + (1 if fitted else 0) + len(w) <= available:
-                fitted.append(w)
-                current_len += (1 if fitted else 0) + len(w)
-            else:
-                break
-
-        if fitted:
-            return f"{date_part} {' '.join(fitted)}"
-
-        # Fallback: strict cut if even first word doesn't fit
-        return full[:max_len].strip()
-
     def _is_missing_time(t: str) -> bool:
         if not t:
             return True
@@ -740,20 +718,14 @@ def payload_as_json(payload: RenderPayload, tz: timezone) -> str:
         else {}
     )
 
-    # New Intro Logic
-    date_part = _intro_date_prefix(payload.events)
+    # Simplified Intro Logic: Directly use stored value
     intro_text_override = (
         str(selection_params.get("intro_text_override") or "").strip()
         or str(selection_params.get("intro_text") or "").strip()
         or None
     )
-    theme_raw = intro_text_override or ""
-    theme = _sanitize_theme(theme_raw) or "АФИША"
-
-    if _contains_date(theme):
-        intro_str = theme[:32]
-    else:
-        intro_str = _fit_intro(date_part, theme, max_len=32)
+    # Fallback to AFISHA if completely missing (e.g. invalid and empty)
+    intro_str = intro_text_override or "АФИША"
 
     event_map = {ev.id: ev for ev in payload.events}
     scenes = []
@@ -762,12 +734,21 @@ def payload_as_json(payload: RenderPayload, tz: timezone) -> str:
         if not ev:
             continue
         location = ", ".join(part for part in [ev.city, ev.location_name] if part)
-        about_text = _build_about(
-            about=item.final_about,
-            event=ev,
-            ocr_text=item.poster_text,
-            title=item.final_title or ev.title,
-        )
+
+        # NOTE: final_about is already computed and stored in prepare_session_items via _build_about
+        # But here we might re-compute if items are fresh?
+        # Ideally we use item.final_about if present.
+        if item.final_about is not None:
+            about_text = item.final_about
+        else:
+             # Fallback calculation if not stored
+             about_text = _build_about(
+                about=item.final_about, # Should be None here if branch taken
+                event=ev,
+                ocr_text=item.poster_text,
+                title=item.final_title or ev.title,
+            )
+
         scene = {
             "about": about_text,
             "description": item.final_description or "",
@@ -837,7 +818,7 @@ async def build_selection(
 
     async def _rank_events(
         current_events: Sequence[Event],
-    ) -> tuple[list[RankedEvent], set[int], set[int], str | None]:
+    ) -> tuple[list[RankedEvent], set[int], set[int], str | None, bool]:
         _log_event_selection_stats(current_events)
         filtered_events = list(current_events)
         mandatory_ids_local = {
@@ -859,7 +840,7 @@ async def build_selection(
             )
         )
         selected_ids_local = {ev.id for ev in selected_local}
-        ranked_local, intro_text_local = await _rank_with_llm(
+        ranked_local, intro_text_local, intro_valid_local = await _rank_with_llm(
             db,
             client,
             selected_local,
@@ -871,9 +852,9 @@ async def build_selection(
             notify_chat_id=notify_chat_id,
             limit=ctx.default_selected_max,
         )
-        return ranked_local, mandatory_ids_local, selected_ids_local, intro_text_local
+        return ranked_local, mandatory_ids_local, selected_ids_local, intro_text_local, intro_valid_local
 
-    ranked, mandatory_ids, selected_ids, intro_text = await _rank_events(events)
+    ranked, mandatory_ids, selected_ids, intro_text, intro_valid = await _rank_events(events)
     default_ready_ids = _choose_default_ready(
         ranked,
         mandatory_ids,
@@ -907,4 +888,5 @@ async def build_selection(
         candidates=events,
         selected_ids=default_ready_ids,
         intro_text=intro_text,
+        intro_text_valid=intro_valid,
     )

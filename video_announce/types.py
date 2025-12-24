@@ -28,6 +28,7 @@ class RankedEvent:
     about: str | None = None
     description: str | None = None
     poster_ocr_text: str | None = None
+    poster_ocr_title: str | None = None
 
 
 @dataclass
@@ -99,6 +100,7 @@ class SelectionBuildResult:
     candidates: list[Event]
     selected_ids: set[int]
     intro_text: str | None = None
+    intro_text_valid: bool = True
 
 
 @dataclass
