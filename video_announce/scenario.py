@@ -50,6 +50,7 @@ from .selection import (
     build_selection,
     fetch_candidates,
     fetch_profiles,
+    fill_missing_about,
     payload_as_json,
     prepare_session_items,
 )
@@ -756,6 +757,16 @@ class VideoAnnounceScenario:
                     )
                 ]
             )
+        
+        # Show force-reset button if there's a stuck rendering session
+        if rendering:
+            keyboard.append(
+                [
+                    types.InlineKeyboardButton(
+                        text="⚠️ Сбросить застрявшую", callback_data=f"vidforce_reset:{rendering.id}"
+                    )
+                ]
+            )
 
         overview_lines: list[str] = []
         for ov in summaries:
@@ -1270,15 +1281,13 @@ class VideoAnnounceScenario:
                     f"#{r.position} · {dt} · {ev.emoji or ''} {title} ({r.score})"
                 )
             preview = "\n".join(preview_lines)
-            await self.bot.send_message(
-                self.chat_id,
-                "<b>Черновик JSON для видеоролика:</b>\n<pre>"
-                + html.escape(json_text)
-                + "</pre>",
-                parse_mode="HTML",
-            )
+            # JSON is already sent as file attachment, no need for text duplicate
             await self.bot.send_message(self.chat_id, preview or "Нет событий")
             dataset_slug = await self._create_dataset(session_obj, json_text, finalized)
+            
+            # Wait for Kaggle to fully process the dataset before attaching to kernel
+            logger.info("video_announce: waiting 15s for dataset to be processed...")
+            await asyncio.sleep(15)
 
             kernel_ref = session_obj.kaggle_kernel_ref
             if not kernel_ref:
@@ -1771,6 +1780,36 @@ class VideoAnnounceScenario:
 
             if sess.status != VideoAnnounceSessionStatus.SELECTED:
                 return "Сессия уже запущена"
+            
+            # Load items and events for fill_missing_about
+            res_items = await session.execute(
+                select(VideoAnnounceItem)
+                .where(VideoAnnounceItem.session_id == session_id)
+                .where(VideoAnnounceItem.status == VideoAnnounceItemStatus.READY)
+            )
+            ready_items = list(res_items.scalars().all())
+            event_ids = [item.event_id for item in ready_items]
+            ev_res = await session.execute(select(Event).where(Event.id.in_(event_ids)))
+            events_map = {ev.id: ev for ev in ev_res.scalars().all()}
+            
+            # Fill missing about via LLM
+            missing_about = await fill_missing_about(
+                self.db,
+                session_id,
+                ready_items,
+                events_map,
+                bot=self.bot,
+                notify_chat_id=self.chat_id,
+            )
+            
+            # Save generated about to items
+            if missing_about:
+                for item in ready_items:
+                    if item.event_id in missing_about:
+                        item.final_about = missing_about[item.event_id]
+                        session.add(item)
+                await session.commit()
+            
             payload = await self._build_render_payload(sess, ranked)
             payload_json = payload_as_json(payload, timezone.utc)
             sess.status = VideoAnnounceSessionStatus.RENDERING
@@ -1884,6 +1923,29 @@ class VideoAnnounceScenario:
             obj.error = error
             await session.commit()
 
+    async def force_reset_session(self, session_id: int) -> str:
+        """Force-reset a stuck RENDERING session to FAILED status."""
+        async with self.db.get_session() as session:
+            obj = await session.get(VideoAnnounceSession, session_id)
+            if not obj:
+                return "Сессия не найдена"
+            if obj.status != VideoAnnounceSessionStatus.RENDERING:
+                return f"Сессия не в статусе RENDERING (текущий: {obj.status.value})"
+            obj.status = VideoAnnounceSessionStatus.FAILED
+            obj.finished_at = datetime.now(timezone.utc)
+            obj.error = "manual force reset"
+            await session.commit()
+            logger.warning(
+                "video_announce: session %s force-reset by user to FAILED",
+                session_id,
+            )
+        await self.bot.send_message(
+            self.chat_id,
+            f"⚠️ Сессия #{session_id} принудительно сброшена в FAILED.\n"
+            "UI разблокирован, можно создавать новые сессии.",
+        )
+        return f"Сессия #{session_id} сброшена"
+
     def _copy_assets(self, tmp_path: Path) -> None:
         assets_dir = Path(__file__).resolve().parent / "assets"
         # Requirement: "Kaggle dataset contains only: payload.json, original *.ttf, Pulsarium.mp3, dataset-metadata.json"
@@ -1893,11 +1955,21 @@ class VideoAnnounceScenario:
             (assets_dir / font_name, tmp_path / font_name),
             (assets_dir / "Pulsarium.mp3", tmp_path / "Pulsarium.mp3"),
         ]
+        logger.info(
+            "video_announce: copying assets from %s, looking for %s files",
+            assets_dir,
+            len(assets),
+        )
+        missing = []
         for src, dest in assets:
             if not src.exists():
-                logger.warning("video_announce: asset not found %s", src)
+                logger.error("video_announce: MISSING required asset %s", src)
+                missing.append(src.name)
                 continue
             shutil.copy2(src, dest)
+            logger.info("video_announce: copied asset %s (%s bytes)", dest.name, dest.stat().st_size)
+        if missing:
+            raise RuntimeError(f"Missing required assets: {missing}. Check that assets folder is deployed.")
 
     async def _create_dataset(
         self, session_obj: VideoAnnounceSession, json_text: str, finalized
@@ -1915,12 +1987,30 @@ class VideoAnnounceScenario:
             (tmp_path / "dataset-metadata.json").write_text(
                 json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
             )
-            (tmp_path / "payload.json").write_text(json_text, encoding="utf-8")
+            payload_path = tmp_path / "payload.json"
+            payload_path.write_text(json_text, encoding="utf-8")
+            logger.info(
+                "video_announce: created payload.json (%s bytes)",
+                payload_path.stat().st_size,
+            )
             # Removed final_texts.json and images as per Requirement 3
 
             self._copy_assets(tmp_path)
+            
+            # Log all files in dataset before upload
+            all_files = list(tmp_path.glob("*"))
+            logger.info(
+                "video_announce: dataset files before upload: %s",
+                [(f.name, f.stat().st_size) for f in all_files],
+            )
+            
             total_size = sum(
                 f.stat().st_size for f in tmp_path.glob("**/*") if f.is_file()
+            )
+            logger.info(
+                "video_announce: dataset total size=%s bytes (limit=%sMB)",
+                total_size,
+                DATASET_PAYLOAD_MAX_MB,
             )
             if total_size > DATASET_PAYLOAD_MAX_MB * 1024 * 1024:
                 raise RuntimeError(
@@ -1933,6 +2023,7 @@ class VideoAnnounceScenario:
                 logger.exception("video_announce: failed to create dataset, retry after delete")
                 await asyncio.to_thread(client.delete_dataset, dataset_id, no_confirm=True)
                 await asyncio.to_thread(client.create_dataset, tmp_path)
+        logger.info("video_announce: dataset created successfully id=%s", dataset_id)
         return dataset_id
 
     async def _push_kernel(
@@ -1987,6 +2078,15 @@ async def handle_prefix_action(prefix: str, callback: types.CallbackQuery, scena
         except Exception:
             logger.exception("video_announce: restart failed")
         await callback.answer("Рестарт")
+        return True
+    if prefix == "vidforce_reset":
+        try:
+            _, session_id = callback.data.split(":", 1)
+            msg = await scenario.force_reset_session(int(session_id))
+            await callback.answer(msg, show_alert=True)
+        except Exception:
+            logger.exception("video_announce: force reset failed")
+            await callback.answer("Ошибка сброса", show_alert=True)
         return True
     if prefix == "vidinstr":
         try:

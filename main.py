@@ -413,7 +413,8 @@ def _week_vk_lock(start: str) -> asyncio.Lock:
 
 DB_PATH = os.getenv("DB_PATH", "/data/db.sqlite")
 db: Database | None = None
-BOT_CODE = os.getenv("BOT_CODE", "announcements")
+_base_bot_code = os.getenv("BOT_CODE", "announcements")
+BOT_CODE = _base_bot_code + "_test" if os.getenv("DEV_MODE") == "1" else _base_bot_code
 TELEGRAPH_TOKEN_FILE = os.getenv("TELEGRAPH_TOKEN_FILE", "/data/telegraph_token.txt")
 TELEGRAPH_AUTHOR_NAME = os.getenv(
     "TELEGRAPH_AUTHOR_NAME", "Полюбить Калининград Анонсы"
@@ -6597,6 +6598,7 @@ async def ask_4o(
     max_tokens: int = FOUR_O_RESPONSE_LIMIT,
     model: str | None = None,
     meta: Mapping[str, Any] | None = None,
+    temperature: float = 0.0,
 ) -> str:
     token = os.getenv("FOUR_O_TOKEN")
     if not token:
@@ -6615,7 +6617,7 @@ async def ask_4o(
     payload: dict[str, Any] = {
         "model": model or "gpt-4o",
         "messages": messages,
-        "temperature": 0,
+        "temperature": temperature,
         "max_tokens": max_tokens,
     }
     if response_format is not None:

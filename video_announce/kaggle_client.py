@@ -83,6 +83,7 @@ class KaggleClient:
         dir_mode: str = "zip",
     ) -> None:
         api = self._get_api()
+        logger.info("kaggle: creating dataset from folder=%s", folder)
         api.dataset_create_new(
             str(folder),
             public=public,
@@ -90,6 +91,7 @@ class KaggleClient:
             convert_to_csv=convert_to_csv,
             dir_mode=dir_mode,
         )
+        logger.info("kaggle: dataset created successfully from folder=%s", folder)
 
     def delete_dataset(self, dataset: str, *, no_confirm: bool = True) -> None:
         api = self._get_api()
@@ -147,7 +149,9 @@ class KaggleClient:
         api.kernels_pull(kernel_ref, path=str(path), metadata=metadata)
 
     def deploy_kernel_update(self, kernel_ref: str, dataset_slug: str) -> str:
+        import time
         api = self._get_api()
+        logger.info("kaggle: deploying kernel update kernel=%s dataset=%s", kernel_ref, dataset_slug)
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             api.kernels_pull(kernel_ref, path=str(tmp_path), metadata=True)
@@ -156,32 +160,77 @@ class KaggleClient:
                 raise FileNotFoundError(f"kernel-metadata.json not found in {kernel_ref}")
 
             meta_data = json.loads(meta_path.read_text(encoding="utf-8"))
-            # Preserve existing sources, or just overwrite?
-            # Requirement: "dataset_sources = [<dataset_slug>]"
+            # Set dataset sources for this session
             meta_data["dataset_sources"] = [dataset_slug]
+            # Ensure internet is enabled for pip installs
+            meta_data["enable_internet"] = True
+            
+            logger.info(
+                "kaggle: kernel metadata updated dataset_sources=%s enable_internet=%s",
+                meta_data.get("dataset_sources"),
+                meta_data.get("enable_internet"),
+            )
 
-            # Ensure id/slug is correct (kernels_pull should have set it)
-            # We push back from this tmp folder which contains only metadata (and maybe code if pulled?
-            # api.kernels_pull with metadata=True pulls everything or just metadata?
-            # Documentation says: "Download kernel files and metadata".
-            # Requirement says: "pull -> change metadata -> push".
-            # This ensures we don't overwrite code with local files.
             meta_path.write_text(json.dumps(meta_data, ensure_ascii=False, indent=2))
 
             api.kernels_push(str(tmp_path))
-            return str(meta_data.get("id") or meta_data.get("slug") or kernel_ref)
+            result_ref = str(meta_data.get("id") or meta_data.get("slug") or kernel_ref)
+            logger.info("kaggle: kernel deployed successfully ref=%s", result_ref)
+            
+            # Wait for Kaggle to propagate metadata changes before kernel starts
+            logger.info("kaggle: waiting 10s for metadata to propagate...")
+            time.sleep(10)
+            
+            return result_ref
 
     def get_kernel_status(self, kernel_ref: str) -> dict:
         api = self._get_api()
-        return api.kernels_status(kernel_ref)
+        logger.debug("kaggle: getting kernel status for %s", kernel_ref)
+        response = api.kernels_status(kernel_ref)
+        
+        # Convert API response object to dict for .get() access
+        # Priority: to_dict() > parse string repr > getattr status
+        if hasattr(response, 'to_dict'):
+            result = response.to_dict()
+        elif hasattr(response, '__str__'):
+            # Response might be like {"status": "COMPLETE", "failureMessage": null}
+            try:
+                result = json.loads(str(response))
+            except (json.JSONDecodeError, TypeError):
+                result = {}
+        else:
+            result = {}
+        
+        # Fallback: get status directly from response object
+        if not result.get("status"):
+            status_val = getattr(response, 'status', None)
+            if status_val is not None:
+                # Handle enum values like KernelWorkerStatus.COMPLETE
+                result["status"] = status_val.name if hasattr(status_val, 'name') else str(status_val)
+        
+        # Also try to get failure message
+        if not result.get("failureMessage"):
+            fail_msg = getattr(response, 'failure_message', None) or getattr(response, 'failureMessage', None)
+            if fail_msg:
+                result["failureMessage"] = fail_msg
+        
+        logger.info(
+            "kaggle: kernel status kernel=%s status=%s failure=%s",
+            kernel_ref,
+            result.get("status"),
+            result.get("failureMessage") or result.get("failure_message"),
+        )
+        return result
 
     def download_kernel_output(
         self, kernel_ref: str, *, path: str | Path, force: bool = True, quiet: bool = False
     ) -> list[str]:
         api = self._get_api()
+        logger.info("kaggle: downloading kernel output kernel=%s path=%s", kernel_ref, path)
         files, _ = api.kernels_output(
             kernel_ref, path=str(path), force=force, quiet=quiet
         )
+        logger.info("kaggle: downloaded %s files: %s", len(files), files)
         return files
 
     def kaggle_test(self) -> str:

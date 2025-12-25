@@ -6,7 +6,6 @@ import logging
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Iterable, Sequence
-from urllib.parse import urlparse
 
 from sqlalchemy import select
 
@@ -14,14 +13,13 @@ from db import Database
 from main import HTTP_SEMAPHORE, ask_4o, get_http_session
 from models import EventPoster, VideoAnnounceItem
 from poster_ocr import recognize_posters
-from main_part2 import get_source_page_text
+
 from .about import normalize_about_text, normalize_about_with_fallback
 from .prompts import FINAL_TEXT_RESPONSE_FORMAT, finalize_prompt
 from .types import FinalizedItem, PosterEnrichment, RankedEvent
 
 logger = logging.getLogger(__name__)
 
-TELEGRAPH_EXCERPT_LIMIT = 1200
 DESCRIPTION_EXCERPT_LIMIT = 400
 
 
@@ -39,7 +37,6 @@ class _PromptItem:
     poster_text: str | None
     ocr_title: str | None
     search_digest: str | None
-    telegraph_text: str | None
     promoted: bool
 
 
@@ -125,14 +122,12 @@ def _build_prompt_items(
     ranked: Sequence[RankedEvent],
     enrichments: dict[int, PosterEnrichment],
     descriptions: dict[int, str],
-    telegraph_excerpts: dict[int, str],
 ) -> list[_PromptItem]:
     items: list[_PromptItem] = []
     for r in ranked:
         e = r.event
         enrich = enrichments.get(e.id)
         description = descriptions.get(e.id)
-        telegraph_text = telegraph_excerpts.get(e.id)
         items.append(
             _PromptItem(
                 event_id=e.id,
@@ -147,7 +142,6 @@ def _build_prompt_items(
                 poster_text=enrich.text if enrich else None,
                 ocr_title=enrich.title if enrich else None,
                 search_digest=getattr(e, "search_digest", None),
-                telegraph_text=telegraph_text,
                 promoted=bool((e.video_include_count or 0) > 3),
             )
         )
@@ -161,68 +155,7 @@ def _description_excerpt(text: str | None) -> str | None:
     return raw[:DESCRIPTION_EXCERPT_LIMIT]
 
 
-async def _fetch_telegraph_excerpt(ev) -> str | None:
-    path = (getattr(ev, "telegraph_path", "") or "").strip()
-    url = (getattr(ev, "telegraph_url", "") or "").strip()
-    resolved_path = ""
-    if path:
-        resolved_path = path.lstrip("/")
-    elif url:
-        parsed = urlparse(url)
-        resolved_path = parsed.path.lstrip("/")
-    if not resolved_path:
-        logger.warning(
-            "telegraph_event_fetch no_path",
-            extra={
-                "event_id": getattr(ev, "id", None),
-                "telegraph_url": url,
-                "telegraph_path": path,
-            },
-        )
-        return None
-    logger.info(
-        "telegraph_event_fetch start",
-        extra={
-            "event_id": getattr(ev, "id", None),
-            "telegraph_url": url,
-            "telegraph_path": path,
-            "resolved_path": resolved_path,
-        },
-    )
-    try:
-        text = await get_source_page_text(resolved_path)
-    except Exception:
-        logger.exception("video_announce: failed to fetch telegraph text event=%s", ev.id)
-        return None
-    excerpt = (text or "").strip()
-    if not excerpt:
-        logger.warning(
-            "telegraph_text_empty",
-            extra={
-                "event_id": getattr(ev, "id", None),
-                "telegraph_url": url,
-                "telegraph_path": path,
-                "resolved_path": resolved_path,
-                "text_len": 0,
-            },
-        )
-        return None
-    return excerpt[:TELEGRAPH_EXCERPT_LIMIT]
 
-
-async def _load_telegraph_excerpts(events: Sequence) -> dict[int, str]:
-    tasks: dict[int, asyncio.Task[str | None]] = {}
-    for ev in events:
-        if getattr(ev, "telegraph_url", None) or getattr(ev, "telegraph_path", None):
-            tasks[ev.id] = asyncio.create_task(_fetch_telegraph_excerpt(ev))
-    excerpts: dict[int, str] = {}
-    if not tasks:
-        return excerpts
-    results = await asyncio.gather(*tasks.values())
-    for event_id, text in zip(tasks.keys(), results):
-        if text:
-            excerpts[event_id] = text
-    return excerpts
 
 
 def _normalize_title(title: str | None, limit: int = 12) -> str:
@@ -286,8 +219,7 @@ async def prepare_final_texts(
         for ev in events
         if (excerpt := _description_excerpt(getattr(ev, "description", None)))
     }
-    telegraph_excerpts = await _load_telegraph_excerpts(events)
-    prompt_items = _build_prompt_items(ranked, enrichments, descriptions, telegraph_excerpts)
+    prompt_items = _build_prompt_items(ranked, enrichments, descriptions)
     payload = json.dumps([item.__dict__ for item in prompt_items], ensure_ascii=False)
     try:
         raw = await ask_4o(

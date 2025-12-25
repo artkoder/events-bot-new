@@ -27,7 +27,7 @@ from models import (
 )
 from .about import normalize_about_with_fallback
 from .kaggle_client import KaggleClient
-from .prompts import selection_prompt, selection_response_format
+from .prompts import selection_prompt, selection_response_format, about_fill_prompt, about_fill_response_format
 from .types import (
     RankedChoice,
     RankedEvent,
@@ -432,13 +432,24 @@ async def _rank_with_llm(
     poster_texts, poster_titles = await _load_poster_ocr_texts(db, event_ids)
 
     payload = []
+    # Russian day of week names
+    day_names_ru = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
+    
     # Sort for consistent LLM input
     for ev in sorted(events, key=lambda e: (e.date, e.time, e.id)):
+        # Calculate day of week from date
+        try:
+            event_date = date.fromisoformat(ev.date.split("..", 1)[0])
+            day_of_week = day_names_ru[event_date.weekday()]
+        except (ValueError, IndexError):
+            day_of_week = None
+        
         payload.append(
             {
                 "event_id": ev.id,
                 "title": ev.title,
                 "date": ev.date,
+                "day_of_week": day_of_week,
                 "time": ev.time,
                 "city": ev.city,
                 "location": ev.location_name,
@@ -476,7 +487,7 @@ async def _rank_with_llm(
             "meta": meta, # Optional but useful for debugging
         }
 
-        request_json = json.dumps(request_details, ensure_ascii=False)
+        request_json = json.dumps(request_details, ensure_ascii=False, indent=2)
 
         # Logging
         llm_input_preview = request_json[:200]
@@ -509,13 +520,22 @@ async def _rank_with_llm(
             system_prompt=system_prompt_text,
             response_format=response_format,
             meta=meta,
+            temperature=1.0,  # High temperature for creative variety in intro_text
         )
 
         if bot and notify_chat_id:
             try:
                 filename = f"selection_response_{session_id or 'session'}.json"
+                
+                # Try to reformat JSON for pretty printing
+                try:
+                    response_obj = json.loads(raw)
+                    pretty_response = json.dumps(response_obj, ensure_ascii=False, indent=2)
+                except Exception:
+                    pretty_response = raw
+                
                 document = types.BufferedInputFile(
-                    raw.encode("utf-8"),
+                    pretty_response.encode("utf-8"),
                     filename=filename,
                 )
                 await bot.send_document(
@@ -659,6 +679,130 @@ async def prepare_session_items(
             stored.append(item)
         await session.commit()
     return stored
+
+
+async def fill_missing_about(
+    db: Database,
+    session_id: int,
+    items: Sequence[VideoAnnounceItem],
+    events: dict[int, Event],
+    *,
+    bot: Any | None = None,
+    notify_chat_id: int | None = None,
+) -> dict[int, str]:
+    """Request about field from LLM for items that don't have final_about.
+    
+    Returns a dict mapping event_id to generated about text.
+    """
+    missing = [item for item in items if not item.final_about]
+    if not missing:
+        return {}
+    
+    # Load OCR data for missing events
+    missing_ids = [item.event_id for item in missing]
+    poster_texts, poster_titles = await _load_poster_ocr_texts(db, missing_ids)
+    
+    # Build payload for LLM
+    payload = []
+    for item in missing:
+        ev = events.get(item.event_id)
+        if not ev:
+            continue
+        payload.append({
+            "event_id": ev.id,
+            "title": ev.title,
+            "search_digest": getattr(ev, "search_digest", None),
+            "ocr_title": poster_titles.get(ev.id),
+            "poster_ocr_text": poster_texts.get(ev.id),
+        })
+    
+    if not payload:
+        return {}
+    
+    logger.info(
+        "video_announce: requesting about for %d events without it",
+        len(payload),
+    )
+    
+    request_json = json.dumps({"events": payload}, ensure_ascii=False, indent=2)
+    
+    if bot and notify_chat_id:
+        try:
+            document = types.BufferedInputFile(
+                request_json.encode("utf-8"),
+                filename=f"about_fill_request_{session_id}.json",
+            )
+            await bot.send_document(
+                notify_chat_id,
+                document,
+                caption="Запрос на генерацию about для недостающих событий",
+                disable_notification=True,
+            )
+        except Exception:
+            logger.exception("video_announce: failed to send about_fill request document")
+    
+    result: dict[int, str] = {}
+    try:
+        raw = await ask_4o(
+            request_json,
+            system_prompt=about_fill_prompt(),
+            response_format=about_fill_response_format(len(payload)),
+            meta={"source": "video_announce.fill_missing_about", "count": len(payload)},
+        )
+        
+        if bot and notify_chat_id:
+            try:
+                response_obj = json.loads(raw)
+                pretty_response = json.dumps(response_obj, ensure_ascii=False, indent=2)
+                document = types.BufferedInputFile(
+                    pretty_response.encode("utf-8"),
+                    filename=f"about_fill_response_{session_id}.json",
+                )
+                await bot.send_document(
+                    notify_chat_id,
+                    document,
+                    caption="Ответ LLM на генерацию about",
+                    disable_notification=True,
+                )
+            except Exception:
+                logger.exception("video_announce: failed to send about_fill response document")
+        
+        await _store_llm_trace(
+            db,
+            session_id=session_id,
+            stage="about_fill",
+            model="gpt-4o",
+            request_json=request_json,
+            response_json=raw,
+        )
+        
+        data = json.loads(raw)
+        items_data = data.get("items", [])
+        known_ids = {ev_id for ev_id in events.keys()}
+        
+        for item_data in items_data:
+            event_id = item_data.get("event_id")
+            about = item_data.get("about")
+            if event_id in known_ids and isinstance(about, str):
+                # Normalize the about text
+                ev = events.get(event_id)
+                if ev:
+                    normalized = normalize_about_with_fallback(
+                        about.strip(),
+                        title=ev.title,
+                        ocr_text=poster_titles.get(event_id),
+                    )
+                    result[event_id] = normalized
+        
+        logger.info(
+            "video_announce: generated about for %d/%d events",
+            len(result),
+            len(payload),
+        )
+    except Exception:
+        logger.exception("video_announce: failed to fill missing about")
+    
+    return result
 
 
 def build_payload(
