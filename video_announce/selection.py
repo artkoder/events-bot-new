@@ -476,7 +476,7 @@ async def _rank_with_llm(
             "meta": meta, # Optional but useful for debugging
         }
 
-        request_json = json.dumps(request_details, ensure_ascii=False)
+        request_json = json.dumps(request_details, ensure_ascii=False, indent=2)
 
         # Logging
         llm_input_preview = request_json[:200]
@@ -514,8 +514,16 @@ async def _rank_with_llm(
         if bot and notify_chat_id:
             try:
                 filename = f"selection_response_{session_id or 'session'}.json"
+                
+                # Try to reformat JSON for pretty printing
+                try:
+                    response_obj = json.loads(raw)
+                    pretty_response = json.dumps(response_obj, ensure_ascii=False, indent=2)
+                except Exception:
+                    pretty_response = raw
+                
                 document = types.BufferedInputFile(
-                    raw.encode("utf-8"),
+                    pretty_response.encode("utf-8"),
                     filename=filename,
                 )
                 await bot.send_document(
