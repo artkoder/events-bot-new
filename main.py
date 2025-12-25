@@ -6598,6 +6598,7 @@ async def ask_4o(
     max_tokens: int = FOUR_O_RESPONSE_LIMIT,
     model: str | None = None,
     meta: Mapping[str, Any] | None = None,
+    temperature: float = 0.0,
 ) -> str:
     token = os.getenv("FOUR_O_TOKEN")
     if not token:
@@ -6616,7 +6617,7 @@ async def ask_4o(
     payload: dict[str, Any] = {
         "model": model or "gpt-4o",
         "messages": messages,
-        "temperature": 0,
+        "temperature": temperature,
         "max_tokens": max_tokens,
     }
     if response_format is not None:

@@ -12546,6 +12546,11 @@ async def get_source_page_text(path: str) -> str:
     except NameError:  # Module imported without main namespace
         from main import get_telegraph_token_info as token_info_fn
 
+    try:
+        tg_call = telegraph_call
+    except NameError:
+        from main import telegraph_call as tg_call
+
     token_info = token_info_fn()
 
     logging.info(
@@ -12569,7 +12574,7 @@ async def get_source_page_text(path: str) -> str:
     fetch_path = normalized_path or path
     tg = Telegraph(access_token=token_info.token)
     try:
-        page = await telegraph_call(tg.get_page, fetch_path, return_html=True)
+        page = await tg_call(tg.get_page, fetch_path, return_html=True)
     except Exception as e:
         logging.exception(
             "telegraph_fetch exception path=%s token_source=%s error=%s",

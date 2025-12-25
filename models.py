@@ -694,3 +694,23 @@ class OcrUsage(SQLModel, table=True):
 
 def create_all(engine) -> None:
     SQLModel.metadata.create_all(engine)
+
+
+class VKInbox(SQLModel, table=True):
+    __tablename__ = "vk_inbox"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    group_id: int
+    post_id: int
+    date: int
+    text: str
+    matched_kw: Optional[str] = None
+    has_date: int
+    event_ts_hint: Optional[int] = None
+    status: str = Field(default="pending")
+    locked_by: Optional[int] = None
+    locked_at: Optional[datetime] = Field(default=None, sa_column=Column(DateTime(timezone=True)))
+    imported_event_id: Optional[int] = None
+    review_batch: Optional[str] = None
+    created_at: datetime = Field(
+        default_factory=utc_now, sa_column=Column(DateTime(timezone=True))
+    )

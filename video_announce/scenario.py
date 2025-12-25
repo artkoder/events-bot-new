@@ -50,6 +50,7 @@ from .selection import (
     build_selection,
     fetch_candidates,
     fetch_profiles,
+    fill_missing_about,
     payload_as_json,
     prepare_session_items,
 )
@@ -1779,6 +1780,36 @@ class VideoAnnounceScenario:
 
             if sess.status != VideoAnnounceSessionStatus.SELECTED:
                 return "Сессия уже запущена"
+            
+            # Load items and events for fill_missing_about
+            res_items = await session.execute(
+                select(VideoAnnounceItem)
+                .where(VideoAnnounceItem.session_id == session_id)
+                .where(VideoAnnounceItem.status == VideoAnnounceItemStatus.READY)
+            )
+            ready_items = list(res_items.scalars().all())
+            event_ids = [item.event_id for item in ready_items]
+            ev_res = await session.execute(select(Event).where(Event.id.in_(event_ids)))
+            events_map = {ev.id: ev for ev in ev_res.scalars().all()}
+            
+            # Fill missing about via LLM
+            missing_about = await fill_missing_about(
+                self.db,
+                session_id,
+                ready_items,
+                events_map,
+                bot=self.bot,
+                notify_chat_id=self.chat_id,
+            )
+            
+            # Save generated about to items
+            if missing_about:
+                for item in ready_items:
+                    if item.event_id in missing_about:
+                        item.final_about = missing_about[item.event_id]
+                        session.add(item)
+                await session.commit()
+            
             payload = await self._build_render_payload(sess, ranked)
             payload_json = payload_as_json(payload, timezone.utc)
             sess.status = VideoAnnounceSessionStatus.RENDERING

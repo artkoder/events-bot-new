@@ -2,3 +2,7 @@ __pycache__/
 *.pyc
 .db
 .env
+
+db_prod_snapshot.sqlite
+backups/
+test_data/
