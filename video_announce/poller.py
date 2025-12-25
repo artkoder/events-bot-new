@@ -295,6 +295,17 @@ async def _download_and_send_logs(
         )
 
 
+async def _cleanup_dataset(client: KaggleClient, dataset_slug: str | None) -> None:
+    """Delete the temporary Kaggle dataset after kernel completion."""
+    if not dataset_slug:
+        return
+    try:
+        logger.info("video_announce: deleting dataset %s", dataset_slug)
+        await asyncio.to_thread(client.delete_dataset, dataset_slug)
+        logger.info("video_announce: dataset %s deleted successfully", dataset_slug)
+    except Exception:
+        logger.exception("video_announce: failed to delete dataset %s", dataset_slug)
+
 async def run_kernel_poller(
     db: Database,
     client: KaggleClient,
@@ -404,6 +415,7 @@ async def run_kernel_poller(
                     download_dir=download_dir,
                     caption_prefix="⚠️ Логи (неизвестный статус)",
                 )
+                await _cleanup_dataset(client, dataset_slug)
                 return
             await asyncio.sleep(poll_interval)
             continue
@@ -451,6 +463,7 @@ async def run_kernel_poller(
                 download_dir=download_dir,
                 caption_prefix="❌ Логи ошибки Kaggle",
             )
+            await _cleanup_dataset(client, dataset_slug)
             return
         await asyncio.sleep(poll_interval)
     else:
@@ -490,6 +503,7 @@ async def run_kernel_poller(
             download_dir=download_dir,
             caption_prefix="⏱️ Логи (таймаут) Kaggle",
         )
+        await _cleanup_dataset(client, dataset_slug)
         return
 
     tmp_dir = download_dir or Path(os.getenv("TMPDIR", "/tmp"))
@@ -623,11 +637,7 @@ async def run_kernel_poller(
             except Exception as e:
                 logger.warning("video_announce: failed to send video to main chat %s: %s", main_chat_id, e)
     finally:
-        if dataset_slug:
-            try:
-                await asyncio.to_thread(client.delete_dataset, dataset_slug)
-            except Exception:
-                logger.exception("video_announce: failed to delete dataset %s", dataset_slug)
+        await _cleanup_dataset(client, dataset_slug)
 
 
 async def reset_stuck_sessions(db: Database, *, max_age_minutes: int = 30) -> int:

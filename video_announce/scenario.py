@@ -38,7 +38,7 @@ from main import (
 )
 from .about import normalize_about_with_fallback
 from .finalize import prepare_final_texts
-from .kaggle_client import DEFAULT_KERNEL_PATH, KaggleClient
+from .kaggle_client import DEFAULT_KERNEL_PATH, KaggleClient, list_local_kernels
 from .poller import (
     VIDEO_MAX_MB,
     remember_status_message,
@@ -1291,8 +1291,9 @@ class VideoAnnounceScenario:
 
             kernel_ref = session_obj.kaggle_kernel_ref
             if not kernel_ref:
-                 # Fallback if not selected, though UI should enforce it
-                 kernel_ref = "video-afisha/video-announce-renderer"
+                # Fallback: use default local kernel with dynamic username
+                username = os.getenv("KAGGLE_USERNAME", "")
+                kernel_ref = f"{username}/video-announce-renderer" if username else "video-announce-renderer"
 
             actual_ref = await self._push_kernel(client, dataset_slug, kernel_ref)
             if actual_ref != kernel_ref:
@@ -1698,49 +1699,70 @@ class VideoAnnounceScenario:
         if not await self._has_access():
             return "Not authorized"
 
-        username = os.getenv("KAGGLE_USERNAME", "video-afisha")
+        keyboard: list[list[types.InlineKeyboardButton]] = []
+        
+        # 1. Local kernels from repository (with 📦 icon)
+        local_kernels = list_local_kernels()
+        if local_kernels:
+            for k in local_kernels:
+                ref = k.get("ref") or ""
+                title = k.get("title") or ref
+                if not ref:
+                    continue
+                keyboard.append(
+                    [
+                        types.InlineKeyboardButton(
+                            text=f"📦 {title} (репозиторий)",
+                            callback_data=f"vidkernel:{session_id}:{ref}",
+                        )
+                    ]
+                )
+        
+        # 2. Kaggle kernels (with 📓 icon)
+        username = os.getenv("KAGGLE_USERNAME")
         client = KaggleClient()
         try:
-            kernels = await asyncio.to_thread(client.kernels_list, user=username, page_size=10)
+            kaggle_kernels = await asyncio.to_thread(client.kernels_list, user=username, page_size=10)
         except Exception:
-            logger.exception("video_announce: failed to list kernels")
-            return "Ошибка списка kernels"
+            logger.exception("video_announce: failed to list Kaggle kernels")
+            kaggle_kernels = []
 
-        if not kernels:
-             return "Нет доступных kernels"
-
-        keyboard: list[list[types.InlineKeyboardButton]] = []
-        for k in kernels:
-            ref = k.get("ref") or ""
-            title = k.get("title") or ref
-            if not ref:
-                continue
-            keyboard.append(
-                [
-                     types.InlineKeyboardButton(
-                        text=f"📓 {title}",
-                        callback_data=f"vidkernel:{session_id}:{ref}",
-                    )
-                ]
-            )
-        keyboard.append(
-             [
-                types.InlineKeyboardButton(
-                     text="🔄 Обновить список",
-                     callback_data=f"vidrender:{session_id}", # Re-trigger this function basically
+        if kaggle_kernels:
+            for k in kaggle_kernels:
+                ref = k.get("ref") or ""
+                title = k.get("title") or ref
+                if not ref:
+                    continue
+                keyboard.append(
+                    [
+                        types.InlineKeyboardButton(
+                            text=f"📓 {title} (Kaggle)",
+                            callback_data=f"vidkernel:{session_id}:{ref}",
+                        )
+                    ]
                 )
-             ]
+        
+        # Refresh button
+        keyboard.append(
+            [
+                types.InlineKeyboardButton(
+                    text="🔄 Обновить список",
+                    callback_data=f"vidrender:{session_id}",
+                )
+            ]
         )
 
-        text = "Выберите Kaggle Notebook для запуска:"
+        if not local_kernels and not kaggle_kernels:
+            return "Нет доступных kernels"
+
+        text = f"Выберите Notebook для запуска:\n📦 — из репозитория\n📓 — с Kaggle"
         if message:
-             # If we are reusing a message (e.g. from the 'Render' button)
-             try:
+            try:
                 await message.edit_text(text, reply_markup=types.InlineKeyboardMarkup(inline_keyboard=keyboard))
-             except Exception:
+            except Exception:
                 await self.bot.send_message(self.chat_id, text, reply_markup=types.InlineKeyboardMarkup(inline_keyboard=keyboard))
         else:
-             await self.bot.send_message(self.chat_id, text, reply_markup=types.InlineKeyboardMarkup(inline_keyboard=keyboard))
+            await self.bot.send_message(self.chat_id, text, reply_markup=types.InlineKeyboardMarkup(inline_keyboard=keyboard))
 
         return "Выбор kernel"
 
@@ -1974,8 +1996,10 @@ class VideoAnnounceScenario:
     async def _create_dataset(
         self, session_obj: VideoAnnounceSession, json_text: str, finalized
     ) -> str:
-        username = os.getenv("KAGGLE_USERNAME", "video-afisha")
-        slug = f"video-afisha-session-{session_obj.id}"
+        username = os.getenv("KAGGLE_USERNAME", "")
+        if not username:
+            raise RuntimeError("KAGGLE_USERNAME not set")
+        slug = f"video-session-{session_obj.id}"
         dataset_id = f"{username}/{slug}"
         meta = {
             "title": f"Video Afisha Session {session_obj.id}",

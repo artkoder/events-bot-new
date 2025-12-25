@@ -26,7 +26,45 @@ from models import Event
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_KERNEL_PATH = Path(__file__).resolve().parent.parent / "kaggle" / "VideoAfisha"
+# Root directory containing all kernel folders
+KERNELS_ROOT_PATH = Path(__file__).resolve().parent.parent / "kaggle"
+# Default kernel (first local one added)
+DEFAULT_KERNEL_PATH = KERNELS_ROOT_PATH / "VideoAfishaEventsBot"
+# Prefix to identify local kernels in kernel_ref
+LOCAL_KERNEL_PREFIX = "local:"
+
+
+def list_local_kernels() -> list[dict]:
+    """List all valid kernel folders in the repository's kaggle/ directory.
+    
+    Returns list of dicts with 'ref', 'title', 'path' keys.
+    A valid kernel folder must contain kernel-metadata.json.
+    """
+    if not KERNELS_ROOT_PATH.exists():
+        return []
+    
+    kernels = []
+    for folder in KERNELS_ROOT_PATH.iterdir():
+        if not folder.is_dir():
+            continue
+        meta_path = folder / "kernel-metadata.json"
+        if not meta_path.exists():
+            continue
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            title = meta.get("title") or folder.name
+            # Use local: prefix to distinguish from Kaggle kernels
+            ref = f"{LOCAL_KERNEL_PREFIX}{folder.name}"
+            kernels.append({
+                "ref": ref,
+                "title": title,
+                "path": str(folder),
+                "is_local": True,
+            })
+        except Exception:
+            logger.warning("Failed to parse kernel metadata in %s", folder)
+            continue
+    return kernels
 
 
 class KaggleClient:
@@ -149,26 +187,79 @@ class KaggleClient:
         api.kernels_pull(kernel_ref, path=str(path), metadata=metadata)
 
     def deploy_kernel_update(self, kernel_ref: str, dataset_slug: str) -> str:
+        """Deploy kernel with dataset sources updated.
+        
+        HYBRID approach:
+        - If kernel_ref starts with 'local:', use code from repository
+        - Otherwise, pull from Kaggle (original behavior)
+        """
         import time
         api = self._get_api()
-        logger.info("kaggle: deploying kernel update kernel=%s dataset=%s", kernel_ref, dataset_slug)
+        
+        is_local = kernel_ref.startswith(LOCAL_KERNEL_PREFIX)
+        
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
-            api.kernels_pull(kernel_ref, path=str(tmp_path), metadata=True)
+            
+            if is_local:
+                # Extract folder name from local:FolderName
+                folder_name = kernel_ref[len(LOCAL_KERNEL_PREFIX):]
+                local_kernel_path = KERNELS_ROOT_PATH / folder_name
+                
+                if not local_kernel_path.exists():
+                    raise FileNotFoundError(f"Local kernel path not found: {local_kernel_path}")
+                
+                logger.info(
+                    "kaggle: deploying LOCAL kernel folder=%s dataset=%s",
+                    folder_name, dataset_slug
+                )
+                
+                # Copy local kernel files to temp directory
+                for item in local_kernel_path.iterdir():
+                    dest = tmp_path / item.name
+                    if item.is_dir():
+                        shutil.copytree(item, dest)
+                    else:
+                        shutil.copy2(item, dest)
+                logger.info("kaggle: copied local kernel from %s", local_kernel_path)
+            else:
+                # Pull from Kaggle (original behavior)
+                logger.info(
+                    "kaggle: deploying REMOTE kernel ref=%s dataset=%s",
+                    kernel_ref, dataset_slug
+                )
+                api.kernels_pull(kernel_ref, path=str(tmp_path), metadata=True)
+                logger.info("kaggle: pulled kernel from Kaggle")
+            
             meta_path = tmp_path / "kernel-metadata.json"
             if not meta_path.exists():
-                raise FileNotFoundError(f"kernel-metadata.json not found in {kernel_ref}")
+                raise FileNotFoundError(f"kernel-metadata.json not found")
 
             meta_data = json.loads(meta_path.read_text(encoding="utf-8"))
+            
+            # Update kernel id to match current user's account from env
+            # Use fixed slug - Kaggle handles versioning automatically
+            username = os.getenv("KAGGLE_USERNAME")
+            if username:
+                fixed_slug = "video-afisha"
+                new_id = f"{username}/{fixed_slug}"
+                old_id = meta_data.get("id", "")
+                
+                logger.info("kaggle: setting kernel id=%s (was %s)", new_id, old_id)
+                meta_data["id"] = new_id
+                meta_data["slug"] = fixed_slug
+                # Title must match slug pattern for Kaggle to accept
+                meta_data["title"] = "Video Afisha"
+            
             # Set dataset sources for this session
             meta_data["dataset_sources"] = [dataset_slug]
             # Ensure internet is enabled for pip installs
             meta_data["enable_internet"] = True
             
             logger.info(
-                "kaggle: kernel metadata updated dataset_sources=%s enable_internet=%s",
+                "kaggle: kernel metadata updated id=%s dataset_sources=%s",
+                meta_data.get("id"),
                 meta_data.get("dataset_sources"),
-                meta_data.get("enable_internet"),
             )
 
             meta_path.write_text(json.dumps(meta_data, ensure_ascii=False, indent=2))
@@ -182,6 +273,7 @@ class KaggleClient:
             time.sleep(10)
             
             return result_ref
+
 
     def get_kernel_status(self, kernel_ref: str) -> dict:
         api = self._get_api()
