@@ -12677,6 +12677,16 @@ async def patch_month_page_for_date(
                 if text in ("суббота", "воскресенье"):
                     # Include weekend header in replacement
                     replace_start = target_sec.start_idx - 1
+                    # Also check for empty paragraphs before weekend header
+                    while replace_start > 0:
+                        check_node = nodes[replace_start - 1]
+                        if (isinstance(check_node, dict) and 
+                            check_node.get("tag") == "p" and
+                            check_node.get("children") == ["\u200b"]):
+                            # Empty paragraph, include it in deletion
+                            replace_start -= 1
+                        else:
+                            break
         
         nodes[replace_start : target_sec.end_idx] = day_nodes
         anchor = "replace"
