@@ -38,17 +38,20 @@ def _tokenize(text: str | None) -> list[str]:
     return tokens
 
 
-def _prepare_drop_sets(title: str | None, ocr_text: str | None, anchor_limit: int) -> tuple[set[str], set[str]]:
+def _prepare_drop_sets(title: str | None, ocr_text: str | None, anchor_limit: int) -> tuple[list[str], set[str]]:
     # NOTE: ocr_text here typically contains just the ocr_title or relevant parts for dedup, passed by caller.
     drop_tokens = {tok.lower() for tok in _tokenize(ocr_text)}
     title_tokens = _tokenize(title)
-    anchors = set()
+    # Use list to preserve order from title (important for proper nouns like "ОДИН ДОМА")
+    anchors: list[str] = []
+    anchors_lower: set[str] = set()
     for tok in title_tokens:
         if len(anchors) >= anchor_limit:
             break
         low = tok.lower()
-        if low not in drop_tokens:
-            anchors.add(low)
+        if low not in drop_tokens and low not in anchors_lower:
+            anchors.append(tok)  # Keep original casing
+            anchors_lower.add(low)
     return anchors, drop_tokens
 
 
@@ -94,37 +97,40 @@ def _shorten_about_text(
 
     # Second pass: ensure at least some anchor tokens are present if missing
     # We only prepend anchors if NO anchor is present in the normalized list.
-    has_anchor = any(tok.lower() in anchors for tok in normalized)
+    # anchors is now a list with original casing, ordered as in title
+    anchors_lower = {a.lower() for a in anchors}
+    has_anchor = any(tok.lower() in anchors_lower for tok in normalized)
     if not has_anchor and anchors:
-        # Try to prepend 1-2 anchors if they fit (replacing if needed or just adding)
-        # Simplified strategy: take best anchor, see if it fits by removing from end
-        best_anchor = next(iter(anchors)) # anchors is set but iteration order roughly insertion in python 3.7+
-        # But we need original casing for best_anchor?
-        # Actually _tokenize returns original casing, but anchors set is lower.
-        # Let's find original casing from title if possible
-        best_anchor_orig = best_anchor.upper() # Fallback
-        title_tokens = _tokenize(title)
-        for t in title_tokens:
-            if t.lower() == best_anchor:
-                best_anchor_orig = t
+        # Prepend ALL anchors (in order from title) to preserve full proper nouns
+        # e.g. "ОДИН ДОМА" should be prepended as both words, not just one
+        
+        # Rebuild with all anchors at the start
+        new_normalized = []
+        current_len = 0
+        seen: set[str] = set()
+        
+        # Add all anchors first (in title order)
+        for anchor in anchors:
+            low = anchor.lower()
+            if low in seen:
+                continue
+            projected = current_len + (1 if new_normalized else 0) + len(anchor)
+            if len(new_normalized) >= word_limit or projected > char_limit:
                 break
-
-        # If adding best_anchor exceeds limits, we might need to truncate `normalized`
-        # But for simplicity, let's just prepend if it fits after clearing enough space
-        # Or just Prepend and Slice.
-
-        # New approach: rebuild
-        new_normalized = [best_anchor_orig]
-        current_len = len(best_anchor_orig)
-        seen = {best_anchor}
-
+            new_normalized.append(anchor)
+            seen.add(low)
+            current_len = projected
+        
+        # Then add remaining tokens from original about
         for token in normalized:
             low = token.lower()
-            if low in seen: continue
+            if low in seen:
+                continue
             projected = current_len + 1 + len(token)
             if len(new_normalized) >= word_limit or projected > char_limit:
                 break
             new_normalized.append(token)
+            seen.add(low)
             current_len = projected
         normalized = new_normalized
 
