@@ -903,10 +903,44 @@ def payload_as_json(payload: RenderPayload, tz: timezone) -> str:
         }
         scenes.append(scene)
 
+    # Extract date range and cities from events for intro
+    # Use payload.events directly to get cities (events have .city attribute)
+    event_cities: list[str] = []
+    for ev in payload.events:
+        city = getattr(ev, "city", None)
+        if city and city not in event_cities:
+            event_cities.append(city)
+    
+    logger.info("video_announce: extracted cities from events: %s", event_cities)
+
+    # Build date string from events
+    intro_date_str = ""
+    if payload.events:
+        dates_list: list[date] = []
+        for ev in payload.events:
+            try:
+                d = date.fromisoformat(ev.date.split("..", 1)[0])
+                dates_list.append(d)
+            except Exception:
+                pass
+        if dates_list:
+            min_date = min(dates_list)
+            max_date = max(dates_list)
+            if min_date == max_date:
+                intro_date_str = format_day_pretty(min_date).upper()
+            else:
+                intro_date_str = f"{format_day_pretty(min_date)} - {format_day_pretty(max_date)}".upper()
+
+    # Extract intro_pattern from selection_params
+    intro_pattern = str(selection_params.get("intro_pattern") or "STICKER")
+
     obj = {
         "intro": {
             "count": len(scenes),
             "text": intro_str,
+            "date": intro_date_str,
+            "cities": event_cities[:4],  # Limit to 4 cities
+            "pattern": intro_pattern,  # Add pattern for notebook
         },
         "scenes": scenes,
     }

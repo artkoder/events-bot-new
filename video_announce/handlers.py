@@ -248,6 +248,34 @@ async def handle_video_callback(
             msg = "Ошибка"
         await callback.answer(msg or "Готово", show_alert=msg not in {"Рендеринг запущен", "Готово"})
         return
+    # --- Pattern Selection Callbacks ---
+    if data.startswith("vidpat:"):
+        try:
+            _, session_id, pattern = data.split(":", 2)
+            msg = await scenario.switch_pattern(int(session_id), pattern, callback.message)
+        except Exception:
+            logger.exception("video_announce: pattern switch failed")
+            msg = "Ошибка"
+        await callback.answer(msg or "Обновлено", show_alert=msg not in {"Паттерн обновлён", "Обновлено", "Выбор паттерна"})
+        return
+    if data.startswith("vidpatconfirm:"):
+        try:
+            _, session_id = data.split(":", 1)
+            msg = await scenario.confirm_pattern(int(session_id), callback.message)
+        except Exception:
+            logger.exception("video_announce: pattern confirm failed")
+            msg = "Ошибка"
+        await callback.answer(msg or "Готово", show_alert=msg not in {"Выбор kernel", "Готово"})
+        return
+    if data.startswith("vidpatshow:"):
+        try:
+            _, session_id = data.split(":", 1)
+            msg = await scenario.show_pattern_selection(int(session_id), message=None)
+        except Exception:
+            logger.exception("video_announce: pattern show failed")
+            msg = "Ошибка"
+        await callback.answer(msg or "Выбор паттерна", show_alert=msg not in {"Выбор паттерна", "Готово"})
+        return
     if data.startswith("vidcnt:"):
         handled = await handle_video_count(
             callback,

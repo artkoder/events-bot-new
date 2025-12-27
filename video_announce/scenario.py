@@ -62,6 +62,13 @@ from .types import (
     SessionOverview,
     VideoProfile,
 )
+from .pattern_preview import (
+    generate_intro_preview,
+    get_next_pattern,
+    get_prev_pattern,
+    ALL_PATTERNS,
+    PATTERN_STICKER,
+)
 
 logger = logging.getLogger(__name__)
 CHANNEL_SETTING_KEY = "videoannounce_channels"
@@ -1010,8 +1017,8 @@ class VideoAnnounceScenario:
                         text="📄 Показать JSON", callback_data=f"vidjson:{session_obj.id}"
                     ),
                     types.InlineKeyboardButton(
-                        text="🚀 Выбрать Kernel",
-                        callback_data=f"vidrender:{session_obj.id}",
+                        text="🎨 Превью паттерна",
+                        callback_data=f"vidpatshow:{session_obj.id}",
                     ),
                 ],
             ]
@@ -1062,6 +1069,163 @@ class VideoAnnounceScenario:
             await session.refresh(sess)
         await self._send_intro_controls(sess)
         return "Интро обновлено"
+
+    # --- Pattern Selection Methods ---
+
+    def _get_current_pattern(self, session_obj: VideoAnnounceSession) -> str:
+        """Get current pattern from session params, default to STICKER."""
+        params = self._get_selection_params(session_obj)
+        return params.get("intro_pattern") or PATTERN_STICKER
+
+    def _build_pattern_keyboard(
+        self, session_id: int, current_pattern: str
+    ) -> types.InlineKeyboardMarkup:
+        """Build inline keyboard for pattern selection."""
+        buttons = []
+        for pattern in ALL_PATTERNS:
+            label = f"✓ {pattern}" if pattern == current_pattern else pattern
+            buttons.append(
+                types.InlineKeyboardButton(
+                    text=label, callback_data=f"vidpat:{session_id}:{pattern}"
+                )
+            )
+        return types.InlineKeyboardMarkup(
+            inline_keyboard=[
+                buttons,
+                [
+                    types.InlineKeyboardButton(
+                        text="✏️ Изменить текст", callback_data=f"vidintro:{session_id}:edit"
+                    ),
+                    types.InlineKeyboardButton(
+                        text="✓ Подтвердить", callback_data=f"vidpatconfirm:{session_id}"
+                    ),
+                ],
+            ]
+        )
+
+    async def show_pattern_selection(
+        self, session_id: int, message: types.Message | None = None
+    ) -> str:
+        """Display pattern preview with selection buttons."""
+        if not await self.ensure_access():
+            return "Not authorized"
+        session_obj = await self._load_session(session_id)
+        if not session_obj:
+            return "Сессия не найдена"
+        if session_obj.status != VideoAnnounceSessionStatus.SELECTED:
+            return "Сессия уже запущена"
+
+        params = self._get_selection_params(session_obj)
+        intro, intro_override, _ = self._intro_texts(params)
+        intro_text = intro_override or intro
+        if not intro_text:
+            return "Нет текста интро"
+
+        current_pattern = self._get_current_pattern(session_obj)
+
+        # Fetch cities from session items' events
+        cities_list = []
+        try:
+            async with self.db.get_session() as session:
+                from sqlalchemy import select
+                from models import VideoAnnounceItem, Event
+                items = (await session.execute(
+                    select(VideoAnnounceItem).where(
+                        VideoAnnounceItem.session_id == session_id,
+                        VideoAnnounceItem.status == VideoAnnounceItemStatus.READY,
+                    )
+                )).scalars().all()
+                event_ids = [it.event_id for it in items]
+                if event_ids:
+                    events = (await session.execute(
+                        select(Event).where(Event.id.in_(event_ids))
+                    )).scalars().all()
+                    for ev in events:
+                        if ev.city and ev.city not in cities_list:
+                            cities_list.append(ev.city)
+        except Exception:
+            logger.exception("video_announce: failed to fetch cities for preview")
+
+        cities = ", ".join(cities_list[:4]) if cities_list else None
+
+        # Generate preview image
+        try:
+            preview_bytes = await asyncio.to_thread(
+                generate_intro_preview, current_pattern, intro_text, cities
+            )
+        except Exception:
+            logger.exception("video_announce: failed to generate pattern preview")
+            return "Ошибка генерации превью"
+
+        keyboard = self._build_pattern_keyboard(session_id, current_pattern)
+        caption = f"Паттерн: <b>{current_pattern}</b>\nТекст: {html.escape(intro_text[:100])}"
+
+        photo = types.BufferedInputFile(preview_bytes, filename="pattern_preview.png")
+
+        if message:
+            # Try to edit existing message with media
+            try:
+                media = types.InputMediaPhoto(media=photo, caption=caption, parse_mode="HTML")
+                await self.bot.edit_message_media(
+                    chat_id=self.chat_id,
+                    message_id=message.message_id,
+                    media=media,
+                    reply_markup=keyboard,
+                )
+                return "Паттерн обновлён"
+            except Exception:
+                logger.exception("video_announce: failed to edit pattern message")
+                # Fall through to send new message
+
+        # Send new message
+        await self.bot.send_photo(
+            self.chat_id, photo=photo, caption=caption, parse_mode="HTML", reply_markup=keyboard
+        )
+        return "Выбор паттерна"
+
+    async def switch_pattern(
+        self, session_id: int, pattern: str, message: types.Message
+    ) -> str:
+        """Switch to a different pattern and update preview."""
+        if pattern not in ALL_PATTERNS:
+            return "Неизвестный паттерн"
+        if not await self.ensure_access():
+            return "Not authorized"
+
+        async with self.db.get_session() as session:
+            sess = await session.get(VideoAnnounceSession, session_id)
+            if not sess:
+                return "Сессия не найдена"
+            if sess.status != VideoAnnounceSessionStatus.SELECTED:
+                return "Сессия уже запущена"
+
+            params = self._get_selection_params(sess)
+            params["intro_pattern"] = pattern
+            sess.selection_params = params
+            session.add(sess)
+            await session.commit()
+
+        # Re-render with new pattern
+        return await self.show_pattern_selection(session_id, message)
+
+    async def confirm_pattern(self, session_id: int, message: types.Message) -> str:
+        """Confirm pattern selection and proceed to render."""
+        if not await self.ensure_access():
+            return "Not authorized"
+        session_obj = await self._load_session(session_id)
+        if not session_obj:
+            return "Сессия не найдена"
+        if session_obj.status != VideoAnnounceSessionStatus.SELECTED:
+            return "Сессия уже запущена"
+
+        # Delete the pattern selection message
+        try:
+            await self.bot.delete_message(self.chat_id, message.message_id)
+        except Exception:
+            pass  # Ignore if delete fails
+
+        # Proceed to kernel selection (existing flow)
+        return await self.show_kernel_selection(session_id, message=None)
 
     def _build_input_message(
         self, session_obj: VideoAnnounceSession, result: SelectionBuildResult
@@ -1972,7 +2136,7 @@ class VideoAnnounceScenario:
         assets_dir = Path(__file__).resolve().parent / "assets"
         # Requirement: "Kaggle dataset contains only: payload.json, original *.ttf, Pulsarium.mp3, dataset-metadata.json"
         # We need to find the font. The example says "Oswald-VariableFont_wght.ttf"
-        font_name = "Oswald-VariableFont_wght.ttf"
+        font_name = "BebasNeue-Bold.ttf"
         assets = [
             (assets_dir / font_name, tmp_path / font_name),
             (assets_dir / "Pulsarium.mp3", tmp_path / "Pulsarium.mp3"),
