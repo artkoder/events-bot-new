@@ -276,6 +276,29 @@ async def handle_video_callback(
             msg = "Ошибка"
         await callback.answer(msg or "Выбор паттерна", show_alert=msg not in {"Выбор паттерна", "Готово"})
         return
+    # --- Sorting Callbacks ---
+    if data.startswith("vidsort:"):
+        try:
+            parts = data.split(":")
+            session_id = int(parts[1])
+            action = parts[2] if len(parts) > 2 else "show"
+            
+            if action == "show":
+                msg = await scenario.show_sort_screen(session_id, callback.message)
+            elif action == "noop":
+                msg = ""
+            elif action == "done":
+                msg = await scenario.finish_sorting(session_id, callback.message)
+            elif action in ("up", "down"):
+                event_id = int(parts[3]) if len(parts) > 3 else 0
+                msg = await scenario.move_item(session_id, event_id, action, callback.message)
+            else:
+                msg = "Неизвестное действие"
+        except Exception:
+            logger.exception("video_announce: sort callback failed")
+            msg = "Ошибка"
+        await callback.answer(msg or "OK", show_alert=msg not in {"Сортировка", "Перемещено", "Готово", "OK", ""})
+        return
     if data.startswith("vidcnt:"):
         handled = await handle_video_count(
             callback,
