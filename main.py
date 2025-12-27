@@ -12660,7 +12660,25 @@ async def patch_month_page_for_date(
 
     anchor: str
     if target_sec:
-        nodes[target_sec.start_idx : target_sec.end_idx] = day_nodes
+        # Check if there's a weekend header immediately before this section
+        replace_start = target_sec.start_idx
+        if target_sec.start_idx > 0:
+            prev_node = nodes[target_sec.start_idx - 1]
+            if isinstance(prev_node, dict) and prev_node.get("tag") == "h3":
+                # Extract text from the header
+                text_parts = []
+                for ch in prev_node.get("children", []):
+                    if isinstance(ch, str):
+                        text_parts.append(ch)
+                text = "".join(text_parts)
+                text = text.replace("\u00a0", " ").replace("\u200b", " ")
+                text = unicodedata.normalize("NFKC", text).lower()
+                text = text.replace("🟥", "").strip()
+                if text in ("суббота", "воскресенье"):
+                    # Include weekend header in replacement
+                    replace_start = target_sec.start_idx - 1
+        
+        nodes[replace_start : target_sec.end_idx] = day_nodes
         anchor = "replace"
     else:
         after_sec = next(

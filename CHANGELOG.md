@@ -2,7 +2,12 @@
 
 ## [Unreleased]
 
-## [1.1.2] - 2025-12-27
+## [1.2.1] - 2025-12-27
+
+### Fixed
+- Исправлено дублирование заголовков выходных дней ("суббота/воскресенье") на месячных Telegraph-страницах при инкрем ентальном обновлении
+
+## [1.2.0] - 2025-12-27
 ### Fixed
 - Fixed critical `TypeError` in video announce generation caused by mismatched arguments in `about` text normalization calls across `scenario.py`, `selection.py`, and `finalize.py`.
 
