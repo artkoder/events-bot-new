@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [1.1.2] - 2025-12-27
+### Fixed
+- Fixed critical `TypeError` in video announce generation caused by mismatched arguments in `about` text normalization calls across `scenario.py`, `selection.py`, and `finalize.py`.
+
 ## [1.1.1] - 2025-12-27
 ### Fixed
 - Fixed bug where `search_digest` was not saved to database during event creation via text import.

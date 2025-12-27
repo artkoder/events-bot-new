@@ -186,7 +186,7 @@ def _parse_final_response(raw: str, known_ids: set[int]) -> list[FinalizedItem]:
         if not isinstance(event_id, int) or event_id not in known_ids:
             continue
         title = _normalize_title(item.get("final_title") or item.get("title"))
-        about = normalize_about_text(item.get("about"), title=title)
+        about = normalize_about_text(item.get("about"))
         description = str(item.get("description") or "").strip()
         if not title or not description:
             continue
@@ -239,9 +239,7 @@ async def prepare_final_texts(
         ocr_key = (enrichment.title if enrichment else None) or (enrichment.text if enrichment else None)
         fin.about = normalize_about_with_fallback(
             fin.about,
-            title=fin.title or getattr(event, "title", None),
             ocr_text=ocr_key,
-            fallback_parts=(getattr(event, "location_name", None), getattr(event, "city", None)),
         )
     enrich_map = {en.event_id: en for en in enrichments.values()}
     async with db.get_session() as session:

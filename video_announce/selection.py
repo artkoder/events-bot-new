@@ -54,9 +54,7 @@ def _build_about(
 ) -> str:
     return normalize_about_with_fallback(
         about,
-        title=title or getattr(event, "title", None),
         ocr_text=ocr_title, # Pass ocr_title as ocr_text for deduplication as per requirements
-        fallback_parts=(getattr(event, "location_name", None), getattr(event, "city", None)),
     )
 
 
@@ -789,7 +787,6 @@ async def fill_missing_about(
                 if ev:
                     normalized = normalize_about_with_fallback(
                         about.strip(),
-                        title=ev.title,
                         ocr_text=poster_titles.get(event_id),
                     )
                     result[event_id] = normalized
