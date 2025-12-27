@@ -10253,6 +10253,8 @@ async def _vkrev_import_flow(
                 detail_lines.append(
                     f"OCR: потрачено {draft.ocr_tokens_spent}, осталось {draft.ocr_tokens_remaining}"
                 )
+            if event_obj and getattr(event_obj, "search_digest", None):
+                detail_lines.append(f"Дайджест: {event_obj.search_digest}")
 
             header = "Импортировано"
             if len(persist_results) > 1:
