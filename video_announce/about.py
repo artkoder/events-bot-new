@@ -38,39 +38,29 @@ def _tokenize(text: str | None) -> list[str]:
     return tokens
 
 
-def _prepare_drop_sets(title: str | None, ocr_text: str | None, anchor_limit: int) -> tuple[list[str], set[str]]:
-    # NOTE: ocr_text here typically contains just the ocr_title or relevant parts for dedup, passed by caller.
-    drop_tokens = {tok.lower() for tok in _tokenize(ocr_text)}
-    title_tokens = _tokenize(title)
-    # Use list to preserve order from title (important for proper nouns like "ОДИН ДОМА")
-    anchors: list[str] = []
-    anchors_lower: set[str] = set()
-    for tok in title_tokens:
-        if len(anchors) >= anchor_limit:
-            break
-        low = tok.lower()
-        if low not in drop_tokens and low not in anchors_lower:
-            anchors.append(tok)  # Keep original casing
-            anchors_lower.add(low)
-    return anchors, drop_tokens
-
 
 def _shorten_about_text(
     text: str | None,
     *,
-    title: str | None = None,
     ocr_text: str | None = None,
     word_limit: int = 12,
     char_limit: int = 60,
-    anchor_limit: int = 2,
 ) -> str:
-    anchors, drop_tokens = _prepare_drop_sets(title, ocr_text, anchor_limit)
+    """Normalize about text: deduplicate words from ocr_text, enforce limits.
+    
+    IMPORTANT: This function does NOT add any new content. 
+    LLM is fully responsible for generating complete about text including title.
+    This only filters and truncates.
+    """
+    # Get tokens to remove (from ocr_text for deduplication)
+    drop_tokens = {tok.lower() for tok in _tokenize(ocr_text)}
+    
     normalized: list[str] = []
     seen: set[str] = set()
     total_len = 0
     input_tokens = _tokenize(text)
 
-    # First pass: collect valid tokens from input text
+    # Collect valid tokens from input text, removing duplicates with ocr_text
     for token in input_tokens:
         low = token.lower()
         if low in seen:
@@ -84,55 +74,10 @@ def _shorten_about_text(
         seen.add(low)
         total_len = projected
 
-    # Stop here if input_tokens was empty (or effectively empty)
-    # to avoid inventing content via anchors if primary input was missing.
-    if not input_tokens:
-        return ""
-
-    # NEW CHECK: If everything was filtered out (empty normalized but input wasn't empty),
-    # do NOT inject anchors. Return empty string.
-    # Requirement: "If after dedup/limits about became empty - do not invent via code, simply save empty."
+    # If input was empty or everything was filtered out, return empty
+    # Do NOT invent content - LLM should handle this
     if not normalized:
         return ""
-
-    # Second pass: ensure at least some anchor tokens are present if missing
-    # We only prepend anchors if NO anchor is present in the normalized list.
-    # anchors is now a list with original casing, ordered as in title
-    anchors_lower = {a.lower() for a in anchors}
-    has_anchor = any(tok.lower() in anchors_lower for tok in normalized)
-    if not has_anchor and anchors:
-        # Prepend ALL anchors (in order from title) to preserve full proper nouns
-        # e.g. "ОДИН ДОМА" should be prepended as both words, not just one
-        
-        # Rebuild with all anchors at the start
-        new_normalized = []
-        current_len = 0
-        seen: set[str] = set()
-        
-        # Add all anchors first (in title order)
-        for anchor in anchors:
-            low = anchor.lower()
-            if low in seen:
-                continue
-            projected = current_len + (1 if new_normalized else 0) + len(anchor)
-            if len(new_normalized) >= word_limit or projected > char_limit:
-                break
-            new_normalized.append(anchor)
-            seen.add(low)
-            current_len = projected
-        
-        # Then add remaining tokens from original about
-        for token in normalized:
-            low = token.lower()
-            if low in seen:
-                continue
-            projected = current_len + 1 + len(token)
-            if len(new_normalized) >= word_limit or projected > char_limit:
-                break
-            new_normalized.append(token)
-            seen.add(low)
-            current_len = projected
-        normalized = new_normalized
 
     return " ".join(normalized)
 
@@ -140,45 +85,44 @@ def _shorten_about_text(
 def normalize_about_text(
     text: str | None,
     *,
-    title: str | None = None,
     ocr_text: str | None = None,
     word_limit: int = 12,
     char_limit: int = 60,
-    anchor_limit: int = 2,
     strip_emojis: bool = True,
 ) -> str:
-    """Clean and enforce limits on LLM-provided about text."""
+    """Clean and enforce limits on LLM-provided about text.
+    
+    Only deduplicates words from ocr_text and truncates to limits.
+    Does NOT add any new content - LLM is fully responsible for complete about.
+    """
     cleaned = _clean_primary_about(text, strip_emojis=strip_emojis)
     return _shorten_about_text(
         cleaned,
-        title=title,
         ocr_text=ocr_text,
         word_limit=word_limit,
         char_limit=char_limit,
-        anchor_limit=anchor_limit,
     )
 
 
 def normalize_about_with_fallback(
     primary: str | None,
     *,
-    title: str | None,
+    title: str | None = None,  # Kept for API compatibility but unused
     ocr_text: str | None = None,
-    fallback_parts: Iterable[str | None] = (),
     word_limit: int = 12,
     char_limit: int = 60,
-    anchor_limit: int = 2,
     strip_emojis: bool = True,
 ) -> str:
-    # 1. Try to normalize the primary (LLM) text.
-    # Note: caller should pass ocr_title as ocr_text for dedup logic.
+    """Normalize LLM-provided about text.
+    
+    Only deduplicates words from ocr_text and truncates to limits.
+    Does NOT add any new content - LLM is fully responsible for complete about.
+    """
     normalized = normalize_about_text(
         primary,
-        title=title,
         ocr_text=ocr_text,
         word_limit=word_limit,
         char_limit=char_limit,
-        anchor_limit=anchor_limit,
         strip_emojis=strip_emojis,
     )
 
