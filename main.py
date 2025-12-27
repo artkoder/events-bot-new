@@ -10598,6 +10598,11 @@ async def add_events_from_text(
             results.append((None, False, missing, "missing"))
             continue
 
+        # Prepare search_digest before creating Event
+        from digest_helper import clean_search_digest
+        raw_digest = (data.get("search_digest") or "").strip()
+        final_digest = clean_search_digest(raw_digest) or None
+
         base_event = Event(
             title=title,
             description=data.get("short_description", ""),
@@ -10607,6 +10612,7 @@ async def add_events_from_text(
             location_name=location_name,
             location_address=addr,
             city=city,
+            search_digest=final_digest,
             ticket_price_min=data.get("ticket_price_min"),
             ticket_price_max=data.get("ticket_price_max"),
             ticket_link=data.get("ticket_link"),
@@ -10760,9 +10766,7 @@ async def add_events_from_text(
                 week=f"{d.year}-{week:02d}" if week else None,
                 weekend=w_start.isoformat() if w_start else None,
             )
-            from digest_helper import clean_search_digest
-            raw_digest = (data.get("search_digest") or "").strip()
-            saved.search_digest = clean_search_digest(raw_digest)
+
 
             if saved.search_digest:
                 digest_words = len(saved.search_digest.split())

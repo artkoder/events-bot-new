@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [1.1.1] - 2025-12-27
+### Fixed
+- Fixed bug where `search_digest` was not saved to database during event creation via text import.
+- Updated `about_fill_prompt` to preserve proper nouns (e.g. "ОДИН ДОМА") in about text.
+- Removed anchor prepending logic in `about.py`, making LLM fully responsible for about text generation.
+- Updated agent instructions to require explicit user command for production deployment.
+
 <!-- Новые изменения добавляй сюда -->
 
 ---
