@@ -285,9 +285,15 @@ class VideoAnnounceScenario:
     def _default_required_periods(self, base_day: date | None = None) -> list[dict[str, int | str]]:
         today_local = base_day or datetime.now(LOCAL_TZ).date()
         tomorrow = today_local + timedelta(days=1)
+        
+        # Calculate next weekend (Saturday)
         weekend_offset = (5 - tomorrow.weekday()) % 7
-        saturday = tomorrow + timedelta(days=weekend_offset)
-        return [
+        next_saturday = tomorrow + timedelta(days=weekend_offset)
+        
+        # Check if today is Saturday or Sunday
+        is_weekend_now = today_local.weekday() >= 5  # 5=Saturday, 6=Sunday
+        
+        periods: list[dict[str, int | str]] = [
             {
                 "title": "Завтра",
                 "target_date": tomorrow.isoformat(),
@@ -300,12 +306,28 @@ class VideoAnnounceScenario:
                 "fallback_window_days": 2,
                 "primary_window_days": 2,
             },
-            {
-                "title": "Выходные",
-                "target_date": saturday.isoformat(),
+        ]
+        
+        # If today is Saturday or Sunday, add current weekend button
+        if is_weekend_now:
+            # Current weekend: this Saturday
+            current_saturday = today_local - timedelta(days=today_local.weekday() - 5) if today_local.weekday() == 6 else today_local
+            periods.append({
+                "title": f"Эти выходные ({current_saturday.day}.{current_saturday.month:02d})",
+                "target_date": current_saturday.isoformat(),
                 "fallback_window_days": 1,
                 "primary_window_days": 1,
-            },
+            })
+        
+        # Next weekend
+        periods.append({
+            "title": f"Выходные ({next_saturday.day}.{next_saturday.month:02d})" if is_weekend_now else "Выходные",
+            "target_date": next_saturday.isoformat(),
+            "fallback_window_days": 1,
+            "primary_window_days": 1,
+        })
+        
+        periods.extend([
             {
                 "title": "Неделя",
                 "target_date": tomorrow.isoformat(),
@@ -316,7 +338,9 @@ class VideoAnnounceScenario:
                 "target_date": tomorrow.isoformat(),
                 "fallback_window_days": 9,
             },
-        ]
+        ])
+        
+        return periods
 
     def _default_selection_params(self) -> dict[str, Any]:
         now_local = datetime.now(LOCAL_TZ)
@@ -1227,6 +1251,179 @@ class VideoAnnounceScenario:
         # Proceed to kernel selection (existing flow)
         return await self.show_kernel_selection(session_id, message=None)
 
+    # --- Sorting Screen Methods ---
+
+    def _get_render_order(self, session_obj: VideoAnnounceSession) -> list[int]:
+        """Get custom render order from session params, or empty list for default."""
+        params = self._get_selection_params(session_obj)
+        return list(params.get("render_order", []))
+
+    async def _sort_view(
+        self, session_id: int
+    ) -> tuple[str, types.InlineKeyboardMarkup]:
+        """Build sorting screen with up/down buttons for ready events."""
+        session_obj = await self._load_session(session_id)
+        if not session_obj:
+            return ("Сессия не найдена", types.InlineKeyboardMarkup(inline_keyboard=[]))
+        
+        pairs = await self._load_items_with_events(session_id)
+        ready_pairs = [(item, ev) for item, ev in pairs if item.status == VideoAnnounceItemStatus.READY]
+        
+        if not ready_pairs:
+            return ("Нет выбранных событий", types.InlineKeyboardMarkup(inline_keyboard=[]))
+        
+        # Get custom render order or use default position order
+        render_order = self._get_render_order(session_obj)
+        
+        # Sort by render_order if exists, otherwise by position
+        if render_order:
+            order_map = {eid: idx for idx, eid in enumerate(render_order)}
+            ready_pairs = sorted(
+                ready_pairs, 
+                key=lambda p: order_map.get(p[1].id, 999999)
+            )
+        
+        lines = [
+            f"Сессия #{session_id}: СОРТИРОВКА",
+            "Расставьте очерёдность для видео:",
+            "",
+        ]
+        
+        keyboard: list[list[types.InlineKeyboardButton]] = []
+        
+        for render_pos, (item, ev) in enumerate(ready_pairs, start=1):
+            emoji = self._normalize_emoji(ev.emoji)
+            date_label = self._format_event_datetime(ev)
+            title = self._format_title(ev)
+            # Show render position vs original LLM position
+            lines.append(f"{render_pos}. #{item.position} · {date_label} · {emoji} {title}")
+            
+            # Up/Down buttons per row
+            row = []
+            if render_pos > 1:
+                row.append(types.InlineKeyboardButton(
+                    text=f"⬆️ {render_pos}",
+                    callback_data=f"vidsort:{session_id}:up:{ev.id}"
+                ))
+            else:
+                row.append(types.InlineKeyboardButton(
+                    text="  ",
+                    callback_data=f"vidsort:{session_id}:noop"
+                ))
+            if render_pos < len(ready_pairs):
+                row.append(types.InlineKeyboardButton(
+                    text=f"⬇️ {render_pos}",
+                    callback_data=f"vidsort:{session_id}:down:{ev.id}"
+                ))
+            else:
+                row.append(types.InlineKeyboardButton(
+                    text="  ",
+                    callback_data=f"vidsort:{session_id}:noop"
+                ))
+            keyboard.append(row)
+        
+        # Back button
+        keyboard.append([
+            types.InlineKeyboardButton(
+                text="✓ Готово", callback_data=f"vidsort:{session_id}:done"
+            )
+        ])
+        
+        markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard)
+        return ("\n".join(lines), markup)
+
+    async def show_sort_screen(
+        self, session_id: int, message: types.Message | None = None
+    ) -> str:
+        """Display the sorting screen."""
+        if not await self.ensure_access():
+            return "Not authorized"
+        session_obj = await self._load_session(session_id)
+        if not session_obj:
+            return "Сессия не найдена"
+        if session_obj.status != VideoAnnounceSessionStatus.SELECTED:
+            return "Сессия уже запущена"
+        
+        # Initialize render_order if not set
+        params = self._get_selection_params(session_obj)
+        if "render_order" not in params:
+            pairs = await self._load_items_with_events(session_id)
+            ready_pairs = [(item, ev) for item, ev in pairs if item.status == VideoAnnounceItemStatus.READY]
+            params["render_order"] = [ev.id for _, ev in ready_pairs]
+            async with self.db.get_session() as session:
+                sess = await session.get(VideoAnnounceSession, session_id)
+                if sess:
+                    sess.selection_params = params
+                    session.add(sess)
+                    await session.commit()
+        
+        text, markup = await self._sort_view(session_id)
+        
+        if message:
+            try:
+                await message.edit_text(text, reply_markup=markup, parse_mode="HTML")
+                return "Сортировка"
+            except Exception:
+                pass
+        
+        await self.bot.send_message(self.chat_id, text, reply_markup=markup, parse_mode="HTML")
+        return "Сортировка"
+
+    async def move_item(
+        self, session_id: int, event_id: int, direction: str, message: types.Message
+    ) -> str:
+        """Move an item up or down in render order."""
+        if not await self.ensure_access():
+            return "Not authorized"
+        
+        async with self.db.get_session() as session:
+            sess = await session.get(VideoAnnounceSession, session_id)
+            if not sess:
+                return "Сессия не найдена"
+            if sess.status != VideoAnnounceSessionStatus.SELECTED:
+                return "Сессия уже запущена"
+            
+            params = self._get_selection_params(sess)
+            render_order = list(params.get("render_order", []))
+            
+            if event_id not in render_order:
+                return "Событие не в списке"
+            
+            idx = render_order.index(event_id)
+            
+            if direction == "up" and idx > 0:
+                render_order[idx], render_order[idx - 1] = render_order[idx - 1], render_order[idx]
+            elif direction == "down" and idx < len(render_order) - 1:
+                render_order[idx], render_order[idx + 1] = render_order[idx + 1], render_order[idx]
+            else:
+                return "Нельзя переместить"
+            
+            params["render_order"] = render_order
+            sess.selection_params = params
+            session.add(sess)
+            await session.commit()
+        
+        # Update the sort screen
+        text, markup = await self._sort_view(session_id)
+        try:
+            await message.edit_text(text, reply_markup=markup, parse_mode="HTML")
+        except Exception:
+            pass
+        return "Перемещено"
+
+    async def finish_sorting(self, session_id: int, message: types.Message) -> str:
+        """Close sort screen and return to selection view."""
+        if not await self.ensure_access():
+            return "Not authorized"
+        
+        try:
+            await self.bot.delete_message(self.chat_id, message.message_id)
+        except Exception:
+            pass
+        
+        await self._send_selection_ui(session_id)
+        return "Готово"
+
     def _build_input_message(
         self, session_obj: VideoAnnounceSession, result: SelectionBuildResult
     ) -> str:
@@ -1665,13 +1862,17 @@ class VideoAnnounceScenario:
         default_selected_max = int(
             params.get("default_selected_max", DEFAULT_SELECTED_MAX) or DEFAULT_SELECTED_MAX
         )
+        show_all = bool(params.get("show_all_candidates", False))
         instruction = (str(params.get("instruction") or "").strip())
         lines = [
             f"Сессия #{session_id}: SELECTED",
             f"Диапазон: {self._date_range_label(params)}",
             "Выберите события для рендера:",
-            f"Показываем топ-{default_selected_max} + промо (всего {len(pairs)})",
         ]
+        if show_all:
+            lines.append(f"Показываем все кандидаты: {len(pairs)}")
+        else:
+            lines.append(f"Показываем топ-{default_selected_max} + промо (всего {len(pairs)})")
         if instruction:
             lines.append(f"Инструкция: {html.escape(instruction[:300])}")
         else:
@@ -1707,7 +1908,11 @@ class VideoAnnounceScenario:
                     ),
                 ]
             )
-        visible_pairs = self._visible_pairs(pairs, visible_limit=default_selected_max)
+        # Show all candidates or limited view
+        if show_all:
+            visible_pairs = list(pairs)  # Show all
+        else:
+            visible_pairs = self._visible_pairs(pairs, visible_limit=default_selected_max)
         for item, ev in visible_pairs:
             marker = "✅" if item.status == VideoAnnounceItemStatus.READY else "⬜"
             emoji = self._normalize_emoji(ev.emoji)
@@ -1740,8 +1945,26 @@ class VideoAnnounceScenario:
         if ready_count:
             lines.insert(3, f"По умолчанию выбрано: {ready_count} из {len(visible_pairs)}")
         if allow_edit and toggle_buttons:
-            keyboard.extend(self._chunk_buttons(toggle_buttons, size=3))
+            # Use 5-column layout for compact display
+            keyboard.extend(self._chunk_buttons(toggle_buttons, size=5))
         if allow_edit:
+            # Expand/Collapse button
+            if show_all:
+                expand_btn = types.InlineKeyboardButton(
+                    text="− Свернуть", callback_data=f"vidsel:{session_id}:collapse"
+                )
+            else:
+                expand_btn = types.InlineKeyboardButton(
+                    text="+ Все кандидаты", callback_data=f"vidsel:{session_id}:expand"
+                )
+            keyboard.append([expand_btn])
+            keyboard.append(
+                [
+                    types.InlineKeyboardButton(
+                        text="🔀 Сортировка", callback_data=f"vidsort:{session_id}:show"
+                    ),
+                ]
+            )
             keyboard.append(
                 [
                     types.InlineKeyboardButton(
@@ -1779,6 +2002,23 @@ class VideoAnnounceScenario:
             if sess.status != VideoAnnounceSessionStatus.SELECTED:
                 return "Сессия уже запущена"
             params = self._get_selection_params(sess)
+            
+            # Handle expand/collapse - just toggle param and update UI, no recalculation
+            if action == "expand":
+                params["show_all_candidates"] = True
+                sess.selection_params = params
+                session.add(sess)
+                await session.commit()
+                await self._update_selection_message(message, session_id)
+                return "Развёрнуто"
+            elif action == "collapse":
+                params["show_all_candidates"] = False
+                sess.selection_params = params
+                session.add(sess)
+                await session.commit()
+                await self._update_selection_message(message, session_id)
+                return "Свёрнуто"
+            
             base_date = self._parse_target_date(str(params.get("target_date"))) or (
                 datetime.now(LOCAL_TZ).date() + timedelta(days=1)
             )
