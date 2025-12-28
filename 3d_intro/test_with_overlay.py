@@ -9,7 +9,7 @@ import os
 import math
 
 OUTPUT_DIR = "/workspaces/events-bot-new/3d_intro/assets"
-REFERENCE_IMAGE = "/home/codespace/.gemini/antigravity/brain/d43d08f1-b44b-444b-8452-4f1dbed5e7b1/uploaded_image_1766911240181.png"
+REFERENCE_IMAGE = "/home/codespace/.gemini/antigravity/brain/990c274c-40a7-4cc4-a521-59a07d231185/uploaded_image_1766957832438.png"
 
 # CSS → Blender Constants
 CANVAS_SIZE = 1080.0

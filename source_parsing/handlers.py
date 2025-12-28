@@ -463,7 +463,13 @@ async def run_source_parsing(
     else:
         from source_parsing.kaggle_runner import run_kaggle_and_get_events
         
+        logger.info("source_parsing: calling Kaggle runner...")
         events_by_source, log_path, kernel_duration = await run_kaggle_and_get_events()
+        logger.info(
+            "source_parsing: Kaggle returned sources=%d duration=%.1fs",
+            len(events_by_source),
+            kernel_duration,
+        )
         result.log_file_path = log_path
         result.kernel_duration = kernel_duration
     

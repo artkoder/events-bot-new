@@ -259,28 +259,71 @@ async def _download_and_send_logs(
             force=True,
             quiet=True,
         )
-        paths = [output_dir / Path(f).name for f in files]
-        log_files = _find_logs(paths)
+        # files is a list of relative paths as strings
+        # Create full paths without flattening directories
+        paths = [output_dir / f for f in files]
+        
+        # Recursively find all log files in the output directory
+        log_candidates = []
+        for p in paths:
+             if p.is_dir():
+                 log_candidates.extend(list(p.rglob("*")))
+             else:
+                 log_candidates.append(p)
+
+        log_files = _find_logs(log_candidates)
+        # Deduplicate paths just in case
+        log_files = sorted(list(set(log_files)))
+
         logger.info(
             "video_announce: found %s log files in output: %s",
             len(log_files),
             [f.name for f in log_files],
         )
+
+        MAX_FILES_TO_SEND = 10
         if log_files:
-            await _send_logs(
-                bot, chat_id, log_files, caption=f"{caption_prefix} сессии #{session_id}"
-            )
+            if len(log_files) <= MAX_FILES_TO_SEND:
+                await _send_logs(
+                    bot, chat_id, log_files, caption=f"{caption_prefix} сессии #{session_id}"
+                )
+            else:
+                # Too many files, zip them
+                zip_path = output_dir / f"logs-{session_id}.zip"
+                import zipfile
+                with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                    for lf in log_files:
+                        zipf.write(lf, lf.relative_to(output_dir))
+                
+                await _send_logs(
+                    bot, chat_id, [zip_path], caption=f"{caption_prefix} сессии #{session_id} (архив)"
+                )
+
         else:
             # Send all files if no .log/.txt/.json found
-            all_files = list(output_dir.iterdir())
+            all_files = []
+            for p in output_dir.rglob("*"):
+                if p.is_file():
+                    all_files.append(p)
+            
             logger.info(
                 "video_announce: no log files found, sending all %s files",
                 len(all_files),
             )
             if all_files:
-                await _send_logs(
-                    bot, chat_id, all_files, caption=f"{caption_prefix} сессии #{session_id}"
-                )
+                if len(all_files) <= MAX_FILES_TO_SEND:
+                    await _send_logs(
+                        bot, chat_id, all_files, caption=f"{caption_prefix} сессии #{session_id}"
+                    )
+                else:
+                    zip_path = output_dir / f"output-{session_id}.zip"
+                    import zipfile
+                    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                        for f in all_files:
+                            zipf.write(f, f.relative_to(output_dir))
+                    await _send_logs(
+                        bot, chat_id, [zip_path], caption=f"{caption_prefix} сессии #{session_id} (полный архив)"
+                    )
             else:
                 await bot.send_message(
                     chat_id, f"⚠️ Логи Kaggle для сессии #{session_id} не найдены"

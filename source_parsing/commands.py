@@ -22,11 +22,16 @@ logger = logging.getLogger(__name__)
 
 async def handle_parse_command(message: types.Message, db: Database, bot: Bot) -> None:
     """Handle /parse command to manually trigger source parsing from theatres."""
+    logger.info("source_parsing: /parse command received from user_id=%s", message.from_user.id)
+    
     async with db.get_session() as session:
         user = await session.get(User, message.from_user.id)
     if not (user and user.is_superadmin):
+        logger.warning("source_parsing: access denied user_id=%s", message.from_user.id)
         await bot.send_message(message.chat.id, "Access denied")
         return
+    
+    logger.info("source_parsing: starting parse for user_id=%s", message.from_user.id)
     
     await bot.send_message(
         message.chat.id,
