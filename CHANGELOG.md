@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [1.2.13] - 2025-12-28
+
+### Fixed
+- Улучшен промпт `about_fill_prompt` для видеоанонсов: теперь LLM явно включает title в about когда ocr_title пуст.
+- Синхронизированы правила about в `selection_prompt` и `about_fill_prompt`.
+
 ## [1.2.1] - 2025-12-27
 
 ### Fixed

@@ -1,0 +1,19 @@
+{
+  "id": "zigomaro/theatres-afisha-get",
+  "id_no": 105697603,
+  "title": "Theatres afisha get",
+  "code_file": "theatres_afisha.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": false,
+  "enable_tpu": false,
+  "enable_internet": true,
+  "keywords": [],
+  "dataset_sources": [],
+  "kernel_sources": [],
+  "competition_sources": [],
+  "model_sources": [],
+  "docker_image": "gcr.io/kaggle-images/python@sha256:9afebf76637ce6541a4a62ba59c41f7cdf5402c3e9b93b86637ef048b20283e0",
+  "machine_shape": "None"
+}

@@ -2171,6 +2171,11 @@ HELP_COMMANDS = [
         "desc": "Restore database from dump",
         "roles": {"superadmin"},
     },
+    {
+        "usage": "/parse",
+        "desc": "Parse events from theatre sources (Драмтеатр, Музтеатр, Кафедральный собор)",
+        "roles": {"superadmin"},
+    },
 ]
 
 HELP_COMMANDS.insert(
@@ -14200,7 +14205,11 @@ def format_event_daily(
         lines.append("\u2705 Пушкинская карта")
 
     ticket_link_display = e.vk_ticket_short_url or e.ticket_link
-    if e.is_free:
+    
+    # Check ticket status for sold-out events
+    if getattr(e, 'ticket_status', None) == "sold_out":
+        lines.append("❌ Билеты все проданы")
+    elif e.is_free:
         txt = "🟡 Бесплатно"
         if e.ticket_link and ticket_link_display:
             txt += f' <a href="{html.escape(ticket_link_display)}">по регистрации</a>'
@@ -14208,18 +14217,21 @@ def format_event_daily(
     elif e.ticket_link and (
         e.ticket_price_min is not None or e.ticket_price_max is not None
     ):
+        # Add ✅ icon if ticket_status is explicitly 'available'
+        status_icon = "✅ " if getattr(e, 'ticket_status', None) == "available" else ""
         if e.ticket_price_max is not None and e.ticket_price_max != e.ticket_price_min:
             price = f"от {e.ticket_price_min} до {e.ticket_price_max}"
         else:
             price = str(e.ticket_price_min or e.ticket_price_max or "")
         if ticket_link_display:
             lines.append(
-                f'<a href="{html.escape(ticket_link_display)}">Билеты в источнике</a> {price}'.strip()
+                f'{status_icon}<a href="{html.escape(ticket_link_display)}">Билеты в источнике</a> {price}'.strip()
             )
     elif e.ticket_link:
+        status_icon = "✅ " if getattr(e, 'ticket_status', None) == "available" else ""
         if ticket_link_display:
             lines.append(
-                f'<a href="{html.escape(ticket_link_display)}">по регистрации</a>'
+                f'{status_icon}<a href="{html.escape(ticket_link_display)}">по регистрации</a>'
             )
     else:
         price = ""

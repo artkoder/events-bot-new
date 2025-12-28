@@ -12689,6 +12689,7 @@ class SourcePageEventSummary:
     ticket_price_max: int | None = None
     ticket_link: str | None = None
     is_free: bool = False
+    ticket_status: str | None = None  # 'available', 'sold_out', or None
 
 
 def _format_summary_anchor_text(url: str) -> str:
@@ -12836,7 +12837,11 @@ async def _build_source_summary_block(
     price_text = _format_ticket_price(
         event_summary.ticket_price_min, event_summary.ticket_price_max
     )
-    if event_summary.is_free:
+    
+    # Check ticket status for sold-out events
+    if event_summary.ticket_status == "sold_out":
+        ticket_segments.append(html.escape("❌ Билеты все проданы"))
+    elif event_summary.is_free:
         if link_value:
             ticket_segments.append(html.escape("🆓 "))
             ticket_segments.append(
@@ -12845,13 +12850,15 @@ async def _build_source_summary_block(
         else:
             ticket_segments.append(html.escape("🆓 Бесплатно"))
     else:
+        # Available tickets - add ✅ icon if ticket_status is explicitly 'available'
+        status_icon = "✅ " if event_summary.ticket_status == "available" else ""
         if link_value:
-            ticket_segments.append(html.escape("🎟 "))
+            ticket_segments.append(html.escape(f"{status_icon}🎟 "))
             ticket_segments.append(_render_summary_anchor(link_value, "Билеты"))
             if price_text:
                 ticket_segments.append(html.escape(f" {price_text}"))
         elif price_text:
-            ticket_segments.append(html.escape(f"🎟 Билеты {price_text}"))
+            ticket_segments.append(html.escape(f"{status_icon}🎟 Билеты {price_text}"))
 
     if ticket_segments:
         lines.append("".join(ticket_segments).strip())
@@ -14036,6 +14043,9 @@ def create_app() -> web.Application:
     dp.message.register(tourist_export_wrapper, Command("tourist_export"))
     dp.message.register(telegraph_fix_author_wrapper, Command("telegraph_fix_author"))
     dp.message.register(restore_wrapper, Command("restore"))
+    # Register /parse command from service module
+    from source_parsing.commands import register_parse_command
+    register_parse_command(dp, db, bot)
     dp.message.register(
         edit_message_wrapper, lambda m: m.from_user.id in editing_sessions
     )

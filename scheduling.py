@@ -582,6 +582,25 @@ def startup(
             "SCHED registered job id=%s next_run=%s", job.id, _job_next_run(job)
         )
 
+    # Source parsing from theatres (before daily announcement at 08:00)
+    if os.getenv("ENABLE_SOURCE_PARSING") == "1":
+        from source_parsing.commands import source_parsing_scheduler
+        job = _scheduler.add_job(
+            _job_wrapper("source_parsing", source_parsing_scheduler),
+            "cron",
+            id="source_parsing",
+            hour="2",
+            minute="0",
+            args=[db, bot],
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=30,
+        )
+        logging.info(
+            "SCHED registered job id=%s next_run=%s", job.id, _job_next_run(job)
+        )
+
     if os.getenv("ENABLE_NIGHTLY_PAGE_SYNC") == "1":
         job = _scheduler.add_job(
             _job_wrapper("nightly_page_sync", nightly_page_sync),
