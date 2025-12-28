@@ -39,7 +39,7 @@ async def handle_parse_command(message: types.Message, db: Database, bot: Bot) -
     )
     
     try:
-        result = await run_source_parsing(db, bot)
+        result = await run_source_parsing(db, bot, chat_id=message.chat.id)
         report = format_parsing_report(result)
         
         await bot.send_message(

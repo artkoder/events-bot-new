@@ -26,7 +26,7 @@ from source_parsing.parser import (
 logger = logging.getLogger(__name__)
 
 # Delay between adding events to avoid overloading the system
-EVENT_ADD_DELAY_SECONDS = 20
+EVENT_ADD_DELAY_SECONDS = 10  # Rate limit protection for LLM calls
 
 
 @dataclass
@@ -50,6 +50,7 @@ class SourceParsingResult:
     log_file_path: str = ""
     json_file_paths: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    chat_id: int | None = None  # For progress messages
 
 
 async def update_event_ticket_status(
@@ -239,7 +240,7 @@ async def add_new_event_via_queue(
     Returns:
         New event ID or None if failed
     """
-    from vk_intake import build_event_drafts_from_vk, persist_event_and_pages
+    from vk_intake import build_event_drafts_from_vk
     
     try:
         # Build description with all available info
@@ -308,46 +309,76 @@ async def add_new_event_via_queue(
         draft.ticket_link = theatre_event.url
         draft.pushkin_card = theatre_event.pushkin_card
         
-        # Use persist_event_and_pages from vk_intake
+        # Use lightweight bulk insert - no Telegraph rebuild, no VK posting
         try:
-            result = await persist_event_and_pages(
-                draft=draft,
-                photos=photos,
-                db=db,
+            import sys
+            from datetime import datetime, timezone
+            from models import Event
+            
+            main_mod = sys.modules.get("main") or sys.modules.get("__main__")
+            if main_mod is None:
+                logger.error("source_parsing: main module not found")
+                return None
+            
+            upsert_event = main_mod.upsert_event
+            assign_event_topics = main_mod.assign_event_topics
+            
+            # Build Event object
+            event = Event(
+                title=draft.title,
+                description=(draft.description or ""),
+                festival=(draft.festival or None),
+                date=draft.date or datetime.now(timezone.utc).date().isoformat(),
+                time=draft.time or "00:00",
+                location_name=draft.venue or "",
+                location_address=draft.location_address or None,
+                city=draft.city or None,
+                ticket_price_min=draft.ticket_price_min,
+                ticket_price_max=draft.ticket_price_max,
+                ticket_link=(draft.links[0] if draft.links else theatre_event.url),
+                event_type=draft.event_type or None,
+                emoji=draft.emoji or None,
+                end_date=draft.end_date or None,
+                is_free=bool(draft.is_free),
+                pushkin_card=bool(draft.pushkin_card),
+                source_text=draft.source_text or draft.title,
+                photo_urls=photos,
+                photo_count=len(photos),
                 source_post_url=theatre_event.url,
+                search_digest=draft.search_digest,
             )
             
-            if result and result.event_id:
-                event_id = result.event_id
-                logger.info(
-                    "source_parsing: event created event_id=%d title=%s",
-                    event_id,
-                    theatre_event.title[:50],
-                )
-                
-                # Update ticket status
-                await update_event_ticket_status(
-                    db,
-                    event_id,
-                    theatre_event.ticket_status,
-                    theatre_event.url,
-                )
-                
-                # Update linked events
-                await update_linked_events(
-                    db,
-                    event_id,
-                    location_name,
-                    theatre_event.title,
-                )
-                
-                return event_id
-            else:
-                logger.warning(
-                    "source_parsing: persist returned no event_id title=%s",
-                    theatre_event.title,
-                )
-                return None
+            # Assign topics (LLM classification)
+            await assign_event_topics(event)
+            
+            # Save to database - NO schedule_event_update_tasks, NO VK posting
+            async with db.get_session() as session:
+                saved, _ = await upsert_event(session, event)
+            
+            event_id = saved.id
+            logger.info(
+                "source_parsing: event created event_id=%d title=%s (bulk mode, no Telegraph)",
+                event_id,
+                theatre_event.title[:50],
+            )
+            
+            # Update ticket status
+            await update_event_ticket_status(
+                db,
+                event_id,
+                theatre_event.ticket_status,
+                theatre_event.url,
+            )
+            
+            # Update linked events
+            await update_linked_events(
+                db,
+                event_id,
+                location_name,
+                theatre_event.title,
+            )
+            
+            return event_id
                 
         except Exception as persist_err:
             logger.error(
@@ -375,6 +406,7 @@ async def process_source_events(
     source: str,
     start_index: int,
     total_count: int,
+    chat_id: int | None = None,
 ) -> SourceParsingStats:
     """Process events from a single source.
     
@@ -385,11 +417,19 @@ async def process_source_events(
         source: Source identifier
         start_index: Starting index for progress
         total_count: Total events across all sources
+        chat_id: Chat ID for progress messages
     
     Returns:
         Statistics for this source
     """
     stats = SourceParsingStats(source=source, total_received=len(events))
+    
+    # Source label for messages
+    source_label = {
+        "dramteatr": "🎭 Драмтеатр",
+        "muzteatr": "🎵 Музтеатр",
+        "sobor": "⛪ Собор",
+    }.get(source, source)
     
     for i, event in enumerate(events):
         current_progress = start_index + i + 1
@@ -437,6 +477,16 @@ async def process_source_events(
             # Always update linked events
             await update_linked_events(db, existing_id, location_name, event.title)
         else:
+            # Send progress message to user
+            if bot and chat_id:
+                try:
+                    await bot.send_message(
+                        chat_id,
+                        f"📝 Добавление {current_progress}/{total_count}: {event.title[:50]}",
+                    )
+                except Exception as e:
+                    logger.warning("source_parsing: failed to send progress: %s", e)
+            
             # Add new event
             new_id = await add_new_event_via_queue(
                 db,
@@ -460,6 +510,7 @@ async def run_source_parsing(
     db: Database,
     bot: Bot | None = None,
     test_data: dict[str, list[TheatreEvent]] | None = None,
+    chat_id: int | None = None,
 ) -> SourceParsingResult:
     """Main entry point for source parsing.
     
@@ -467,12 +518,14 @@ async def run_source_parsing(
         db: Database instance
         bot: Telegram bot for notifications
         test_data: Optional test data to use instead of Kaggle
+        chat_id: Chat ID for progress messages
     
     Returns:
         Complete parsing result with statistics
     """
     start_time = time.time()
     result = SourceParsingResult()
+    result.chat_id = chat_id
     
     # Get events from Kaggle or test data
     if test_data:
@@ -519,6 +572,7 @@ async def run_source_parsing(
             source,
             current_index,
             total_count,
+            chat_id=chat_id,
         )
         result.stats_by_source[source] = stats
         current_index += len(events)
@@ -531,6 +585,29 @@ async def run_source_parsing(
         result.kernel_duration,
         result.processing_duration,
     )
+    
+    # Rebuild Telegraph pages once at the end (batch mode)
+    total_new_added = sum(s.new_added for s in result.stats_by_source.values())
+    if total_new_added > 0:
+        logger.info("source_parsing: rebuilding Telegraph pages for %d new events", total_new_added)
+        try:
+            from main_part2 import _perform_pages_rebuild
+            from datetime import datetime
+            
+            # Get affected months from stats (current month + next 2 months for safety)
+            now = datetime.now()
+            affected_months = []
+            for i in range(3):
+                month = (now.month + i - 1) % 12 + 1
+                year = now.year + ((now.month + i - 1) // 12)
+                affected_months.append(f"{year}-{month:02d}")
+            
+            logger.info("source_parsing: pages_rebuild for months=%s", affected_months)
+            await _perform_pages_rebuild(db, affected_months, force=True)
+            logger.info("source_parsing: pages_rebuild complete")
+        except Exception as rebuild_err:
+            logger.error("source_parsing: pages_rebuild failed: %s", rebuild_err)
+            result.errors.append(f"Pages rebuild failed: {rebuild_err}")
     
     return result
 
