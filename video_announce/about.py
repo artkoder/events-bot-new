@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-from typing import Iterable
 
 _EMOJI_RE = re.compile(
     "["
@@ -17,10 +16,9 @@ _EMOJI_RE = re.compile(
     "]+"
 )
 
-_PUNCT_STRIP_RE = re.compile(r"[«»\"' <>.,!?:;()\[\]{}]")
 
-
-def _clean_primary_about(text: str | None, *, strip_emojis: bool) -> str:
+def _clean_text(text: str | None, *, strip_emojis: bool = True) -> str:
+    """Clean text: strip emojis, normalize whitespace. NO truncation."""
     cleaned = str(text or "")
     if strip_emojis:
         cleaned = _EMOJI_RE.sub("", cleaned)
@@ -28,131 +26,34 @@ def _clean_primary_about(text: str | None, *, strip_emojis: bool) -> str:
     return cleaned
 
 
-def _tokenize(text: str | None) -> list[str]:
-    cleaned = _EMOJI_RE.sub("", str(text or "")).replace("\n", " ")
-    tokens: list[str] = []
-    for raw in cleaned.split():
-        token = _PUNCT_STRIP_RE.sub("", raw)
-        if token:
-            tokens.append(token)
-    return tokens
-
-
-
-def _shorten_about_text(
-    text: str | None,
-    *,
-    ocr_text: str | None = None,
-    word_limit: int = 12,
-    char_limit: int = 60,
-) -> str:
-    """Normalize about text: deduplicate words from ocr_text, enforce limits.
-    
-    IMPORTANT: This function does NOT add any new content. 
-    LLM is fully responsible for generating complete about text including title.
-    This only filters and truncates.
-    """
-    # Get tokens to remove (from ocr_text for deduplication)
-    drop_tokens = {tok.lower() for tok in _tokenize(ocr_text)}
-    
-    normalized: list[str] = []
-    seen: set[str] = set()
-    total_len = 0
-    input_tokens = _tokenize(text)
-
-    # Collect valid tokens from input text, removing duplicates with ocr_text
-    for token in input_tokens:
-        low = token.lower()
-        if low in seen:
-            continue
-        if low in drop_tokens:
-            continue
-        projected = total_len + (1 if normalized else 0) + len(token)
-        if len(normalized) >= word_limit or projected > char_limit:
-            break
-        normalized.append(token)
-        seen.add(low)
-        total_len = projected
-
-    # If input was empty or everything was filtered out, return empty
-    # Do NOT invent content - LLM should handle this
-    if not normalized:
-        return ""
-
-    return " ".join(normalized)
-
-
 def normalize_about_text(
     text: str | None,
     *,
-    ocr_text: str | None = None,
-    word_limit: int = 12,
-    char_limit: int = 60,
+    ocr_text: str | None = None,  # Kept for API compatibility, UNUSED
+    word_limit: int = 12,  # Kept for API compatibility, UNUSED
+    char_limit: int = 60,  # Kept for API compatibility, UNUSED
     strip_emojis: bool = True,
 ) -> str:
-    """Clean and enforce limits on LLM-provided about text.
+    """Clean LLM-provided about text.
     
-    Only deduplicates words from ocr_text and truncates to limits.
-    Does NOT add any new content - LLM is fully responsible for complete about.
+    ONLY strips emojis and normalizes whitespace.
+    NO truncation, NO deduplication - LLM is fully responsible for content.
     """
-    cleaned = _clean_primary_about(text, strip_emojis=strip_emojis)
-    return _shorten_about_text(
-        cleaned,
-        ocr_text=ocr_text,
-        word_limit=word_limit,
-        char_limit=char_limit,
-    )
+    return _clean_text(text, strip_emojis=strip_emojis)
 
 
 def normalize_about_with_fallback(
     primary: str | None,
     *,
-    title: str | None = None,  # Kept for API compatibility but unused
-    ocr_text: str | None = None,
-    word_limit: int = 12,
-    char_limit: int = 60,
+    title: str | None = None,  # Kept for API compatibility, UNUSED
+    ocr_text: str | None = None,  # Kept for API compatibility, UNUSED
+    word_limit: int = 12,  # Kept for API compatibility, UNUSED
+    char_limit: int = 60,  # Kept for API compatibility, UNUSED
     strip_emojis: bool = True,
 ) -> str:
-    """Normalize LLM-provided about text.
+    """Clean LLM-provided about text.
     
-    Only deduplicates words from ocr_text and truncates to limits.
-    Does NOT add any new content - LLM is fully responsible for complete about.
+    ONLY strips emojis and normalizes whitespace.
+    NO truncation, NO deduplication - LLM is fully responsible for content.
     """
-    normalized = normalize_about_text(
-        primary,
-        ocr_text=ocr_text,
-        word_limit=word_limit,
-        char_limit=char_limit,
-        strip_emojis=strip_emojis,
-    )
-
-    # 2. If primary was provided (even if empty string originally), we respect it.
-    # BUT the requirement says: "If after dedup/limits about became empty - do not invent via code, simply save empty."
-    # AND "If about was returned by LLM...".
-    # So if `primary` is not None, we check `normalized`. If `normalized` is empty, we return empty.
-
-    if primary is not None:
-        return normalized
-
-    # 3. Fallback logic only if primary was None (not generated by LLM, e.g. legacy or other flows).
-    # Since we updated selection to always parse `about` (which might be None or string),
-    # If LLM didn't return `about`, it is None.
-    # However, prompt says "about for each selected event".
-    # If LLM fails to return it, primary is None.
-    # The user says: "if format not met... simply save as comes (or save empty)".
-    # This implies we shouldn't fallback to constructing from title if LLM was SUPPOSED to do it.
-
-    # Actually, the user instruction is specific:
-    # "If ocr_title empty... rely on title + search_digest... and still no overlap with ocr_title" -> This is for LLM prompt.
-    # "Normalization (post-LLM)... If after dedup/limits about became empty - do not invent anew via code, simply save empty."
-
-    # So, if primary is None (LLM didn't send it), we should also probably return empty or handle it gracefully.
-    # But existing code has a fallback.
-    # Let's remove the fallback for the Selection LLM flow context.
-    # But `normalize_about_with_fallback` might be used elsewhere?
-    # It is used in `_build_about` in selection.py, and `finalize.py`.
-    # In `selection.py`, `primary` comes from `RankedEvent.about`.
-    # If LLM didn't return `about` (failed/old prompt), it's None.
-    # If we return empty, we show empty about in UI. That's what requested: "LLM didn't offer correct option".
-
-    return normalized
+    return _clean_text(primary, strip_emojis=strip_emojis)
