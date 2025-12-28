@@ -27,7 +27,7 @@ description: Основные инструкции для AI-агента при
 5. Закоммить все изменения: `git add -A && git commit -m "chore: release vX.Y.Z"`
 6. **Создай git tag**: `git tag -a vX.Y.Z -m "Release vX.Y.Z"`
 7. **Запуш с тегами**: `git push origin main --tags`
-8. Задеплой на Fly.io: `fly deploy`
+8. **Деплой на Fly.io**: `fly deploy` (ТОЛЬКО ПО КОМАНДЕ ПОЛЬЗОВАТЕЛЯ!)
 
 > ⚠️ **ВАЖНО**: Git tag ОБЯЗАТЕЛЕН! Без тега релиз не считается завершённым.
 

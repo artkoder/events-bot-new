@@ -1832,9 +1832,7 @@ class VideoAnnounceScenario:
                 item.include_count = getattr(r.event, "video_include_count", 0) or 0
                 about_text = normalize_about_with_fallback(
                     r.about,
-                    title=getattr(r.event, "title", None),
                     ocr_text=r.poster_ocr_text,
-                    fallback_parts=(getattr(r.event, "location_name", None), getattr(r.event, "city", None)),
                 )
                 description_text = (r.description or "").strip()
                 if item.status == VideoAnnounceItemStatus.READY:

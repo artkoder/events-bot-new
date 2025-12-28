@@ -54,9 +54,7 @@ def _build_about(
 ) -> str:
     return normalize_about_with_fallback(
         about,
-        title=title or getattr(event, "title", None),
         ocr_text=ocr_title, # Pass ocr_title as ocr_text for deduplication as per requirements
-        fallback_parts=(getattr(event, "location_name", None), getattr(event, "city", None)),
     )
 
 
@@ -789,7 +787,6 @@ async def fill_missing_about(
                 if ev:
                     normalized = normalize_about_with_fallback(
                         about.strip(),
-                        title=ev.title,
                         ocr_text=poster_titles.get(event_id),
                     )
                     result[event_id] = normalized
@@ -872,8 +869,21 @@ def payload_as_json(payload: RenderPayload, tz: timezone) -> str:
     intro_str = intro_text_override or "АФИША"
 
     event_map = {ev.id: ev for ev in payload.events}
+    
+    # Use render_order if available, otherwise sort by position
+    render_order = list(selection_params.get("render_order", []))
+    if render_order:
+        # Build order map: event_id -> order index
+        order_map = {eid: idx for idx, eid in enumerate(render_order)}
+        sorted_items = sorted(
+            payload.items,
+            key=lambda it: order_map.get(it.event_id, 999999)
+        )
+    else:
+        sorted_items = sorted(payload.items, key=lambda it: it.position)
+    
     scenes = []
-    for item in sorted(payload.items, key=lambda it: it.position):
+    for item in sorted_items:
         ev = event_map.get(item.event_id)
         if not ev:
             continue

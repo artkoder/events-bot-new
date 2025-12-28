@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+## [1.2.13] - 2025-12-28
+
+### Fixed
+- Улучшен промпт `about_fill_prompt` для видеоанонсов: теперь LLM явно включает title в about когда ocr_title пуст.
+- Синхронизированы правила about в `selection_prompt` и `about_fill_prompt`.
+
+## [1.2.1] - 2025-12-27
+
+### Fixed
+- Исправлено дублирование заголовков выходных дней ("суббота/воскресенье") на месячных Telegraph-страницах при инкрем ентальном обновлении
+
+## [1.2.0] - 2025-12-27
+### Fixed
+- Fixed critical `TypeError` in video announce generation caused by mismatched arguments in `about` text normalization calls across `scenario.py`, `selection.py`, and `finalize.py`.
+
+## [1.1.1] - 2025-12-27
+### Fixed
+- Fixed bug where `search_digest` was not saved to database during event creation via text import.
+- Updated `about_fill_prompt` to preserve proper nouns (e.g. "ОДИН ДОМА") in about text.
+- Removed anchor prepending logic in `about.py`, making LLM fully responsible for about text generation.
+- Updated agent instructions to require explicit user command for production deployment.
+
 <!-- Новые изменения добавляй сюда -->
 
 ---

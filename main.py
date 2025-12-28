@@ -2171,6 +2171,11 @@ HELP_COMMANDS = [
         "desc": "Restore database from dump",
         "roles": {"superadmin"},
     },
+    {
+        "usage": "/parse",
+        "desc": "Parse events from theatre sources (Драмтеатр, Музтеатр, Кафедральный собор)",
+        "roles": {"superadmin"},
+    },
 ]
 
 HELP_COMMANDS.insert(
@@ -10598,6 +10603,11 @@ async def add_events_from_text(
             results.append((None, False, missing, "missing"))
             continue
 
+        # Prepare search_digest before creating Event
+        from digest_helper import clean_search_digest
+        raw_digest = (data.get("search_digest") or "").strip()
+        final_digest = clean_search_digest(raw_digest) or None
+
         base_event = Event(
             title=title,
             description=data.get("short_description", ""),
@@ -10607,6 +10617,7 @@ async def add_events_from_text(
             location_name=location_name,
             location_address=addr,
             city=city,
+            search_digest=final_digest,
             ticket_price_min=data.get("ticket_price_min"),
             ticket_price_max=data.get("ticket_price_max"),
             ticket_link=data.get("ticket_link"),
@@ -10760,9 +10771,7 @@ async def add_events_from_text(
                 week=f"{d.year}-{week:02d}" if week else None,
                 weekend=w_start.isoformat() if w_start else None,
             )
-            from digest_helper import clean_search_digest
-            raw_digest = (data.get("search_digest") or "").strip()
-            saved.search_digest = clean_search_digest(raw_digest)
+
 
             if saved.search_digest:
                 digest_words = len(saved.search_digest.split())
@@ -12656,7 +12665,35 @@ async def patch_month_page_for_date(
 
     anchor: str
     if target_sec:
-        nodes[target_sec.start_idx : target_sec.end_idx] = day_nodes
+        # Check if there's a weekend header immediately before this section
+        replace_start = target_sec.start_idx
+        if target_sec.start_idx > 0:
+            prev_node = nodes[target_sec.start_idx - 1]
+            if isinstance(prev_node, dict) and prev_node.get("tag") == "h3":
+                # Extract text from the header
+                text_parts = []
+                for ch in prev_node.get("children", []):
+                    if isinstance(ch, str):
+                        text_parts.append(ch)
+                text = "".join(text_parts)
+                text = text.replace("\u00a0", " ").replace("\u200b", " ")
+                text = unicodedata.normalize("NFKC", text).lower()
+                text = text.replace("🟥", "").strip()
+                if text in ("суббота", "воскресенье"):
+                    # Include weekend header in replacement
+                    replace_start = target_sec.start_idx - 1
+                    # Also check for empty paragraphs before weekend header
+                    while replace_start > 0:
+                        check_node = nodes[replace_start - 1]
+                        if (isinstance(check_node, dict) and 
+                            check_node.get("tag") == "p" and
+                            check_node.get("children") == ["\u200b"]):
+                            # Empty paragraph, include it in deletion
+                            replace_start -= 1
+                        else:
+                            break
+        
+        nodes[replace_start : target_sec.end_idx] = day_nodes
         anchor = "replace"
     else:
         after_sec = next(
@@ -14168,7 +14205,11 @@ def format_event_daily(
         lines.append("\u2705 Пушкинская карта")
 
     ticket_link_display = e.vk_ticket_short_url or e.ticket_link
-    if e.is_free:
+    
+    # Check ticket status for sold-out events
+    if getattr(e, 'ticket_status', None) == "sold_out":
+        lines.append("❌ Билеты все проданы")
+    elif e.is_free:
         txt = "🟡 Бесплатно"
         if e.ticket_link and ticket_link_display:
             txt += f' <a href="{html.escape(ticket_link_display)}">по регистрации</a>'
@@ -14176,18 +14217,21 @@ def format_event_daily(
     elif e.ticket_link and (
         e.ticket_price_min is not None or e.ticket_price_max is not None
     ):
+        # Add ✅ icon if ticket_status is explicitly 'available'
+        status_icon = "✅ " if getattr(e, 'ticket_status', None) == "available" else ""
         if e.ticket_price_max is not None and e.ticket_price_max != e.ticket_price_min:
             price = f"от {e.ticket_price_min} до {e.ticket_price_max}"
         else:
             price = str(e.ticket_price_min or e.ticket_price_max or "")
         if ticket_link_display:
             lines.append(
-                f'<a href="{html.escape(ticket_link_display)}">Билеты в источнике</a> {price}'.strip()
+                f'{status_icon}<a href="{html.escape(ticket_link_display)}">Билеты в источнике</a> {price}'.strip()
             )
     elif e.ticket_link:
+        status_icon = "✅ " if getattr(e, 'ticket_status', None) == "available" else ""
         if ticket_link_display:
             lines.append(
-                f'<a href="{html.escape(ticket_link_display)}">по регистрации</a>'
+                f'{status_icon}<a href="{html.escape(ticket_link_display)}">по регистрации</a>'
             )
     else:
         price = ""

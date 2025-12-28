@@ -1,0 +1,24 @@
+{
+    "comment": "Auto-calibrated parameters matched to Screenshot (uploaded_image_1766911240181.png).",
+    "calibrated_at": "2025-12-28 11:30 UTC",
+    "fonts": {
+        "Benzin-Bold": {
+            "scale": 1.295,
+            "tracking_factor": 0.976,
+            "offset_x_px": -52.9,
+            "offset_y_px": -28.3
+        },
+        "BebasNeue": {
+            "scale": 1.004,
+            "tracking_factor": 1.006,
+            "offset_x_px": -52.0,
+            "offset_y_px": 27.3
+        },
+        "DrukCyr-Bold": {
+            "scale": 1.193,
+            "tracking_factor": 0.996,
+            "offset_x_px": -52.6,
+            "offset_y_px": 44.0
+        }
+    }
+}

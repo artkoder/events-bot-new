@@ -403,6 +403,8 @@ class Event(SQLModel, table=True):
         default_factory=utc_now, sa_column=Column(DateTime(timezone=True))
     )
     content_hash: Optional[str] = None
+    ticket_status: Optional[str] = None  # 'available', 'sold_out', or None/unknown
+    linked_event_ids: list[int] = Field(default_factory=list, sa_column=Column(JSON))
 
 
 class VideoAnnounceSessionStatus(str, Enum):
