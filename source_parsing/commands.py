@@ -48,12 +48,28 @@ async def handle_parse_command(message: types.Message, db: Database, bot: Bot) -
             parse_mode="Markdown",
         )
         
+        # Send JSON files if available
+        if hasattr(result, 'json_file_paths') and result.json_file_paths:
+            from aiogram.types import FSInputFile
+            for json_path in result.json_file_paths:
+                try:
+                    import os
+                    if os.path.exists(json_path):
+                        filename = os.path.basename(json_path)
+                        json_file = FSInputFile(json_path, filename=filename)
+                        await bot.send_document(message.chat.id, json_file)
+                        logger.info("source_parsing: sent JSON file %s", filename)
+                except Exception as e:
+                    logger.warning("source_parsing: failed to send JSON %s: %s", json_path, e)
+        
         # Send log file if available
         if result.log_file_path:
             try:
                 from aiogram.types import FSInputFile
-                log_file = FSInputFile(result.log_file_path, filename="kaggle_log.txt")
-                await bot.send_document(message.chat.id, log_file)
+                import os
+                if os.path.exists(result.log_file_path):
+                    log_file = FSInputFile(result.log_file_path, filename="kaggle_log.txt")
+                    await bot.send_document(message.chat.id, log_file)
             except Exception as e:
                 logger.warning("source_parsing: failed to send log file: %s", e)
                 

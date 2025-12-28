@@ -48,6 +48,7 @@ class SourceParsingResult:
     kernel_duration: float = 0.0
     processing_duration: float = 0.0
     log_file_path: str = ""
+    json_file_paths: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
 
@@ -238,8 +239,7 @@ async def add_new_event_via_queue(
     Returns:
         New event ID or None if failed
     """
-    from vk_intake import build_event_drafts_from_vk, EventDraft
-    from runtime import get_running_main
+    from vk_intake import build_event_drafts_from_vk, persist_event_and_pages
     
     try:
         # Build description with all available info
@@ -274,10 +274,11 @@ async def add_new_event_via_queue(
         
         # Log progress
         logger.info(
-            "source_parsing: adding event %d/%d title=%s",
+            "source_parsing: adding event %d/%d title=%s location=%s",
             progress_current,
             progress_total,
             theatre_event.title[:50],
+            location_name,
         )
         
         # Use existing event creation logic
@@ -307,17 +308,22 @@ async def add_new_event_via_queue(
         draft.ticket_link = theatre_event.url
         draft.pushkin_card = theatre_event.pushkin_card
         
-        # Create event in database
-        main = get_running_main()
-        if main and hasattr(main, "persist_event_draft"):
-            result = await main.persist_event_draft(
-                db,
-                draft,
+        # Use persist_event_and_pages from vk_intake
+        try:
+            result = await persist_event_and_pages(
+                draft=draft,
                 photos=photos,
-                silent=True,  # Don't send notifications for bulk imports
+                db=db,
+                source_post_url=theatre_event.url,
             )
-            if result:
+            
+            if result and result.event_id:
                 event_id = result.event_id
+                logger.info(
+                    "source_parsing: event created event_id=%d title=%s",
+                    event_id,
+                    theatre_event.title[:50],
+                )
                 
                 # Update ticket status
                 await update_event_ticket_status(
@@ -336,8 +342,21 @@ async def add_new_event_via_queue(
                 )
                 
                 return event_id
-        
-        return None
+            else:
+                logger.warning(
+                    "source_parsing: persist returned no event_id title=%s",
+                    theatre_event.title,
+                )
+                return None
+                
+        except Exception as persist_err:
+            logger.error(
+                "source_parsing: persist failed title=%s error=%s",
+                theatre_event.title,
+                persist_err,
+                exc_info=True,
+            )
+            return None
         
     except Exception as e:
         logger.error(
@@ -460,18 +479,21 @@ async def run_source_parsing(
         events_by_source = test_data
         result.log_file_path = ""
         result.kernel_duration = 0.0
+        result.json_file_paths = []
     else:
         from source_parsing.kaggle_runner import run_kaggle_and_get_events
         
         logger.info("source_parsing: calling Kaggle runner...")
-        events_by_source, log_path, kernel_duration = await run_kaggle_and_get_events()
+        events_by_source, log_path, kernel_duration, json_files = await run_kaggle_and_get_events()
         logger.info(
-            "source_parsing: Kaggle returned sources=%d duration=%.1fs",
+            "source_parsing: Kaggle returned sources=%d duration=%.1fs json_files=%d",
             len(events_by_source),
             kernel_duration,
+            len(json_files),
         )
         result.log_file_path = log_path
         result.kernel_duration = kernel_duration
+        result.json_file_paths = json_files
     
     if not events_by_source:
         result.errors.append("No events received from sources")

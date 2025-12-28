@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [1.2.15] - 2025-12-28
+
+### Fixed
+- **source_parsing**: Исправлено добавление событий — теперь используется `persist_event_and_pages` вместо несуществующего `persist_event_draft`
+- **source_parsing**: Добавлена отправка JSON файлов из Kaggle в ответ на `/parse`
+- **source_parsing**: Улучшено логирование создания событий
+
 ## [1.2.14] - 2025-12-28
 
 ### Added

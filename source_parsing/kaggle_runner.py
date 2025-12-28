@@ -210,21 +210,24 @@ def parse_output_files(file_paths: list[str]) -> dict[str, Any]:
     return results
 
 
-async def run_kaggle_and_get_events() -> tuple[dict[str, list], str, float]:
+async def run_kaggle_and_get_events() -> tuple[dict[str, list], str, float, list[str]]:
     """Run Kaggle kernel and return parsed events.
     
     Returns:
-        Tuple of (events_by_source, log_file_path, kernel_duration)
+        Tuple of (events_by_source, log_file_path, kernel_duration, json_file_paths)
     """
     status, output_files, duration = await run_kaggle_kernel()
     
     if status == "not_found":
         logger.warning("theatres_kaggle: kernel not configured")
-        return {}, "", 0.0
+        return {}, "", 0.0, []
     
     if status != "complete":
         logger.error("theatres_kaggle: kernel failed status=%s", status)
-        return {}, "", duration
+        return {}, "", duration, []
+    
+    # Separate JSON files from other outputs
+    json_files = [f for f in output_files if f.endswith('.json')]
     
     events_by_source = parse_output_files(output_files)
     
@@ -234,6 +237,7 @@ async def run_kaggle_and_get_events() -> tuple[dict[str, list], str, float]:
         f"Kaggle kernel completed at {datetime.now().isoformat()}",
         f"Duration: {duration:.1f}s",
         f"Status: {status}",
+        f"Output files: {len(output_files)}",
         "",
         "Events by source:",
     ]
@@ -242,4 +246,4 @@ async def run_kaggle_and_get_events() -> tuple[dict[str, list], str, float]:
     
     log_path.write_text("\n".join(log_lines), encoding="utf-8")
     
-    return events_by_source, str(log_path), duration
+    return events_by_source, str(log_path), duration, json_files
