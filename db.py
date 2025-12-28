@@ -242,6 +242,8 @@ class Database:
                 conn, "event", "video_include_count INTEGER NOT NULL DEFAULT 0"
             )
             await _add_column(conn, "event", "search_digest TEXT")
+            await _add_column(conn, "event", "ticket_status TEXT")
+            await _add_column(conn, "event", "linked_event_ids TEXT")
             await conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_event_tourist_label ON event(tourist_label)"
             )
