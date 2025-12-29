@@ -14,8 +14,10 @@ from typing import Optional, Sequence
 from aiogram import Bot
 
 from db import Database
+from source_parsing.kaggle_runner import run_kaggle_kernel
 from source_parsing.parser import (
     TheatreEvent,
+    parse_theatre_json,
     normalize_location_name,
     find_existing_event,
     should_update_event,
