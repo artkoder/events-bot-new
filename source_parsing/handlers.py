@@ -28,6 +28,9 @@ logger = logging.getLogger(__name__)
 # Delay between adding events to avoid overloading the system
 EVENT_ADD_DELAY_SECONDS = 20  # Delay for Telegraph creation
 
+# TEMPORARY: Limit events for debugging (set to None to disable)
+DEBUG_MAX_EVENTS = 3
+
 
 @dataclass
 class SourceParsingStats:
@@ -517,6 +520,11 @@ async def process_source_events(
                 stats.new_added += 1
                 # Delay between additions
                 await asyncio.sleep(EVENT_ADD_DELAY_SECONDS)
+                
+                # DEBUG: Stop after max events
+                if DEBUG_MAX_EVENTS and stats.new_added >= DEBUG_MAX_EVENTS:
+                    logger.info("source_parsing: DEBUG limit reached (%d events)", DEBUG_MAX_EVENTS)
+                    break
             else:
                 stats.failed += 1
     
