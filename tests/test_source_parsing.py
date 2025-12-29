@@ -49,6 +49,18 @@ class TestParseDateRaw:
         assert date_str is None
         assert time_str is None
 
+    def test_numeric_date_format(self):
+        """Parse DD.MM.YYYY format from Pyramida."""
+        date_str, time_str = parse_date_raw("21.03.2026 18:00")
+        assert date_str == "2026-03-21"
+        assert time_str == "18:00"
+
+    def test_numeric_date_without_time(self):
+        """Parse DD.MM.YYYY format without time."""
+        date_str, time_str = parse_date_raw("15.01.2025")
+        assert date_str == "2025-01-15"
+        assert time_str is None
+
 
 class TestParseTheatreJson:
     """Tests for JSON parsing."""

@@ -65,6 +65,7 @@ def parse_date_raw(date_raw: str) -> tuple[Optional[str], Optional[str]]:
         "28 декабря 18:00" -> ("2024-12-28", "18:00")
         "02 ЯНВАРЯ 13:00" -> ("2025-01-02", "13:00")
         "28 ДЕКАБР" -> ("2024-12-28", None)
+        "21.03.2026 18:00" -> ("2026-03-21", "18:00")
     """
     if not date_raw:
         return None, None
@@ -78,6 +79,18 @@ def parse_date_raw(date_raw: str) -> tuple[Optional[str], Optional[str]]:
         hour = int(time_match.group(1))
         minute = int(time_match.group(2))
         parsed_time = f"{hour:02d}:{minute:02d}"
+    
+    # Try DD.MM.YYYY format first (e.g., "21.03.2026")
+    numeric_date_match = re.search(r'(\d{1,2})\.(\d{1,2})\.(\d{4})', text)
+    if numeric_date_match:
+        day = int(numeric_date_match.group(1))
+        month = int(numeric_date_match.group(2))
+        year = int(numeric_date_match.group(3))
+        try:
+            event_date = date(year, month, day)
+            return event_date.isoformat(), parsed_time
+        except ValueError:
+            pass  # Invalid date, fall through to Russian month parsing
     
     # Extract day and month
     day_match = re.search(r'(\d{1,2})\s*', text)
