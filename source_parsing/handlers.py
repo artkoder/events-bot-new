@@ -546,8 +546,6 @@ async def run_source_parsing(
     total_count = sum(len(ev) for ev in events_by_source.values())
     result.total_events = total_count
     
-    # Sort sources for consistent order? (optional, keys are random-ish but usually consistent)
-    
     current_index = 0
     progress_message_id = None
     
@@ -567,7 +565,8 @@ async def run_source_parsing(
             current_index += len(events)
         except Exception as e:
             logger.error("source_parsing: failed to process events from %s: %s", source, e, exc_info=True)
-            result.errors.append(f"Source {source}: {str(e)}")
+            # Escape error text as it may contain underscores/paths
+            result.errors.append(f"Source {escape_md(source)}: {escape_md(str(e))}")
             
     # Final progress update
     if bot and chat_id and progress_message_id:
