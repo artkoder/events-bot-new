@@ -16,7 +16,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Awaitable, Optional
 
 from aiogram import Bot
 
@@ -78,6 +78,7 @@ async def run_pyramida_kaggle_kernel(
     urls: list[str],
     timeout_minutes: int = 15,
     poll_interval: int = 20,
+    status_callback: Optional[Callable[[str], Awaitable[None]]] = None,
 ) -> tuple[str, list[str], float]:
     """Run Kaggle kernel for parsing Pyramida URLs.
     
@@ -166,6 +167,12 @@ async def run_pyramida_kaggle_kernel(
                     max_polls,
                     status,
                 )
+                
+                if status_callback:
+                    try:
+                        await status_callback(f"Kaggle: {status} (poll {poll + 1}/{max_polls})")
+                    except Exception as exc:
+                        logger.warning("pyramida_kaggle: callback failed: %s", exc)
                 
                 if status == "COMPLETE":
                     final_status = "complete"

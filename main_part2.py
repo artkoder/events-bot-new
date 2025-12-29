@@ -7929,11 +7929,21 @@ async def handle_pyramida_input(message: types.Message, db: Database, bot: Bot) 
         await bot.send_message(message.chat.id, "❌ Не найдены ссылки pyramida.info/tickets/")
         return
     
-    await bot.send_message(message.chat.id, f"🔮 Найдено {len(urls)} ссылок. Запускаю Kaggle...")
+    status_msg = await bot.send_message(message.chat.id, f"🔮 Найдено {len(urls)} ссылок. Запускаю Kaggle...")
+    
+    async def _status_cb(text: str):
+        try:
+            await bot.edit_message_text(
+                f"🔮 {text}",
+                chat_id=message.chat.id,
+                message_id=status_msg.message_id,
+            )
+        except Exception:
+            pass
     
     # Run Kaggle
     try:
-        status, output_files, duration = await run_pyramida_kaggle_kernel(urls)
+        status, output_files, duration = await run_pyramida_kaggle_kernel(urls, status_callback=_status_cb)
     except Exception as e:
         logging.exception("pyramida_input: kaggle failed")
         await bot.send_message(message.chat.id, f"❌ Ошибка Kaggle: {e}")
@@ -10829,11 +10839,21 @@ async def _handle_pyramida_extraction(
         await _vkrev_show_next(chat_id, batch_id, operator_id, db, bot)
         return
     
-    await bot.send_message(chat_id, f"🔮 Найдено {len(urls)} ссылок. Запускаю Kaggle...")
+    status_msg = await bot.send_message(chat_id, f"🔮 Найдено {len(urls)} ссылок. Запускаю Kaggle...")
     
+    async def _status_cb(text: str):
+        try:
+            await bot.edit_message_text(
+                f"🔮 {text}",
+                chat_id=chat_id,
+                message_id=status_msg.message_id,
+            )
+        except Exception:
+            pass
+            
     # 2. Run Kaggle kernel
     try:
-        status, output_files, duration = await run_pyramida_kaggle_kernel(urls)
+        status, output_files, duration = await run_pyramida_kaggle_kernel(urls, status_callback=_status_cb)
     except Exception as e:
         logging.exception("pyramida_extraction: kaggle failed")
         await bot.send_message(chat_id, f"❌ Ошибка Kaggle: {e}")
