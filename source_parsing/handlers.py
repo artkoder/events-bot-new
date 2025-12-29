@@ -406,6 +406,14 @@ async def add_new_event_via_queue(
         return None
 
 
+def escape_md(text: str) -> str:
+    """Escape Telegram Markdown special characters."""
+    chars = "_*[]()~`>#+-=|{}.!"
+    for c in chars:
+        text = text.replace(c, f"\\{c}")
+    return text
+
+
 def format_parsing_report(result: SourceParsingResult) -> str:
     """Format parsing result as a human-readable report.
     
@@ -432,7 +440,14 @@ def format_parsing_report(result: SourceParsingResult) -> str:
         total_failed += stats.failed
         total_skipped += stats.skipped
         
-        lines.append(f"• **{source}**:")
+        # Use descriptive labels if available
+        source_label = {
+            "dramteatr": "Драмтеатр",
+            "muzteatr": "Музтеатр",
+            "sobor": "Собор",
+        }.get(source, source)
+        
+        lines.append(f"• **{escape_md(source_label)}**:")
         lines.append(f"  ✅ Добавлено: {stats.new_added}")
         if stats.failed:
             lines.append(f"  ❌ Ошибок: {stats.failed}")
@@ -450,7 +465,8 @@ def format_parsing_report(result: SourceParsingResult) -> str:
         lines.append("**Ошибки выполнения:**")
         # Show first 3 errors to avoid overflow
         for err in result.errors[:3]:
-            lines.append(f"⚠️ {err}")
+            # Escape error text as it may contain underscores/paths
+            lines.append(f"⚠️ {escape_md(str(err))}")
         if len(result.errors) > 3:
             lines.append(f"... и еще {len(result.errors) - 3}")
 
@@ -459,7 +475,7 @@ def format_parsing_report(result: SourceParsingResult) -> str:
         lines.append("")
         lines.append("**Сохраненные файлы:**")
         for path in result.json_file_paths:
-            lines.append(f"📄 {Path(path).name}")
+            lines.append(f"📄 {escape_md(Path(path).name)}")
             
     return "\n".join(lines)
 
