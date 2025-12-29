@@ -26,7 +26,7 @@ from source_parsing.parser import (
 logger = logging.getLogger(__name__)
 
 # Delay between adding events to avoid overloading the system
-EVENT_ADD_DELAY_SECONDS = 20  # Delay for Telegraph creation
+EVENT_ADD_DELAY_SECONDS = 5  # Delay for Telegraph creation
 
 # TEMPORARY: Limit events for debugging (set to None to disable)
 DEBUG_MAX_EVENTS = 10
@@ -244,6 +244,7 @@ async def add_new_event_via_queue(
         New event ID or None if failed
     """
     from vk_intake import build_event_drafts_from_vk
+    import main as main_mod
     
     try:
         # Build description with all available info
@@ -356,12 +357,12 @@ async def add_new_event_via_queue(
             async with db.get_session() as session:
                 saved = await session.get(Event, event_id)
             
-            # Create Telegraph pages and other artifacts (NO VK posting)
+            # Create Telegraph pages and other artifacts (NO VK posting, NO nav drain - updated in batch later)
             schedule_event_update_tasks = main_mod.schedule_event_update_tasks
-            await schedule_event_update_tasks(db, saved, skip_vk_sync=True)
+            await schedule_event_update_tasks(db, saved, drain_nav=False, skip_vk_sync=True)
             
             logger.info(
-                "source_parsing: event created event_id=%d title=%s (with Telegraph)",
+                "source_parsing: event created event_id=%d title=%s (Telegraph only, no nav update)",
                 event_id,
                 theatre_event.title[:50],
             )
@@ -401,6 +402,194 @@ async def add_new_event_via_queue(
             exc_info=True,
         )
         return None
+
+
+def format_parsing_report(result: SourceParsingResult) -> str:
+    """Format parsing result as a human-readable report.
+    
+    Args:
+        result: Parsing result
+    
+    Returns:
+        Formatted summary string
+    """
+    lines = [
+        f"🏁 **Парсинг источников завершен**",
+        f"Продолжительность: {result.processing_duration:.1f} сек",
+        f"Всего событий: {result.total_events}",
+        "",
+        "**По источникам:**"
+    ]
+    
+    total_added = 0
+    total_failed = 0
+    total_skipped = 0
+    
+    for source, stats in result.stats_by_source.items():
+        total_added += stats.new_added
+        total_failed += stats.failed
+        total_skipped += stats.skipped
+        
+        lines.append(f"• **{source}**:")
+        lines.append(f"  ✅ Добавлено: {stats.new_added}")
+        if stats.failed:
+            lines.append(f"  ❌ Ошибок: {stats.failed}")
+        if stats.skipped:
+            lines.append(f"  ⏭️ Пропущено: {stats.skipped}")
+    
+    lines.append("")
+    lines.append(f"**Итого:**")
+    lines.append(f"✅ Всего добавлено: {total_added}")
+    if total_failed:
+        lines.append(f"❌ Всего ошибок: {total_failed}")
+    
+    if result.errors:
+        lines.append("")
+        lines.append("**Ошибки выполнения:**")
+        # Show first 3 errors to avoid overflow
+        for err in result.errors[:3]:
+            lines.append(f"⚠️ {err}")
+        if len(result.errors) > 3:
+            lines.append(f"... и еще {len(result.errors) - 3}")
+
+    # Add JSON file paths if available
+    if result.json_file_paths:
+        lines.append("")
+        lines.append("**Сохраненные файлы:**")
+        for path in result.json_file_paths:
+            lines.append(f"📄 {Path(path).name}")
+            
+    return "\n".join(lines)
+
+
+async def run_source_parsing(
+    db: Database,
+    bot: Bot | None = None,
+    chat_id: int | None = None,
+) -> SourceParsingResult:
+    """Run full source parsing pipeline.
+    
+    Args:
+        db: Database instance
+        bot: Optional bot instance for progress updates
+        chat_id: Optional chat ID for progress updates
+    
+    Returns:
+        Result statistics
+    """
+    start_time = time.time()
+    result = SourceParsingResult(chat_id=chat_id)
+    
+    # 1. Run Kaggle kernel
+    try:
+        status, output_files, duration = await run_kaggle_kernel()
+        result.kernel_duration = duration
+        result.json_file_paths = output_files
+        
+        if status != "complete":
+            result.errors.append(f"Kaggle kernel failed: {status}")
+            return result
+            
+        logger.info(
+            "source_parsing: kaggle complete duration=%.1fs files=%d",
+            duration,
+            len(output_files),
+        )
+        
+    except Exception as e:
+        logger.error("source_parsing: kaggle error: %s", e, exc_info=True)
+        result.errors.append(f"Kaggle error: {str(e)}")
+        return result
+    
+    # 2. Process each source file
+    total_count = 0
+    progress_message_id = None
+    
+    for file_path_str in output_files:
+        try:
+            file_path = Path(file_path_str)
+            # Determine source from filename (e.g. sobor.json -> sobor)
+            source_name = file_path.stem
+            
+            # Parse JSON
+            raw_content = file_path.read_text(encoding="utf-8")
+            events = parse_theatre_json(raw_content, source_name)
+            
+            if not events:
+                logger.warning("source_parsing: no events found in %s", file_path)
+                continue
+                
+            total_count += len(events)
+            
+            # Process events
+            stats, progress_message_id = await process_source_events(
+                db,
+                events,
+                source_name,
+                bot,
+                chat_id,
+                progress_message_id,
+            )
+            result.stats_by_source[source_name] = stats
+            result.total_events += len(events)
+            
+        except Exception as e:
+            logger.error("source_parsing: failed to process %s: %s", file_path_str, e, exc_info=True)
+            result.errors.append(f"File {file_path_str}: {str(e)}")
+            
+    # Final progress update
+    if bot and chat_id and progress_message_id:
+        try:
+            total_new = sum(s.new_added for s in result.stats_by_source.values())
+            total_fail = sum(s.failed for s in result.stats_by_source.values())
+            
+            final_text = (
+                f"✅ Обработка завершена\n"
+                f"Добавлено: {total_new}\n"
+                f"Ошибок: {total_fail}"
+            )
+            await bot.edit_message_text(
+                text=final_text,
+                chat_id=chat_id,
+                message_id=progress_message_id,
+            )
+        except Exception as e:
+            logger.warning("source_parsing: failed to update final progress: %s", e)
+    
+    result.processing_duration = time.time() - start_time
+    
+    logger.info(
+        "source_parsing: complete total=%d kernel=%.1fs processing=%.1fs",
+        total_count,
+        result.kernel_duration,
+        result.processing_duration,
+    )
+    
+    # Rebuild Telegraph pages once at the end (batch mode)
+    total_new_added = sum(s.new_added for s in result.stats_by_source.values())
+    if total_new_added > 0:
+        logger.info("source_parsing: rebuilding Telegraph pages for %d new events", total_new_added)
+        try:
+            # Import strictly here to avoid circular imports during module load
+            from main_part2 import _perform_pages_rebuild
+            from datetime import datetime
+            
+            # Get affected months from stats (current month + next 2 months for safety)
+            now = datetime.now()
+            affected_months = []
+            for i in range(3):
+                month = (now.month + i - 1) % 12 + 1
+                year = now.year + ((now.month + i - 1) // 12)
+                affected_months.append(f"{year}-{month:02d}")
+            
+            logger.info("source_parsing: pages_rebuild for months=%s", affected_months)
+            await _perform_pages_rebuild(db, affected_months, force=True)
+            logger.info("source_parsing: pages_rebuild complete")
+        except Exception as rebuild_err:
+            logger.error("source_parsing: pages_rebuild failed: %s", rebuild_err)
+            result.errors.append(f"Pages rebuild failed: {rebuild_err}")
+    
+    return result
 
 
 async def process_source_events(
@@ -523,183 +712,3 @@ async def process_source_events(
     return stats, progress_message_id
 
 
-async def run_source_parsing(
-    db: Database,
-    bot: Bot | None = None,
-    test_data: dict[str, list[TheatreEvent]] | None = None,
-    chat_id: int | None = None,
-) -> SourceParsingResult:
-    """Main entry point for source parsing.
-    
-    Args:
-        db: Database instance
-        bot: Telegram bot for notifications
-        test_data: Optional test data to use instead of Kaggle
-        chat_id: Chat ID for progress messages
-    
-    Returns:
-        Complete parsing result with statistics
-    """
-    start_time = time.time()
-    result = SourceParsingResult()
-    result.chat_id = chat_id
-    
-    # Get events from Kaggle or test data
-    if test_data:
-        events_by_source = test_data
-        result.log_file_path = ""
-        result.kernel_duration = 0.0
-        result.json_file_paths = []
-    else:
-        from source_parsing.kaggle_runner import run_kaggle_and_get_events
-        
-        logger.info("source_parsing: calling Kaggle runner...")
-        events_by_source, log_path, kernel_duration, json_files = await run_kaggle_and_get_events()
-        logger.info(
-            "source_parsing: Kaggle returned sources=%d duration=%.1fs json_files=%d",
-            len(events_by_source),
-            kernel_duration,
-            len(json_files),
-        )
-        result.log_file_path = log_path
-        result.kernel_duration = kernel_duration
-        result.json_file_paths = json_files
-    
-    if not events_by_source:
-        result.errors.append("No events received from sources")
-        return result
-    
-    # Count total events
-    total_count = sum(len(events) for events in events_by_source.values())
-    result.total_events = total_count
-    
-    logger.info(
-        "source_parsing: starting processing sources=%d total_events=%d",
-        len(events_by_source),
-        total_count,
-    )
-    
-    # Process each source
-    current_index = 0
-    progress_message_id = None
-    for source, events in events_by_source.items():
-        stats, progress_message_id = await process_source_events(
-            db,
-            bot,
-            events,
-            source,
-            current_index,
-            total_count,
-            chat_id=chat_id,
-            progress_message_id=progress_message_id,
-        )
-        result.stats_by_source[source] = stats
-        current_index += len(events)
-    
-    # Update progress message to show completion
-    if bot and chat_id and progress_message_id:
-        try:
-            total_new = sum(s.new_added for s in result.stats_by_source.values())
-            total_failed = sum(s.failed for s in result.stats_by_source.values())
-            await bot.edit_message_text(
-                text=f"✅ Обработка завершена: добавлено {total_new}, ошибок {total_failed}",
-                chat_id=chat_id,
-                message_id=progress_message_id,
-            )
-        except Exception as e:
-            logger.warning("source_parsing: failed to update final progress: %s", e)
-    
-    result.processing_duration = time.time() - start_time
-    
-    logger.info(
-        "source_parsing: complete total=%d kernel=%.1fs processing=%.1fs",
-        total_count,
-        result.kernel_duration,
-        result.processing_duration,
-    )
-    
-    # Rebuild Telegraph pages once at the end (batch mode)
-    total_new_added = sum(s.new_added for s in result.stats_by_source.values())
-    if total_new_added > 0:
-        logger.info("source_parsing: rebuilding Telegraph pages for %d new events", total_new_added)
-        try:
-            from main_part2 import _perform_pages_rebuild
-            from datetime import datetime
-            
-            # Get affected months from stats (current month + next 2 months for safety)
-            now = datetime.now()
-            affected_months = []
-            for i in range(3):
-                month = (now.month + i - 1) % 12 + 1
-                year = now.year + ((now.month + i - 1) // 12)
-                affected_months.append(f"{year}-{month:02d}")
-            
-            logger.info("source_parsing: pages_rebuild for months=%s", affected_months)
-            await _perform_pages_rebuild(db, affected_months, force=True)
-            logger.info("source_parsing: pages_rebuild complete")
-        except Exception as rebuild_err:
-            logger.error("source_parsing: pages_rebuild failed: %s", rebuild_err)
-            result.errors.append(f"Pages rebuild failed: {rebuild_err}")
-    
-    return result
-
-
-def format_parsing_report(result: SourceParsingResult) -> str:
-    """Format parsing result as a human-readable report.
-    
-    Args:
-        result: Parsing result
-    
-    Returns:
-        Formatted report string
-    """
-    lines = [
-        "📊 **Отчёт о парсинге источников**",
-        "",
-        f"⏱ Время Kaggle: {result.kernel_duration:.1f}с",
-        f"⏱ Время обработки: {result.processing_duration:.1f}с",
-        f"⏱ Общее время: {result.kernel_duration + result.processing_duration:.1f}с",
-        "",
-    ]
-    
-    total_new = 0
-    total_updated = 0
-    total_exists = 0
-    total_failed = 0
-    
-    for source, stats in result.stats_by_source.items():
-        source_label = {
-            "dramteatr": "🎭 Драматический театр",
-            "muzteatr": "🎵 Музыкальный театр",
-            "sobor": "⛪ Кафедральный собор",
-        }.get(source, source)
-        
-        lines.append(f"**{source_label}**")
-        lines.append(f"  Получено: {stats.total_received}")
-        lines.append(f"  ✅ Добавлено: {stats.new_added}")
-        lines.append(f"  🔄 Обновлено: {stats.ticket_updated}")
-        lines.append(f"  ⏭ Уже было: {stats.already_exists}")
-        if stats.failed:
-            lines.append(f"  ❌ Ошибок: {stats.failed}")
-        lines.append("")
-        
-        total_new += stats.new_added
-        total_updated += stats.ticket_updated
-        total_exists += stats.already_exists
-        total_failed += stats.failed
-    
-    lines.append("**📈 Итого:**")
-    lines.append(f"  Получено событий: {result.total_events}")
-    lines.append(f"  Добавлено новых: {total_new}")
-    lines.append(f"  Обновлено статусов: {total_updated}")
-    lines.append(f"  Уже существовало: {total_exists}")
-    if total_failed:
-        lines.append(f"  Ошибок: {total_failed}")
-    
-    if result.errors:
-        lines.append("")
-        lines.append("**⚠️ Ошибки:**")
-        for error in result.errors:
-            lines.append(f"  • {error}")
-    
-    return "\n".join(lines)
