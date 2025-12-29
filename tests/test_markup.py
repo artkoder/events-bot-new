@@ -67,3 +67,33 @@ def test_expose_links_from_html():
 
 def test_expose_links_from_md():
     assert expose_links_for_vk('see [site](https://example.com)') == 'see site (https://example.com)'
+
+
+def test_linkify_phone_with_country_code():
+    """Phone with +7 country code becomes clickable tel: link."""
+    assert (
+        linkify_for_telegraph("+7 (495) 123-45-67")
+        == '<a href="tel:+74951234567">+7 (495) 123-45-67</a>'
+    )
+
+
+def test_linkify_phone_with_8():
+    """Phone with 8 prefix converts to +7 in tel: link."""
+    assert (
+        linkify_for_telegraph("8-800-555-35-35")
+        == '<a href="tel:+78005553535">8-800-555-35-35</a>'
+    )
+
+
+def test_linkify_phone_local():
+    """Local phone without country code gets +7 prefix."""
+    assert (
+        linkify_for_telegraph("(4012) 12-34-56")
+        == '<a href="tel:+74012123456">(4012) 12-34-56</a>'
+    )
+
+
+def test_linkify_phone_inside_anchor_untouched():
+    """Phone already inside a link is not modified."""
+    html = '<a href="tel:+74951234567">+7 (495) 123-45-67</a>'
+    assert linkify_for_telegraph(html) == html

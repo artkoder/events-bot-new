@@ -12,6 +12,24 @@ _TEXT_LINK_RE = re.compile(r'([^<\[]+?)\s*\((https?://(?:\\\)|[^)])+)\)')
 _VK_LINK_RE = re.compile(r'\[([^|\]]+)\|([^\]]+)\]')
 _TG_MENTION_RE = re.compile(r'(?<![\w/@])@([a-zA-Z0-9_]{4,32})')
 
+# Phone number patterns for tel: links
+# Matches: +7 (495) 123-45-67, 8-800-555-35-35, +7 999 123 45 67, (4012) 12-34-56
+_PHONE_RE = re.compile(
+    r'(?<![/\d])'  # Not preceded by / or digit (avoid matching parts of URLs)
+    r'(\+7|8)?'  # Optional country code
+    r'\s*'
+    r'[\s(-]*'
+    r'(\d{3,4})'  # Area code or first group
+    r'[\s)-]*'
+    r'(\d{2,3})'  # Second group
+    r'[\s-]*'
+    r'(\d{2})'  # Third group
+    r'[\s-]*'
+    r'(\d{2})'  # Fourth group
+    r'(?![/\d])',  # Not followed by / or digit
+    re.VERBOSE
+)
+
 
 def _unescape_md_url(url: str) -> str:
     return url.replace("\\)", ")").replace("\\\\", "\\")
@@ -29,7 +47,7 @@ def simple_md_to_html(text: str) -> str:
 
 
 def linkify_for_telegraph(text_or_html: str) -> str:
-    """Преобразует голые URL и пары «текст (url)» в кликабельные ссылки."""
+    """Преобразует голые URL, пары «текст (url)» и телефоны в кликабельные ссылки."""
     def repl_text(m: re.Match[str]) -> str:
         label, href = m.group(1).strip(), _unescape_md_url(m.group(2))
         return f'<a href="{href}">{label}</a>'
@@ -47,6 +65,29 @@ def linkify_for_telegraph(text_or_html: str) -> str:
         username = m.group(1)
         return f'<a href="https://t.me/{username}">@{username}</a>'
 
+    def repl_phone(m: re.Match[str]) -> str:
+        # Reconstruct the original matched text
+        original = m.group(0)
+        # Extract parts: country_code, area, group2, group3, group4
+        country = m.group(1) or ""
+        area = m.group(2)
+        g2 = m.group(3)
+        g3 = m.group(4)
+        g4 = m.group(5)
+        # Build normalized phone number for tel: link
+        # Convert 8 to +7 for Russian numbers
+        if country == "8":
+            tel_country = "+7"
+        elif country == "+7":
+            tel_country = "+7"
+        elif country:
+            tel_country = country
+        else:
+            # Local number without country code, assume +7 for Russia
+            tel_country = "+7"
+        tel_number = f"{tel_country}{area}{g2}{g3}{g4}"
+        return f'<a href="tel:{tel_number}">{original}</a>'
+
     text = _VK_LINK_RE.sub(repl_vk, text_or_html)
     text = MD_LINK.sub(lambda m: f'<a href="{_unescape_md_url(m[2])}">{m[1]}</a>', text)
     text = _TEXT_LINK_RE.sub(repl_text, text)
@@ -56,6 +97,11 @@ def linkify_for_telegraph(text_or_html: str) -> str:
             parts[idx] = _TG_MENTION_RE.sub(repl_mention, parts[idx])
         text = "".join(parts)
     text = _BARE_LINK_RE.sub(repl_bare, text)
+    # Convert phone numbers to tel: links (only outside existing links)
+    parts = re.split(r'(<a\b[^>]*>.*?</a>)', text, flags=re.IGNORECASE | re.DOTALL)
+    for idx in range(0, len(parts), 2):
+        parts[idx] = _PHONE_RE.sub(repl_phone, parts[idx])
+    text = "".join(parts)
     return text
 
 
