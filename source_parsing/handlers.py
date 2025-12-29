@@ -26,7 +26,7 @@ from source_parsing.parser import (
 logger = logging.getLogger(__name__)
 
 # Delay between adding events to avoid overloading the system
-EVENT_ADD_DELAY_SECONDS = 10  # Rate limit protection for LLM calls
+EVENT_ADD_DELAY_SECONDS = 20  # Delay for Telegraph creation
 
 
 @dataclass
@@ -323,10 +323,10 @@ async def add_new_event_via_queue(
             upsert_event = main_mod.upsert_event
             assign_event_topics = main_mod.assign_event_topics
             
-            # Build Event object - use description directly from theatre_event
+            # Build Event object - use LLM-generated short description if available
             event = Event(
                 title=draft.title,
-                description=full_description,  # Use description from theatre_event, not draft
+                description=(draft.description or full_description),  # Prefer LLM short description
                 festival=(draft.festival or None),
                 date=draft.date or datetime.now(timezone.utc).date().isoformat(),
                 time=draft.time or "00:00",
@@ -351,13 +351,22 @@ async def add_new_event_via_queue(
             # Assign topics (LLM classification)
             await assign_event_topics(event)
             
-            # Save to database - NO schedule_event_update_tasks, NO VK posting
+            # Save to database
             async with db.get_session() as session:
                 saved, _ = await upsert_event(session, event)
             
             event_id = saved.id
+            
+            # Reload saved event for schedule_event_update_tasks
+            async with db.get_session() as session:
+                saved = await session.get(Event, event_id)
+            
+            # Create Telegraph pages and other artifacts (NO VK posting)
+            schedule_event_update_tasks = main_mod.schedule_event_update_tasks
+            await schedule_event_update_tasks(db, saved, skip_vk_sync=True)
+            
             logger.info(
-                "source_parsing: event created event_id=%d title=%s (bulk mode, no Telegraph)",
+                "source_parsing: event created event_id=%d title=%s (with Telegraph)",
                 event_id,
                 theatre_event.title[:50],
             )
