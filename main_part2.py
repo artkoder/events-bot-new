@@ -7870,10 +7870,10 @@ async def handle_vk_command(message: types.Message, db: Database, bot: Bot) -> N
             types.KeyboardButton(text=VK_BTN_CHECK_EVENTS),
             types.KeyboardButton(text=VK_BTN_QUEUE_SUMMARY),
         ],
-        [types.KeyboardButton(text=VK_BTN_PYRAMIDA)],
     ]
     markup = types.ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
     await bot.send_message(message.chat.id, "VK мониторинг", reply_markup=markup)
+
 
 
 

@@ -7359,6 +7359,9 @@ async def send_main_menu(bot: Bot, user: User | None, chat_id: int) -> None:
             ],
             [types.KeyboardButton(text=MENU_EVENTS)],
         ]
+        # Add Pyramida button for superadmins
+        if user and user.is_superadmin:
+            buttons.append([types.KeyboardButton(text=VK_BTN_PYRAMIDA)])
         markup = types.ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
     async with span("tg-send"):
         await bot.send_message(chat_id, "Choose action", reply_markup=markup)
