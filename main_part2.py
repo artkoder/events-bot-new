@@ -12795,7 +12795,7 @@ async def _build_source_summary_block(
     elif default_date_str:
         time_part = ""
         if event_summary.time and event_summary.time != "00:00":
-            time_part = f" ⏰ {event_summary.time}"
+            time_part = f" в {event_summary.time}"
         date_line = f"🗓 {default_date_str}{time_part}"
     else:
         date_line = ""
@@ -12803,11 +12803,13 @@ async def _build_source_summary_block(
     date_line = date_line.strip()
     if date_line:
         escaped_date = html.escape(date_line)
-        if ics_url:
-            escaped_date += (
-                f' \U0001f4c5 <a href="{html.escape(ics_url)}">{ICS_LABEL}</a>'
-            )
         lines.append(escaped_date)
+    
+    # Add calendar link on separate line
+    if ics_url:
+        lines.append(
+            f'📅 <a href="{html.escape(ics_url)}">{ICS_LABEL}</a>'
+        )
 
     location_parts: list[str] = []
     existing_normalized: set[str] = set()

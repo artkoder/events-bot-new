@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 EVENT_ADD_DELAY_SECONDS = 20  # Delay for Telegraph creation
 
 # TEMPORARY: Limit events for debugging (set to None to disable)
-DEBUG_MAX_EVENTS = 3
+DEBUG_MAX_EVENTS = 10
 
 
 @dataclass
@@ -257,16 +257,8 @@ async def add_new_event_via_queue(
         
         full_description = "\n\n".join(description_parts) if description_parts else theatre_event.title
         
-        # Build source text for LLM
-        source_text = f"""
-Название: {theatre_event.title}
-Дата: {theatre_event.date_raw}
-Место: {theatre_event.location}
-{full_description}
-
-Билеты: {theatre_event.url}
-Пушкинская карта: {'Да' if theatre_event.pushkin_card else 'Нет'}
-"""
+        # Build source text for LLM - just the description content, no duplicate headers
+        source_text = full_description
         
         location_name = normalize_location_name(theatre_event.location)
         

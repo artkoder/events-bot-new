@@ -11990,6 +11990,7 @@ async def update_telegraph_event_page(
             ticket_price_max=getattr(ev, "ticket_price_max", None),
             ticket_link=(ev.ticket_link or None),
             is_free=bool(getattr(ev, "is_free", False)),
+            ticket_status=getattr(ev, "ticket_status", None),
         )
         html_content, _, _ = await build_source_page_content(
             ev.title or "Event",
