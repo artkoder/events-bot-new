@@ -1,0 +1,14 @@
+{
+  "id": "zigomaro/parse-theatres",
+  "title": "Parse Theatres",
+  "code_file": "parse_theatres.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": false,
+  "enable_internet": true,
+  "dataset_sources": [],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "slug": "parse-theatres"
+}

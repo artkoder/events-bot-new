@@ -22,7 +22,7 @@ from video_announce.kaggle_client import (
 logger = logging.getLogger(__name__)
 
 # Kernel folder name for theatres afisha
-THEATRES_KERNEL_FOLDER = "TheatresAfisha"
+THEATRES_KERNEL_FOLDER = "ParseTheatres"
 
 
 async def run_kaggle_kernel(
