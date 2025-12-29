@@ -407,7 +407,8 @@ async def process_source_events(
     start_index: int,
     total_count: int,
     chat_id: int | None = None,
-) -> SourceParsingStats:
+    progress_message_id: int | None = None,
+) -> tuple[SourceParsingStats, int | None]:
     """Process events from a single source.
     
     Args:
@@ -418,9 +419,10 @@ async def process_source_events(
         start_index: Starting index for progress
         total_count: Total events across all sources
         chat_id: Chat ID for progress messages
+        progress_message_id: Message ID to edit for progress updates
     
     Returns:
-        Statistics for this source
+        Tuple of (statistics, updated progress_message_id)
     """
     stats = SourceParsingStats(source=source, total_received=len(events))
     
@@ -477,15 +479,21 @@ async def process_source_events(
             # Always update linked events
             await update_linked_events(db, existing_id, location_name, event.title)
         else:
-            # Send progress message to user
+            # Update progress message (edit single message)
             if bot and chat_id:
                 try:
-                    await bot.send_message(
-                        chat_id,
-                        f"📝 Добавление {current_progress}/{total_count}: {event.title[:50]}",
-                    )
+                    progress_text = f"📝 Обработка {current_progress}/{total_count}: {event.title[:40]}"
+                    if progress_message_id:
+                        await bot.edit_message_text(
+                            text=progress_text,
+                            chat_id=chat_id,
+                            message_id=progress_message_id,
+                        )
+                    else:
+                        msg = await bot.send_message(chat_id, progress_text)
+                        progress_message_id = msg.message_id
                 except Exception as e:
-                    logger.warning("source_parsing: failed to send progress: %s", e)
+                    logger.warning("source_parsing: failed to update progress: %s", e)
             
             # Add new event
             new_id = await add_new_event_via_queue(
@@ -503,7 +511,7 @@ async def process_source_events(
             else:
                 stats.failed += 1
     
-    return stats
+    return stats, progress_message_id
 
 
 async def run_source_parsing(
@@ -564,8 +572,9 @@ async def run_source_parsing(
     
     # Process each source
     current_index = 0
+    progress_message_id = None
     for source, events in events_by_source.items():
-        stats = await process_source_events(
+        stats, progress_message_id = await process_source_events(
             db,
             bot,
             events,
@@ -573,9 +582,23 @@ async def run_source_parsing(
             current_index,
             total_count,
             chat_id=chat_id,
+            progress_message_id=progress_message_id,
         )
         result.stats_by_source[source] = stats
         current_index += len(events)
+    
+    # Update progress message to show completion
+    if bot and chat_id and progress_message_id:
+        try:
+            total_new = sum(s.new_added for s in result.stats_by_source.values())
+            total_failed = sum(s.failed for s in result.stats_by_source.values())
+            await bot.edit_message_text(
+                text=f"✅ Обработка завершена: добавлено {total_new}, ошибок {total_failed}",
+                chat_id=chat_id,
+                message_id=progress_message_id,
+            )
+        except Exception as e:
+            logger.warning("source_parsing: failed to update final progress: %s", e)
     
     result.processing_duration = time.time() - start_time
     
