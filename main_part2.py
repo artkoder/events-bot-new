@@ -466,9 +466,14 @@ def _build_month_page_content_sync(
         add_many(telegraph_br())
 
     # Generate title based on page number
+    # Import DEBUG flag to add TEST prefix in dev mode
+    import os
+    is_debug = os.getenv("EVBOT_DEBUG") == "1"
+    test_prefix = "ТЕСТ " if is_debug else ""
+    
     if page_number == 1:
         title = (
-            f"События Калининграда в {month_name_prepositional(month)}: полный анонс от Полюбить Калининград Анонсы"
+            f"{test_prefix}События Калининграда в {month_name_prepositional(month)}: полный анонс от Полюбить Калининград Анонсы"
         )
     else:
         # For continuation pages, use date range in title
@@ -476,9 +481,9 @@ def _build_month_page_content_sync(
         month_num = int(month.split("-")[1])
         month_gen = MONTHS_GEN[month_num]
         if first_date and last_date:
-            title = f"События Калининграда с {first_date.day} по {last_date.day} {month_gen} {year}"
+            title = f"{test_prefix}События Калининграда с {first_date.day} по {last_date.day} {month_gen} {year}"
         else:
-            title = f"События Калининграда в {month_name_prepositional(month)} (продолжение)"
+            title = f"{test_prefix}События Калининграда в {month_name_prepositional(month)} (продолжение)"
     return title, content, size
 
 

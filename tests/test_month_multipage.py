@@ -146,3 +146,46 @@ async def test_build_month_page_content_page_2_fallback_title(tmp_path: Path, mo
 
     # Check title uses fallback format
     assert "продолжение" in title
+
+
+@pytest.mark.asyncio
+async def test_build_month_page_content_debug_prefix(tmp_path: Path, monkeypatch):
+    """In DEBUG mode, titles should have ТЕСТ prefix."""
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    class FakeDate(date):
+        @classmethod
+        def today(cls) -> date:
+            return date(2026, 1, 1)
+
+    class FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None) -> datetime:
+            return datetime(2026, 1, 1, 12, 0, tzinfo=tz)
+
+    monkeypatch.setattr(main, "date", FakeDate)
+    monkeypatch.setattr(main, "datetime", FakeDatetime)
+    monkeypatch.setenv("EVBOT_DEBUG", "1")
+
+    month = "2026-01"
+    events = [
+        Event(
+            id=1,
+            title="Test Event",
+            description="Desc",
+            source_text="src",
+            date="2026-01-15",
+            time="18:00",
+            location_name="Hall",
+            added_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+    ]
+
+    title, _, _ = await main.build_month_page_content(
+        db, month, events, [], page_number=1
+    )
+
+    # Check title has TEST prefix
+    assert title.startswith("ТЕСТ ")
+
