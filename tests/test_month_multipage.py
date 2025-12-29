@@ -166,7 +166,7 @@ async def test_build_month_page_content_debug_prefix(tmp_path: Path, monkeypatch
 
     monkeypatch.setattr(main, "date", FakeDate)
     monkeypatch.setattr(main, "datetime", FakeDatetime)
-    monkeypatch.setenv("EVBOT_DEBUG", "1")
+    monkeypatch.setenv("DEV_MODE", "1")
 
     month = "2026-01"
     events = [

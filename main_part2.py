@@ -466,10 +466,10 @@ def _build_month_page_content_sync(
         add_many(telegraph_br())
 
     # Generate title based on page number
-    # Import DEBUG flag to add TEST prefix in dev mode
+    # Check DEV_MODE flag to add TEST prefix for separate dev pages
     import os
-    is_debug = os.getenv("EVBOT_DEBUG") == "1"
-    test_prefix = "ТЕСТ " if is_debug else ""
+    is_dev_mode = os.getenv("DEV_MODE") == "1"
+    test_prefix = "ТЕСТ " if is_dev_mode else ""
     
     if page_number == 1:
         title = (
