@@ -154,11 +154,37 @@ async def parse_pyramida_event(page, url):
 
         # --- ОПИСАНИЕ ---
         description = ""
-        desc_label = soup.find(string=re.compile("^Описание"))
-        if desc_label and desc_label.parent:
-            description = desc_label.parent.get_text("\n", strip=True).replace("Описание:", "").strip()
-            for sw in ["ИНФОРМАЦИЯ ОБ ОРГАНИЗАТОРЕ", "Продолжительность:", "Расписание:"]:
-                if sw in description: description = description.split(sw)[0].strip()
+        desc_label = soup.find(string=re.compile("Описание"))
+        if desc_label:
+            # Находим контейнер с текстом "Описание" (обычно p > strong)
+            current = desc_label.parent
+            # Поднимаемся до уровня блока (p или div), который содержит заголовок
+            while current and current.name not in ['p', 'div', 'section']:
+                current = current.parent
+            
+            if current:
+                # Текст описания обычно находится в следующем блоке div
+                next_div = current.find_next_sibling('div')
+                if next_div:
+                    description = next_div.get_text("\n", strip=True)
+                
+                # Если не нашли в соседе, проверяем родителя (иногда текст внутри того же блока)
+                if not description:
+                     parent_text = current.get_text("\n", strip=True)
+                     if len(parent_text) > len("Описание:") + 10:
+                         description = parent_text.replace("Описание:", "").strip()
+
+            # Очистка от служебной информации
+            stop_words = [
+                "ИНФОРМАЦИЯ ОБ ОРГАНИЗАТОРЕ", 
+                "Продолжительность:", 
+                "Расписание:", 
+                "Важно знать", 
+                "Информация о возврате"
+            ]
+            for sw in stop_words:
+                if sw in description: 
+                    description = description.split(sw, 1)[0].strip()
 
         return {
             "title": title,

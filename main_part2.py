@@ -7945,6 +7945,17 @@ async def handle_pyramida_input(message: types.Message, db: Database, bot: Bot) 
     
     await bot.send_message(message.chat.id, f"✅ Kaggle завершён за {duration:.1f}с. Обрабатываю...")
     
+    # Send JSON files to chat
+    for file_path in output_files:
+        try:
+            await bot.send_document(
+                message.chat.id,
+                types.InputFile(file_path),
+                caption=f"📄 {os.path.basename(file_path)}"
+            )
+        except Exception as e:
+            logging.error(f"Failed to send JSON file {file_path}: {e}")
+    
     # Parse events
     try:
         events = parse_pyramida_output(output_files)
@@ -10835,6 +10846,17 @@ async def _handle_pyramida_extraction(
         return
     
     await bot.send_message(chat_id, f"✅ Kaggle завершён за {duration:.1f}с. Обрабатываю...")
+    
+    # Send JSON files to chat
+    for file_path in output_files:
+        try:
+            await bot.send_document(
+                chat_id,
+                types.InputFile(file_path),
+                caption=f"📄 {os.path.basename(file_path)}"
+            )
+        except Exception as e:
+            logging.error(f"Failed to send JSON file {file_path}: {e}")
     
     # 3. Parse and process events
     try:

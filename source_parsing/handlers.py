@@ -24,6 +24,7 @@ from source_parsing.parser import (
     find_linked_events,
     limit_photos_for_source,
 )
+from poster_media import PosterMedia, process_media
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +58,31 @@ class SourceParsingResult:
     json_file_paths: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     chat_id: int | None = None  # For progress messages
+
+
+async def _download_images(urls: list[str]) -> list[tuple[bytes, str]]:
+    """Download images from URLs."""
+    import main as main_mod
+    session = main_mod.get_http_session()
+    result = []
+    seen = set()
+    
+    for url in urls:
+        if url in seen:
+            continue
+        seen.add(url)
+        try:
+            # Use short timeout to avoid blocking
+            async with session.get(url, timeout=10) as resp:
+                if resp.status == 200:
+                    data = await resp.read()
+                    # Try to get filename from URL or content-disposition
+                    name = url.split("/")[-1] or "image.jpg"
+                    result.append((data, name))
+        except Exception as e:
+            logger.warning("source_parsing: download failed url=%s error=%s", url, e)
+            
+    return result
 
 
 async def update_event_ticket_status(
@@ -231,6 +257,7 @@ async def add_new_event_via_queue(
     theatre_event: TheatreEvent,
     progress_current: int,
     progress_total: int,
+    poster_media: Sequence[PosterMedia] | None = None,
 ) -> tuple[int | None, bool]:
     """Add a new event through the existing LLM queue system.
     
@@ -266,11 +293,22 @@ async def add_new_event_via_queue(
         
         location_name = normalize_location_name(theatre_event.location)
         
-        # Limit photos for Музтеатр
+        # Limit photos for source
         photos = limit_photos_for_source(
             theatre_event.photos,
             theatre_event.source_type,
         )
+        
+        # Prefer Catbox URLs from poster_media if available
+        if poster_media:
+            catbox_photos = [
+                p.catbox_url for p in poster_media 
+                if p.catbox_url
+            ]
+            if catbox_photos:
+                # Use catbox photos, but still respect source limits if needed
+                # (though usually we want all processed photos)
+                photos = catbox_photos
         
         # Log progress
         logger.info(
@@ -287,6 +325,7 @@ async def add_new_event_via_queue(
             source_name=f"theatre:{theatre_event.source_type}",
             location_hint=location_name,
             default_ticket_link=theatre_event.url,
+            poster_media=poster_media,
         )
         
         if not drafts:
@@ -726,6 +765,31 @@ async def process_source_events(
                 except Exception as e:
                     logger.warning("source_parsing: failed to update progress: %s", e)
             
+            # Prepare images for OCR if any
+            poster_media_list = []
+            
+            # Filter photos first
+            target_photos = limit_photos_for_source(
+                event.photos,
+                event.source_type,
+            )
+            
+            if target_photos:
+                try:
+                    # Download images
+                    raw_images = await _download_images(target_photos)
+                    
+                    if raw_images:
+                        # Process with OCR and Catbox upload
+                        # This matches standard flow: upload to persistent storage + recognize text
+                        poster_media_list, _ = await process_media(
+                            raw_images,
+                            need_catbox=True,
+                            need_ocr=True,
+                        )
+                except Exception as e:
+                    logger.warning("source_parsing: ocr failed event=%s error=%s", event.title, e)
+
             # Add new event
             new_id, was_added = await add_new_event_via_queue(
                 db,
@@ -733,6 +797,7 @@ async def process_source_events(
                 event,
                 current_progress,
                 total_count,
+                poster_media=poster_media_list,
             )
             
             if new_id:
