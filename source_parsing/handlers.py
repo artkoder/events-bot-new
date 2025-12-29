@@ -519,9 +519,8 @@ async def run_source_parsing(
         result.errors.append(f"Kaggle error: {str(e)}")
         return result
     
-    # 2. Process each source file
-    total_count = 0
-    progress_message_id = None
+    # 2. Parse all files first
+    events_by_source = {}
     
     for file_path_str in output_files:
         try:
@@ -537,23 +536,38 @@ async def run_source_parsing(
                 logger.warning("source_parsing: no events found in %s", file_path)
                 continue
                 
-            total_count += len(events)
-            
-            # Process events
-            stats, progress_message_id = await process_source_events(
-                db,
-                events,
-                source_name,
-                bot,
-                chat_id,
-                progress_message_id,
-            )
-            result.stats_by_source[source_name] = stats
-            result.total_events += len(events)
+            events_by_source[source_name] = events
             
         except Exception as e:
-            logger.error("source_parsing: failed to process %s: %s", file_path_str, e, exc_info=True)
+            logger.error("source_parsing: failed to parse %s: %s", file_path_str, e, exc_info=True)
             result.errors.append(f"File {file_path_str}: {str(e)}")
+    
+    # 3. Process events
+    total_count = sum(len(ev) for ev in events_by_source.values())
+    result.total_events = total_count
+    
+    # Sort sources for consistent order? (optional, keys are random-ish but usually consistent)
+    
+    current_index = 0
+    progress_message_id = None
+    
+    for source, events in events_by_source.items():
+        try:
+            stats, progress_message_id = await process_source_events(
+                db,
+                bot,
+                events,
+                source,
+                current_index,
+                total_count,
+                chat_id=chat_id,
+                progress_message_id=progress_message_id,
+            )
+            result.stats_by_source[source] = stats
+            current_index += len(events)
+        except Exception as e:
+            logger.error("source_parsing: failed to process events from %s: %s", source, e, exc_info=True)
+            result.errors.append(f"Source {source}: {str(e)}")
             
     # Final progress update
     if bot and chat_id and progress_message_id:
