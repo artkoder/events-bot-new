@@ -323,10 +323,10 @@ async def add_new_event_via_queue(
             upsert_event = main_mod.upsert_event
             assign_event_topics = main_mod.assign_event_topics
             
-            # Build Event object
+            # Build Event object - use description directly from theatre_event
             event = Event(
                 title=draft.title,
-                description=(draft.description or ""),
+                description=full_description,  # Use description from theatre_event, not draft
                 festival=(draft.festival or None),
                 date=draft.date or datetime.now(timezone.utc).date().isoformat(),
                 time=draft.time or "00:00",
