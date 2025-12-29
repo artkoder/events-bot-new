@@ -252,6 +252,11 @@ async def find_existing_event(
     from models import Event
     from sqlalchemy import select, or_
     
+    logger.debug(
+        "find_existing_event: searching location=%s date=%s time=%s title=%s",
+        location_name, event_date, event_time, title[:50],
+    )
+    
     async with db.get_session() as session:
         # First try exact match on location + date
         stmt = select(Event).where(
@@ -261,15 +266,33 @@ async def find_existing_event(
         result = await session.execute(stmt)
         candidates = result.scalars().all()
         
+        logger.debug(
+            "find_existing_event: found %d candidates for location=%s date=%s",
+            len(candidates), location_name, event_date,
+        )
+        
         for event in candidates:
             # Check for fuzzy title match
             if fuzzy_title_match(title, event.title):
                 # Check if this is a placeholder event (00:00 time)
                 if event.time == "00:00" and event_time != "00:00":
+                    logger.info(
+                        "find_existing_event: MATCHED placeholder event_id=%d title=%s (needs full update)",
+                        event.id, event.title[:50],
+                    )
                     return event.id, True  # Needs full update
                 # Check time match (exact or close)
                 if event.time == event_time:
+                    logger.info(
+                        "find_existing_event: MATCHED event_id=%d title=%s time=%s",
+                        event.id, event.title[:50], event.time,
+                    )
                     return event.id, False  # Just update ticket status
+                else:
+                    logger.debug(
+                        "find_existing_event: title matches but time differs db_time=%s new_time=%s",
+                        event.time, event_time,
+                    )
         
         # Also check for events with same location and title but different dates
         # (for recurring shows on different days)
@@ -283,10 +306,21 @@ async def find_existing_event(
         for event in title_matches:
             if event.date == event_date and fuzzy_title_match(title, event.title, 0.95):
                 if event.time == "00:00" and event_time != "00:00":
+                    logger.info(
+                        "find_existing_event: MATCHED (exact title) placeholder event_id=%d",
+                        event.id,
+                    )
                     return event.id, True
                 if event.time == event_time:
+                    logger.info(
+                        "find_existing_event: MATCHED (exact title) event_id=%d",
+                        event.id,
+                    )
                     return event.id, False
     
+    logger.debug(
+        "find_existing_event: NO MATCH for title=%s", title[:50],
+    )
     return None, False
 
 

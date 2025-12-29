@@ -43,6 +43,7 @@ class SourceParsingStats:
     ticket_updated: int = 0
     already_exists: int = 0
     failed: int = 0
+    skipped: int = 0  # Events that already existed and were updated (not new)
 
 
 @dataclass
@@ -230,7 +231,7 @@ async def add_new_event_via_queue(
     theatre_event: TheatreEvent,
     progress_current: int,
     progress_total: int,
-) -> int | None:
+) -> tuple[int | None, bool]:
     """Add a new event through the existing LLM queue system.
     
     Uses build_event_drafts_from_vk for consistent event creation.
@@ -351,7 +352,7 @@ async def add_new_event_via_queue(
             
             # Save to database
             async with db.get_session() as session:
-                saved, _ = await upsert_event(session, event)
+                saved, was_added = await upsert_event(session, event)
             
             event_id = saved.id
             
@@ -385,7 +386,7 @@ async def add_new_event_via_queue(
                 theatre_event.title,
             )
             
-            return event_id
+            return event_id, was_added
                 
         except Exception as persist_err:
             logger.error(
@@ -394,7 +395,7 @@ async def add_new_event_via_queue(
                 persist_err,
                 exc_info=True,
             )
-            return None
+            return None, False
         
     except Exception as e:
         logger.error(
@@ -403,7 +404,7 @@ async def add_new_event_via_queue(
             e,
             exc_info=True,
         )
-        return None
+        return None, False
 
 
 def escape_md(text: str) -> str:
@@ -432,11 +433,13 @@ def format_parsing_report(result: SourceParsingResult) -> str:
     ]
     
     total_added = 0
+    total_updated = 0
     total_failed = 0
     total_skipped = 0
     
     for source, stats in result.stats_by_source.items():
         total_added += stats.new_added
+        total_updated += stats.ticket_updated
         total_failed += stats.failed
         total_skipped += stats.skipped
         
@@ -449,6 +452,8 @@ def format_parsing_report(result: SourceParsingResult) -> str:
         
         lines.append(f"• **{escape_md(source_label)}**:")
         lines.append(f"  ✅ Добавлено: {stats.new_added}")
+        if stats.ticket_updated:
+            lines.append(f"  🔄 Обновлено: {stats.ticket_updated}")
         if stats.failed:
             lines.append(f"  ❌ Ошибок: {stats.failed}")
         if stats.skipped:
@@ -457,6 +462,8 @@ def format_parsing_report(result: SourceParsingResult) -> str:
     lines.append("")
     lines.append(f"**Итого:**")
     lines.append(f"✅ Всего добавлено: {total_added}")
+    if total_updated:
+        lines.append(f"🔄 Всего обновлено: {total_updated}")
     if total_failed:
         lines.append(f"❌ Всего ошибок: {total_failed}")
     
@@ -720,7 +727,7 @@ async def process_source_events(
                     logger.warning("source_parsing: failed to update progress: %s", e)
             
             # Add new event
-            new_id = await add_new_event_via_queue(
+            new_id, was_added = await add_new_event_via_queue(
                 db,
                 bot,
                 event,
@@ -729,7 +736,10 @@ async def process_source_events(
             )
             
             if new_id:
-                stats.new_added += 1
+                if was_added:
+                    stats.new_added += 1
+                else:
+                    stats.skipped += 1  # Event existed, was updated but not new
                 # Delay between additions
                 await asyncio.sleep(EVENT_ADD_DELAY_SECONDS)
                 

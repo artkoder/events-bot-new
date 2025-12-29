@@ -9873,6 +9873,18 @@ async def _vkrev_show_next(chat_id: int, batch_id: str, operator_id: int, db: Da
                 text="Создать историю", callback_data=f"vkrev:story:{post.id}"
             )
         ],
+    ]
+    # Add Pyramida extraction button if post contains pyramida.info links
+    from source_parsing.pyramida import extract_pyramida_urls
+    pyramida_urls = extract_pyramida_urls(post.text or "")
+    if pyramida_urls:
+        inline_keyboard.append([
+            types.InlineKeyboardButton(
+                text=f"🔮 Извлечь из Pyramida ({len(pyramida_urls)})",
+                callback_data=f"vkrev:pyramida:{post.id}",
+            )
+        ])
+    inline_keyboard.extend([
         [types.InlineKeyboardButton(text="⏹ Стоп", callback_data=f"vkrev:stop:{batch_id}")],
         [
             types.InlineKeyboardButton(
@@ -9880,8 +9892,9 @@ async def _vkrev_show_next(chat_id: int, batch_id: str, operator_id: int, db: Da
                 callback_data=f"vkrev:finish:{batch_id}",
             )
         ],
-    ]
+    ])
     imported_event_id = getattr(post, "imported_event_id", None)
+
     if imported_event_id:
         async with db.get_session() as session:
             event = await session.get(Event, imported_event_id)
@@ -10676,7 +10689,112 @@ async def _vkrev_handle_story_choice(
     vk_review_story_sessions.pop(operator_id, None)
 
 
+async def _handle_pyramida_extraction(
+    chat_id: int,
+    operator_id: int,
+    inbox_id: int,
+    batch_id: str,
+    post_text: str,
+    db: Database,
+    bot: Bot,
+) -> None:
+    """Handle Pyramida event extraction from VK post.
+    
+    1. Extract pyramida.info URLs from post text
+    2. Run Kaggle kernel to parse events
+    3. Process events (add to DB without pages rebuild)
+    4. Mark post as imported
+    5. Show next post
+    """
+    from source_parsing.pyramida import (
+        extract_pyramida_urls,
+        run_pyramida_kaggle_kernel,
+        parse_pyramida_output,
+        process_pyramida_events,
+    )
+    
+    # 1. Extract URLs
+    urls = extract_pyramida_urls(post_text)
+    if not urls:
+        await bot.send_message(chat_id, "❌ Не найдены ссылки на pyramida.info")
+        await _vkrev_show_next(chat_id, batch_id, operator_id, db, bot)
+        return
+    
+    await bot.send_message(chat_id, f"🔮 Найдено {len(urls)} ссылок. Запускаю Kaggle...")
+    
+    # 2. Run Kaggle kernel
+    try:
+        status, output_files, duration = await run_pyramida_kaggle_kernel(urls)
+    except Exception as e:
+        logging.exception("pyramida_extraction: kaggle failed")
+        await bot.send_message(chat_id, f"❌ Ошибка Kaggle: {e}")
+        await _vkrev_show_next(chat_id, batch_id, operator_id, db, bot)
+        return
+    
+    if status != "complete":
+        await bot.send_message(chat_id, f"❌ Kaggle завершился с ошибкой: {status}")
+        await _vkrev_show_next(chat_id, batch_id, operator_id, db, bot)
+        return
+    
+    await bot.send_message(chat_id, f"✅ Kaggle завершён за {duration:.1f}с. Обрабатываю...")
+    
+    # 3. Parse and process events
+    try:
+        events = parse_pyramida_output(output_files)
+    except Exception as e:
+        logging.exception("pyramida_extraction: parse failed")
+        await bot.send_message(chat_id, f"❌ Ошибка парсинга: {e}")
+        await _vkrev_show_next(chat_id, batch_id, operator_id, db, bot)
+        return
+    
+    if not events:
+        await bot.send_message(chat_id, "⚠️ Не найдено событий в результатах Kaggle")
+        await _vkrev_show_next(chat_id, batch_id, operator_id, db, bot)
+        return
+    
+    await bot.send_message(chat_id, f"📝 Обрабатываю {len(events)} событий...")
+    
+    try:
+        stats = await process_pyramida_events(
+            db,
+            bot,
+            events,
+            chat_id=chat_id,
+            skip_pages_rebuild=True,
+        )
+    except Exception as e:
+        logging.exception("pyramida_extraction: processing failed")
+        await bot.send_message(chat_id, f"❌ Ошибка обработки: {e}")
+        await _vkrev_show_next(chat_id, batch_id, operator_id, db, bot)
+        return
+    
+    # 4. Send summary
+    summary_lines = [
+        "🔮 **Pyramida импорт завершён**",
+        f"✅ Добавлено: {stats.new_added}",
+    ]
+    if stats.ticket_updated:
+        summary_lines.append(f"🔄 Обновлено: {stats.ticket_updated}")
+    if stats.failed:
+        summary_lines.append(f"❌ Ошибок: {stats.failed}")
+    
+    await bot.send_message(chat_id, "\n".join(summary_lines), parse_mode="Markdown")
+    
+    # 5. Mark post as imported (use first event date or today)
+    from datetime import datetime, timezone
+    event_date = None
+    if events and events[0].parsed_date:
+        event_date = events[0].parsed_date
+    else:
+        event_date = datetime.now(timezone.utc).date().isoformat()
+    
+    # Don't mark as imported - let user decide with accept/reject buttons
+    # Just show next post
+    await _vkrev_show_next(chat_id, batch_id, operator_id, db, bot)
+
+
 async def handle_vk_review_cb(callback: types.CallbackQuery, db: Database, bot: Bot) -> None:
+
     assert callback.data
     parts = callback.data.split(":")
     action = parts[1] if len(parts) > 1 else ""
@@ -10835,7 +10953,32 @@ async def handle_vk_review_cb(callback: types.CallbackQuery, db: Database, bot: 
         answered = True
         await callback.answer("Создаю историю…")
         await _vkrev_handle_story_choice(callback, placement, inbox_id, db, bot)
+    elif action == "pyramida":
+        # Handle Pyramida event extraction
+        inbox_id = int(parts[2]) if len(parts) > 2 else 0
+        async with db.raw_conn() as conn:
+            cur = await conn.execute(
+                "SELECT review_batch, text FROM vk_inbox WHERE id=?",
+                (inbox_id,),
+            )
+            row = await cur.fetchone()
+        if not row:
+            await callback.answer("Пост не найден", show_alert=True)
+            return
+        batch_id, post_text = row
+        await callback.answer("Извлекаю события из Pyramida…")
+        answered = True
+        await _handle_pyramida_extraction(
+            callback.message.chat.id,
+            callback.from_user.id,
+            inbox_id,
+            batch_id,
+            post_text or "",
+            db,
+            bot,
+        )
     elif action == "stop":
+
         async with db.raw_conn() as conn:
             await conn.execute(
                 "UPDATE vk_inbox SET status='pending', locked_by=NULL, locked_at=NULL WHERE locked_by=?",
