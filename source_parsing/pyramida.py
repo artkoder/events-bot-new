@@ -34,7 +34,10 @@ from source_parsing.handlers import (
     find_existing_event,
     normalize_location_name,
     EVENT_ADD_DELAY_SECONDS,
+    limit_photos_for_source,
+    download_images,
 )
+from poster_media import process_media
 
 logger = logging.getLogger(__name__)
 
@@ -391,6 +394,22 @@ async def process_pyramida_events(
                 except Exception as e:
                     logger.warning("pyramida_process: failed to send progress: %s", e)
             
+            # Prepare images for OCR
+            poster_media_list = []
+            photos = limit_photos_for_source(event.photos, event.source_type)
+            
+            if photos:
+                try:
+                    images = await download_images(photos)
+                    if images:
+                        poster_media_list, _ = await process_media(
+                            images,
+                            need_catbox=True,
+                            need_ocr=True,
+                        )
+                except Exception as e:
+                    logger.warning("pyramida_process: ocr failed: %s", e)
+            
             # Add new event
             new_id, was_added = await add_new_event_via_queue(
                 db,
@@ -398,6 +417,7 @@ async def process_pyramida_events(
                 event,
                 current_progress,
                 len(events),
+                poster_media=poster_media_list,
             )
             
             if new_id:

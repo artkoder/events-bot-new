@@ -7960,7 +7960,7 @@ async def handle_pyramida_input(message: types.Message, db: Database, bot: Bot) 
         try:
             await bot.send_document(
                 message.chat.id,
-                types.InputFile(file_path),
+                types.FSInputFile(file_path),
                 caption=f"📄 {os.path.basename(file_path)}"
             )
         except Exception as e:
@@ -10872,7 +10872,7 @@ async def _handle_pyramida_extraction(
         try:
             await bot.send_document(
                 chat_id,
-                types.InputFile(file_path),
+                types.FSInputFile(file_path),
                 caption=f"📄 {os.path.basename(file_path)}"
             )
         except Exception as e:

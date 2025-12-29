@@ -60,7 +60,7 @@ class SourceParsingResult:
     chat_id: int | None = None  # For progress messages
 
 
-async def _download_images(urls: list[str]) -> list[tuple[bytes, str]]:
+async def download_images(urls: list[str]) -> list[tuple[bytes, str]]:
     """Download images from URLs."""
     import main as main_mod
     session = main_mod.get_http_session()
@@ -777,7 +777,7 @@ async def process_source_events(
             if target_photos:
                 try:
                     # Download images
-                    raw_images = await _download_images(target_photos)
+                    raw_images = await download_images(target_photos)
                     
                     if raw_images:
                         # Process with OCR and Catbox upload
