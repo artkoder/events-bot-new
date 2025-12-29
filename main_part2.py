@@ -7870,9 +7870,11 @@ async def handle_vk_command(message: types.Message, db: Database, bot: Bot) -> N
             types.KeyboardButton(text=VK_BTN_CHECK_EVENTS),
             types.KeyboardButton(text=VK_BTN_QUEUE_SUMMARY),
         ],
+        [types.KeyboardButton(text=VK_BTN_PYRAMIDA)],
     ]
     markup = types.ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
     await bot.send_message(message.chat.id, "VK мониторинг", reply_markup=markup)
+
 
 
 async def handle_vk_add_start(message: types.Message, db: Database, bot: Bot) -> None:
@@ -7886,6 +7888,102 @@ async def handle_vk_add_start(message: types.Message, db: Database, bot: Bot) ->
         message.chat.id,
         "Отправьте ссылку или скриннейм, опционально локацию и время через |",
     )
+
+
+async def handle_pyramida_start(message: types.Message, db: Database, bot: Bot) -> None:
+    """Handle Pyramida button click - start waiting for URL input."""
+    async with db.get_session() as session:
+        user = await session.get(User, message.from_user.id)
+    if not (user and user.is_superadmin):
+        await bot.send_message(message.chat.id, "Access denied")
+        return
+    pyramida_input_sessions.add(message.from_user.id)
+    await bot.send_message(
+        message.chat.id,
+        "🔮 Отправьте текст со ссылками pyramida.info/tickets/...\n"
+        "Я извлеку все ссылки и парсю события.",
+    )
+
+
+async def handle_pyramida_input(message: types.Message, db: Database, bot: Bot) -> None:
+    """Handle text input with Pyramida URLs."""
+    if message.from_user.id not in pyramida_input_sessions:
+        return
+    pyramida_input_sessions.discard(message.from_user.id)
+    
+    text = (message.text or "").strip()
+    if not text:
+        await bot.send_message(message.chat.id, "❌ Пустой ввод")
+        return
+    
+    # Extract URLs
+    from source_parsing.pyramida import (
+        extract_pyramida_urls,
+        run_pyramida_kaggle_kernel,
+        parse_pyramida_output,
+        process_pyramida_events,
+    )
+    
+    urls = extract_pyramida_urls(text)
+    if not urls:
+        await bot.send_message(message.chat.id, "❌ Не найдены ссылки pyramida.info/tickets/")
+        return
+    
+    await bot.send_message(message.chat.id, f"🔮 Найдено {len(urls)} ссылок. Запускаю Kaggle...")
+    
+    # Run Kaggle
+    try:
+        status, output_files, duration = await run_pyramida_kaggle_kernel(urls)
+    except Exception as e:
+        logging.exception("pyramida_input: kaggle failed")
+        await bot.send_message(message.chat.id, f"❌ Ошибка Kaggle: {e}")
+        return
+    
+    if status != "complete":
+        await bot.send_message(message.chat.id, f"❌ Kaggle завершился с ошибкой: {status}")
+        return
+    
+    await bot.send_message(message.chat.id, f"✅ Kaggle завершён за {duration:.1f}с. Обрабатываю...")
+    
+    # Parse events
+    try:
+        events = parse_pyramida_output(output_files)
+    except Exception as e:
+        logging.exception("pyramida_input: parse failed")
+        await bot.send_message(message.chat.id, f"❌ Ошибка парсинга: {e}")
+        return
+    
+    if not events:
+        await bot.send_message(message.chat.id, "⚠️ Не найдено событий в результатах Kaggle")
+        return
+    
+    await bot.send_message(message.chat.id, f"📝 Обрабатываю {len(events)} событий...")
+    
+    # Process events
+    try:
+        stats = await process_pyramida_events(
+            db,
+            bot,
+            events,
+            chat_id=message.chat.id,
+            skip_pages_rebuild=True,
+        )
+    except Exception as e:
+        logging.exception("pyramida_input: processing failed")
+        await bot.send_message(message.chat.id, f"❌ Ошибка обработки: {e}")
+        return
+    
+    # Summary
+    summary_lines = [
+        "🔮 **Pyramida импорт завершён**",
+        f"✅ Добавлено: {stats.new_added}",
+    ]
+    if stats.ticket_updated:
+        summary_lines.append(f"🔄 Обновлено: {stats.ticket_updated}")
+    if stats.failed:
+        summary_lines.append(f"❌ Ошибок: {stats.failed}")
+    
+    await bot.send_message(message.chat.id, "\n".join(summary_lines), parse_mode="Markdown")
 
 
 async def handle_vk_add_message(message: types.Message, db: Database, bot: Bot) -> None:
@@ -13826,6 +13924,12 @@ def create_app() -> web.Application:
     async def vk_add_msg_wrapper(message: types.Message):
         await handle_vk_add_message(message, db, bot)
 
+    async def pyramida_start_wrapper(message: types.Message):
+        await handle_pyramida_start(message, db, bot)
+
+    async def pyramida_input_wrapper(message: types.Message):
+        await handle_pyramida_input(message, db, bot)
+
     async def vk_list_wrapper(message: types.Message):
         await handle_vk_list(message, db, bot)
 
@@ -14067,7 +14171,10 @@ def create_app() -> web.Application:
     dp.message.register(vk_list_wrapper, lambda m: m.text == VK_BTN_LIST_SOURCES)
     dp.message.register(vk_check_wrapper, lambda m: m.text == VK_BTN_CHECK_EVENTS)
     dp.message.register(vk_queue_wrapper, lambda m: m.text == VK_BTN_QUEUE_SUMMARY)
+    dp.message.register(pyramida_start_wrapper, lambda m: m.text == VK_BTN_PYRAMIDA)
+    dp.message.register(pyramida_input_wrapper, lambda m: m.from_user.id in pyramida_input_sessions)
     dp.message.register(vk_add_msg_wrapper, lambda m: m.from_user.id in vk_add_source_sessions)
+
     dp.message.register(vk_extra_msg_wrapper, lambda m: m.from_user.id in vk_review_extra_sessions)
     dp.message.register(
         vk_story_instr_msg_wrapper,

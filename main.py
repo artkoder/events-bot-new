@@ -709,9 +709,12 @@ vk_default_location_sessions: TTLCache[
 ] = TTLCache(maxsize=64, ttl=3600)
 # waiting for VK source add input
 vk_add_source_sessions: set[int] = set()
+# waiting for Pyramida URL input
+pyramida_input_sessions: set[int] = set()
 
 # operator_id -> (inbox_id, batch_id) awaiting extra info during VK review
 vk_review_extra_sessions: dict[int, tuple[int, str, bool]] = {}
+
 
 # user_id -> review session for VK misses
 vk_miss_review_sessions: dict[int, VkMissReviewSession] = {}
@@ -1937,6 +1940,7 @@ VK_BTN_ADD_SOURCE = "\u2795 Добавить сообщество"
 VK_BTN_LIST_SOURCES = "\U0001f4cb Показать список сообществ"
 VK_BTN_CHECK_EVENTS = "\U0001f50e Проверить события"
 VK_BTN_QUEUE_SUMMARY = "\U0001f4ca Сводка очереди"
+VK_BTN_PYRAMIDA = "🔮 Pyramida"
 
 # command help descriptions by role
 # roles: guest (not registered), user (registered), superadmin
