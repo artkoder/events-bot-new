@@ -560,10 +560,28 @@ class MonthPage(SQLModel, table=True):
     month: str = Field(primary_key=True)
     url: str
     path: str
-    url2: Optional[str] = None
-    path2: Optional[str] = None
+    url2: Optional[str] = None  # Deprecated: use MonthPagePart
+    path2: Optional[str] = None  # Deprecated: use MonthPagePart
     content_hash: Optional[str] = None
-    content_hash2: Optional[str] = None
+    content_hash2: Optional[str] = None  # Deprecated: use MonthPagePart
+
+
+class MonthPagePart(SQLModel, table=True):
+    """Stores individual parts of a month page when split into multiple pages."""
+    __table_args__ = (
+        Index("ix_monthpagepart_month", "month"),
+        UniqueConstraint("month", "part_number", name="ux_monthpagepart_month_part"),
+        {"extend_existing": True},
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    month: str  # e.g., "2025-01"
+    part_number: int  # 1, 2, 3, ...
+    url: str
+    path: str
+    content_hash: Optional[str] = None
+    first_date: Optional[str] = None  # First event date on this page (YYYY-MM-DD)
+    last_date: Optional[str] = None   # Last event date on this page (YYYY-MM-DD)
 
 
 class WeekendPage(SQLModel, table=True):

@@ -287,6 +287,25 @@ class Database:
 
             await conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS monthpagepart(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    month TEXT NOT NULL,
+                    part_number INTEGER NOT NULL,
+                    url TEXT NOT NULL,
+                    path TEXT NOT NULL,
+                    content_hash TEXT,
+                    first_date TEXT,
+                    last_date TEXT,
+                    UNIQUE(month, part_number)
+                )
+                """
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_monthpagepart_month ON monthpagepart(month)"
+            )
+
+            await conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS weekendpage(
                     start TEXT PRIMARY KEY,
                     url TEXT NOT NULL,

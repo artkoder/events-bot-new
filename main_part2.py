@@ -9,6 +9,7 @@ from typing import Callable, Iterable
 from telegraph import Telegraph
 
 from models import Event, Festival
+from scheduling import MONTHS_GEN
 
 
 def _normalize_title_and_emoji(title: str, emoji: str | None) -> tuple[str, str]:
@@ -295,6 +296,9 @@ async def build_month_page_content(
     *,
     include_ics: bool = True,
     include_details: bool = True,
+    page_number: int = 1,
+    first_date: date | None = None,
+    last_date: date | None = None,
 ) -> tuple[str, list, int]:
     if events is None or exhibitions is None:
         events, exhibitions = await get_month_data(db, month)
@@ -323,8 +327,11 @@ async def build_month_page_content(
             fest_index_url,
             include_ics,
             include_details,
+            page_number,
+            first_date,
+            last_date,
         )
-    logging.info("build_month_page_content size=%d", size)
+    logging.info("build_month_page_content size=%d page=%d", size, page_number)
     return title, content, size
 
 
@@ -338,6 +345,9 @@ def _build_month_page_content_sync(
     fest_index_url: str | None,
     include_ics: bool,
     include_details: bool,
+    page_number: int = 1,
+    first_date: date | None = None,
+    last_date: date | None = None,
 ) -> tuple[str, list, int]:
     # Ensure festivals have full Telegraph URLs for easy linking
     for fest in fest_map.values():
@@ -384,18 +394,21 @@ def _build_month_page_content_sync(
             if exceeded:
                 break
             add(n)
-    intro = (
-        f"Планируйте свой месяц заранее: интересные мероприятия Калининграда и 39 региона в {month_name_prepositional(month)} — от лекций и концертов до культурных шоу. "
-    )
-    intro_nodes = [
-        intro,
-        {
-            "tag": "a",
-            "attrs": {"href": "https://t.me/kenigevents"},
-            "children": ["Полюбить Калининград Анонсы"],
-        },
-    ]
-    add({"tag": "p", "children": intro_nodes})
+
+    # Only add intro paragraph on page 1
+    if page_number == 1:
+        intro = (
+            f"Планируйте свой месяц заранее: интересные мероприятия Калининграда и 39 региона в {month_name_prepositional(month)} — от лекций и концертов до культурных шоу. "
+        )
+        intro_nodes = [
+            intro,
+            {
+                "tag": "a",
+                "attrs": {"href": "https://t.me/kenigevents"},
+                "children": ["Полюбить Калининград Анонсы"],
+            },
+        ]
+        add({"tag": "p", "children": intro_nodes})
 
     add_day_sections(
         sorted(by_day),
@@ -452,9 +465,20 @@ def _build_month_page_content_sync(
         )
         add_many(telegraph_br())
 
-    title = (
-        f"События Калининграда в {month_name_prepositional(month)}: полный анонс от Полюбить Калининград Анонсы"
-    )
+    # Generate title based on page number
+    if page_number == 1:
+        title = (
+            f"События Калининграда в {month_name_prepositional(month)}: полный анонс от Полюбить Калининград Анонсы"
+        )
+    else:
+        # For continuation pages, use date range in title
+        year = int(month.split("-")[0])
+        month_num = int(month.split("-")[1])
+        month_gen = MONTHS_GEN[month_num]
+        if first_date and last_date:
+            title = f"События Калининграда с {first_date.day} по {last_date.day} {month_gen} {year}"
+        else:
+            title = f"События Калининграда в {month_name_prepositional(month)} (продолжение)"
     return title, content, size
 
 
