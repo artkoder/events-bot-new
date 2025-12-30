@@ -1,0 +1,11 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.1, pytest-9.0.1, pluggy-1.6.0
+rootdir: /workspaces/events-bot-new
+configfile: pytest.ini
+plugins: anyio-4.12.0, asyncio-0.23.6
+asyncio: mode=Mode.STRICT
+collected 1 item
+
+tests/test_immediate_rebuild_skip.py .                                   [100%]
+
+============================== 1 passed in 0.14s ===============================

@@ -12357,8 +12357,28 @@ async def update_telegraph_event_page(
         await session.commit()
         url = ev.telegraph_url
 
-    logline("TG-EVENT", event_id, "done", url=url)
-    await update_month_pages_for(event_id, db, bot)
+    
+    # NEW: Check if we have a deferred month_pages job for this month
+    # If so, SKIP immediate update to avoid double work.
+    skipped_immediate = False
+    if ev.date:
+        month_key = ev.date[:7]
+        async with db.get_session() as session:
+            # We look for a PENDING job with matching coalesce_key and next_run_at in future
+            stmt = select(JobOutbox).where(
+                JobOutbox.coalesce_key == f"month_pages:{month_key}",
+                JobOutbox.status == JobStatus.pending,
+                JobOutbox.next_run_at > datetime.now(timezone.utc)
+            ).limit(1)
+            deferred_job = (await session.execute(stmt)).scalar_one_or_none()
+            
+            if deferred_job:
+                logline("TG-EVENT", event_id, "done (immediate update skipped due to deferred job)", url=url)
+                skipped_immediate = True
+
+    if not skipped_immediate:
+        logline("TG-EVENT", event_id, "done", url=url)
+        await update_month_pages_for(event_id, db, bot)
     return url
 
 

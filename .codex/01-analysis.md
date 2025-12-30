@@ -1,0 +1,14 @@
+1. Шаг 1: `schedule_event_update_tasks` находится в `main.py`, и там действительно выставляется `next_run_at = now + 15 минут` для `month_pages` (и `weekend_pages`), но `telegraph_build` ставится без отсрочки. `scheduling.py` не содержит `schedule_event_update_tasks`, это отдельный коалесцирующий планировщик для батчей/тестов. См. `main.py:10138`, `main.py:10162`, `main.py:10165`, `main.py:10148`.
+2. Шаг 2: вызовы `page_rebuild` не найдены — в коде есть команда `/pages_rebuild` и `rebuild_pages` (ручной запуск), см. `main_part2.py:5713`, `main_part2.py:5791`, `main_part2.py:5820`. `month_pages` вызывается/ставится так:
+- немедленно как прямой вызов `update_month_pages_for` после `telegraph_build`, см. `main.py:12361`;
+- как джоба `month_pages` из `schedule_event_update_tasks` с отложенным запуском, см. `main.py:10165`;
+- доп. постановки `month_pages` при “новом месяце” внутри `schedule_event_update_tasks`, см. `main.py:10230`, `main.py:10291`;
+- `ics_fix_nav` ставит `month_pages` без отсрочки, см. `main.py:13293`;
+- обработчик `month_pages` привязан к `update_month_pages_for`, см. `main.py:13943`.
+3. Шаг 3: механизм двойной пересборки. После добавления события `schedule_event_update_tasks` ставит `telegraph_build` немедленно и `month_pages` на +15 минут. Джоб-раннер сначала выполняет `telegraph_build` (у него приоритет выше), и `update_telegraph_event_page` прямо вызывает `update_month_pages_for`, что инициирует немедленную пересборку/патч месяца. Отложенная `month_pages` при этом не блокируется, потому что это другая ветка: прямой вызов не использует `JobOutbox` и не проверяет `next_run_at`. Через 15 минут `_run_due_jobs_once` подхватывает отложенную `month_pages` (нет препятствий, фильтрация только по `next_run_at <= now`), см. `main.py:11778`, и та же логика `update_month_pages_for` запускается повторно.
+4. План исправления (убрать немедленную пересборку, если она лишняя):
+1) Определить правило: при включенной отсрочке `month_pages` не дергать `update_month_pages_for` из `update_telegraph_event_page`. Это главный источник “немедленной” пересборки.  
+2) Реализовать защиту в `update_telegraph_event_page`: перед вызовом `update_month_pages_for` проверить наличие отложенной `month_pages` для месяца события в `JobOutbox` (coalesce_key `month_pages:YYYY-MM` и `next_run_at > now`) и в этом случае пропускать немедленное обновление. Это сохранит быстрый путь для редких “ручных” случаев, если они возникнут.  
+3) Обновить тесты на deferred‑поведение (`tests/test_deferred_rebuild*.py`) так, чтобы `telegraph_build` не считался триггером немедленного `month_pages`, и убедиться, что deferred‑джоба все еще выполняется.
+
+Если хочешь, могу предложить точечный патч с этой защитой и обновить тесты.
