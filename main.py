@@ -263,6 +263,7 @@ from models import (
     Festival,
     EventPoster,
     JobOutbox,
+    MonthPagePart,
     JobTask,
     JobStatus,
     OcrUsage,
@@ -1474,7 +1475,7 @@ _vk_session: ClientSession | None = None
 
 # Telegraph API rejects pages over ~64&nbsp;kB. Use a slightly lower limit
 # to decide when month pages should be split into two parts.
-TELEGRAPH_LIMIT = 60000
+TELEGRAPH_LIMIT = 45000
 
 def rough_size(nodes: Iterable[dict], limit: int | None = None) -> int:
     """Return an approximate size of Telegraph nodes in bytes.
@@ -2385,6 +2386,63 @@ async def set_setting_value(db: Database, key: str, value: str | None):
         settings_cache.pop(key, None)
     else:
         settings_cache[key] = value
+
+
+# --- Dirty-flag helpers for deferred page rebuilds ---
+PAGES_DIRTY_KEY = "pages_dirty_state"
+
+
+async def load_pages_dirty_state(db: Database) -> dict | None:
+    """Load dirty-flag state for deferred page rebuilds.
+    
+    Returns dict with keys: since (ISO timestamp), months (list), reminded (bool)
+    or None if clean.
+    """
+    val = await get_setting_value(db, PAGES_DIRTY_KEY)
+    if not val:
+        return None
+    try:
+        import json
+        return json.loads(val)
+    except Exception:
+        return None
+
+
+async def mark_pages_dirty(db: Database, month: str) -> None:
+    """Mark a month as dirty for deferred rebuild.
+    
+    If already dirty, adds month to list. If clean, creates new state.
+    """
+    import json
+    state = await load_pages_dirty_state(db)
+    now = datetime.now(timezone.utc).isoformat()
+    if state:
+        months = state.get("months", [])
+        if month not in months:
+            months.append(month)
+        state["months"] = months
+    else:
+        state = {"since": now, "months": [month], "reminded": False}
+    await set_setting_value(db, PAGES_DIRTY_KEY, json.dumps(state))
+    settings_cache.pop(PAGES_DIRTY_KEY, None)  # Clear cache to force reload
+    logging.info("mark_pages_dirty: month=%s state=%s", month, state)
+
+
+async def clear_pages_dirty_state(db: Database) -> None:
+    """Clear dirty-flag state after successful rebuild."""
+    await set_setting_value(db, PAGES_DIRTY_KEY, None)
+    settings_cache.pop(PAGES_DIRTY_KEY, None)
+    logging.info("clear_pages_dirty_state: cleared")
+
+
+async def mark_pages_reminded(db: Database) -> None:
+    """Mark that reminder has been sent."""
+    import json
+    state = await load_pages_dirty_state(db)
+    if state:
+        state["reminded"] = True
+        await set_setting_value(db, PAGES_DIRTY_KEY, json.dumps(state))
+        settings_cache.pop(PAGES_DIRTY_KEY, None)
 
 
 async def get_partner_last_run(db: Database) -> date | None:
@@ -9795,9 +9853,11 @@ async def enqueue_job(
     *,
     coalesce_key: str | None = None,
     depends_on: list[str] | None = None,
+    next_run_at: datetime | None = None,
 ) -> str:
     async with db.get_session() as session:
         now = datetime.now(timezone.utc)
+        run_time = next_run_at or now
         ev = None
         if coalesce_key is None or depends_on is None:
             ev = await session.get(Event, event_id)
@@ -9988,7 +10048,7 @@ async def enqueue_job(
                 payload=payload,
                 status=JobStatus.pending,
                 updated_at=now,
-                next_run_at=now,
+                next_run_at=run_time,
                 coalesce_key=coalesce_key,
                 depends_on=dep_str,
             )
@@ -10023,9 +10083,17 @@ async def schedule_event_update_tasks(
     page_deps = [results[JobTask.telegraph_build]]
     if ics_dep:
         page_deps.append(ics_dep)
+    
+    # Deferred page rebuilds: откладываем month_pages и weekend_pages на 15 минут
+    deferred_time = datetime.now(timezone.utc) + timedelta(minutes=15)
+    
+    # month_pages — отложенный запуск
+    month = ev.date.split("..", 1)[0][:7]
     results[JobTask.month_pages] = await enqueue_job(
-        db, eid, JobTask.month_pages, depends_on=page_deps
+        db, eid, JobTask.month_pages, depends_on=page_deps, next_run_at=deferred_time
     )
+    await mark_pages_dirty(db, month)
+    
     d = parse_iso_date(ev.date)
     if d:
         results[JobTask.week_pages] = await enqueue_job(
@@ -10033,9 +10101,11 @@ async def schedule_event_update_tasks(
         )
         w_start = weekend_start_for_date(d)
         if w_start:
+            # weekend_pages — отложенный запуск
             results[JobTask.weekend_pages] = await enqueue_job(
-                db, eid, JobTask.weekend_pages, depends_on=page_deps
+                db, eid, JobTask.weekend_pages, depends_on=page_deps, next_run_at=deferred_time
             )
+            await mark_pages_dirty(db, f"weekend:{w_start.isoformat()}")
     if ev.festival:
         results[JobTask.festival_pages] = await enqueue_job(
             db, eid, JobTask.festival_pages
@@ -12163,315 +12233,329 @@ def locate_month_day_page(page_html_1: str, page_html_2: str | None, d: date) ->
     return 1
 
 
+async def optimize_month_chunks(
+    db: Database,
+    month: str,
+    events: list[Event],
+    exhibitions: list[Event],  # Usually put on the last page
+    nav_block: str,
+) -> tuple[list[tuple[list[Event], list[Event]]], bool, bool]:
+    """
+    Split events into chunks that fit into Telegraph pages.
+    Returns (chunks, include_ics, include_details).
+    Each chunk is a tuple (events_list, exhibitions_list).
+    If > 2 pages are needed, tries to switch to compact mode (no ICS/details).
+    """
+    from telegraph.utils import nodes_to_html
+
+    async def make_chunks(inc_ics: bool, inc_det: bool) -> list[tuple[list[Event], list[Event]]]:
+        chunks_list = []
+        rem_events = events[:]
+        # We only attach exhibitions to the very last chunk of the sequence.
+        # However, if we split, we might have multiple chunks.
+        # Strategy: Keep exhibitions for the end.
+        
+        while rem_events or exhibitions:
+            page_num = len(chunks_list) + 1
+            
+            # Case 1: Try fitting EVERYTHING remaining (events + exhibitions)
+            # This is the "Final Page" scenario.
+            title, content, _ = await build_month_page_content(
+                db, month, rem_events, exhibitions,
+                include_ics=inc_ics, include_details=inc_det,
+                continuation_url=None, # Last page has no continuation
+                page_number=page_num
+            )
+            html = unescape_html_comments(nodes_to_html(content))
+            html = ensure_footer_nav_with_hr(html, nav_block, month=month, page=page_num)
+            
+            if len(html.encode()) <= TELEGRAPH_LIMIT:
+                chunks_list.append((rem_events, exhibitions))
+                logging.info("optimize_month_chunks: Case 1 success. Appended chunk with events=%d exhibitions=%d", len(rem_events), len(exhibitions))
+                return chunks_list
+
+            # Case 2: Cannot fit all. Must split.
+            # We assume exhibitions go to the LAST page, so current intermediate page will have NO exhibitions.
+            # Unless we have NO events left? Then we must split exhibitions (not implemented, force fit).
+            
+            if not rem_events:
+                # Only exhibitions left.
+                if exhibitions:
+                     logging.warning("optimize_month_chunks: Exhibitions remaining, forcing new page.")
+                     chunks_list.append(([], exhibitions))
+                else:
+                     logging.info("optimize_month_chunks: No events and no exhibitions left.")
+                return chunks_list
+
+            logging.info("optimize_month_chunks: Splitting. Events left: %d", len(rem_events))
+            # Binary search for max events for this intermediate page
+            low = 1
+            high = len(rem_events)
+            best_k = 1
+            
+            while low <= high:
+                mid = (low + high) // 2
+                # Intermediate page: No exhibitions, YES continuation link
+                title, content, _ = await build_month_page_content(
+                    db, month, rem_events[:mid], [],
+                    include_ics=inc_ics, include_details=inc_det,
+                    continuation_url="x", # Placeholder for size estimation
+                    page_number=page_num
+                )
+                html = unescape_html_comments(nodes_to_html(content))
+                html = ensure_footer_nav_with_hr(html, nav_block, month=month, page=page_num)
+                
+                if len(html.encode()) <= TELEGRAPH_LIMIT:
+                    best_k = mid
+                    low = mid + 1
+                else:
+                    high = mid - 1
+            
+            # ATOMIC DATE SPLIT check
+            # We have best_k events.
+            # Check if we are splitting in the middle of a date.
+            # Condition: We are taking 'best_k', so the next event is at index 'best_k'.
+            # If best_k < len(rem_events) (meaning we haven't taken all),
+            # check if rem_events[best_k-1].date == rem_events[best_k].date
+            
+            if best_k < len(rem_events):
+                last_included_date = rem_events[best_k - 1].date
+                first_excluded_date = rem_events[best_k].date
+                
+                if last_included_date == first_excluded_date:
+                    logging.info("Atomic Split: Date %s cut at %d. Backtracking to prevent split.", last_included_date, best_k)
+                    
+                    # Backtrack best_k until date changes or we hit 0
+                    original_k = best_k
+                    while best_k > 0 and rem_events[best_k - 1].date == last_included_date:
+                        best_k -= 1
+                    
+                    if best_k == 0:
+                        logging.warning("Atomic Split: Single date %s (%d events) too big to fit atomically. Forcing split at %d.", 
+                                        last_included_date, len(rem_events), original_k)
+                        best_k = original_k # Revert to greedy split
+                    else:
+                        logging.info("Atomic Split: Adjusted split to %d (End of %s)", best_k, rem_events[best_k-1].date)
+
+            chunks_list.append((rem_events[:best_k], []))
+            rem_events = rem_events[best_k:]
+            
+        return chunks_list
+
+    # 1. Try Default Mode
+    res_default = await make_chunks(True, True)
+    
+    # If it fits in 1 or 2 pages, perfect.
+    if len(res_default) <= 2:
+        return res_default, True, True
+
+    # 2. Try Compact Mode (no ICS)
+    # Requirement: "If ... requires 3 or more pages, use compact" (implied preference for compact if big)
+    res_compact = await make_chunks(False, True)
+    
+    # If compact mode reduces pages OR we are just complying with "many pages = compact" rule:
+    # We use compact mode if default yielded > 2 pages.
+    return res_compact, False, True
+
+
 async def split_month_until_ok(
     db: Database,
     tg: Telegraph,
     page: MonthPage,
     month: str,
     events: list[Event],
-    exhibitions: list[Exhibition],
+    exhibitions: list[Event],
     nav_block: str,
 ) -> None:
     from telegraph.utils import nodes_to_html
 
     if len(events) < 2:
-        raise RuntimeError(
-            f"split_month_until_ok: cannot split {month} without at least two events"
-        )
+         # Should not happen typically, but if it does, optimization handles it.
+         pass
 
-    def event_day_key(ev: Event) -> str | None:
-        parsed = parse_iso_date(ev.date)
-        if parsed:
-            return parsed.isoformat()
-        raw = (ev.date or "").split("..", 1)[0].strip()
-        return raw or None
+    # 1. Calculate optimized chunks
+    chunks, include_ics, include_details = await optimize_month_chunks(
+        db, month, events, exhibitions, nav_block
+    )
 
-    day_boundaries: list[int] = []
-    prev_key = event_day_key(events[0])
-    for idx, ev in enumerate(events[1:], start=1):
-        key = event_day_key(ev)
-        if key is None:
-            continue
-        if prev_key is None:
-            prev_key = key
-            continue
-        if key != prev_key:
-            day_boundaries.append(idx)
-        prev_key = key
+    # (p1 lookup block removed)
+    
+    logging.info(
+        "split_month_until_ok month=%s events=%d chunks=%d ics=%s details=%s",
+        month, len(events), len(chunks), include_ics, include_details
+    )
 
-    if not day_boundaries:
-        raise RuntimeError(
-            f"split_month_until_ok: no valid day boundary found for {month}"
-        )
+    # 2. Create/Update pages in REVERSE order (N down to 1)
+    # This ensures we have the URL for the "Continuation" link.
+    
+    next_url = None
+    next_path = None
+    
+    # To store updated info for Page 1
+    page1_url = page.url
+    page1_path = page.path
+    page1_hash = None
+    
+    # Prepare to update MonthPagePart
+    # We need to know current parts to delete obsolete ones?
+    # We'll do cleanup at the end.
 
-    def snap_index(idx: int, *, direction: int | None = None) -> int:
-        if not day_boundaries:
-            raise RuntimeError(
-                f"split_month_until_ok: no valid day boundary found for {month}"
-            )
-        idx = max(1, min(len(events) - 1, idx))
-        if direction is None:
-            pos = bisect_left(day_boundaries, idx)
-            candidates: list[int] = []
-            if pos < len(day_boundaries):
-                candidates.append(day_boundaries[pos])
-            if pos > 0:
-                candidates.append(day_boundaries[pos - 1])
-            if not candidates:
-                return day_boundaries[0]
-            return min(candidates, key=lambda b: (abs(b - idx), b))
-        if direction < 0:
-            pos = bisect_left(day_boundaries, idx)
-            if pos < len(day_boundaries) and day_boundaries[pos] == idx:
-                return day_boundaries[pos]
-            if pos > 0:
-                return day_boundaries[pos - 1]
-            return day_boundaries[0]
-        pos = bisect_left(day_boundaries, idx)
-        if pos < len(day_boundaries):
-            return day_boundaries[pos]
-        return day_boundaries[-1]
+    total_pages = len(chunks)
+    
+    for i in range(total_pages, 0, -1):
+        idx = i - 1
+        chunk_events, chunk_exhibitions = chunks[idx]
+        
+        # Determine Title logic (handled by build_month_page_content using page_number and dates)
+        # We need to pass first_date/last_date for nice titles on continuation pages
+        p_first_date = None
+        p_last_date = None
+        if chunk_events:
+             # Parse dates from first and last event
+             try:
+                 p_first_date = parse_iso_date(chunk_events[0].date)
+                 p_last_date = parse_iso_date(chunk_events[-1].date)
+             except:
+                 pass
 
-    async def attempt(include_ics: bool, include_details: bool) -> None:
         title, content, _ = await build_month_page_content(
-            db,
-            month,
-            events,
-            exhibitions,
+            db, month, chunk_events, chunk_exhibitions,
             include_ics=include_ics,
             include_details=include_details,
+            continuation_url=next_url,
+            page_number=i,
+            first_date=p_first_date,
+            last_date=p_last_date
         )
-        html_full = unescape_html_comments(nodes_to_html(content))
-        html_full = ensure_footer_nav_with_hr(html_full, nav_block, month=month, page=1)
-        total_size = len(html_full.encode())
-        avg = total_size / len(events) if events else total_size
-        base_idx = max(1, min(len(events) - 1, int(TELEGRAPH_LIMIT // avg)))
-        split_idx = snap_index(base_idx)
-        logging.info(
-            "month_split start month=%s events=%d total_bytes=%d nav_bytes=%d split_idx=%d include_ics=%s include_details=%s",
-            month,
-            len(events),
-            total_size,
-            len(nav_block),
-            split_idx,
-            include_ics,
-            include_details,
-        )
-        attempts = 0
-        fallback_reason = ""
-        saw_both_too_big = False
-        while attempts < 50:
-            attempts += 1
-            first, second = events[:split_idx], events[split_idx:]
-            title2, content2, _ = await build_month_page_content(
-                db,
-                month,
-                second,
-                exhibitions,
-                include_ics=include_ics,
-                include_details=include_details,
-            )
-            rough2 = rough_size(content2) + len(nav_block)
-            title1, content1, _ = await build_month_page_content(
-                db,
-                month,
-                first,
-                [],
-                continuation_url="x",
-                include_ics=include_ics,
-                include_details=include_details,
-            )
-            rough1 = rough_size(content1) + len(nav_block) + 200
-            logging.info(
-                "month_split try attempt=%d idx=%d first_events=%d second_events=%d rough1=%d rough2=%d include_ics=%s include_details=%s",
-                attempts,
-                split_idx,
-                len(first),
-                len(second),
-                rough1,
-                rough2,
-                include_ics,
-                include_details,
-            )
-            if rough1 > TELEGRAPH_LIMIT and rough2 > TELEGRAPH_LIMIT:
-                logging.info(
-                    "month_split forcing attempt idx=%d include_ics=%s include_details=%s",
-                    split_idx,
-                    include_ics,
-                    include_details,
-                )
-                saw_both_too_big = True
-            if rough1 > TELEGRAPH_LIMIT:
-                delta = max(1, split_idx // 6)
-                new_idx = snap_index(split_idx - delta, direction=-1)
-                if new_idx != split_idx:
-                    split_idx = new_idx
-                    logging.info(
-                        "month_split adjust idx=%d reason=rough_size target=first include_ics=%s include_details=%s",
-                        split_idx,
-                        include_ics,
-                        include_details,
-                    )
-                    continue
-            elif rough2 > TELEGRAPH_LIMIT:
-                delta = max(1, (len(events) - split_idx) // 6)
-                new_idx = snap_index(split_idx + delta, direction=1)
-                if new_idx != split_idx:
-                    split_idx = new_idx
-                    logging.info(
-                        "month_split adjust idx=%d reason=rough_size target=second include_ics=%s include_details=%s",
-                        split_idx,
-                        include_ics,
-                        include_details,
-                    )
-                    continue
-            html2 = unescape_html_comments(nodes_to_html(content2))
-            html2 = ensure_footer_nav_with_hr(html2, nav_block, month=month, page=2)
-            hash2 = content_hash(html2)
+        
+        html_str = unescape_html_comments(nodes_to_html(content))
+        html_str = ensure_footer_nav_with_hr(html_str, nav_block, month=month, page=i)
+        phash = content_hash(html_str)
+        
+        # Telegraph API interaction
+        curr_url = None
+        curr_path = None
+        
+        if i == 1:
+            # Page 1: Update MonthPage
+            # Start/Update logic matches old implementation
             try:
-                if not page.path2:
-                    logging.info("creating second page for %s", month)
-                    data2 = await telegraph_create_page(
-                        tg,
-                        title=title2,
-                        html_content=html2,
-                        caller="month_build",
-                    )
-                    page.url2 = normalize_telegraph_url(data2.get("url"))
-                    page.path2 = data2.get("path")
-                else:
-                    logging.info("updating second page for %s", month)
-                    start = _time.perf_counter()
-                    await telegraph_edit_page(
-                        tg,
-                        page.path2,
-                        title=title2,
-                        html_content=html2,
-                        caller="month_build",
-                    )
-                    dur = (_time.perf_counter() - start) * 1000
-                    logging.info("editPage %s done in %.0f ms", page.path2, dur)
-            except TelegraphException as e:
-                msg = str(e).lower()
-                if "content" in msg and "too" in msg and "big" in msg:
-                    delta = max(1, (len(events) - split_idx) // 6)
-                    new_idx = snap_index(split_idx + delta, direction=1)
-                    if new_idx != split_idx:
-                        split_idx = new_idx
-                        logging.info(
-                            "month_split adjust idx=%d reason=telegraph_too_big target=second include_ics=%s include_details=%s",
-                            split_idx,
-                            include_ics,
-                            include_details,
-                        )
-                        continue
-                raise
-            page.content_hash2 = hash2
-            await asyncio.sleep(0)
-            title1, content1, _ = await build_month_page_content(
-                db,
-                month,
-                first,
-                [],
-                continuation_url=page.url2,
-                include_ics=include_ics,
-                include_details=include_details,
-            )
-            html1 = unescape_html_comments(nodes_to_html(content1))
-            html1 = ensure_footer_nav_with_hr(html1, nav_block, month=month, page=1)
-            hash1 = content_hash(html1)
-            try:
-                if not page.path:
+                if not page1_path:
                     logging.info("creating first page for %s", month)
-                    data1 = await telegraph_create_page(
-                        tg,
-                        title=title1,
-                        html_content=html1,
-                        caller="month_build",
+                    data = await telegraph_create_page(
+                        tg, title=title, html_content=html_str, caller="month_build"
                     )
-                    page.url = normalize_telegraph_url(data1.get("url"))
-                    page.path = data1.get("path")
+                    page1_path = data.get("path")
+                    page1_url = normalize_telegraph_url(data.get("url"))
                 else:
                     logging.info("updating first page for %s", month)
-                    start = _time.perf_counter()
                     await telegraph_edit_page(
-                        tg,
-                        page.path,
-                        title=title1,
-                        html_content=html1,
-                        caller="month_build",
+                        tg, page1_path, title=title, html_content=html_str, caller="month_build"
                     )
-                    dur = (_time.perf_counter() - start) * 1000
-                    logging.info("editPage %s done in %.0f ms", page.path, dur)
+                    # path/url remain same
+                    curr_path = page1_path
+                    curr_url = page1_url
             except TelegraphException as e:
-                msg = str(e).lower()
-                if "content" in msg and "too" in msg and "big" in msg:
-                    delta = max(1, split_idx // 6)
-                    new_idx = snap_index(split_idx - delta, direction=-1)
-                    if new_idx != split_idx:
-                        split_idx = new_idx
-                        logging.info(
-                            "month_split adjust idx=%d reason=telegraph_too_big target=first include_ics=%s include_details=%s",
-                            split_idx,
-                            include_ics,
-                            include_details,
-                        )
-                        continue
+                logging.error("Failed to update Page 1 for %s: %s", month, e)
                 raise
-            page.content_hash = hash1
+            
+            page1_hash = phash
+            curr_url = page1_url
+            curr_path = page1_path
+            
+        else:
+            # Page 2..N: Update/Create MonthPagePart
+            # Check DB if part exists
             async with db.get_session() as session:
-                db_page = await session.get(MonthPage, month)
-                db_page.url = page.url
-                db_page.path = page.path
-                db_page.url2 = page.url2
-                db_page.path2 = page.path2
-                db_page.content_hash = page.content_hash
-                db_page.content_hash2 = page.content_hash2
-                await session.commit()
-            logging.info(
-                "month_split done month=%s idx=%d first_bytes=%d second_bytes=%d include_ics=%s include_details=%s",
-                month,
-                split_idx,
-                rough1,
-                rough2,
-                include_ics,
-                include_details,
-            )
-            return
-        if saw_both_too_big:
-            fallback_reason = "both_too_big"
-        if not fallback_reason:
-            fallback_reason = "attempts_exhausted"
-        logging.error(
-            "month_split failed month=%s attempts=%d last_idx=%d include_ics=%s include_details=%s reason=%s",
-            month,
-            attempts,
-            split_idx,
-            include_ics,
-            include_details,
-            fallback_reason,
+                result = await session.execute(
+                    select(MonthPagePart).where(
+                        MonthPagePart.month == month, 
+                        MonthPagePart.part_number == i
+                    )
+                )
+                part = result.scalar_one_or_none()
+                
+                if not part:
+                    # Create New
+                    logging.info("creating part %d for %s", i, month)
+                    try:
+                        data = await telegraph_create_page(
+                            tg, title=title, html_content=html_str, caller="month_build"
+                        )
+                        curr_path = data.get("path")
+                        curr_url = normalize_telegraph_url(data.get("url"))
+                        
+                        part = MonthPagePart(
+                            month=month, part_number=i, 
+                            url=curr_url, path=curr_path, 
+                            content_hash=phash,
+                            first_date=chunk_events[0].date if chunk_events else None,
+                            last_date=chunk_events[-1].date if chunk_events else None
+                        )
+                        session.add(part)
+                        await session.commit()
+                    except TelegraphException as e:
+                         logging.error("Failed to create part %d for %s: %s", i, month, e)
+                         raise
+                else:
+                    # Update Existing
+                    logging.info("updating part %d for %s", i, month)
+                    try:
+                        await telegraph_edit_page(
+                            tg, part.path, title=title, html_content=html_str, caller="month_build"
+                        )
+                        # usage: part.url, part.path
+                        curr_url = part.url
+                        curr_path = part.path
+                        part.content_hash = phash
+                        # Update dates just in case
+                        if chunk_events:
+                            part.first_date = chunk_events[0].date
+                            part.last_date = chunk_events[-1].date
+                        session.add(part)
+                        await session.commit()
+                    except TelegraphException as e:
+                         logging.error("Failed to update part %d for %s: %s", i, month, e)
+                         # Raise? Or continue? Raise is safer.
+                         raise
+            
+        # Set next_url for the PREVIOUS iteration (which is Page i-1)
+        next_url = curr_url
+        next_path = curr_path
+
+    # Update Page 1 record in DB
+    async with db.get_session() as session:
+        db_page = await session.get(MonthPage, month)
+        db_page.url = page1_url
+        db_page.path = page1_path
+        db_page.content_hash = page1_hash
+        # Clear legacy 2nd page fields
+        db_page.url2 = None
+        db_page.path2 = None
+        db_page.content_hash2 = None
+        await session.commit()
+        
+    # Cleanup Obsolete Parts (e.g. if we had 5 pages and now only 3)
+    async with db.get_session() as session:
+        logging.info("split_month_until_ok: cleaning up obsolete parts start=%d end=%d", total_pages + 1, 99)
+        await session.execute(
+            delete(MonthPagePart)
+            .where(MonthPagePart.month == month)
+            .where(MonthPagePart.part_number > total_pages)
         )
-        raise TelegraphException("CONTENT_TOO_BIG")
+        await session.commit()
 
-    try:
-        await attempt(True, True)
-        return
-    except TelegraphException as exc:
-        msg = str(exc).lower()
-        if "content" not in msg or "too" not in msg or "big" not in msg:
-            raise
-        logging.info("month_split retry_without_ics month=%s", month)
-
-    try:
-        await attempt(False, True)
-        return
-    except TelegraphException as exc:
-        msg = str(exc).lower()
-        if "content" not in msg or "too" not in msg or "big" not in msg:
-            raise
-        logging.info("month_split retry_without_details month=%s", month)
-
-    await attempt(False, False)
+    # Update the in-memory page object with the results for Page 1
+    if page1_path:
+        page.url = page1_url
+        page.path = page1_path
+        page.content_hash = page1_hash
+        # Clear legacy secondary fields if they exist
+        page.url2 = None
+        page.path2 = None
+        page.content_hash2 = None
+    
+    logging.info("split_month_until_ok done. Created %d parts.", len(chunks))
 
 
 async def patch_month_page_for_date(
@@ -12483,6 +12567,16 @@ async def patch_month_page_for_date(
     start = _time.perf_counter()
 
     async with db.get_session() as session:
+        # Check if we have multiple parts (N-page split)
+        # If so, patching individual pages is risky (events might move between pages).
+        # Fallback to full rebuild.
+        res_parts = await session.execute(
+            select(MonthPagePart).where(MonthPagePart.month == month_key)
+        )
+        if res_parts.scalars().first():
+            logging.info("patch_month_page_for_date: multi-page detected, forcing rebuild for %s", month_key)
+            return "rebuild"
+
         page = await session.get(MonthPage, month_key)
         if not page or not page.path:
             return False
@@ -14031,7 +14125,8 @@ def format_event_md(
     else:
         logging.error("Invalid event date: %s", e.date)
         day = e.date
-    lines.append(f"_{day} {e.time} {loc}_")
+    time_part = f" {e.time}" if e.time and e.time != "00:00" else ""
+    lines.append(f"_{day}{time_part} {loc}_")
     return "\n".join(lines)
 
 
