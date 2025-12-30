@@ -1960,8 +1960,19 @@ async def persist_event_and_pages(
         await rebuild_fest_nav_if_changed(db)
     await schedule_event_update_tasks(db, saved)
 
-    async with db.get_session() as session:
-        saved = await session.get(Event, saved.id)
+    await schedule_event_update_tasks(db, saved)
+
+    # Wait for Telegraph URL to become available (async job)
+    # This prevents sending empty links in the operator report
+    start_wait = time.time()
+    for _ in range(20):  # Wait up to 10 seconds
+        async with db.get_session() as session:
+            saved = await session.get(Event, saved.id)
+        if saved.telegraph_url:
+            elapsed = time.time() - start_wait
+            logging.info("persist_event_and_pages: telegraph_url appeared after %.2fs", elapsed)
+            break
+        await asyncio.sleep(0.5)
 
     return PersistResult(
         event_id=saved.id,
