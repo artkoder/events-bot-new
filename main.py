@@ -10136,7 +10136,7 @@ async def enqueue_job(
 
 
 async def schedule_event_update_tasks(
-    db: Database, ev: Event, *, drain_nav: bool = True, skip_vk_sync: bool = False
+    db: Database, ev: Event, *, drain_nav: bool = False, skip_vk_sync: bool = False
 ) -> dict[JobTask, str]:
     eid = ev.id
     results: dict[JobTask, str] = {}
@@ -10160,7 +10160,7 @@ async def schedule_event_update_tasks(
         page_deps.append(ics_dep)
     
     # Deferred page rebuilds: откладываем month_pages и weekend_pages на 15 минут
-    deferred_time = datetime.now(timezone.utc) + timedelta(minutes=5)
+    deferred_time = datetime.now(timezone.utc) + timedelta(minutes=15)
     
     # month_pages — отложенный запуск
     month = ev.date.split("..", 1)[0][:7]
@@ -10276,53 +10276,24 @@ async def schedule_event_update_tasks(
         res_months = await session.execute(select(MonthPage.month))
         existing_months = set(res_months.scalars().all())
     
-    if month not in existing_months:
-        logging.info("New month %s detected! Triggering global nav refresh.", month)
-        # Schedule rebuild for ALL existing months to update their footer
-        # Use a nominal event_id (ev.id) but ensure the Task + Coalesce Key are correct.
-        # We assume existing worker logic can handle `month_pages` job just by coalesce key if event_id is irrelevant for the month scope?
-        # Actually `job_handler` usually loads the event. 
-        # But `month_pages` rebuilds the whole month data.
-        # Let's assume it's robust.
-        
-        for m_other in existing_months:
-            # We must construct the coalesce key manually or trust a helper?
-            # Enqueue task logic usually auto-generates key if not provided, but based on event!
-            # If we reuse `ev.id` (which is in `month`), the job might try to build `month` again?
-            # NO. `enqueue_job` creates a job.
-            # The Worker executes it.
-            # If the Worker uses `event.date` to determine month, then passing `ev.id` (April event)
-            # to a job intended for January will result in April being rebuilt again!
-            
-            # Use `refresh_month_nav` job? Does it exist?
-            # If not, we should probably modify `refresh_month_nav` to be a job handler?
-            
-            # Alternative: Just call `refresh_month_nav(db)` here? 
-            # It handles the loop and calls `sync_month_page`.
-            # But it waits for Telegraph API. That blocks the webhook/user for too long.
-            
-            # Ideal: Create a new task type `JobTask.nav_update_all`?
-            # Or just mark them dirty and hope a cron picks them up?
-            
-            # Let's look at `worker.py` or the job definitions.
-            # But I don't have time to refactor the whole job system.
-            
-            # Workaround:
-            # `schedule_event_update_tasks` is async.
-            # We can spawn a background task? `asyncio.create_task(refresh_month_nav(db))`
-            # Risk: Concurrency with DB session? `refresh_month_nav` creates its own session.
-            # Risk: App termination?
-            
-            # Given constraints:
-            # "refresh_month_nav already exists but is never called".
-            # The prompt says "call refresh_month_nav".
-            # I will spawn it as a background task.
-            asyncio.create_task(refresh_month_nav(db))
-            
-    # Wait, I need to import asyncio. It is imported in main.py? Yes.
-    # And `refresh_month_nav` is available.
+    # Filter existing_months to only include current and future months
+    today = datetime.now(timezone.utc).date()
+    current_month = today.strftime("%Y-%m")
+    future_months = {m for m in existing_months if m >= current_month}
     
-    pass
+    if month not in existing_months:
+        logging.info("New month %s detected! Marking other months dirty for deferred rebuild.", month)
+        # For new month: mark all FUTURE existing months dirty for deferred rebuild
+        # They will be picked up by the job worker when next_run_at arrives
+        for m_other in future_months:
+            await mark_pages_dirty(db, m_other)
+            # Enqueue deferred job for each month
+            await enqueue_job(
+                db, ev.id, JobTask.month_pages,
+                payload=None,
+                coalesce_key=f"month_pages:{m_other}",
+                next_run_at=deferred_time
+            )
     
     d = parse_iso_date(ev.date)
     if d:
