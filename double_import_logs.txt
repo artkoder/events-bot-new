@@ -1,0 +1,200 @@
+    raise VKAPIError(None, "VK token missing", method=method)
+VKAPIError: VK token missing
+INFO:root:vk_shortlink_fallback eid=1935 url=https://янтарьхолл.рф reason=ticket_fetch_failed
+ERROR:root:vk_shortlink_fetch_failed kind=ticket eid=1937
+Traceback (most recent call last):
+  File "/workspaces/events-bot-new/shortlinks.py", line 159, in _ensure_vk_short_link
+    response = await vk_api_fn("utils.getShortLink", params, db, bot)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspaces/events-bot-new/main.py", line 3032, in _vk_api
+    raise VKAPIError(None, "VK token missing", method=method)
+VKAPIError: VK token missing
+INFO:root:vk_shortlink_fallback eid=1937 url=https://qtjadt.qtickets.ru/ reason=ticket_fetch_failed
+ERROR:root:vk_shortlink_fetch_failed kind=ticket eid=1938
+Traceback (most recent call last):
+  File "/workspaces/events-bot-new/shortlinks.py", line 159, in _ensure_vk_short_link
+    response = await vk_api_fn("utils.getShortLink", params, db, bot)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspaces/events-bot-new/main.py", line 3032, in _vk_api
+    raise VKAPIError(None, "VK token missing", method=method)
+VKAPIError: VK token missing
+INFO:root:vk_shortlink_fallback eid=1938 url=https://pyramida.info/tickets/danila-kozlovskiy-spektakl-frenk_50179595 reason=ticket_fetch_failed
+ERROR:root:vk_shortlink_fetch_failed kind=ticket eid=1940
+Traceback (most recent call last):
+  File "/workspaces/events-bot-new/shortlinks.py", line 159, in _ensure_vk_short_link
+    response = await vk_api_fn("utils.getShortLink", params, db, bot)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspaces/events-bot-new/main.py", line 3032, in _vk_api
+    raise VKAPIError(None, "VK token missing", method=method)
+VKAPIError: VK token missing
+INFO:root:vk_shortlink_fallback eid=1940 url=https://kaliningrad.qtickets.events/168431-mari-kraymbreri-kontsert reason=ticket_fetch_failed
+ERROR:root:vk_shortlink_fetch_failed kind=ticket eid=1934
+Traceback (most recent call last):
+  File "/workspaces/events-bot-new/shortlinks.py", line 159, in _ensure_vk_short_link
+    response = await vk_api_fn("utils.getShortLink", params, db, bot)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspaces/events-bot-new/main.py", line 3032, in _vk_api
+    raise VKAPIError(None, "VK token missing", method=method)
+VKAPIError: VK token missing
+INFO:root:vk_shortlink_fallback eid=1934 url=https://vk.ru/club107282077 reason=ticket_fetch_failed
+ERROR:root:vk_shortlink_fetch_failed kind=ticket eid=1935
+Traceback (most recent call last):
+  File "/workspaces/events-bot-new/shortlinks.py", line 159, in _ensure_vk_short_link
+    response = await vk_api_fn("utils.getShortLink", params, db, bot)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspaces/events-bot-new/main.py", line 3032, in _vk_api
+    raise VKAPIError(None, "VK token missing", method=method)
+VKAPIError: VK token missing
+INFO:root:vk_shortlink_fallback eid=1935 url=https://янтарьхолл.рф reason=ticket_fetch_failed
+ERROR:root:vk_shortlink_fetch_failed kind=ticket eid=1937
+Traceback (most recent call last):
+  File "/workspaces/events-bot-new/shortlinks.py", line 159, in _ensure_vk_short_link
+    response = await vk_api_fn("utils.getShortLink", params, db, bot)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspaces/events-bot-new/main.py", line 3032, in _vk_api
+    raise VKAPIError(None, "VK token missing", method=method)
+VKAPIError: VK token missing
+INFO:root:vk_shortlink_fallback eid=1937 url=https://qtjadt.qtickets.ru/ reason=ticket_fetch_failed
+ERROR:root:vk_shortlink_fetch_failed kind=ticket eid=1938
+Traceback (most recent call last):
+  File "/workspaces/events-bot-new/shortlinks.py", line 159, in _ensure_vk_short_link
+    response = await vk_api_fn("utils.getShortLink", params, db, bot)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspaces/events-bot-new/main.py", line 3032, in _vk_api
+    raise VKAPIError(None, "VK token missing", method=method)
+VKAPIError: VK token missing
+INFO:root:vk_shortlink_fallback eid=1938 url=https://pyramida.info/tickets/danila-kozlovskiy-spektakl-frenk_50179595 reason=ticket_fetch_failed
+ERROR:root:vk_shortlink_fetch_failed kind=ticket eid=1940
+Traceback (most recent call last):
+  File "/workspaces/events-bot-new/shortlinks.py", line 159, in _ensure_vk_short_link
+    response = await vk_api_fn("utils.getShortLink", params, db, bot)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspaces/events-bot-new/main.py", line 3032, in _vk_api
+    raise VKAPIError(None, "VK token missing", method=method)
+VKAPIError: VK token missing
+INFO:root:vk_shortlink_fallback eid=1940 url=https://kaliningrad.qtickets.events/168431-mari-kraymbreri-kontsert reason=ticket_fetch_failed
+ERROR:aiogram.dispatcher:Failed to fetch updates - TelegramConflictError: Telegram server says - Conflict: terminated by other getUpdates request; make sure that only one bot instance is running
+WARNING:aiogram.dispatcher:Sleep for 4.898570 seconds and try again... (tryings = 5, bot id = 8365878972)
+WARNING:root:tg call send_message failed after 5 attempts: Telegram server says - Bad Request: chat not found
+ERROR:root:daily send failed for -1002210431821: Telegram server says - Bad Request: chat not found
+ERROR:asyncio:Task exception was never retrieved
+future: <Task finished name='Task-240' coro=<send_daily_announcement() done, defined at main_part2.py:3457> exception=TelegramBadRequest('Telegram server says - Bad Request: chat not found')>
+Traceback (most recent call last):
+  File "main_part2.py", line 3477, in send_daily_announcement
+    await bot.send_message(
+  File "/workspaces/events-bot-new/safe_bot.py", line 68, in send_message
+    result = await self._call(super().send_message, chat_id, text, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspaces/events-bot-new/safe_bot.py", line 64, in _call
+    raise last_exc
+  File "/workspaces/events-bot-new/safe_bot.py", line 37, in _call
+    result = await func(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/codespace/.local/lib/python3.12/site-packages/aiogram/client/bot.py", line 2718, in send_message
+    return await self(call, request_timeout=request_timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/codespace/.local/lib/python3.12/site-packages/aiogram/client/bot.py", line 432, in __call__
+    return await self.session(self, method, timeout=request_timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/codespace/.local/lib/python3.12/site-packages/aiogram/client/session/base.py", line 257, in __call__
+    return cast(TelegramType, await middleware(bot, method))
+                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/codespace/.local/lib/python3.12/site-packages/aiogram/client/session/aiohttp.py", line 179, in make_request
+    response = self.check_response(
+               ^^^^^^^^^^^^^^^^^^^^
+  File "/home/codespace/.local/lib/python3.12/site-packages/aiogram/client/session/base.py", line 120, in check_response
+    raise TelegramBadRequest(method=method, message=description)
+aiogram.exceptions.TelegramBadRequest: Telegram server says - Bad Request: chat not found
+WARNING:root:tg call send_message failed after 5 attempts: Telegram server says - Bad Request: chat not found
+ERROR:root:daily send failed for -1002331532485: Telegram server says - Bad Request: chat not found
+ERROR:asyncio:Task exception was never retrieved
+future: <Task finished name='Task-239' coro=<send_daily_announcement() done, defined at main_part2.py:3457> exception=TelegramBadRequest('Telegram server says - Bad Request: chat not found')>
+Traceback (most recent call last):
+  File "main_part2.py", line 3477, in send_daily_announcement
+    await bot.send_message(
+  File "/workspaces/events-bot-new/safe_bot.py", line 68, in send_message
+    result = await self._call(super().send_message, chat_id, text, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspaces/events-bot-new/safe_bot.py", line 64, in _call
+    raise last_exc
+  File "/workspaces/events-bot-new/safe_bot.py", line 37, in _call
+    result = await func(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/codespace/.local/lib/python3.12/site-packages/aiogram/client/bot.py", line 2718, in send_message
+    return await self(call, request_timeout=request_timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/codespace/.local/lib/python3.12/site-packages/aiogram/client/bot.py", line 432, in __call__
+    return await self.session(self, method, timeout=request_timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/codespace/.local/lib/python3.12/site-packages/aiogram/client/session/base.py", line 257, in __call__
+    return cast(TelegramType, await middleware(bot, method))
+                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/codespace/.local/lib/python3.12/site-packages/aiogram/client/session/aiohttp.py", line 179, in make_request
+    response = self.check_response(
+               ^^^^^^^^^^^^^^^^^^^^
+  File "/home/codespace/.local/lib/python3.12/site-packages/aiogram/client/session/base.py", line 120, in check_response
+    raise TelegramBadRequest(method=method, message=description)
+aiogram.exceptions.TelegramBadRequest: Telegram server says - Bad Request: chat not found
+INFO:root:RUN pick key=tg_ics_post:1940 owner_eid=1940 started_at=2025-12-30T16:32:09.221307+00:00 attempts=2
+INFO:root:RUN [E1940] start | job_id=9262 task=tg_ics_post key=tg_ics_post:1940
+INFO:root:RUN [E1940] error | job_id=9262 task=tg_ics_post exc=Telegram server says - Bad Request: chat not found
+ERROR:root:job 9262 failed
+Traceback (most recent call last):
+  File "/workspaces/events-bot-new/main.py", line 6061, in tg_ics_post
+    msg = await bot.send_document(
+          ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/codespace/.local/lib/python3.12/site-packages/aiogram/client/bot.py", line 2428, in send_document
+    return await self(call, request_timeout=request_timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/codespace/.local/lib/python3.12/site-packages/aiogram/client/bot.py", line 432, in __call__
+    return await self.session(self, method, timeout=request_timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/codespace/.local/lib/python3.12/site-packages/aiogram/client/session/base.py", line 257, in __call__
+    return cast(TelegramType, await middleware(bot, method))
+                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/codespace/.local/lib/python3.12/site-packages/aiogram/client/session/aiohttp.py", line 179, in make_request
+    response = self.check_response(
+               ^^^^^^^^^^^^^^^^^^^^
+  File "/home/codespace/.local/lib/python3.12/site-packages/aiogram/client/session/base.py", line 120, in check_response
+    raise TelegramBadRequest(method=method, message=description)
+aiogram.exceptions.TelegramBadRequest: Telegram server says - Bad Request: chat not found
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/workspaces/events-bot-new/main.py", line 11823, in _run_due_jobs_once_locked
+    res = await handler(obj.event_id, db, bot)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspaces/events-bot-new/main.py", line 6069, in tg_ics_post
+    msg = await bot.send_document(
+          ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/codespace/.local/lib/python3.12/site-packages/aiogram/client/bot.py", line 2428, in send_document
+    return await self(call, request_timeout=request_timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/codespace/.local/lib/python3.12/site-packages/aiogram/client/bot.py", line 432, in __call__
+    return await self.session(self, method, timeout=request_timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/codespace/.local/lib/python3.12/site-packages/aiogram/client/session/base.py", line 257, in __call__
+    return cast(TelegramType, await middleware(bot, method))
+                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/codespace/.local/lib/python3.12/site-packages/aiogram/client/session/aiohttp.py", line 179, in make_request
+    response = self.check_response(
+               ^^^^^^^^^^^^^^^^^^^^
+  File "/home/codespace/.local/lib/python3.12/site-packages/aiogram/client/session/base.py", line 120, in check_response
+    raise TelegramBadRequest(method=method, message=description)
+aiogram.exceptions.TelegramBadRequest: Telegram server says - Bad Request: chat not found
+INFO:root:RUN done key=tg_ics_post:1940 status=fail duration_ms=315
+ERROR:aiogram.dispatcher:Failed to fetch updates - TelegramConflictError: Telegram server says - Conflict: terminated by other getUpdates request; make sure that only one bot instance is running
+WARNING:aiogram.dispatcher:Sleep for 4.989601 seconds and try again... (tryings = 6, bot id = 8365878972)
+INFO:root:WORKER_STATE pending=2 running=0 error=810 avg_age_s=47.0 lag_s=0.0
+ERROR:aiogram.dispatcher:Failed to fetch updates - TelegramConflictError: Telegram server says - Conflict: terminated by other getUpdates request; make sure that only one bot instance is running
+WARNING:aiogram.dispatcher:Sleep for 5.064839 seconds and try again... (tryings = 7, bot id = 8365878972)
+ERROR:aiogram.dispatcher:Failed to fetch updates - TelegramConflictError: Telegram server says - Conflict: terminated by other getUpdates request; make sure that only one bot instance is running
+WARNING:aiogram.dispatcher:Sleep for 5.111508 seconds and try again... (tryings = 8, bot id = 8365878972)
+WARNING:root:NAV_WATCHDOG key=month_pages:2026-04 blocked_by=next_run_at:2025-12-30T16:46:36.693576+00:00
+WARNING:root:NAV_WATCHDOG key=weekend_pages:2026-04-18 blocked_by=prior:month_pages ; next_run_at:2025-12-30T16:46:36.693576+00:00
+ERROR:aiogram.dispatcher:Failed to fetch updates - TelegramConflictError: Telegram server says - Conflict: terminated by other getUpdates request; make sure that only one bot instance is running
+WARNING:aiogram.dispatcher:Sleep for 5.114347 seconds and try again... (tryings = 9, bot id = 8365878972)
+INFO:root:WORKER_STATE pending=2 running=0 error=810 avg_age_s=78.0 lag_s=0.0
+ERROR:aiogram.dispatcher:Failed to fetch updates - TelegramConflictError: Telegram server says - Conflict: terminated by other getUpdates request; make sure that only one bot instance is running
+WARNING:aiogram.dispatcher:Sleep for 5.093511 seconds and try again... (tryings = 10, bot id = 8365878972)

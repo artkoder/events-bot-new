@@ -1,0 +1,100 @@
+[2m2025-12-29T20:08:16Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]DEBUG:root:SPAN_DONE label=telegraph dur_ms=411
+[2m2025-12-29T20:08:16Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:MEM rss=233.7 MB (Δ0.0 MB) edit_page after
+[2m2025-12-29T20:08:16Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:editPage CHem-zanyatsya-na-vyhodnyh-v-Kaliningradskoj-oblasti-20---21-dekabrya-09-06 done in 412 ms
+[2m2025-12-29T20:08:16Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]DEBUG:root:telegraph_update page=CHem-zanyatsya-na-vyhodnyh-v-Kaliningradskoj-oblasti-20---21-dekabrya-09-06 nodes=60 bytes≈15432
+[2m2025-12-29T20:08:16Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:Edited weekend page 2025-12-20
+[2m2025-12-29T20:08:16Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:MEM rss=233.7 MB (Δ0.0 MB) weekend page after
+[2m2025-12-29T20:08:16Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:weekend page 2025-12-20: edited path=CHem-zanyatsya-na-vyhodnyh-v-Kaliningradskoj-oblasti-20---21-dekabrya-09-06 size=10926
+[2m2025-12-29T20:08:16Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:update weekend 2025-12-20 done https://telegra.ph/CHem-zanyatsya-na-vyhodnyh-v-Kaliningradskoj-oblasti-20---21-dekabrya-09-06
+[2m2025-12-29T20:08:16Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:rebuild weekend finish 2025-12-20 updated=True failed=False
+[2m2025-12-29T20:08:16Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:rebuild weekend start 2025-12-27
+[2m2025-12-29T20:08:16Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:sync_weekend_page start: start=2025-12-27 update_links=False post_vk=False
+[2m2025-12-29T20:08:16Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:MEM rss=233.7 MB (Δ0.0 MB) weekend page before
+[2m2025-12-29T20:08:16Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]DEBUG:root:weekend_html sizes: html=8629 json=13531
+[2m2025-12-29T20:08:16Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:telegraph_edit_page author=Полюбить Калининград Анонсы url=https://t.me/kenigevents path=CHem-zanyatsya-na-vyhodnyh-v-Kaliningradskoj-oblasti-27---28-dekabrya-09-06 caller=weekend_build eid=None
+[2m2025-12-29T20:08:16Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:MEM rss=233.7 MB (Δ0.0 MB) edit_page before
+[2m2025-12-29T20:08:16Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]DEBUG:urllib3.connectionpool:Starting new HTTPS connection (1): api.telegra.ph:443
+[2m2025-12-29T20:08:17Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:WORKER_STATE pending=0 running=0 error=807 avg_age_s=0.0 lag_s=0.0
+[2m2025-12-29T20:08:17Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]DEBUG:urllib3.connectionpool:https://api.telegra.ph:443 "POST /editPage/CHem-zanyatsya-na-vyhodnyh-v-Kaliningradskoj-oblasti-27---28-dekabrya-09-06 HTTP/1.1" 200 331
+[2m2025-12-29T20:08:17Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]DEBUG:root:SPAN_DONE label=telegraph dur_ms=489
+[2m2025-12-29T20:08:17Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:MEM rss=233.7 MB (Δ0.0 MB) edit_page after
+[2m2025-12-29T20:08:17Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:editPage CHem-zanyatsya-na-vyhodnyh-v-Kaliningradskoj-oblasti-27---28-dekabrya-09-06 done in 490 ms
+[2m2025-12-29T20:08:17Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]DEBUG:root:telegraph_update page=CHem-zanyatsya-na-vyhodnyh-v-Kaliningradskoj-oblasti-27---28-dekabrya-09-06 nodes=70 bytes≈16304
+[2m2025-12-29T20:08:17Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:Edited weekend page 2025-12-27
+[2m2025-12-29T20:08:17Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:MEM rss=233.7 MB (Δ0.0 MB) weekend page after
+[2m2025-12-29T20:08:17Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:weekend page 2025-12-27: edited path=CHem-zanyatsya-na-vyhodnyh-v-Kaliningradskoj-oblasti-27---28-dekabrya-09-06 size=11542
+[2m2025-12-29T20:08:17Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:update weekend 2025-12-27 done https://telegra.ph/CHem-zanyatsya-na-vyhodnyh-v-Kaliningradskoj-oblasti-27---28-dekabrya-09-06
+[2m2025-12-29T20:08:17Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:rebuild weekend finish 2025-12-27 updated=True failed=False
+[2m2025-12-29T20:08:17Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:rebuild finished
+[2m2025-12-29T20:08:17Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:aiogram.event:Update id=178969368 is handled. Duration 35510 ms by bot id=7910015203
+[2m2025-12-29T20:08:47Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:WORKER_STATE pending=0 running=0 error=807 avg_age_s=0.0 lag_s=0.0
+[2m2025-12-29T20:09:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:__main__:daily_scheduler: start
+[2m2025-12-29T20:09:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:daily_scheduler: channel=-1002331532485 due=False last_daily=2025-12-29 now=22:09:00 target=08:00:00
+[2m2025-12-29T20:09:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:daily_scheduler: channel=-1002210431821 due=False last_daily=2025-12-29 now=22:09:00 target=08:00:00
+[2m2025-12-29T20:09:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:__main__:daily_scheduler: done
+[2m2025-12-29T20:09:17Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:WORKER_STATE pending=0 running=0 error=807 avg_age_s=0.0 lag_s=0.0
+[2m2025-12-29T20:09:47Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:WORKER_STATE pending=0 running=0 error=807 avg_age_s=0.0 lag_s=0.0
+[2m2025-12-29T20:10:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:__main__:daily_scheduler: start
+[2m2025-12-29T20:10:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:daily_scheduler: channel=-1002331532485 due=False last_daily=2025-12-29 now=22:10:00 target=08:00:00
+[2m2025-12-29T20:10:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:daily_scheduler: channel=-1002210431821 due=False last_daily=2025-12-29 now=22:10:00 target=08:00:00
+[2m2025-12-29T20:10:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:__main__:daily_scheduler: done
+[2m2025-12-29T20:10:17Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:WORKER_STATE pending=0 running=0 error=807 avg_age_s=0.0 lag_s=0.0
+[2m2025-12-29T20:10:47Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:WORKER_STATE pending=0 running=0 error=807 avg_age_s=0.0 lag_s=0.0
+[2m2025-12-29T20:11:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:__main__:daily_scheduler: start
+[2m2025-12-29T20:11:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:daily_scheduler: channel=-1002331532485 due=False last_daily=2025-12-29 now=22:11:00 target=08:00:00
+[2m2025-12-29T20:11:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:daily_scheduler: channel=-1002210431821 due=False last_daily=2025-12-29 now=22:11:00 target=08:00:00
+[2m2025-12-29T20:11:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:__main__:daily_scheduler: done
+[2m2025-12-29T20:11:17Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:WORKER_STATE pending=0 running=0 error=807 avg_age_s=0.0 lag_s=0.0
+[2m2025-12-29T20:11:47Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:WORKER_STATE pending=0 running=0 error=807 avg_age_s=0.0 lag_s=0.0
+[2m2025-12-29T20:12:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:__main__:daily_scheduler: start
+[2m2025-12-29T20:12:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:daily_scheduler: channel=-1002331532485 due=False last_daily=2025-12-29 now=22:12:00 target=08:00:00
+[2m2025-12-29T20:12:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:daily_scheduler: channel=-1002210431821 due=False last_daily=2025-12-29 now=22:12:00 target=08:00:00
+[2m2025-12-29T20:12:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:__main__:daily_scheduler: done
+[2m2025-12-29T20:12:17Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:WORKER_STATE pending=0 running=0 error=807 avg_age_s=0.0 lag_s=0.0
+[2m2025-12-29T20:12:47Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:WORKER_STATE pending=0 running=0 error=807 avg_age_s=0.0 lag_s=0.0
+[2m2025-12-29T20:13:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:__main__:daily_scheduler: start
+[2m2025-12-29T20:13:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:daily_scheduler: channel=-1002331532485 due=False last_daily=2025-12-29 now=22:13:00 target=08:00:00
+[2m2025-12-29T20:13:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:daily_scheduler: channel=-1002210431821 due=False last_daily=2025-12-29 now=22:13:00 target=08:00:00
+[2m2025-12-29T20:13:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:__main__:daily_scheduler: done
+[2m2025-12-29T20:13:18Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:WORKER_STATE pending=0 running=0 error=807 avg_age_s=0.0 lag_s=0.0
+[2m2025-12-29T20:13:48Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:WORKER_STATE pending=0 running=0 error=807 avg_age_s=0.0 lag_s=0.0
+[2m2025-12-29T20:14:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:__main__:daily_scheduler: start
+[2m2025-12-29T20:14:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:daily_scheduler: channel=-1002331532485 due=False last_daily=2025-12-29 now=22:14:00 target=08:00:00
+[2m2025-12-29T20:14:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:daily_scheduler: channel=-1002210431821 due=False last_daily=2025-12-29 now=22:14:00 target=08:00:00
+[2m2025-12-29T20:14:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:__main__:daily_scheduler: done
+[2m2025-12-29T20:14:18Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:WORKER_STATE pending=0 running=0 error=807 avg_age_s=0.0 lag_s=0.0
+[2m2025-12-29T20:14:48Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:WORKER_STATE pending=0 running=0 error=807 avg_age_s=0.0 lag_s=0.0
+[2m2025-12-29T20:15:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:__main__:daily_scheduler: start
+[2m2025-12-29T20:15:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:daily_scheduler: channel=-1002331532485 due=False last_daily=2025-12-29 now=22:15:00 target=08:00:00
+[2m2025-12-29T20:15:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:daily_scheduler: channel=-1002210431821 due=False last_daily=2025-12-29 now=22:15:00 target=08:00:00
+[2m2025-12-29T20:15:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:__main__:daily_scheduler: done
+[2m2025-12-29T20:15:18Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:WORKER_STATE pending=0 running=0 error=807 avg_age_s=0.0 lag_s=0.0
+[2m2025-12-29T20:15:48Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:WORKER_STATE pending=0 running=0 error=807 avg_age_s=0.0 lag_s=0.0
+[2m2025-12-29T20:16:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]DEBUG:apscheduler.scheduler:Looking for jobs to run
+[2m2025-12-29T20:16:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]DEBUG:apscheduler.scheduler:Next wakeup is due at 2025-12-29 20:16:00+00:00 (in 0.000245 seconds)
+[2m2025-12-29T20:16:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:__main__:daily_scheduler: start
+[2m2025-12-29T20:16:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]DEBUG:apscheduler.scheduler:Looking for jobs to run
+[2m2025-12-29T20:16:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:JOB_SUBMITTED job_id=vk_scheduler run_id=1c644002d36f4573bc16b069059962e4 next_run=2025-12-29 20:31:00+00:00 took_ms=0 traceback_excerpt=None
+[2m2025-12-29T20:16:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]DEBUG:apscheduler.scheduler:Next wakeup is due at 2025-12-29 20:17:00+00:00 (in 59.999440 seconds)
+[2m2025-12-29T20:16:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:apscheduler.executors.default:Running job "_job_wrapper.<locals>._run (trigger: cron[minute='1,16,31,46'], next run at: 2025-12-29 20:31:00 UTC)" (scheduled at 2025-12-29 20:16:00+00:00)
+[2m2025-12-29T20:16:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]DEBUG:root:SPAN_START label=db
+[2m2025-12-29T20:16:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:daily_scheduler: channel=-1002331532485 due=False last_daily=2025-12-29 now=22:16:00 target=08:00:00
+[2m2025-12-29T20:16:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:daily_scheduler: channel=-1002210431821 due=False last_daily=2025-12-29 now=22:16:00 target=08:00:00
+[2m2025-12-29T20:16:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:__main__:daily_scheduler: done
+[2m2025-12-29T20:16:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]DEBUG:root:SPAN_DONE label=db dur_ms=5
+[2m2025-12-29T20:16:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:apscheduler.executors.default:Job "_job_wrapper.<locals>._run (trigger: cron[minute='1,16,31,46'], next run at: 2025-12-29 20:31:00 UTC)" executed successfully
+[2m2025-12-29T20:16:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:JOB_EXECUTED job_id=vk_scheduler run_id=1c644002d36f4573bc16b069059962e4 next_run=2025-12-29 20:31:00+00:00 took_ms=6 traceback_excerpt=None
+[2m2025-12-29T20:16:18Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:WORKER_STATE pending=0 running=0 error=807 avg_age_s=0.0 lag_s=0.0
+[2m2025-12-29T20:16:48Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:WORKER_STATE pending=0 running=0 error=807 avg_age_s=0.0 lag_s=0.0
+[2m2025-12-29T20:17:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:__main__:daily_scheduler: start
+[2m2025-12-29T20:17:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]DEBUG:apscheduler.scheduler:Looking for jobs to run
+[2m2025-12-29T20:17:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:JOB_SUBMITTED job_id=vk_poll_scheduler run_id=b4b2f14ee7464ba7a2b2fc8dac7ce466 next_run=2025-12-29 20:32:00+00:00 took_ms=0 traceback_excerpt=None
+[2m2025-12-29T20:17:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]DEBUG:apscheduler.scheduler:Next wakeup is due at 2025-12-29 20:20:07.960404+00:00 (in 187.958480 seconds)
+[2m2025-12-29T20:17:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:apscheduler.executors.default:Running job "_job_wrapper.<locals>._run (trigger: cron[minute='2,17,32,47'], next run at: 2025-12-29 20:32:00 UTC)" (scheduled at 2025-12-29 20:17:00+00:00)
+[2m2025-12-29T20:17:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]DEBUG:root:SPAN_START label=db
+[2m2025-12-29T20:17:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:daily_scheduler: channel=-1002331532485 due=False last_daily=2025-12-29 now=22:17:00 target=08:00:00
+[2m2025-12-29T20:17:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:daily_scheduler: channel=-1002210431821 due=False last_daily=2025-12-29 now=22:17:00 target=08:00:00
+[2m2025-12-29T20:17:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:__main__:daily_scheduler: done
+[2m2025-12-29T20:17:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]DEBUG:root:SPAN_DONE label=db dur_ms=91
+[2m2025-12-29T20:17:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:apscheduler.executors.default:Job "_job_wrapper.<locals>._run (trigger: cron[minute='2,17,32,47'], next run at: 2025-12-29 20:32:00 UTC)" executed successfully
+[2m2025-12-29T20:17:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:JOB_EXECUTED job_id=vk_poll_scheduler run_id=b4b2f14ee7464ba7a2b2fc8dac7ce466 next_run=2025-12-29 20:32:00+00:00 took_ms=93 traceback_excerpt=None

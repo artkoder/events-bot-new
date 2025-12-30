@@ -1,0 +1,19 @@
+**JobOutbox**
+- Таблица: `JobOutbox` хранит id, event_id, task (Enum), payload, status, attempts, last_error/last_result, updated_at/next_run_at, coalesce_key, depends_on; индексы по `(event_id, task)` и `(status, next_run_at)` (`models.py:669-693`).
+- Воркфлоу: `job_outbox_worker` циклично вызывает `_run_due_jobs_once` и `_watch_nav_jobs`, логирует статистику (`main.py:11862-11902`). `_run_due_jobs_once_locked` сериализовано через lock, помечает застрявшие `running` как `error`, выбирает pending/error с `next_run_at<=now`, сортирует по приоритету, истекшие TTL переводит в `error`, стартует обработчик из `JOB_HANDLERS`, обновляет статус/next_run/backoff и оповещения (`main.py:11446-11820`, `main.py:13620-13628`).
+- Coalescing/dedup: при enq coalesce_key автоматически вычисляется для nav-задач, pending задачи перезаряжаются, running — обновляются payload/depends; для `month_pages` создаётся follow-up ключ `...:v2:<event>` с depends_on на основной, если другой event пытается тот же месяц (`main.py:9791-10001`). При исполнении более ранние coalesced задачи, если есть более свежая pending/running, помечаются `superseded` (`main.py:11532-11559`); блокировка по более ранним задачам того же event предотвращает смену порядка (`main.py:11561-11604`). `_watch_nav_jobs` только уведомляет, если nav-задачи висят из-за depends_on/предыдущих задач (`main.py:117?? actually 11840-11859`).
+
+**Команда /pages_rebuild**
+- Парсит аргументы `/pages_rebuild [YYYY-MM...] [--past=0] [--future=2] [--force]`; без параметров показывает инлайн-кнопки по будущим месяцам или диапазону (`main_part2.py:5793-5834`, `main_part2.py:5769-5790`, `main_part2.py:5684-5712`).
+- Выполнение: `_perform_pages_rebuild` включает `DISABLE_EVENT_PAGE_UPDATES`, вызывает `rebuild_pages`, затем формирует текстовый отчёт (`main_part2.py:5715-5765`). `rebuild_pages` по каждому месяцу/выходным вызывает `sync_month_page`/`sync_weekend_page` (force при ручном вызове), фиксирует обновлённые/ошибочные страницы (`main_part2.py:3661-3743`). Callback `pages_rebuild:<month|ALL>` ведёт туда же (`main_part2.py:5822-5834`).
+
+**Debounce/throttle для month_pages**
+- Внутри `_sync_month_page_inner` проверяется `_month_next_run[month]`: без `force` повторный запуск того же месяца раньше 60 с пропускается; запускается под `HEAVY_SEMAPHORE` (`main_part2.py:482-511`).
+- `sync_month_page` дополнительно синхронизирует по per-month lock `_page_locks["month:{month}"]` (`main_part2.py:515-524` и `main.py:282-286`), так что параллельные rebuild'ы одного месяца сериализуются.
+- Job-обработчик `update_month_pages_for` всегда вызывает `sync_month_page` (создание/патч) с обновлением ссылок, тем самым наследуя тот же throttle/lock (`main.py:12859-12927`).
+
+**Гонки при rebuild vs добавление событий**
+- `/pages_rebuild` использует те же `sync_month_page` с локами и семафором, что и job-воркер, поэтому job `month_pages` для того же месяца будет ждать lock; риск одновременной записи минимизирован (`main_part2.py:482-524`, `main.py:282-286`).
+- Coalescing при enqueue: если rebuild того же coalesce_key уже `running`, новая nav-задача с другим event либо мёржится, либо ставится follow-up `:v2:` с depends_on, чтобы не потерять обновление после завершения текущего прогона (`main.py:9899-9962`).
+- На время ручного rebuild флаг `DISABLE_EVENT_PAGE_UPDATES` отключает создание/правку индивидуальных Telegraph-страниц событий, чтобы массовая пересборка не пересекалась с точечными обновлениями (`main_part2.py:5715-5722`, `main.py:11961-11978`).
+- После добавления событий `schedule_event_update_tasks` вызывает `_drain_nav_tasks`, который гоняет nav-задачи по ключам до опустошения, поэтому новые события попадут в очередь и будут обработаны после снятия локов (`main.py:10004-10050`, `main.py:10061-10144`).

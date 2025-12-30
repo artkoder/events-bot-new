@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import logging
 import re
 import time as _time
@@ -540,7 +538,7 @@ async def _sync_month_page_inner(
                 db_page.content_hash2 = page.content_hash2
                 await s.commit()
 
-        if update_links:
+        if update_links and page.path:
             nav_block = await build_month_nav_block(db, month)
             nav_update_failed = False
             for path_attr, hash_attr in (("path", "content_hash"), ("path2", "content_hash2")):
@@ -5804,9 +5802,13 @@ async def handle_pages_rebuild(message: types.Message, db: Database, bot: Bot):
             inline_keyboard=buttons
             + [[types.InlineKeyboardButton(text="Все", callback_data="pages_rebuild:ALL")]]
         )
+        msg_text = "Выберите месяц для пересборки или «Все»"
+        if os.getenv("DEV_MODE") == "1":
+            msg_text = "⚠️ DEV MODE: Страницы будут созданы с префиксом ТЕСТ!\n\n" + msg_text
+
         await bot.send_message(
             message.chat.id,
-            "Выберите месяц для пересборки или «Все»",
+            msg_text,
             reply_markup=markup,
         )
         return
@@ -7890,8 +7892,9 @@ async def handle_vk_command(message: types.Message, db: Database, bot: Bot) -> N
         await bot.send_message(message.chat.id, "Access denied")
         return
     if not (VK_USER_TOKEN or VK_TOKEN or VK_TOKEN_AFISHA):
-        await bot.send_message(message.chat.id, "VK token not configured")
-        return
+        if os.getenv("DEV_MODE") != "1":
+            await bot.send_message(message.chat.id, "VK token not configured")
+            return
     buttons = [
         [types.KeyboardButton(text=VK_BTN_ADD_SOURCE)],
         [types.KeyboardButton(text=VK_BTN_LIST_SOURCES)],
@@ -10989,6 +10992,22 @@ async def handle_vk_review_cb(callback: types.CallbackQuery, db: Database, bot: 
             if action == "accept" and len(parts) > 3:
                 force_arg = parts[3].strip().lower()
                 force_festival = force_arg in {"1", "true", "fest", "festival", "force"}
+            
+            # Atomic lock: try to switch content to 'importing' state
+            # This prevents double-clicks from spawning multiple import flows
+            async with db.raw_conn() as conn:
+                cur = await conn.execute(
+                    "UPDATE vk_inbox SET status='importing' WHERE id=? AND status IN ('locked', 'pending') RETURNING id",
+                    (inbox_id,),
+                )
+                locked_row = await cur.fetchone()
+                await conn.commit()
+            
+            if not locked_row:
+                # Already importing or processed
+                await callback.answer("⏳ Уже в обработке или завершено")
+                return
+
             await callback.answer("Запускаю импорт…")
             answered = True
             await bot.send_message(
