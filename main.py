@@ -10160,7 +10160,7 @@ async def schedule_event_update_tasks(
         page_deps.append(ics_dep)
     
     # Deferred page rebuilds: откладываем month_pages и weekend_pages на 15 минут
-    deferred_time = datetime.now(timezone.utc) + timedelta(minutes=15)
+    deferred_time = datetime.now(timezone.utc) + timedelta(minutes=5)
     
     # month_pages — отложенный запуск
     month = ev.date.split("..", 1)[0][:7]
