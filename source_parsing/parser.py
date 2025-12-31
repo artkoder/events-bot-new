@@ -37,6 +37,28 @@ MONTHS_RU = {
     "декабря": 12, "дек": 12, "декабр": 12,
 }
 
+_TIME_RANGE_SPLIT = re.compile(r"\s*(?:-|–|—|\.\.\.?|…)\s*")
+_TIME_RE = re.compile(r"(\d{1,2}):(\d{2})")
+
+
+def extract_time_start(value: str | None) -> str | None:
+    """Extract start time (HH:MM) from a time string or range."""
+    if not value:
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    parts = _TIME_RANGE_SPLIT.split(text, maxsplit=1)
+    candidate = parts[0] if parts else text
+    match = _TIME_RE.search(candidate)
+    if not match:
+        match = _TIME_RE.search(text)
+    if not match:
+        return None
+    hour = int(match.group(1))
+    minute = int(match.group(2))
+    return f"{hour:02d}:{minute:02d}"
+
 
 @dataclass
 class TheatreEvent:
@@ -301,6 +323,17 @@ async def find_existing_event(
                         event.id, event.title[:50], event.time,
                     )
                     return event.id, False  # Just update ticket status
+                db_start = extract_time_start(event.time)
+                new_start = extract_time_start(event_time)
+                if db_start and new_start and db_start == new_start:
+                    logger.info(
+                        "find_existing_event: MATCHED by start time event_id=%d title=%s db_time=%s new_time=%s",
+                        event.id,
+                        event.title[:50],
+                        event.time,
+                        event_time,
+                    )
+                    return event.id, False
                 else:
                     if event_time == "00:00":
                         logger.info(
@@ -310,7 +343,7 @@ async def find_existing_event(
                             event.time,
                         )
                     else:
-                        logger.debug(
+                        logger.info(
                             "find_existing_event: title matches but time differs db_time=%s new_time=%s",
                             event.time, event_time,
                         )
