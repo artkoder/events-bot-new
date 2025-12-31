@@ -2414,6 +2414,11 @@ class VideoAnnounceScenario:
         if not await self._has_access():
              return "Not authorized"
 
+        logger.info(
+            "video_announce: kernel selected session_id=%s kernel_ref=%s",
+            session_id,
+            kernel_ref,
+        )
         async with self.db.get_session() as session:
             sess = await session.get(VideoAnnounceSession, session_id)
             if not sess:

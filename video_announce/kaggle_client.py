@@ -150,6 +150,7 @@ class KaggleClient:
         base_path = Path(kernel_path) if kernel_path else DEFAULT_KERNEL_PATH
         if not base_path.exists():
             raise FileNotFoundError(f"Kernel path not found: {base_path}")
+        logger.info("kaggle: preparing kernel push from %s", base_path.resolve())
         api = self._get_api()
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -164,6 +165,12 @@ class KaggleClient:
             if dataset_sources is not None:
                 meta_data["dataset_sources"] = dataset_sources
                 meta_path.write_text(json.dumps(meta_data, ensure_ascii=False, indent=2))
+            files = sorted(
+                (f.relative_to(tmp_path).as_posix(), f.stat().st_size)
+                for f in tmp_path.rglob("*")
+                if f.is_file()
+            )
+            logger.info("kaggle: pushing kernel files=%s", files)
             api.kernels_push(str(tmp_path), timeout=timeout)
 
     def kernels_list(self, user: str, page_size: int = 20) -> list[dict]:
@@ -212,6 +219,10 @@ class KaggleClient:
                 logger.info(
                     "kaggle: deploying LOCAL kernel folder=%s dataset=%s",
                     folder_name, dataset_slug
+                )
+                logger.info(
+                    "kaggle: local kernel path resolved=%s",
+                    local_kernel_path.resolve(),
                 )
                 
                 # Copy local kernel files to temp directory
@@ -264,6 +275,12 @@ class KaggleClient:
 
             meta_path.write_text(json.dumps(meta_data, ensure_ascii=False, indent=2))
 
+            files = sorted(
+                (f.relative_to(tmp_path).as_posix(), f.stat().st_size)
+                for f in tmp_path.rglob("*")
+                if f.is_file()
+            )
+            logger.info("kaggle: pushing kernel files=%s", files)
             api.kernels_push(str(tmp_path))
             result_ref = str(meta_data.get("id") or meta_data.get("slug") or kernel_ref)
             logger.info("kaggle: kernel deployed successfully ref=%s", result_ref)
