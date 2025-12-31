@@ -454,6 +454,50 @@ def escape_md(text: str) -> str:
     return text
 
 
+def _format_kaggle_status(status: dict | None) -> str:
+    if not status:
+        return "неизвестен"
+    state = status.get("status")
+    failure_msg = status.get("failureMessage") or status.get("failure_message")
+    if not state:
+        return "неизвестен"
+    result = str(state)
+    if failure_msg:
+        result += f" ({failure_msg})"
+    return result
+
+
+def _format_kaggle_phase(phase: str) -> str:
+    labels = {
+        "prepare": "подготовка",
+        "pushed": "запуск в Kaggle",
+        "poll": "выполнение",
+        "complete": "завершено",
+        "failed": "ошибка",
+        "timeout": "таймаут",
+        "not_found": "kernel не найден",
+        "metadata_missing": "нет kernel-metadata.json",
+        "metadata_error": "ошибка метаданных",
+        "push_failed": "ошибка отправки",
+    }
+    return labels.get(phase, phase)
+
+
+def _format_kaggle_status_message(
+    phase: str,
+    kernel_ref: str,
+    status: dict | None,
+) -> str:
+    lines = [
+        "🛰️ Kaggle: ParseTheatres",
+        f"Kernel: {kernel_ref or '—'}",
+        f"Этап: {_format_kaggle_phase(phase)}",
+    ]
+    if status is not None:
+        lines.append(f"Статус Kaggle: {_format_kaggle_status(status)}")
+    return "\n".join(lines)
+
+
 def format_parsing_report(result: SourceParsingResult) -> str:
     """Format parsing result as a human-readable report.
     
@@ -543,6 +587,34 @@ async def run_source_parsing(
     """
     start_time = time.time()
     result = SourceParsingResult(chat_id=chat_id)
+    kaggle_status_message_id: int | None = None
+    kaggle_kernel_ref = ""
+
+    async def _update_kaggle_status(
+        phase: str,
+        kernel_ref: str,
+        status: dict | None,
+    ) -> None:
+        nonlocal kaggle_status_message_id, kaggle_kernel_ref
+        kaggle_kernel_ref = kernel_ref or kaggle_kernel_ref
+        if not bot or not chat_id:
+            return
+        text = _format_kaggle_status_message(phase, kernel_ref, status)
+        try:
+            if kaggle_status_message_id is None:
+                sent = await bot.send_message(chat_id, text)
+                kaggle_status_message_id = sent.message_id
+            else:
+                await bot.edit_message_text(
+                    text=text,
+                    chat_id=chat_id,
+                    message_id=kaggle_status_message_id,
+                )
+        except Exception:
+            logger.warning(
+                "source_parsing: failed to update kaggle status message",
+                exc_info=True,
+            )
     if DEBUG_MAX_EVENTS:
         logger.info(
             "source_parsing: DEBUG limit active max_new_events=%d",
@@ -551,7 +623,9 @@ async def run_source_parsing(
     
     # 1. Run Kaggle kernel
     try:
-        status, output_files, duration = await run_kaggle_kernel()
+        status, output_files, duration = await run_kaggle_kernel(
+            status_callback=_update_kaggle_status,
+        )
         result.kernel_duration = duration
         result.json_file_paths = output_files
         
@@ -619,6 +693,55 @@ async def run_source_parsing(
             # Escape error text as it may contain underscores/paths
             result.errors.append(f"Source {escape_md(source)}: {escape_md(str(e))}")
             
+    months = sorted({
+        event.parsed_date[:7]
+        for events in events_by_source.values()
+        for event in events
+        if event.parsed_date
+    })
+    if months:
+        logger.info("source_parsing: ensuring month_pages tasks for months=%s", months)
+        try:
+            import sys
+            from sqlalchemy import select
+            from models import Event, JobTask
+        except Exception as e:
+            logger.error(
+                "source_parsing: failed to prepare month_pages enqueue: %s",
+                e,
+            )
+        else:
+            main_mod = sys.modules.get("main") or sys.modules.get("__main__")
+            if main_mod is None:
+                logger.error("source_parsing: main module not found for month_pages enqueue")
+            else:
+                enqueue_job = main_mod.enqueue_job
+                mark_pages_dirty = main_mod.mark_pages_dirty
+                month_event_ids: dict[str, int] = {}
+                async with db.get_session() as session:
+                    for month in months:
+                        res = await session.execute(
+                            select(Event.id)
+                            .where(Event.date.like(f"{month}%"))
+                            .order_by(Event.id.desc())
+                            .limit(1)
+                        )
+                        event_id = res.scalar_one_or_none()
+                        if event_id:
+                            month_event_ids[month] = event_id
+
+                for month in months:
+                    event_id = month_event_ids.get(month)
+                    if not event_id:
+                        continue
+                    await enqueue_job(
+                        db,
+                        event_id,
+                        JobTask.month_pages,
+                        coalesce_key=f"month_pages:{month}",
+                    )
+                    await mark_pages_dirty(db, month)
+
     # Final progress update
     if bot and chat_id and progress_message_id:
         try:

@@ -14365,7 +14365,9 @@ def format_event_md(
     lines.append(e.description.strip())
     if e.pushkin_card:
         lines.append("\u2705 Пушкинская карта")
-    if e.is_free:
+    if getattr(e, "ticket_status", None) == "sold_out":
+        lines.append("❌ Билеты все проданы")
+    elif e.is_free:
         txt = "🟡 Бесплатно"
         if e.ticket_link:
             txt += f" [по регистрации]({e.ticket_link})"
@@ -14373,13 +14375,15 @@ def format_event_md(
     elif e.ticket_link and (
         e.ticket_price_min is not None or e.ticket_price_max is not None
     ):
+        status_icon = "✅ " if getattr(e, "ticket_status", None) == "available" else ""
         if e.ticket_price_max is not None and e.ticket_price_max != e.ticket_price_min:
             price = f"от {e.ticket_price_min} до {e.ticket_price_max}"
         else:
             price = str(e.ticket_price_min or e.ticket_price_max or "")
-        lines.append(f"[Билеты в источнике]({e.ticket_link}) {price}".strip())
+        lines.append(f"{status_icon}[Билеты в источнике]({e.ticket_link}) {price}".strip())
     elif e.ticket_link:
-        lines.append(f"[по регистрации]({e.ticket_link})")
+        status_icon = "✅ " if getattr(e, "ticket_status", None) == "available" else ""
+        lines.append(f"{status_icon}[по регистрации]({e.ticket_link})")
     else:
         if (
             e.ticket_price_min is not None
@@ -14394,7 +14398,8 @@ def format_event_md(
         else:
             price = ""
         if price:
-            lines.append(f"Билеты {price}")
+            status_icon = "✅ " if getattr(e, "ticket_status", None) == "available" else ""
+            lines.append(f"{status_icon}Билеты {price}")
     if include_details and e.telegraph_url:
         cam = "\U0001f4f8" * min(2, max(0, e.photo_count))
         prefix = f"{cam} " if cam else ""

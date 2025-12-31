@@ -11,7 +11,7 @@ import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from video_announce.kaggle_client import (
     KaggleClient,
@@ -29,6 +29,7 @@ async def run_kaggle_kernel(
     kernel_folder: str = THEATRES_KERNEL_FOLDER,
     timeout_minutes: int = 30,
     poll_interval: int = 30,
+    status_callback: Callable[[str, str, dict | None], Awaitable[None]] | None = None,
 ) -> tuple[str, list[str], float]:
     """Run the Kaggle kernel and wait for completion.
     
@@ -47,25 +48,39 @@ async def run_kaggle_kernel(
     start_time = time.time()
     client = KaggleClient()
     kernel_path = KERNELS_ROOT_PATH / kernel_folder
+    kernel_ref = f"{LOCAL_KERNEL_PREFIX}{kernel_folder}"
+
+    async def _notify(phase: str, status: dict | None = None) -> None:
+        if not status_callback:
+            return
+        try:
+            await status_callback(phase, kernel_ref, status)
+        except Exception:
+            logger.exception("theatres_kaggle: status callback failed phase=%s", phase)
     
     if not kernel_path.exists():
         logger.warning(
             "theatres_kaggle: kernel not found path=%s",
             kernel_path,
         )
+        await _notify("not_found")
         return "not_found", [], 0.0
     
     meta_path = kernel_path / "kernel-metadata.json"
     if not meta_path.exists():
         logger.warning("theatres_kaggle: kernel-metadata.json not found")
+        await _notify("metadata_missing")
         return "not_found", [], 0.0
     
     try:
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        kernel_ref = meta.get("id", f"{LOCAL_KERNEL_PREFIX}{kernel_folder}")
+        kernel_ref = meta.get("id", kernel_ref)
     except Exception as e:
         logger.error("theatres_kaggle: failed to read metadata: %s", e)
+        await _notify("metadata_error")
         return "error", [], time.time() - start_time
+
+    await _notify("prepare")
     
     logger.info(
         "theatres_kaggle: pushing kernel folder=%s ref=%s",
@@ -78,7 +93,10 @@ async def run_kaggle_kernel(
         client.push_kernel(kernel_path=kernel_path)
     except Exception as e:
         logger.error("theatres_kaggle: push failed: %s", e)
+        await _notify("push_failed")
         return "push_failed", [], time.time() - start_time
+
+    await _notify("pushed")
     
     # Wait for Kaggle to start
     await asyncio.sleep(10)
@@ -87,12 +105,15 @@ async def run_kaggle_kernel(
     max_polls = (timeout_minutes * 60) // poll_interval
     final_status = "timeout"
     
+    last_status: dict | None = None
     for poll in range(max_polls):
         await asyncio.sleep(poll_interval)
         
         try:
             status_response = client.get_kernel_status(kernel_ref)
             status = (status_response.get("status", "") or "").upper()
+            last_status = status_response
+            await _notify("poll", status_response)
             
             logger.info(
                 "theatres_kaggle: poll %d/%d status=%s",
@@ -103,6 +124,7 @@ async def run_kaggle_kernel(
             
             if status == "COMPLETE":
                 final_status = "complete"
+                await _notify("complete", status_response)
                 break
             elif status in ("ERROR", "FAILED", "CANCELLED"):
                 final_status = "failed"
@@ -112,6 +134,7 @@ async def run_kaggle_kernel(
                     status,
                     failure_msg,
                 )
+                await _notify("failed", status_response)
                 break
             elif status in ("QUEUED", "RUNNING"):
                 continue
@@ -128,6 +151,8 @@ async def run_kaggle_kernel(
             final_status,
             duration,
         )
+        if final_status == "timeout":
+            await _notify("timeout", last_status)
         return final_status, [], duration
     
     # Download output files
