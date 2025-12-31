@@ -682,21 +682,11 @@ class VkDefaultLocationSession:
     message: types.Message | None = None
 
 
-@dataclass(slots=True)
-class VkMissRecord:
-    id: str
-    url: str
-    reason: str | None
-    matched_kw: str | None
-    timestamp: datetime
+from models import VkMissRecord
 
 
-@dataclass(slots=True)
-class VkMissReviewSession:
-    queue: list[VkMissRecord]
-    index: int = 0
-    last_text: str | None = None
-    last_published_at: datetime | None = None
+from models import VkMissReviewSession
+
 
 
 vk_default_time_sessions: TTLCache[int, VkDefaultTimeSession] = TTLCache(
@@ -10164,10 +10154,15 @@ async def schedule_event_update_tasks(
     
     # month_pages — отложенный запуск
     month = ev.date.split("..", 1)[0][:7]
-    results[JobTask.month_pages] = await enqueue_job(
-        db, eid, JobTask.month_pages, depends_on=page_deps, next_run_at=deferred_time
-    )
-    await mark_pages_dirty(db, month)
+    if os.getenv("EVENT_UPDATE_SYNC"):
+        logging.info("EVENT_UPDATE_SYNC set, triggering sync_month_page immediately")
+        await sync_month_page(db, month)
+        results[JobTask.month_pages] = "sync_executed"
+    else:
+        results[JobTask.month_pages] = await enqueue_job(
+            db, eid, JobTask.month_pages, depends_on=page_deps, next_run_at=deferred_time
+        )
+        await mark_pages_dirty(db, month)
     
     # Check if this month exists in MonthPage. If not, we found a new month!
     # Trigger full nav rebuild so ALL existing pages get the link to this new month.
@@ -10303,10 +10298,15 @@ async def schedule_event_update_tasks(
         w_start = weekend_start_for_date(d)
         if w_start:
             # weekend_pages — отложенный запуск
-            results[JobTask.weekend_pages] = await enqueue_job(
-                db, eid, JobTask.weekend_pages, depends_on=page_deps, next_run_at=deferred_time
-            )
-            await mark_pages_dirty(db, f"weekend:{w_start.isoformat()}")
+            if os.getenv("EVENT_UPDATE_SYNC"):
+                logging.info("EVENT_UPDATE_SYNC set, triggering sync_weekend_page immediately")
+                await sync_weekend_page(db, w_start.isoformat())
+                results[JobTask.weekend_pages] = "sync_executed"
+            else:
+                results[JobTask.weekend_pages] = await enqueue_job(
+                    db, eid, JobTask.weekend_pages, depends_on=page_deps, next_run_at=deferred_time
+                )
+                await mark_pages_dirty(db, f"weekend:{w_start.isoformat()}")
     if ev.festival:
         results[JobTask.festival_pages] = await enqueue_job(
             db, eid, JobTask.festival_pages
@@ -12815,7 +12815,7 @@ async def split_month_until_ok(
 
 
 async def patch_month_page_for_date(
-    db: Database, telegraph: Telegraph, month_key: str, d: date, _retried: bool = False
+    db: Database, telegraph: Telegraph, month_key: str, d: date, show_images: bool = False, _retried: bool = False
 ) -> bool:
     """Patch a single day's section on a month page if it changed."""
     page_key = f"telegraph:month:{month_key}"
@@ -12853,7 +12853,9 @@ async def patch_month_page_for_date(
         if fest:
             setattr(ev, "_festival", fest)
 
-    html_section = render_month_day_section(d, events)
+            setattr(ev, "_festival", fest)
+
+    html_section = render_month_day_section(d, events, show_images=show_images)
     new_hash = content_hash(html_section)
     old_hash = await get_section_hash(db, page_key, section_key)
     if new_hash == old_hash:
@@ -12977,6 +12979,16 @@ async def patch_month_page_for_date(
         2 if hash_attr == "content_hash2" else 1,
     )
     from telegraph.utils import nodes_to_html
+
+    # Check for consistency between show_images flag and page content
+    has_figures = "<figure>" in html_content
+    if show_images and not has_figures:
+        if any(e.photo_urls for e in events):
+             logging.info("patch_month: show_images=True but no figures found in page (events have photos). Rebuilding.")
+             return "rebuild"
+    if not show_images and has_figures:
+         logging.info("patch_month: show_images=False but figures found in page. Rebuilding.")
+         return "rebuild"
 
     if need_rebuild:
         logging.info(
@@ -13147,7 +13159,7 @@ async def patch_month_page_for_date(
                 "month_patch retry month=%s day=%s", month_key, d.isoformat()
             )
             return await patch_month_page_for_date(
-                db, telegraph, month_key, d, _retried=True
+                db, telegraph, month_key, d, show_images=show_images, _retried=True
             )
         raise
 
@@ -13220,11 +13232,18 @@ async def update_month_pages_for(event_id: int, db: Database, bot: Bot | None) -
     rebuild_any = False
     rebuild_months: set[str] = set()
     for month, month_dates in months.items():
+        # Custom count to determine show_images
+        async with db.get_session() as session:
+             # Importing get_month_data is safe.
+             from main_part2 import get_month_data
+             m_events, m_exhibitions = await get_month_data(db, month)
+             show_images = len(m_events) < 10
+
         # ensure the month page is created before attempting a patch
         await sync_month_page(db, month, update_links=True)
         for d in month_dates:
             logline("TG-MONTH", event_id, "patch start", month=month, day=d.isoformat())
-            changed = await patch_month_page_for_date(db, tg, month, d)
+            changed = await patch_month_page_for_date(db, tg, month, d, show_images=show_images)
             if changed == "rebuild":
                 changed_any = True
                 rebuild_any = True

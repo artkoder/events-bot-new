@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
+from dataclasses import dataclass
 
 from sqlmodel import Field, SQLModel
 from sqlalchemy import (
@@ -734,3 +735,18 @@ class VKInbox(SQLModel, table=True):
     created_at: datetime = Field(
         default_factory=utc_now, sa_column=Column(DateTime(timezone=True))
     )
+
+@dataclass
+class VkMissRecord:
+    id: str
+    url: str
+    reason: str | None
+    matched_kw: str | None
+    timestamp: datetime
+
+@dataclass
+class VkMissReviewSession:
+    queue: list[VkMissRecord]
+    index: int = 0
+    last_text: str | None = None
+    last_published_at: datetime | None = None

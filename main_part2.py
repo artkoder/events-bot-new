@@ -1,13 +1,87 @@
 import logging
 import re
+import asyncio
 import time as _time
+from datetime import date, timezone, datetime, timedelta
 from dataclasses import dataclass, field
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Any, Sequence, List, Mapping, Optional, Dict, Tuple, Collection, Literal, Awaitable
+from aiogram import Bot, types
 
+from aiohttp import web
 from telegraph import Telegraph
+from markup import md_to_html, telegraph_br
 
-from models import Event, Festival
+from models import Event, Festival, WeekPage, WeekendPage, MonthPage, MonthPagePart, VkMissRecord, VkMissReviewSession, User
+from poster_media import PosterMedia
+from db import Database
+from sqlmodel.ext.asyncio.session import AsyncSession
 from scheduling import MONTHS_GEN
+from event_utils import format_event_md, is_recent
+
+if "LOCAL_TZ" not in globals():
+    LOCAL_TZ = timezone.utc
+
+if "format_day_pretty" not in globals():
+    _MONTHS = [
+        "января",
+        "февраля",
+        "марта",
+        "апреля",
+        "мая",
+        "июня",
+        "июля",
+        "августа",
+        "сентября",
+        "октября",
+        "ноября",
+        "декабря",
+    ]
+
+    def format_day_pretty(day: date) -> str:
+        return f"{day.day} {_MONTHS[day.month - 1]}"
+
+if "month_name_prepositional" not in globals():
+    _MONTHS_PREP = [
+        "январе",
+        "феврале",
+        "марте",
+        "апреле",
+        "мае",
+        "июне",
+        "июле",
+        "августе",
+        "сентябре",
+        "октябре",
+        "ноябре",
+        "декабре",
+    ]
+
+    def month_name_prepositional(month: str) -> str:
+        y, m = month.split("-")
+        return f"{_MONTHS_PREP[int(m) - 1]} {y}"
+
+if "month_name_nominative" not in globals():
+    _MONTHS_NOM = [
+        "январь",
+        "февраль",
+        "март",
+        "апрель",
+        "май",
+        "июнь",
+        "июль",
+        "август",
+        "сентябрь",
+        "октябрь",
+        "ноябрь",
+        "декабрь",
+    ]
+
+    def month_name_nominative(month: str) -> str:
+        y, m = month.split("-")
+        name = _MONTHS_NOM[int(m) - 1]
+        if int(y) != datetime.now(LOCAL_TZ).year:
+            return f"{name} {y}"
+        return name
 
 
 def _normalize_title_and_emoji(title: str, emoji: str | None) -> tuple[str, str]:
@@ -51,6 +125,7 @@ def event_to_nodes(
     show_festival: bool = True,
     include_ics: bool = True,
     include_details: bool = True,
+    show_image: bool = False,
 ) -> list[dict]:
     md = format_event_md(
         e,
@@ -66,7 +141,17 @@ def event_to_nodes(
     body_md = "\n".join(body_lines) if body_lines else ""
     from telegraph.utils import html_to_nodes
 
-    nodes = [{"tag": "h4", "children": event_title_nodes(e)}]
+    nodes = []
+    if show_image and e.photo_urls:
+        first_url = e.photo_urls[0]
+        if isinstance(first_url, str):
+            first_url = first_url.strip()
+        if isinstance(first_url, str) and first_url.startswith("http"):
+            nodes.append({
+                "tag": "figure",
+                "children": [{"tag": "img", "attrs": {"src": first_url}, "children": []}]
+            })
+    nodes.append({"tag": "h4", "children": event_title_nodes(e)})
     fest = festival if show_festival else None
     if fest is None and show_festival and e.festival:
         fest = getattr(e, "_festival", None)
@@ -183,7 +268,9 @@ def add_day_sections(
     *,
     use_markers: bool = False,
     include_ics: bool = True,
+
     include_details: bool = True,
+    show_images: bool = False,
 ):
     """Append event sections grouped by day to Telegraph content."""
     for d in days:
@@ -212,13 +299,14 @@ def add_day_sections(
                     log_fest_link=use_markers,
                     include_ics=include_ics,
                     include_details=include_details,
+                    show_image=show_images,
                 )
             )
         if use_markers:
             add_many([DAY_END(d)])
 
 
-def render_month_day_section(d: date, events: list[Event]) -> str:
+def render_month_day_section(d: date, events: list[Event], show_images: bool = False) -> str:
     """Return HTML snippet for a single day on a month page."""
     from telegraph.utils import nodes_to_html
 
@@ -233,7 +321,7 @@ def render_month_day_section(d: date, events: list[Event]) -> str:
     for ev in events:
         fest = getattr(ev, "_festival", None)
         nodes.extend(
-            event_to_nodes(ev, fest, fest_icon=True, log_fest_link=True)
+            event_to_nodes(ev, fest, fest_icon=True, log_fest_link=True, show_image=show_images)
         )
     return nodes_to_html(nodes)
 
@@ -416,6 +504,7 @@ def _build_month_page_content_sync(
         use_markers=True,
         include_ics=include_ics,
         include_details=include_details,
+        show_images=len(events) < 10,
     )
 
     if exhibitions and not exceeded:
@@ -882,7 +971,7 @@ async def build_weekend_page_content(
         }
     )
 
-    add_day_sections(days, by_day, fest_map, add_many)
+    add_day_sections(days, by_day, fest_map, add_many, show_images=len(events) < 10)
 
     weekend_nav: list[dict] = []
     future_weekends = [w for w in weekend_pages if w.start >= start]
@@ -14901,4 +14990,3 @@ if __name__ == "__main__":
         else:
             # Run in production mode with webhooks
             run_prod_mode()
-

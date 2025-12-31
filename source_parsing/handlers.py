@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 EVENT_ADD_DELAY_SECONDS = 5  # Delay for Telegraph creation
 
 # TEMPORARY: Limit events for debugging (set to None to disable)
-DEBUG_MAX_EVENTS = 10
+DEBUG_MAX_EVENTS = 5
 
 
 @dataclass
@@ -543,6 +543,11 @@ async def run_source_parsing(
     """
     start_time = time.time()
     result = SourceParsingResult(chat_id=chat_id)
+    if DEBUG_MAX_EVENTS:
+        logger.info(
+            "source_parsing: DEBUG limit active max_new_events=%d",
+            DEBUG_MAX_EVENTS,
+        )
     
     # 1. Run Kaggle kernel
     try:
@@ -641,30 +646,6 @@ async def run_source_parsing(
         result.kernel_duration,
         result.processing_duration,
     )
-    
-    # Rebuild Telegraph pages once at the end (batch mode)
-    total_new_added = sum(s.new_added for s in result.stats_by_source.values())
-    if total_new_added > 0:
-        logger.info("source_parsing: rebuilding Telegraph pages for %d new events", total_new_added)
-        try:
-            # Import strictly here to avoid circular imports during module load
-            from main_part2 import _perform_pages_rebuild
-            from datetime import datetime
-            
-            # Get affected months from stats (current month + next 2 months for safety)
-            now = datetime.now()
-            affected_months = []
-            for i in range(3):
-                month = (now.month + i - 1) % 12 + 1
-                year = now.year + ((now.month + i - 1) // 12)
-                affected_months.append(f"{year}-{month:02d}")
-            
-            logger.info("source_parsing: pages_rebuild for months=%s", affected_months)
-            await _perform_pages_rebuild(db, affected_months, force=True)
-            logger.info("source_parsing: pages_rebuild complete")
-        except Exception as rebuild_err:
-            logger.error("source_parsing: pages_rebuild failed: %s", rebuild_err)
-            result.errors.append(f"Pages rebuild failed: {rebuild_err}")
     
     return result
 
@@ -816,5 +797,3 @@ async def process_source_events(
                 stats.failed += 1
     
     return stats, progress_message_id
-
-
