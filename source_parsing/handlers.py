@@ -437,6 +437,7 @@ async def add_new_event_via_queue(
                 return None
             
             upsert_event = main_mod.upsert_event
+            upsert_event_posters = main_mod.upsert_event_posters
             assign_event_topics = main_mod.assign_event_topics
             
             # Build Event object - use LLM-generated short description if available
@@ -470,6 +471,7 @@ async def add_new_event_via_queue(
             # Save to database
             async with db.get_session() as session:
                 saved, was_added = await upsert_event(session, event)
+                await upsert_event_posters(session, saved.id, poster_media)
             
             event_id = saved.id
             
