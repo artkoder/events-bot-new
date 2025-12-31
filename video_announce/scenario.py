@@ -2600,8 +2600,8 @@ class VideoAnnounceScenario:
             if not obj:
                 await self.bot.send_message(self.chat_id, "Сессия не найдена")
                 return
-            if obj.status != VideoAnnounceSessionStatus.FAILED:
-                await self.bot.send_message(self.chat_id, "Сессию можно рестартовать только после ошибки")
+            if obj.status == VideoAnnounceSessionStatus.RENDERING:
+                await self.bot.send_message(self.chat_id, "Сессия сейчас рендерится, дождитесь завершения")
                 return
             obj.status = VideoAnnounceSessionStatus.SELECTED
             obj.started_at = None
