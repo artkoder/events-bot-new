@@ -14415,7 +14415,7 @@ def format_event_md(
     if addr:
         loc += f", {addr}"
     if e.city:
-        loc += f", #{e.city}"
+        loc += f", {e.city}"
     date_part = e.date.split("..", 1)[0]
     d = parse_iso_date(date_part)
     if d:
@@ -14424,7 +14424,7 @@ def format_event_md(
         logging.error("Invalid event date: %s", e.date)
         day = e.date
     time_part = f" {e.time}" if e.time and e.time != "00:00" else ""
-    lines.append(f"_{day}{time_part} {loc}_")
+    lines.append(f"_{day}{time_part}, {loc}_")
     return "\n".join(lines)
 
 
