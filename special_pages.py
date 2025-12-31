@@ -524,8 +524,7 @@ async def build_special_page_content(
         today = datetime.now(LOCAL_TZ).date()
         events = [
             e for e in events
-            if (e.end_date and e.end_date >= today.isoformat())
-            or (not e.end_date and e.date >= today.isoformat())
+            if max(e.date, e.end_date or e.date) >= today.isoformat()
         ]
         
         # Ensure telegraph links

@@ -99,6 +99,8 @@ class SelectionBuildResult:
     mandatory_ids: set[int]
     candidates: list[Event]
     selected_ids: set[int]
+    schedule_map: dict[int, str] = field(default_factory=dict)
+    occurrences_map: dict[int, list[dict[str, list[str]]]] = field(default_factory=dict)
     intro_text: str | None = None
     intro_text_valid: bool = True
 

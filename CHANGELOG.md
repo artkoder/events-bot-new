@@ -2,9 +2,13 @@
 
 ## [Unreleased]
 
-### Added
+## [1.4.6] – 2025-12-31
+- **Fix**: Исправлена ошибка фильтрации в `/special`: события больше не скрываются, если у него ошибочно указан `end_date` в прошлом (проверяется `max(date, end_date)`).
+- **Refinement**: Очистка описаний Музтеатра и Кафедрального собора на продакшене.
+- **Fix**: Исправлена дата и метаданные события в Веселовке.
+- **Infrastructure**: Введено правило изоляции временных скриптов в папке `scripts/`.
 
-## [1.4.5] - 2025-12-31
+## [1.4.5] – 2025-12-31
 
 ### Fixed
 - **Muzteatr Parser**: Fixed empty descriptions by extracting text from `og:description` meta tags (site structure changed).

@@ -449,7 +449,7 @@ class VideoAnnounceScenario:
         merged.update(preset)
         ctx = self._selection_ctx_from_params(profile, merged)
         try:
-            events = await fetch_candidates(self.db, ctx)
+            events, _, _ = await fetch_candidates(self.db, ctx)
         except Exception:
             logger.exception("video_announce: failed to fetch candidates for preset")
             return 0
@@ -513,6 +513,61 @@ class VideoAnnounceScenario:
             short_time = time_text[:5] if ":" in time_text else time_text
             return f"{date_label} {short_time}"
         return date_label
+
+    def _extract_schedule_map(self, params: dict[str, Any]) -> dict[int, str]:
+        raw = params.get("dedup_schedule")
+        if not isinstance(raw, dict):
+            return {}
+        result: dict[int, str] = {}
+        for key, value in raw.items():
+            try:
+                event_id = int(key)
+            except (TypeError, ValueError):
+                continue
+            if isinstance(value, str) and value.strip():
+                result[event_id] = value.strip()
+        return result
+
+    def _extract_occurrences_map(
+        self, params: dict[str, Any]
+    ) -> dict[int, list[dict[str, list[str]]]]:
+        raw = params.get("dedup_occurrences")
+        if not isinstance(raw, dict):
+            return {}
+        result: dict[int, list[dict[str, list[str]]]] = {}
+        for key, value in raw.items():
+            try:
+                event_id = int(key)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(value, list):
+                continue
+            cleaned: list[dict[str, list[str]]] = []
+            for entry in value:
+                if not isinstance(entry, dict):
+                    continue
+                date_value = entry.get("date")
+                times_value = entry.get("times")
+                if not isinstance(date_value, str):
+                    continue
+                times: list[str] = []
+                if isinstance(times_value, list):
+                    times = [t for t in times_value if isinstance(t, str)]
+                cleaned.append({"date": date_value, "times": times})
+            if cleaned:
+                result[event_id] = cleaned
+        return result
+
+    def _format_event_schedule(self, ev: Event, params: dict[str, Any]) -> str:
+        schedule_map = params.get("dedup_schedule")
+        raw = None
+        if isinstance(schedule_map, dict) and ev.id is not None:
+            raw = schedule_map.get(str(ev.id))
+            if raw is None:
+                raw = schedule_map.get(ev.id)
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip().replace("\n", " · ")
+        return self._format_event_datetime(ev)
 
     def _parse_event_datetime(self, ev: Event) -> datetime | None:
         try:
@@ -958,12 +1013,21 @@ class VideoAnnounceScenario:
         preserve_existing: bool = False,
     ) -> SelectionBuildResult:
         ctx = await self._build_selection_context(session_obj)
+        params = self._get_selection_params(session_obj)
+        schedule_map = (
+            self._extract_schedule_map(params) if candidates is not None else None
+        )
+        occurrences_map = (
+            self._extract_occurrences_map(params) if candidates is not None else None
+        )
         result = await build_selection(
             self.db,
             ctx,
             client=KaggleClient(),
             session_id=session_obj.id,
             candidates=candidates,
+            schedule_map=schedule_map,
+            occurrences_map=occurrences_map,
             bot=self.bot,
             notify_chat_id=self.chat_id,
         )
@@ -976,8 +1040,41 @@ class VideoAnnounceScenario:
                 result.ranked,
                 default_ready_ids=result.default_ready_ids,
             )
+        await self._persist_schedule_map(
+            session_obj, result.schedule_map, result.occurrences_map
+        )
         await self._persist_intro_text(session_obj, result.intro_text, valid=result.intro_text_valid)
         return result
+
+    async def _persist_schedule_map(
+        self,
+        session_obj: VideoAnnounceSession,
+        schedule_map: dict[int, str],
+        occurrences_map: dict[int, list[dict[str, list[str]]]],
+    ) -> None:
+        async with self.db.get_session() as session:
+            fresh = await session.get(VideoAnnounceSession, session_obj.id)
+            if not fresh:
+                return
+            params = self._get_selection_params(fresh)
+            if schedule_map:
+                params["dedup_schedule"] = {
+                    str(event_id): text for event_id, text in schedule_map.items()
+                }
+            else:
+                params.pop("dedup_schedule", None)
+            if occurrences_map:
+                params["dedup_occurrences"] = {
+                    str(event_id): value
+                    for event_id, value in occurrences_map.items()
+                }
+            else:
+                params.pop("dedup_occurrences", None)
+            fresh.selection_params = params
+            session.add(fresh)
+            await session.commit()
+            await session.refresh(fresh)
+            session_obj.selection_params = params
 
     async def _persist_intro_text(
         self, session_obj: VideoAnnounceSession, intro_text: str | None, valid: bool = True
@@ -1271,9 +1368,10 @@ class VideoAnnounceScenario:
         
         if not ready_pairs:
             return ("Нет выбранных событий", types.InlineKeyboardMarkup(inline_keyboard=[]))
-        
+
         # Get custom render order or use default position order
         render_order = self._get_render_order(session_obj)
+        params = self._get_selection_params(session_obj)
         
         # Sort by render_order if exists, otherwise by position
         if render_order:
@@ -1293,7 +1391,7 @@ class VideoAnnounceScenario:
         
         for render_pos, (item, ev) in enumerate(ready_pairs, start=1):
             emoji = self._normalize_emoji(ev.emoji)
-            date_label = self._format_event_datetime(ev)
+            date_label = self._format_event_schedule(ev, params)
             title = self._format_title(ev)
             # Show render position vs original LLM position
             lines.append(f"{render_pos}. #{item.position} · {date_label} · {emoji} {title}")
@@ -1455,7 +1553,7 @@ class VideoAnnounceScenario:
             r = ranked_map.get(ev.id)
             marker = "✅" if ev.id in result.default_ready_ids else "⬜"
             emoji = self._normalize_emoji(ev.emoji)
-            date_label = self._format_event_datetime(ev)
+            date_label = self._format_event_schedule(ev, params)
             include_count = getattr(ev, "video_include_count", 0) or 0
             promo_marker = " · 🔥PROMO" if (r and r.mandatory) or include_count > 0 else ""
             score = f" · {r.score:.1f}" if r and r.score is not None else ""
@@ -1914,7 +2012,7 @@ class VideoAnnounceScenario:
         for item, ev in visible_pairs:
             marker = "✅" if item.status == VideoAnnounceItemStatus.READY else "⬜"
             emoji = self._normalize_emoji(ev.emoji)
-            date_label = self._format_event_datetime(ev)
+            date_label = self._format_event_schedule(ev, params)
             pin = ""
             include_count = item.include_count or getattr(ev, "video_include_count", 0) or 0
             if include_count > 0:

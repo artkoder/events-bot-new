@@ -127,6 +127,154 @@ def _filter_events_by_ticket_status(
     return filtered
 
 
+def _normalize_group_value(value: str | None) -> str:
+    text = (value or "").strip().casefold().replace("ё", "е")
+    text = re.sub(r"[^\w\s]", " ", text, flags=re.UNICODE)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _event_group_key(ev: Event) -> str:
+    return "|".join(
+        [
+            _normalize_group_value(getattr(ev, "title", "")),
+            _normalize_group_value(getattr(ev, "location_name", "")),
+            _normalize_group_value(getattr(ev, "city", "")),
+        ]
+    )
+
+
+def _has_poster(ev: Event) -> bool:
+    return (getattr(ev, "photo_count", 0) or 0) > 0 and any(
+        (getattr(ev, "photo_urls", []) or [])
+    )
+
+
+def _short_time_text(value: str | None) -> str | None:
+    if not value:
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    first = (
+        text.split(" ")[0]
+        .split("-")[0]
+        .split("–")[0]
+        .split("—")[0]
+    )
+    if first in ("00:00", "0:00"):
+        return None
+    if ":" in text:
+        return text[:5]
+    return text
+
+
+def _time_sort_key(value: str | None) -> int:
+    if not value:
+        return 24 * 60 + 1
+    match = re.search(r"(\d{1,2}):(\d{2})", value)
+    if not match:
+        return 24 * 60 + 1
+    return int(match.group(1)) * 60 + int(match.group(2))
+
+
+def _event_sort_key(ev: Event) -> tuple[date, int, int]:
+    try:
+        base_date = date.fromisoformat(ev.date.split("..", 1)[0])
+    except Exception:
+        base_date = date.max
+    return (base_date, _time_sort_key(_short_time_text(ev.time)), ev.id or 0)
+
+
+def _build_schedule_info(
+    events: Sequence[Event],
+) -> tuple[str, list[dict[str, list[str]]]]:
+    date_map: dict[date, set[str]] = defaultdict(set)
+    date_seen: set[date] = set()
+    for ev in events:
+        raw_date = (ev.date or "").split("..", 1)[0]
+        try:
+            d = date.fromisoformat(raw_date)
+        except Exception:
+            continue
+        date_seen.add(d)
+        time_text = _short_time_text(ev.time)
+        if time_text:
+            date_map[d].add(time_text)
+    parts: list[str] = []
+    occurrences: list[dict[str, list[str]]] = []
+    for d in sorted(date_seen):
+        label = format_day_pretty(d)
+        times = sorted(date_map.get(d, set()), key=_time_sort_key)
+        occurrences.append({"date": d.isoformat(), "times": times})
+        if times:
+            parts.append(f"{label}: {', '.join(times)}")
+        else:
+            parts.append(label)
+    return "\n".join(parts), occurrences
+
+
+def _build_schedule_text(events: Sequence[Event]) -> str:
+    return _build_schedule_info(events)[0]
+
+
+def _dedupe_events(
+    events: Sequence[Event],
+    *,
+    promoted_ids: set[int],
+    primary_end: date,
+) -> tuple[list[Event], dict[int, str], dict[int, list[dict[str, list[str]]]]]:
+    grouped: dict[str, list[Event]] = defaultdict(list)
+    for ev in events:
+        grouped[_event_group_key(ev)].append(ev)
+
+    primary: list[tuple[Event, str, list[dict[str, list[str]]]]] = []
+    flexible: list[tuple[Event, str, list[dict[str, list[str]]]]] = []
+    fallback: list[tuple[Event, str, list[dict[str, list[str]]]]] = []
+
+    for group_events in grouped.values():
+        schedule_events = [
+            ev
+            for ev in group_events
+            if getattr(ev, "ticket_status", None) != "sold_out"
+        ]
+        if not schedule_events:
+            continue
+        poster_events = [ev for ev in schedule_events if _has_poster(ev)]
+        if not poster_events:
+            continue
+        rep = sorted(poster_events, key=_event_sort_key)[0]
+        schedule_text, occurrences = _build_schedule_info(schedule_events)
+        include = any(
+            (getattr(ev, "video_include_count", 0) or 0) > 0
+            or ev.id in promoted_ids
+            for ev in schedule_events
+        )
+        try:
+            earliest = min(
+                date.fromisoformat(ev.date.split("..", 1)[0])
+                for ev in schedule_events
+            )
+        except Exception:
+            earliest = date.max
+        bucket = primary if include and earliest <= primary_end else flexible if include else fallback
+        bucket.append((rep, schedule_text, occurrences))
+
+    primary.sort(key=lambda pair: _event_sort_key(pair[0]))
+    flexible.sort(key=lambda pair: _event_sort_key(pair[0]))
+    fallback.sort(key=lambda pair: _event_sort_key(pair[0]))
+
+    combined = primary + flexible
+    selected = combined if combined else fallback
+    schedule_map = {
+        ev.id: schedule for ev, schedule, _ in selected if ev.id and schedule
+    }
+    occurrences_map = {
+        ev.id: occ for ev, _, occ in selected if ev.id and occ
+    }
+    return [ev for ev, _, _ in selected], schedule_map, occurrences_map
+
+
 async def fetch_profiles() -> list[VideoProfile]:
     from pathlib import Path
     import json
@@ -154,7 +302,13 @@ async def fetch_profiles() -> list[VideoProfile]:
     return profiles
 
 
-async def fetch_candidates(db: Database, ctx: SelectionContext) -> list[Event]:
+async def fetch_candidates(
+    db: Database, ctx: SelectionContext
+) -> tuple[
+    list[Event],
+    dict[int, str],
+    dict[int, list[dict[str, list[str]]]],
+]:
     today = ctx.target_date or datetime.now(ctx.tz).date()
     primary_end = today + timedelta(days=max(ctx.primary_window_days, 0))
     fallback_end = today + timedelta(days=max(ctx.fallback_window_days, ctx.primary_window_days))
@@ -168,8 +322,30 @@ async def fetch_candidates(db: Database, ctx: SelectionContext) -> list[Event]:
         events = result.scalars().all()
     exclude_sold_out = ctx.profile is None or ctx.profile.key == "default"
     events = _filter_events_by_ticket_status(events, allow_sold_out=not exclude_sold_out)
-    events = _filter_events_with_posters(events)
     promoted_ids = set(ctx.promoted_event_ids or set())
+    if ctx.profile is None or ctx.profile.key == "default":
+        deduped, schedule_map, occurrences_map = _dedupe_events(
+            events,
+            promoted_ids=promoted_ids,
+            primary_end=primary_end,
+        )
+        if not deduped:
+            fallback = _filter_events_with_posters(events)[: ctx.candidate_limit]
+            return fallback, {}, {}
+        selected = deduped[: ctx.candidate_limit]
+        filtered_map = {ev.id: schedule_map.get(ev.id, "") for ev in selected if ev.id}
+        filtered_occurrences = {
+            ev.id: occurrences_map.get(ev.id, [])
+            for ev in selected
+            if ev.id
+        }
+        return (
+            selected,
+            {k: v for k, v in filtered_map.items() if v},
+            {k: v for k, v in filtered_occurrences.items() if v},
+        )
+
+    events = _filter_events_with_posters(events)
     filtered: list[Event] = []
     flexible: list[Event] = []
     for e in events:
@@ -183,8 +359,8 @@ async def fetch_candidates(db: Database, ctx: SelectionContext) -> list[Event]:
             flexible.append(e)
     combined = filtered + flexible
     if not combined:
-        return events[: ctx.candidate_limit]
-    return combined[: ctx.candidate_limit]
+        return events[: ctx.candidate_limit], {}, {}
+    return combined[: ctx.candidate_limit], {}, {}
 
 
 def _score_events(client: KaggleClient, events: Iterable[Event]) -> list[RankedEvent]:
@@ -430,6 +606,8 @@ async def _rank_with_llm(
     *,
     promoted: set[int],
     mandatory_ids: set[int],
+    schedule_map: dict[int, str] | None = None,
+    occurrences_map: dict[int, list[dict[str, list[str]]]] | None = None,
     session_id: int | None = None,
     instruction: str | None = None,
     bot: Any | None = None,
@@ -445,6 +623,8 @@ async def _rank_with_llm(
 
     event_ids = [e.id for e in events]
     poster_texts, poster_titles = await _load_poster_ocr_texts(db, event_ids)
+    schedule_map = schedule_map or {}
+    occurrences_map = occurrences_map or {}
 
     payload = []
     # Russian day of week names
@@ -466,6 +646,8 @@ async def _rank_with_llm(
                 "date": ev.date,
                 "day_of_week": day_of_week,
                 "time": ev.time,
+                "schedule_text": schedule_map.get(ev.id),
+                "occurrences": occurrences_map.get(ev.id),
                 "city": ev.city,
                 "location": ev.location_name,
                 "topics": getattr(ev, "topics", []),
@@ -858,6 +1040,12 @@ def payload_as_json(payload: RenderPayload, tz: timezone) -> str:
         return first in ("00:00", "0:00")
 
     def _format_scene_date(ev: Event) -> str:
+        if isinstance(schedule_map, dict) and ev.id is not None:
+            raw = schedule_map.get(str(ev.id))
+            if raw is None:
+                raw = schedule_map.get(ev.id)
+            if isinstance(raw, str) and raw.strip():
+                return raw.strip()
         base_date = ev.date.split("..", 1)[0]
         try:
             pretty_date = format_day_pretty(date.fromisoformat(base_date))
@@ -875,6 +1063,7 @@ def payload_as_json(payload: RenderPayload, tz: timezone) -> str:
         if isinstance(payload.session.selection_params, dict)
         else {}
     )
+    schedule_map = selection_params.get("dedup_schedule")
 
     # Simplified Intro Logic: Directly use stored value
     intro_text_override = (
@@ -1009,17 +1198,22 @@ async def build_selection(
     client: KaggleClient | None = None,
     session_id: int | None = None,
     candidates: Sequence[Event] | None = None,
+    schedule_map: dict[int, str] | None = None,
+    occurrences_map: dict[int, list[dict[str, list[str]]]] | None = None,
     bot: Any | None = None,
     notify_chat_id: int | None = None,
 ) -> SelectionBuildResult:
     client = client or KaggleClient()
 
     # Removed auto-expansion loop (Task Requirement: Отключить любое авторасширение дат/периодов)
-    events = (
-        _filter_events_with_posters(list(candidates))
-        if candidates is not None
-        else await fetch_candidates(db, ctx)
-    )
+    if candidates is not None:
+        events = _filter_events_with_posters(list(candidates))
+        schedule_map = schedule_map or {}
+        occurrences_map = occurrences_map or {}
+    else:
+        events, schedule_map, occurrences_map = await fetch_candidates(db, ctx)
+        schedule_map = schedule_map or {}
+        occurrences_map = occurrences_map or {}
 
     async def _rank_events(
         current_events: Sequence[Event],
@@ -1051,6 +1245,8 @@ async def build_selection(
             selected_local,
             promoted=promoted_local,
             mandatory_ids=mandatory_ids_local,
+            schedule_map=schedule_map,
+            occurrences_map=occurrences_map,
             session_id=session_id,
             instruction=ctx.instruction,
             bot=bot,
@@ -1066,6 +1262,11 @@ async def build_selection(
         min_count=ctx.default_selected_min,
         max_count=ctx.default_selected_max,
     )
+    event_ids = {ev.id for ev in events if ev.id is not None}
+    schedule_map = {eid: txt for eid, txt in schedule_map.items() if eid in event_ids}
+    occurrences_map = {
+        eid: occ for eid, occ in occurrences_map.items() if eid in event_ids
+    }
     logger.info(
         "video_announce ranked events=%d candidates=%d ready=%d mandatory=%d top=%s",
         len(events),
@@ -1092,6 +1293,8 @@ async def build_selection(
         mandatory_ids=mandatory_ids,
         candidates=events,
         selected_ids=default_ready_ids,
+        schedule_map=schedule_map,
+        occurrences_map=occurrences_map,
         intro_text=intro_text,
         intro_text_valid=intro_valid,
     )
