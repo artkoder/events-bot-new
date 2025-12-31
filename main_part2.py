@@ -13807,8 +13807,9 @@ def create_app() -> web.Application:
     logging.info("FOUR_O_TOKEN found: %s", bool(os.getenv("FOUR_O_TOKEN")))
     dp = Dispatcher()
     dp.include_router(ik_poster_router)
-    dp.include_router(special_router)
     db = Database(DB_PATH)
+    set_db(db)  # Set db in main.py's namespace for handlers
+    dp.include_router(special_router)  # must be after db init
     import video_announce.handlers as video_handlers
 
     async def start_wrapper(message: types.Message):

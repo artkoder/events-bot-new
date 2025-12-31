@@ -20,6 +20,8 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message
 
+from runtime import require_main_attr
+
 if TYPE_CHECKING:
     from aiogram import Bot
 
@@ -43,9 +45,14 @@ special_router = Router(name="special")
 @special_router.message(Command("special"))
 async def cmd_special(message: Message, state: FSMContext) -> None:
     """Start the /special command flow."""
-    # Import db from main (initialized at runtime)
-    import main
-    db = main.db
+    # Get db from running main module (avoids __main__ vs main split)
+    get_db = require_main_attr("get_db")
+    db = get_db()
+    
+    if db is None:
+        logger.error("special_cmd: db is None, bot not fully initialized")
+        await message.answer("❌ Бот ещё не инициализирован. Попробуйте позже.")
+        return
     
     from models import User
     
@@ -80,7 +87,7 @@ async def cmd_cancel(message: Message, state: FSMContext) -> None:
 @special_router.message(SpecialStates.waiting_start_date)
 async def handle_start_date(message: Message, state: FSMContext) -> None:
     """Handle start date input."""
-    from main import parse_events_date
+    parse_events_date = require_main_attr("parse_events_date")
     
     text = message.text
     if not text:
@@ -104,7 +111,7 @@ async def handle_start_date(message: Message, state: FSMContext) -> None:
     await state.update_data(start_date=parsed_date.isoformat())
     await state.set_state(SpecialStates.waiting_days)
     
-    from main import format_day_pretty
+    format_day_pretty = require_main_attr("format_day_pretty")
     date_str = format_day_pretty(parsed_date)
     
     await message.answer(
@@ -146,7 +153,8 @@ async def handle_days(message: Message, state: FSMContext) -> None:
 @special_router.message(SpecialStates.waiting_cover)
 async def handle_cover(message: Message, state: FSMContext) -> None:
     """Handle cover image upload."""
-    from main import extract_images, upload_images
+    extract_images = require_main_attr("extract_images")
+    upload_images = require_main_attr("upload_images")
     
     # Check if user wants to skip cover
     if message.text and message.text.strip() == "-":
@@ -194,7 +202,6 @@ async def handle_cover(message: Message, state: FSMContext) -> None:
 async def handle_title(message: Message, state: FSMContext) -> None:
     """Handle page title and generate the page."""
     from special_pages import create_special_telegraph_page
-    import main
     
     text = message.text
     if not text or not text.strip():
@@ -204,7 +211,8 @@ async def handle_title(message: Message, state: FSMContext) -> None:
     title = text.strip()
     data = await state.get_data()
     
-    db = main.db
+    get_db = require_main_attr("get_db")
+    db = get_db()
     start_date_str = data.get("start_date")
     days = data.get("days", 1)
     cover_url = data.get("cover_url")
@@ -217,7 +225,7 @@ async def handle_title(message: Message, state: FSMContext) -> None:
     start_date = date.fromisoformat(start_date_str)
     
     # Notify user that generation is starting
-    from main import format_day_pretty
+    format_day_pretty = require_main_attr("format_day_pretty")
     from datetime import timedelta
     
     end_date = start_date + timedelta(days=days - 1)

@@ -7,13 +7,17 @@ This module provides functionality to build Telegraph pages for special periods
 from __future__ import annotations
 
 import logging
+import os
 import re
 import unicodedata
 from dataclasses import dataclass, field
 from datetime import date, timedelta
+from functools import lru_cache
 from typing import TYPE_CHECKING, Iterable
 
 from sqlalchemy import select
+
+from runtime import require_main_attr
 
 if TYPE_CHECKING:
     from db import Database
@@ -129,24 +133,81 @@ def format_ticket_line(event: "Event") -> str:
 # Location Formatting
 # ---------------------------------------------------------------------------
 
+def _normalize_location_key(value: str) -> str:
+    text = value.casefold().strip()
+    text = text.replace("ё", "е")
+    text = re.sub(r"\s+", " ", text)
+    return text.strip(" ,")
+
+
+@lru_cache(maxsize=1)
+def _load_known_locations() -> dict[str, tuple[str, str | None, str | None]]:
+    loc_path = os.path.join("docs", "LOCATIONS.md")
+    if not os.path.exists(loc_path):
+        return {}
+    mapping: dict[str, tuple[str, str | None, str | None]] = {}
+    with open(loc_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "," not in line:
+                continue
+            parts = [p.strip() for p in line.split(",") if p.strip()]
+            if not parts:
+                continue
+            name = parts[0]
+            address = None
+            city = None
+            if len(parts) >= 2:
+                if len(parts) > 3:
+                    address = ", ".join(parts[1:-1]).strip()
+                    city = parts[-1].strip()
+                else:
+                    address = parts[1].strip()
+                    city = parts[2].strip() if len(parts) == 3 else None
+            key = _normalize_location_key(name)
+            if key and key not in mapping:
+                mapping[key] = (name, address, city)
+    return mapping
+
+
 def format_location(event: "Event") -> str:
     """Format location string: 'Place, address, city'."""
-    parts = [event.location_name]
-    
+    name = event.location_name or ""
     addr = event.location_address
-    if addr and event.city:
-        # Strip city from address if it's at the end
-        city_lower = event.city.lower()
-        if addr.lower().endswith(city_lower):
-            addr = addr[: -len(event.city)].rstrip(", ")
-        elif addr.lower().endswith(f"г. {city_lower}"):
-            addr = addr[: -len(f"г. {event.city}")].rstrip(", ")
-    
+    city = event.city
+
+    if name:
+        key = _normalize_location_key(name.split(",", 1)[0])
+        known = _load_known_locations().get(key)
+        if known:
+            known_name, known_addr, known_city = known
+            name = known_name
+            if not addr and known_addr:
+                addr = known_addr
+            if not city and known_city:
+                city = known_city.lstrip("#").strip()
+
+    if not name:
+        return ""
+
+    if addr and city:
+        try:
+            strip_city_from_address = require_main_attr("strip_city_from_address")
+            addr = strip_city_from_address(addr, city)
+        except Exception:
+            city_lower = city.lower()
+            if addr.lower().endswith(city_lower):
+                addr = addr[: -len(city)].rstrip(", ")
+            elif addr.lower().endswith(f"г. {city_lower}"):
+                addr = addr[: -len(f"г. {city}")].rstrip(", ")
+
+    parts = [name]
     if addr:
         parts.append(addr)
-    if event.city:
-        parts.append(event.city)
-    
+    if city:
+        parts.append(city)
     return ", ".join(parts)
 
 
@@ -162,7 +223,7 @@ def group_events_for_special(
     Events with same title on same day are merged into one group
     with multiple time slots.
     """
-    from main import parse_iso_date
+    parse_iso_date = require_main_attr("parse_iso_date")
     
     # Key: (date, normalized_title) -> list of events
     groups: dict[tuple[date, str], list["Event"]] = {}
@@ -287,7 +348,7 @@ def render_special_group(
     - ...
     - Location
     """
-    from main import format_day_pretty
+    format_day_pretty = require_main_attr("format_day_pretty")
     
     nodes: list[dict] = []
     
@@ -340,25 +401,37 @@ def render_special_group(
     nodes.append({"tag": "p", "children": [f"📅 {date_str}"]})
     
     # Time slots
-    for slot in group.slots:
-        time_str = slot.time or "время уточняется"
-        line = f"🕐 {time_str}"
-        if slot.ticket_line:
-            # Add ticket link if available
-            source_event = slot.source_event
-            ticket_url = source_event.ticket_link
-            if ticket_url:
-                line_children: list = [f"🕐 {time_str} — "]
-                line_children.append({
-                    "tag": "a",
-                    "attrs": {"href": ticket_url},
-                    "children": [slot.ticket_line]
-                })
-                nodes.append({"tag": "p", "children": line_children})
+    has_ticket_info = any(slot.ticket_line for slot in group.slots)
+    if group.slots and not has_ticket_info and len(group.slots) > 1:
+        times: list[str] = []
+        seen: set[str] = set()
+        for slot in group.slots:
+            time_str = slot.time or "время уточняется"
+            if time_str not in seen:
+                seen.add(time_str)
+                times.append(time_str)
+        if times:
+            nodes.append({"tag": "p", "children": [f"🕐 {', '.join(times)}"]})
+    else:
+        for slot in group.slots:
+            time_str = slot.time or "время уточняется"
+            line = f"🕐 {time_str}"
+            if slot.ticket_line:
+                # Add ticket link if available
+                source_event = slot.source_event
+                ticket_url = source_event.ticket_link
+                if ticket_url:
+                    line_children: list = [f"🕐 {time_str} — "]
+                    line_children.append({
+                        "tag": "a",
+                        "attrs": {"href": ticket_url},
+                        "children": [slot.ticket_line]
+                    })
+                    nodes.append({"tag": "p", "children": line_children})
+                else:
+                    nodes.append({"tag": "p", "children": [f"{line} — {slot.ticket_line}"]})
             else:
-                nodes.append({"tag": "p", "children": [f"{line} — {slot.ticket_line}"]})
-        else:
-            nodes.append({"tag": "p", "children": [line]})
+                nodes.append({"tag": "p", "children": [line]})
     
     # Location
     if group.location:
@@ -379,7 +452,7 @@ def rough_size(nodes: Iterable[dict], limit: int | None = None) -> int:
     Estimate the size of Telegraph content nodes.
     Import from main to use the same logic.
     """
-    from main import rough_size as _rough_size
+    _rough_size = require_main_attr("rough_size")
     return _rough_size(nodes, limit)
 
 
@@ -406,7 +479,10 @@ async def build_special_page_content(
         (page_title, content_nodes, content_size, used_days)
     """
     from models import Event, Festival
-    from main import ensure_event_telegraph_link, format_day_pretty, LOCAL_TZ
+    ensure_event_telegraph_link = require_main_attr("ensure_event_telegraph_link")
+    format_day_pretty = require_main_attr("format_day_pretty")
+    build_month_nav_block = require_main_attr("build_month_nav_block")
+    LOCAL_TZ = require_main_attr("LOCAL_TZ")
     from datetime import datetime
     
     original_days = days
@@ -479,14 +555,19 @@ async def build_special_page_content(
         
         # Events by day
         sorted_days = sorted(grouped.keys())
-        show_images = len(events) < 15  # Show images only if not too many events
+        show_images = True
         
         for day in sorted_days:
             # Day header
-            day_str = format_day_pretty(day)
-            weekday_names = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
-            weekday = weekday_names[day.weekday()]
-            content.append({"tag": "h3", "children": [f"{day_str}, {weekday}"]})
+            content.extend(telegraph_br())
+            if day.weekday() == 5:
+                content.append({"tag": "h3", "children": ["🟥🟥🟥 суббота 🟥🟥🟥"]})
+            elif day.weekday() == 6:
+                content.append({"tag": "h3", "children": ["🟥🟥 воскресенье 🟥🟥"]})
+            content.append(
+                {"tag": "h3", "children": [f"🟥🟥🟥 {format_day_pretty(day)} 🟥🟥🟥"]}
+            )
+            content.extend(telegraph_br())
             
             # Events for this day
             for group in grouped[day]:
@@ -527,6 +608,13 @@ async def build_special_page_content(
                 
                 ex_nodes.extend(telegraph_br())
                 content.extend(ex_nodes)
+
+        # Month navigation
+        month_key = start_date.strftime("%Y-%m")
+        nav_html = await build_month_nav_block(db, current_month=month_key)
+        if nav_html:
+            from telegraph.utils import html_to_nodes
+            content.extend(html_to_nodes(nav_html))
         
         # Check size
         size = rough_size(content)
@@ -556,13 +644,24 @@ async def build_special_page_content(
     content.append({"tag": "h3", "children": [title]})
     
     for day in sorted(grouped.keys()):
-        day_str = format_day_pretty(day)
-        weekday_names = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
-        weekday = weekday_names[day.weekday()]
-        content.append({"tag": "h3", "children": [f"{day_str}, {weekday}"]})
+        content.extend(telegraph_br())
+        if day.weekday() == 5:
+            content.append({"tag": "h3", "children": ["🟥🟥🟥 суббота 🟥🟥🟥"]})
+        elif day.weekday() == 6:
+            content.append({"tag": "h3", "children": ["🟥🟥 воскресенье 🟥🟥"]})
+        content.append(
+            {"tag": "h3", "children": [f"🟥🟥🟥 {format_day_pretty(day)} 🟥🟥🟥"]}
+        )
+        content.extend(telegraph_br())
         
         for group in grouped[day]:
             content.extend(render_special_group(group, show_image=False))
+
+    month_key = start_date.strftime("%Y-%m")
+    nav_html = await build_month_nav_block(db, current_month=month_key)
+    if nav_html:
+        from telegraph.utils import html_to_nodes
+        content.extend(html_to_nodes(nav_html))
     
     size = rough_size(content)
     page_title = title
@@ -582,7 +681,8 @@ async def create_special_telegraph_page(
     Returns:
         (telegraph_url, used_days)
     """
-    from main import telegraph_create_page, get_telegraph
+    telegraph_create_page = require_main_attr("telegraph_create_page")
+    get_telegraph = require_main_attr("get_telegraph")
     
     page_title, content, size, used_days = await build_special_page_content(
         db, start_date, days, cover_url, title

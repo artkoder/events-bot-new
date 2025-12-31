@@ -5,6 +5,11 @@ Debugging:
 """
 from __future__ import annotations
 
+# Fix double-import split: make 'import main' return __main__ when run as script
+import sys
+if __name__ == "__main__":
+    sys.modules.setdefault("main", sys.modules[__name__])
+
 import asyncio
 from weakref import WeakKeyDictionary
 import logging
@@ -415,6 +420,22 @@ def _week_vk_lock(start: str) -> asyncio.Lock:
 
 DB_PATH = os.getenv("DB_PATH", "/data/db.sqlite")
 db: Database | None = None
+
+
+def get_db() -> Database | None:
+    """Get the current database instance. Use this instead of main.db in handlers."""
+    global db
+    logging.debug("get_db called, db=%s, module=%s", db, __name__)
+    return db
+
+
+def set_db(new_db: Database) -> None:
+    """Set the database instance. Called from create_app() in main_part2.py."""
+    global db
+    logging.info("set_db called: new_db=%s, module=%s", new_db, __name__)
+    db = new_db
+
+
 _base_bot_code = os.getenv("BOT_CODE", "announcements")
 BOT_CODE = _base_bot_code + "_test" if os.getenv("DEV_MODE") == "1" else _base_bot_code
 TELEGRAPH_TOKEN_FILE = os.getenv("TELEGRAPH_TOKEN_FILE", "/data/telegraph_token.txt")
@@ -7457,6 +7478,17 @@ def get_telegraph_token_info(*, create_if_missing: bool = True) -> TelegraphToke
 def get_telegraph_token() -> str | None:
     info = get_telegraph_token_info()
     return info.token
+
+
+def get_telegraph() -> Telegraph:
+    token = get_telegraph_token()
+    if not token:
+        logging.error(
+            "Telegraph token unavailable",
+            extra={"action": "error", "target": "tg"},
+        )
+        raise RuntimeError("Telegraph token unavailable")
+    return Telegraph(access_token=token)
 
 
 async def send_main_menu(bot: Bot, user: User | None, chat_id: int) -> None:
