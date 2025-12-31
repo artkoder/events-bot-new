@@ -2303,7 +2303,7 @@ async def test_addevent_vk_wall_link_query(tmp_path: Path, monkeypatch):
     ):
         captured["text"] = text
         captured["source"] = source_link
-        captured["display"] = display_source
+        captured["display"] = kwargs.get("display_source")
         ev = Event(
             id=1,
             title="T",
