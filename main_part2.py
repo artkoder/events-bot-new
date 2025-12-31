@@ -13275,12 +13275,12 @@ async def _build_source_summary_block(
         # Available tickets - add ✅ icon if ticket_status is explicitly 'available'
         status_icon = "✅ " if event_summary.ticket_status == "available" else ""
         if link_value:
-            ticket_segments.append(html.escape(f"{status_icon}🎟 "))
+            ticket_segments.append(html.escape(f"🎟 {status_icon}"))
             ticket_segments.append(_render_summary_anchor(link_value, "Билеты"))
             if price_text:
                 ticket_segments.append(html.escape(f" {price_text}"))
         elif price_text:
-            ticket_segments.append(html.escape(f"{status_icon}🎟 Билеты {price_text}"))
+            ticket_segments.append(html.escape(f"🎟 {status_icon}Билеты {price_text}"))
 
     if ticket_segments:
         lines.append("".join(ticket_segments).strip())

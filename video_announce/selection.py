@@ -112,6 +112,21 @@ def _filter_events_with_posters(events: Sequence[Event]) -> list[Event]:
     return filtered
 
 
+def _filter_events_by_ticket_status(
+    events: Sequence[Event], *, allow_sold_out: bool
+) -> list[Event]:
+    if allow_sold_out:
+        return list(events)
+    filtered = [e for e in events if getattr(e, "ticket_status", None) != "sold_out"]
+    if len(filtered) != len(events):
+        logger.info(
+            "video_announce: dropped sold_out events total=%d filtered=%d",  # noqa: G004
+            len(events),
+            len(filtered),
+        )
+    return filtered
+
+
 async def fetch_profiles() -> list[VideoProfile]:
     from pathlib import Path
     import json
@@ -151,6 +166,8 @@ async def fetch_candidates(db: Database, ctx: SelectionContext) -> list[Event]:
             .order_by(Event.date, Event.time, Event.id)
         )
         events = result.scalars().all()
+    exclude_sold_out = ctx.profile is None or ctx.profile.key == "default"
+    events = _filter_events_by_ticket_status(events, allow_sold_out=not exclude_sold_out)
     events = _filter_events_with_posters(events)
     promoted_ids = set(ctx.promoted_event_ids or set())
     filtered: list[Event] = []

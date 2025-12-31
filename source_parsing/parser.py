@@ -39,6 +39,19 @@ MONTHS_RU = {
 
 _TIME_RANGE_SPLIT = re.compile(r"\s*(?:-|–|—|\.\.\.?|…)\s*")
 _TIME_RE = re.compile(r"(\d{1,2}):(\d{2})")
+_TITLE_CLEAN_RE = re.compile(r"[^\w\s]+", re.UNICODE)
+_TITLE_SPACE_RE = re.compile(r"\s+")
+_TITLE_NOISE_WORDS = {
+    "спектакль",
+    "мюзикл",
+    "опера",
+    "балет",
+    "премьера",
+    "оперетта",
+    "музыкальная",
+    "музыкальный",
+}
+_TITLE_MIN_TOKEN_LEN = 3
 
 
 def extract_time_start(value: str | None) -> str | None:
@@ -58,6 +71,46 @@ def extract_time_start(value: str | None) -> str | None:
     hour = int(match.group(1))
     minute = int(match.group(2))
     return f"{hour:02d}:{minute:02d}"
+
+
+def _normalize_title(text: str) -> str:
+    if not text:
+        return ""
+    normalized = (
+        text.strip()
+        .lower()
+        .replace("ё", "е")
+        .replace("\u00a0", " ")
+    )
+    normalized = _TITLE_CLEAN_RE.sub(" ", normalized)
+    normalized = _TITLE_SPACE_RE.sub(" ", normalized).strip()
+    return normalized
+
+
+def _title_tokens(text: str) -> list[str]:
+    if not text:
+        return []
+    return [
+        token
+        for token in text.split()
+        if len(token) >= _TITLE_MIN_TOKEN_LEN
+    ]
+
+
+def _strip_noise_tokens(tokens: Sequence[str]) -> list[str]:
+    if not tokens:
+        return []
+    return [token for token in tokens if token not in _TITLE_NOISE_WORDS]
+
+
+def _tokens_subset_match(tokens1: Sequence[str], tokens2: Sequence[str]) -> bool:
+    if not tokens1 or not tokens2:
+        return False
+    set1 = set(tokens1)
+    set2 = set(tokens2)
+    if not set1 or not set2:
+        return False
+    return set1.issubset(set2) or set2.issubset(set1)
 
 
 @dataclass
@@ -250,17 +303,36 @@ def fuzzy_title_match(title1: str, title2: str, threshold: float = 0.85) -> bool
     if not title1 or not title2:
         return False
     
-    # Normalize titles
-    t1 = title1.strip().lower()
-    t2 = title2.strip().lower()
+    # Normalize titles (strip punctuation/emoji, normalize whitespace)
+    t1 = _normalize_title(title1)
+    t2 = _normalize_title(title2)
+    if not t1 or not t2:
+        return False
     
     # Exact match
     if t1 == t2:
         return True
+
+    tokens1 = _strip_noise_tokens(_title_tokens(t1))
+    tokens2 = _strip_noise_tokens(_title_tokens(t2))
+    if tokens1 and tokens2:
+        if tokens1 == tokens2:
+            return True
+        if _tokens_subset_match(tokens1, tokens2):
+            return True
     
     # Fuzzy match using SequenceMatcher
     ratio = SequenceMatcher(None, t1, t2).ratio()
-    return ratio >= threshold
+    if ratio >= threshold:
+        return True
+
+    if tokens1 and tokens2:
+        core1 = " ".join(tokens1)
+        core2 = " ".join(tokens2)
+        ratio = SequenceMatcher(None, core1, core2).ratio()
+        return ratio >= max(0.7, threshold - 0.1)
+
+    return False
 
 
 async def find_existing_event(

@@ -4,6 +4,14 @@
 
 ### Added
 
+## [1.4.3] - 2025-12-31
+
+### Fixed
+- **Dramteatr Parser**: Fixed date extraction (incomplete dates like "31 ДЕКАБР") using CSS selectors.
+- **Parsing**: Improved duplicate detection with fuzzy title matching (Codex).
+- **Video Announce**: Filter out "sold_out" events from video digests by default.
+- **UI**: Minor adjustment to ticket icon order in summaries.
+
 ## [1.4.2] - 2025-12-31
 
 ### Changed
