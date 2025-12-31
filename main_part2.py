@@ -13807,6 +13807,7 @@ def create_app() -> web.Application:
     logging.info("FOUR_O_TOKEN found: %s", bool(os.getenv("FOUR_O_TOKEN")))
     dp = Dispatcher()
     dp.include_router(ik_poster_router)
+    dp.include_router(special_router)
     db = Database(DB_PATH)
     import video_announce.handlers as video_handlers
 
