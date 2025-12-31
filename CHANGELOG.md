@@ -4,6 +4,11 @@
 
 ### Added
 
+## [1.4.4] - 2025-12-31
+
+### Fixed
+- **Dramteatr Parser**: Fixed DOM traversal issue where date block was missed because it is a sibling of the link wrapper.
+
 ## [1.4.3] - 2025-12-31
 
 ### Fixed
