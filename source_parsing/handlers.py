@@ -58,6 +58,84 @@ class SourceParsingResult:
     json_file_paths: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     chat_id: int | None = None  # For progress messages
+    added_events: list["AddedEventInfo"] = field(default_factory=list)
+
+
+@dataclass
+class AddedEventInfo:
+    """Newly added event with Telegraph link for reporting."""
+    event_id: int
+    title: str
+    telegraph_url: str
+    date: str | None
+    time: str | None
+    source: str | None
+
+
+def _event_telegraph_url(event) -> str | None:
+    url = getattr(event, "telegraph_url", None)
+    if url:
+        return url
+    path = getattr(event, "telegraph_path", None)
+    if path:
+        return f"https://telegra.ph/{path.lstrip('/')}"
+    return None
+
+
+async def _ensure_telegraph_url(db: Database, event_id: int) -> str | None:
+    import sys
+
+    main_mod = sys.modules.get("main") or sys.modules.get("__main__")
+    if not main_mod or not hasattr(main_mod, "update_telegraph_event_page"):
+        logger.warning("source_parsing: main module missing for telegraph build")
+        return None
+    try:
+        return await main_mod.update_telegraph_event_page(event_id, db, None)
+    except Exception as e:
+        logger.warning(
+            "source_parsing: telegraph build failed event_id=%d error=%s",
+            event_id,
+            e,
+        )
+        return None
+
+
+async def build_added_event_info(
+    db: Database,
+    event_id: int,
+    source: str | None,
+) -> AddedEventInfo | None:
+    from models import Event
+
+    async with db.get_session() as session:
+        event = await session.get(Event, event_id)
+
+    if not event:
+        return None
+
+    url = _event_telegraph_url(event)
+    if not url:
+        await _ensure_telegraph_url(db, event_id)
+        async with db.get_session() as session:
+            event = await session.get(Event, event_id)
+        if not event:
+            return None
+        url = _event_telegraph_url(event)
+
+    if not url:
+        logger.warning(
+            "source_parsing: telegraph url missing after build event_id=%d",
+            event_id,
+        )
+
+    return AddedEventInfo(
+        event_id=event_id,
+        title=event.title or "",
+        telegraph_url=url or "",
+        date=getattr(event, "date", None),
+        time=getattr(event, "time", None),
+        source=source,
+    )
 
 
 async def download_images(urls: list[str]) -> list[tuple[bytes, str]]:
@@ -685,6 +763,7 @@ async def run_source_parsing(
                 total_count,
                 chat_id=chat_id,
                 progress_message_id=progress_message_id,
+                added_events=result.added_events if chat_id else None,
             )
             result.stats_by_source[source] = stats
             current_index += len(events)
@@ -782,6 +861,7 @@ async def process_source_events(
     total_count: int,
     chat_id: int | None = None,
     progress_message_id: int | None = None,
+    added_events: list[AddedEventInfo] | None = None,
 ) -> tuple[SourceParsingStats, int | None]:
     """Process events from a single source.
     
@@ -809,6 +889,10 @@ async def process_source_events(
     
     for i, event in enumerate(events):
         current_progress = start_index + i + 1
+        event_start = time.monotonic()
+        result_tag = "unknown"
+        event_id: int | None = None
+        llm_used = False
         
         if not event.parsed_date:
             logger.warning(
@@ -816,6 +900,14 @@ async def process_source_events(
                 event.title,
             )
             stats.failed += 1
+            result_tag = "missing_date"
+            logger.info(
+                "source_parsing: event_result source=%s title=%s result=%s duration=%.2fs",
+                source,
+                event.title[:80],
+                result_tag,
+                time.monotonic() - event_start,
+            )
             continue
         
         location_name = normalize_location_name(event.location)
@@ -830,13 +922,16 @@ async def process_source_events(
         )
         
         if existing_id:
+            event_id = existing_id
             if needs_full_update:
                 # Update the placeholder event fully
                 success = await update_event_full(db, existing_id, event)
                 if success:
                     stats.ticket_updated += 1
+                    result_tag = "existing_full_update"
                 else:
                     stats.failed += 1
+                    result_tag = "existing_full_update_failed"
             else:
                 # Just update ticket status
                 success = await update_event_ticket_status(
@@ -847,8 +942,10 @@ async def process_source_events(
                 )
                 if success:
                     stats.ticket_updated += 1
+                    result_tag = "existing_ticket_update"
                 else:
                     stats.already_exists += 1
+                    result_tag = "existing_ticket_update_failed"
             
             # Always update linked events
             await update_linked_events(db, existing_id, location_name, event.title)
@@ -895,6 +992,7 @@ async def process_source_events(
                     logger.warning("source_parsing: ocr failed event=%s error=%s", event.title, e)
 
             # Add new event
+            llm_used = True
             new_id, was_added = await add_new_event_via_queue(
                 db,
                 bot,
@@ -905,10 +1003,17 @@ async def process_source_events(
             )
             
             if new_id:
+                event_id = new_id
                 if was_added:
                     stats.new_added += 1
+                    if added_events is not None:
+                        info = await build_added_event_info(db, new_id, source)
+                        if info:
+                            added_events.append(info)
+                    result_tag = "new_added"
                 else:
                     stats.skipped += 1  # Event existed, was updated but not new
+                    result_tag = "new_updated"
                 # Delay between additions
                 await asyncio.sleep(EVENT_ADD_DELAY_SECONDS)
                 
@@ -918,5 +1023,18 @@ async def process_source_events(
                     break
             else:
                 stats.failed += 1
+                result_tag = "new_failed"
+
+        logger.info(
+            "source_parsing: event_result source=%s title=%s date=%s time=%s result=%s event_id=%s llm=%s duration=%.2fs",
+            source,
+            event.title[:80],
+            event.parsed_date,
+            event.parsed_time,
+            result_tag,
+            event_id,
+            int(llm_used),
+            time.monotonic() - event_start,
+        )
     
     return stats, progress_message_id

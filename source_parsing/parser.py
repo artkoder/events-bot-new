@@ -302,10 +302,18 @@ async def find_existing_event(
                     )
                     return event.id, False  # Just update ticket status
                 else:
-                    logger.debug(
-                        "find_existing_event: title matches but time differs db_time=%s new_time=%s",
-                        event.time, event_time,
-                    )
+                    if event_time == "00:00":
+                        logger.info(
+                            "find_existing_event: title matches but incoming time is unknown (00:00), "
+                            "skipping time match event_id=%d db_time=%s",
+                            event.id,
+                            event.time,
+                        )
+                    else:
+                        logger.debug(
+                            "find_existing_event: title matches but time differs db_time=%s new_time=%s",
+                            event.time, event_time,
+                        )
         
         # Also check for events with same location and title but different dates
         # (for recurring shows on different days)

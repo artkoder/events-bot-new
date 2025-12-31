@@ -15,9 +15,61 @@ from aiogram.filters import Command
 
 from db import Database
 from models import User
-from source_parsing.handlers import run_source_parsing, format_parsing_report
+from source_parsing.handlers import (
+    run_source_parsing,
+    format_parsing_report,
+    escape_md,
+)
 
 logger = logging.getLogger(__name__)
+
+MAX_TG_MESSAGE_LEN = 3800
+
+
+def _format_added_events_lines(added_events) -> list[str]:
+    source_labels = {
+        "dramteatr": "Драмтеатр",
+        "muzteatr": "Музтеатр",
+        "sobor": "Собор",
+    }
+    lines = [f"📌 **Добавленные события:** {len(added_events)}", ""]
+    for item in added_events:
+        title = escape_md(item.title or "Без названия")
+        url = item.telegraph_url
+        if url:
+            line = f"• [{title}]({url})"
+        else:
+            line = f"• {title} — телеграф не создан"
+        suffix_parts = []
+        if item.date:
+            suffix_parts.append(escape_md(item.date))
+        if item.time:
+            suffix_parts.append(escape_md(item.time))
+        source_label = source_labels.get(item.source or "", item.source or "")
+        if source_label:
+            suffix_parts.append(escape_md(source_label))
+        if suffix_parts:
+            line += f" — {', '.join(suffix_parts)}"
+        lines.append(line)
+    return lines
+
+
+def _chunk_lines(lines: list[str], max_len: int = MAX_TG_MESSAGE_LEN) -> list[str]:
+    chunks: list[str] = []
+    current: list[str] = []
+    current_len = 0
+    for line in lines:
+        line_len = len(line) + 1
+        if current and current_len + line_len > max_len:
+            chunks.append("\n".join(current))
+            current = [line]
+            current_len = line_len
+        else:
+            current.append(line)
+            current_len += line_len
+    if current:
+        chunks.append("\n".join(current))
+    return chunks
 
 
 async def handle_parse_command(message: types.Message, db: Database, bot: Bot) -> None:
@@ -47,6 +99,20 @@ async def handle_parse_command(message: types.Message, db: Database, bot: Bot) -
             report,
             parse_mode="Markdown",
         )
+
+        if getattr(result, "added_events", None):
+            lines = _format_added_events_lines(result.added_events)
+            for chunk in _chunk_lines(lines):
+                await bot.send_message(
+                    message.chat.id,
+                    chunk,
+                    parse_mode="Markdown",
+                )
+        else:
+            await bot.send_message(
+                message.chat.id,
+                "ℹ️ Новых событий не добавлено.",
+            )
         
         # Send JSON files if available
         if hasattr(result, 'json_file_paths') and result.json_file_paths:
