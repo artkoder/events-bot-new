@@ -390,4 +390,5 @@ async def handle_payload_import_message(
     msg = await scenario.import_payload_and_render(
         pending.profile_key, payload_json, scene_count=scene_count
     )
-    await bot.send_message(message.chat.id, msg or "Готово")
+    if msg:
+        await bot.send_message(message.chat.id, msg)

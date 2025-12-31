@@ -79,6 +79,8 @@ MAX_CANDIDATE_LIMIT = 80
 DEFAULT_SELECTED_MIN = 6
 DEFAULT_SELECTED_MAX = 8
 PENDING_INSTRUCTION_TTL = 15 * 60
+IMPORT_PAYLOAD_FLAG_KEY = "imported_payload"
+IMPORT_PAYLOAD_JSON_KEY = "imported_payload_json"
 
 
 @dataclass
@@ -978,9 +980,30 @@ class VideoAnnounceScenario:
             return f"{username}/video-announce-renderer"
         return None
 
+    def _extract_import_payload_json(
+        self, session_obj: VideoAnnounceSession
+    ) -> str | None:
+        params = (
+            session_obj.selection_params
+            if isinstance(session_obj.selection_params, dict)
+            else {}
+        )
+        payload_json = params.get(IMPORT_PAYLOAD_JSON_KEY)
+        if isinstance(payload_json, str) and payload_json.strip():
+            return payload_json
+        return None
+
+    def _is_import_session(self, session_obj: VideoAnnounceSession) -> bool:
+        params = (
+            session_obj.selection_params
+            if isinstance(session_obj.selection_params, dict)
+            else {}
+        )
+        return bool(params.get(IMPORT_PAYLOAD_FLAG_KEY))
+
     async def import_payload_and_render(
         self, profile_key: str, payload_json: str, *, scene_count: int | None = None
-    ) -> str:
+    ) -> str | None:
         if not await self._has_access():
             return "Not authorized"
         existing = await self.has_rendering()
@@ -990,19 +1013,17 @@ class VideoAnnounceScenario:
         profile = next((p for p in profiles if p.key == profile_key), None)
         if not profile:
             return "Профиль не найден"
-        kernel_ref = self._pick_default_kernel_ref()
-        if not kernel_ref:
-            return "Не найден kernel для запуска"
         test_chat_id, main_chat_id = await self._get_profile_channels(profile_key)
         async with self.db.get_session() as session:
             obj = VideoAnnounceSession(
-                status=VideoAnnounceSessionStatus.RENDERING,
+                status=VideoAnnounceSessionStatus.CREATED,
                 profile_key=profile_key,
-                selection_params={"imported_payload": True},
+                selection_params={
+                    IMPORT_PAYLOAD_FLAG_KEY: True,
+                    IMPORT_PAYLOAD_JSON_KEY: payload_json,
+                },
                 test_chat_id=test_chat_id,
                 main_chat_id=main_chat_id,
-                kaggle_kernel_ref=kernel_ref,
-                started_at=datetime.now(timezone.utc),
             )
             session.add(obj)
             await session.commit()
@@ -1010,26 +1031,12 @@ class VideoAnnounceScenario:
         scene_note = f" ({scene_count} сцен)" if scene_count else ""
         await self.bot.send_message(
             self.chat_id,
-            f"Импортирован payload{scene_note}. Сессия #{obj.id} запущена. Kernel: {kernel_ref}",
+            f"Импортирован payload{scene_note}. Сессия #{obj.id} готова к запуску.",
         )
-        status_message = await update_status_message(
-            self.bot,
-            obj,
-            {},
-            chat_id=self.chat_id,
-            allow_send=True,
-            note="Готовим Kaggle",
-        )
-        asyncio.create_task(
-            self._render_and_notify(
-                obj,
-                [],
-                status_message=status_message,
-                payload=None,
-                payload_json=payload_json,
-            )
-        )
-        return "Рендеринг запущен"
+        kernel_msg = await self.show_kernel_selection(obj.id, message=None)
+        if kernel_msg != "Выбор kernel":
+            return kernel_msg
+        return None
 
     async def _prompt_instruction(
         self,
@@ -2414,8 +2421,78 @@ class VideoAnnounceScenario:
             sess.kaggle_kernel_ref = kernel_ref
             session.add(sess)
             await session.commit()
+            await session.refresh(sess)
 
+        payload_json = self._extract_import_payload_json(sess)
+        if payload_json:
+            return await self.start_import_render(session_id, payload_json, message=message)
+        if self._is_import_session(sess):
+            return "Payload не найден, импортируйте заново"
         return await self.start_render(session_id, message=message)
+
+    async def start_import_render(
+        self,
+        session_id: int,
+        payload_json: str,
+        message: types.Message | None = None,
+    ) -> str:
+        if not await self._has_access():
+            return "Not authorized"
+        if await self.has_rendering():
+            return "Уже есть активный рендер"
+        if not payload_json.strip():
+            return "Payload не найден"
+        async with self.db.get_session() as session:
+            sess = await session.get(VideoAnnounceSession, session_id)
+            if not sess:
+                return "Сессия не найдена"
+            if not sess.kaggle_kernel_ref:
+                return "Kernel не выбран"
+            if sess.status == VideoAnnounceSessionStatus.RENDERING:
+                return "Сессия уже запущена"
+            sess.status = VideoAnnounceSessionStatus.RENDERING
+            sess.started_at = datetime.now(timezone.utc)
+            sess.finished_at = None
+            sess.error = None
+            sess.video_url = None
+            sess.kaggle_dataset = None
+            params = (
+                sess.selection_params
+                if isinstance(sess.selection_params, dict)
+                else {}
+            )
+            if params:
+                params.pop(IMPORT_PAYLOAD_JSON_KEY, None)
+                params.pop(IMPORT_PAYLOAD_FLAG_KEY, None)
+                sess.selection_params = params
+            session.add(sess)
+            await session.commit()
+            await session.refresh(sess)
+        await self.bot.send_message(
+            self.chat_id,
+            (
+                f"Сессия #{session_id} запущена, готовим материалы. "
+                f"Kernel: {sess.kaggle_kernel_ref}"
+            ),
+        )
+        status_message = await update_status_message(
+            self.bot,
+            sess,
+            {},
+            chat_id=self.chat_id,
+            allow_send=True,
+            note="Готовим Kaggle",
+        )
+        asyncio.create_task(
+            self._render_and_notify(
+                sess,
+                [],
+                status_message=status_message,
+                payload=None,
+                payload_json=payload_json,
+            )
+        )
+        return "Рендеринг запущен"
 
     async def start_render(self, session_id: int, message: types.Message | None = None) -> str:
         if not await self._has_access():
@@ -2513,8 +2590,6 @@ class VideoAnnounceScenario:
         if not ranked:
             await self.bot.send_message(self.chat_id, "Не удалось собрать события для рестарта")
             return
-        payload: RenderPayload | None = None
-        payload_json: str | None = None
         async with self.db.get_session() as session:
             obj = await session.get(VideoAnnounceSession, session_id)
             if not obj:
@@ -2523,10 +2598,8 @@ class VideoAnnounceScenario:
             if obj.status != VideoAnnounceSessionStatus.FAILED:
                 await self.bot.send_message(self.chat_id, "Сессию можно рестартовать только после ошибки")
                 return
-            payload = await self._build_render_payload(obj, ranked)
-            payload_json = payload_as_json(payload, timezone.utc)
-            obj.status = VideoAnnounceSessionStatus.RENDERING
-            obj.started_at = datetime.now(timezone.utc)
+            obj.status = VideoAnnounceSessionStatus.SELECTED
+            obj.started_at = None
             obj.finished_at = None
             obj.error = None
             obj.video_url = None
@@ -2536,29 +2609,12 @@ class VideoAnnounceScenario:
             await session.commit()
             await session.refresh(obj)
         await self.bot.send_message(
-            self.chat_id, f"Сессия #{session_id} перезапущена, готовим материалы"
+            self.chat_id,
+            f"Сессия #{session_id} подготовлена к перезапуску. Выберите kernel.",
         )
-        if payload_json:
-            await self._send_payload_file(
-                obj, payload_json, caption="Payload JSON перед запуском Kaggle"
-            )
-        status_message = await update_status_message(
-            self.bot,
-            obj,
-            {},
-            chat_id=self.chat_id,
-            allow_send=True,
-            note="Готовим Kaggle",
-        )
-        asyncio.create_task(
-            self._render_and_notify(
-                obj,
-                ranked,
-                status_message=status_message,
-                payload=payload,
-                payload_json=payload_json,
-            )
-        )
+        kernel_msg = await self.show_kernel_selection(session_id, message=None)
+        if kernel_msg != "Выбор kernel":
+            await self.bot.send_message(self.chat_id, kernel_msg)
 
     async def _store_kaggle_meta(
         self, session_id: int, dataset_slug: str, kernel_ref: str | None
