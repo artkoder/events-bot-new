@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+from io import BytesIO
 from datetime import date
 from typing import Callable
 
@@ -16,12 +17,16 @@ from db import Database
 from .scenario import (
     PendingInstruction,
     PendingIntroText,
+    PendingPayloadImport,
     VideoAnnounceScenario,
     handle_prefix_action,
     is_waiting_instruction,
     is_waiting_intro_text,
+    is_waiting_payload_import,
     take_pending_instruction,
     take_pending_intro_text,
+    take_pending_payload_import,
+    set_pending_payload_import,
 )
 
 logger = logging.getLogger(__name__)
@@ -342,4 +347,47 @@ async def handle_intro_message(message: types.Message, db: Database, bot) -> Non
     scenario = VideoAnnounceScenario(db, bot, message.chat.id, message.from_user.id)
     text = (message.text or message.caption or "").strip()
     msg = await scenario.save_intro_override(pending.session_id, text or None)
+    await bot.send_message(message.chat.id, msg or "Готово")
+
+
+async def handle_payload_import_message(
+    message: types.Message, db: Database, bot
+) -> None:
+    pending: PendingPayloadImport | None = take_pending_payload_import(message.from_user.id)
+    if not pending:
+        return
+    document = message.document
+    if not document:
+        set_pending_payload_import(message.from_user.id, pending)
+        await bot.send_message(message.chat.id, "Пожалуйста, пришлите payload.json файлом.")
+        return
+    filename = document.file_name or ""
+    if (
+        document.mime_type
+        and document.mime_type != "application/json"
+        and not filename.endswith(".json")
+    ):
+        set_pending_payload_import(message.from_user.id, pending)
+        await bot.send_message(message.chat.id, "Файл должен быть JSON (payload.json).")
+        return
+    buffer = BytesIO()
+    await bot.download(document.file_id, destination=buffer)
+    try:
+        raw_text = buffer.getvalue().decode("utf-8")
+    except UnicodeDecodeError:
+        set_pending_payload_import(message.from_user.id, pending)
+        await bot.send_message(
+            message.chat.id, "Не удалось прочитать JSON (ожидается UTF-8)."
+        )
+        return
+    scenario = VideoAnnounceScenario(db, bot, message.chat.id, message.from_user.id)
+    try:
+        payload_json, scene_count = scenario._parse_import_payload(raw_text)
+    except ValueError as exc:
+        set_pending_payload_import(message.from_user.id, pending)
+        await bot.send_message(message.chat.id, f"Ошибка payload.json: {exc}")
+        return
+    msg = await scenario.import_payload_and_render(
+        pending.profile_key, payload_json, scene_count=scene_count
+    )
     await bot.send_message(message.chat.id, msg or "Готово")

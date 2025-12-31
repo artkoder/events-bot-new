@@ -102,6 +102,16 @@ _pending_intro_texts: TTLCache[int, PendingIntroText] = TTLCache(
 )
 
 
+@dataclass
+class PendingPayloadImport:
+    profile_key: str
+
+
+_pending_payload_imports: TTLCache[int, PendingPayloadImport] = TTLCache(
+    maxsize=64, ttl=PENDING_INSTRUCTION_TTL
+)
+
+
 def set_pending_instruction(user_id: int, pending: PendingInstruction) -> None:
     _pending_instructions[user_id] = pending
 
@@ -134,6 +144,18 @@ def take_pending_intro_text(
 
 def is_waiting_intro_text(user_id: int) -> bool:
     return user_id in _pending_intro_texts
+
+
+def set_pending_payload_import(user_id: int, pending: PendingPayloadImport) -> None:
+    _pending_payload_imports[user_id] = pending
+
+
+def take_pending_payload_import(user_id: int) -> PendingPayloadImport | None:
+    return _pending_payload_imports.pop(user_id, None)
+
+
+def is_waiting_payload_import(user_id: int) -> bool:
+    return user_id in _pending_payload_imports
 
 
 def read_positive_int_env(env_key: str, default: int) -> int:
@@ -792,7 +814,11 @@ class VideoAnnounceScenario:
             [
                 types.InlineKeyboardButton(
                     text="🚀 Запустить подбор", callback_data=f"vidstart:{profile_key}"
-                )
+                ),
+                types.InlineKeyboardButton(
+                    text="📥 Импортировать payload",
+                    callback_data=f"vidimport:{profile_key}",
+                ),
             ]
         )
         markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard)
@@ -898,6 +924,112 @@ class VideoAnnounceScenario:
             self.user_id, PendingInstruction(session_id=obj.id, reuse_candidates=False)
         )
         await self._prompt_instruction(obj, ctx)
+
+    async def prompt_payload_import(self, profile_key: str) -> None:
+        if not await self.ensure_access():
+            return
+        existing = await self.has_rendering()
+        if existing:
+            await self.bot.send_message(
+                self.chat_id,
+                f"Сессия #{existing.id} уже рендерится, дождитесь завершения",
+            )
+            return
+        profiles = await fetch_profiles()
+        profile = next((p for p in profiles if p.key == profile_key), None)
+        if not profile:
+            await self.bot.send_message(self.chat_id, "Профиль не найден")
+            return
+        set_pending_payload_import(
+            self.user_id, PendingPayloadImport(profile_key=profile_key)
+        )
+        await self.bot.send_message(
+            self.chat_id,
+            "Пришлите JSON-файл payload.json для перезапуска рендера.",
+        )
+
+    def _parse_import_payload(self, raw_text: str) -> tuple[str, int]:
+        try:
+            data = json.loads(raw_text)
+        except json.JSONDecodeError as exc:
+            raise ValueError("Некорректный JSON") from exc
+        if not isinstance(data, dict):
+            raise ValueError("Payload должен быть JSON-объектом")
+        scenes = data.get("scenes")
+        intro = data.get("intro")
+        if not isinstance(scenes, list) or not isinstance(intro, dict):
+            raise ValueError("Payload должен содержать поля intro и scenes")
+        if not scenes:
+            raise ValueError("Payload не содержит сцен")
+        json_text = json.dumps(data, ensure_ascii=False, indent=2)
+        return json_text, len(scenes)
+
+    def _pick_default_kernel_ref(self) -> str | None:
+        local_kernels = sorted(
+            list_local_kernels(),
+            key=lambda k: (k.get("title") or k.get("ref") or ""),
+        )
+        if local_kernels:
+            ref = local_kernels[0].get("ref")
+            if isinstance(ref, str) and ref:
+                return ref
+        username = os.getenv("KAGGLE_USERNAME", "")
+        if username:
+            return f"{username}/video-announce-renderer"
+        return None
+
+    async def import_payload_and_render(
+        self, profile_key: str, payload_json: str, *, scene_count: int | None = None
+    ) -> str:
+        if not await self._has_access():
+            return "Not authorized"
+        existing = await self.has_rendering()
+        if existing:
+            return f"Сессия #{existing.id} уже рендерится, дождитесь завершения"
+        profiles = await fetch_profiles()
+        profile = next((p for p in profiles if p.key == profile_key), None)
+        if not profile:
+            return "Профиль не найден"
+        kernel_ref = self._pick_default_kernel_ref()
+        if not kernel_ref:
+            return "Не найден kernel для запуска"
+        test_chat_id, main_chat_id = await self._get_profile_channels(profile_key)
+        async with self.db.get_session() as session:
+            obj = VideoAnnounceSession(
+                status=VideoAnnounceSessionStatus.RENDERING,
+                profile_key=profile_key,
+                selection_params={"imported_payload": True},
+                test_chat_id=test_chat_id,
+                main_chat_id=main_chat_id,
+                kaggle_kernel_ref=kernel_ref,
+                started_at=datetime.now(timezone.utc),
+            )
+            session.add(obj)
+            await session.commit()
+            await session.refresh(obj)
+        scene_note = f" ({scene_count} сцен)" if scene_count else ""
+        await self.bot.send_message(
+            self.chat_id,
+            f"Импортирован payload{scene_note}. Сессия #{obj.id} запущена. Kernel: {kernel_ref}",
+        )
+        status_message = await update_status_message(
+            self.bot,
+            obj,
+            {},
+            chat_id=self.chat_id,
+            allow_send=True,
+            note="Готовим Kaggle",
+        )
+        asyncio.create_task(
+            self._render_and_notify(
+                obj,
+                [],
+                status_message=status_message,
+                payload=None,
+                payload_json=payload_json,
+            )
+        )
+        return "Рендеринг запущен"
 
     async def _prompt_instruction(
         self,
@@ -1691,57 +1823,61 @@ class VideoAnnounceScenario:
                     session_obj.id, status_chat_id, status_message_id
                 )
         finalized = []
+        if ranked:
+            try:
+                # We still might want finalized texts for debugging, but not for dataset export as per requirement 3
+                finalized = await prepare_final_texts(self.db, session_obj.id, ranked)
+            except Exception:
+                logger.exception("video_announce: failed to prepare final texts")
         try:
-            # We still might want finalized texts for debugging, but not for dataset export as per requirement 3
-            finalized = await prepare_final_texts(self.db, session_obj.id, ranked)
-        except Exception:
-            logger.exception("video_announce: failed to prepare final texts")
-        try:
-            payload = payload or await self._build_render_payload(session_obj, ranked)
-            json_text = payload_json or payload_as_json(payload, timezone.utc)
+            json_text = payload_json
+            if not json_text:
+                payload = payload or await self._build_render_payload(session_obj, ranked)
+                json_text = payload_as_json(payload, timezone.utc)
 
-            # Validation Step: Check for photo_urls presence
-            missing_photos = []
-            for item in payload.items:
-                 ev = next((e for e in payload.events if e.id == item.event_id), None)
-                 if ev and item.status == VideoAnnounceItemStatus.READY:
-                     urls = getattr(ev, "photo_urls", []) or []
-                     if not any(urls):
-                         missing_photos.append(ev.id)
+            if payload:
+                # Validation Step: Check for photo_urls presence
+                missing_photos = []
+                for item in payload.items:
+                    ev = next((e for e in payload.events if e.id == item.event_id), None)
+                    if ev and item.status == VideoAnnounceItemStatus.READY:
+                        urls = getattr(ev, "photo_urls", []) or []
+                        if not any(urls):
+                            missing_photos.append(ev.id)
 
-            if missing_photos:
-                 error_msg = f"Ошибка: у событий {missing_photos} отсутствуют photo_urls, запуск Kaggle отменён."
-                 await self.bot.send_message(self.chat_id, error_msg)
-                 await self._mark_failed(session_obj.id, error_msg)
-                 failed = await self._load_session(session_obj.id)
-                 if failed:
-                    await update_status_message(
-                        self.bot,
-                        failed,
-                        {},
-                        chat_id=status_chat_id,
-                        message_id=status_message_id,
-                        allow_send=True,
-                        note="Ошибка: нет фото",
+                if missing_photos:
+                    error_msg = f"Ошибка: у событий {missing_photos} отсутствуют photo_urls, запуск Kaggle отменён."
+                    await self.bot.send_message(self.chat_id, error_msg)
+                    await self._mark_failed(session_obj.id, error_msg)
+                    failed = await self._load_session(session_obj.id)
+                    if failed:
+                        await update_status_message(
+                            self.bot,
+                            failed,
+                            {},
+                            chat_id=status_chat_id,
+                            message_id=status_message_id,
+                            allow_send=True,
+                            note="Ошибка: нет фото",
+                        )
+                    return
+
+                preview_lines = []
+                event_map = {ev.id: ev for ev in payload.events}
+                item_map = {it.event_id: it for it in payload.items}
+                for r in ranked[:5]:
+                    ev = event_map.get(r.event.id)
+                    item = item_map.get(r.event.id)
+                    if not ev or not item:
+                        continue
+                    dt = ev.date.split("..", 1)[0]
+                    title = item.final_title or ev.title
+                    preview_lines.append(
+                        f"#{r.position} · {dt} · {ev.emoji or ''} {title} ({r.score})"
                     )
-                 return
-
-            preview_lines = []
-            event_map = {ev.id: ev for ev in payload.events}
-            item_map = {it.event_id: it for it in payload.items}
-            for r in ranked[:5]:
-                ev = event_map.get(r.event.id)
-                item = item_map.get(r.event.id)
-                if not ev or not item:
-                    continue
-                dt = ev.date.split("..", 1)[0]
-                title = item.final_title or ev.title
-                preview_lines.append(
-                    f"#{r.position} · {dt} · {ev.emoji or ''} {title} ({r.score})"
-                )
-            preview = "\n".join(preview_lines)
-            # JSON is already sent as file attachment, no need for text duplicate
-            await self.bot.send_message(self.chat_id, preview or "Нет событий")
+                preview = "\n".join(preview_lines)
+                # JSON is already sent as file attachment, no need for text duplicate
+                await self.bot.send_message(self.chat_id, preview or "Нет событий")
             dataset_slug = await self._create_dataset(session_obj, json_text, finalized)
             
             # Wait for Kaggle to fully process the dataset before attaching to kernel
@@ -2590,6 +2726,11 @@ async def handle_prefix_action(prefix: str, callback: types.CallbackQuery, scena
         _, profile = callback.data.split(":", 1)
         await scenario.start_session(profile)
         await callback.answer("Сбор профиля")
+        return True
+    if prefix == "vidimport":
+        _, profile = callback.data.split(":", 1)
+        await scenario.prompt_payload_import(profile)
+        await callback.answer("Ожидаю payload")
         return True
     if prefix == "vidstatus":
         await scenario.refresh_status()
