@@ -4,6 +4,11 @@
 
 ### Added
 
+## [1.4.5] - 2025-12-31
+
+### Fixed
+- **Muzteatr Parser**: Fixed empty descriptions by extracting text from `og:description` meta tags (site structure changed).
+
 ## [1.4.4] - 2025-12-31
 
 ### Fixed
