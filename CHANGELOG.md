@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [1.6.7] - 2026-01-01
+
+### Fixed
+- **3D Preview**: Fixed critical bug where database session variable shadowed the user session dictionary, causing "AsyncSession object does not support item assignment" error.
+
 ## [1.6.6] - 2026-01-01
 
 ### Performance

@@ -417,17 +417,17 @@ async def _run_kaggle_render(
                 updated_events: list[Event] = []
                 month_url: str | None = None
                 if updated_event_ids:
-                    async with db.get_session() as session:
-                        result = await session.execute(
+                    async with db.get_session() as db_session:
+                        result = await db_session.execute(
                             select(Event).where(Event.id.in_(updated_event_ids))
                         )
                         updated_events = result.scalars().all()
-                        month_page = await session.get(MonthPage, month)
+                        month_page = await db_session.get(MonthPage, month)
                         if month_page and month_page.url:
                             month_url = month_page.url
                 else:
-                    async with db.get_session() as session:
-                        month_page = await session.get(MonthPage, month)
+                    async with db.get_session() as db_session:
+                        month_page = await db_session.get(MonthPage, month)
                         if month_page and month_page.url:
                             month_url = month_page.url
 
