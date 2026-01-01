@@ -6,7 +6,10 @@ import asyncio
 import html
 import json
 import logging
+import os
+import shutil
 import tempfile
+import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
@@ -17,6 +20,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from db import Database
 from models import Event, User
 from sqlmodel import select
+from video_announce.kaggle_client import KaggleClient, KERNELS_ROOT_PATH
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +30,12 @@ MONTHS_RU = {
     5: "Май", 6: "Июнь", 7: "Июль", 8: "Август",
     9: "Сентябрь", 10: "Октябрь", 11: "Ноябрь", 12: "Декабрь"
 }
+MAX_IMAGES_PER_EVENT = 7
+KAGGLE_KERNEL_FOLDER = "Preview3D"
+KAGGLE_DATASET_SLUG = "preview3d-dataset"
+KAGGLE_POLL_INTERVAL_SECONDS = 20
+KAGGLE_TIMEOUT_SECONDS = 30 * 60
+KAGGLE_STARTUP_WAIT_SECONDS = 10
 
 # Store active sessions (in production, use DB)
 _active_sessions: dict[int, dict] = {}
@@ -94,6 +104,199 @@ def _build_month_menu() -> InlineKeyboardMarkup:
     
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="3di:back")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def _require_kaggle_username() -> str:
+    username = (os.getenv("KAGGLE_USERNAME") or "").strip()
+    if not username:
+        raise RuntimeError("KAGGLE_USERNAME not set")
+    return username
+
+
+async def _create_preview3d_dataset(payload: dict, session_id: int) -> str:
+    username = _require_kaggle_username()
+    dataset_id = f"{username}/{KAGGLE_DATASET_SLUG}"
+    meta = {
+        "title": f"Preview 3D Payload {session_id}",
+        "id": dataset_id,
+        "licenses": [{"name": "CC0-1.0"}],
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        (tmp_path / "dataset-metadata.json").write_text(
+            json.dumps(meta, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        (tmp_path / "payload.json").write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        client = KaggleClient()
+        try:
+            await asyncio.to_thread(client.create_dataset, tmp_path)
+        except Exception:
+            logger.exception("3di: dataset create failed, retry after delete")
+            await asyncio.to_thread(client.delete_dataset, dataset_id, no_confirm=True)
+            await asyncio.to_thread(client.create_dataset, tmp_path)
+    return dataset_id
+
+
+async def _push_preview3d_kernel(client: KaggleClient, dataset_id: str) -> str:
+    kernel_path = KERNELS_ROOT_PATH / KAGGLE_KERNEL_FOLDER
+    if not kernel_path.exists():
+        raise FileNotFoundError(f"Kernel folder not found: {kernel_path}")
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        for item in kernel_path.iterdir():
+            dest = tmp_path / item.name
+            if item.is_dir():
+                shutil.copytree(item, dest)
+            else:
+                shutil.copy2(item, dest)
+        meta_path = tmp_path / "kernel-metadata.json"
+        meta_data = json.loads(meta_path.read_text(encoding="utf-8"))
+        slug = meta_data.get("slug") or "preview-3d"
+        username = os.getenv("KAGGLE_USERNAME")
+        if username:
+            meta_data["id"] = f"{username}/{slug}"
+            meta_data["slug"] = slug
+            meta_data["title"] = meta_data.get("title") or "Preview 3D"
+        meta_data["dataset_sources"] = [dataset_id]
+        meta_data["enable_internet"] = True
+        meta_path.write_text(
+            json.dumps(meta_data, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        api = client._get_api()
+        await asyncio.to_thread(api.kernels_push, str(tmp_path))
+        kernel_ref = str(meta_data.get("id") or meta_data.get("slug") or slug)
+    await asyncio.sleep(KAGGLE_STARTUP_WAIT_SECONDS)
+    return kernel_ref
+
+
+async def _poll_kaggle_kernel(
+    client: KaggleClient,
+    kernel_ref: str,
+    session_id: int,
+) -> tuple[str, dict | None, float]:
+    started = time.monotonic()
+    deadline = started + KAGGLE_TIMEOUT_SECONDS
+    last_status: dict | None = None
+    while time.monotonic() < deadline:
+        status = await asyncio.to_thread(client.get_kernel_status, kernel_ref)
+        last_status = status
+        status_name = (status.get("status") or "").upper()
+        if session_id in _active_sessions:
+            _active_sessions[session_id]["status"] = status_name.lower() or "running"
+        if status_name == "COMPLETE":
+            return "complete", last_status, time.monotonic() - started
+        if status_name in ("ERROR", "FAILED", "CANCELLED"):
+            return "failed", last_status, time.monotonic() - started
+        await asyncio.sleep(KAGGLE_POLL_INTERVAL_SECONDS)
+    return "timeout", last_status, time.monotonic() - started
+
+
+async def _download_kaggle_results(
+    client: KaggleClient, kernel_ref: str
+) -> list[dict]:
+    output_dir = Path(tempfile.gettempdir()) / "preview3d_output"
+    output_dir.mkdir(exist_ok=True)
+    files = await asyncio.to_thread(
+        client.download_kernel_output,
+        kernel_ref,
+        path=str(output_dir),
+        force=True,
+    )
+    output_path = None
+    for name in files:
+        if Path(name).name == "output.json":
+            output_path = output_dir / name
+            break
+    if not output_path:
+        for name in files:
+            path = output_dir / name
+            if path.suffix.lower() == ".json":
+                output_path = path
+                break
+    if not output_path or not output_path.exists():
+        raise RuntimeError("output.json not found in Kaggle output")
+    output_data = json.loads(output_path.read_text(encoding="utf-8"))
+    results = output_data.get("results")
+    if not isinstance(results, list):
+        raise RuntimeError("Invalid output.json format: missing results")
+    return results
+
+
+async def _run_kaggle_render(
+    db: Database,
+    bot,
+    chat_id: int,
+    session_id: int,
+    payload: dict,
+    month: str,
+) -> None:
+    session = _active_sessions.get(session_id)
+    if not session:
+        return
+    message_id = session.get("message_id")
+    month_name = MONTHS_RU.get(int(month.split("-")[1]), month)
+    event_count = session.get("event_count", len(payload.get("events", [])))
+    try:
+        session["status"] = "dataset"
+        dataset_id = await _create_preview3d_dataset(payload, session_id)
+        session["kaggle_dataset"] = dataset_id
+        session["status"] = "kernel_push"
+        client = KaggleClient()
+        kernel_ref = await _push_preview3d_kernel(client, dataset_id)
+        session["kaggle_kernel_ref"] = kernel_ref
+        session["status"] = "rendering"
+        final_status, status_data, duration = await _poll_kaggle_kernel(
+            client, kernel_ref, session_id
+        )
+        if final_status != "complete":
+            failure = ""
+            if status_data:
+                failure = status_data.get("failureMessage") or ""
+            raise RuntimeError(f"Kaggle kernel failed ({final_status}) {failure}".strip())
+        session["status"] = "download"
+        results = await _download_kaggle_results(client, kernel_ref)
+        session["status"] = "apply_results"
+        updated, errors, skipped = await update_previews_from_results(db, results)
+        session["status"] = "done"
+        if message_id:
+            text = (
+                f"🎨 <b>3D-превью: {month_name}</b>\n\n"
+                f"📊 Событий: {event_count}\n"
+                f"✅ Обновлено: {updated}\n"
+                f"⚠️ Ошибок: {errors}\n"
+                f"⏭ Пропущено: {skipped}\n"
+                f"⏱ Длительность: {duration:.1f}с"
+            )
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=text,
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="⬅️ Назад", callback_data="3di:back")],
+                    [InlineKeyboardButton(text="❌ Закрыть", callback_data="3di:close")],
+                ]),
+                parse_mode="HTML",
+            )
+    except Exception as exc:
+        session["status"] = "error"
+        session["error"] = str(exc)
+        if message_id:
+            error_text = html.escape(str(exc))
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=f"❌ <b>Ошибка 3D-превью</b>\n\n{error_text}",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="⬅️ Назад", callback_data="3di:back")],
+                    [InlineKeyboardButton(text="❌ Закрыть", callback_data="3di:close")],
+                ]),
+                parse_mode="HTML",
+            )
 
 
 async def handle_3di_command(message: types.Message, db: Database, bot) -> None:
@@ -242,6 +445,8 @@ async def _start_generation(
         "mode": mode,
         "event_count": len(events),
         "created_at": datetime.now(timezone.utc),
+        "chat_id": chat_id,
+        "message_id": message_id,
     }
     
     # Build payload
@@ -250,7 +455,7 @@ async def _start_generation(
             {
                 "event_id": e.id,
                 "title": e.title,
-                "images": (e.photo_urls or [])[:57]  # Max 57 images per event
+                "images": (e.photo_urls or [])[:MAX_IMAGES_PER_EVENT]
             }
             for e in events
         ]
@@ -281,53 +486,31 @@ async def _start_generation(
     
     _active_sessions[session_id]["status"] = "rendering"
     
-    # If we have a Kaggle render function, use it
-    if start_kaggle_render:
-        try:
-            await start_kaggle_render(
-                db=db,
-                bot=bot,
-                chat_id=chat_id,
-                session_id=session_id,
-                payload=payload,
-                month=month,
-            )
-        except Exception as e:
-            logger.exception("3di: Kaggle render failed")
-            _active_sessions[session_id]["status"] = "error"
-            _active_sessions[session_id]["error"] = str(e)
-            
-            await bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=message_id,
-                text=f"❌ Ошибка: {e}",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="⬅️ Назад", callback_data="3di:back")]
-                ]),
-                parse_mode="HTML"
-            )
-    else:
-        # No render function - just show payload info
-        logger.info("3di: No Kaggle render function, showing payload info")
-        
-        status_text = (
-            f"🎨 <b>3D-превью: {month_name}</b>\n\n"
-            f"📊 Событий: {len(events)}\n"
-            f"📷 Всего изображений: {sum(len(e.photo_urls or []) for e in events)}\n\n"
-            f"⚠️ Kaggle рендер не настроен.\n"
-            f"Payload готов к отправке."
+    if start_kaggle_render is None:
+        start_kaggle_render = _run_kaggle_render
+    try:
+        await start_kaggle_render(
+            db=db,
+            bot=bot,
+            chat_id=chat_id,
+            session_id=session_id,
+            payload=payload,
+            month=month,
         )
+    except Exception as e:
+        logger.exception("3di: Kaggle render failed")
+        _active_sessions[session_id]["status"] = "error"
+        _active_sessions[session_id]["error"] = str(e)
         
         await bot.edit_message_text(
             chat_id=chat_id,
             message_id=message_id,
-            text=status_text,
+            text=f"❌ Ошибка: {html.escape(str(e))}",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="⬅️ Назад", callback_data="3di:back")]
             ]),
             parse_mode="HTML"
         )
-        _active_sessions[session_id]["status"] = "done"
 
 
 async def update_previews_from_results(
@@ -371,4 +554,3 @@ async def update_previews_from_results(
         await session.commit()
     
     return updated, errors, skipped
-

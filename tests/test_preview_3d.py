@@ -1,7 +1,5 @@
 import pytest
 from aiogram import types
-from sqlalchemy import text
-
 from db import Database
 from main_part2 import event_to_nodes
 from models import Event, User
@@ -91,7 +89,6 @@ async def test_update_previews_from_results_updates_db(tmp_path):
     await db.init()
 
     async with db.get_session() as session:
-        await session.execute(text("ALTER TABLE event ADD COLUMN preview_3d_url TEXT"))
         session.add(_make_event(1))
         session.add(_make_event(2))
         await session.commit()
@@ -130,7 +127,6 @@ async def test_update_previews_from_results_handles_skip(tmp_path):
     await db.init()
 
     async with db.get_session() as session:
-        await session.execute(text("ALTER TABLE event ADD COLUMN preview_3d_url TEXT"))
         session.add(_make_event(1))
         await session.commit()
 
@@ -142,4 +138,3 @@ async def test_update_previews_from_results_handles_skip(tmp_path):
     assert updated == 0
     assert errors == 0
     assert skipped == 1
-

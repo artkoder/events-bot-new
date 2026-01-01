@@ -244,6 +244,7 @@ class Database:
             await _add_column(conn, "event", "search_digest TEXT")
             await _add_column(conn, "event", "ticket_status TEXT")
             await _add_column(conn, "event", "linked_event_ids TEXT")
+            await _add_column(conn, "event", "preview_3d_url TEXT")
             await conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_event_tourist_label ON event(tourist_label)"
             )
@@ -765,5 +766,4 @@ async def optimize(engine):
 async def vacuum(engine):
     async with engine.begin() as conn:
         await conn.exec_driver_sql("VACUUM")
-
 
