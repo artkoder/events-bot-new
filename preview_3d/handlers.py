@@ -39,6 +39,23 @@ KAGGLE_STARTUP_WAIT_SECONDS = 10
 
 # Store active sessions (in production, use DB)
 _active_sessions: dict[int, dict] = {}
+_preview3d_lock = asyncio.Lock()
+
+STATUS_LABELS = {
+    "preparing": "подготовка",
+    "queued": "в очереди",
+    "dataset": "подготовка датасета",
+    "kernel_push": "запуск ядра Kaggle",
+    "rendering": "рендеринг",
+    "running": "рендеринг (Kaggle)",
+    "complete": "завершено",
+    "failed": "ошибка",
+    "timeout": "таймаут",
+    "download": "скачивание результатов",
+    "apply_results": "применение результатов",
+    "done": "готово",
+    "error": "ошибка",
+}
 
 
 async def _is_authorized(db: Database, user_id: int) -> bool:
@@ -104,6 +121,68 @@ def _build_month_menu() -> InlineKeyboardMarkup:
     
     buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="3di:back")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def _format_month_name(month: str) -> str:
+    try:
+        month_number = int(month.split("-")[1])
+    except (AttributeError, IndexError, ValueError, TypeError):
+        return month
+    return MONTHS_RU.get(month_number, month)
+
+
+def _format_status_text(session: dict) -> str:
+    month_name = _format_month_name(session.get("month", ""))
+    event_count = session.get("event_count", 0)
+    status = session.get("status", "unknown")
+    status_label = STATUS_LABELS.get(status, status)
+    mode = session.get("mode", "")
+    return (
+        f"🎨 <b>3D-превью: {month_name}</b>\n\n"
+        f"📊 Событий к обработке: {event_count}\n"
+        f"🔄 Статус: {status_label}\n\n"
+        f"Режим: {mode}"
+    )
+
+
+def _build_status_keyboard(session_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Обновить статус", callback_data=f"3di:status:{session_id}")],
+        [InlineKeyboardButton(text="❌ Закрыть", callback_data="3di:close")],
+    ])
+
+
+async def _update_status_message(bot, chat_id: int, message_id: int, session_id: int) -> None:
+    session = _active_sessions.get(session_id)
+    if not session or not message_id:
+        return
+    try:
+        await bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=_format_status_text(session),
+            reply_markup=_build_status_keyboard(session_id),
+            parse_mode="HTML",
+        )
+    except Exception:
+        logger.debug("3di: status message update skipped", exc_info=True)
+
+
+async def _set_session_status(
+    session_id: int,
+    status: str,
+    bot=None,
+    chat_id: int | None = None,
+    message_id: int | None = None,
+) -> None:
+    session = _active_sessions.get(session_id)
+    if not session:
+        return
+    if session.get("status") == status:
+        return
+    session["status"] = status
+    if bot and chat_id and message_id:
+        await _update_status_message(bot, chat_id, message_id, session_id)
 
 
 def _require_kaggle_username() -> str:
@@ -179,16 +258,27 @@ async def _poll_kaggle_kernel(
     client: KaggleClient,
     kernel_ref: str,
     session_id: int,
+    bot,
+    chat_id: int,
+    message_id: int | None,
 ) -> tuple[str, dict | None, float]:
     started = time.monotonic()
     deadline = started + KAGGLE_TIMEOUT_SECONDS
     last_status: dict | None = None
+    last_status_name = None
     while time.monotonic() < deadline:
         status = await asyncio.to_thread(client.get_kernel_status, kernel_ref)
         last_status = status
         status_name = (status.get("status") or "").upper()
-        if session_id in _active_sessions:
-            _active_sessions[session_id]["status"] = status_name.lower() or "running"
+        if status_name != last_status_name:
+            last_status_name = status_name
+            await _set_session_status(
+                session_id,
+                status_name.lower() or "running",
+                bot=bot,
+                chat_id=chat_id,
+                message_id=message_id,
+            )
         if status_name == "COMPLETE":
             return "complete", last_status, time.monotonic() - started
         if status_name in ("ERROR", "FAILED", "CANCELLED"):
@@ -198,10 +288,12 @@ async def _poll_kaggle_kernel(
 
 
 async def _download_kaggle_results(
-    client: KaggleClient, kernel_ref: str
+    client: KaggleClient,
+    kernel_ref: str,
+    session_id: int,
 ) -> list[dict]:
-    output_dir = Path(tempfile.gettempdir()) / "preview3d_output"
-    output_dir.mkdir(exist_ok=True)
+    output_dir = Path(tempfile.gettempdir()) / f"preview3d-{session_id}"
+    output_dir.mkdir(parents=True, exist_ok=True)
     files = await asyncio.to_thread(
         client.download_kernel_output,
         kernel_ref,
@@ -243,46 +335,61 @@ async def _run_kaggle_render(
     month_name = MONTHS_RU.get(int(month.split("-")[1]), month)
     event_count = session.get("event_count", len(payload.get("events", [])))
     try:
-        session["status"] = "dataset"
-        dataset_id = await _create_preview3d_dataset(payload, session_id)
-        session["kaggle_dataset"] = dataset_id
-        session["status"] = "kernel_push"
-        client = KaggleClient()
-        kernel_ref = await _push_preview3d_kernel(client, dataset_id)
-        session["kaggle_kernel_ref"] = kernel_ref
-        session["status"] = "rendering"
-        final_status, status_data, duration = await _poll_kaggle_kernel(
-            client, kernel_ref, session_id
-        )
-        if final_status != "complete":
-            failure = ""
-            if status_data:
-                failure = status_data.get("failureMessage") or ""
-            raise RuntimeError(f"Kaggle kernel failed ({final_status}) {failure}".strip())
-        session["status"] = "download"
-        results = await _download_kaggle_results(client, kernel_ref)
-        session["status"] = "apply_results"
-        updated, errors, skipped = await update_previews_from_results(db, results)
-        session["status"] = "done"
-        if message_id:
-            text = (
-                f"🎨 <b>3D-превью: {month_name}</b>\n\n"
-                f"📊 Событий: {event_count}\n"
-                f"✅ Обновлено: {updated}\n"
-                f"⚠️ Ошибок: {errors}\n"
-                f"⏭ Пропущено: {skipped}\n"
-                f"⏱ Длительность: {duration:.1f}с"
+        if _preview3d_lock.locked():
+            await _set_session_status(
+                session_id, "queued", bot=bot, chat_id=chat_id, message_id=message_id
             )
-            await bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=message_id,
-                text=text,
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="⬅️ Назад", callback_data="3di:back")],
-                    [InlineKeyboardButton(text="❌ Закрыть", callback_data="3di:close")],
-                ]),
-                parse_mode="HTML",
+        async with _preview3d_lock:
+            await _set_session_status(
+                session_id, "dataset", bot=bot, chat_id=chat_id, message_id=message_id
             )
+            dataset_id = await _create_preview3d_dataset(payload, session_id)
+            session["kaggle_dataset"] = dataset_id
+            await _set_session_status(
+                session_id, "kernel_push", bot=bot, chat_id=chat_id, message_id=message_id
+            )
+            client = KaggleClient()
+            kernel_ref = await _push_preview3d_kernel(client, dataset_id)
+            session["kaggle_kernel_ref"] = kernel_ref
+            await _set_session_status(
+                session_id, "rendering", bot=bot, chat_id=chat_id, message_id=message_id
+            )
+            final_status, status_data, duration = await _poll_kaggle_kernel(
+                client, kernel_ref, session_id, bot, chat_id, message_id
+            )
+            if final_status != "complete":
+                failure = ""
+                if status_data:
+                    failure = status_data.get("failureMessage") or ""
+                raise RuntimeError(f"Kaggle kernel failed ({final_status}) {failure}".strip())
+            await _set_session_status(
+                session_id, "download", bot=bot, chat_id=chat_id, message_id=message_id
+            )
+            results = await _download_kaggle_results(client, kernel_ref, session_id)
+            await _set_session_status(
+                session_id, "apply_results", bot=bot, chat_id=chat_id, message_id=message_id
+            )
+            updated, errors, skipped = await update_previews_from_results(db, results)
+            session["status"] = "done"
+            if message_id:
+                text = (
+                    f"🎨 <b>3D-превью: {month_name}</b>\n\n"
+                    f"📊 Событий: {event_count}\n"
+                    f"✅ Обновлено: {updated}\n"
+                    f"⚠️ Ошибок: {errors}\n"
+                    f"⏭ Пропущено: {skipped}\n"
+                    f"⏱ Длительность: {duration:.1f}с"
+                )
+                await bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=text,
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(text="⬅️ Назад", callback_data="3di:back")],
+                        [InlineKeyboardButton(text="❌ Закрыть", callback_data="3di:close")],
+                    ]),
+                    parse_mode="HTML",
+                )
     except Exception as exc:
         session["status"] = "error"
         session["error"] = str(exc)
@@ -462,31 +569,15 @@ async def _start_generation(
         ]
     }
     
-    month_name = MONTHS_RU.get(int(month.split("-")[1]), month)
-    
-    status_text = (
-        f"🎨 <b>3D-превью: {month_name}</b>\n\n"
-        f"📊 Событий к обработке: {len(events)}\n"
-        f"🔄 Статус: подготовка...\n\n"
-        f"Режим: {mode}"
-    )
-    
-    status_keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔄 Обновить статус", callback_data=f"3di:status:{session_id}")],
-        [InlineKeyboardButton(text="❌ Закрыть", callback_data="3di:close")],
-    ])
-    
     await bot.edit_message_text(
         chat_id=chat_id,
         message_id=message_id,
-        text=status_text,
-        reply_markup=status_keyboard,
+        text=_format_status_text(_active_sessions[session_id]),
+        reply_markup=_build_status_keyboard(session_id),
         parse_mode="HTML"
     )
     await callback.answer("Генерация запущена!")
-    
-    _active_sessions[session_id]["status"] = "rendering"
-    
+
     if start_kaggle_render is None:
         start_kaggle_render = _run_kaggle_render
     try:

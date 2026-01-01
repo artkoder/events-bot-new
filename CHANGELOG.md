@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [1.6.1] - 2026-01-01
+
+### Fixed
+- **3D Preview**:
+  - Fixed payload path detection in Kaggle notebook (now uses `rglob`).
+  - Added "fail fast" logic in notebook if payload is missing.
+  - Implemented live status updates in Telegram message during polling.
+  - Added `asyncio.Lock` to serialize concurrent generation requests.
+  - Fixed output directory collisions by using per-session paths.
+
 ## [1.6.0] – 2026-01-01
 
 ### Added
