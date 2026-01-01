@@ -160,6 +160,8 @@ def event_to_nodes(
     # Show 3D preview as main image if available, otherwise use first photo
     if show_image:
         preview_url = getattr(e, "preview_3d_url", None)
+        if isinstance(preview_url, str):
+            preview_url = preview_url.strip()
         if preview_url and isinstance(preview_url, str) and preview_url.startswith("http"):
             # Use 3D preview as main image
             nodes.append({

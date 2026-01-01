@@ -43,7 +43,7 @@ def normalize_tretyakov_date(date_raw):
         day = int(range_match.group(1))
         month_name = range_match.group(2)
     else:
-        # "2 и 8 января" - ищем любой месяц
+        # "2 и 8 января" -> "января" -> Day 2
         ru_months = ["января", "февраля", "марта", "апреля", "мая", "июня", 
                      "июля", "августа", "сентября", "октября", "ноября", "декабря"]
         
@@ -68,7 +68,7 @@ def normalize_tretyakov_date(date_raw):
 
     # 4. Маппинг месяца
     MONTHS = {
-        "января": 1, "февраля": 2, "марта", "апреля": 4, "мая": 5, "июня": 6,
+        "января": 1, "февраля": 2, "марта": 3, "апреля": 4, "мая": 5, "июня": 6,
         "июля": 7, "августа": 8, "сентября": 9, "октября": 10, "ноября": 11, "декабря": 12
     }
     month = MONTHS.get(month_name)
@@ -124,7 +124,6 @@ async def scrape_tretyakov_schedule(page):
             elif href and href.startswith('/'):
                 href = f"{BASE_URL_TRETYAKOV}{href}"
             
-            # --- ФОТО ---
             img_url = ""
             img_tag = card.select_one('img.card_img')
             if img_tag and img_tag.get('src'):
@@ -138,7 +137,6 @@ async def scrape_tretyakov_schedule(page):
             if img_url and img_url.startswith('/'):
                 img_url = f"{BASE_URL_TRETYAKOV}{img_url}"
 
-            # --- ДАТА ---
             date_text = ""
             info = card.select_one('.card_info')
             if info:
@@ -185,25 +183,23 @@ async def scrape_tretyakov_schedule(page):
 
 async def _tretyakov_interact_and_get_price(page, target_date=None, target_time=None):
     """
-    СТРАТЕГИЯ:
-    1. Check Price (если есть - выход).
-    2. Try STANDARD Selectors (exact classes) -> для большинства ивентов.
-    3. Try FUZZY Selectors (JS lookup) -> для 'Fairy Tale' и сложных.
-    4. Click Time -> Parse Price.
+    SEQUENCE:
+    1. Check Price (Exit if found).
+    2. Click Date (Standard -> Fuzzy).
+    3. Click Time (Simple).
+    4. Click SECTOR/ZONE (NEW).
+    5. Parse Price.
     """
     try:
-        # 1. Wait for widget container or price
-        # Широкий вейт, чтобы не падать сразу
+        # 1. Wait
         try:
             await page.wait_for_selector('div[class*="calendar"], .skin-inner, app-root, .wrapper, .page-buy-container', timeout=8000)
         except:
              pass
 
-        # === CHECK 0: Pre-existing price ===
-        text_init = await page.inner_text("body")
-        if re.search(r"\d+\s*(?:₽|руб)", text_init):
-            # Price visible?
-            pass 
+        # === CHECK 0: Price Exists? ===
+        # If price is already found, maybe return early? 
+        # But safer to interact if we can. 
 
         await page.wait_for_timeout(1000)
 
@@ -215,34 +211,26 @@ async def _tretyakov_interact_and_get_price(page, target_date=None, target_time=
             except:
                 pass
 
+        # === STEP 1: DATE ===
         if target_day:
             print(f"   ...Target Day: {target_day}")
             
-            # --- ATTEMPT 1: STANDARD SELECTORS (Strict) ---
-            # Это работало для большинства событий ранее
-            # Ищем элементы с классом day/cell и точным текстом
+            # ATTEMPT A: Standard
             try:
-                # Selectors used in typical calendars
                 candidates = await page.locator('.cell:not(.day-header), .day, .date-item, span[class*="day"]').all()
                 for cand in candidates:
                     if not await cand.is_visible(): continue
-                    
-                    # Check text Exact Match
                     txt = (await cand.inner_text()).strip()
                     if txt == str(target_day):
-                        # Found it!
                         cls = await cand.get_attribute('class') or ""
-                        if "disabled" in cls or "sold" in cls: continue
-                        
-                        await cand.click(force=True)
-                        click_success = True
-                        print(f"   >>> [Standard] Clicked date {target_day}")
-                        break
-            except Exception as e:
-                print(f"   Standard click error: {e}")
+                        if "disabled" not in cls and "sold" not in cls:
+                            await cand.click(force=True)
+                            click_success = True
+                            print(f"   >>> [Standard] Clicked date {target_day}")
+                            break
+            except: pass
 
-            # --- ATTEMPT 2: FUZZY SELECTORS (JS) ---
-            # Если стандарт не сработал (как в Fairy Tale)
+            # ATTEMPT B: Fuzzy
             if not click_success:
                 print(f"   ...Attempts Fuzzy Search for {target_day}")
                 try:
@@ -255,18 +243,11 @@ async def _tretyakov_interact_and_get_price(page, target_date=None, target_time=
                                 if (cls.includes('disabled') || cls.includes('sold')) return false;
                                 
                                 const txt = el.innerText.trim();
-                                // Regex: word boundary check for day number
-                                // e.g. matches "29" in "ПН 29" but NOT "290" or "129"
                                 const dayRx = new RegExp("(^|\\D)" + day + "(\\D|$)", "i");
                                 if (!dayRx.test(txt)) return false;
-                                
-                                // Avoid long text blocks (descriptions)
                                 if (txt.length > 50) return false;
-                                
-                                // Avoid obvious non-date things if possible?
                                 return true;
                             });
-                            // Prefer shorter matches (exact button vs container)
                             matches.sort((a,b) => a.innerText.length - b.innerText.length);
                             return matches.length > 0 ? matches[0] : null;
                         }
@@ -276,10 +257,9 @@ async def _tretyakov_interact_and_get_price(page, target_date=None, target_time=
                         await candidates.as_element().click()
                         click_success = True
                         print(f"   >>> [Fuzzy] Clicked date {target_day}")
-                except Exception as e:
-                    print(f"   Fuzzy click error: {e}")
+                except: pass
 
-        # Fallback date (Any date 1-31) if target specific failed
+        # Fallback 1-31
         if not click_success:
              print("   ...Fallback: Clicking first available date 1-31")
              try:
@@ -290,13 +270,9 @@ async def _tretyakov_interact_and_get_price(page, target_date=None, target_time=
                             if (el.offsetParent === null) return false;
                             const cls = (el.className || "").toString();
                             if (cls.includes('disabled') || cls.includes('sold')) return false;
-                            
                             const txt = el.innerText.trim();
-                            // STRICT: Matches exactly a number 1-31 alone, or matches "Mon 29" format
-                            // Checking for explicit 1-31 range match
                             const dateMatch = txt.match(/(^|\D)([1-9]|[12]\d|3[01])(\D|$)/);
                             if (!dateMatch) return false;
-                            
                             if (txt.length > 40) return false; 
                             return true;
                         });
@@ -305,19 +281,15 @@ async def _tretyakov_interact_and_get_price(page, target_date=None, target_time=
                    }
                  """)
                  if candidates.as_element():
-                     txt_click = await candidates.as_element().inner_text()
                      await candidates.as_element().click()
-                     print(f"   >>> [Fallback] Clicked date: {txt_click[:10]}...")
-             except Exception as e:
-                 print(f"   Fallback error: {e}")
+                     print(f"   >>> [Fallback] Clicked date")
+             except: pass
 
-        # 3. TIME SELECTION
-        await page.wait_for_timeout(1500) 
-        
+        # === STEP 2: TIME ===
+        await page.wait_for_timeout(1000) 
         target_hm = target_time if target_time else None
         print("   ...Searching Time")
         
-        # Standard + Fuzzy Time Search
         try:
              time_el = await page.evaluate_handle(r"""
                 (tgt) => {
@@ -326,16 +298,10 @@ async def _tretyakov_interact_and_get_price(page, target_date=None, target_time=
                         if (el.offsetParent === null) return false;
                         const cls = (el.className || "").toString();
                         if (cls.includes('disabled')) return false;
-                        
                         const txt = el.innerText.trim();
-                        // STRICT HH:MM pattern
                         const timeMatch = txt.match(/\d{1,2}:\d{2}/);
                         if (!timeMatch) return false;
-                        
-                        // If target provided, must contain it
                         if (tgt && !txt.includes(tgt)) return false;
-                        
-                        if (txt.length > 30) return false;
                         return true;
                     });
                      matches.sort((a,b) => a.innerText.length - b.innerText.length);
@@ -344,13 +310,49 @@ async def _tretyakov_interact_and_get_price(page, target_date=None, target_time=
              """, target_hm)
              
              if time_el.as_element():
-                 t_txt = await time_el.as_element().inner_text()
                  await time_el.as_element().click()
-                 print(f"   >>> Clicked time: {t_txt}")
-        except:
-            pass
+                 print(f"   >>> Clicked time")
+        except: pass
 
-        # 4. PRICE EXTRACTION
+        # === STEP 3: SECTOR / ZONE (NEW!) ===
+        # Sometimes after Time, we need to choose "Entrance" or "Sector"
+        await page.wait_for_timeout(1500)
+        
+        # Check if we still don't have prices
+        text_chk = await page.inner_text("body")
+        if not re.search(r"\d+\s*(?:₽|руб|р\.)", text_chk):
+             print("   ...Checking for SECTORS/ZONES")
+             # Try to click any "Zone" or "Sector" button
+             # OR just the FIRST available button in the widget area that looks like a choice
+             try:
+                 sector_el = await page.evaluate_handle(r"""
+                    () => {
+                        const els = Array.from(document.querySelectorAll('div, span, button, td, a'));
+                        const matches = els.filter(el => {
+                            if (el.offsetParent === null) return false;
+                            const cls = (el.className || "").toString();
+                            const txt = el.innerText.trim().toLowerCase();
+                            
+                            // Keywords: Sector, Zone, Entrance, Ticket type
+                            if (txt.includes('сектор') || txt.includes('вход') || txt.includes('билет')) {
+                                 return true;
+                            }
+                            // Or maybe it's just a generic "item" that appeared?
+                            if (cls.includes('zone') || cls.includes('sector')) return true;
+                            
+                            return false;
+                        });
+                        return matches.length > 0 ? matches[0] : null;
+                    }
+                 """)
+                 if sector_el.as_element():
+                     txt_sec = await sector_el.as_element().inner_text()
+                     await sector_el.as_element().click()
+                     print(f"   >>> Clicked Sector/Zone: {txt_sec[:20]}")
+             except Exception as e:
+                 print(f"   Sector click error: {e}")
+
+        # === STEP 4: PARSE ===
         await page.wait_for_timeout(2000)
 
         text = await page.inner_text("body")
@@ -452,7 +454,7 @@ def update_notebook():
     with open(OUTPUT_PATH, 'w', encoding='utf-8') as f:
         json.dump(nb_content, f, indent=1, ensure_ascii=False)
     
-    print("✅ Notebook updated with HYBRID (Standard + Fuzzy) Logic")
+    print("✅ Notebook updated with SECTOR SELECTION logic")
 
 if __name__ == "__main__":
     update_notebook()

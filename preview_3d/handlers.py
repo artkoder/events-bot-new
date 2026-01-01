@@ -333,13 +333,14 @@ async def _start_generation(
 async def update_previews_from_results(
     db: Database,
     results: list[dict],
-) -> tuple[int, int]:
+) -> tuple[int, int, int]:
     """Update Event.preview_3d_url from Kaggle results.
     
-    Returns: (updated_count, error_count)
+    Returns: (updated_count, error_count, skipped_count)
     """
     updated = 0
     errors = 0
+    skipped = 0
     
     async with db.get_session() as session:
         for result in results:
@@ -348,6 +349,7 @@ async def update_previews_from_results(
             status = result.get("status", "")
             
             if not event_id:
+                logger.warning("3di: Result without event_id: %s", result)
                 continue
             
             if status == "ok" and preview_url:
@@ -356,6 +358,11 @@ async def update_previews_from_results(
                     event.preview_3d_url = preview_url
                     updated += 1
                     logger.info("3di: Updated preview for event %d: %s", event_id, preview_url)
+                else:
+                    logger.warning("3di: Event %d not found in DB", event_id)
+            elif status == "skip":
+                skipped += 1
+                logger.debug("3di: Skipped event %d: %s", event_id, result.get("error", "no images"))
             else:
                 errors += 1
                 error_msg = result.get("error", "unknown")
@@ -363,4 +370,5 @@ async def update_previews_from_results(
         
         await session.commit()
     
-    return updated, errors
+    return updated, errors, skipped
+
