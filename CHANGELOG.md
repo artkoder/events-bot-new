@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [1.6.3] - 2026-01-01
+
+### Fixed
+- **3D Preview**: Added 15s delay after dataset creation in handler (syncing pattern with video_announce) to ensure dataset availability before kernel start.
+
 ## [1.6.2] - 2026-01-01
 
 ### Fixed

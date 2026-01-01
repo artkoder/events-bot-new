@@ -36,6 +36,7 @@ KAGGLE_DATASET_SLUG_PREFIX = "preview3d"
 KAGGLE_POLL_INTERVAL_SECONDS = 20
 KAGGLE_TIMEOUT_SECONDS = 30 * 60
 KAGGLE_STARTUP_WAIT_SECONDS = 10
+KAGGLE_DATASET_WAIT_SECONDS = 15
 
 # Store active sessions (in production, use DB)
 _active_sessions: dict[int, dict] = {}
@@ -45,7 +46,9 @@ STATUS_LABELS = {
     "preparing": "подготовка",
     "queued": "в очереди",
     "dataset": "подготовка датасета",
+    "dataset_wait": "Ожидание датасета...",
     "kernel_push": "запуск ядра Kaggle",
+    "pushing": "запуск ядра Kaggle",
     "rendering": "рендеринг",
     "running": "рендеринг (Kaggle)",
     "complete": "завершено",
@@ -346,7 +349,11 @@ async def _run_kaggle_render(
             dataset_id = await _create_preview3d_dataset(payload, session_id)
             session["kaggle_dataset"] = dataset_id
             await _set_session_status(
-                session_id, "kernel_push", bot=bot, chat_id=chat_id, message_id=message_id
+                session_id, "dataset_wait", bot=bot, chat_id=chat_id, message_id=message_id
+            )
+            await asyncio.sleep(KAGGLE_DATASET_WAIT_SECONDS)
+            await _set_session_status(
+                session_id, "pushing", bot=bot, chat_id=chat_id, message_id=message_id
             )
             client = KaggleClient()
             kernel_ref = await _push_preview3d_kernel(client, dataset_id)
