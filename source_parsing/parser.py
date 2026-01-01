@@ -342,7 +342,10 @@ async def find_existing_event(
     event_time: str,
     title: str,
 ) -> tuple[int | None, bool]:
-    """Find existing event in database by location, date, time and title.
+    """Find existing event in database by date, time, location and title.
+    
+    Uses the same matching logic as upsert_event to avoid false negatives
+    that would trigger unnecessary LLM calls.
     
     Args:
         db: Database instance
@@ -357,92 +360,109 @@ async def find_existing_event(
         - needs_full_update: True if event has 00:00 time and should be fully updated
     """
     from models import Event
-    from sqlalchemy import select, or_
+    from sqlalchemy import select
+    from difflib import SequenceMatcher
     
     logger.debug(
-        "find_existing_event: searching location=%s date=%s time=%s title=%s",
-        location_name, event_date, event_time, title[:50],
+        "find_existing_event: searching date=%s time=%s location=%s title=%s",
+        event_date, event_time, location_name, title[:50],
     )
     
     async with db.get_session() as session:
-        # First try exact match on location + date
+        # Match upsert_event: search by date + time first
         stmt = select(Event).where(
-            Event.location_name == location_name,
             Event.date == event_date,
+            Event.time == event_time,
         )
         result = await session.execute(stmt)
         candidates = result.scalars().all()
         
         logger.debug(
-            "find_existing_event: found %d candidates for location=%s date=%s",
-            len(candidates), location_name, event_date,
+            "find_existing_event: found %d candidates for date=%s time=%s",
+            len(candidates), event_date, event_time,
         )
         
-        for event in candidates:
-            # Check for fuzzy title match
-            if fuzzy_title_match(title, event.title):
-                # Check if this is a placeholder event (00:00 time)
-                if event.time == "00:00" and event_time != "00:00":
+        # Apply same matching logic as upsert_event (main.py:9823-9912)
+        for ev in candidates:
+            ev_loc = (ev.location_name or "").strip().lower()
+            new_loc = (location_name or "").strip().lower()
+            ev_addr = (ev.location_address or "").strip().lower()
+            
+            # Exact location match
+            if ev_loc == new_loc:
+                logger.info(
+                    "find_existing_event: MATCHED by location event_id=%d title=%s",
+                    ev.id, ev.title[:50],
+                )
+                return ev.id, False
+            
+            # Fuzzy title match (threshold 0.9 like upsert_event)
+            title_ratio = SequenceMatcher(
+                None, (ev.title or "").lower(), (title or "").lower()
+            ).ratio()
+            if title_ratio >= 0.9:
+                logger.info(
+                    "find_existing_event: MATCHED by title (ratio=%.2f) event_id=%d title=%s",
+                    title_ratio, ev.id, ev.title[:50],
+                )
+                return ev.id, False
+            
+            # Combined fuzzy match (title >= 0.6 AND location >= 0.6)
+            loc_ratio = SequenceMatcher(None, ev_loc, new_loc).ratio()
+            if title_ratio >= 0.6 and loc_ratio >= 0.6:
+                logger.info(
+                    "find_existing_event: MATCHED by combined fuzzy (title=%.2f loc=%.2f) event_id=%d",
+                    title_ratio, loc_ratio, ev.id,
+                )
+                return ev.id, False
+        
+        # Also check for placeholder events (00:00 time) that need full update
+        if event_time != "00:00":
+            stmt_placeholder = select(Event).where(
+                Event.date == event_date,
+                Event.time == "00:00",
+            )
+            result = await session.execute(stmt_placeholder)
+            placeholders = result.scalars().all()
+            
+            for ev in placeholders:
+                ev_loc = (ev.location_name or "").strip().lower()
+                new_loc = (location_name or "").strip().lower()
+                
+                if ev_loc == new_loc:
+                    if fuzzy_title_match(title, ev.title):
+                        logger.info(
+                            "find_existing_event: MATCHED placeholder event_id=%d (needs full update)",
+                            ev.id,
+                        )
+                        return ev.id, True
+        
+        # Check by location + date (fallback for different time slots)
+        stmt_loc = select(Event).where(
+            Event.location_name == location_name,
+            Event.date == event_date,
+        )
+        result = await session.execute(stmt_loc)
+        loc_candidates = result.scalars().all()
+        
+        for ev in loc_candidates:
+            if fuzzy_title_match(title, ev.title):
+                # Different time for same event?
+                if ev.time == "00:00" and event_time != "00:00":
                     logger.info(
-                        "find_existing_event: MATCHED placeholder event_id=%d title=%s (needs full update)",
-                        event.id, event.title[:50],
+                        "find_existing_event: MATCHED by loc+title placeholder event_id=%d",
+                        ev.id,
                     )
-                    return event.id, True  # Needs full update
-                # Check time match (exact or close)
-                if event.time == event_time:
-                    logger.info(
-                        "find_existing_event: MATCHED event_id=%d title=%s time=%s",
-                        event.id, event.title[:50], event.time,
-                    )
-                    return event.id, False  # Just update ticket status
-                db_start = extract_time_start(event.time)
+                    return ev.id, True
+                # Skip if times differ significantly (different show times)
+                db_start = extract_time_start(ev.time)
                 new_start = extract_time_start(event_time)
                 if db_start and new_start and db_start == new_start:
                     logger.info(
-                        "find_existing_event: MATCHED by start time event_id=%d title=%s db_time=%s new_time=%s",
-                        event.id,
-                        event.title[:50],
-                        event.time,
-                        event_time,
+                        "find_existing_event: MATCHED by loc+title+start_time event_id=%d",
+                        ev.id,
                     )
-                    return event.id, False
-                else:
-                    if event_time == "00:00":
-                        logger.info(
-                            "find_existing_event: title matches but incoming time is unknown (00:00), "
-                            "skipping time match event_id=%d db_time=%s",
-                            event.id,
-                            event.time,
-                        )
-                    else:
-                        logger.info(
-                            "find_existing_event: title matches but time differs db_time=%s new_time=%s",
-                            event.time, event_time,
-                        )
-        
-        # Also check for events with same location and title but different dates
-        # (for recurring shows on different days)
-        stmt = select(Event).where(
-            Event.location_name == location_name,
-            Event.title == title,
-        )
-        result = await session.execute(stmt)
-        title_matches = result.scalars().all()
-        
-        for event in title_matches:
-            if event.date == event_date and fuzzy_title_match(title, event.title, 0.95):
-                if event.time == "00:00" and event_time != "00:00":
-                    logger.info(
-                        "find_existing_event: MATCHED (exact title) placeholder event_id=%d",
-                        event.id,
-                    )
-                    return event.id, True
-                if event.time == event_time:
-                    logger.info(
-                        "find_existing_event: MATCHED (exact title) event_id=%d",
-                        event.id,
-                    )
-                    return event.id, False
+                    return ev.id, False
     
     logger.debug(
         "find_existing_event: NO MATCH for title=%s", title[:50],
