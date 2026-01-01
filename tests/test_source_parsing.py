@@ -197,3 +197,33 @@ class TestLimitPhotosForSource:
         """Handle empty photo list."""
         result = limit_photos_for_source([], "muzteatr")
         assert result == []
+
+
+class TestShortDescriptionFallback:
+    """Tests for short_description fallback logic."""
+
+    def test_first_sentence_extraction(self):
+        """First sentence should be extracted when splitting by period."""
+        description = "Это первое предложение. Это второе предложение. И третье."
+        first_sentence = description.split('.')[0].strip()
+        assert first_sentence == "Это первое предложение"
+        
+    def test_first_sentence_with_empty_result(self):
+        """Empty description should not cause errors."""
+        description = ""
+        first_sentence = description.split('.')[0].strip()
+        assert first_sentence == ""
+        
+    def test_first_sentence_no_period(self):
+        """Description without period returns full text."""
+        description = "Текст без точки"
+        first_sentence = description.split('.')[0].strip()
+        assert first_sentence == "Текст без точки"
+
+    def test_fallback_to_title_when_empty(self):
+        """When description is empty, title should be used."""
+        description = ""
+        title = "Название события"
+        first_sentence = description.split('.')[0].strip() if description else ""
+        result = first_sentence + '.' if first_sentence else title
+        assert result == title

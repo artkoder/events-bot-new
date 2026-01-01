@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 EVENT_ADD_DELAY_SECONDS = 5  # Delay for Telegraph creation
 
 # TEMPORARY: Limit events for debugging (set to None to disable)
-DEBUG_MAX_EVENTS = 5
+DEBUG_MAX_EVENTS = None
 
 
 @dataclass
@@ -247,9 +247,9 @@ async def update_event_full(
             # Update pushkin card
             event.pushkin_card = theatre_event.pushkin_card
             
-            # Update description if provided
-            if theatre_event.description and not event.description:
-                event.description = theatre_event.description
+            # Don't overwrite description with raw parser text
+            # Description should only come from LLM (short_description)
+            # Keeping existing description if present
             
             # Update photos
             photos = limit_photos_for_source(
@@ -392,8 +392,8 @@ async def add_new_event_via_queue(
         
         full_description = "\n\n".join(description_parts) if description_parts else theatre_event.title
         
-        # Build source text for LLM - just the description content, no duplicate headers
-        source_text = full_description
+        # Build source text for LLM - include title explicitly for normalization
+        source_text = f"Название: {theatre_event.title}\n\n{full_description}"
         
         location_name = normalize_location_name(theatre_event.location)
         
@@ -437,7 +437,7 @@ async def add_new_event_via_queue(
                 "source_parsing: no drafts returned title=%s",
                 theatre_event.title,
             )
-            return None
+            return None, False
         
         draft = drafts[0]
         
@@ -446,6 +446,12 @@ async def add_new_event_via_queue(
             draft.date = theatre_event.parsed_date
         if theatre_event.parsed_time:
             draft.time = theatre_event.parsed_time
+            
+        # Override prices if available
+        if theatre_event.ticket_price_min is not None:
+            draft.ticket_price_min = theatre_event.ticket_price_min
+        if theatre_event.ticket_price_max is not None:
+            draft.ticket_price_max = theatre_event.ticket_price_max
         
         draft.venue = location_name
         draft.ticket_link = theatre_event.url
@@ -466,10 +472,20 @@ async def add_new_event_via_queue(
             upsert_event_posters = main_mod.upsert_event_posters
             assign_event_topics = main_mod.assign_event_topics
             
-            # Build Event object - use LLM-generated short description if available
+            # Build final description - should come from LLM (short_description)
+            # If LLM didn't return it, use title as fallback and log warning
+            final_description = draft.description
+            if not final_description:
+                logger.warning(
+                    "source_parsing: LLM returned empty short_description title=%s",
+                    theatre_event.title[:50],
+                )
+                final_description = draft.title
+            
+            # Build Event object
             event = Event(
                 title=draft.title,
-                description=(draft.description or full_description),  # Prefer LLM short description
+                description=final_description,
                 festival=(draft.festival or None),
                 date=draft.date or datetime.now(timezone.utc).date().isoformat(),
                 time=draft.time or "00:00",
@@ -478,7 +494,7 @@ async def add_new_event_via_queue(
                 city=draft.city or None,
                 ticket_price_min=draft.ticket_price_min,
                 ticket_price_max=draft.ticket_price_max,
-                ticket_link=(draft.links[0] if draft.links else theatre_event.url),
+                ticket_link=theatre_event.url,  # Always use parser URL, not LLM links
                 event_type=draft.event_type or None,
                 emoji=draft.emoji or None,
                 end_date=draft.end_date or None,

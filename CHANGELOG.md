@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+- **Source Parsing**: Исправлено формирование `short_description` для событий из `/parse`. Усилен промпт LLM — добавлены подробные правила генерации `short_description` (REQUIRED поле, one-sentence summary с примерами). Убран fallback на `full_description` (многострочный текст), fallback на title используется только в крайнем случае с логированием warning.
+
+
 ## [1.6.9] - 2026-01-01
 
 ### Changed
