@@ -297,30 +297,38 @@ async def _download_kaggle_results(
 ) -> list[dict]:
     output_dir = Path(tempfile.gettempdir()) / f"preview3d-{session_id}"
     output_dir.mkdir(parents=True, exist_ok=True)
-    files = await asyncio.to_thread(
-        client.download_kernel_output,
-        kernel_ref,
-        path=str(output_dir),
-        force=True,
-    )
-    output_path = None
-    for name in files:
-        if Path(name).name == "output.json":
-            output_path = output_dir / name
-            break
-    if not output_path:
+    for attempt in range(1, 4):
+        files = await asyncio.to_thread(
+            client.download_kernel_output,
+            kernel_ref,
+            path=str(output_dir),
+            force=True,
+        )
+        output_path = None
         for name in files:
-            path = output_dir / name
-            if path.suffix.lower() == ".json":
-                output_path = path
+            if Path(name).name == "output.json":
+                output_path = output_dir / name
                 break
-    if not output_path or not output_path.exists():
-        raise RuntimeError("output.json not found in Kaggle output")
-    output_data = json.loads(output_path.read_text(encoding="utf-8"))
-    results = output_data.get("results")
-    if not isinstance(results, list):
-        raise RuntimeError("Invalid output.json format: missing results")
-    return results
+        if output_path and output_path.exists():
+            output_data = json.loads(output_path.read_text(encoding="utf-8"))
+            results = output_data.get("results")
+            if not isinstance(results, list):
+                raise RuntimeError("Invalid output.json format: missing results")
+            return results
+        if files:
+            logger.warning(
+                "output.json not found in Kaggle output (attempt %s/3). Files: %s",
+                attempt,
+                sorted(files),
+            )
+        else:
+            logger.warning(
+                "output.json not found in Kaggle output (attempt %s/3). No files returned.",
+                attempt,
+            )
+        if attempt < 3:
+            await asyncio.sleep(5)
+    raise RuntimeError("output.json not found in Kaggle output after 3 attempts")
 
 
 async def _run_kaggle_render(

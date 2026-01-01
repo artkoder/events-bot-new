@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [1.6.4] - 2026-01-01
+
+### Fixed
+- **3D Preview**: Added 3 retry attempts for downloading output.json from Kaggle (handles API race conditions).
+
 ## [1.6.3] - 2026-01-01
 
 ### Fixed
