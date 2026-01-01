@@ -15,10 +15,17 @@ from typing import Optional, Sequence
 logger = logging.getLogger(__name__)
 
 # Location name mappings from source to database
+TRETYAKOV_LOCATION = "Филиал Третьяковской галереи, Парадная наб. 3, #Калининград"
+
 LOCATION_MAPPINGS = {
     "кафедральный собор": "Кафедральный собор",
     "драматический театр": "Драматический театр",
     "музыкальный театр": "Музыкальный театр",
+    "третьяков": TRETYAKOV_LOCATION,
+    "третяков": TRETYAKOV_LOCATION,
+    "tretyakov": TRETYAKOV_LOCATION,
+    "атриум": TRETYAKOV_LOCATION,
+    "кинозал": TRETYAKOV_LOCATION,
 }
 
 # Russian month names for date parsing
@@ -235,12 +242,22 @@ def parse_theatre_json(json_data: str | list | dict, source_name: str = "") -> l
             continue
         
         date_raw = item.get("date_raw", "")
-        parsed_date, parsed_time = parse_date_raw(date_raw)
+        
+        # Use pre-parsed date/time if available (e.g. from specific parsers)
+        if item.get("parsed_date"):
+            parsed_date = item.get("parsed_date")
+            parsed_time = item.get("parsed_time")
+        else:
+            parsed_date, parsed_time = parse_date_raw(date_raw)
         
         # Map ticket status
         raw_status = item.get("ticket_status", "").lower()
         ticket_status = "available" if raw_status == "available" else "sold_out" if raw_status in ("sold_out", "soldout", "sold out") else "unknown"
         
+        location = item.get("location", "") or ""
+        if source_name.lower() == "tretyakov" and not location:
+            location = TRETYAKOV_LOCATION
+
         event = TheatreEvent(
             title=title,
             date_raw=date_raw,
@@ -249,7 +266,7 @@ def parse_theatre_json(json_data: str | list | dict, source_name: str = "") -> l
             photos=item.get("photos", []) or [],
             description=item.get("description", "") or "",
             pushkin_card=bool(item.get("pushkin_card", False)),
-            location=item.get("location", "") or "",
+            location=location,
             age_restriction=item.get("age_restriction", "") or "",
             scene=item.get("scene", "") or "",
             source_type=source_name,

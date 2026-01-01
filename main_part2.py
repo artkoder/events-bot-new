@@ -1,4 +1,5 @@
 import logging
+import os
 import re
 import asyncio
 import time as _time
@@ -156,15 +157,25 @@ def event_to_nodes(
     from telegraph.utils import html_to_nodes
 
     nodes = []
-    if show_image and e.photo_urls:
-        first_url = e.photo_urls[0]
-        if isinstance(first_url, str):
-            first_url = first_url.strip()
-        if isinstance(first_url, str) and first_url.startswith("http"):
+    # Show 3D preview as main image if available, otherwise use first photo
+    if show_image:
+        preview_url = getattr(e, "preview_3d_url", None)
+        if preview_url and isinstance(preview_url, str) and preview_url.startswith("http"):
+            # Use 3D preview as main image
             nodes.append({
                 "tag": "figure",
-                "children": [{"tag": "img", "attrs": {"src": first_url}, "children": []}]
+                "children": [{"tag": "img", "attrs": {"src": preview_url}, "children": []}]
             })
+        elif e.photo_urls:
+            # Fallback to first photo
+            first_url = e.photo_urls[0]
+            if isinstance(first_url, str):
+                first_url = first_url.strip()
+            if isinstance(first_url, str) and first_url.startswith("http"):
+                nodes.append({
+                    "tag": "figure",
+                    "children": [{"tag": "img", "attrs": {"src": first_url}, "children": []}]
+                })
     nodes.append({"tag": "h4", "children": event_title_nodes(e)})
     fest = festival if show_festival else None
     if fest is None and show_festival and e.festival:
@@ -13909,6 +13920,7 @@ def create_app() -> web.Application:
     set_db(db)  # Set db in main.py's namespace for handlers
     dp.include_router(special_router)  # must be after db init
     import video_announce.handlers as video_handlers
+    import preview_3d.handlers as preview_3d_handlers
 
     async def start_wrapper(message: types.Message):
         await handle_start(message, db, bot)
@@ -14108,6 +14120,12 @@ def create_app() -> web.Application:
 
     async def video_payload_wrapper(message: types.Message):
         await video_handlers.handle_payload_import_message(message, db, bot)
+
+    async def preview_3di_wrapper(message: types.Message):
+        await preview_3d_handlers.handle_3di_command(message, db, bot)
+
+    async def preview_3di_cb_wrapper(callback: types.CallbackQuery):
+        await preview_3d_handlers.handle_3di_callback(callback, db, bot)
 
     async def edit_message_wrapper(message: types.Message):
         await handle_edit_message(message, db, bot)
@@ -14326,6 +14344,7 @@ def create_app() -> web.Application:
     dp.message.register(requests_wrapper, Command("requests"))
     dp.message.register(kaggle_test_wrapper, Command("kaggletest"))
     dp.message.register(video_cmd_wrapper, Command("v"))
+    dp.message.register(preview_3di_wrapper, Command("3di"))
     dp.message.register(usage_test_wrapper, Command("usage_test"))
     dp.callback_query.register(
         callback_wrapper,
@@ -14377,6 +14396,9 @@ def create_app() -> web.Application:
     )
     dp.callback_query.register(
         video_cb_wrapper, lambda c: c.data and c.data.startswith("vid")
+    )
+    dp.callback_query.register(
+        preview_3di_cb_wrapper, lambda c: c.data and c.data.startswith("3di:")
     )
     dp.callback_query.register(
         festmerge_do_wrapper, lambda c: c.data and c.data.startswith("festmerge_do:")

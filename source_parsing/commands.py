@@ -10,6 +10,8 @@ import logging
 import os
 from functools import partial
 
+import asyncio
+
 from aiogram import Bot, types
 from aiogram.filters import Command
 
@@ -19,6 +21,7 @@ from source_parsing.handlers import (
     run_source_parsing,
     format_parsing_report,
     escape_md,
+    run_diagnostic_parse,
 )
 
 logger = logging.getLogger(__name__)
@@ -31,6 +34,7 @@ def _format_added_events_lines(added_events) -> list[str]:
         "dramteatr": "Драмтеатр",
         "muzteatr": "Музтеатр",
         "sobor": "Собор",
+        "tretyakov": "Третьяковка",
     }
     lines = [f"📌 **Добавленные события:** {len(added_events)}", ""]
     for item in added_events:
@@ -72,6 +76,27 @@ def _chunk_lines(lines: list[str], max_len: int = MAX_TG_MESSAGE_LEN) -> list[st
     return chunks
 
 
+async def handle_parse_check_callback(callback_query: types.CallbackQuery, bot: Bot) -> None:
+    """Handle callback for diagnostic parse selection."""
+    source_map = {
+        "parse_check_dramteatr": "dramteatr",
+        "parse_check_muzteatr": "muzteatr",
+        "parse_check_sobor": "sobor",
+        "parse_check_tretyakov": "tretyakov",
+    }
+    source = source_map.get(callback_query.data)
+    if not source:
+        await callback_query.answer("Неизвестный источник")
+        return
+        
+    await callback_query.answer()
+    
+    # Run diagnostic parse in background
+    asyncio.create_task(
+        run_diagnostic_parse(bot, callback_query.from_user.id, source)
+    )
+
+
 async def handle_parse_command(message: types.Message, db: Database, bot: Bot) -> None:
     """Handle /parse command to manually trigger source parsing from theatres."""
     logger.info("source_parsing: /parse command received from user_id=%s", message.from_user.id)
@@ -82,12 +107,38 @@ async def handle_parse_command(message: types.Message, db: Database, bot: Bot) -
         logger.warning("source_parsing: access denied user_id=%s", message.from_user.id)
         await bot.send_message(message.chat.id, "Access denied")
         return
+        
+    # Check for arguments (e.g. "/parse check")
+    args = ""
+    if message.text:
+        parts = message.text.split(maxsplit=1)
+        if len(parts) > 1:
+            args = parts[1].strip().lower()
+            
+    if args == "check":
+        keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
+            [
+                types.InlineKeyboardButton(text="Драмтеатр", callback_data="parse_check_dramteatr"),
+                types.InlineKeyboardButton(text="Музтеатр", callback_data="parse_check_muzteatr"),
+            ],
+            [
+                types.InlineKeyboardButton(text="Собор", callback_data="parse_check_sobor"),
+                types.InlineKeyboardButton(text="Третьяковка", callback_data="parse_check_tretyakov"),
+            ]
+        ])
+        await bot.send_message(
+            message.chat.id,
+            "🛠 **Диагностический режим**\nВыберите источник для тестового запуска (без сохранения в БД):",
+            reply_markup=keyboard,
+            parse_mode="Markdown"
+        )
+        return
     
     logger.info("source_parsing: starting parse for user_id=%s", message.from_user.id)
     
     await bot.send_message(
         message.chat.id,
-        "🔄 Запуск парсинга источников (Драмтеатр, Музтеатр, Кафедральный собор)..."
+        "🔄 Запуск парсинга источников (Драмтеатр, Музтеатр, Кафедральный собор, Третьяковка)..."
     )
     
     try:
@@ -186,4 +237,10 @@ def register_parse_command(dp, db: Database, bot: Bot) -> None:
     """
     parse_wrapper = partial(handle_parse_command, db=db, bot=bot)
     dp.message.register(parse_wrapper, Command("parse"))
-    logger.info("source_parsing: registered /parse command")
+    
+    # Register diagnostic callbacks
+    callback_wrapper = partial(handle_parse_check_callback, bot=bot)
+    # Using lambda to filter callbacks
+    dp.callback_query.register(callback_wrapper, lambda c: c.data and c.data.startswith("parse_check_"))
+    
+    logger.info("source_parsing: registered /parse command and diagnostic callbacks")

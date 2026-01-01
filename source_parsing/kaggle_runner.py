@@ -30,6 +30,7 @@ async def run_kaggle_kernel(
     timeout_minutes: int = 30,
     poll_interval: int = 30,
     status_callback: Callable[[str, str, dict | None], Awaitable[None]] | None = None,
+    run_config: dict[str, Any] | None = None,
 ) -> tuple[str, list[str], float]:
     """Run the Kaggle kernel and wait for completion.
     
@@ -83,14 +84,60 @@ async def run_kaggle_kernel(
     await _notify("prepare")
     
     logger.info(
-        "theatres_kaggle: pushing kernel folder=%s ref=%s",
+        "theatres_kaggle: pushing kernel folder=%s ref=%s config=%s",
         kernel_folder,
         kernel_ref,
+        run_config,
     )
     
     # Push kernel to Kaggle
     try:
-        client.push_kernel(kernel_path=kernel_path)
+        if run_config:
+            # Inject config by modifying the notebook code directly
+            # (Kaggle push doesn't upload auxiliary files reliably for notebooks)
+            import shutil
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                tmp_path = Path(tmp_dir)
+                
+                # Copy all files first
+                for item in kernel_path.iterdir():
+                    dest = tmp_path / item.name
+                    if item.is_dir():
+                        shutil.copytree(item, dest)
+                    else:
+                        shutil.copy2(item, dest)
+                
+                # Find and modify the notebook file
+                notebook_files = list(tmp_path.glob("*.ipynb"))
+                if notebook_files:
+                    nb_path = notebook_files[0]
+                    try:
+                        nb_content = json.loads(nb_path.read_text(encoding="utf-8"))
+                        target = run_config.get("target_source", "all")
+                        
+                        # Modify the code in the first code cell
+                        # We look for 'target = "all"' initialization in main()
+                        for cell in nb_content.get("cells", []):
+                            if cell.get("cell_type") == "code":
+                                source_lines = cell.get("source", [])
+                                new_source = []
+                                for line in source_lines:
+                                    if 'target = "all"' in line and 'config.get' not in line:
+                                        # Replace default init with our target
+                                        new_source.append(f'    target = "{target}"\n')
+                                    else:
+                                        new_source.append(line)
+                                cell["source"] = new_source
+                                break  # Only modify the first code cell
+                        
+                        nb_path.write_text(json.dumps(nb_content, indent=1), encoding="utf-8")
+                        logger.info("theatres_kaggle: injected target=%s into notebook", target)
+                    except Exception as e:
+                        logger.error("theatres_kaggle: failed to inject config: %s", e)
+                
+                client.push_kernel(kernel_path=tmp_path)
+        else:
+            client.push_kernel(kernel_path=kernel_path)
     except Exception as e:
         logger.error("theatres_kaggle: push failed: %s", e)
         await _notify("push_failed")

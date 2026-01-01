@@ -1068,3 +1068,94 @@ async def process_source_events(
         )
     
     return stats, progress_message_id
+async def run_diagnostic_parse(
+    bot: Bot,
+    chat_id: int,
+    source: str,
+) -> None:
+    """Run diagnostic parse for a specific source and send result JSON.
+    
+    Args:
+        bot: Bot instance
+        chat_id: Chat ID to send results to
+        source: Source identifier (dramteatr, muzteatr, sobor, tretyakov, or all)
+    """
+    from aiogram.types import FSInputFile
+    
+    await bot.send_message(
+        chat_id,
+        f"🔍 Запуск диагностического парсинга: {source}...\nПожалуйста, подождите (около 2-5 минут)."
+    )
+    
+    start_time = time.time()
+    kaggle_status_message_id: int | None = None
+    kaggle_kernel_ref = ""
+
+    async def _update_kaggle_status(
+        phase: str,
+        kernel_ref: str,
+        status: dict | None,
+    ) -> None:
+        nonlocal kaggle_status_message_id, kaggle_kernel_ref
+        kaggle_kernel_ref = kernel_ref or kaggle_kernel_ref
+        
+        text = _format_kaggle_status_message(phase, kernel_ref, status)
+        try:
+            if kaggle_status_message_id is None:
+                sent = await bot.send_message(chat_id, text)
+                kaggle_status_message_id = sent.message_id
+            else:
+                await bot.edit_message_text(
+                    text=text,
+                    chat_id=chat_id,
+                    message_id=kaggle_status_message_id,
+                )
+        except Exception:
+            pass
+
+    # Run kernel with config
+    status, output_files, duration = await run_kaggle_kernel(
+        status_callback=_update_kaggle_status,
+        run_config={"target_source": source}
+    )
+    
+    if status != "complete":
+        await bot.send_message(chat_id, f"❌ Ошибка запуска: статус {status}")
+        return
+
+    # Find the specific JSON file
+    target_filename = f"{source}.json"
+    target_path = None
+    
+    # If source is 'tretyakov', look for 'tretyakov.json' etc.
+    # Note: notebook saves lowercase filenames
+    
+    found_files = []
+    
+    for fpath in output_files:
+        path = Path(fpath)
+        if path.name == target_filename:
+            target_path = fpath
+        if path.suffix == ".json":
+            found_files.append(path)
+            
+    if target_path and Path(target_path).exists():
+        await bot.send_document(
+            chat_id,
+            FSInputFile(target_path),
+            caption=f"✅ Диагностика {source} завершена за {duration:.1f}с.\nРезультат в файле."
+        )
+    elif found_files:
+        # If exact match not found but other JSONs exist (maybe naming mismatch), send them
+        await bot.send_message(chat_id, f"⚠️ Файл {target_filename} не найден, отправляю найденные JSON:")
+        for fpath in found_files:
+             await bot.send_document(
+                chat_id,
+                FSInputFile(fpath),
+                caption=f"📄 {fpath.name}"
+            )
+    else:
+        await bot.send_message(
+            chat_id, 
+            f"⚠️ Файл {target_filename} не найден в результатах.\nСтатус: {status}\nФайлы: {len(output_files)}"
+        )
