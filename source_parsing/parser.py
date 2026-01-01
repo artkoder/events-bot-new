@@ -138,6 +138,10 @@ class TheatreEvent:
     # Parsed date/time
     parsed_date: Optional[str] = None  # ISO format YYYY-MM-DD
     parsed_time: Optional[str] = None  # HH:MM format
+    
+    # Prices
+    ticket_price_min: Optional[int] = None
+    ticket_price_max: Optional[int] = None
 
 
 def parse_date_raw(date_raw: str) -> tuple[Optional[str], Optional[str]]:
@@ -271,7 +275,9 @@ def parse_theatre_json(json_data: str | list | dict, source_name: str = "") -> l
             scene=item.get("scene", "") or "",
             source_type=source_name,
             parsed_date=parsed_date,
-            parsed_time=parsed_time or "00:00",
+            parsed_time=parsed_time,
+            ticket_price_min=item.get("ticket_price_min"),
+            ticket_price_max=item.get("ticket_price_max"),
         )
         events.append(event)
     

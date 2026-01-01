@@ -13,7 +13,7 @@ NEW_TRETYAKOV_CODE = r'''
 # ==========================================
 
 BASE_URL_TRETYAKOV = "https://kaliningrad.tretyakovgallery.ru"
-MAX_EVENTS_TO_PROCESS = 10  # Limit for testing
+MAX_EVENTS_TO_PROCESS = 1000  # Production limit
 MAX_DATE_TIME_COMBOS = 30
 
 MONTHS_RU = {
@@ -102,9 +102,17 @@ async def scrape_tretyakov_events_list(page):
 
 
 async def scrape_tretyakov_detail(page, detail_url):
-    """Visit detail page for title and description."""
+    """Visit detail page for title, description, AND date/time.
+    
+    CRITICAL: For Pianissimo festival events, each performer has their own
+    detail page with the correct date (e.g. "6 февраля в 20:00"). The shared
+    ticket widget shows all festival dates, which caused phantom events.
+    """
+    import re
+    import datetime
+    
     if not detail_url:
-        return {"title": None, "description": None}
+        return {"title": None, "description": None, "parsed_date": None, "parsed_time": None}
     
     full_url = f"{BASE_URL_TRETYAKOV}{detail_url}" if detail_url.startswith('/') else detail_url
     print(f"   📄 Detail: {full_url}")
@@ -126,10 +134,52 @@ async def scrape_tretyakov_detail(page, detail_url):
                 description = text[:500]
                 break
         
-        return {"title": title, "description": description}
+        # Extract date and time from page text
+        # Pattern: "6 февраля в 20:00" or "6 февраля, в 20:00"
+        body_text = await page.inner_text("body")
+        parsed_date = None
+        parsed_time = None
+        today = datetime.date.today()
+        fallback = None
+        
+        for match in re.finditer(r'(\d{1,2})\s+([а-яё]+)\s*,?\s*(?:в|В)\s*(\d{1,2}:\d{2})', body_text, re.IGNORECASE):
+            day = int(match.group(1))
+            month_name = match.group(2).lower().strip('.,')
+            time_str = match.group(3)
+            
+            month_num = MONTHS_RU.get(month_name)
+            if not month_num:
+                continue
+            
+            year = today.year
+            # Handle year rollover
+            if today.month >= 10 and month_num < 3:
+                year += 1
+            
+            try:
+                date_obj = datetime.date(year, month_num, day)
+            except ValueError:
+                continue
+            
+            if date_obj >= today:
+                parsed_date = date_obj.isoformat()
+                parsed_time = time_str
+                break
+            
+            if fallback is None:
+                fallback = (date_obj, time_str)
+        
+        if not parsed_date and fallback:
+            parsed_date = fallback[0].isoformat()
+            parsed_time = fallback[1]
+        
+        if parsed_date and parsed_time:
+            print(f"      📅 Detail page date: {parsed_date} {parsed_time}")
+        
+        return {"title": title, "description": description, "parsed_date": parsed_date, "parsed_time": parsed_time}
     except Exception as e:
         print(f"      ⚠️ Detail error: {e}")
-        return {"title": None, "description": None}
+        return {"title": None, "description": None, "parsed_date": None, "parsed_time": None}
 
 
 async def scrape_tretyakov_tickets(page, ticket_url):
@@ -255,48 +305,138 @@ async def run_tretyakov(browser):
     for idx, event in enumerate(events_raw):
         print(f"\n📌 [{idx+1}/{len(events_raw)}] {event['title_raw'][:50]}...")
         
-        # Get title and description from detail page
+        # Clean ticket_url
+        raw_url = event['ticket_url']
+        # 1. Remove absolute prefix if present
+        if raw_url.startswith(BASE_URL_TRETYAKOV):
+            raw_url = raw_url[len(BASE_URL_TRETYAKOV):]
+        elif raw_url.startswith('http'):
+            # External or other domain, keep as is but careful with base concatenation
+            pass
+            
+        # 2. Remove trailing date/time components (e.g. /2026-01-07/20:00:00)
+        # Regex for /YYYY-MM-DD/HH:MM:SS or /YYYY-MM-DD/HH:MM
+        import re
+        clean_url = re.sub(r'/\d{4}-\d{2}-\d{2}/\d{2}:\d{2}(:\d{2})?$', '', raw_url)
+        clean_url = re.sub(r'/\d{4}-\d{2}-\d{2}/\d{2}:\d{2}(:\d{2})?$', '', clean_url) # Safety repeat
+        
+        # Use cleaned URL for processing
+        print(f"   🔗 Url: {clean_url}")
+        
+        # Get title, description, AND date from detail page
         detail = await scrape_tretyakov_detail(detail_page, event.get('detail_url'))
         title = detail['title'] or event['title_raw']
         description = detail['description']
-        
-        # Get dates/times/prices from ticket page
-        entries = await scrape_tretyakov_tickets(ticket_page, event['ticket_url'])
+        detail_date = detail.get('parsed_date')
+        detail_time = detail.get('parsed_time')
         
         photo = event['photo']
         if photo and photo.startswith('/'):
             photo = f"{BASE_URL_TRETYAKOV}{photo}"
         
-        if not entries:
+        # CRITICAL FIX: If detail page has date, USE IT as authoritative source
+        # This fixes Pianissimo bug where shared ticket widget showed wrong dates
+        if detail_date and detail_time:
+            print(f"      ✅ Using detail page date: {detail_date} {detail_time}")
+            
+            # Construct URL with detail page date
+            base = clean_url
+            if base.startswith('/'):
+                base = f"{BASE_URL_TRETYAKOV}{base}"
+            direct_url = f"{base}/{detail_date}/{detail_time}:00"
+            
+            # Get price from ticket widget for this specific date
+            # (optional - we can try to verify if this date exists in widget)
+            price = None
+            status = "unknown"
+            try:
+                entries = await scrape_tretyakov_tickets(ticket_page, clean_url)
+                def normalize_time(value):
+                    if not value:
+                        return value
+                    parts = value.split(':')
+                    if len(parts) != 2:
+                        return value
+                    try:
+                        return f"{int(parts[0]):02d}:{int(parts[1]):02d}"
+                    except ValueError:
+                        return value
+                
+                target_time = normalize_time(detail_time)
+                for e in entries:
+                    if e['parsed_date'] == detail_date and normalize_time(e['parsed_time']) == target_time:
+                        price = e['ticket_price_min']
+                        status = e['ticket_status']
+                        break
+            except:
+                pass
+            
+            # Format date_raw
+            day = int(detail_date.split('-')[2])
+            month_num = int(detail_date.split('-')[1])
+            month_names = {1: 'января', 2: 'февраля', 3: 'марта', 4: 'апреля', 5: 'мая', 6: 'июня',
+                          7: 'июля', 8: 'августа', 9: 'сентября', 10: 'октября', 11: 'ноября', 12: 'декабря'}
+            date_raw = f"{day} {month_names.get(month_num, '')} в {detail_time}"
+            
             all_events.append({
                 "title": title,
                 "description": description,
-                "date_raw": "",
-                "parsed_date": None,
-                "parsed_time": None,
-                "ticket_status": "unknown",
-                "ticket_price_min": None,
-                "ticket_price_max": None,
-                "url": f"{BASE_URL_TRETYAKOV}{event['ticket_url']}",
+                "date_raw": date_raw,
+                "parsed_date": detail_date,
+                "parsed_time": detail_time,
+                "ticket_status": status,
+                "ticket_price_min": price,
+                "ticket_price_max": price,
+                "url": direct_url,
                 "photos": [photo] if photo else [],
                 "location": event['location'],
+                "scene": event['location'] if event['location'] in ["Атриум", "Кинозал"] else ""
             })
         else:
-            for e in entries:
-                direct_url = f"{BASE_URL_TRETYAKOV}{event['ticket_url']}/{e['parsed_date']}/{e['parsed_time']}:00"
+            # No detail page date - use ticket widget dates (original behavior)
+            entries = await scrape_tretyakov_tickets(ticket_page, clean_url)
+            
+            if not entries:
+                target_url = clean_url
+                if target_url.startswith('/'):
+                    target_url = f"{BASE_URL_TRETYAKOV}{target_url}"
+                    
                 all_events.append({
                     "title": title,
                     "description": description,
-                    "date_raw": e['date_raw'],
-                    "parsed_date": e['parsed_date'],
-                    "parsed_time": e['parsed_time'],
-                    "ticket_status": e['ticket_status'],
-                    "ticket_price_min": e['ticket_price_min'],
-                    "ticket_price_max": e['ticket_price_max'],
-                    "url": direct_url,
+                    "date_raw": "",
+                    "parsed_date": None,
+                    "parsed_time": None,
+                    "ticket_status": "unknown",
+                    "ticket_price_min": None,
+                    "ticket_price_max": None,
+                    "url": target_url,
                     "photos": [photo] if photo else [],
                     "location": event['location'],
+                    "scene": event['location'] if event['location'] in ["Атриум", "Кинозал"] else ""
                 })
+            else:
+                for e in entries:
+                    # Construct clean direct URL
+                    base = clean_url
+                    if base.startswith('/'):
+                        base = f"{BASE_URL_TRETYAKOV}{base}"
+                    
+                    direct_url = f"{base}/{e['parsed_date']}/{e['parsed_time']}:00"
+                    all_events.append({
+                        "title": title,
+                        "description": description,
+                        "date_raw": e['date_raw'],
+                        "parsed_date": e['parsed_date'],
+                        "parsed_time": e['parsed_time'],
+                        "ticket_status": e['ticket_status'],
+                        "ticket_price_min": e['ticket_price_min'],
+                        "ticket_price_max": e['ticket_price_max'],
+                        "url": direct_url,
+                        "photos": [photo] if photo else [],
+                        "location": event['location'],
+                        "scene": event['location'] if event['location'] in ["Атриум", "Кинозал"] else ""
+                    })
 
     print(f"\n🎉 [Третьяковка] Total: {len(all_events)} event entries")
     await context.close()

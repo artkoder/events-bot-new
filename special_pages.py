@@ -270,14 +270,24 @@ def group_events_for_special(
                     description = e.search_digest.strip()
                     break
         
-        # Photo URL: first valid photo
+        # Photo URL: prioritize 3D preview, then first valid photo
         photo_url = None
+        
+        # Check for 3D preview first
         for e in event_list:
-            if e.photo_urls:
-                url = e.photo_urls[0]
-                if isinstance(url, str) and url.startswith("http"):
-                    photo_url = url
-                    break
+            p_url = getattr(e, "preview_3d_url", None)
+            if p_url and isinstance(p_url, str) and p_url.startswith("http"):
+                photo_url = p_url
+                break
+        
+        # If no 3D preview, look for regular photos
+        if not photo_url:
+            for e in event_list:
+                if e.photo_urls:
+                    url = e.photo_urls[0]
+                    if isinstance(url, str) and url.startswith("http"):
+                        photo_url = url
+                        break
         
         # Link URL: telegraph_url > source_post_url
         link_url = None
