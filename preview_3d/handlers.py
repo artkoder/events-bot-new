@@ -391,110 +391,114 @@ async def _run_kaggle_render(
             await _set_session_status(
                 session_id, "download", bot=bot, chat_id=chat_id, message_id=message_id
             )
-            results = await _download_kaggle_results(client, kernel_ref, session_id)
-            await _set_session_status(
-                session_id, "apply_results", bot=bot, chat_id=chat_id, message_id=message_id
-            )
-            updated, errors, skipped = await update_previews_from_results(db, results)
-            updated_event_ids: list[int] = []
-            seen_event_ids: set[int] = set()
-            for result in results:
-                status = (result.get("status") or "").lower()
-                if status != "ok" or not result.get("preview_url"):
-                    continue
-                raw_event_id = result.get("event_id")
-                try:
-                    event_id = int(raw_event_id)
-                except (TypeError, ValueError):
-                    continue
-                if event_id in seen_event_ids:
-                    continue
-                seen_event_ids.add(event_id)
-                updated_event_ids.append(event_id)
-
-            updated_events: list[Event] = []
-            month_url: str | None = None
-            if updated_event_ids:
-                async with db.get_session() as session:
-                    result = await session.execute(
-                        select(Event).where(Event.id.in_(updated_event_ids))
-                    )
-                    updated_events = result.scalars().all()
-                    month_page = await session.get(MonthPage, month)
-                    if month_page and month_page.url:
-                        month_url = month_page.url
-            else:
-                async with db.get_session() as session:
-                    month_page = await session.get(MonthPage, month)
-                    if month_page and month_page.url:
-                        month_url = month_page.url
-
-            events_by_id = {event.id: event for event in updated_events}
-            ordered_events = [
-                events_by_id[event_id]
-                for event_id in updated_event_ids
-                if event_id in events_by_id
-            ]
-
-            schedule_tasks = None
+            output_dir = Path(tempfile.gettempdir()) / f"preview3d-{session_id}"
             try:
-                from main import schedule_event_update_tasks as schedule_tasks
-            except Exception:
-                try:
-                    from main_part2 import schedule_event_update_tasks as schedule_tasks
-                except Exception:
-                    logger.exception("3di: schedule_event_update_tasks import failed")
-                    schedule_tasks = None
-
-            if schedule_tasks:
-                for event in ordered_events:
-                    await schedule_tasks(db, event, skip_vk_sync=True)
-            session["status"] = "done"
-            if message_id:
-                lines = [
-                    f"🎨 <b>3D-превью: {month_label}</b>",
-                    "",
-                    f"📊 Событий: {event_count}",
-                    f"✅ Успешно: {updated}",
-                    f"⚠️ Ошибок: {errors}",
-                    f"⏭ Пропущено: {skipped}",
-                    f"⏱ Длительность: {duration:.1f}с",
-                    "",
-                ]
-                if month_url:
-                    lines.append(
-                        f"🔗 <a href=\"{html.escape(month_url)}\">Страница месяца</a>"
-                    )
-                else:
-                    lines.append("🔗 <i>Страница месяца не найдена</i>")
-                lines.append("")
-                lines.append("<b>Обновленные события:</b>")
-                listed_events = ordered_events[:5]
-                if listed_events:
-                    for idx, event in enumerate(listed_events, 1):
-                        title = html.escape(event.title)
-                        if event.telegraph_url:
-                            url = html.escape(event.telegraph_url)
-                            lines.append(f"{idx}. <a href=\"{url}\">{title}</a>")
-                        else:
-                            lines.append(f"{idx}. {title}")
-                    if len(ordered_events) > len(listed_events):
-                        lines.append(
-                            f"... и еще {len(ordered_events) - len(listed_events)}"
-                        )
-                else:
-                    lines.append("Нет обновленных событий.")
-                text = "\n".join(lines)
-                await bot.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=message_id,
-                    text=text,
-                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                        [InlineKeyboardButton(text="⬅️ Назад", callback_data="3di:back")],
-                        [InlineKeyboardButton(text="❌ Закрыть", callback_data="3di:close")],
-                    ]),
-                    parse_mode="HTML",
+                results = await _download_kaggle_results(client, kernel_ref, session_id)
+                await _set_session_status(
+                    session_id, "apply_results", bot=bot, chat_id=chat_id, message_id=message_id
                 )
+                updated, errors, skipped = await update_previews_from_results(db, results)
+                updated_event_ids: list[int] = []
+                seen_event_ids: set[int] = set()
+                for result in results:
+                    status = (result.get("status") or "").lower()
+                    if status != "ok" or not result.get("preview_url"):
+                        continue
+                    raw_event_id = result.get("event_id")
+                    try:
+                        event_id = int(raw_event_id)
+                    except (TypeError, ValueError):
+                        continue
+                    if event_id in seen_event_ids:
+                        continue
+                    seen_event_ids.add(event_id)
+                    updated_event_ids.append(event_id)
+
+                updated_events: list[Event] = []
+                month_url: str | None = None
+                if updated_event_ids:
+                    async with db.get_session() as session:
+                        result = await session.execute(
+                            select(Event).where(Event.id.in_(updated_event_ids))
+                        )
+                        updated_events = result.scalars().all()
+                        month_page = await session.get(MonthPage, month)
+                        if month_page and month_page.url:
+                            month_url = month_page.url
+                else:
+                    async with db.get_session() as session:
+                        month_page = await session.get(MonthPage, month)
+                        if month_page and month_page.url:
+                            month_url = month_page.url
+
+                events_by_id = {event.id: event for event in updated_events}
+                ordered_events = [
+                    events_by_id[event_id]
+                    for event_id in updated_event_ids
+                    if event_id in events_by_id
+                ]
+
+                schedule_tasks = None
+                try:
+                    from main import schedule_event_update_tasks as schedule_tasks
+                except Exception:
+                    try:
+                        from main_part2 import schedule_event_update_tasks as schedule_tasks
+                    except Exception:
+                        logger.exception("3di: schedule_event_update_tasks import failed")
+                        schedule_tasks = None
+
+                if schedule_tasks:
+                    for event in ordered_events:
+                        await schedule_tasks(db, event, skip_vk_sync=True)
+                session["status"] = "done"
+                if message_id:
+                    lines = [
+                        f"🎨 <b>3D-превью: {month_label}</b>",
+                        "",
+                        f"📊 Событий: {event_count}",
+                        f"✅ Успешно: {updated}",
+                        f"⚠️ Ошибок: {errors}",
+                        f"⏭ Пропущено: {skipped}",
+                        f"⏱ Длительность: {duration:.1f}с",
+                        "",
+                    ]
+                    if month_url:
+                        lines.append(
+                            f"🔗 <a href=\"{html.escape(month_url)}\">Страница месяца</a>"
+                        )
+                    else:
+                        lines.append("🔗 <i>Страница месяца не найдена</i>")
+                    lines.append("")
+                    lines.append("<b>Обновленные события:</b>")
+                    listed_events = ordered_events[:5]
+                    if listed_events:
+                        for idx, event in enumerate(listed_events, 1):
+                            title = html.escape(event.title)
+                            if event.telegraph_url:
+                                url = html.escape(event.telegraph_url)
+                                lines.append(f"{idx}. <a href=\"{url}\">{title}</a>")
+                            else:
+                                lines.append(f"{idx}. {title}")
+                        if len(ordered_events) > len(listed_events):
+                            lines.append(
+                                f"... и еще {len(ordered_events) - len(listed_events)}"
+                            )
+                    else:
+                        lines.append("Нет обновленных событий.")
+                    text = "\n".join(lines)
+                    await bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=message_id,
+                        text=text,
+                        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                            [InlineKeyboardButton(text="⬅️ Назад", callback_data="3di:back")],
+                            [InlineKeyboardButton(text="❌ Закрыть", callback_data="3di:close")],
+                        ]),
+                        parse_mode="HTML",
+                    )
+            finally:
+                shutil.rmtree(output_dir, ignore_errors=True)
     except Exception as exc:
         session["status"] = "error"
         session["error"] = str(exc)

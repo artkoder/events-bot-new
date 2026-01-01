@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [1.6.6] - 2026-01-01
+
+### Performance
+- **3D Preview**:
+  - Notebook now cleans up Blender binaries and input files before completion, leaving only `output.json`. This dramatically speeds up the result download (from minutes to seconds) and prevents timeouts.
+  - Handler now actively cleans up temporary download directories in `/tmp` to save disk space.
+
 ## [1.6.5] - 2026-01-01
 
 ### Fixed
