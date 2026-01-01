@@ -32,7 +32,7 @@ MONTHS_RU = {
 }
 MAX_IMAGES_PER_EVENT = 7
 KAGGLE_KERNEL_FOLDER = "Preview3D"
-KAGGLE_DATASET_SLUG = "preview3d-dataset"
+KAGGLE_DATASET_SLUG_PREFIX = "preview3d"
 KAGGLE_POLL_INTERVAL_SECONDS = 20
 KAGGLE_TIMEOUT_SECONDS = 30 * 60
 KAGGLE_STARTUP_WAIT_SECONDS = 10
@@ -115,7 +115,8 @@ def _require_kaggle_username() -> str:
 
 async def _create_preview3d_dataset(payload: dict, session_id: int) -> str:
     username = _require_kaggle_username()
-    dataset_id = f"{username}/{KAGGLE_DATASET_SLUG}"
+    dataset_slug = f"{KAGGLE_DATASET_SLUG_PREFIX}-{session_id}"
+    dataset_id = f"{username}/{dataset_slug}"
     meta = {
         "title": f"Preview 3D Payload {session_id}",
         "id": dataset_id,
