@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [1.6.5] - 2026-01-01
+
+### Fixed
+- **3D Preview**:
+  - Increased output download retry limit to 10 attempts (50s total timeout).
+  - Implemented automatic Month Page rebuild triggering after 3D preview application.
+  - Added detailed final report in Telegram with links to the updated month page and events.
+
 ## [1.6.4] - 2026-01-01
 
 ### Fixed

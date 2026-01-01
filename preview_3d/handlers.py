@@ -18,7 +18,7 @@ from aiogram import types
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from db import Database
-from models import Event, User
+from models import Event, MonthPage, User
 from sqlmodel import select
 from video_announce.kaggle_client import KaggleClient, KERNELS_ROOT_PATH
 
@@ -297,7 +297,8 @@ async def _download_kaggle_results(
 ) -> list[dict]:
     output_dir = Path(tempfile.gettempdir()) / f"preview3d-{session_id}"
     output_dir.mkdir(parents=True, exist_ok=True)
-    for attempt in range(1, 4):
+    max_attempts = 10
+    for attempt in range(1, max_attempts + 1):
         files = await asyncio.to_thread(
             client.download_kernel_output,
             kernel_ref,
@@ -317,18 +318,22 @@ async def _download_kaggle_results(
             return results
         if files:
             logger.warning(
-                "output.json not found in Kaggle output (attempt %s/3). Files: %s",
+                "output.json not found in Kaggle output (attempt %s/%s). Files: %s",
                 attempt,
+                max_attempts,
                 sorted(files),
             )
         else:
             logger.warning(
-                "output.json not found in Kaggle output (attempt %s/3). No files returned.",
+                "output.json not found in Kaggle output (attempt %s/%s). No files returned.",
                 attempt,
+                max_attempts,
             )
-        if attempt < 3:
+        if attempt < max_attempts:
             await asyncio.sleep(5)
-    raise RuntimeError("output.json not found in Kaggle output after 3 attempts")
+    raise RuntimeError(
+        f"output.json not found in Kaggle output after {max_attempts} attempts"
+    )
 
 
 async def _run_kaggle_render(
@@ -343,7 +348,13 @@ async def _run_kaggle_render(
     if not session:
         return
     message_id = session.get("message_id")
-    month_name = MONTHS_RU.get(int(month.split("-")[1]), month)
+    try:
+        year = month.split("-")[0]
+        month_number = int(month.split("-")[1])
+    except (AttributeError, IndexError, ValueError, TypeError):
+        month_label = month
+    else:
+        month_label = f"{MONTHS_RU.get(month_number, month)} {year}"
     event_count = session.get("event_count", len(payload.get("events", [])))
     try:
         if _preview3d_lock.locked():
@@ -385,16 +396,95 @@ async def _run_kaggle_render(
                 session_id, "apply_results", bot=bot, chat_id=chat_id, message_id=message_id
             )
             updated, errors, skipped = await update_previews_from_results(db, results)
+            updated_event_ids: list[int] = []
+            seen_event_ids: set[int] = set()
+            for result in results:
+                status = (result.get("status") or "").lower()
+                if status != "ok" or not result.get("preview_url"):
+                    continue
+                raw_event_id = result.get("event_id")
+                try:
+                    event_id = int(raw_event_id)
+                except (TypeError, ValueError):
+                    continue
+                if event_id in seen_event_ids:
+                    continue
+                seen_event_ids.add(event_id)
+                updated_event_ids.append(event_id)
+
+            updated_events: list[Event] = []
+            month_url: str | None = None
+            if updated_event_ids:
+                async with db.get_session() as session:
+                    result = await session.execute(
+                        select(Event).where(Event.id.in_(updated_event_ids))
+                    )
+                    updated_events = result.scalars().all()
+                    month_page = await session.get(MonthPage, month)
+                    if month_page and month_page.url:
+                        month_url = month_page.url
+            else:
+                async with db.get_session() as session:
+                    month_page = await session.get(MonthPage, month)
+                    if month_page and month_page.url:
+                        month_url = month_page.url
+
+            events_by_id = {event.id: event for event in updated_events}
+            ordered_events = [
+                events_by_id[event_id]
+                for event_id in updated_event_ids
+                if event_id in events_by_id
+            ]
+
+            schedule_tasks = None
+            try:
+                from main import schedule_event_update_tasks as schedule_tasks
+            except Exception:
+                try:
+                    from main_part2 import schedule_event_update_tasks as schedule_tasks
+                except Exception:
+                    logger.exception("3di: schedule_event_update_tasks import failed")
+                    schedule_tasks = None
+
+            if schedule_tasks:
+                for event in ordered_events:
+                    await schedule_tasks(db, event, skip_vk_sync=True)
             session["status"] = "done"
             if message_id:
-                text = (
-                    f"🎨 <b>3D-превью: {month_name}</b>\n\n"
-                    f"📊 Событий: {event_count}\n"
-                    f"✅ Обновлено: {updated}\n"
-                    f"⚠️ Ошибок: {errors}\n"
-                    f"⏭ Пропущено: {skipped}\n"
-                    f"⏱ Длительность: {duration:.1f}с"
-                )
+                lines = [
+                    f"🎨 <b>3D-превью: {month_label}</b>",
+                    "",
+                    f"📊 Событий: {event_count}",
+                    f"✅ Успешно: {updated}",
+                    f"⚠️ Ошибок: {errors}",
+                    f"⏭ Пропущено: {skipped}",
+                    f"⏱ Длительность: {duration:.1f}с",
+                    "",
+                ]
+                if month_url:
+                    lines.append(
+                        f"🔗 <a href=\"{html.escape(month_url)}\">Страница месяца</a>"
+                    )
+                else:
+                    lines.append("🔗 <i>Страница месяца не найдена</i>")
+                lines.append("")
+                lines.append("<b>Обновленные события:</b>")
+                listed_events = ordered_events[:5]
+                if listed_events:
+                    for idx, event in enumerate(listed_events, 1):
+                        title = html.escape(event.title)
+                        if event.telegraph_url:
+                            url = html.escape(event.telegraph_url)
+                            lines.append(f"{idx}. <a href=\"{url}\">{title}</a>")
+                        else:
+                            lines.append(f"{idx}. {title}")
+                    if len(ordered_events) > len(listed_events):
+                        lines.append(
+                            f"... и еще {len(ordered_events) - len(listed_events)}"
+                        )
+                else:
+                    lines.append("Нет обновленных событий.")
+                text = "\n".join(lines)
                 await bot.edit_message_text(
                     chat_id=chat_id,
                     message_id=message_id,
