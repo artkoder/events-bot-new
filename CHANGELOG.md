@@ -2,8 +2,15 @@
 
 ## [Unreleased]
 
+## [1.6.0] – 2026-01-01
+
 ### Added
-- **3D Preview**: Новая фича генерации 3D-превью для событий через Blender на Kaggle. Команда `/3di` с меню выбора месяца. Превью отображается как главное изображение на месячных страницах Telegraph, если событий менее 10. Изображения загружаются в Catbox прямо из ноутбука.
+- **3D Preview Feature**:
+  - Added `preview_3d_url` to `Event` model.
+  - Created `/3di` command for generating 3D previews using Kaggle.
+  - Implemented Kaggle orchestration pipeline (dataset -> kernel -> polling -> db update).
+  - Added support for GPU rendering on Kaggle.
+  - Integrated 3D previews into Telegraph month pages (displayed as main image).
 
 ## [1.5.3] – 2026-01-01
 - **Performance**: Оптимизация LLM-вызовов в `/parse` — унифицирована логика `find_existing_event` с `upsert_event`. Теперь существующие события распознаются до вызова LLM, что значительно снижает расход токенов и время обработки.
