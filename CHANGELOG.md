@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [1.6.9] - 2026-01-01
+
+### Changed
+- **3D Preview**: Changed the Blender background color from dark gray to pure Black (#000000) for better integration with both light and dark Telegraph themes.
+
 ## [1.6.8] - 2026-01-01
 
 ### Refinements
