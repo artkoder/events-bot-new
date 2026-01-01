@@ -45,6 +45,14 @@ _EMOJI_RE = re.compile(
 )
 
 
+def clone_event_with_date(event: "Event", day: date) -> "Event":
+    from models import Event
+
+    payload = event.model_dump()
+    payload["date"] = day.isoformat()
+    return Event(**payload)
+
+
 # ---------------------------------------------------------------------------
 # Data Structures for Event Deduplication
 # ---------------------------------------------------------------------------
@@ -515,11 +523,54 @@ async def build_special_page_content(
                 .order_by(Event.date)
             )
             exhibitions = list(ex_result.scalars().all())
+
+            fair_result = await session.execute(
+                select(Event)
+                .where(
+                    Event.event_type == "ярмарка",
+                    Event.end_date.is_not(None),
+                    Event.date <= end_date.isoformat(),
+                    Event.end_date >= start_date.isoformat(),
+                )
+                .order_by(Event.date, Event.time)
+            )
+            fairs = list(fair_result.scalars().all())
             
             # Festival map for links
             fest_result = await session.execute(select(Festival))
             fest_map = {f.name.casefold(): f for f in fest_result.scalars().all()}
         
+        # Expand fairs across the range
+        if fairs:
+            parse_iso_date = require_main_attr("parse_iso_date")
+            existing_pairs = {
+                (e.id, e.date)
+                for e in events
+                if e.id is not None and e.date
+            }
+            expanded_fairs: list[Event] = []
+            day_objs = [
+                (start_date + timedelta(days=i)) for i in range(days)
+            ]
+            for fair in fairs:
+                start_dt = parse_iso_date(fair.date)
+                end_dt = parse_iso_date(fair.end_date or "")
+                if not start_dt or not end_dt:
+                    continue
+                if end_dt < start_dt:
+                    start_dt, end_dt = end_dt, start_dt
+                for day in day_objs:
+                    if not (start_dt <= day <= end_dt):
+                        continue
+                    day_iso = day.isoformat()
+                    if fair.id is not None and (fair.id, day_iso) in existing_pairs:
+                        continue
+                    expanded_fairs.append(clone_event_with_date(fair, day))
+                    if fair.id is not None:
+                        existing_pairs.add((fair.id, day_iso))
+            if expanded_fairs:
+                events.extend(expanded_fairs)
+
         # Filter out past events
         today = datetime.now(LOCAL_TZ).date()
         events = [

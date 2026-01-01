@@ -4743,6 +4743,46 @@ async def test_build_weekend_page_content(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_build_weekend_page_includes_fair_each_day(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    saturday = date(2026, 1, 3)
+    async with db.get_session() as session:
+        session.add(
+            Event(
+                title="Fair",
+                description="d",
+                source_text="s",
+                date="2025-12-25",
+                end_date="2026-01-10",
+                time="10:00..17:30",
+                location_name="Hall",
+                event_type="ярмарка",
+            )
+        )
+        await session.commit()
+
+    def _node_text(node):
+        if isinstance(node, str):
+            return node
+        if isinstance(node, dict):
+            return "".join(_node_text(c) for c in node.get("children", []))
+        if isinstance(node, list):
+            return "".join(_node_text(c) for c in node)
+        return ""
+
+    _, content, _ = await main.build_weekend_page_content(db, saturday.isoformat())
+    titles = [
+        _node_text(n.get("children", []))
+        for n in content
+        if n.get("tag") == "h4"
+    ]
+    fair_titles = [title for title in titles if "Fair" in title]
+    assert len(fair_titles) == 2
+
+
+@pytest.mark.asyncio
 async def test_weekend_nav_and_exhibitions(tmp_path: Path):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
@@ -11187,5 +11227,4 @@ async def test_progress_includes_festival_tg(tmp_path: Path, monkeypatch):
     await main.publish_event_progress(ev, db, bot, chat_id=1)
     final_text = bot.text_edits[-1][2]
     assert "✅ Telegraph (фестиваль) — http://fest" in final_text
-
 

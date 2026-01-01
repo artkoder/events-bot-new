@@ -1802,7 +1802,7 @@ async def log_token_usage(
     }
 
     logging.debug(
-        "log_token_usage scheduling bot=%s model=%s request_id=%s endpoint=%s prompt=%s completion=%s total=%s",
+        "log_token_usage start bot=%s model=%s request_id=%s endpoint=%s prompt=%s completion=%s total=%s",
         row["bot"],
         row["model"],
         row["request_id"],
@@ -1831,7 +1831,7 @@ async def log_token_usage(
         except Exception as exc:  # pragma: no cover - network logging failure
             logging.warning("log_token_usage failed: %s", exc, exc_info=True)
 
-    asyncio.create_task(_log())
+    await _log()
 
 
 # Run blocking Telegraph API calls with a timeout and simple retries
@@ -4328,6 +4328,15 @@ def normalize_event_type(
         if any(word in text for word in ("кино", "фильм", "кинопоказ", "киносеанс")):
             return "кинопоказ"
     return event_type
+
+
+_LONG_EVENT_TYPES = {"выставка", "ярмарка"}
+
+
+def is_long_event_type(event_type: str | None) -> bool:
+    if not event_type:
+        return False
+    return event_type.strip().casefold() in _LONG_EVENT_TYPES
 
 
 def canonicalize_date(value: str | None) -> str | None:
@@ -10999,7 +11008,7 @@ async def add_events_from_text(
 
         events_to_add = [base_event]
         if (
-            base_event.event_type != "выставка"
+            not is_long_event_type(base_event.event_type)
             and base_event.end_date
             and base_event.end_date != base_event.date
         ):

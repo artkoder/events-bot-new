@@ -329,6 +329,32 @@ async def update_linked_events(
         )
 
 
+async def schedule_existing_event_update(db: Database, event_id: int) -> None:
+    """Enqueue deferred page rebuilds for an updated existing event."""
+    import sys
+    from models import Event
+
+    main_mod = sys.modules.get("main") or sys.modules.get("__main__")
+    if not main_mod or not hasattr(main_mod, "schedule_event_update_tasks"):
+        logger.warning(
+            "source_parsing: schedule_event_update_tasks unavailable event_id=%d",
+            event_id,
+        )
+        return
+
+    async with db.get_session() as session:
+        event = await session.get(Event, event_id)
+    if not event:
+        return
+
+    await main_mod.schedule_event_update_tasks(
+        db,
+        event,
+        drain_nav=False,
+        skip_vk_sync=True,
+    )
+
+
 async def add_new_event_via_queue(
     db: Database,
     bot: Bot | None,
@@ -929,6 +955,7 @@ async def process_source_events(
                 # Update the placeholder event fully
                 success = await update_event_full(db, existing_id, event)
                 if success:
+                    await schedule_existing_event_update(db, existing_id)
                     stats.ticket_updated += 1
                     result_tag = "existing_full_update"
                 else:
@@ -943,6 +970,7 @@ async def process_source_events(
                     event.url,
                 )
                 if success:
+                    await schedule_existing_event_update(db, existing_id)
                     stats.ticket_updated += 1
                     result_tag = "existing_ticket_update"
                 else:

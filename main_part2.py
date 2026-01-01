@@ -14,6 +14,7 @@ from markup import md_to_html, telegraph_br
 from models import Event, Festival, WeekPage, WeekendPage, MonthPage, MonthPagePart, VkMissRecord, VkMissReviewSession, User
 from poster_media import PosterMedia
 from db import Database
+from sqlalchemy import select, update, delete, text, func, or_, and_
 from sqlmodel.ext.asyncio.session import AsyncSession
 from scheduling import MONTHS_GEN
 from event_utils import format_event_md, is_recent
@@ -39,6 +40,19 @@ if "format_day_pretty" not in globals():
 
     def format_day_pretty(day: date) -> str:
         return f"{day.day} {_MONTHS[day.month - 1]}"
+
+if "is_long_event_type" not in globals():
+
+    def is_long_event_type(event_type: str | None) -> bool:
+        if not event_type:
+            return False
+        return event_type.strip().casefold() in {"выставка", "ярмарка"}
+
+
+def clone_event_with_date(event: Event, day: date) -> Event:
+    payload = event.model_dump()
+    payload["date"] = day.isoformat()
+    return Event(**payload)
 
 if "month_name_prepositional" not in globals():
     _MONTHS_PREP = [
@@ -337,6 +351,9 @@ async def get_month_data(db: Database, month: str, *, fallback: bool = True):
             .order_by(Event.date, Event.time)
         )
         events = result.scalars().all()
+        events = [
+            e for e in events if (e.event_type or "").casefold() != "ярмарка"
+        ]
 
         ex_result = await session.execute(
             select(Event)
@@ -892,6 +909,18 @@ async def build_weekend_page_content(
         )
         exhibitions = ex_res.scalars().all()
 
+        fair_res = await session.execute(
+            select(Event)
+            .where(
+                Event.event_type == "ярмарка",
+                Event.end_date.is_not(None),
+                Event.date <= sunday.isoformat(),
+                Event.end_date >= saturday.isoformat(),
+            )
+            .order_by(Event.date, Event.time)
+        )
+        fairs = fair_res.scalars().all()
+
         res_w = await session.execute(select(WeekendPage).order_by(WeekendPage.start))
         weekend_pages = res_w.scalars().all()
         res_m = await session.execute(select(MonthPage).order_by(MonthPage.month))
@@ -908,6 +937,14 @@ async def build_weekend_page_content(
             or (not e.end_date and e.date >= today.isoformat())
         )
     ]
+    fairs = [
+        e
+        for e in fairs
+        if (
+            (e.end_date and e.end_date >= today.isoformat())
+            or (not e.end_date and e.date >= today.isoformat())
+        )
+    ]
 
     async with db.get_session() as session:
         res_f = await session.execute(select(Festival))
@@ -915,7 +952,7 @@ async def build_weekend_page_content(
 
     fest_index_url = await get_setting_value(db, "fest_index_url")
 
-    for e in events:
+    for e in (*events, *fairs):
         fest = fest_map.get((e.festival or "").casefold())
         await ensure_event_telegraph_link(e, fest, db)
 
@@ -925,6 +962,27 @@ async def build_weekend_page_content(
         if not d:
             continue
         by_day.setdefault(d, []).append(e)
+
+    day_ids: dict[date, set[int]] = {
+        d: {e.id for e in by_day.get(d, []) if e.id is not None} for d in days
+    }
+    for fair in fairs:
+        start = parse_iso_date(fair.date)
+        end = parse_iso_date(fair.end_date) if fair.end_date else None
+        if not start or not end:
+            continue
+        if end < start:
+            start, end = end, start
+        for day in days:
+            if start <= day <= end:
+                if fair.id is not None and fair.id in day_ids.get(day, set()):
+                    continue
+                by_day.setdefault(day, []).append(clone_event_with_date(fair, day))
+                if fair.id is not None:
+                    day_ids.setdefault(day, set()).add(fair.id)
+
+    for day in by_day:
+        by_day[day].sort(key=lambda e: e.time or "99:99")
 
     content: list[dict] = []
     size = 0
@@ -2486,6 +2544,26 @@ async def build_daily_posts(
             .order_by(Event.time)
         )
         events_today = res_today.scalars().all()
+        if len(events_today) < 6:
+            res_fairs = await session.execute(
+                select(Event)
+                .where(
+                    Event.event_type == "ярмарка",
+                    Event.end_date.is_not(None),
+                    Event.end_date >= today.isoformat(),
+                    Event.date <= today.isoformat(),
+                )
+                .order_by(Event.date, Event.time)
+            )
+            fairs_today = res_fairs.scalars().all()
+            if fairs_today:
+                seen_ids = {e.id for e in events_today if e.id is not None}
+                fairs_today = [e for e in fairs_today if e.id not in seen_ids]
+                if fairs_today:
+                    events_today.extend(
+                        clone_event_with_date(e, today) for e in fairs_today
+                    )
+                    events_today.sort(key=lambda e: e.time or "99:99")
         res_new = await session.execute(
             select(Event)
             .where(
@@ -2557,7 +2635,7 @@ async def build_daily_posts(
                 for e in new_events
                 if e.date in {sat.isoformat(), sun.isoformat()}
                 or (
-                    e.event_type == "выставка"
+                    is_long_event_type(e.event_type)
                     and e.end_date
                     and e.end_date >= sat.isoformat()
                     and e.date <= sun.isoformat()
@@ -2568,7 +2646,7 @@ async def build_daily_posts(
                 for e in events_today
                 if e.date in {sat.isoformat(), sun.isoformat()}
                 or (
-                    e.event_type == "выставка"
+                    is_long_event_type(e.event_type)
                     and e.end_date
                     and e.end_date >= sat.isoformat()
                     and e.date <= sun.isoformat()
@@ -2739,6 +2817,26 @@ async def build_daily_sections_vk(
             .order_by(Event.time)
         )
         events_today = res_today.scalars().all()
+        if len(events_today) < 6:
+            res_fairs = await session.execute(
+                select(Event)
+                .where(
+                    Event.event_type == "ярмарка",
+                    Event.end_date.is_not(None),
+                    Event.end_date >= today.isoformat(),
+                    Event.date <= today.isoformat(),
+                )
+                .order_by(Event.date, Event.time)
+            )
+            fairs_today = res_fairs.scalars().all()
+            if fairs_today:
+                seen_ids = {e.id for e in events_today if e.id is not None}
+                fairs_today = [e for e in fairs_today if e.id not in seen_ids]
+                if fairs_today:
+                    events_today.extend(
+                        clone_event_with_date(e, today) for e in fairs_today
+                    )
+                    events_today.sort(key=lambda e: e.time or "99:99")
         res_new = await session.execute(
             select(Event)
             .where(
@@ -2802,7 +2900,7 @@ async def build_daily_sections_vk(
                 for e in new_events
                 if e.date in {sat.isoformat(), sun.isoformat()}
                 or (
-                    e.event_type == "выставка"
+                    is_long_event_type(e.event_type)
                     and e.end_date
                     and e.end_date >= sat.isoformat()
                     and e.date <= sun.isoformat()
@@ -2813,7 +2911,7 @@ async def build_daily_sections_vk(
                 for e in events_today
                 if e.date in {sat.isoformat(), sun.isoformat()}
                 or (
-                    e.event_type == "выставка"
+                    is_long_event_type(e.event_type)
                     and e.end_date
                     and e.end_date >= sat.isoformat()
                     and e.date <= sun.isoformat()

@@ -12,10 +12,10 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Iterable, Sequence
 
 from aiogram import types
-from sqlalchemy import select
+from sqlalchemy import select, and_, or_
 
 from db import Database
-from main import ask_4o, format_day_pretty
+from main import ask_4o, format_day_pretty, parse_time_range
 from models import (
     Event,
     EventPoster,
@@ -42,6 +42,47 @@ logger = logging.getLogger(__name__)
 TELEGRAPH_EXCERPT_LIMIT = 1200
 POSTER_OCR_EXCERPT_LIMIT = 800
 TRACE_MAX_LEN = 100_000
+
+
+def _is_fair_event(ev: Event) -> bool:
+    return (getattr(ev, "event_type", "") or "").strip().casefold() == "ярмарка"
+
+
+def _format_fair_time(value: str | None) -> str | None:
+    if not value:
+        return None
+    text = value.strip()
+    if not text or text in {"00:00", "0:00"}:
+        return None
+    parsed = parse_time_range(text)
+    if not parsed:
+        return text
+    start, end = parsed
+    start_text = start.strftime("%H:%M")
+    if end:
+        return f"с {start_text} до {end.strftime('%H:%M')}"
+    return f"с {start_text}"
+
+
+def _build_fair_schedule_text(ev: Event) -> str | None:
+    raw_end = getattr(ev, "end_date", None)
+    if not raw_end:
+        return None
+    try:
+        end_dt = date.fromisoformat(raw_end.split("..", 1)[0])
+    except Exception:
+        return None
+    try:
+        start_dt = date.fromisoformat((ev.date or "").split("..", 1)[0])
+    except Exception:
+        start_dt = None
+    if start_dt and end_dt <= start_dt:
+        return None
+    end_label = format_day_pretty(end_dt)
+    time_text = _format_fair_time(getattr(ev, "time", None))
+    if time_text:
+        return f"по {end_label} {time_text}"
+    return f"по {end_label}"
 
 
 def _build_about(
@@ -245,6 +286,10 @@ def _dedupe_events(
             continue
         rep = sorted(poster_events, key=_event_sort_key)[0]
         schedule_text, occurrences = _build_schedule_info(schedule_events)
+        fair_schedule = _build_fair_schedule_text(rep) if _is_fair_event(rep) else None
+        if fair_schedule:
+            schedule_text = fair_schedule
+            occurrences = []
         include = any(
             (getattr(ev, "video_include_count", 0) or 0) > 0
             or ev.id in promoted_ids
@@ -312,11 +357,22 @@ async def fetch_candidates(
     today = ctx.target_date or datetime.now(ctx.tz).date()
     primary_end = today + timedelta(days=max(ctx.primary_window_days, 0))
     fallback_end = today + timedelta(days=max(ctx.fallback_window_days, ctx.primary_window_days))
+    today_iso = today.isoformat()
+    fallback_iso = fallback_end.isoformat()
     async with db.get_session() as session:
         result = await session.execute(
             select(Event)
-            .where(Event.date >= today.isoformat())
-            .where(Event.date <= fallback_end.isoformat())
+            .where(
+                or_(
+                    and_(Event.date >= today_iso, Event.date <= fallback_iso),
+                    and_(
+                        Event.event_type == "ярмарка",
+                        Event.end_date.is_not(None),
+                        Event.end_date >= today_iso,
+                        Event.date <= fallback_iso,
+                    ),
+                )
+            )
             .order_by(Event.date, Event.time, Event.id)
         )
         events = result.scalars().all()
@@ -358,9 +414,16 @@ async def fetch_candidates(
         else:
             flexible.append(e)
     combined = filtered + flexible
+    selected = combined[: ctx.candidate_limit] if combined else events[: ctx.candidate_limit]
+    schedule_map: dict[int, str] = {}
+    for ev in selected:
+        if ev.id and _is_fair_event(ev):
+            fair_schedule = _build_fair_schedule_text(ev)
+            if fair_schedule:
+                schedule_map[ev.id] = fair_schedule
     if not combined:
-        return events[: ctx.candidate_limit], {}, {}
-    return combined[: ctx.candidate_limit], {}, {}
+        return selected, schedule_map, {}
+    return selected, schedule_map, {}
 
 
 def _score_events(client: KaggleClient, events: Iterable[Event]) -> list[RankedEvent]:
