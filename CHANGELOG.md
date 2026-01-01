@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [1.6.2] - 2026-01-01
+
+### Fixed
+- **3D Preview**: Added 60s retry loop for payload detection in Kaggle notebook to handle dataset mounting latency.
+
 ## [1.6.1] - 2026-01-01
 
 ### Fixed
