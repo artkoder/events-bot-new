@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [1.6.8] - 2026-01-01
+
+### Refinements
+- **3D Preview**:
+  - **Cover Logic**: 3D preview is now used as the Telegraph page cover ONLY if the event has 2 or more source photos. If there is only 1 photo, the original is preserved.
+  - **Transparency**: Added a dark background to the Blender scene to fix transparency rendering issues in Telegraph.
+  - **Composition**: Improved layout for single images (< 3 photos) to use a centered single plane instead of the carousel.
+
+### Refined
+- **3D Preview**: Use the preview image as the leading Telegraph photo, add a dark scene background, and simplify layout when fewer than three images are available.
+
 ## [1.6.7] - 2026-01-01
 
 ### Fixed

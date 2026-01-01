@@ -12347,6 +12347,9 @@ async def update_telegraph_event_page(
             is_free=bool(getattr(ev, "is_free", False)),
             ticket_status=getattr(ev, "ticket_status", None),
         )
+        photos = list(ev.photo_urls or [])
+        if ev.preview_3d_url and len(photos) >= 2:
+            photos.insert(0, ev.preview_3d_url)
         html_content, _, _ = await build_source_page_content(
             ev.title or "Event",
             ev.source_text,
@@ -12357,7 +12360,7 @@ async def update_telegraph_event_page(
             db,
             event_summary=summary,
             display_link=display_link,
-            catbox_urls=ev.photo_urls,
+            catbox_urls=photos,
         )
         from telegraph.utils import html_to_nodes
 
