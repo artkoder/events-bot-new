@@ -13416,6 +13416,7 @@ async def build_source_page_content(
     catbox_urls: list[str] | None = None,
     image_mode: Literal["tail", "inline"] = "tail",
     page_mode: Literal["default", "history"] = "default",
+    search_digest: str | None = None,
 ) -> tuple[str, str, int]:
     if image_mode not in {"tail", "inline"}:
         raise ValueError(f"unknown image_mode={image_mode}")
@@ -13456,6 +13457,13 @@ async def build_source_page_content(
         html_content += (
             f'<p>\U0001f4c5 <a href="{html.escape(ics_url)}">{ICS_LABEL}</a></p>'
         )
+    
+    # Add search_digest before long descriptions (> 500 chars)
+    text_len = len((text or "").strip())
+    if search_digest and search_digest.strip() and text_len > 500:
+        digest_escaped = html.escape(search_digest.strip())
+        html_content += f"<p>{digest_escaped}</p>"
+        html_content += "<hr/>"
     emoji_pat = re.compile(r"<tg-emoji[^>]*>(.*?)</tg-emoji>", re.DOTALL)
     spoiler_pat = re.compile(r"<tg-spoiler[^>]*>(.*?)</tg-spoiler>", re.DOTALL)
     tg_emoji_cleaned = 0

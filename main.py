@@ -12361,6 +12361,7 @@ async def update_telegraph_event_page(
             event_summary=summary,
             display_link=display_link,
             catbox_urls=photos,
+            search_digest=ev.search_digest,
         )
         from telegraph.utils import html_to_nodes
 
