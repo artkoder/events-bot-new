@@ -1,8 +1,12 @@
 """Tests for Pyramida event extraction module."""
 
 import pytest
-from source_parsing.pyramida import extract_pyramida_urls
-
+import json
+import tempfile
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+from source_parsing.pyramida import extract_pyramida_urls, parse_pyramida_output, parse_price_string
+from source_parsing.parser import TheatreEvent
 
 class TestExtractPyramidaUrls:
     """Tests for extract_pyramida_urls function."""
@@ -89,3 +93,120 @@ class TestExtractPyramidaUrls:
         assert len(result) == 1
         # The closing paren is part of the slug in this case
         assert "pyramida.info/tickets/event_xyz" in result[0]
+
+
+class TestParsePriceString:
+    """Tests for price parsing helper."""
+    
+    def test_simple_price(self):
+        assert parse_price_string("500 ₽") == (500, 500)
+        assert parse_price_string("1000 руб") == (1000, 1000)
+        assert parse_price_string("1500") == (1500, 1500)
+    
+    def test_price_range(self):
+        assert parse_price_string("500 - 1000 ₽") == (500, 1000)
+        assert parse_price_string("500-1000") == (500, 1000)
+    
+    def test_price_from(self):
+        assert parse_price_string("от 500 ₽") == (500, None)
+        assert parse_price_string("от 1000") == (1000, None)
+    
+    def test_free(self):
+        assert parse_price_string("Бесплатно") == (0, 0)
+        assert parse_price_string("Вход свободный") == (0, 0) # Fallback to 0 if detected as free
+        
+    def test_invalid(self):
+        assert parse_price_string("") == (None, None)
+        assert parse_price_string("invalid") == (None, None)
+
+
+class TestParsePyramidaOutput:
+    """Tests for parse_pyramida_output function."""
+    
+    def test_parse_with_price(self):
+        """Test parsing JSON with price field."""
+        data = [
+            {
+                "title": "Тестовое событие",
+                "date_raw": "01.01.2026 18:00",
+                "location": "Театр",
+                "price": "500 ₽",
+                "age_restriction": "12+",
+                "ticket_status": "unknown",
+                "url": "https://pyramida.info/ticket",
+                "image_url": "https://example.com/img.jpg",
+                "description": "Desc"
+            }
+        ]
+        
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', prefix='pyramida_', delete=False) as f:
+            json.dump(data, f)
+            temp_path = f.name
+            
+        try:
+            events = parse_pyramida_output([temp_path])
+            assert len(events) == 1
+            event = events[0]
+            
+            assert event.title == "Тестовое событие"
+            assert event.ticket_price_min == 500
+            assert event.ticket_price_max == 500
+            # Should be updated to available because price exists
+            assert event.ticket_status == "available"
+            
+        finally:
+            Path(temp_path).unlink()
+            
+    def test_parse_without_price(self):
+        """Test parsing JSON without price."""
+        data = [
+            {
+                "title": "Без цены",
+                "date_raw": "01.01.2026 18:00",
+                "url": "https://pyramida.info/ticket",
+                "ticket_status": "unknown"
+            }
+        ]
+        
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', prefix='pyramida_', delete=False) as f:
+            json.dump(data, f)
+            temp_path = f.name
+            
+        try:
+            events = parse_pyramida_output([temp_path])
+            assert len(events) == 1
+            event = events[0]
+            
+            assert event.ticket_price_min is None
+            assert event.ticket_status == "unknown"
+            
+        finally:
+            Path(temp_path).unlink()
+
+    def test_parse_with_range_price(self):
+        """Test parsing JSON with price range."""
+        data = [
+            {
+                "title": "Диапазон",
+                "date_raw": "01.01.2026 18:00",
+                "price": "500 - 1500 ₽",
+                "url": "https://pyramida.info/ticket",
+                "ticket_status": "unknown"
+            }
+        ]
+        
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', prefix='pyramida_', delete=False) as f:
+            json.dump(data, f)
+            temp_path = f.name
+            
+        try:
+            events = parse_pyramida_output([temp_path])
+            assert len(events) == 1
+            event = events[0]
+            
+            assert event.ticket_price_min == 500
+            assert event.ticket_price_max == 1500
+            assert event.ticket_status == "available"
+            
+        finally:
+            Path(temp_path).unlink()

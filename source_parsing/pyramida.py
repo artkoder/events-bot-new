@@ -77,6 +77,58 @@ def extract_pyramida_urls(text: str) -> list[str]:
     return result
 
 
+def parse_price_string(price_str: str) -> tuple[int | None, int | None]:
+    """Parse price string into min and max price.
+    
+    Examples:
+        "500 ₽" -> (500, 500)
+        "500 - 1000 ₽" -> (500, 1000)
+        "от 500 ₽" -> (500, None)
+        "Бесплатно" -> (0, 0)
+    """
+    if not price_str:
+        return None, None
+        
+    s = price_str.lower().strip()
+    if not s:
+        return None, None
+        
+    if "бесплатно" in s or "free" in s or "свободный" in s:
+        return 0, 0
+        
+    # Remove currency symbols and spaces
+    s = s.replace("₽", "").replace("rub", "").replace("руб", "").replace(" ", "").strip()
+    
+    # Try range "500-1000"
+    if "-" in s:
+        parts = s.split("-")
+        try:
+            min_p = int(re.sub(r'\D', '', parts[0]))
+            max_p = int(re.sub(r'\D', '', parts[1]))
+            return min_p, max_p
+        except (ValueError, IndexError):
+            pass
+            
+    # Try "from 500"
+    if s.startswith("от"):
+        try:
+            val = int(re.sub(r'\D', '', s))
+            return val, None
+        except ValueError:
+            pass
+            
+    # Try simple number "500"
+    try:
+        val = int(re.sub(r'\D', '', s))
+        if val > 0:
+            return val, val
+    except ValueError:
+        pass
+        
+    return None, None
+
+
+
 async def run_pyramida_kaggle_kernel(
     urls: list[str],
     timeout_minutes: int = 15,
@@ -286,10 +338,20 @@ def parse_pyramida_output(file_paths: list[str]) -> list[TheatreEvent]:
                 if image_url:
                     photos = [image_url]
                 
+                # Parse price
+                price_str = (item.get("price") or "").strip()
+                min_price, max_price = parse_price_string(price_str)
+                
+                # Determine ticket status
+                ticket_status = (item.get("ticket_status") or "unknown").strip()
+                if ticket_status == "unknown" and (min_price is not None or max_price is not None):
+                    # If we have a price, assume tickets are available
+                    ticket_status = "available"
+                
                 event = TheatreEvent(
                     title=title,
                     date_raw=date_raw,
-                    ticket_status=(item.get("ticket_status") or "unknown").strip(),
+                    ticket_status=ticket_status,
                     url=(item.get("url") or "").strip(),
                     photos=photos,
                     description=(item.get("description") or "").strip(),
@@ -300,6 +362,8 @@ def parse_pyramida_output(file_paths: list[str]) -> list[TheatreEvent]:
                     source_type="pyramida",
                     parsed_date=parsed_date,
                     parsed_time=parsed_time,
+                    ticket_price_min=min_price,
+                    ticket_price_max=max_price,
                 )
                 events.append(event)
             

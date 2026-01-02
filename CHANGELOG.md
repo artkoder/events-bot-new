@@ -2,6 +2,30 @@
 
 ## [Unreleased]
 
+## [1.7.3] - 2026-01-02
+
+### Added
+- **3D Preview**: Added "Only New" button to `/3di` command. Allows generating missing previews for new events without reprocessing existing ones.
+- **Pyramida**: Fixed price parsing from ticket widget. Now extracts specific prices (e.g. "500 ₽") and price ranges ("500 - 1000 ₽"), ensuring correct `ticket_status` ("available" instead of "unknown").
+
+## [1.7.2] - 2026-01-02
+
+### Changed
+- **3D Preview Aesthetics**:
+    - **Soft Shadows**: Increased light source angle to 10° for softer, more realistic shadows.
+    - **Cinematic Rotation**: The first card in the stack is now slightly rotated (-3°) for a more dynamic look.
+
+## [1.7.1] - 2026-01-02
+
+### Fixed
+- **3D Preview**: Fixed argument parsing in `/3di` command to support running from image captions and avoid errors when `message.text` is None (aiogram v3 compatibility).
+
+## [1.7.0] - 2026-01-02
+
+### Added
+- **3D Preview**: Added `/3di multy` command mode. Generates previews only for events with 2 or more images, filtering out single-image events.
+- **3D Preview**: Improved lighting with a new "Shadow Lift" fill light. This makes cards 2, 3, and 4 readable by softening the hard shadows while maintaining the dramatic texture.
+
 ## [1.6.11] - 2026-01-02
 
 ### Changed

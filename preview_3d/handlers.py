@@ -68,7 +68,7 @@ async def _is_authorized(db: Database, user_id: int) -> bool:
         return user is not None and user.is_superadmin
 
 
-async def _get_events_for_month(db: Database, month: str) -> list[Event]:
+async def _get_events_for_month(db: Database, month: str, min_images: int = 1) -> list[Event]:
     """Get all events for a month that have images."""
     start = date.fromisoformat(f"{month}-01")
     next_start = (start.replace(day=28) + timedelta(days=4)).replace(day=1)
@@ -85,29 +85,66 @@ async def _get_events_for_month(db: Database, month: str) -> list[Event]:
         events = result.scalars().all()
     
     # Filter events that have images
-    return [e for e in events if e.photo_urls and len(e.photo_urls) > 0]
+    return [e for e in events if e.photo_urls and len(e.photo_urls) >= min_images]
 
 
-async def _get_events_without_preview(db: Database, month: str) -> list[Event]:
+async def _get_events_without_preview(db: Database, month: str, min_images: int = 1) -> list[Event]:
     """Get events that don't have a 3D preview yet."""
-    events = await _get_events_for_month(db, month)
+    events = await _get_events_for_month(db, month, min_images=min_images)
     return [e for e in events if not e.preview_3d_url]
 
 
-def _build_main_menu() -> InlineKeyboardMarkup:
+async def _get_new_events_gap(db: Database, min_images: int = 1) -> list[Event]:
+    """Get events added after the last event that has a 3D preview.
+    
+    Walks backwards from newest events until it finds one with a 3D preview.
+    Returns all events encountered before that one, filtered by min_images.
+    """
+    candidates: list[Event] = []
+    
+    async with db.get_session() as session:
+        # Fetch events ordered by ID desc (newest first)
+        # We fetch in chunks to avoid loading entire DB if the gap is small
+        query = select(Event).order_by(Event.id.desc())
+        
+        # Stream results to process one by one
+        result = await session.stream(query)
+        
+        async for event in result.scalars():
+            if event.preview_3d_url:
+                # Found the barrier - the latest event that HAS a preview
+                break
+            
+            # Check image requirement
+            urls = event.photo_urls or []
+            if len(urls) >= min_images:
+                candidates.append(event)
+                
+            # safety break if gap is huge (optional, but good practice)
+            if len(candidates) > 200:
+                logger.warning("3di: _get_new_events_gap hit safety limit of 200")
+                break
+                
+    return candidates
+
+
+def _build_main_menu(is_multy: bool = False) -> InlineKeyboardMarkup:
     """Build main menu for /3di command."""
+    suffix = ":multy" if is_multy else ""
     buttons = [
-        [InlineKeyboardButton(text="🆕 Сгенерировать новые", callback_data="3di:new")],
-        [InlineKeyboardButton(text="🔄 Перегенерировать все", callback_data="3di:all")],
-        [InlineKeyboardButton(text="📅 Выбрать месяц", callback_data="3di:month_select")],
+        [InlineKeyboardButton(text="🆕 Только новые", callback_data=f"3di:new_only{suffix}")],
+        [InlineKeyboardButton(text="⚡️ Сгенерировать (текущий мес)", callback_data=f"3di:new{suffix}")],
+        [InlineKeyboardButton(text="🔄 Перегенерировать все", callback_data=f"3di:all{suffix}")],
+        [InlineKeyboardButton(text="📅 Выбрать месяц", callback_data=f"3di:month_select{suffix}")],
         [InlineKeyboardButton(text="❌ Закрыть", callback_data="3di:close")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-def _build_month_menu() -> InlineKeyboardMarkup:
+def _build_month_menu(is_multy: bool = False) -> InlineKeyboardMarkup:
     """Build month selection menu."""
     today = datetime.now(timezone.utc).date()
+    suffix = ":multy" if is_multy else ""
     buttons = []
     
     for i in range(6):  # Show 6 months
@@ -118,11 +155,12 @@ def _build_month_menu() -> InlineKeyboardMarkup:
         buttons.append([
             InlineKeyboardButton(
                 text=f"{month_name} {year}",
-                callback_data=f"3di:gen:{month_key}"
+                callback_data=f"3di:gen:{month_key}{suffix}"
             )
         ])
     
-    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="3di:back")])
+    back_suffix = ":multy" if is_multy else ""
+    buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"3di:back{back_suffix}")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
@@ -517,21 +555,34 @@ async def _run_kaggle_render(
 
 
 async def handle_3di_command(message: types.Message, db: Database, bot) -> None:
-    """Handle /3di command - show main menu."""
+    """Handle /3di command - show main menu.
+    
+    Args:
+        message: The message triggering the command (e.g., "/3di multy")
+    """
     if not await _is_authorized(db, message.from_user.id):
         await bot.send_message(message.chat.id, "❌ Недостаточно прав")
         return
     
+    # Parse arguments
+    # Parse arguments
+    full_text = message.text or message.caption or ""
+    args = full_text.split()[1:]
+    is_multy = "multy" in args or "multi" in args
+    
     text = (
         "🎨 <b>3D-превью генератор</b>\n\n"
         "Генерация 3D-превью для событий с помощью Blender на Kaggle.\n\n"
-        "Выберите действие:"
     )
+    if is_multy:
+        text += "🎭 <b>Режим: MULTY</b> (только события с 2+ картинками)\n\n"
+    
+    text += "Выберите действие:"
     
     await bot.send_message(
         message.chat.id,
         text,
-        reply_markup=_build_main_menu(),
+        reply_markup=_build_main_menu(is_multy=is_multy),
         parse_mode="HTML"
     )
 
@@ -555,77 +606,109 @@ async def handle_3di_callback(
     chat_id = callback.message.chat.id
     message_id = callback.message.message_id
     
-    if data == "3di:close":
+    is_multy = data.endswith(":multy")
+    suffix = ":multy" if is_multy else ""
+    # Strip suffix for logic processing steps that don't need it or handle it manually
+    base_data = data.replace(":multy", "")
+    
+    if base_data == "3di:close":
         await bot.delete_message(chat_id, message_id)
         await callback.answer()
         return
     
-    if data == "3di:back":
+    if base_data == "3di:back":
+        text = (
+            "🎨 <b>3D-превью генератор</b>\n\n"
+            "Генерация 3D-превью для событий с помощью Blender на Kaggle.\n\n"
+        )
+        if is_multy:
+            text += "🎭 <b>Режим: MULTY</b> (только события с 2+ картинками)\n\n"
+        text += "Выберите действие:"
+        
         await bot.edit_message_text(
             chat_id=chat_id,
             message_id=message_id,
-            text=(
-                "🎨 <b>3D-превью генератор</b>\n\n"
-                "Генерация 3D-превью для событий с помощью Blender на Kaggle.\n\n"
-                "Выберите действие:"
-            ),
-            reply_markup=_build_main_menu(),
+            text=text,
+            reply_markup=_build_main_menu(is_multy=is_multy),
             parse_mode="HTML"
         )
         await callback.answer()
         return
     
-    if data == "3di:month_select":
+    if base_data == "3di:month_select":
         await bot.edit_message_text(
             chat_id=chat_id,
             message_id=message_id,
             text="📅 <b>Выберите месяц для генерации:</b>",
-            reply_markup=_build_month_menu(),
+            reply_markup=_build_month_menu(is_multy=is_multy),
             parse_mode="HTML"
         )
         await callback.answer()
         return
     
-    if data == "3di:new":
+    if base_data == "3di:new_only":
+        # Generate for events added after the last one with preview
+        min_images = 2 if is_multy else 1
+        events = await _get_new_events_gap(db, min_images=min_images)
+        
+        if not events:
+            await callback.answer("Нет новых событий (после последнего с превью)", show_alert=True)
+            return
+            
+        mode_str = "new_only:multy" if is_multy else "new_only"
+        # Use a generic label for the month/group since it's a gap fill
+        label = "New Events Gap"
+        await _start_generation(
+            db, bot, callback, events, label, mode_str, start_kaggle_render
+        )
+        return
+
+    if base_data == "3di:new":
         # Generate for all months - events without preview
         today = datetime.now(timezone.utc).date()
         month_key = today.strftime("%Y-%m")
-        events = await _get_events_without_preview(db, month_key)
+        min_images = 2 if is_multy else 1
+        events = await _get_events_without_preview(db, month_key, min_images=min_images)
         
         if not events:
-            await callback.answer("Нет событий без превью", show_alert=True)
+            await callback.answer("Нет событий без превью (в текущем месяце)", show_alert=True)
             return
         
+        mode_str = "new:multy" if is_multy else "new"
         await _start_generation(
-            db, bot, callback, events, month_key, "new", start_kaggle_render
+            db, bot, callback, events, month_key, mode_str, start_kaggle_render
         )
         return
     
-    if data == "3di:all":
+    if base_data == "3di:all":
         # Regenerate all for current month
         today = datetime.now(timezone.utc).date()
         month_key = today.strftime("%Y-%m")
-        events = await _get_events_for_month(db, month_key)
+        min_images = 2 if is_multy else 1
+        events = await _get_events_for_month(db, month_key, min_images=min_images)
         
         if not events:
-            await callback.answer("Нет событий с изображениями", show_alert=True)
+            await callback.answer(f"Нет событий ({min_images}+ изображений)", show_alert=True)
             return
         
+        mode_str = "all:multy" if is_multy else "all"
         await _start_generation(
-            db, bot, callback, events, month_key, "all", start_kaggle_render
+            db, bot, callback, events, month_key, mode_str, start_kaggle_render
         )
         return
     
-    if data.startswith("3di:gen:"):
-        month_key = data.split(":")[2]
-        events = await _get_events_for_month(db, month_key)
+    if base_data.startswith("3di:gen:"):
+        month_key = base_data.split(":")[2]
+        min_images = 2 if is_multy else 1
+        events = await _get_events_for_month(db, month_key, min_images=min_images)
         
         if not events:
-            await callback.answer("Нет событий с изображениями в этом месяце", show_alert=True)
+            await callback.answer(f"Нет событий ({min_images}+ изображений) в этом месяце", show_alert=True)
             return
         
+        mode_str = "month:multy" if is_multy else "month"
         await _start_generation(
-            db, bot, callback, events, month_key, "month", start_kaggle_render
+            db, bot, callback, events, month_key, mode_str, start_kaggle_render
         )
         return
     
