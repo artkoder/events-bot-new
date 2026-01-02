@@ -94,11 +94,46 @@ async def _get_events_without_preview(db: Database, month: str, min_images: int 
     return [e for e in events if not e.preview_3d_url]
 
 
+async def _get_new_events_gap(db: Database, min_images: int = 1) -> list[Event]:
+    """Get events added after the last event that has a 3D preview.
+    
+    Walks backwards from newest events until it finds one with a 3D preview.
+    Returns all events encountered before that one, filtered by min_images.
+    """
+    candidates: list[Event] = []
+    
+    async with db.get_session() as session:
+        # Fetch events ordered by ID desc (newest first)
+        # We fetch in chunks to avoid loading entire DB if the gap is small
+        query = select(Event).order_by(Event.id.desc())
+        
+        # Stream results to process one by one
+        result = await session.stream(query)
+        
+        async for event in result.scalars():
+            if event.preview_3d_url:
+                # Found the barrier - the latest event that HAS a preview
+                break
+            
+            # Check image requirement
+            urls = event.photo_urls or []
+            if len(urls) >= min_images:
+                candidates.append(event)
+                
+            # safety break if gap is huge (optional, but good practice)
+            if len(candidates) > 200:
+                logger.warning("3di: _get_new_events_gap hit safety limit of 200")
+                break
+                
+    return candidates
+
+
 def _build_main_menu(is_multy: bool = False) -> InlineKeyboardMarkup:
     """Build main menu for /3di command."""
     suffix = ":multy" if is_multy else ""
     buttons = [
-        [InlineKeyboardButton(text="🆕 Сгенерировать новые", callback_data=f"3di:new{suffix}")],
+        [InlineKeyboardButton(text="🆕 Только новые", callback_data=f"3di:new_only{suffix}")],
+        [InlineKeyboardButton(text="⚡️ Сгенерировать (текущий мес)", callback_data=f"3di:new{suffix}")],
         [InlineKeyboardButton(text="🔄 Перегенерировать все", callback_data=f"3di:all{suffix}")],
         [InlineKeyboardButton(text="📅 Выбрать месяц", callback_data=f"3di:month_select{suffix}")],
         [InlineKeyboardButton(text="❌ Закрыть", callback_data="3di:close")],
@@ -611,6 +646,23 @@ async def handle_3di_callback(
         await callback.answer()
         return
     
+    if base_data == "3di:new_only":
+        # Generate for events added after the last one with preview
+        min_images = 2 if is_multy else 1
+        events = await _get_new_events_gap(db, min_images=min_images)
+        
+        if not events:
+            await callback.answer("Нет новых событий (после последнего с превью)", show_alert=True)
+            return
+            
+        mode_str = "new_only:multy" if is_multy else "new_only"
+        # Use a generic label for the month/group since it's a gap fill
+        label = "New Events Gap"
+        await _start_generation(
+            db, bot, callback, events, label, mode_str, start_kaggle_render
+        )
+        return
+
     if base_data == "3di:new":
         # Generate for all months - events without preview
         today = datetime.now(timezone.utc).date()
@@ -619,7 +671,7 @@ async def handle_3di_callback(
         events = await _get_events_without_preview(db, month_key, min_images=min_images)
         
         if not events:
-            await callback.answer("Нет событий без превью", show_alert=True)
+            await callback.answer("Нет событий без превью (в текущем месяце)", show_alert=True)
             return
         
         mode_str = "new:multy" if is_multy else "new"

@@ -138,3 +138,42 @@ async def test_update_previews_from_results_handles_skip(tmp_path):
     assert updated == 0
     assert errors == 0
     assert skipped == 1
+
+
+@pytest.mark.asyncio
+async def test_get_new_events_gap(tmp_path):
+    """Test that _get_new_events_gap returns events after the last one with preview."""
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    
+    from preview_3d.handlers import _get_new_events_gap
+
+    # Create 4 events:
+    # 4 (Newest) - No preview, 2 images -> Should return
+    # 3          - No preview, 0 images -> Should skip (if min_images=1)
+    # 2          - Has preview          -> Stop barrier
+    # 1 (Oldest) - No preview           -> Should not reach
+    
+    async with db.get_session() as session:
+        session.add(_make_event(1, photo_urls=["http://img"], preview_3d_url=None))
+        session.add(_make_event(2, photo_urls=["http://img"], preview_3d_url="http://preview"))
+        session.add(_make_event(3, photo_urls=[], preview_3d_url=None))
+        session.add(_make_event(4, photo_urls=["http://img"], preview_3d_url=None))
+        await session.commit()
+        
+    candidates = await _get_new_events_gap(db, min_images=1)
+    
+    # Expect only event 4
+    # Event 3 skipped due to no images
+    # Event 2 stops the search
+    # Event 1 is behind event 2
+    
+    assert len(candidates) == 1
+    assert candidates[0].id == 4
+    
+    # Test with min_images=0, should get 4 and 3
+    candidates_all = await _get_new_events_gap(db, min_images=0)
+    assert len(candidates_all) == 2
+    ids = sorted([e.id for e in candidates_all])
+    assert ids == [3, 4]
+
