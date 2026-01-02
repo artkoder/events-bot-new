@@ -13991,8 +13991,32 @@ async def update_all_festival_nav(event_id: int, db: Database, bot: Bot | None) 
 async def festivals_fix_nav(
     db: Database, bot: Bot | None = None
 ) -> tuple[int, int, int, int]:
+    today = datetime.now(LOCAL_TZ).date().isoformat()
     async with db.get_session() as session:
-        res = await session.execute(select(Festival))
+        # Build subquery for festival event date ranges - only future events
+        ev_dates = (
+            select(
+                Event.festival,
+                func.max(func.coalesce(Event.end_date, Event.date)).label("last_event_date"),
+            )
+            .where(Event.date >= today)
+            .group_by(Event.festival)
+            .subquery()
+        )
+
+        # Join festivals with their future events - filter out festivals with no future events
+        # and past end_date
+        stmt = (
+            select(Festival)
+            .outerjoin(ev_dates, ev_dates.c.festival == Festival.name)
+            .where(
+                or_(
+                    Festival.end_date >= today,  # Festival end date is today or future
+                    ev_dates.c.last_event_date.is_not(None),  # Has future events
+                )
+            )
+        )
+        res = await session.execute(stmt)
         fests = res.scalars().all()
 
     pages = 0

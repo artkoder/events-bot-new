@@ -2035,7 +2035,9 @@ async def build_festival_page_content(db: Database, fest: Festival) -> tuple[str
         nodes.extend(telegraph_br())
         nodes.append({"tag": "h3", "children": ["Мероприятия фестиваля"]})
         for e in events:
-            nodes.extend(event_to_nodes(e, festival=fest, show_festival=False))
+            # Show 3D preview image if available for the event
+            has_preview = bool(getattr(e, "preview_3d_url", None))
+            nodes.extend(event_to_nodes(e, festival=fest, show_festival=False, show_image=has_preview))
     else:
         nodes.extend(telegraph_br())
         nodes.extend(telegraph_br())
