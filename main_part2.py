@@ -534,7 +534,7 @@ def _build_month_page_content_sync(
         use_markers=True,
         include_ics=include_ics,
         include_details=include_details,
-        show_images=len(events) < 10,
+        show_images=len(events) <= 30,
     )
 
     if exhibitions and not exceeded:
