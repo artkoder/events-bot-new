@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [1.7.3] - 2026-01-02
+
+### Added
+- **3D Preview**: Added "Only New" button to `/3di` command. Allows generating missing previews for new events without reprocessing existing ones.
+- **Pyramida**: Fixed price parsing from ticket widget. Now extracts specific prices (e.g. "500 ₽") and price ranges ("500 - 1000 ₽"), ensuring correct `ticket_status` ("available" instead of "unknown").
+
 ## [1.7.2] - 2026-01-02
 
 ### Changed
