@@ -144,6 +144,13 @@ class TestNormalizeLocationName:
         """Handle empty input."""
         assert normalize_location_name("") == ""
 
+    def test_normalize_tretyakov(self):
+        """Normalize Tretyakov variants."""
+        expected = "Филиал Третьяковской галереи"
+        assert normalize_location_name("Третьяков") == expected
+        assert normalize_location_name("Третьяковка Калининград") == expected
+        assert normalize_location_name("Атриум") == expected
+
 
 class TestFuzzyTitleMatch:
     """Tests for fuzzy title matching."""
