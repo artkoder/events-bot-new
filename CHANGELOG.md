@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-01-02
+
+### Added
+- **3D Preview**: Added `/3di multy` command mode. Generates previews only for events with 2 or more images, filtering out single-image events.
+- **3D Preview**: Improved lighting with a new "Shadow Lift" fill light. This makes cards 2, 3, and 4 readable by softening the hard shadows while maintaining the dramatic texture.
+
 ## [1.6.10] - 2026-01-01
 
 ### Fixed

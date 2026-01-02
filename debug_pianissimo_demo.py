@@ -59,11 +59,11 @@ def deduplicate_events(events):
             log(f"\n⚠️ ДУБЛИКАТ НАЙДЕН: {date_str} {time_str} {location}", 1)
             for e in group:
                 photos_count = len(e.get('photos', []))
-                log(f"   - '{e['title'][:40]}' (source={e['source']}, photos={photos_count})", 1)
+                log(f"   - '{e['title'][:40]}' (source_type={e['source_type']}, photos={photos_count})", 1)
             
             # Предпочитаем direct_url_date (конкретный исполнитель)
-            direct = [e for e in group if e['source'] == 'direct_url_date']
-            other = [e for e in group if e['source'] != 'direct_url_date']
+            direct = [e for e in group if e['source_type'] == 'direct_url_date']
+            other = [e for e in group if e['source_type'] != 'direct_url_date']
             
             if direct:
                 kept = direct[0].copy()  # Копируем чтобы не мутировать оригинал
@@ -422,7 +422,7 @@ async def main():
                         "ticket_price_min": price_min,
                         "ticket_price_max": price_max,
                         "location": event['location'],
-                        "source": "direct_url_date"
+                        "source_type": "direct_url_date"
                     })
             else:
                 # Общий фестиваль - получаем ВСЕ даты
@@ -538,7 +538,7 @@ async def main():
                             "ticket_status": status,
                             "ticket_price_min": price,
                             "location": event['location'],
-                            "source": "all_dates_extracted"
+                            "source_type": "all_dates_extracted"
                         })
                     
                     dates_processed += 1

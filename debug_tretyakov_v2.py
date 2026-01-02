@@ -630,7 +630,7 @@ async def main():
                         "url": direct_ticket_url,
                         "photos": [photo] if photo else [],
                         "location": event['location'],
-                        "source": "direct_url_date"
+                        "source_type": "direct_url_date"
                     })
                     continue  # Skip to next event
             
@@ -661,7 +661,7 @@ async def main():
                         "url": direct_url,
                         "photos": [photo] if photo else [],
                         "location": event['location'],
-                        "source": "all_dates_extracted"
+                        "source_type": "all_dates_extracted"
                     })
             else:
                 # No entries found - create one with detail page date if available
@@ -688,7 +688,7 @@ async def main():
                         "url": direct_url,
                         "photos": [photo] if photo else [],
                         "location": event['location'],
-                        "source": "detail_page_fallback"
+                        "source_type": "detail_page_fallback"
                     })
                 else:
                     # No date info at all
@@ -707,7 +707,7 @@ async def main():
                         "url": clean_url,
                         "photos": [photo] if photo else [],
                         "location": event['location'],
-                        "source": "no_dates"
+                        "source_type": "no_dates"
                     })
         
         await browser.close()
