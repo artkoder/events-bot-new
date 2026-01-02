@@ -307,12 +307,14 @@ async def scrape_tretyakov_tickets_all_dates(page, ticket_url):
                 all_dates.add((d['day'], d['month']))
             
             # Click right arrow
-            arrows = await page.locator('button, div, span, a').filter(has_text='→').all()
-            if arrows:
-                try:
-                    await arrows[0].click()
+            # Click right arrow to see more dates
+            arrow = await page.query_selector('.week-calendar-arrow.week-calendar-next')
+            if arrow:
+                is_visible = await arrow.is_visible()
+                if is_visible:
+                    await arrow.click()
                     await page.wait_for_timeout(800)
-                except:
+                else:
                     break
             else:
                 break
