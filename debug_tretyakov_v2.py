@@ -47,7 +47,7 @@ def deduplicate_events(events):
             result.append(group[0])
         else:
             # Предпочитаем direct_url_date (конкретный исполнитель)
-            direct = [e for e in group if e['source'] == 'direct_url_date']
+            direct = [e for e in group if e['source_type'] == 'direct_url_date']
             if direct:
                 result.append(direct[0])
                 duplicates_removed += len(group) - 1
