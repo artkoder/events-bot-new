@@ -32,6 +32,8 @@ def deduplicate_events(events):
     """
     Дедупликация: при совпадении (дата, время, зал) оставляем
     событие исполнителя (direct_url_date), удаляем фестиваль (all_dates_extracted).
+    
+    ВАЖНО: Фото удаляемых событий добавляются к оставленному событию.
     """
     log("\n" + "=" * 70)
     log("🔄 ДЕДУПЛИКАЦИЯ")
@@ -56,15 +58,29 @@ def deduplicate_events(events):
         else:
             log(f"\n⚠️ ДУБЛИКАТ НАЙДЕН: {date_str} {time_str} {location}", 1)
             for e in group:
-                log(f"   - '{e['title'][:45]}' (source={e['source']})", 1)
+                photos_count = len(e.get('photos', []))
+                log(f"   - '{e['title'][:40]}' (source={e['source']}, photos={photos_count})", 1)
             
-            # Предпочитаем direct_url_date
+            # Предпочитаем direct_url_date (конкретный исполнитель)
             direct = [e for e in group if e['source'] == 'direct_url_date']
+            other = [e for e in group if e['source'] != 'direct_url_date']
+            
             if direct:
-                result.append(direct[0])
+                kept = direct[0].copy()  # Копируем чтобы не мутировать оригинал
+                
+                # Собираем ВСЕ фото из удаляемых событий
+                all_photos = list(kept.get('photos', []))
+                for removed in other:
+                    for photo in removed.get('photos', []):
+                        if photo and photo not in all_photos:
+                            all_photos.append(photo)
+                            log(f"   📸 Добавлено фото от '{removed['title'][:30]}...'", 1)
+                
+                kept['photos'] = all_photos
+                result.append(kept)
                 duplicates_removed += len(group) - 1
-                log(f"   → ОСТАВЛЕН: '{direct[0]['title'][:45]}' (конкретный исполнитель)", 1)
-                log(f"   → УДАЛЁН: остальные {len(group)-1} событий (общий фестиваль)", 1)
+                log(f"   → ОСТАВЛЕН: '{kept['title'][:40]}' ({len(all_photos)} фото)", 1)
+                log(f"   → УДАЛЁН: остальные {len(group)-1} событий", 1)
             else:
                 result.append(group[0])
                 duplicates_removed += len(group) - 1
