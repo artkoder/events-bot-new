@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [1.7.5] - 2026-01-02
+
+### Changed
+- Increased event limit for 3D previews on month pages from 10 to 30.
+
 ## [1.7.4] - 2026-01-02
 
 ### Added
