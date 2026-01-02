@@ -142,37 +142,56 @@ async def get_price_and_status(page, ticket_url, target_date=None, target_time=N
             await page.wait_for_timeout(1000)
             log(f"   ✓ Кликнул на время {target_time}", 2)
         
-        # Кликаем на сектор если есть
-        sector_label = await page.query_selector('label.select-sector-button')
-        if sector_label:
-            try:
-                await sector_label.click()
-                await page.wait_for_timeout(1500)
-                log(f"   ✓ Кликнул на сектор", 2)
-            except:
-                pass
+        # Извлекаем цены со ВСЕХ секторов (min и max)
+        all_prices = []
         
-        # Извлекаем цену - ПЕРВЫЙ ПРИОРИТЕТ: .ticket-price элемент
-        ticket_price_el = await page.query_selector('.ticket-price')
-        if ticket_price_el:
-            price_text = await ticket_price_el.inner_text()
-            match = re.search(r'(\d+)', price_text)
-            if match:
-                price = int(match.group(1))
-                log(f"   💰 Цена из .ticket-price: {price} ₽", 2)
-                return price, "available"
+        sector_labels = await page.query_selector_all('label.select-sector-button')
+        if sector_labels:
+            log(f"   📍 Найдено секторов: {len(sector_labels)}", 2)
+            for i, sector in enumerate(sector_labels):
+                try:
+                    await sector.click()
+                    await page.wait_for_timeout(1000)
+                    
+                    # Получаем цену из .ticket-price
+                    price_el = await page.query_selector('.ticket-price')
+                    if price_el:
+                        price_text = await price_el.inner_text()
+                        match = re.search(r'(\d+)', price_text)
+                        if match:
+                            price = int(match.group(1))
+                            all_prices.append(price)
+                            sector_text = await sector.inner_text()
+                            log(f"      Сектор {i+1}: {price} ₽ ({sector_text.strip()[:30]})", 2)
+                except:
+                    pass
         
-        # ЗАПАСНОЙ ВАРИАНТ: ищем любой текст с ценой
-        prices = await page.evaluate("""() => [...new Set([...document.querySelectorAll('*')].map(e => e.innerText?.match(/(\\d+)\\s*₽/)?.[1]).filter(Boolean).map(Number).filter(p => p > 100))]""")
-        price = min(prices) if prices else None
-        status = "available" if price else "unknown"
+        # Если секторов нет, пробуем получить цену напрямую
+        if not all_prices:
+            price_el = await page.query_selector('.ticket-price')
+            if price_el:
+                price_text = await price_el.inner_text()
+                match = re.search(r'(\d+)', price_text)
+                if match:
+                    all_prices.append(int(match.group(1)))
         
-        log(f"   💰 Цена: {price} ₽, Статус: {status}", 2)
-        return price, status
+        # Запасной вариант
+        if not all_prices:
+            prices = await page.evaluate("""() => [...new Set([...document.querySelectorAll('*')].map(e => e.innerText?.match(/(\\d+)\\s*₽/)?.[1]).filter(Boolean).map(Number).filter(p => p > 100))]""")
+            all_prices = prices
+        
+        if all_prices:
+            price_min = min(all_prices)
+            price_max = max(all_prices)
+            log(f"   💰 Цены: {price_min}–{price_max} ₽", 2)
+            return (price_min, price_max), "available"
+        
+        log(f"   💰 Цена: не найдена", 2)
+        return (None, None), "unknown"
         
     except Exception as e:
         log(f"   ⚠️ Ошибка: {e}", 2)
-        return None, "error"
+        return (None, None), "error"
 
 
 async def scrape_detail_page(page, detail_url):
@@ -364,7 +383,7 @@ async def main():
                     specific_time = url_match.group(2)
                     log(f"\n   🎯 КОНКРЕТНЫЙ ИСПОЛНИТЕЛЬ - используем дату из URL: {specific_date} {specific_time}", 0)
                     
-                    price, status = await get_price_and_status(
+                    prices, status = await get_price_and_status(
                         ticket_page, direct_ticket_url,
                         target_date=specific_date, target_time=specific_time
                     )
@@ -375,6 +394,8 @@ async def main():
                                   7: 'июля', 8: 'августа', 9: 'сентября', 10: 'октября', 11: 'ноября', 12: 'декабря'}
                     date_raw = f"{day} {month_names.get(month_num, '')} в {specific_time}"
                     
+                    price_min, price_max = prices if isinstance(prices, tuple) else (prices, prices)
+                    
                     all_results.append({
                         "title": title,
                         "description": description,
@@ -382,7 +403,8 @@ async def main():
                         "parsed_date": specific_date,
                         "parsed_time": specific_time,
                         "ticket_status": status,
-                        "ticket_price_min": price,
+                        "ticket_price_min": price_min,
+                        "ticket_price_max": price_max,
                         "location": event['location'],
                         "source": "direct_url_date"
                     })
