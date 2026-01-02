@@ -22,6 +22,47 @@ MONTHS_RU = {
 MAX_ARROW_CLICKS = 10  # Maximum calendar navigation clicks
 
 
+def deduplicate_events(events):
+    """
+    Дедупликация событий фестиваля.
+    
+    Если два события имеют одинаковые (дата, время, зал), оставляем только
+    событие с source='direct_url_date' (конкретный исполнитель).
+    События с 'all_dates_extracted' (общий фестиваль) удаляются.
+    """
+    # Группируем по (дата, время, зал)
+    groups = {}
+    for e in events:
+        key = (e['parsed_date'], e['parsed_time'], e['location'])
+        if key not in groups:
+            groups[key] = []
+        groups[key].append(e)
+    
+    # Для каждой группы выбираем приоритетное событие
+    result = []
+    duplicates_removed = 0
+    
+    for key, group in groups.items():
+        if len(group) == 1:
+            result.append(group[0])
+        else:
+            # Предпочитаем direct_url_date (конкретный исполнитель)
+            direct = [e for e in group if e['source'] == 'direct_url_date']
+            if direct:
+                result.append(direct[0])
+                duplicates_removed += len(group) - 1
+                print(f"   🔄 Дедупликация: {key[0]} {key[1]} {key[2]} - оставлен '{direct[0]['title'][:40]}...'")
+            else:
+                # Если нет direct_url_date, берём первое
+                result.append(group[0])
+                duplicates_removed += len(group) - 1
+    
+    if duplicates_removed > 0:
+        print(f"\n📊 Дедупликация: удалено {duplicates_removed} дубликатов")
+    
+    return result
+
+
 async def scrape_events_list(page):
     """Scrape all events from /events/ page."""
     url = f"{BASE_URL}/events/"
@@ -546,46 +587,95 @@ async def main():
             if photo and photo.startswith('/'):
                 photo = f"{BASE_URL}{photo}"
             
-            # Step 2: Get dates from ticket widget with navigation
-            if detail_date and detail_time:
-                print(f"\n   ✅ Detail page has date: {detail_date} {detail_time}")
-                # Try to verify this date exists in ticket widget
-                entries = await parse_ticket_page_with_navigation(
-                    ticket_page, event['ticket_url'],
-                    target_date=detail_date, target_time=detail_time
-                )
-                
-                if entries:
-                    # Found the date - use it
-                    e = entries[0]
-                    clean_url = re.sub(r'/\d{4}-\d{2}-\d{2}/\d{2}:\d{2}(:\d{2})?$', '', event['ticket_url'])
-                    base = clean_url if not clean_url.startswith('/') else f"{BASE_URL}{clean_url}"
-                    direct_url = f"{base}/{detail_date}/{detail_time}:00"
+            # Get direct ticket URL from detail page (contains correct date for specific performers like Pianissimo)
+            direct_ticket_url = detail.get('direct_ticket_url')
+            
+            # Determine which ticket URL to use
+            # For Pianissimo performers, use direct URL (ensures correct event/date)
+            # For others, use ticket URL from card
+            ticket_url_to_use = direct_ticket_url if direct_ticket_url else event['ticket_url']
+            
+            # SPECIAL CASE: If we have direct_ticket_url with embedded date (Pianissimo performers)
+            # Use ONLY that specific date - don't fetch all dates from shared calendar
+            if direct_ticket_url:
+                url_match = re.search(r'/(\d{4}-\d{2}-\d{2})/(\d{2}:\d{2})', direct_ticket_url)
+                if url_match:
+                    specific_date = url_match.group(1)
+                    specific_time = url_match.group(2)
+                    print(f"\n   🎯 Using SPECIFIC date from direct URL: {specific_date} {specific_time}")
+                    
+                    # Get price from ticket page with this specific date
+                    entries = await parse_ticket_page_with_navigation(
+                        ticket_page, direct_ticket_url,
+                        target_date=specific_date, target_time=specific_time
+                    )
+                    
+                    day = int(specific_date.split('-')[2])
+                    month_num = int(specific_date.split('-')[1])
+                    month_names = {1: 'января', 2: 'февраля', 3: 'марта', 4: 'апреля', 5: 'мая', 6: 'июня',
+                                  7: 'июля', 8: 'августа', 9: 'сентября', 10: 'октября', 11: 'ноября', 12: 'декабря'}
+                    date_raw = f"{day} {month_names.get(month_num, '')} в {specific_time}"
+                    
+                    price = entries[0]['price'] if entries else None
+                    status = entries[0]['status'] if entries else "unknown"
+                    
+                    all_results.append({
+                        "title": title,
+                        "description": description,
+                        "date_raw": date_raw,
+                        "parsed_date": specific_date,
+                        "parsed_time": specific_time,
+                        "ticket_status": status,
+                        "ticket_price_min": price,
+                        "url": direct_ticket_url,
+                        "photos": [photo] if photo else [],
+                        "location": event['location'],
+                        "source": "direct_url_date"
+                    })
+                    continue  # Skip to next event
+            
+            # Step 2: Get ALL active dates from ticket widget
+            # Each date+time combination becomes a separate event entry
+            print(f"\n   🎫 Getting ALL dates from ticket page")
+            entries = await parse_ticket_page_with_navigation(
+                ticket_page, ticket_url_to_use,
+                target_date=None, target_time=None  # Get ALL dates
+            )
+            
+            if entries:
+                print(f"      📅 Found {len(entries)} date+time entries")
+                for e in entries:
+                    clean_url = re.sub(r'/\d{4}-\d{2}-\d{2}/\d{2}:\d{2}(:\d{2})?$', '', ticket_url_to_use)
+                    if clean_url.startswith('/'):
+                        clean_url = f"{BASE_URL}{clean_url}"
+                    direct_url = f"{clean_url}/{e['parsed_date']}/{e['parsed_time']}:00"
                     
                     all_results.append({
                         "title": title,
                         "description": description,
                         "date_raw": e['date_raw'],
-                        "parsed_date": detail_date,
-                        "parsed_time": detail_time,
+                        "parsed_date": e['parsed_date'],
+                        "parsed_time": e['parsed_time'],
                         "ticket_status": e['status'],
                         "ticket_price_min": e['price'],
                         "url": direct_url,
                         "photos": [photo] if photo else [],
                         "location": event['location'],
-                        "source": "detail_page+verified"
+                        "source": "all_dates_extracted"
                     })
-                else:
-                    # Use detail page date anyway
+            else:
+                # No entries found - create one with detail page date if available
+                if detail_date and detail_time:
                     day = int(detail_date.split('-')[2])
                     month_num = int(detail_date.split('-')[1])
                     month_names = {1: 'января', 2: 'февраля', 3: 'марта', 4: 'апреля', 5: 'мая', 6: 'июня',
                                   7: 'июля', 8: 'августа', 9: 'сентября', 10: 'октября', 11: 'ноября', 12: 'декабря'}
                     date_raw = f"{day} {month_names.get(month_num, '')} в {detail_time}"
                     
-                    clean_url = re.sub(r'/\d{4}-\d{2}-\d{2}/\d{2}:\d{2}(:\d{2})?$', '', event['ticket_url'])
-                    base = clean_url if not clean_url.startswith('/') else f"{BASE_URL}{clean_url}"
-                    direct_url = f"{base}/{detail_date}/{detail_time}:00"
+                    clean_url = re.sub(r'/\d{4}-\d{2}-\d{2}/\d{2}:\d{2}(:\d{2})?$', '', ticket_url_to_use)
+                    if clean_url.startswith('/'):
+                        clean_url = f"{BASE_URL}{clean_url}"
+                    direct_url = f"{clean_url}/{detail_date}/{detail_time}:00"
                     
                     all_results.append({
                         "title": title,
@@ -598,16 +688,13 @@ async def main():
                         "url": direct_url,
                         "photos": [photo] if photo else [],
                         "location": event['location'],
-                        "source": "detail_page_only"
+                        "source": "detail_page_fallback"
                     })
-            else:
-                # No detail page date - get all dates from ticket widget
-                print(f"\n   ℹ️ No date in detail page, using TICKET WIDGET")
-                entries = await parse_ticket_page_with_navigation(ticket_page, event['ticket_url'])
-                
-                if not entries:
-                    clean_url = re.sub(r'/\d{4}-\d{2}-\d{2}/\d{2}:\d{2}(:\d{2})?$', '', event['ticket_url'])
-                    target_url = clean_url if not clean_url.startswith('/') else f"{BASE_URL}{clean_url}"
+                else:
+                    # No date info at all
+                    clean_url = re.sub(r'/\d{4}-\d{2}-\d{2}/\d{2}:\d{2}(:\d{2})?$', '', ticket_url_to_use)
+                    if clean_url.startswith('/'):
+                        clean_url = f"{BASE_URL}{clean_url}"
                     
                     all_results.append({
                         "title": title,
@@ -617,32 +704,18 @@ async def main():
                         "parsed_time": None,
                         "ticket_status": "unknown",
                         "ticket_price_min": None,
-                        "url": target_url,
+                        "url": clean_url,
                         "photos": [photo] if photo else [],
                         "location": event['location'],
                         "source": "no_dates"
                     })
-                else:
-                    for e in entries:
-                        clean_url = re.sub(r'/\d{4}-\d{2}-\d{2}/\d{2}:\d{2}(:\d{2})?$', '', event['ticket_url'])
-                        base = clean_url if not clean_url.startswith('/') else f"{BASE_URL}{clean_url}"
-                        direct_url = f"{base}/{e['parsed_date']}/{e['parsed_time']}:00"
-                        
-                        all_results.append({
-                            "title": title,
-                            "description": description,
-                            "date_raw": e['date_raw'],
-                            "parsed_date": e['parsed_date'],
-                            "parsed_time": e['parsed_time'],
-                            "ticket_status": e['status'],
-                            "ticket_price_min": e['price'],
-                            "url": direct_url,
-                            "photos": [photo] if photo else [],
-                            "location": event['location'],
-                            "source": "ticket_widget"
-                        })
         
         await browser.close()
+    
+    # Deduplicate: remove festival duplicates when specific performer exists
+    print("\n" + "=" * 70)
+    print("🔄 STEP 3: Deduplication")
+    all_results = deduplicate_events(all_results)
     
     # Save full results
     with open("/tmp/tretyakov_v2.json", "w", encoding="utf-8") as f:
