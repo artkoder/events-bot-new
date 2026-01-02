@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [1.6.11] - 2026-01-02
+
+### Changed
+- **Configuration**: Increased Kaggle polling timeout from 30 minutes to 4 hours to accommodate CPU fallback scenarios.
+
 ## [1.6.10] - 2026-01-01
 
 ### Fixed
