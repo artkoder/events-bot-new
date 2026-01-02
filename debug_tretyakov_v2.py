@@ -738,7 +738,7 @@ async def main():
         print(f"   📸 Photo: {'✅' if r['photos'] else '❌'}")
         print(f"   📝 Description: {'✅' if r['description'] else '❌'} ({len(r['description']) if r['description'] else 0} chars)")
         print(f"   🔗 URL: {r['url'][:70]}...")
-        print(f"   📊 Source: {r['source']}")
+        print(f"   📊 Source: {r['source_type']}")
     
     print(f"\n{'='*70}")
     print(f"📈 SUMMARY:")
