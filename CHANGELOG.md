@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [1.7.2] - 2026-01-02
+
+### Changed
+- **3D Preview Aesthetics**:
+    - **Soft Shadows**: Increased light source angle to 10° for softer, more realistic shadows.
+    - **Cinematic Rotation**: The first card in the stack is now slightly rotated (-3°) for a more dynamic look.
+
 ## [1.7.1] - 2026-01-02
 
 ### Fixed
