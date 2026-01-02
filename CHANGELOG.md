@@ -7,6 +7,12 @@
 ### Changed
 - Increased event limit for 3D previews on month pages from 10 to 30.
 
+## [1.7.6] - 2026-01-02
+
+### Fixed
+- **3D Preview**:
+  - **Notebook Cleanup**: Kaggle notebook now performs aggressive cleanup (`rm -rf`) of Blender binary and image directories before completion. This prevents the bot from downloading massive amount of data (hundreds of MBs) and ensures only the result JSON is retrieved, fixing "Result not applied" errors.
+
 ## [1.7.4] - 2026-01-02
 
 ### Added
