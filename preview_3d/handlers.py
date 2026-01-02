@@ -530,7 +530,9 @@ async def handle_3di_command(message: types.Message, db: Database, bot) -> None:
         return
     
     # Parse arguments
-    args = message.get_args().split() if hasattr(message, "get_args") else message.text.split()[1:]
+    # Parse arguments
+    full_text = message.text or message.caption or ""
+    args = full_text.split()[1:]
     is_multy = "multy" in args or "multi" in args
     
     text = (

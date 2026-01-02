@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [1.7.1] - 2026-01-02
+
+### Fixed
+- **3D Preview**: Fixed argument parsing in `/3di` command to support running from image captions and avoid errors when `message.text` is None (aiogram v3 compatibility).
+
 ## [1.7.0] - 2026-01-02
 
 ### Added
