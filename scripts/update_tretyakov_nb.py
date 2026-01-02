@@ -339,14 +339,37 @@ async def scrape_tretyakov_tickets_all_dates(page, ticket_url):
             date_iso = date_obj.isoformat()
             date_raw = f"{day_str} {month_str}"
             
-            # Click date
-            await page.evaluate(f"""() => {{ 
-                document.querySelectorAll('div.item.active').forEach(i => {{ 
-                    const dayEl = i.querySelector('.calendarDay'); 
-                    if (dayEl && dayEl.innerText.trim() === '{day_str}') i.click(); 
-                }}); 
-            }}""")
-            await page.wait_for_timeout(1500)
+            # Navigate calendar to find this date (it may be on another page)
+            date_found = False
+            for nav_attempt in range(MAX_ARROW_CLICKS):
+                clicked = await page.evaluate(f"""() => {{ 
+                    let found = false;
+                    document.querySelectorAll('div.item.active').forEach(i => {{ 
+                        const dayEl = i.querySelector('.calendarDay'); 
+                        if (dayEl && dayEl.innerText.trim() === '{day_str}') {{
+                            i.click();
+                            found = true;
+                        }}
+                    }}); 
+                    return found;
+                }}""")
+                
+                if clicked:
+                    date_found = True
+                    await page.wait_for_timeout(1500)
+                    break
+                
+                # Click right arrow to navigate
+                arrow = await page.query_selector('.week-calendar-arrow.week-calendar-next')
+                if arrow and await arrow.is_visible():
+                    await arrow.click()
+                    await page.wait_for_timeout(600)
+                else:
+                    break
+            
+            if not date_found:
+                print(f"         ⚠️ Date {day_str} not found in calendar")
+                continue
             
             # Get times
             times = await page.evaluate("""() => [...document.querySelectorAll('label.select-time-button:not(.disabled)')].map(b => b.innerText.trim().match(/^\\d{1,2}:\\d{2}$/)?.[0]).filter(Boolean)""")
