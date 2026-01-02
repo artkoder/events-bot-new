@@ -4718,6 +4718,12 @@ async def show_festival_edit_menu(user_id: int, fest: Festival, bot: Bot):
                 callback_data=f"festmerge:{fest.id}",
             )
         ],
+        [
+            types.InlineKeyboardButton(
+                text="🔄 Обновить события",
+                callback_data=f"festsyncevents:{fest.id}",
+            )
+        ],
         [types.InlineKeyboardButton(text="Done", callback_data="festeditdone")],
     ]
     markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard)
@@ -14400,6 +14406,7 @@ def create_app() -> web.Application:
         or c.data.startswith("festimgs:")
         or c.data.startswith("festsetcover:")
         or c.data.startswith("festcover:")
+        or c.data.startswith("festsyncevents:")
         or c.data.startswith("requeue:")
         or c.data.startswith("tourist:")
     ,

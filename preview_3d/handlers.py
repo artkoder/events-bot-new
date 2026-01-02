@@ -94,6 +94,29 @@ async def _get_events_without_preview(db: Database, month: str, min_images: int 
     return [e for e in events if not e.preview_3d_url]
 
 
+async def _get_all_future_events_without_preview(db: Database, min_images: int = 1) -> list[Event]:
+    """Get ALL future events (date >= today) that don't have a 3D preview.
+    
+    Searches across all months, not limited to a single month.
+    """
+    today = datetime.now(timezone.utc).date()
+    today_str = today.isoformat()
+    
+    async with db.get_session() as session:
+        result = await session.execute(
+            select(Event)
+            .where(
+                Event.date >= today_str,
+                (Event.preview_3d_url.is_(None)) | (Event.preview_3d_url == "")
+            )
+            .order_by(Event.date, Event.time)
+        )
+        events = result.scalars().all()
+    
+    # Filter events that have enough images
+    return [e for e in events if e.photo_urls and len(e.photo_urls) >= min_images]
+
+
 async def _get_new_events_gap(db: Database, min_images: int = 1) -> list[Event]:
     """Get events added after the last event that has a 3D preview.
     
@@ -133,6 +156,7 @@ def _build_main_menu(is_multy: bool = False) -> InlineKeyboardMarkup:
     suffix = ":multy" if is_multy else ""
     buttons = [
         [InlineKeyboardButton(text="🆕 Только новые", callback_data=f"3di:new_only{suffix}")],
+        [InlineKeyboardButton(text="🌐 All missing", callback_data=f"3di:all_missing{suffix}")],
         [InlineKeyboardButton(text="⚡️ Сгенерировать (текущий мес)", callback_data=f"3di:new{suffix}")],
         [InlineKeyboardButton(text="🔄 Перегенерировать все", callback_data=f"3di:all{suffix}")],
         [InlineKeyboardButton(text="📅 Выбрать месяц", callback_data=f"3di:month_select{suffix}")],
@@ -677,6 +701,23 @@ async def handle_3di_callback(
         mode_str = "new:multy" if is_multy else "new"
         await _start_generation(
             db, bot, callback, events, month_key, mode_str, start_kaggle_render
+        )
+        return
+    
+    if base_data == "3di:all_missing":
+        # Generate for ALL future events (date >= today) without preview
+        min_images = 2 if is_multy else 1
+        events = await _get_all_future_events_without_preview(db, min_images=min_images)
+        
+        if not events:
+            await callback.answer("Нет будущих событий без превью", show_alert=True)
+            return
+        
+        mode_str = "all_missing:multy" if is_multy else "all_missing"
+        # Use a descriptive label since this spans multiple months
+        label = "All Missing"
+        await _start_generation(
+            db, bot, callback, events, label, mode_str, start_kaggle_render
         )
         return
     

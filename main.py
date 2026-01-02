@@ -8520,6 +8520,26 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
         )
         await callback.answer()
 
+    elif data.startswith("festsyncevents:"):
+        fid = int(data.split(":")[1])
+        async with db.get_session() as session:
+            user = await session.get(User, callback.from_user.id)
+            fest = await session.get(Festival, fid)
+            if not fest or (user and user.blocked):
+                await callback.answer("Not authorized", show_alert=True)
+                return
+            fest_name = fest.name
+        await callback.message.answer("⏳ Обновляю события на странице фестиваля...")
+        try:
+            await sync_festival_page(db, fest_name)
+            await callback.message.answer(
+                f"✅ События обновлены на странице фестиваля «{fest_name}»"
+            )
+        except Exception as e:
+            logging.error("festsyncevents error: %s", e)
+            await callback.message.answer(f"❌ Ошибка при обновлении: {e}")
+        await callback.answer()
+
     elif data.startswith("togglesilent:"):
         eid = int(data.split(":")[1])
         async with db.get_session() as session:
