@@ -47,7 +47,7 @@ def deduplicate_events(events):
             result.append(group[0])
         else:
             # Предпочитаем direct_url_date (конкретный исполнитель)
-            direct = [e for e in group if e['source'] == 'direct_url_date']
+            direct = [e for e in group if e['source_type'] == 'direct_url_date']
             if direct:
                 result.append(direct[0])
                 duplicates_removed += len(group) - 1
@@ -738,7 +738,7 @@ async def main():
         print(f"   📸 Photo: {'✅' if r['photos'] else '❌'}")
         print(f"   📝 Description: {'✅' if r['description'] else '❌'} ({len(r['description']) if r['description'] else 0} chars)")
         print(f"   🔗 URL: {r['url'][:70]}...")
-        print(f"   📊 Source: {r['source']}")
+        print(f"   📊 Source: {r['source_type']}")
     
     print(f"\n{'='*70}")
     print(f"📈 SUMMARY:")

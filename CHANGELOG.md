@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [1.7.4] - 2026-01-02
+
+### Added
+- **Telegraph**: Для событий с длинным описанием (>500 символов) теперь отображается краткое описание (`search_digest`) над полным текстом, разделённое горизонтальной линией. Улучшает читаемость страниц событий.
+
+### Fixed
+- **Tretyakov Parser**: 
+  - Исправлена навигация по календарю — теперь парсер корректно находит все даты через стрелку `.week-calendar-next`.
+  - Исправлено извлечение времени — парсер теперь прокручивает календарь к нужной дате перед кликом, устраняя ошибки `00:00` для дат на других страницах календаря.
+  - Добавлена полная поддержка min/max цен из всех секторов.
+  - Добавлена дедупликация событий с объединением фото (исполнитель приоритет над фестивалем).
+
 ## [1.7.3] - 2026-01-02
 
 ### Added
@@ -25,6 +37,11 @@
 ### Added
 - **3D Preview**: Added `/3di multy` command mode. Generates previews only for events with 2 or more images, filtering out single-image events.
 - **3D Preview**: Improved lighting with a new "Shadow Lift" fill light. This makes cards 2, 3, and 4 readable by softening the hard shadows while maintaining the dramatic texture.
+
+## [1.6.11] - 2026-01-02
+
+### Changed
+- **Configuration**: Increased Kaggle polling timeout from 30 minutes to 4 hours to accommodate CPU fallback scenarios.
 
 ## [1.6.10] - 2026-01-01
 

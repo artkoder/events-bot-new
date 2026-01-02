@@ -15,7 +15,7 @@ from typing import Optional, Sequence
 logger = logging.getLogger(__name__)
 
 # Location name mappings from source to database
-TRETYAKOV_LOCATION = "Филиал Третьяковской галереи, Парадная наб. 3, #Калининград"
+TRETYAKOV_LOCATION = "Филиал Третьяковской галереи"
 
 LOCATION_MAPPINGS = {
     "кафедральный собор": "Кафедральный собор",
