@@ -724,6 +724,8 @@ vk_default_location_sessions: TTLCache[
 vk_add_source_sessions: set[int] = set()
 # waiting for Pyramida URL input
 pyramida_input_sessions: set[int] = set()
+# waiting for Dom Iskusstv URL input
+dom_iskusstv_input_sessions: set[int] = set()
 
 # operator_id -> (inbox_id, batch_id) awaiting extra info during VK review
 vk_review_extra_sessions: dict[int, tuple[int, str, bool]] = {}
@@ -1954,6 +1956,7 @@ VK_BTN_LIST_SOURCES = "\U0001f4cb Показать список сообщест
 VK_BTN_CHECK_EVENTS = "\U0001f50e Проверить события"
 VK_BTN_QUEUE_SUMMARY = "\U0001f4ca Сводка очереди"
 VK_BTN_PYRAMIDA = "🔮 Pyramida"
+VK_BTN_DOM_ISKUSSTV = "🏛 Дом искусств"
 
 # command help descriptions by role
 # roles: guest (not registered), user (registered), superadmin

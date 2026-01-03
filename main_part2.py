@@ -23,6 +23,9 @@ from event_utils import format_event_md, is_recent
 if "LOCAL_TZ" not in globals():
     LOCAL_TZ = timezone.utc
 
+if "dom_iskusstv_input_sessions" not in globals():
+    dom_iskusstv_input_sessions = set()
+
 if "format_day_pretty" not in globals():
     _MONTHS = [
         "января",
@@ -8247,6 +8250,134 @@ async def handle_pyramida_input(message: types.Message, db: Database, bot: Bot) 
     await bot.send_message(message.chat.id, "\n".join(summary_lines), parse_mode="Markdown")
 
 
+async def handle_dom_iskusstv_start(message: types.Message, db: Database, bot: Bot) -> None:
+    """Handle Dom Iskusstv button click - start waiting for URL input."""
+    async with db.get_session() as session:
+        user = await session.get(User, message.from_user.id)
+    if not (user and user.is_superadmin):
+        await bot.send_message(message.chat.id, "Access denied")
+        return
+    dom_iskusstv_input_sessions.add(message.from_user.id)
+    await bot.send_message(
+        message.chat.id,
+        "🏛 Отправьте ссылку на спецпроект Дом искусств\n"
+        "(например: https://домискусств.рф/skazka или https://xn--b1admiilxbaki.xn--p1ai/aladdin)",
+    )
+
+
+async def handle_dom_iskusstv_input(message: types.Message, db: Database, bot: Bot) -> None:
+    """Handle text input with Dom Iskusstv URLs."""
+    if message.from_user.id not in dom_iskusstv_input_sessions:
+        return
+    dom_iskusstv_input_sessions.discard(message.from_user.id)
+    
+    text = (message.text or "").strip()
+    if not text:
+        await bot.send_message(message.chat.id, "❌ Пустой ввод")
+        return
+    
+    # Extract URLs
+    from source_parsing.dom_iskusstv import (
+        extract_dom_iskusstv_urls,
+        run_dom_iskusstv_kaggle_kernel,
+        parse_dom_iskusstv_output,
+        process_dom_iskusstv_events,
+    )
+    
+    urls = extract_dom_iskusstv_urls(text)
+    if not urls:
+        await bot.send_message(message.chat.id, "❌ Не найдены ссылки на домискусств.рф")
+        return
+    
+    status_msg = await bot.send_message(message.chat.id, f"🏛 Найдено {len(urls)} ссылок. Запускаю Kaggle...")
+    
+    async def _status_cb(text: str):
+        try:
+            await bot.edit_message_text(
+                f"🏛 {text}",
+                chat_id=message.chat.id,
+                message_id=status_msg.message_id,
+            )
+        except Exception:
+            pass
+    
+    # Run Kaggle
+    try:
+        status, output_files, duration = await run_dom_iskusstv_kaggle_kernel(urls, status_callback=_status_cb)
+    except Exception as e:
+        logging.exception("dom_iskusstv_input: kaggle failed")
+        await bot.send_message(message.chat.id, f"❌ Ошибка Kaggle: {e}")
+        return
+    
+    if status != "complete":
+        await bot.send_message(message.chat.id, f"❌ Kaggle завершился с ошибкой: {status}")
+        # Send logs if available
+        for file_path in output_files:
+            if file_path.endswith(".log"):
+                try:
+                    await bot.send_document(
+                        message.chat.id,
+                        types.FSInputFile(file_path),
+                        caption=f"📝 Log: {os.path.basename(file_path)}"
+                    )
+                except Exception as e:
+                    logging.error(f"Failed to send log file {file_path}: {e}")
+        return
+    
+    await bot.send_message(message.chat.id, f"✅ Kaggle завершён за {duration:.1f}с. Обрабатываю...")
+    
+    # Send JSON files to chat
+    for file_path in output_files:
+        try:
+            await bot.send_document(
+                message.chat.id,
+                types.FSInputFile(file_path),
+                caption=f"📄 {os.path.basename(file_path)}"
+            )
+        except Exception as e:
+            logging.error(f"Failed to send JSON file {file_path}: {e}")
+    
+    # Parse events
+    try:
+        events = parse_dom_iskusstv_output(output_files)
+    except Exception as e:
+        logging.exception("dom_iskusstv_input: parse failed")
+        await bot.send_message(message.chat.id, f"❌ Ошибка парсинга: {e}")
+        return
+    
+    if not events:
+        await bot.send_message(message.chat.id, "⚠️ Не найдено событий в результатах Kaggle")
+        return
+    
+    await bot.send_message(message.chat.id, f"📝 Обрабатываю {len(events)} событий...")
+    
+    # Process events
+    try:
+        stats = await process_dom_iskusstv_events(
+            db,
+            bot,
+            events,
+            chat_id=message.chat.id,
+            skip_pages_rebuild=True,
+        )
+    except Exception as e:
+        logging.exception("dom_iskusstv_input: processing failed")
+        await bot.send_message(message.chat.id, f"❌ Ошибка обработки: {e}")
+        return
+    
+    # Summary
+    summary_lines = [
+        "🏛 **Дом искусств импорт завершён**",
+        f"✅ Добавлено: {stats.new_added}",
+    ]
+    if stats.ticket_updated:
+        summary_lines.append(f"🔄 Обновлено: {stats.ticket_updated}")
+    if stats.failed:
+        summary_lines.append(f"❌ Ошибок: {stats.failed}")
+    
+    await bot.send_message(message.chat.id, "\n".join(summary_lines), parse_mode="Markdown")
+
+
 async def handle_vk_add_message(message: types.Message, db: Database, bot: Bot) -> None:
     if message.from_user.id not in vk_add_source_sessions:
         return
@@ -10243,6 +10374,16 @@ async def _vkrev_show_next(chat_id: int, batch_id: str, operator_id: int, db: Da
                 callback_data=f"vkrev:pyramida:{post.id}",
             )
         ])
+    # Add Dom Iskusstv extraction button if post contains домискусств.рф links
+    from source_parsing.dom_iskusstv import extract_dom_iskusstv_urls
+    dom_iskusstv_urls = extract_dom_iskusstv_urls(post.text or "")
+    if dom_iskusstv_urls:
+        inline_keyboard.append([
+            types.InlineKeyboardButton(
+                text=f"🏛 Извлечь из Дом искусств ({len(dom_iskusstv_urls)})",
+                callback_data=f"vkrev:domiskusstv:{post.id}",
+            )
+        ])
     inline_keyboard.extend([
         [types.InlineKeyboardButton(text="⏹ Стоп", callback_data=f"vkrev:stop:{batch_id}")],
         [
@@ -11173,6 +11314,121 @@ async def _handle_pyramida_extraction(
     await _vkrev_show_next(chat_id, batch_id, operator_id, db, bot)
 
 
+async def _handle_dom_iskusstv_extraction(
+    chat_id: int,
+    operator_id: int,
+    inbox_id: int,
+    batch_id: str,
+    post_text: str,
+    db: Database,
+    bot: Bot,
+) -> None:
+    """Handle Dom Iskusstv event extraction from VK post.
+    
+    1. Extract домискусств.рф URLs from post text
+    2. Run Kaggle kernel to parse events
+    3. Process events (add to DB without pages rebuild)
+    4. Show next post
+    """
+    from source_parsing.dom_iskusstv import (
+        extract_dom_iskusstv_urls,
+        run_dom_iskusstv_kaggle_kernel,
+        parse_dom_iskusstv_output,
+        process_dom_iskusstv_events,
+    )
+    
+    # 1. Extract URLs
+    urls = extract_dom_iskusstv_urls(post_text)
+    if not urls:
+        await bot.send_message(chat_id, "❌ Не найдены ссылки на домискусств.рф")
+        await _vkrev_show_next(chat_id, batch_id, operator_id, db, bot)
+        return
+    
+    status_msg = await bot.send_message(chat_id, f"🏛 Найдено {len(urls)} ссылок. Запускаю Kaggle...")
+    
+    async def _status_cb(text: str):
+        try:
+            await bot.edit_message_text(
+                f"🏛 {text}",
+                chat_id=chat_id,
+                message_id=status_msg.message_id,
+            )
+        except Exception:
+            pass
+            
+    # 2. Run Kaggle kernel
+    try:
+        status, output_files, duration = await run_dom_iskusstv_kaggle_kernel(urls, status_callback=_status_cb)
+    except Exception as e:
+        logging.exception("dom_iskusstv_extraction: kaggle failed")
+        await bot.send_message(chat_id, f"❌ Ошибка Kaggle: {e}")
+        await _vkrev_show_next(chat_id, batch_id, operator_id, db, bot)
+        return
+    
+    if status != "complete":
+        await bot.send_message(chat_id, f"❌ Kaggle завершился с ошибкой: {status}")
+        await _vkrev_show_next(chat_id, batch_id, operator_id, db, bot)
+        return
+    
+    await bot.send_message(chat_id, f"✅ Kaggle завершён за {duration:.1f}с. Обрабатываю...")
+    
+    # Send JSON files to chat
+    for file_path in output_files:
+        try:
+            await bot.send_document(
+                chat_id,
+                types.FSInputFile(file_path),
+                caption=f"📄 {os.path.basename(file_path)}"
+            )
+        except Exception as e:
+            logging.error(f"Failed to send JSON file {file_path}: {e}")
+    
+    # 3. Parse and process events
+    try:
+        events = parse_dom_iskusstv_output(output_files)
+    except Exception as e:
+        logging.exception("dom_iskusstv_extraction: parse failed")
+        await bot.send_message(chat_id, f"❌ Ошибка парсинга: {e}")
+        await _vkrev_show_next(chat_id, batch_id, operator_id, db, bot)
+        return
+    
+    if not events:
+        await bot.send_message(chat_id, "⚠️ Не найдено событий в результатах Kaggle")
+        await _vkrev_show_next(chat_id, batch_id, operator_id, db, bot)
+        return
+    
+    await bot.send_message(chat_id, f"📝 Обрабатываю {len(events)} событий...")
+    
+    try:
+        stats = await process_dom_iskusstv_events(
+            db,
+            bot,
+            events,
+            chat_id=chat_id,
+            skip_pages_rebuild=True,
+        )
+    except Exception as e:
+        logging.exception("dom_iskusstv_extraction: processing failed")
+        await bot.send_message(chat_id, f"❌ Ошибка обработки: {e}")
+        await _vkrev_show_next(chat_id, batch_id, operator_id, db, bot)
+        return
+    
+    # 4. Send summary
+    summary_lines = [
+        "🏛 **Дом искусств импорт завершён**",
+        f"✅ Добавлено: {stats.new_added}",
+    ]
+    if stats.ticket_updated:
+        summary_lines.append(f"🔄 Обновлено: {stats.ticket_updated}")
+    if stats.failed:
+        summary_lines.append(f"❌ Ошибок: {stats.failed}")
+    
+    await bot.send_message(chat_id, "\n".join(summary_lines), parse_mode="Markdown")
+    
+    # Show next post
+    await _vkrev_show_next(chat_id, batch_id, operator_id, db, bot)
+
+
 async def handle_vk_review_cb(callback: types.CallbackQuery, db: Database, bot: Bot) -> None:
 
     assert callback.data
@@ -11365,6 +11621,30 @@ async def handle_vk_review_cb(callback: types.CallbackQuery, db: Database, bot: 
         await callback.answer("Извлекаю события из Pyramida…")
         answered = True
         await _handle_pyramida_extraction(
+            callback.message.chat.id,
+            callback.from_user.id,
+            inbox_id,
+            batch_id,
+            post_text or "",
+            db,
+            bot,
+        )
+    elif action == "domiskusstv":
+        # Handle Dom Iskusstv event extraction
+        inbox_id = int(parts[2]) if len(parts) > 2 else 0
+        async with db.raw_conn() as conn:
+            cur = await conn.execute(
+                "SELECT review_batch, text FROM vk_inbox WHERE id=?",
+                (inbox_id,),
+            )
+            row = await cur.fetchone()
+        if not row:
+            await callback.answer("Пост не найден", show_alert=True)
+            return
+        batch_id, post_text = row
+        await callback.answer("Извлекаю события из Дом искусств…")
+        answered = True
+        await _handle_dom_iskusstv_extraction(
             callback.message.chat.id,
             callback.from_user.id,
             inbox_id,
@@ -14248,6 +14528,12 @@ def create_app() -> web.Application:
     async def pyramida_input_wrapper(message: types.Message):
         await handle_pyramida_input(message, db, bot)
 
+    async def dom_iskusstv_start_wrapper(message: types.Message):
+        await handle_dom_iskusstv_start(message, db, bot)
+
+    async def dom_iskusstv_input_wrapper(message: types.Message):
+        await handle_dom_iskusstv_input(message, db, bot)
+
     async def vk_list_wrapper(message: types.Message):
         await handle_vk_list(message, db, bot)
 
@@ -14500,6 +14786,8 @@ def create_app() -> web.Application:
     dp.message.register(vk_queue_wrapper, lambda m: m.text == VK_BTN_QUEUE_SUMMARY)
     dp.message.register(pyramida_start_wrapper, lambda m: m.text == VK_BTN_PYRAMIDA)
     dp.message.register(pyramida_input_wrapper, lambda m: m.from_user.id in pyramida_input_sessions)
+    dp.message.register(dom_iskusstv_start_wrapper, lambda m: m.text == VK_BTN_DOM_ISKUSSTV)
+    dp.message.register(dom_iskusstv_input_wrapper, lambda m: m.from_user.id in dom_iskusstv_input_sessions)
     dp.message.register(vk_add_msg_wrapper, lambda m: m.from_user.id in vk_add_source_sessions)
 
     dp.message.register(vk_extra_msg_wrapper, lambda m: m.from_user.id in vk_review_extra_sessions)
