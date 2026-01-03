@@ -13,6 +13,10 @@
   - Device fingerprint (iPhone 14 Pro / iOS 17.2), Gaussian-распределённые задержки
   - Typing action simulation, FloodWait safety wrapper
   - Pytest fixture `human_client` для единой точки входа в E2E тесты
+- **BDD Gherkin Layer**: Добавлен слой BDD тестов с русским синтаксисом (`tests/e2e/features/`):
+  - Сценарии на Gherkin (Функция/Сценарий/Когда/Тогда)
+  - `behave` интеграция с HumanUserClient
+  - Поддержка проверки кнопок, отправки команд, логирования
 - **Фестивали**: На странице фестиваля в Telegraph теперь отображается 3D превью над заголовком события (если у события есть `preview_3d_url`).
 
 ### Changed
