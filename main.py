@@ -8982,7 +8982,14 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
             user = await session.get(User, callback.from_user.id)
         filter_id = user.user_id if user and user.is_partner else None
         text, markup = await build_events_message(db, target, tz, filter_id)
-        await callback.message.edit_text(text, reply_markup=markup)
+        try:
+            await callback.message.edit_text(text, reply_markup=markup)
+        except TelegramBadRequest as e:
+            if "message is too long" in str(e).lower() or "MESSAGE_TOO_LONG" in str(e):
+                text, markup = await build_events_message_compact(db, target, tz, filter_id)
+                await callback.message.edit_text(text, reply_markup=markup, parse_mode="HTML")
+            else:
+                raise
         await callback.answer()
     elif data.startswith("unset:"):
         cid = int(data.split(":")[1])
