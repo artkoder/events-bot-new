@@ -7985,6 +7985,15 @@ async def handle_edit_message(message: types.Message, db: Database, bot: Bot):
     await show_edit_menu(message.from_user.id, event, bot)
 
 
+async def handle_dom_iskusstv_start(message: types.Message, db: Database, bot: Bot):
+    await bot.send_message(
+        message.chat.id,
+        "🎭 Отправьте ссылку на событие Дом искусств (domiskusstv.ru).\n"
+        "Бот автоматически распознает ссылку и запустит парсер.\n"
+        "Пример: https://дом-искусств.рф/events/...",
+    )
+
+
 async def handle_add_event_start(message: types.Message, db: Database, bot: Bot):
     """Initiate event creation via the menu."""
     logging.info("handle_add_event_start from user %s", message.from_user.id)
@@ -14499,6 +14508,9 @@ def create_app() -> web.Application:
         )
         await handle_add_festival_start(message, db, bot)
 
+    async def dom_iskusstv_start_wrapper(message: types.Message):
+        await handle_dom_iskusstv_start(message, db, bot)
+
     async def add_event_session_wrapper(message: types.Message):
         logging.info("add_event_session_wrapper start: user=%s", message.from_user.id)
         session_mode = add_event_sessions.get(message.from_user.id)
@@ -14768,6 +14780,7 @@ def create_app() -> web.Application:
     dp.message.register(events_menu_wrapper, lambda m: m.text == MENU_EVENTS)
     dp.message.register(events_date_wrapper, lambda m: m.from_user.id in events_date_sessions)
     dp.message.register(add_event_start_wrapper, lambda m: m.text == MENU_ADD_EVENT)
+    dp.message.register(dom_iskusstv_start_wrapper, lambda m: m.text == MENU_DOM_ISKUSSTV)
     dp.message.register(
         add_festival_start_wrapper, lambda m: m.text == MENU_ADD_FESTIVAL
     )

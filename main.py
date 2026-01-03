@@ -448,6 +448,39 @@ TELEGRAPH_AUTHOR_URL = os.getenv(
 HISTORY_TELEGRAPH_AUTHOR_URL = os.getenv(
     "HISTORY_TELEGRAPH_AUTHOR_URL", "https://t.me/kgdstories"
 )
+
+
+def is_e2e_tester(user_id: int) -> bool:
+    """Check if user is the E2E tester (only works in DEV_MODE).
+    
+    This allows automated E2E tests to run commands that require superadmin access.
+    The tester ID must be explicitly set via E2E_TESTER_ID environment variable.
+    
+    Security: This function ALWAYS returns False in production (when DEV_MODE != "1").
+    """
+    if os.getenv("DEV_MODE") != "1":
+        return False
+    tester_id = os.getenv("E2E_TESTER_ID")
+    if not tester_id:
+        return False
+    try:
+        return int(tester_id) == user_id
+    except ValueError:
+        return False
+
+
+def has_admin_access(user) -> bool:
+    """Check if user has admin access (superadmin or E2E tester in DEV_MODE).
+    
+    Use this instead of checking user.is_superadmin directly when you want
+    E2E tests to be able to execute admin commands.
+    """
+    if user is None:
+        return False
+    if user.is_superadmin:
+        return True
+    return is_e2e_tester(user.user_id)
+
 VK_MISS_REVIEW_COMMAND = os.getenv("VK_MISS_REVIEW_COMMAND", "/vk_misses")
 VK_MISS_REVIEW_FILE = os.getenv("VK_MISS_REVIEW_FILE", "/data/vk_miss_review.md")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -1071,11 +1104,12 @@ def build_event_card_message(
 def _user_can_label_event(user: User | None) -> bool:
     if not user or user.blocked:
         return False
-    if user.is_superadmin:
+    if has_admin_access(user):
         return True
     if user.is_partner:
         return False
     return True
+
 
 
 async def update_tourist_message(
@@ -1949,6 +1983,7 @@ def seconds_to_next_minute(now: datetime) -> float:
 
 # main menu buttons
 MENU_ADD_EVENT = "\u2795 Добавить событие"
+MENU_DOM_ISKUSSTV = "\u1f3ad Дом искусств"
 MENU_ADD_FESTIVAL = "\u2795 Добавить фестиваль"
 MENU_EVENTS = "\U0001f4c5 События"
 VK_BTN_ADD_SOURCE = "\u2795 Добавить сообщество"
@@ -4082,7 +4117,7 @@ async def notify_event_added(
     db: Database, bot: Bot, user: User | None, event: Event, added: bool
 ) -> None:
     """Notify superadmin when a user or partner adds an event."""
-    if not added or not user or user.is_superadmin:
+    if not added or not user or has_admin_access(user):
         return
     role = "partner" if user.is_partner else "user"
     name = f"@{user.username}" if user.username else str(user.user_id)
@@ -7509,12 +7544,13 @@ async def send_main_menu(bot: Bot, user: User | None, chat_id: int) -> None:
         buttons = [
             [
                 types.KeyboardButton(text=MENU_ADD_EVENT),
+                types.KeyboardButton(text=MENU_DOM_ISKUSSTV),
                 types.KeyboardButton(text=MENU_ADD_FESTIVAL),
             ],
             [types.KeyboardButton(text=MENU_EVENTS)],
         ]
-        # Add Pyramida button for superadmins
-        if user and user.is_superadmin:
+        # Add Pyramida button for admins
+        if has_admin_access(user):
             buttons.append([types.KeyboardButton(text=VK_BTN_PYRAMIDA)])
         markup = types.ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
     async with span("tg-send"):
@@ -7571,7 +7607,7 @@ async def handle_help(message: types.Message, db: Database, bot: Bot) -> None:
         user = await session.get(User, message.from_user.id)
     role = "guest"
     if user and not user.blocked:
-        role = "superadmin" if user.is_superadmin else "user"
+        role = "superadmin" if has_admin_access(user) else "user"
     lines = [
         f"{item['usage']} — {item['desc']}"
         for item in HELP_COMMANDS
@@ -7583,7 +7619,7 @@ async def handle_help(message: types.Message, db: Database, bot: Bot) -> None:
 async def handle_ocrtest(message: types.Message, db: Database, bot: Bot) -> None:
     async with db.get_session() as session:
         user = await session.get(User, message.from_user.id)
-        if not user or not user.is_superadmin:
+        if not has_admin_access(user):
             await bot.send_message(message.chat.id, "Not authorized")
             return
 
@@ -7660,7 +7696,7 @@ async def handle_register(message: types.Message, db: Database, bot: Bot):
 async def handle_requests(message: types.Message, db: Database, bot: Bot):
     async with db.get_session() as session:
         user = await session.get(User, message.from_user.id)
-        if not user or not user.is_superadmin:
+        if not has_admin_access(user):
             return
         result = await session.execute(select(PendingUser))
         pending = result.scalars().all()
@@ -9082,7 +9118,7 @@ async def handle_tz(message: types.Message, db: Database, bot: Bot):
         return
     async with db.get_session() as session:
         user = await session.get(User, message.from_user.id)
-        if not user or not user.is_superadmin:
+        if not has_admin_access(user):
             await bot.send_message(message.chat.id, "Not authorized")
             return
     await set_tz_offset(db, parts[1])
@@ -9092,7 +9128,7 @@ async def handle_tz(message: types.Message, db: Database, bot: Bot):
 async def handle_images(message: types.Message, db: Database, bot: Bot):
     async with db.get_session() as session:
         user = await session.get(User, message.from_user.id)
-        if not user or not user.is_superadmin:
+        if not has_admin_access(user):
             await bot.send_message(message.chat.id, "Not authorized")
             return
     new_value = not CATBOX_ENABLED
@@ -9108,7 +9144,7 @@ async def handle_vkgroup(message: types.Message, db: Database, bot: Bot):
         return
     async with db.get_session() as session:
         user = await session.get(User, message.from_user.id)
-        if not user or not user.is_superadmin:
+        if not has_admin_access(user):
             await bot.send_message(message.chat.id, "Not authorized")
             return
     if parts[1].lower() == "off":
@@ -9126,7 +9162,7 @@ async def handle_vktime(message: types.Message, db: Database, bot: Bot):
         return
     async with db.get_session() as session:
         user = await session.get(User, message.from_user.id)
-        if not user or not user.is_superadmin:
+        if not has_admin_access(user):
             await bot.send_message(message.chat.id, "Not authorized")
             return
     if not re.match(r"^\d{2}:\d{2}$", parts[2]):
@@ -9142,7 +9178,7 @@ async def handle_vktime(message: types.Message, db: Database, bot: Bot):
 async def handle_vkphotos(message: types.Message, db: Database, bot: Bot):
     async with db.get_session() as session:
         user = await session.get(User, message.from_user.id)
-        if not user or not user.is_superadmin:
+        if not has_admin_access(user):
             await bot.send_message(message.chat.id, "Not authorized")
             return
     new_value = not VK_PHOTOS_ENABLED
@@ -9169,7 +9205,7 @@ async def handle_vk_captcha(message: types.Message, db: Database, bot: Bot):
     _vk_captcha_awaiting_user = None
     async with db.get_session() as session:
         user = await session.get(User, message.from_user.id)
-        if not user or not user.is_superadmin:
+        if not has_admin_access(user):
             return
     invalid_markup = types.InlineKeyboardMarkup(
         inline_keyboard=[[types.InlineKeyboardButton(text="Отправить новый код", callback_data="captcha_refresh")]]
@@ -9265,7 +9301,7 @@ async def send_channels_list(
 ):
     async with db.get_session() as session:
         user = await session.get(User, message.from_user.id)
-        if not user or not user.is_superadmin:
+        if not has_admin_access(user):
             if not edit:
                 await bot.send_message(message.chat.id, "Not authorized")
             return
@@ -9309,7 +9345,7 @@ async def send_channels_list(
 async def send_users_list(message: types.Message, db: Database, bot: Bot, edit: bool = False):
     async with db.get_session() as session:
         user = await session.get(User, message.from_user.id)
-        if not user or not user.is_superadmin:
+        if not has_admin_access(user):
             if not edit:
                 await bot.send_message(message.chat.id, "Not authorized")
             return
@@ -9512,7 +9548,7 @@ async def send_setchannel_list(
 ):
     async with db.get_session() as session:
         user = await session.get(User, message.from_user.id)
-        if not user or not user.is_superadmin:
+        if not has_admin_access(user):
             if not edit:
                 await bot.send_message(message.chat.id, "Not authorized")
             return
@@ -9555,7 +9591,7 @@ async def send_regdaily_list(
 ):
     async with db.get_session() as session:
         user = await session.get(User, message.from_user.id)
-        if not user or not user.is_superadmin:
+        if not has_admin_access(user):
             if not edit:
                 await bot.send_message(message.chat.id, "Not authorized")
             return
@@ -9603,7 +9639,7 @@ async def send_daily_list(
 ):
     async with db.get_session() as session:
         user = await session.get(User, message.from_user.id)
-        if not user or not user.is_superadmin:
+        if not has_admin_access(user):
             if not edit:
                 await bot.send_message(message.chat.id, "Not authorized")
             return
