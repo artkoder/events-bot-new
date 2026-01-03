@@ -111,11 +111,11 @@ async def test_real_dom_iskusstv_kaggle_flow(tmp_path):
     logger.info("Verifying database content...")
     async with db.get_session() as session:
         # Check for event with the specific location and date
-        # Kaggle gives date="2026-01-03" (verified in logs)
-        # Title usually "«Сказки на ночь»"
+        # Kaggle gives date="2026-01-06" (verified in logs)
+        # Title usually "«Сказки на ночь»" or "🎭 Сказки на ночь" (LLM)
         
         result = await session.execute(
-            text("SELECT id, title, date, description, ticket_price_min, search_digest FROM event WHERE location_name LIKE '%Дом искусств%' AND date = '2026-01-03'")
+            text("SELECT id, title, date, description, ticket_price_min, search_digest, source_text, ocr_title FROM event WHERE location_name LIKE '%Дом искусств%' AND date = '2026-01-06'")
         )
         row = result.first()
         
@@ -124,7 +124,6 @@ async def test_real_dom_iskusstv_kaggle_flow(tmp_path):
         logger.info(f"Found event: ID={row.id}, Title={row.title}, Date={row.date}")
         
         # Verify LLM populated description
-        # If LLM failed, description might be empty or fallback.
         if row.description:
             logger.info(f"Description length: {len(row.description)}")
             logger.info(f"Description preview: {row.description[:100]}...")
@@ -135,6 +134,18 @@ async def test_real_dom_iskusstv_kaggle_flow(tmp_path):
             logger.info(f"Search digest: {row.search_digest}")
         else:
             logger.warning("Search digest is empty!")
+
+        # Verify OCR and Source Text
+        if row.source_text:
+            logger.info(f"Source Text length: {len(row.source_text)}")
+            logger.info(f"Source Text preview: {row.source_text[:100]}...")
+        else:
+            logger.warning("Source Text is empty!")
+
+        if row.ocr_title:
+            logger.info(f"OCR Title: '{row.ocr_title}'")
+        else:
+            logger.warning("OCR Title is empty!")
 
         # 6. Manual Telegraph Build (simulating Job Queue)
         logger.info(f"Generating Telegraph page for event {event_id}...")
