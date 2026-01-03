@@ -8,6 +8,11 @@
   - Роль "супертестера" (`is_e2e_tester`, `has_admin_access`) для авторизации тестов в DEV_MODE
   - BDD сценарии на русском языке (Gherkin + Telethon)
   - Security: роль супертестера работает ТОЛЬКО при `DEV_MODE=1` и `E2E_TESTER_ID`
+- **E2E HumanLikeTelethon**: Новый фреймворк для E2E тестов через реальный Telegram аккаунт (`tests/e2e/`):
+  - `HumanUserClient` — обёртка Telethon с имитацией человеческого поведения
+  - Device fingerprint (iPhone 14 Pro / iOS 17.2), Gaussian-распределённые задержки
+  - Typing action simulation, FloodWait safety wrapper
+  - Pytest fixture `human_client` для единой точки входа в E2E тесты
 - **Фестивали**: На странице фестиваля в Telegraph теперь отображается 3D превью над заголовком события (если у события есть `preview_3d_url`).
 
 ### Changed
