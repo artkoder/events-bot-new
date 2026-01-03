@@ -4278,6 +4278,58 @@ async def build_events_message(db: Database, target_date: date, tz: timezone, cr
     return text, markup
 
 
+async def build_events_message_compact(db: Database, target_date: date, tz: timezone, creator_id: int | None = None):
+    """Compact version of events message - only ID and title with link.
+    
+    Used as fallback when full message exceeds Telegram's 4096 char limit.
+    """
+    async with db.get_session() as session:
+        stmt = select(Event).where(
+            (Event.date == target_date.isoformat())
+            | (Event.end_date == target_date.isoformat())
+        )
+        if creator_id is not None:
+            stmt = stmt.where(Event.creator_id == creator_id)
+        result = await session.execute(stmt.order_by(Event.time))
+        events = result.scalars().all()
+
+    lines = [f"📋 Events on {format_day(target_date, tz)} (compact mode)\n"]
+    
+    for e in events:
+        title = f"{e.emoji} {e.title}" if e.emoji else e.title
+        if e.telegraph_url:
+            # Clickable link to telegraph page
+            lines.append(f'{e.id}. <a href="{e.telegraph_url}">{title}</a>')
+        else:
+            lines.append(f"{e.id}. {title}")
+    
+    if len(events) == 0:
+        lines.append("No events")
+    else:
+        lines.append(f"\n<i>Total: {len(events)} events</i>")
+
+    # Simplified navigation keyboard (no per-event buttons)
+    today = datetime.now(tz).date()
+    prev_day = target_date - timedelta(days=1)
+    next_day = target_date + timedelta(days=1)
+    nav_row = []
+    if target_date > today:
+        nav_row.append(
+            types.InlineKeyboardButton(
+                text="◀", callback_data=f"nav:{prev_day.isoformat()}"
+            )
+        )
+    nav_row.append(
+        types.InlineKeyboardButton(
+            text="▶", callback_data=f"nav:{next_day.isoformat()}"
+        )
+    )
+    keyboard = [nav_row]
+
+    text = "\n".join(lines)
+    markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard)
+    return text, markup
+
 async def build_exhibitions_message(
     db: Database, tz: timezone
 ) -> tuple[list[str], types.InlineKeyboardMarkup | None]:
@@ -5057,7 +5109,15 @@ async def handle_events(message: types.Message, db: Database, bot: Bot):
         creator_filter = user.user_id if user.is_partner else None
 
     text, markup = await build_events_message(db, day, tz, creator_filter)
-    await bot.send_message(message.chat.id, text, reply_markup=markup)
+    
+    # Try sending full message, fallback to compact format if too long
+    try:
+        await bot.send_message(message.chat.id, text, reply_markup=markup)
+    except TelegramBadRequest as e:
+        if "message is too long" in str(e).lower():
+            # Fallback to compact format
+            text, markup = await build_events_message_compact(db, day, tz, creator_filter)
+            await bot.send_message(message.chat.id, text, reply_markup=markup, parse_mode="HTML")
 
 
 async def show_digest_menu(message: types.Message, db: Database, bot: Bot) -> None:
@@ -14217,6 +14277,7 @@ def create_app() -> web.Application:
     # Webhook is optional - only required for production mode
     # In dev mode, we'll skip webhook setup
 
+    from main import IPv4AiohttpSession
     session = IPv4AiohttpSession(timeout=ClientTimeout(total=HTTP_TIMEOUT))
     bot = SafeBot(token, session=session)
     logging.info("DB_PATH=%s", DB_PATH)
