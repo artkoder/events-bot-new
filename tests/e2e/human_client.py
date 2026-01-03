@@ -229,10 +229,31 @@ class HumanUserClient:
         entity = await self.client.get_entity(chat_id)
         
         async with self.client.conversation(entity, timeout=timeout) as conv:
-            # Send with human behavior
-            await self.human_send_message(chat_id, text, skip_read=True)
+            # 1. Mark as read (human reads before responding)
+            try:
+                await self.client.send_read_acknowledge(entity)
+            except Exception as e:
+                logger.warning(f"Failed to mark as read: {e}")
             
-            # Wait and return response
+            # 2. Reaction time (reading/thinking)
+            await self._gaussian_delay(
+                self.MIN_REACTION_SEC,
+                self.MAX_REACTION_SEC
+            )
+            
+            # 3. Typing simulation
+            typing_seconds = (len(text) / self.CHARS_PER_MINUTE) * 60
+            typing_seconds = max(1.0, typing_seconds)
+            jitter = random.uniform(-0.2, 0.2)
+            typing_seconds *= (1 + jitter)
+            
+            await self._simulate_typing(entity, typing_seconds)
+            
+            # 4. Send message THROUGH conversation for proper tracking
+            await conv.send_message(text)
+            logger.info(f"Sent message: {text}")
+            
+            # 5. Wait and return response
             response = await conv.get_response()
             logger.info(
                 f"Got response from {chat_id}: "
