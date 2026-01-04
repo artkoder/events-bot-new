@@ -100,6 +100,25 @@ def step_send_command(context, command):
     run_async(context, _send())
 
 
+@when('я отправляю сообщение "{text}"')
+def step_send_message(context, text):
+    """Send arbitrary text message."""
+    async def _send():
+        response = await context.client.human_send_and_wait(
+            context.bot_entity,
+            text,
+            timeout=120  # Increased timeout for long operations
+        )
+        context.last_response = response
+        logger.info(f"→ Отправлено сообщение: {text}")
+        if response and response.text:
+            preview = response.text[:100].replace('\n', ' ')
+            logger.info(f"← Ответ: {preview}...")
+        return response
+    
+    run_async(context, _send())
+
+
 @when('я нажимаю инлайн-кнопку "{btn_text}"')
 def step_click_inline_button(context, btn_text):
     """Click inline button by text."""
@@ -177,12 +196,14 @@ def step_see_keyboard_buttons(context):
 
 
 @then("я логирую в консоль список всех кнопок, которые вижу")
+@when("я логирую в консоль список всех кнопок, которые вижу")
 def step_log_all_buttons(context):
     """Log all visible buttons to console."""
     msg = context.last_response
     buttons = get_all_buttons(msg)
     
     print("\n" + "=" * 50)
+    print(f"[REPORT] Текст сообщения: {msg.text if msg else 'None'}")
     print("[REPORT] Видимые кнопки:")
     for i, btn in enumerate(buttons, 1):
         print(f"  {i}. {btn}")
@@ -244,6 +265,29 @@ def step_wait_for_update(context):
     logger.info("✓ Дождались обновления")
 
 
+@when('я жду сообщения с текстом "{text}"')
+@then('я жду сообщения с текстом "{text}"')
+def step_wait_for_message_text(context, text):
+    """Wait for a new message containing specific text."""
+    async def _wait():
+        import asyncio
+        # Try for 5 seconds
+        for _ in range(10):
+            messages = await context.client.client.get_messages(
+                context.bot_entity, limit=5
+            )
+            for msg in messages:
+                if msg.text and text.lower() in msg.text.lower():
+                    context.last_response = msg
+                    logger.info(f"✓ Найдено ожидаемое сообщение: '{text}'")
+                    return
+            await asyncio.sleep(0.5)
+        
+        raise AssertionError(f"Сообщение с текстом '{text}' не получено за 5 секунд. Последние: {[m.text for m in messages]}")
+
+    run_async(context, _wait())
+
+
 @then("я пишу в лог количество отображенных событий")
 def step_log_events_count(context):
     """Log estimated number of events in the message."""
@@ -267,3 +311,121 @@ def step_log_events_count(context):
     print("=" * 50 + "\n")
     
     logger.info(f"[REPORT] Событий: ~{estimated_events}")
+
+
+@then("я логирую полный текст сообщения")
+def step_log_full_message(context):
+    """Log the full text of the last response."""
+    msg = context.last_response
+    text = msg.text if msg and msg.text else "[No text]"
+    
+    print("\n" + "=" * 50)
+    print("[REPORT] Полный текст ответа:")
+    print(text)
+    print("=" * 50 + "\n")
+    
+    logger.info(f"[REPORT] Текст сообщения ({len(text)} chars)")
+
+
+@then("я должен найти в ответе действующую ссылку на телеграф")
+def step_check_telegraph_link(context):
+    """Assert response contains valid and accessible Telegraph links."""
+    import aiohttp
+    
+    msg = context.last_response
+    text = msg.text if msg and msg.text else ""
+    
+    # Regex for Telegraph links
+    link_pattern = r"https://telegra\.ph/[a-zA-Z0-9_-]+"
+    links = re.findall(link_pattern, text)
+    
+    assert len(links) > 0, f"Не найдено ни одной ссылки на telegra.ph в тексте:\n{text}"
+    
+    print("\n" + "=" * 50)
+    print(f"[REPORT] Найдены ссылки Telegraph ({len(links)}):")
+    for link in links:
+        print(f"  - {link}")
+    print("=" * 50 + "\n")
+    
+    # Verify each link is accessible via HTTP
+    async def _verify():
+        async with aiohttp.ClientSession() as session:
+            for link in links:
+                try:
+                    async with session.head(link, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                        if resp.status != 200:
+                            raise AssertionError(f"Telegraph ссылка {link} вернула статус {resp.status}")
+                        logger.info(f"✓ Ссылка работает: {link}")
+                except Exception as e:
+                    raise AssertionError(f"Не удалось проверить ссылку {link}: {e}")
+    
+    run_async(context, _verify())
+    context.telegraph_links = links
+    logger.info(f"✓ Все {len(links)} Telegraph ссылок валидны")
+
+
+@then("я жду медиа-сообщения")
+def step_check_media_message(context):
+    """Wait for a message with media."""
+    import asyncio
+    async def _wait():
+        for i in range(10): # 5 seconds
+            messages = await context.client.client.get_messages(
+                 context.bot_entity, limit=5
+            )
+            for msg in messages:
+                if msg.media:
+                    context.last_response = msg
+                    logger.info("✓ Медиа-сообщение получено")
+                    return
+            await asyncio.sleep(0.5)
+        raise AssertionError("Медиа-сообщение не получено")
+    run_async(context, _wait())
+
+@then('под сообщением должны быть кнопки: "{buttons}"')
+def step_check_inline_buttons_custom(context, buttons):
+    """Verify specific buttons are present (partial match)."""
+    expected = [b.strip() for b in buttons.split(",")]
+    msg = context.last_response
+    visible = get_all_buttons(msg)
+    
+    missing = []
+    for exp in expected:
+        found = False
+        for v in visible:
+            if exp.strip('"').strip("'") in v:
+                found = True
+                break
+        if not found:
+            missing.append(exp)
+    
+    if missing:
+        print(f"[ERROR] Expected: {expected}")
+        print(f"[ERROR] Visible: {visible}")
+        raise AssertionError(f"Не найдены кнопки: {missing}")
+    logger.info(f"✓ Найдены все кнопки: {expected}")
+
+
+@then('я жду долгой операции с текстом "{text}"')
+def step_wait_long_operation(context, text):
+    """Wait for a long operation (up to 5 minutes) for message containing text."""
+    async def _wait():
+        import asyncio
+        # Try for 300 seconds (5 minutes - Kaggle notebook can take a while)
+        for i in range(600):
+            messages = await context.client.client.get_messages(
+                context.bot_entity, limit=10
+            )
+            for msg in messages:
+                if msg.text and text.lower() in msg.text.lower():
+                    context.last_response = msg
+                    logger.info(f"✓ Найден результат долгой операции: '{text}' (за {i*0.5:.1f}с)")
+                    return
+            await asyncio.sleep(0.5)
+        
+        last_texts = [m.text[:100] if m.text else "(no text)" for m in messages[:3]]
+        raise AssertionError(f"Сообщение с текстом '{text}' не получено за 5 минут. Последние: {last_texts}")
+
+    run_async(context, _wait())
+
+

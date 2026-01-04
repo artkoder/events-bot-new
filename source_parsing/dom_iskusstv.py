@@ -486,6 +486,7 @@ async def process_dom_iskusstv_events(
             )
             if success:
                 stats.ticket_updated += 1
+                stats.updated_event_ids.append(existing_id)
             else:
                 stats.already_exists += 1
             
@@ -529,6 +530,7 @@ async def process_dom_iskusstv_events(
             if new_id:
                 if was_added:
                     stats.new_added += 1
+                    stats.added_event_ids.append(new_id)
                 else:
                     stats.skipped += 1
                 # Delay between additions

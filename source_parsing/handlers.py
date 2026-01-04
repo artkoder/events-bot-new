@@ -45,6 +45,8 @@ class SourceParsingStats:
     already_exists: int = 0
     failed: int = 0
     skipped: int = 0  # Events that already existed and were updated (not new)
+    added_event_ids: list[int] = field(default_factory=list)
+    updated_event_ids: list[int] = field(default_factory=list)  # For displaying Telegraph links
 
 
 @dataclass

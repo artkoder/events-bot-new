@@ -8323,7 +8323,7 @@ async def handle_dom_iskusstv_start(message: types.Message, db: Database, bot: B
     """Handle Dom Iskusstv button click - start waiting for URL input."""
     async with db.get_session() as session:
         user = await session.get(User, message.from_user.id)
-    if not (user and user.is_superadmin):
+    if not has_admin_access(user):
         await bot.send_message(message.chat.id, "Access denied")
         return
     dom_iskusstv_input_sessions.add(message.from_user.id)
@@ -8443,6 +8443,25 @@ async def handle_dom_iskusstv_input(message: types.Message, db: Database, bot: B
         summary_lines.append(f"🔄 Обновлено: {stats.ticket_updated}")
     if stats.failed:
         summary_lines.append(f"❌ Ошибок: {stats.failed}")
+
+    # Add Telegraph links
+    all_event_ids = stats.added_event_ids + stats.updated_event_ids
+    if all_event_ids:
+        from source_parsing.handlers import build_added_event_info
+        event_infos = []
+        for eid in all_event_ids:
+            # build_added_event_info is async
+            info = await build_added_event_info(db, eid, "dom_iskusstv")
+            if info:
+                event_infos.append(info)
+        
+        if event_infos:
+            summary_lines.append("")
+            summary_lines.append("🔗 **Ссылки:**")
+            for info in event_infos:
+                # Escape for Legacy Markdown
+                safe_title = info.title.replace("[", "\\[").replace("]", "\\]")
+                summary_lines.append(f"• [{safe_title}]({info.telegraph_url})")
     
     await bot.send_message(message.chat.id, "\n".join(summary_lines), parse_mode="Markdown")
 
@@ -10443,16 +10462,17 @@ async def _vkrev_show_next(chat_id: int, batch_id: str, operator_id: int, db: Da
                 callback_data=f"vkrev:pyramida:{post.id}",
             )
         ])
-    # Add Dom Iskusstv extraction button if post contains домискусств.рф links
+    # Add Dom Iskusstv extraction button (always visible)
     from source_parsing.dom_iskusstv import extract_dom_iskusstv_urls
     dom_iskusstv_urls = extract_dom_iskusstv_urls(post.text or "")
-    if dom_iskusstv_urls:
-        inline_keyboard.append([
-            types.InlineKeyboardButton(
-                text=f"🏛 Извлечь из Дом искусств ({len(dom_iskusstv_urls)})",
-                callback_data=f"vkrev:domiskusstv:{post.id}",
-            )
-        ])
+    logging.info(f"Adding Dom Iskusstv button. URLs found: {len(dom_iskusstv_urls)}")
+    # Always add the button, showing count (0 if none)
+    inline_keyboard.append([
+        types.InlineKeyboardButton(
+            text=f"🏛 Извлечь из Дом искусств ({len(dom_iskusstv_urls)})",
+            callback_data=f"vkrev:domiskusstv:{post.id}",
+        )
+    ])
     inline_keyboard.extend([
         [types.InlineKeyboardButton(text="⏹ Стоп", callback_data=f"vkrev:stop:{batch_id}")],
         [
@@ -11711,6 +11731,16 @@ async def handle_vk_review_cb(callback: types.CallbackQuery, db: Database, bot: 
             await callback.answer("Пост не найден", show_alert=True)
             return
         batch_id, post_text = row
+        
+        from source_parsing.dom_iskusstv import extract_dom_iskusstv_urls
+        if not extract_dom_iskusstv_urls(post_text or ""):
+            await callback.answer("Ссылки не найдены")
+            await bot.send_message(
+                callback.message.chat.id, 
+                "⚠️ В тексте поста не найдено ссылок на домискусств.рф (или tickets.domiskusstv.ru)."
+            )
+            return
+
         await callback.answer("Извлекаю события из Дом искусств…")
         answered = True
         await _handle_dom_iskusstv_extraction(
