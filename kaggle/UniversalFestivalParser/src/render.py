@@ -104,12 +104,15 @@ async def render_page(
             await page.screenshot(path=str(screenshot_path), full_page=True)
             result["screenshot_path"] = str(screenshot_path)
             
-            result["success"] = True
-            logger.info(
-                "Rendered successfully: title=%s html_size=%d",
-                result["title"],
-                result["html_size"],
-            )
+            result["success"] = result["error"] is None
+            if result["success"]:
+                logger.info(
+                    "Rendered successfully: title=%s html_size=%d",
+                    result["title"],
+                    result["html_size"],
+                )
+            else:
+                logger.warning("Rendered with error: %s", result["error"])
             
         except Exception as e:
             result["error"] = str(e)

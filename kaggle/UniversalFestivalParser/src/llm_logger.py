@@ -140,7 +140,7 @@ class LLMTracker:
         self._start_time: float = 0
         self._response: str = ""
         self._error: Optional[str] = None
-        self._response_tokens: int = 0
+        self._response_tokens: Optional[int] = None
     
     def __enter__(self) -> "LLMTracker":
         self._start_time = time.perf_counter()
@@ -154,7 +154,10 @@ class LLMTracker:
         
         # Estimate token counts (rough approximation: ~4 chars per token)
         prompt_tokens = len(self._prompt) // 4
-        response_tokens = len(self._response) // 4 if self._response else 0
+        if self._response_tokens is not None:
+            response_tokens = self._response_tokens
+        else:
+            response_tokens = len(self._response) // 4 if self._response else 0
         
         interaction = LLMInteraction(
             request_id=self._request_id,

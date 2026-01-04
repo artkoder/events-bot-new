@@ -95,7 +95,7 @@ class GemmaRateLimiter:
         self._daily_requests = 0
         self._last_reset_day: Optional[str] = None
     
-    async def acquire(self, estimated_tokens: int = 500) -> "RateLimitContext":
+    def acquire(self, estimated_tokens: int = 500) -> "RateLimitContext":
         """Acquire rate limit slot before making API call."""
         return RateLimitContext(self, estimated_tokens)
     

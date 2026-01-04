@@ -70,6 +70,15 @@ Rules:
 """
 
 
+def _strip_code_fences(text: str) -> str:
+    """Strip markdown code fences from a response if present."""
+    if "```json" in text:
+        return text.split("```json")[1].split("```")[0].strip()
+    if "```" in text:
+        return text.split("```")[1].split("```")[0].strip()
+    return text.strip()
+
+
 async def reason_with_gemma(
     distilled_content: str,
     api_key: str,
@@ -104,17 +113,23 @@ Output ONLY valid JSON matching the schema."""
             system_instruction=SYSTEM_PROMPT,
         )
         
-        # Track LLM call
         if llm_logger:
-            tracker = llm_logger.track(
+            with llm_logger.track(
                 phase="reason",
                 model=model,
                 prompt=prompt,
                 content_length=len(distilled_content),
-            )
-            tracker.__enter__()
-        
-        try:
+            ) as tracker:
+                response = await model_instance.generate_content_async(
+                    prompt,
+                    generation_config={
+                        "temperature": 0.1,
+                        "max_output_tokens": 8192,
+                    },
+                )
+                response_text = response.text or ""
+                tracker.set_response(response_text)
+        else:
             response = await model_instance.generate_content_async(
                 prompt,
                 generation_config={
@@ -122,25 +137,9 @@ Output ONLY valid JSON matching the schema."""
                     "max_output_tokens": 8192,
                 },
             )
-            
-            response_text = response.text
-            
-            if llm_logger:
-                tracker.set_response(response_text)
-            
-        finally:
-            if llm_logger:
-                tracker.__exit__(None, None, None)
+            response_text = response.text or ""
         
-        # Parse JSON from response
-        # Handle markdown code blocks
-        if "```json" in response_text:
-            json_match = response_text.split("```json")[1].split("```")[0]
-            response_text = json_match.strip()
-        elif "```" in response_text:
-            json_match = response_text.split("```")[1].split("```")[0]
-            response_text = json_match.strip()
-        
+        response_text = _strip_code_fences(response_text)
         data = json.loads(response_text)
         logger.info("Successfully extracted festival data")
         return data, None
@@ -208,29 +207,24 @@ Output the complete corrected JSON."""
         )
         
         if llm_logger:
-            tracker = llm_logger.track(
+            with llm_logger.track(
                 phase="validate",
                 model="gemma-3-27b",
                 prompt=validation_prompt,
-            )
-            tracker.__enter__()
-        
-        try:
+            ) as tracker:
+                response = await model.generate_content_async(
+                    validation_prompt,
+                    generation_config={"temperature": 0.1},
+                )
+                tracker.set_response(response.text or "")
+        else:
             response = await model.generate_content_async(
                 validation_prompt,
                 generation_config={"temperature": 0.1},
             )
-            
-            if llm_logger:
-                tracker.set_response(response.text)
-                
-        finally:
-            if llm_logger:
-                tracker.__exit__(None, None, None)
         
-        response_text = response.text
-        if "```json" in response_text:
-            response_text = response_text.split("```json")[1].split("```")[0].strip()
+        response_text = response.text or ""
+        response_text = _strip_code_fences(response_text)
         
         enhanced = json.loads(response_text)
         logger.info("Enhanced data with validation pass")
