@@ -4689,7 +4689,17 @@ async def show_festival_edit_menu(user_id: int, fest: Festival, bot: Bot):
         f"vk: {fest.vk_url or ''}",
         f"tg: {fest.tg_url or ''}",
         f"ticket: {fest.ticket_url or ''}",
+        # New parser fields
+        f"source_url: {fest.source_url or ''}",
+        f"source_type: {fest.source_type or ''}",
+        f"phone: {fest.contacts_phone or ''}",
+        f"email: {fest.contacts_email or ''}",
+        f"audience: {fest.audience or ''}",
+        f"annual: {'✓' if fest.is_annual else '✗' if fest.is_annual is False else ''}",
     ]
+    if fest.last_parsed_at:
+        lines.append(f"last_parsed: {fest.last_parsed_at.strftime('%Y-%m-%d %H:%M')}")
+    
     keyboard = [
         [
             types.InlineKeyboardButton(
@@ -4751,6 +4761,25 @@ async def show_festival_edit_menu(user_id: int, fest: Festival, bot: Bot):
                 callback_data=f"festeditfield:{fest.id}:ticket",
             )
         ],
+        # New parser fields buttons
+        [
+            types.InlineKeyboardButton(
+                text=("Delete phone" if fest.contacts_phone else "Add phone"),
+                callback_data=f"festeditfield:{fest.id}:phone",
+            )
+        ],
+        [
+            types.InlineKeyboardButton(
+                text=("Delete email" if fest.contacts_email else "Add email"),
+                callback_data=f"festeditfield:{fest.id}:email",
+            )
+        ],
+        [
+            types.InlineKeyboardButton(
+                text=("Delete audience" if fest.audience else "Add audience"),
+                callback_data=f"festeditfield:{fest.id}:audience",
+            )
+        ],
         [
             types.InlineKeyboardButton(
                 text="Обновить обложку из Telegraph",
@@ -4781,8 +4810,16 @@ async def show_festival_edit_menu(user_id: int, fest: Festival, bot: Bot):
                 callback_data=f"festsyncevents:{fest.id}",
             )
         ],
-        [types.InlineKeyboardButton(text="Done", callback_data="festeditdone")],
     ]
+    # Add re-parse button only if source_url exists
+    if fest.source_url:
+        keyboard.append([
+            types.InlineKeyboardButton(
+                text="🔄 Перепарсить с сайта",
+                callback_data=f"festreparse:{fest.id}",
+            )
+        ])
+    keyboard.append([types.InlineKeyboardButton(text="Done", callback_data="festeditdone")])
     markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard)
     await bot.send_message(user_id, "\n".join(lines), reply_markup=markup)
 
@@ -8082,7 +8119,10 @@ async def handle_add_festival_start(message: types.Message, db: Database, bot: B
         "handle_add_festival_start session opened for user %s",
         message.from_user.id,
     )
-    await bot.send_message(message.chat.id, "Пришлите текст фестиваля…")
+    await bot.send_message(
+        message.chat.id,
+        "Пришлите текст фестиваля или ссылку на его сайт…",
+    )
 
 
 async def handle_vk_link_command(message: types.Message, db: Database, bot: Bot):
@@ -12725,6 +12765,13 @@ async def handle_festival_edit_message(message: types.Message, db: Database, bot
             fest.tg_url = None if text in {"", "-"} else text
         elif field == "ticket":
             fest.ticket_url = None if text in {"", "-"} else text
+        # New parser fields
+        elif field == "phone":
+            fest.contacts_phone = None if text in {"", "-"} else text
+        elif field == "email":
+            fest.contacts_email = None if text in {"", "-"} else text
+        elif field == "audience":
+            fest.audience = None if text in {"", "-"} else text
         await session.commit()
         logging.info("festival %s updated", fest.name)
     festival_edit_sessions[message.from_user.id] = (fid, None)
@@ -14605,6 +14652,54 @@ def create_app() -> web.Application:
     async def add_event_session_wrapper(message: types.Message):
         logging.info("add_event_session_wrapper start: user=%s", message.from_user.id)
         session_mode = add_event_sessions.get(message.from_user.id)
+        
+        # Check for festival URL parsing
+        if session_mode == "festival":
+            text = (message.text or "").strip()
+            from source_parsing.festival_parser import is_valid_url, process_festival_url
+            
+            if is_valid_url(text):
+                # URL detected - use festival parser
+                logging.info("festival_url_detected: user=%s url=%s", message.from_user.id, text)
+                add_event_sessions.pop(message.from_user.id, None)
+                
+                await bot.send_message(message.chat.id, "🔄 Запускаю парсер фестиваля...")
+                
+                try:
+                    async def status_callback(status: str):
+                        await bot.send_message(message.chat.id, f"📊 {status}")
+                    
+                    festival, json_url = await process_festival_url(
+                        db=db,
+                        bot=bot,
+                        chat_id=message.chat.id,
+                        url=text,
+                        status_callback=status_callback,
+                    )
+                    
+                    # Build success message
+                    lines = [
+                        f"✅ Фестиваль добавлен: **{festival.name}**",
+                    ]
+                    if festival.telegraph_url:
+                        lines.append(f"📄 [Открыть страницу фестиваля]({festival.telegraph_url})")
+                    if json_url:
+                        lines.append(f"📊 [JSON отчёт парсинга]({json_url})")
+                    
+                    await bot.send_message(
+                        message.chat.id,
+                        "\n".join(lines),
+                        parse_mode="Markdown",
+                    )
+                    
+                except Exception as e:
+                    logging.exception("festival_parser_failed: %s", e)
+                    await bot.send_message(
+                        message.chat.id,
+                        f"❌ Парсинг завершился ошибкой: {e}",
+                    )
+                return
+        
         if message.media_group_id:
             await handle_add_event_media_group(message, db, bot)
         else:
