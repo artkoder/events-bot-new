@@ -151,17 +151,24 @@ def extract_meta_tags(soup) -> dict:
     return meta
 
 
-def prepare_llm_context(distilled: dict, max_tokens: int = 8000) -> str:
+def prepare_llm_context(distilled: dict, max_tokens: int = 30000) -> str:
     """Prepare distilled content for LLM input.
     
     Args:
         distilled: Distilled content dict
-        max_tokens: Approximate max tokens for context
+        max_tokens: Approximate max tokens for context (default 30K for greedy extraction)
         
     Returns:
         Formatted string for LLM prompt
     """
+    from datetime import datetime
+    
     parts = []
+    
+    # Add current date context for correct year inference
+    today = datetime.now()
+    parts.append(f"IMPORTANT: Today's date is {today.strftime('%Y-%m-%d')}. Use this for correct year inference.")
+    parts.append("")
     
     # Add meta info
     meta = distilled.get("meta", {})
@@ -187,12 +194,23 @@ def prepare_llm_context(distilled: dict, max_tokens: int = 8000) -> str:
             main_text = main_text[:max_chars] + "\n... [TRUNCATED]"
         parts.append(main_text)
     
-    # Add key links
+    # Add ALL links (greedy strategy - tickets are critical)
     links = distilled.get("links", [])
     if links:
-        parts.append("\n--- Links Found ---")
-        for link in links[:20]:  # Limit to 20 most important
+        parts.append("\n--- ALL Links Found (IMPORTANT: Extract ticket URLs!) ---")
+        for link in links:  # ALL links, no limit
             parts.append(f"- {link['text']}: {link['url']}")
+    
+    # Add images
+    images = distilled.get("images", [])
+    if images:
+        parts.append("\n--- Images Found ---")
+        for img in images:
+            url = img.get("url", "") if isinstance(img, dict) else str(img)
+            alt = img.get("alt", "") if isinstance(img, dict) else ""
+            # Filter out SVG icons
+            if not url.endswith(".svg"):
+                parts.append(f"- {url} (alt: {alt})")
     
     return "\n".join(parts)
 

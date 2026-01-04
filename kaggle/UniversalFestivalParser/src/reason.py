@@ -15,27 +15,35 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
-# System prompt for Gemma
-SYSTEM_PROMPT = """You are a festival information extraction expert. 
-Your task is to analyze website content and extract structured information about a festival.
+# System prompt for Gemma - GREEDY extraction strategy
+SYSTEM_PROMPT = """You are a festival information extraction expert with GREEDY extraction strategy.
+Your task is to MAXIMIZE data extraction from website content. Extract EVERYTHING available.
+
+LANGUAGE: All text output (descriptions, titles, audience info) MUST be in RUSSIAN language!
+Используй русский язык для всех текстовых полей!
+
+CRITICAL: Pay attention to the "Today's date" at the start - use it for correct year inference!
+If dates mention "декабрь" and we are in late December/early January, use the PREVIOUS year for December dates.
+The festival is happening NOW or very recently.
 
 Output ONLY valid JSON matching this schema:
 {
   "festival": {
-    "title_full": "Full festival name or null",
+    "title_full": "Full festival name - REQUIRED",
     "title_short": "Short name or null",
-    "description_short": "1-2 sentence description or null",
-    "dates": {"start": "YYYY-MM-DD or null", "end": "YYYY-MM-DD or null"},
+    "description_short": "1-2 sentence engaging description - REQUIRED",
+    "dates": {"start": "YYYY-MM-DD - REQUIRED", "end": "YYYY-MM-DD - REQUIRED"},
     "is_annual": true/false/null,
-    "audience": "Target audience description or null",
+    "audience": "Target audience (e.g. 'families with children', 'music lovers')",
     "links": {
-      "website": "Official URL or null",
-      "socials": ["VK/TG/other social URLs"]
+      "website": "Official URL - look for main domain",
+      "socials": ["VK/TG/other social URLs"],
+      "tickets": "Main ticket purchase URL if exists"
     },
     "registration": {
       "is_free": true/false/null,
-      "common_url": "Ticket/registration URL or null",
-      "price_info": "Price description or null"
+      "common_url": "Main ticket/registration URL",
+      "price_info": "Price range like '500-2000 руб' or 'бесплатно'"
     },
     "contacts": {
       "phone": "Phone number or null",
@@ -45,29 +53,35 @@ Output ONLY valid JSON matching this schema:
   },
   "program": [
     {
-      "title": "Event title",
-      "type": "film/concert/workshop/lecture/other",
-      "date": "YYYY-MM-DD or null",
+      "title": "Event title - BE SPECIFIC",
+      "type": "theater/concert/workshop/lecture/film/show/other",
+      "date": "YYYY-MM-DD - USE CORRECT YEAR!",
       "time_start": "HH:MM or null",
-      "venue": "Location name or null",
-      "price": "Price or 'free' or null",
-      "is_free": true/false/null,
-      "description": "Short description or null"
+      "time_end": "HH:MM or null",
+      "venue": "Full venue name with address if available",
+      "price": "Exact price like '500 руб' or 'бесплатно' or null",
+      "is_free": true/false,
+      "ticket_url": "Direct URL to buy tickets for THIS event",
+      "description": "1-2 sentence description of the event",
+      "performers": ["Names of performers/actors if mentioned"]
     }
   ],
   "venues": [
-    {"title": "Venue name", "city": "City", "address": "Address or null"}
+    {"title": "Full venue name", "city": "City", "address": "Full street address"}
   ],
-  "images_festival": ["URL1", "URL2"]
+  "images_festival": ["Only real photo URLs, NOT .svg icons"]
 }
 
-Rules:
-- Use null for unknown/missing data, never invent information
-- Dates must be ISO 8601 (YYYY-MM-DD)
-- Extract ALL activities/events found in the program
-- For films: include director, year, country if available
-- Output ONLY the JSON, no explanations
-"""
+EXTRACTION RULES (GREEDY):
+1. Extract EVERY event from the program - don't skip any
+2. For EACH event, look for its specific ticket URL (pyramida.info, etc)
+3. Use CORRECT YEAR based on today's date context
+4. Dates MUST be in ISO 8601 format (YYYY-MM-DD)
+5. Extract performer names when mentioned
+6. Include price information for each event
+7. DO NOT include .svg icon URLs in images_festival
+8. If an event repeats on multiple dates, create SEPARATE entries
+9. Output ONLY the JSON, no explanations"""
 
 
 def _strip_code_fences(text: str) -> str:

@@ -94,9 +94,12 @@ async def main():
     try:
         from reason import reason_with_gemma
         from llm_logger import LLMLogger
+        from distill import prepare_llm_context
         
         llm_logger = LLMLogger("local-test")
-        llm_context = distilled.get("main_text", "")[:8000]  # Limit context size
+        
+        # Use prepare_llm_context for full greedy extraction with all links and images
+        llm_context = prepare_llm_context(distilled)
         
         print(f"   📤 Sending {len(llm_context):,} chars to Gemma...")
         uds, error = await reason_with_gemma(
