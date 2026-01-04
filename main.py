@@ -570,6 +570,17 @@ logging.info(
     "present" if VK_SERVICE_TOKEN else "missing",
 )
 
+# Festival Parser: check GOOGLE_API_KEY for Gemma 3-27B LLM
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+if GOOGLE_API_KEY:
+    logging.info("festival_parser.config: GOOGLE_API_KEY=present (Festival Parser enabled)")
+else:
+    logging.warning(
+        "festival_parser.config: GOOGLE_API_KEY=MISSING! "
+        "Festival Parser will NOT work. "
+        "Set GOOGLE_API_KEY environment variable for production deployment."
+    )
+
 
 @dataclass
 class VkActor:
