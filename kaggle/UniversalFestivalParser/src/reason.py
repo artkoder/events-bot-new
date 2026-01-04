@@ -63,7 +63,7 @@ Output ONLY valid JSON matching this schema:
       "price": "Exact price like '500 руб' or 'от 500 руб' or 'бесплатно' - EXTRACT FROM PAGE!",
       "is_free": true/false,
       "ticket_url": "Direct URL to buy tickets for THIS event",
-      "ticket_status": "available/sold_out/registration_open/registration_closed/unknown",
+      "ticket_status": "available/sold_out/registration_open/registration_closed/ended/unknown",
       "description": "DETAILED description - include all available info: what happens, who performs, program highlights, age restrictions, etc.",
       "performers": ["Names of performers/actors if mentioned"],
       "age_restriction": "Age restriction like '0+', '6+', '12+', '16+', '18+' or null"
@@ -88,11 +88,12 @@ EXTRACTION RULES (GREEDY - MAXIMIZE DATA):
 4. Dates MUST be in ISO 8601 format (YYYY-MM-DD)
 5. Extract performer names when mentioned
 6. PRICE IS CRITICAL: Look for prices near ticket buttons, in event descriptions
-7. TICKET STATUS: 
+7. TICKET STATUS (compare event date with today's date!): 
    - 'available' if tickets can be purchased
    - 'sold_out' if SOLD OUT/распродано mentioned
    - 'registration_open' if free registration is open
    - 'registration_closed' if registration ended
+   - 'ended' if event date has PASSED (before today's date)
    - 'unknown' if status cannot be determined
 8. DO NOT include .svg icon URLs in images_festival
 9. If an event repeats on multiple dates, create SEPARATE entries
