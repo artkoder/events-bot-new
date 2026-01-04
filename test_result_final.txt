@@ -1,0 +1,82 @@
+2026-01-03 22:54:35,665 [INFO] e2e.behave: ============================================================
+2026-01-03 22:54:35,665 [INFO] e2e.behave: E2E BDD Test Suite Starting
+2026-01-03 22:54:35,665 [INFO] e2e.behave: ============================================================
+2026-01-03 22:54:35,666 [INFO] telethon.network.mtprotosender: Connecting to 149.154.167.51:443/TcpFull...
+2026-01-03 22:54:35,805 [INFO] telethon.network.mtprotosender: Connection to 149.154.167.51:443/TcpFull complete!
+2026-01-03 22:54:36,685 [INFO] tests.e2e.human_client: Connected as: M (ID: 5130989066)
+2026-01-03 22:54:36,686 [INFO] e2e.behave: Connected! Testing bot: @eventsbotTestBot
+USING RUNNER: behave.runner:Runner
+Функция: Проверка парсера "Дом искусств" # tests/e2e/features/dom_iskusstv.feature:2
+
+  Функция: Проверка парсера "Дом искусств"  # tests/e2e/features/dom_iskusstv.feature:2
+2026-01-03 22:54:36,687 [INFO] e2e.behave: 
+📌 Сценарий: Проверка кнопки "Дом искусств" в инлайн-меню проверки событий
+
+  Сценарий: Проверка кнопки "Дом искусств" в инлайн-меню проверки событий  # tests/e2e/features/dom_iskusstv.feature:8
+    Дано я авторизован в клиенте Telethon                                  # tests/e2e/features/steps/bot_steps.py:49
+2026-01-03 22:54:36,687 [INFO] e2e.steps: ✓ Клиент авторизован
+    И я открыл чат с ботом                                                 # tests/e2e/features/steps/bot_steps.py:57
+2026-01-03 22:54:36,836 [INFO] e2e.steps: ✓ Открыт чат с @eventsbotTestBot
+    Когда я отправляю команду "/start"                                     # tests/e2e/features/steps/bot_steps.py:84
+2026-01-03 22:54:42,976 [INFO] tests.e2e.human_client: Sent message: /start
+2026-01-03 22:54:43,439 [INFO] tests.e2e.human_client: Got response from User(id=8365878972, is_self=False, contact=False, mutual_contact=False, deleted=False, bot=True, bot_chat_history=False, bot_nochats=False, verified=False, restricted=False, min=False, bot_inline_geo=False, support=False, scam=False, apply_min_photo=True, fake=False, bot_attach_menu=False, premium=False, attach_menu_enabled=False, bot_can_edit=False, close_friend=False, stories_hidden=False, stories_unavailable=True, contact_require_premium=False, bot_business=False, bot_has_main_app=False, bot_forum_view=False, access_hash=2218334829196132400, first_name='eventsbot-test-env', last_name=None, username='eventsbotTestBot', phone=None, photo=None, status=None, bot_info_version=1, restriction_reason=[], bot_inline_placeholder=None, lang_code=None, emoji_status=None, usernames=[], stories_max_id=None, color=None, profile_color=None, bot_active_users=None, bot_verification_icon=None, send_paid_messages_stars=None): Bot is running...
+2026-01-03 22:54:43,439 [INFO] e2e.steps: → Отправлено: /start
+2026-01-03 22:54:43,439 [INFO] e2e.steps: ← Ответ: Bot is running...
+    И я должен увидеть сообщение, содержащее текст "Choose action"         # None
+2026-01-03 22:54:43,440 [ERROR] e2e.behave: ❌ Сценарий FAILED: Проверка кнопки "Дом искусств" в инлайн-меню проверки событий
+    Тогда под сообщением должна быть кнопка "🏛 Дом искусств"               # None
+    Когда я отправляю команду "/vk"                                        # None
+    Тогда под сообщением должна быть кнопка "Проверить события"            # None
+    Когда я нажимаю инлайн-кнопку "Проверить события"                      # None
+    Тогда я жду обновления сообщения                                       # None
+    И под сообщением должна быть кнопка "🏛 Извлечь из Дом искусств"        # None
+2026-01-03 22:54:43,440 [INFO] e2e.behave: 
+📌 Сценарий: Парсинг событий по ссылке с Дома искусств
+
+  Сценарий: Парсинг событий по ссылке с Дома искусств                       # tests/e2e/features/dom_iskusstv.feature:18
+    Дано я авторизован в клиенте Telethon                                   # tests/e2e/features/steps/bot_steps.py:49
+2026-01-03 22:54:43,441 [INFO] e2e.steps: ✓ Клиент авторизован
+    И я открыл чат с ботом                                                  # tests/e2e/features/steps/bot_steps.py:57
+2026-01-03 22:54:43,603 [INFO] e2e.steps: ✓ Открыт чат с @eventsbotTestBot
+    Когда я отправляю команду "/start"                                      # tests/e2e/features/steps/bot_steps.py:84
+2026-01-03 22:54:48,983 [INFO] tests.e2e.human_client: Sent message: /start
+2026-01-03 22:54:49,173 [INFO] tests.e2e.human_client: Got response from User(id=8365878972, is_self=False, contact=False, mutual_contact=False, deleted=False, bot=True, bot_chat_history=False, bot_nochats=False, verified=False, restricted=False, min=False, bot_inline_geo=False, support=False, scam=False, apply_min_photo=True, fake=False, bot_attach_menu=False, premium=False, attach_menu_enabled=False, bot_can_edit=False, close_friend=False, stories_hidden=False, stories_unavailable=True, contact_require_premium=False, bot_business=False, bot_has_main_app=False, bot_forum_view=False, access_hash=2218334829196132400, first_name='eventsbot-test-env', last_name=None, username='eventsbotTestBot', phone=None, photo=None, status=None, bot_info_version=1, restriction_reason=[], bot_inline_placeholder=None, lang_code=None, emoji_status=None, usernames=[], stories_max_id=None, color=None, profile_color=None, bot_active_users=None, bot_verification_icon=None, send_paid_messages_stars=None): Bot is running...
+2026-01-03 22:54:49,173 [INFO] e2e.steps: → Отправлено: /start
+2026-01-03 22:54:49,173 [INFO] e2e.steps: ← Ответ: Bot is running...
+    И я должен увидеть сообщение, содержащее текст "Choose action"          # None
+2026-01-03 22:54:49,174 [ERROR] e2e.behave: ❌ Сценарий FAILED: Парсинг событий по ссылке с Дома искусств
+    И я логирую в консоль список всех кнопок, которые вижу                  # None
+    Тогда под сообщением должна быть кнопка "🏛 Дом искусств"                # None
+    Когда я отправляю сообщение "🏛 Дом искусств"                            # None
+    Тогда я должен увидеть сообщение, содержащее текст "Отправьте ссылку"   # None
+    Когда я отправляю сообщение "https://xn--b1admiilxbaki.xn--p1ai/skazka" # None
+    Тогда я жду обновления сообщения                                        # None
+    И я логирую полный текст сообщения                                      # None
+    И я должен увидеть сообщение, содержащее текст "Добавлено событий"      # None
+    И я должен найти в ответе действующую ссылку на телеграф                # None
+
+2026-01-03 22:54:49,175 [INFO] telethon.network.mtprotosender: Disconnecting from 149.154.167.51:443/TcpFull...
+2026-01-03 22:54:49,175 [INFO] telethon.network.mtprotosender: Disconnection from 149.154.167.51:443/TcpFull complete!
+2026-01-03 22:54:49,175 [INFO] tests.e2e.human_client: Disconnected from Telegram
+2026-01-03 22:54:49,175 [INFO] e2e.behave: Client disconnected
+2026-01-03 22:54:49,176 [INFO] e2e.behave: ============================================================
+2026-01-03 22:54:49,176 [INFO] e2e.behave: E2E BDD Test Suite Finished
+2026-01-03 22:54:49,176 [INFO] e2e.behave: ============================================================
+
+You can implement step definitions for undefined steps with these snippets:
+
+from behave.api.pending_step import StepNotImplementedError
+@when(u'я должен увидеть сообщение, содержащее текст "Choose action"')
+def step_impl(context):
+    raise StepNotImplementedError(u'When я должен увидеть сообщение, содержащее текст "Choose action"')
+
+
+
+Errored scenarios:
+  tests/e2e/features/dom_iskusstv.feature:8  Проверка кнопки "Дом искусств" в инлайн-меню проверки событий
+  tests/e2e/features/dom_iskusstv.feature:18  Парсинг событий по ссылке с Дома искусств
+
+0 features passed, 0 failed, 1 error, 0 skipped
+0 scenarios passed, 0 failed, 2 error, 0 skipped
+6 steps passed, 0 failed, 15 skipped, 2 undefined
+Took 0min 12.484s

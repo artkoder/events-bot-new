@@ -14669,7 +14669,7 @@ def create_app() -> web.Application:
                     async def status_callback(status: str):
                         await bot.send_message(message.chat.id, f"📊 {status}")
                     
-                    festival, json_url = await process_festival_url(
+                    festival, uds_url, llm_log_url = await process_festival_url(
                         db=db,
                         bot=bot,
                         chat_id=message.chat.id,
@@ -14683,8 +14683,10 @@ def create_app() -> web.Application:
                     ]
                     if festival.telegraph_url:
                         lines.append(f"📄 [Открыть страницу фестиваля]({festival.telegraph_url})")
-                    if json_url:
-                        lines.append(f"📊 [JSON отчёт парсинга]({json_url})")
+                    if uds_url:
+                        lines.append(f"📊 [JSON отчёт парсинга]({uds_url})")
+                    if llm_log_url:
+                        lines.append(f"🔍 [LLM лог (отладка)]({llm_log_url})")
                     
                     await bot.send_message(
                         message.chat.id,
@@ -14893,6 +14895,7 @@ def create_app() -> web.Application:
         or c.data.startswith("festsetcover:")
         or c.data.startswith("festcover:")
         or c.data.startswith("festsyncevents:")
+        or c.data.startswith("festreparse:")
         or c.data.startswith("requeue:")
         or c.data.startswith("tourist:")
     ,

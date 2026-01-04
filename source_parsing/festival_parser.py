@@ -400,32 +400,36 @@ async def save_to_supabase_storage(
     run_id: str,
     festival_slug: str,
     uds_json: dict,
+    llm_log_json: dict | None = None,
     debug_artifacts: dict[str, bytes] | None = None,
-) -> str | None:
-    """Save UDS and debug artifacts to Supabase Storage.
+) -> tuple[str | None, str | None]:
+    """Save UDS, LLM log, and debug artifacts to Supabase Storage.
     
     Args:
         run_id: Parser run ID
         festival_slug: URL-safe festival name
         uds_json: UDS JSON to save
+        llm_log_json: Optional LLM log JSON (all requests/responses)
         debug_artifacts: Optional dict of artifact_name -> bytes
         
     Returns:
-        Public URL to UDS JSON or None if failed
+        Tuple of (UDS public URL, LLM log public URL) or (None, None) if failed
     """
     # Import Supabase client lazily
     try:
         from main import get_supabase_client
     except ImportError:
         logger.warning("Supabase client not available")
-        return None
+        return None, None
     
     client = get_supabase_client()
     if not client:
         logger.warning("Supabase client not configured")
-        return None
+        return None, None
     
     base_path = f"festival_parsing/{festival_slug}/{run_id}"
+    uds_public_url = None
+    llm_log_public_url = None
     
     try:
         # Upload UDS JSON
@@ -437,6 +441,21 @@ async def save_to_supabase_storage(
             file=uds_bytes,
             file_options={"content-type": "application/json"},
         )
+        uds_public_url = client.storage.from_(SUPABASE_PARSER_BUCKET).get_public_url(uds_path)
+        logger.info("Saved UDS to Supabase: %s", uds_public_url)
+        
+        # Upload LLM log JSON
+        if llm_log_json:
+            llm_log_bytes = json.dumps(llm_log_json, ensure_ascii=False, indent=2).encode("utf-8")
+            llm_log_path = f"{base_path}/llm_log.json"
+            
+            client.storage.from_(SUPABASE_PARSER_BUCKET).upload(
+                path=llm_log_path,
+                file=llm_log_bytes,
+                file_options={"content-type": "application/json"},
+            )
+            llm_log_public_url = client.storage.from_(SUPABASE_PARSER_BUCKET).get_public_url(llm_log_path)
+            logger.info("Saved LLM log to Supabase: %s", llm_log_public_url)
         
         # Upload debug artifacts
         if debug_artifacts:
@@ -456,14 +475,11 @@ async def save_to_supabase_storage(
                     file_options={"content-type": content_type},
                 )
         
-        # Get public URL
-        public_url = client.storage.from_(SUPABASE_PARSER_BUCKET).get_public_url(uds_path)
-        logger.info("Saved UDS to Supabase: %s", public_url)
-        return public_url
+        return uds_public_url, llm_log_public_url
         
     except Exception as e:
         logger.error("Failed to save to Supabase: %s", e)
-        return None
+        return None, None
 
 
 async def process_festival_url(
@@ -472,7 +488,7 @@ async def process_festival_url(
     chat_id: int,
     url: str,
     status_callback: Optional[Callable[[str], Awaitable[None]]] = None,
-) -> tuple["Festival", str | None]:
+) -> tuple["Festival", str | None, str | None]:
     """Full pipeline: URL -> Kaggle -> UDS -> DB -> Telegraph -> Storage.
     
     Args:
@@ -483,7 +499,7 @@ async def process_festival_url(
         status_callback: Optional callback for status updates
         
     Returns:
-        Tuple of (Festival, JSON URL or None)
+        Tuple of (Festival, UDS JSON URL or None, LLM log URL or None)
     """
     run_id = generate_run_id(url)
     logger.info("Starting festival parser: run_id=%s url=%s", run_id, url)
@@ -519,15 +535,23 @@ async def process_festival_url(
     if not uds:
         raise RuntimeError(f"No valid UDS output found (run_id={run_id})")
     
+    # Parse LLM log output (for debugging/analysis)
+    llm_log = parse_llm_log_output(output_files)
+    
     # Upsert festival to database
     festival = await upsert_festival_from_uds(db, uds, run_id, url)
     
-    # Save to Supabase Storage
+    # Save to Supabase Storage (UDS + LLM log)
     slug = generate_festival_slug(festival.name)
-    json_url = await save_to_supabase_storage(run_id, slug, uds)
+    uds_url, llm_log_url = await save_to_supabase_storage(
+        run_id=run_id,
+        festival_slug=slug,
+        uds_json=uds,
+        llm_log_json=llm_log,
+    )
     
     # Update festival with storage path
-    if json_url:
+    if uds_url:
         async with db.get_session() as session:
             from models import Festival
             from sqlalchemy import update
@@ -556,4 +580,24 @@ async def process_festival_url(
     except Exception as e:
         logger.error("Failed to set menu highlight: %s", e)
     
-    return festival, json_url
+    return festival, uds_url, llm_log_url
+
+
+def parse_llm_log_output(file_paths: list[str]) -> dict | None:
+    """Parse LLM log JSON from kernel output files.
+    
+    Args:
+        file_paths: List of downloaded file paths
+        
+    Returns:
+        Parsed LLM log dict or None if not found
+    """
+    for path in file_paths:
+        if path.endswith("llm_log.json"):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception as e:
+                logger.error("Failed to parse LLM log %s: %s", path, e)
+    return None
+
