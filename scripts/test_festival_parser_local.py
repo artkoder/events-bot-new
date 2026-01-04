@@ -111,6 +111,28 @@ async def main():
         if error:
             print(f"   ❌ LLM Error: {error}")
         else:
+            # Phase 4: ENRICH (parse ticket pages for prices)
+            print("\n🟣 Phase 4: ENRICH (Ticket pages)")
+            try:
+                from enrich import enrich_event_prices
+                
+                events = uds.get("program", [])
+                events_needing_prices = [e for e in events if e.get("ticket_url") and not e.get("price")]
+                
+                if events_needing_prices:
+                    print(f"   📤 Parsing {len(events_needing_prices)} ticket pages...")
+                    enriched_events = await enrich_event_prices(events, max_concurrent=2)
+                    uds["program"] = enriched_events
+                    
+                    # Count enriched prices
+                    new_prices = sum(1 for e in enriched_events if e.get("price") and e not in events_needing_prices)
+                    print(f"   ✅ Enriched {new_prices} prices from ticket pages")
+                else:
+                    print(f"   ⏭️ All events already have prices or no ticket URLs")
+                    
+            except Exception as e:
+                print(f"   ⚠️ Enrich phase error: {e}")
+            
             uds_path = output_dir / "uds.json"
             uds_path.write_text(json.dumps(uds, ensure_ascii=False, indent=2), encoding="utf-8")
             print(f"   ✅ UDS extracted and saved: {uds_path}")
@@ -124,6 +146,10 @@ async def main():
             print(f"   Events in program: {len(uds.get('program', []))}")
             print(f"   Venues: {len(uds.get('venues', []))}")
             print(f"   Images: {len(uds.get('images_festival', []))}")
+            
+            # Price coverage
+            prices = [e for e in uds.get("program", []) if e.get("price")]
+            print(f"   Prices: {len(prices)}/{len(uds.get('program', []))}")
         
         # Save LLM log
         llm_log_path = output_dir / "llm_log.json"

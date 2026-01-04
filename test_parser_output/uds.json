@@ -231,7 +231,7 @@
       "is_free": true,
       "ticket_url": "https://pyramida.info/tickets/kontsert-detskogo-khora-volshebnoe-rozhdestvo_53257919",
       "ticket_status": "registration_open",
-      "description": "Рождественский концерт детского хора «Волшебное Рождество».",
+      "description": "Рождественский концерт детского хора «Счастье» и Камерного оркестра филармонии.",
       "performers": [],
       "age_restriction": "0+"
     },
@@ -264,7 +264,7 @@
       "is_free": false,
       "ticket_url": "https://pyramida.info/tickets/vecher-klassicheskoy-muzyki-s-yuriem-demidovichem-i-abisalom-gergievym_54566307",
       "ticket_status": "available",
-      "description": "Концерт классической музыки с участием Юрия Демидовича и Абисала Гергиева.",
+      "description": "Концерт Калининградского симфонического оркестра под руководством Юрия Демидовича и Абисала Гергиева.",
       "performers": [
         "Юрий Демидович",
         "Абисал Гергиев"
@@ -335,6 +335,15 @@
     }
   ],
   "images_festival": [
-    "https://static.tildacdn.com/tild3232-3133-4434-a164-626564623261/Group_33.png"
+    {
+      "url": "https://static.tildacdn.com/tild3232-3133-4434-a164-626564623261/Group_33.png",
+      "ocr_text": null,
+      "ocr_title": null
+    },
+    {
+      "url": "https://mc.yandex.ru/watch/95551469",
+      "ocr_text": null,
+      "ocr_title": null
+    }
   ]
 }
