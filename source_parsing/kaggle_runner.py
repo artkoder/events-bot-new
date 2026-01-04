@@ -31,6 +31,7 @@ async def run_kaggle_kernel(
     poll_interval: int = 30,
     status_callback: Callable[[str, str, dict | None], Awaitable[None]] | None = None,
     run_config: dict[str, Any] | None = None,
+    dataset_sources: list[str] | None = None,
 ) -> tuple[str, list[str], float]:
     """Run the Kaggle kernel and wait for completion.
     
@@ -40,10 +41,14 @@ async def run_kaggle_kernel(
         kernel_folder: Folder name in kaggle/ directory
         timeout_minutes: Maximum wait time
         poll_interval: Seconds between status checks
+        status_callback: Optional async callback for status updates
+        run_config: Optional config dict to inject into notebook
+        dataset_sources: Optional list of private dataset slugs (e.g., for API keys)
     
     Returns:
         Tuple of (status, output_files, duration_seconds)
     """
+
     import asyncio
     
     start_time = time.time()
@@ -135,9 +140,9 @@ async def run_kaggle_kernel(
                     except Exception as e:
                         logger.error("theatres_kaggle: failed to inject config: %s", e)
                 
-                client.push_kernel(kernel_path=tmp_path)
+                client.push_kernel(kernel_path=tmp_path, dataset_sources=dataset_sources)
         else:
-            client.push_kernel(kernel_path=kernel_path)
+            client.push_kernel(kernel_path=kernel_path, dataset_sources=dataset_sources)
     except Exception as e:
         logger.error("theatres_kaggle: push failed: %s", e)
         await _notify("push_failed")

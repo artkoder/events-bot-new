@@ -638,6 +638,19 @@ class Festival(SQLModel, table=True):
     source_chat_id: Optional[int] = None
     source_message_id: Optional[int] = None
     nav_hash: Optional[str] = None
+    # Parser-related fields (Universal Festival Parser)
+    source_url: Optional[str] = None  # Original URL of the festival site
+    source_type: Optional[str] = None  # "canonical" | "official" | "external"
+    parser_run_id: Optional[str] = None  # Last parser run ID
+    parser_version: Optional[str] = None  # Parser version used
+    last_parsed_at: Optional[datetime] = Field(
+        default=None, sa_column=Column(DateTime(timezone=True))
+    )
+    uds_storage_path: Optional[str] = None  # Path in Supabase Storage to UDS JSON
+    contacts_phone: Optional[str] = None  # Phone contact
+    contacts_email: Optional[str] = None  # Email contact
+    is_annual: Optional[bool] = None  # Is this an annual festival?
+    audience: Optional[str] = None  # Target audience description
     created_at: datetime = Field(
         default_factory=utc_now,
         sa_column=Column(
@@ -646,6 +659,7 @@ class Festival(SQLModel, table=True):
             server_default=text("CURRENT_TIMESTAMP"),
         ),
     )
+
 
 
 class JobTask(str, Enum):
