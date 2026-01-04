@@ -1983,7 +1983,7 @@ def seconds_to_next_minute(now: datetime) -> float:
 
 # main menu buttons
 MENU_ADD_EVENT = "\u2795 Добавить событие"
-MENU_DOM_ISKUSSTV = "\u1f3ad Дом искусств"
+MENU_DOM_ISKUSSTV = "🏛 Дом искусств"
 MENU_ADD_FESTIVAL = "\u2795 Добавить фестиваль"
 MENU_EVENTS = "\U0001f4c5 События"
 VK_BTN_ADD_SOURCE = "\u2795 Добавить сообщество"
@@ -7544,14 +7544,16 @@ async def send_main_menu(bot: Bot, user: User | None, chat_id: int) -> None:
         buttons = [
             [
                 types.KeyboardButton(text=MENU_ADD_EVENT),
-                types.KeyboardButton(text=MENU_DOM_ISKUSSTV),
                 types.KeyboardButton(text=MENU_ADD_FESTIVAL),
             ],
             [types.KeyboardButton(text=MENU_EVENTS)],
         ]
         # Add Pyramida button for admins
         if has_admin_access(user):
-            buttons.append([types.KeyboardButton(text=VK_BTN_PYRAMIDA)])
+            buttons.append([
+                types.KeyboardButton(text=VK_BTN_PYRAMIDA),
+                types.KeyboardButton(text=MENU_DOM_ISKUSSTV),
+            ])
         markup = types.ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
     async with span("tg-send"):
         await bot.send_message(chat_id, "Choose action", reply_markup=markup)
@@ -7563,6 +7565,7 @@ async def handle_start(message: types.Message, db: Database, bot: Bot):
             result = await session.execute(select(User))
             user_count = len(result.scalars().all())
             user = await session.get(User, message.from_user.id)
+            logging.info(f"DEBUG_AUTH: user_id={message.from_user.id}, user_count={user_count}, user_found={user}")
             if user:
                 if user.blocked:
                     msg = "Access denied"
@@ -12455,15 +12458,36 @@ async def update_telegraph_event_page(
             ev.telegraph_url = normalize_telegraph_url(data.get("url"))
             ev.telegraph_path = data.get("path")
         else:
-            await telegraph_edit_page(
-                tg,
-                ev.telegraph_path,
-                title=title,
-                content=nodes,
-                return_content=False,
-                caller="event_pipeline",
-                eid=ev.id,
-            )
+            try:
+                await telegraph_edit_page(
+                    tg,
+                    ev.telegraph_path,
+                    title=title,
+                    content=nodes,
+                    return_content=False,
+                    caller="event_pipeline",
+                    eid=ev.id,
+                )
+            except Exception as edit_err:
+                # Fallback: if edit fails (e.g., PAGE_ACCESS_DENIED), create new page
+                logging.warning(
+                    "Telegraph edit failed for event %d (path=%s): %s. Creating new page.",
+                    ev.id,
+                    ev.telegraph_path,
+                    edit_err,
+                )
+                # Clear old path and create new page
+                ev.telegraph_path = None
+                data = await telegraph_create_page(
+                    tg,
+                    title=title,
+                    content=nodes,
+                    return_content=False,
+                    caller="event_pipeline_fallback",
+                    eid=ev.id,
+                )
+                ev.telegraph_url = normalize_telegraph_url(data.get("url"))
+                ev.telegraph_path = data.get("path")
         ev.content_hash = new_hash
         session.add(ev)
         await session.commit()

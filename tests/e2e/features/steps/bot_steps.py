@@ -364,6 +364,55 @@ def step_check_telegraph_link(context):
     logger.info(f"✓ Все {len(links)} Telegraph ссылок валидны")
 
 
+@then('каждая Telegraph страница должна содержать "{required_text}"')
+def step_verify_telegraph_content(context, required_text):
+    """Verify each Telegraph page contains required content."""
+    import aiohttp
+    
+    links = getattr(context, 'telegraph_links', [])
+    if not links:
+        raise AssertionError("Нет сохранённых Telegraph ссылок для проверки")
+    
+    required_items = [item.strip() for item in required_text.split(",")]
+    
+    async def _verify_content():
+        async with aiohttp.ClientSession() as session:
+            failed_pages = []
+            
+            for link in links:
+                try:
+                    async with session.get(link, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                        if resp.status != 200:
+                            failed_pages.append(f"{link}: HTTP {resp.status}")
+                            continue
+                        
+                        html = await resp.text()
+                        
+                        missing = []
+                        for item in required_items:
+                            if item.lower() not in html.lower():
+                                missing.append(item)
+                        
+                        if missing:
+                            failed_pages.append(f"{link}: отсутствует [{', '.join(missing)}]")
+                        else:
+                            logger.info(f"✓ Страница {link} содержит все элементы: {required_items}")
+                
+                except Exception as e:
+                    failed_pages.append(f"{link}: ошибка {e}")
+            
+            if failed_pages:
+                print("\n" + "=" * 60)
+                print("[ERROR] Проверка контента Telegraph страниц:")
+                for fail in failed_pages:
+                    print(f"  ✗ {fail}")
+                print("=" * 60 + "\n")
+                raise AssertionError(f"Не все страницы содержат требуемый контент: {failed_pages}")
+    
+    run_async(context, _verify_content())
+    logger.info(f"✓ Все {len(links)} страниц содержат: {required_items}")
+
+
 @then("я жду медиа-сообщения")
 def step_check_media_message(context):
     """Wait for a message with media."""

@@ -204,6 +204,10 @@ async def update_event_ticket_status(
                 old_status,
                 ticket_status,
             )
+            
+            # Rebuild Telegraph page with updated data
+            await _ensure_telegraph_url(db, event_id)
+            
             return True
     except Exception as e:
         logger.error(
