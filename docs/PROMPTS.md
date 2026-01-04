@@ -10,7 +10,7 @@ You receive long multi-line text describing one **or several** events.
 Extract structured information and respond **only** with JSON.
 If multiple events are found, return an array of objects. Each object uses these keys:
 title             - name of the event
-short_description - one-sentence summary
+short_description - **REQUIRED** one-sentence summary of the event (see **short_description** rules below)
 festival          - festival name or empty string
 festival_full     - full festival edition name or empty string
 date              - single date or range (YYYY-MM-DD or YYYY-MM-DD..YYYY-MM-DD)
@@ -31,6 +31,26 @@ end_date         - end date for multi-day events or null
 search_digest    - search summary text (see guidelines below)
 When a range is provided, put the start date in `date` and the end date in `end_date`.
 Always put the emoji at the start of `title` so headings are easily scannable.
+
+**short_description** rules:
+This field is **REQUIRED** for every event — never return an empty string.
+Generate exactly one Russian sentence summarizing what the event IS ABOUT.
+Strict constraints:
+- Exactly ONE sentence, no line breaks.
+- MUST be a summary/description of the event content, NOT a copy of the source text.
+- Do NOT include: date, time, address, ticket prices, phone numbers, URLs.
+- Do NOT use promotional language or calls to action.
+- Keep it concise: 10-25 words.
+- Write in third person, neutral tone.
+Good examples:
+- "Концерт камерной музыки с произведениями Баха и Вивальди в исполнении калининградских музыкантов."
+- "Спектакль по мотивам романа Достоевского о судьбе молодого человека в большом городе."
+- "Мастер-класс по изготовлению традиционных янтарных украшений для начинающих."
+Bad examples (do NOT write like this):
+- "Приходите на концерт!" (call to action)
+- "12 января в 19:00" (date/time)
+- "Подробности по ссылке" (URL reference)
+- "" (empty — NEVER allowed)
 
 **search_digest** rules:
 Generate a single Russian sentence in a formal neutral style for extended search.

@@ -15,10 +15,17 @@ from typing import Optional, Sequence
 logger = logging.getLogger(__name__)
 
 # Location name mappings from source to database
+TRETYAKOV_LOCATION = "Филиал Третьяковской галереи"
+
 LOCATION_MAPPINGS = {
     "кафедральный собор": "Кафедральный собор",
     "драматический театр": "Драматический театр",
     "музыкальный театр": "Музыкальный театр",
+    "третьяков": TRETYAKOV_LOCATION,
+    "третяков": TRETYAKOV_LOCATION,
+    "tretyakov": TRETYAKOV_LOCATION,
+    "атриум": TRETYAKOV_LOCATION,
+    "кинозал": TRETYAKOV_LOCATION,
 }
 
 # Russian month names for date parsing
@@ -36,6 +43,81 @@ MONTHS_RU = {
     "ноября": 11, "ноя": 11,
     "декабря": 12, "дек": 12, "декабр": 12,
 }
+
+_TIME_RANGE_SPLIT = re.compile(r"\s*(?:-|–|—|\.\.\.?|…)\s*")
+_TIME_RE = re.compile(r"(\d{1,2}):(\d{2})")
+_TITLE_CLEAN_RE = re.compile(r"[^\w\s]+", re.UNICODE)
+_TITLE_SPACE_RE = re.compile(r"\s+")
+_TITLE_NOISE_WORDS = {
+    "спектакль",
+    "мюзикл",
+    "опера",
+    "балет",
+    "премьера",
+    "оперетта",
+    "музыкальная",
+    "музыкальный",
+}
+_TITLE_MIN_TOKEN_LEN = 3
+
+
+def extract_time_start(value: str | None) -> str | None:
+    """Extract start time (HH:MM) from a time string or range."""
+    if not value:
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    parts = _TIME_RANGE_SPLIT.split(text, maxsplit=1)
+    candidate = parts[0] if parts else text
+    match = _TIME_RE.search(candidate)
+    if not match:
+        match = _TIME_RE.search(text)
+    if not match:
+        return None
+    hour = int(match.group(1))
+    minute = int(match.group(2))
+    return f"{hour:02d}:{minute:02d}"
+
+
+def _normalize_title(text: str) -> str:
+    if not text:
+        return ""
+    normalized = (
+        text.strip()
+        .lower()
+        .replace("ё", "е")
+        .replace("\u00a0", " ")
+    )
+    normalized = _TITLE_CLEAN_RE.sub(" ", normalized)
+    normalized = _TITLE_SPACE_RE.sub(" ", normalized).strip()
+    return normalized
+
+
+def _title_tokens(text: str) -> list[str]:
+    if not text:
+        return []
+    return [
+        token
+        for token in text.split()
+        if len(token) >= _TITLE_MIN_TOKEN_LEN
+    ]
+
+
+def _strip_noise_tokens(tokens: Sequence[str]) -> list[str]:
+    if not tokens:
+        return []
+    return [token for token in tokens if token not in _TITLE_NOISE_WORDS]
+
+
+def _tokens_subset_match(tokens1: Sequence[str], tokens2: Sequence[str]) -> bool:
+    if not tokens1 or not tokens2:
+        return False
+    set1 = set(tokens1)
+    set2 = set(tokens2)
+    if not set1 or not set2:
+        return False
+    return set1.issubset(set2) or set2.issubset(set1)
 
 
 @dataclass
@@ -56,6 +138,10 @@ class TheatreEvent:
     # Parsed date/time
     parsed_date: Optional[str] = None  # ISO format YYYY-MM-DD
     parsed_time: Optional[str] = None  # HH:MM format
+    
+    # Prices
+    ticket_price_min: Optional[int] = None
+    ticket_price_max: Optional[int] = None
 
 
 def parse_date_raw(date_raw: str) -> tuple[Optional[str], Optional[str]]:
@@ -65,6 +151,7 @@ def parse_date_raw(date_raw: str) -> tuple[Optional[str], Optional[str]]:
         "28 декабря 18:00" -> ("2024-12-28", "18:00")
         "02 ЯНВАРЯ 13:00" -> ("2025-01-02", "13:00")
         "28 ДЕКАБР" -> ("2024-12-28", None)
+        "21.03.2026 18:00" -> ("2026-03-21", "18:00")
     """
     if not date_raw:
         return None, None
@@ -78,6 +165,18 @@ def parse_date_raw(date_raw: str) -> tuple[Optional[str], Optional[str]]:
         hour = int(time_match.group(1))
         minute = int(time_match.group(2))
         parsed_time = f"{hour:02d}:{minute:02d}"
+    
+    # Try DD.MM.YYYY format first (e.g., "21.03.2026")
+    numeric_date_match = re.search(r'(\d{1,2})\.(\d{1,2})\.(\d{4})', text)
+    if numeric_date_match:
+        day = int(numeric_date_match.group(1))
+        month = int(numeric_date_match.group(2))
+        year = int(numeric_date_match.group(3))
+        try:
+            event_date = date(year, month, day)
+            return event_date.isoformat(), parsed_time
+        except ValueError:
+            pass  # Invalid date, fall through to Russian month parsing
     
     # Extract day and month
     day_match = re.search(r'(\d{1,2})\s*', text)
@@ -147,12 +246,22 @@ def parse_theatre_json(json_data: str | list | dict, source_name: str = "") -> l
             continue
         
         date_raw = item.get("date_raw", "")
-        parsed_date, parsed_time = parse_date_raw(date_raw)
+        
+        # Use pre-parsed date/time if available (e.g. from specific parsers)
+        if item.get("parsed_date"):
+            parsed_date = item.get("parsed_date")
+            parsed_time = item.get("parsed_time")
+        else:
+            parsed_date, parsed_time = parse_date_raw(date_raw)
         
         # Map ticket status
         raw_status = item.get("ticket_status", "").lower()
         ticket_status = "available" if raw_status == "available" else "sold_out" if raw_status in ("sold_out", "soldout", "sold out") else "unknown"
         
+        location = item.get("location", "") or ""
+        if source_name.lower() == "tretyakov" and not location:
+            location = TRETYAKOV_LOCATION
+
         event = TheatreEvent(
             title=title,
             date_raw=date_raw,
@@ -161,12 +270,14 @@ def parse_theatre_json(json_data: str | list | dict, source_name: str = "") -> l
             photos=item.get("photos", []) or [],
             description=item.get("description", "") or "",
             pushkin_card=bool(item.get("pushkin_card", False)),
-            location=item.get("location", "") or "",
+            location=location,
             age_restriction=item.get("age_restriction", "") or "",
             scene=item.get("scene", "") or "",
             source_type=source_name,
             parsed_date=parsed_date,
-            parsed_time=parsed_time or "00:00",
+            parsed_time=parsed_time,
+            ticket_price_min=item.get("ticket_price_min"),
+            ticket_price_max=item.get("ticket_price_max"),
         )
         events.append(event)
     
@@ -215,17 +326,36 @@ def fuzzy_title_match(title1: str, title2: str, threshold: float = 0.85) -> bool
     if not title1 or not title2:
         return False
     
-    # Normalize titles
-    t1 = title1.strip().lower()
-    t2 = title2.strip().lower()
+    # Normalize titles (strip punctuation/emoji, normalize whitespace)
+    t1 = _normalize_title(title1)
+    t2 = _normalize_title(title2)
+    if not t1 or not t2:
+        return False
     
     # Exact match
     if t1 == t2:
         return True
+
+    tokens1 = _strip_noise_tokens(_title_tokens(t1))
+    tokens2 = _strip_noise_tokens(_title_tokens(t2))
+    if tokens1 and tokens2:
+        if tokens1 == tokens2:
+            return True
+        if _tokens_subset_match(tokens1, tokens2):
+            return True
     
     # Fuzzy match using SequenceMatcher
     ratio = SequenceMatcher(None, t1, t2).ratio()
-    return ratio >= threshold
+    if ratio >= threshold:
+        return True
+
+    if tokens1 and tokens2:
+        core1 = " ".join(tokens1)
+        core2 = " ".join(tokens2)
+        ratio = SequenceMatcher(None, core1, core2).ratio()
+        return ratio >= max(0.7, threshold - 0.1)
+
+    return False
 
 
 async def find_existing_event(
@@ -235,7 +365,10 @@ async def find_existing_event(
     event_time: str,
     title: str,
 ) -> tuple[int | None, bool]:
-    """Find existing event in database by location, date, time and title.
+    """Find existing event in database by date, time, location and title.
+    
+    Uses the same matching logic as upsert_event to avoid false negatives
+    that would trigger unnecessary LLM calls.
     
     Args:
         db: Database instance
@@ -250,43 +383,113 @@ async def find_existing_event(
         - needs_full_update: True if event has 00:00 time and should be fully updated
     """
     from models import Event
-    from sqlalchemy import select, or_
+    from sqlalchemy import select
+    from difflib import SequenceMatcher
+    
+    logger.debug(
+        "find_existing_event: searching date=%s time=%s location=%s title=%s",
+        event_date, event_time, location_name, title[:50],
+    )
     
     async with db.get_session() as session:
-        # First try exact match on location + date
+        # Match upsert_event: search by date + time first
         stmt = select(Event).where(
-            Event.location_name == location_name,
             Event.date == event_date,
+            Event.time == event_time,
         )
         result = await session.execute(stmt)
         candidates = result.scalars().all()
         
-        for event in candidates:
-            # Check for fuzzy title match
-            if fuzzy_title_match(title, event.title):
-                # Check if this is a placeholder event (00:00 time)
-                if event.time == "00:00" and event_time != "00:00":
-                    return event.id, True  # Needs full update
-                # Check time match (exact or close)
-                if event.time == event_time:
-                    return event.id, False  # Just update ticket status
-        
-        # Also check for events with same location and title but different dates
-        # (for recurring shows on different days)
-        stmt = select(Event).where(
-            Event.location_name == location_name,
-            Event.title == title,
+        logger.debug(
+            "find_existing_event: found %d candidates for date=%s time=%s",
+            len(candidates), event_date, event_time,
         )
-        result = await session.execute(stmt)
-        title_matches = result.scalars().all()
         
-        for event in title_matches:
-            if event.date == event_date and fuzzy_title_match(title, event.title, 0.95):
-                if event.time == "00:00" and event_time != "00:00":
-                    return event.id, True
-                if event.time == event_time:
-                    return event.id, False
+        # Apply same matching logic as upsert_event (main.py:9823-9912)
+        for ev in candidates:
+            ev_loc = (ev.location_name or "").strip().lower()
+            new_loc = (location_name or "").strip().lower()
+            ev_addr = (ev.location_address or "").strip().lower()
+            
+            # Exact location match
+            if ev_loc == new_loc:
+                logger.info(
+                    "find_existing_event: MATCHED by location event_id=%d title=%s",
+                    ev.id, ev.title[:50],
+                )
+                return ev.id, False
+            
+            # Fuzzy title match (threshold 0.9 like upsert_event)
+            title_ratio = SequenceMatcher(
+                None, (ev.title or "").lower(), (title or "").lower()
+            ).ratio()
+            if title_ratio >= 0.9:
+                logger.info(
+                    "find_existing_event: MATCHED by title (ratio=%.2f) event_id=%d title=%s",
+                    title_ratio, ev.id, ev.title[:50],
+                )
+                return ev.id, False
+            
+            # Combined fuzzy match (title >= 0.6 AND location >= 0.6)
+            loc_ratio = SequenceMatcher(None, ev_loc, new_loc).ratio()
+            if title_ratio >= 0.6 and loc_ratio >= 0.6:
+                logger.info(
+                    "find_existing_event: MATCHED by combined fuzzy (title=%.2f loc=%.2f) event_id=%d",
+                    title_ratio, loc_ratio, ev.id,
+                )
+                return ev.id, False
+        
+        # Also check for placeholder events (00:00 time) that need full update
+        if event_time != "00:00":
+            stmt_placeholder = select(Event).where(
+                Event.date == event_date,
+                Event.time == "00:00",
+            )
+            result = await session.execute(stmt_placeholder)
+            placeholders = result.scalars().all()
+            
+            for ev in placeholders:
+                ev_loc = (ev.location_name or "").strip().lower()
+                new_loc = (location_name or "").strip().lower()
+                
+                if ev_loc == new_loc:
+                    if fuzzy_title_match(title, ev.title):
+                        logger.info(
+                            "find_existing_event: MATCHED placeholder event_id=%d (needs full update)",
+                            ev.id,
+                        )
+                        return ev.id, True
+        
+        # Check by location + date (fallback for different time slots)
+        stmt_loc = select(Event).where(
+            Event.location_name == location_name,
+            Event.date == event_date,
+        )
+        result = await session.execute(stmt_loc)
+        loc_candidates = result.scalars().all()
+        
+        for ev in loc_candidates:
+            if fuzzy_title_match(title, ev.title):
+                # Different time for same event?
+                if ev.time == "00:00" and event_time != "00:00":
+                    logger.info(
+                        "find_existing_event: MATCHED by loc+title placeholder event_id=%d",
+                        ev.id,
+                    )
+                    return ev.id, True
+                # Skip if times differ significantly (different show times)
+                db_start = extract_time_start(ev.time)
+                new_start = extract_time_start(event_time)
+                if db_start and new_start and db_start == new_start:
+                    logger.info(
+                        "find_existing_event: MATCHED by loc+title+start_time event_id=%d",
+                        ev.id,
+                    )
+                    return ev.id, False
     
+    logger.debug(
+        "find_existing_event: NO MATCH for title=%s", title[:50],
+    )
     return None, False
 
 

@@ -3,6 +3,32 @@ __pycache__/
 .db
 .env
 
+# Production database snapshots and WAL files
 db_prod_snapshot.sqlite
+db_prod_snapshot.sqlite-shm
+db_prod_snapshot.sqlite-wal
+
+# Local database WAL files
+db.sqlite-shm
+db.sqlite-wal
+
+# Temporary database copies
+tmp_db*.sqlite
+
+# Logs
+*.log
+prod_logs.txt
+production_logs.txt
+double_import_logs.txt
+test_output.txt
+
+# Secrets - NEVER commit!
+telegraph_token.txt
+telegraph_token_prod.txt
+
+# Backups and test data
 backups/
 test_data/
+
+# Virtual environment (should not be committed)
+.venv/

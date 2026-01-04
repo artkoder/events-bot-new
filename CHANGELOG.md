@@ -2,6 +2,297 @@
 
 ## [Unreleased]
 
+## [1.7.7] - 2026-01-02
+
+### Added
+- **3D Preview**: Добавлена кнопка "🌐 All missing" в меню `/3di` для генерации превью всех будущих событий без preview_3d_url одним нажатием.
+- **Фестивали**: Добавлена кнопка "🔄 Обновить события" в меню редактирования фестиваля (`/fest edit`) для обновления списка событий на Telegraph-странице фестиваля.
+
+## [1.7.5] - 2026-01-02
+
+### Changed
+- Increased event limit for 3D previews on month pages from 10 to 30.
+
+## [1.7.6] - 2026-01-02
+
+### Fixed
+- **3D Preview**:
+  - **Notebook Cleanup**: Kaggle notebook now performs aggressive cleanup (`rm -rf`) of Blender binary and image directories before completion. This prevents the bot from downloading massive amount of data (hundreds of MBs) and ensures only the result JSON is retrieved, fixing "Result not applied" errors.
+
+## [1.7.4] - 2026-01-02
+
+### Added
+- **Telegraph**: Для событий с длинным описанием (>500 символов) теперь отображается краткое описание (`search_digest`) над полным текстом, разделённое горизонтальной линией. Улучшает читаемость страниц событий.
+
+### Fixed
+- **Tretyakov Parser**: 
+  - Исправлена навигация по календарю — теперь парсер корректно находит все даты через стрелку `.week-calendar-next`.
+  - Исправлено извлечение времени — парсер теперь прокручивает календарь к нужной дате перед кликом, устраняя ошибки `00:00` для дат на других страницах календаря.
+  - Добавлена полная поддержка min/max цен из всех секторов.
+  - Добавлена дедупликация событий с объединением фото (исполнитель приоритет над фестивалем).
+
+## [1.7.3] - 2026-01-02
+
+### Added
+- **3D Preview**: Added "Only New" button to `/3di` command. Allows generating missing previews for new events without reprocessing existing ones.
+- **Pyramida**: Fixed price parsing from ticket widget. Now extracts specific prices (e.g. "500 ₽") and price ranges ("500 - 1000 ₽"), ensuring correct `ticket_status` ("available" instead of "unknown").
+
+## [1.7.2] - 2026-01-02
+
+### Changed
+- **3D Preview Aesthetics**:
+    - **Soft Shadows**: Increased light source angle to 10° for softer, more realistic shadows.
+    - **Cinematic Rotation**: The first card in the stack is now slightly rotated (-3°) for a more dynamic look.
+
+## [1.7.1] - 2026-01-02
+
+### Fixed
+- **3D Preview**: Fixed argument parsing in `/3di` command to support running from image captions and avoid errors when `message.text` is None (aiogram v3 compatibility).
+
+## [1.7.0] - 2026-01-02
+
+### Added
+- **3D Preview**: Added `/3di multy` command mode. Generates previews only for events with 2 or more images, filtering out single-image events.
+- **3D Preview**: Improved lighting with a new "Shadow Lift" fill light. This makes cards 2, 3, and 4 readable by softening the hard shadows while maintaining the dramatic texture.
+
+## [1.6.11] - 2026-01-02
+
+### Changed
+- **Configuration**: Increased Kaggle polling timeout from 30 minutes to 4 hours to accommodate CPU fallback scenarios.
+
+## [1.6.10] - 2026-01-01
+
+### Fixed
+- **Source Parsing**: Исправлено формирование `short_description` для событий из `/parse`. Усилен промпт LLM — добавлены подробные правила генерации `short_description` (REQUIRED поле, one-sentence summary с примерами). Убран fallback на `full_description` (многострочный текст), fallback на title используется только в крайнем случае с логированием warning.
+- **Special Pages**: Added support for 3D generated previews (`preview_3d_url`) in special pages. If available, the 3D preview is used as the main event image, prioritizing it over regular photos.
+
+## [1.6.9] - 2026-01-01
+
+### Changed
+- **3D Preview**: Changed the Blender background color from dark gray to pure Black (#000000) for better integration with both light and dark Telegraph themes.
+
+## [1.6.8] - 2026-01-01
+
+### Refinements
+- **3D Preview**:
+  - **Cover Logic**: 3D preview is now used as the Telegraph page cover ONLY if the event has 2 or more source photos. If there is only 1 photo, the original is preserved.
+  - **Transparency**: Added a dark background to the Blender scene to fix transparency rendering issues in Telegraph.
+  - **Composition**: Improved layout for single images (< 3 photos) to use a centered single plane instead of the carousel.
+
+### Refined
+- **3D Preview**: Use the preview image as the leading Telegraph photo, add a dark scene background, and simplify layout when fewer than three images are available.
+
+## [1.6.7] - 2026-01-01
+
+### Fixed
+- **3D Preview**: Fixed critical bug where database session variable shadowed the user session dictionary, causing "AsyncSession object does not support item assignment" error.
+
+## [1.6.6] - 2026-01-01
+
+### Performance
+- **3D Preview**:
+  - Notebook now cleans up Blender binaries and input files before completion, leaving only `output.json`. This dramatically speeds up the result download (from minutes to seconds) and prevents timeouts.
+  - Handler now actively cleans up temporary download directories in `/tmp` to save disk space.
+
+## [1.6.5] - 2026-01-01
+
+### Fixed
+- **3D Preview**:
+  - Increased output download retry limit to 10 attempts (50s total timeout).
+  - Implemented automatic Month Page rebuild triggering after 3D preview application.
+  - Added detailed final report in Telegram with links to the updated month page and events.
+
+## [1.6.4] - 2026-01-01
+
+### Fixed
+- **3D Preview**: Added 3 retry attempts for downloading output.json from Kaggle (handles API race conditions).
+
+## [1.6.3] - 2026-01-01
+
+### Fixed
+- **3D Preview**: Added 15s delay after dataset creation in handler (syncing pattern with video_announce) to ensure dataset availability before kernel start.
+
+## [1.6.2] - 2026-01-01
+
+### Fixed
+- **3D Preview**: Added 60s retry loop for payload detection in Kaggle notebook to handle dataset mounting latency.
+
+## [1.6.1] - 2026-01-01
+
+### Fixed
+- **3D Preview**:
+  - Fixed payload path detection in Kaggle notebook (now uses `rglob`).
+  - Added "fail fast" logic in notebook if payload is missing.
+  - Implemented live status updates in Telegram message during polling.
+  - Added `asyncio.Lock` to serialize concurrent generation requests.
+  - Fixed output directory collisions by using per-session paths.
+
+## [1.6.0] – 2026-01-01
+
+### Added
+- **3D Preview Feature**:
+  - Added `preview_3d_url` to `Event` model.
+  - Created `/3di` command for generating 3D previews using Kaggle.
+  - Implemented Kaggle orchestration pipeline (dataset -> kernel -> polling -> db update).
+  - Added support for GPU rendering on Kaggle.
+  - Integrated 3D previews into Telegraph month pages (displayed as main image).
+
+## [1.5.3] – 2026-01-01
+- **Performance**: Оптимизация LLM-вызовов в `/parse` — унифицирована логика `find_existing_event` с `upsert_event`. Теперь существующие события распознаются до вызова LLM, что значительно снижает расход токенов и время обработки.
+
+## [1.5.2] – 2025-12-31
+- **Logging**: логируются выбор kernel, путь локального kernel и состав файлов при push в Kaggle.
+
+## [1.5.1] – 2025-12-31
+- **Fix**: В импортировании payload и перезапуске последней сессии добавлен шаг выбора kernel перед рендером, чтобы избежать 403.
+## [1.5.0] – 2025-12-31
+- **Fix**: Исправлена маска MoviePy в Kaggle-ноутбуке `video_afisha.ipynb` — маска остается 2D для корректного blit.
+- **Feature**: Добавлена кнопка "📥 Импортировать payload" для запуска рендера видео-анонса из сохранённого `payload.json` без этапа подбора событий.
+
+## [1.4.6] – 2025-12-31
+- **Fix**: Исправлена ошибка фильтрации в `/special`: события больше не скрываются, если у него ошибочно указан `end_date` в прошлом (проверяется `max(date, end_date)`).
+- **Refinement**: Очистка описаний Музтеатра и Кафедрального собора на продакшене.
+- **Fix**: Исправлена дата и метаданные события в Веселовке.
+- **Infrastructure**: Введено правило изоляции временных скриптов в папке `scripts/`.
+
+## [1.4.5] – 2025-12-31
+
+### Fixed
+- **Muzteatr Parser**: Fixed empty descriptions by extracting text from `og:description` meta tags (site structure changed).
+
+## [1.4.4] - 2025-12-31
+
+### Fixed
+- **Dramteatr Parser**: Fixed DOM traversal issue where date block was missed because it is a sibling of the link wrapper.
+
+## [1.4.3] - 2025-12-31
+
+### Fixed
+- **Dramteatr Parser**: Fixed date extraction (incomplete dates like "31 ДЕКАБР") using CSS selectors.
+- **Parsing**: Improved duplicate detection with fuzzy title matching (Codex).
+- **Video Announce**: Filter out "sold_out" events from video digests by default.
+- **UI**: Minor adjustment to ticket icon order in summaries.
+
+## [1.4.2] - 2025-12-31
+
+### Changed
+- **Source Parsing**: Улучшен алгоритм сопоставления событий (parser.py) — добавлено извлечение стартового времени для более точного поиска дубликатов.
+- **Source Parsing**: Добавлено детальное логирование (per-event logging) с метриками (LLM usage, duration).
+
+## [1.4.1] - 2025-12-31
+
+### Fixed
+- **Source Parsing**: Раскомментированы блоки Драмтеатра и Музтеатра в ноутбуке `ParseTheatres`.
+
+## [1.4.0] - 2025-12-31
+
+### Added
+- **Special Pages**: Новая команда `/special` для генерации праздничных Telegraph-страниц. Поддержка произвольного периода (1–14 дней), дедупликация событий с одинаковыми названиями (объединение в блок с несколькими временами), загрузка обложки, автоматическое сокращение периода при превышении лимита Telegraph.
+- **Special Pages**: Нормализация названий локаций при генерации страницы (удаление дублей адресов).
+- **Special Pages**: Улучшили навигацию — добавлена навигация по месяцам в футере страницы.
+- **Source Parsing**: Улучшен Kaggle-ноутбук `ParsePyramida` для более надежного парсинга.
+
+### Fixed
+- **System**: Исправлен конфликт `sys.modules` при запуске бота, вызывавший ошибку доступа к базе данных (`get_db() -> None`) в динамически загружаемых модулях.
+- **Month/Weekend Pages**: Исправлено отсутствие дат и времени на страницах месяцев и выходных в Telegraph. Теперь дата и время отображаются корректно в формате "_31 декабря 19:00, Место, Город_".
+
+### Added
+
+### Changed
+
+### Fixed
+
+## [1.3.7] - 2025-12-31
+
+### Added
+- **Telegraph**: Телефонные номера на страницах событий теперь кликабельные (ссылки `tel:`). Поддерживаются форматы: +7, 8, локальные номера.
+- **Performance**: Отложенные перестройки страниц (Deferred Rebuilds) — задачи `month_pages` и `weekend_pages` откладываются на 15 минут для оптимизации при массовом добавлении событий.
+- **Conditional Images**: На месячных и выходных страницах Telegraph отображаются изображения событий, если на странице менее 10 событий.
+- **EVENT_UPDATE_SYNC**: Добавлена поддержка синхронного режима для тестирования отложенных задач.
+
+### Changed
+- **/parse limit**: Лимит одновременно добавляемых событий снижен с 10 до 5 для стабильности.
+- **/parse rebuild**: Убрана автоматическая пересборка Telegraph страниц после `/parse` — теперь используется стандартная очередь отложенных задач.
+
+### Fixed
+- **/parse month_pages**: При добавлении событий через `/parse` теперь гарантированно создаются задачи `month_pages` для всех затронутых месяцев for deferred rebuild.
+- **Deferred Rebuilds**: Исправлен обход отложенности — `_drain_nav_tasks` больше не создаёт немедленные follow-up задачи если уже есть отложенная задача для event_id. Это предотвращает преждевременную пересборку страниц Telegraph.
+- **VK Inbox**: Исправлено отсутствие ссылки на Telegraph страницу в отчёте оператору ("✅ Telegraph — "). Теперь бот ожидает создания страницы перед отправкой ответа (до 10 секунд).
+- **Deferred Rebuilds**: Убран синхронный вызов `refresh_month_nav` при обнаружении нового месяца, вызывавший немедленную пересборку всех страниц. Теперь новые месяцы обрабатываются через отложенную очередь.
+- **Deferred Rebuilds**: `schedule_event_update_tasks` по умолчанию теперь использует `drain_nav=False`, гарантируя соблюдение 15-минутной задержки перед сборкой.
+- **Deferred Rebuilds TTL**: Исправлено преждевременное истечение (expiration) отложенных задач — TTL теперь считается от момента запланированного выполнения (`next_run_at`), а не от момента создания (`updated_at`). Ранее задачи с 15-минутной отложенностью истекали через 10 минут (TTL=600с).
+- **Rebuild Notifications**: При автоматической пересборке страниц теперь суперадминам приходит уведомление с перечнем обновлённых месяцев.
+- **Navigation Update**: При добавлении события на новый месяц (например, Апрель) теперь обновляются футеры навигации на всех существующих страницах (Январь, Февраль и т.д.).
+- **Year Suffix**: Исправлено отображение года в навигации — "2026" добавляется только к Январю или при смене года, а не ко всем месяцам.
+- **Spam Removal**: Удалены отладочные сообщения `NAV_WATCHDOG`, которые отправлялись в чат оператора при каждой отложенной задаче.
+- **Retry Logic**: При ошибке `CONTENT_TOO_BIG` флаг `show_images` теперь корректно прокидывается в ретрай.
+- **Test Stability**: `main_part2.py` теперь безопаснее импортировать напрямую (fallback для `LOCAL_TZ`, `format_day_pretty`).
+- **Photo URL Validation**: Добавлена проверка схемы `http` для `photo_urls`.
+
+## [1.3.5] - 2025-12-29
+
+### Fixed
+- **Pyramida**: Исправлен парсинг дат в формате `DD.MM.YYYY HH:MM` (например `21.03.2026 18:00`). Ранее такие даты не распознавались и события не добавлялись.
+
+## [1.3.4] - 2025-12-29
+
+### Fixed
+- **Pyramida**: Исправлена ошибка ("missing FSInputFile"), из-за которой не отправлялся JSON файл с результатом парсинга.
+- **Pyramida**: Включено OCR для событий, добавляемых через кнопку в VK Review (ранее работало только для `/parse`).
+
+## [1.3.3] - 2025-12-29
+
+### Fixed
+- **Pyramida**: Добавлено отображение статуса работы Kaggle (Running/Poling) в чате. Теперь пользователь видит прогресс выполнения ноутбука.
+
+## [1.3.2] - 2025-12-29
+
+### Added
+- **Source Parsing**: Добавлена поддержка OCR (распознавание текста) для событий из Pyramida и /parse. Теперь афиши скачиваются, распознаются и текст используется для улучшения описания события.
+
+## [1.3.1] - 2025-12-29
+
+### Fixed
+- **Pyramida**: Исправлен парсинг описания событий (корректный селектор для Playwright/BS4)
+- **Pyramida**: Добавлена отправка JSON файла с результатами парсинга в чат
+- **Docs**: Уточнено, что OCR для Pyramida не выполняется
+
+## [1.3.0] - 2025-12-29
+
+### Added
+- **Pyramida extraction**: Новая кнопка "🔮 Извлечь из Pyramida" в VK review flow для автоматического парсинга событий с pyramida.info. Извлекает ссылки из поста, запускает Kaggle notebook, добавляет события в базу. См. [docs/PYRAMIDA.md](docs/PYRAMIDA.md)
+- **Pyramida manual input**: Кнопка "🔮 Pyramida" в меню /start (для супер-админов) для ручного ввода
+
+## [1.2.17] - 2025-12-29
+
+
+
+### Added
+- **source_parsing**: Новый Kaggle-ноутбук `ParseTheatres` с полем `description`
+- **docs**: Документация `/parse` в `docs/SOURCE_PARSING.md`
+
+### Fixed
+- **source_parsing**: События из `/parse` теперь корректно появляются в ежедневном анонсе — исправлен подсчёт новых vs обновлённых событий
+- **source_parsing**: Отчёт теперь показывает 🔄 Обновлено для существующих событий (ранее не отображалось)
+- **source_parsing**: Добавлено debug-логирование в `find_existing_event` для диагностики
+- **source_parsing**: Прогресс теперь редактирует одно сообщение вместо множества
+- **source_parsing**: Поле `description` корректно передаётся в БД из парсера
+
+## [1.2.15] - 2025-12-28
+
+### Fixed
+- **source_parsing**: Исправлено добавление событий — теперь используется `persist_event_and_pages` вместо несуществующего `persist_event_draft`
+- **source_parsing**: Добавлена отправка JSON файлов из Kaggle в ответ на `/parse`
+- **source_parsing**: Улучшено логирование создания событий
+
+## [1.2.14] - 2025-12-28
+
+### Added
+- Улучшено логирование модуля `source_parsing` для отладки команды `/parse`:
+  - Логирование при получении команды и проверке прав
+  - Логирование старта и завершения Kaggle-ноутбука
+  - Логирование количества полученных событий
+
 ## [1.2.13] - 2025-12-28
 
 ### Fixed
@@ -25,6 +316,7 @@
 - Updated agent instructions to require explicit user command for production deployment.
 
 <!-- Новые изменения добавляй сюда -->
+- Исправлен сбор логов с Kaggle: теперь `poller.py` корректно скачивает логи из вложенных директорий и пакует их в zip-архив, если файлов больше 10.
 
 ---
 

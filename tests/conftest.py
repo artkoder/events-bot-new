@@ -23,7 +23,9 @@ def _mock_telegraph(monkeypatch, request):
         monkeypatch.setattr(main, "get_telegraph_token", lambda: "t")
     async def fake_create_page(tg, *args, **kwargs):
         return {"path": "test", "url": "https://t.me/test"}
-    monkeypatch.setattr(main, "telegraph_create_page", fake_create_page)
+    # Skip for new test that needs real implementation to verify calls
+    if "test_split_month_requires_many_pages" not in request.node.nodeid:
+        monkeypatch.setattr(main, "telegraph_create_page", fake_create_page)
 
     async def fake_update(event_id, db_obj, bot_obj):
         async with db_obj.get_session() as session:

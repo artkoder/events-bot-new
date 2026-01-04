@@ -138,6 +138,34 @@ async def test_build_daily_sections_vk_keeps_partner_source_link(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+async def test_build_daily_sections_vk_includes_fair_when_few_events(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    now = datetime(2026, 1, 3, 12, 0, tzinfo=timezone.utc)
+    async with db.get_session() as session:
+        session.add(
+            Event(
+                title="Fair",
+                description="d",
+                source_text="s",
+                date="2025-12-25",
+                end_date="2026-01-10",
+                time="10:00..17:30",
+                location_name="Market",
+                event_type="ярмарка",
+            )
+        )
+        await session.commit()
+
+    sec1, _ = await main.build_daily_sections_vk(
+        db, timezone.utc, now=now
+    )
+    assert "FAIR" in sec1
+    assert main.format_day_pretty(date(2026, 1, 3)) in sec1
+
+
+@pytest.mark.asyncio
 async def test_build_daily_sections_vk_short_link_reuse(tmp_path: Path, monkeypatch):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()

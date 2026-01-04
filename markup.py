@@ -1,5 +1,6 @@
-import html, re
+import html, re, logging
 from typing import List
+from functools import lru_cache
 
 MD_BOLD   = re.compile(r'(?<!\w)(\*\*|__)(.+?)\1(?!\w)', re.S)
 MD_ITALIC = re.compile(r'(?<!\w)(\*|_)(.+?)\1(?!\w)', re.S)
@@ -11,6 +12,24 @@ _BARE_LINK_RE = re.compile(r'(?<!href=["\'])(https?://[^\s<>)]+)')
 _TEXT_LINK_RE = re.compile(r'([^<\[]+?)\s*\((https?://(?:\\\)|[^)])+)\)')
 _VK_LINK_RE = re.compile(r'\[([^|\]]+)\|([^\]]+)\]')
 _TG_MENTION_RE = re.compile(r'(?<![\w/@])@([a-zA-Z0-9_]{4,32})')
+
+# Phone number patterns for tel: links
+# Matches: +7 (495) 123-45-67, 8-800-555-35-35, +7 999 123 45 67, (4012) 12-34-56
+_PHONE_RE = re.compile(
+    r'(?<![/\d])'  # Not preceded by / or digit (avoid matching parts of URLs)
+    r'(\+7|8)?'  # Optional country code
+    r'\s*'
+    r'[\s(-]*'
+    r'(\d{3,4})'  # Area code or first group
+    r'[\s)-]*'
+    r'(\d{2,3})'  # Second group
+    r'[\s-]*'
+    r'(\d{2})'  # Third group
+    r'[\s-]*'
+    r'(\d{2})'  # Fourth group
+    r'(?![/\d])',  # Not followed by / or digit
+    re.VERBOSE
+)
 
 
 def _unescape_md_url(url: str) -> str:
@@ -29,7 +48,7 @@ def simple_md_to_html(text: str) -> str:
 
 
 def linkify_for_telegraph(text_or_html: str) -> str:
-    """Преобразует голые URL и пары «текст (url)» в кликабельные ссылки."""
+    """Преобразует голые URL, пары «текст (url)» и телефоны в кликабельные ссылки."""
     def repl_text(m: re.Match[str]) -> str:
         label, href = m.group(1).strip(), _unescape_md_url(m.group(2))
         return f'<a href="{href}">{label}</a>'
@@ -47,6 +66,29 @@ def linkify_for_telegraph(text_or_html: str) -> str:
         username = m.group(1)
         return f'<a href="https://t.me/{username}">@{username}</a>'
 
+    def repl_phone(m: re.Match[str]) -> str:
+        # Reconstruct the original matched text
+        original = m.group(0)
+        # Extract parts: country_code, area, group2, group3, group4
+        country = m.group(1) or ""
+        area = m.group(2)
+        g2 = m.group(3)
+        g3 = m.group(4)
+        g4 = m.group(5)
+        # Build normalized phone number for tel: link
+        # Convert 8 to +7 for Russian numbers
+        if country == "8":
+            tel_country = "+7"
+        elif country == "+7":
+            tel_country = "+7"
+        elif country:
+            tel_country = country
+        else:
+            # Local number without country code, assume +7 for Russia
+            tel_country = "+7"
+        tel_number = f"{tel_country}{area}{g2}{g3}{g4}"
+        return f'<a href="tel:{tel_number}">{original}</a>'
+
     text = _VK_LINK_RE.sub(repl_vk, text_or_html)
     text = MD_LINK.sub(lambda m: f'<a href="{_unescape_md_url(m[2])}">{m[1]}</a>', text)
     text = _TEXT_LINK_RE.sub(repl_text, text)
@@ -56,6 +98,11 @@ def linkify_for_telegraph(text_or_html: str) -> str:
             parts[idx] = _TG_MENTION_RE.sub(repl_mention, parts[idx])
         text = "".join(parts)
     text = _BARE_LINK_RE.sub(repl_bare, text)
+    # Convert phone numbers to tel: links (only outside existing links)
+    parts = re.split(r'(<a\b[^>]*>.*?</a>)', text, flags=re.IGNORECASE | re.DOTALL)
+    for idx in range(0, len(parts), 2):
+        parts[idx] = _PHONE_RE.sub(repl_phone, parts[idx])
+    text = "".join(parts)
     return text
 
 
@@ -165,3 +212,42 @@ FEST_NAV_END: Marker = NEAR_FESTIVALS_END
 # Festivals index intro markers
 FEST_INDEX_INTRO_START: Marker = Marker("<!-- festivals-index:intro:start -->")
 FEST_INDEX_INTRO_END: Marker = Marker("<!-- festivals-index:intro:end -->")
+
+_TG_TAG_RE = re.compile(r"</?tg-(?:emoji|spoiler)[^>]*?>", re.IGNORECASE)
+_ESCAPED_TG_TAG_RE = re.compile(r"&lt;/?tg-(?:emoji|spoiler).*?&gt;", re.IGNORECASE)
+
+def sanitize_telegram_html(html: str) -> str:
+    """Remove Telegram-specific HTML wrappers while keeping inner text.
+
+    >>> sanitize_telegram_html("<tg-emoji e=1/>")
+    ''
+    >>> sanitize_telegram_html("<tg-emoji e=1></tg-emoji>")
+    ''
+    >>> sanitize_telegram_html("<tg-emoji e=1>➡</tg-emoji>")
+    '➡'
+    >>> sanitize_telegram_html("&lt;tg-emoji e=1/&gt;")
+    ''
+    >>> sanitize_telegram_html("&lt;tg-emoji e=1&gt;&lt;/tg-emoji&gt;")
+    ''
+    >>> sanitize_telegram_html("&lt;tg-emoji e=1&gt;➡&lt;/tg-emoji&gt;")
+    '➡'
+    """
+    raw = len(_TG_TAG_RE.findall(html))
+    escaped = len(_ESCAPED_TG_TAG_RE.findall(html))
+    if raw or escaped:
+        logging.info("telegraph:sanitize tg-tags raw=%d escaped=%d", raw, escaped)
+    cleaned = _TG_TAG_RE.sub("", html)
+    cleaned = _ESCAPED_TG_TAG_RE.sub("", cleaned)
+    return cleaned
+
+@lru_cache(maxsize=8)
+def md_to_html(text: str) -> str:
+    html_text = simple_md_to_html(text)
+    html_text = linkify_for_telegraph(html_text)
+    html_text = sanitize_telegram_html(html_text)
+    if not re.match(r"^<(?:h\d|p|ul|ol|blockquote|pre|table)", html_text):
+        html_text = f"<p>{html_text}</p>"
+    # Telegraph API does not allow h1/h2 or Telegram-specific tags
+    html_text = re.sub(r"<(\/?)h[12]>", r"<\1h3>", html_text)
+    html_text = sanitize_telegram_html(html_text)
+    return html_text

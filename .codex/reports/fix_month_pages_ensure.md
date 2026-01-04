@@ -1,0 +1,3 @@
+Added a post‑processing safeguard in `source_parsing/handlers.py` to ensure `month_pages` jobs are enqueued for every month seen during parsing, with an INFO log of affected months and `mark_pages_dirty` calls so missed months still get scheduled. After the source loop, it collects unique `YYYY‑MM` values, maps each to an existing event id, then calls `enqueue_job` with a month coalesce key.
+
+Tests: `pytest tests/test_conditional_images.py`

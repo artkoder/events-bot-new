@@ -244,6 +244,7 @@ class Database:
             await _add_column(conn, "event", "search_digest TEXT")
             await _add_column(conn, "event", "ticket_status TEXT")
             await _add_column(conn, "event", "linked_event_ids TEXT")
+            await _add_column(conn, "event", "preview_3d_url TEXT")
             await conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_event_tourist_label ON event(tourist_label)"
             )
@@ -283,6 +284,25 @@ class Database:
                     content_hash2 TEXT
                 )
                 """
+            )
+
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS monthpagepart(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    month TEXT NOT NULL,
+                    part_number INTEGER NOT NULL,
+                    url TEXT NOT NULL,
+                    path TEXT NOT NULL,
+                    content_hash TEXT,
+                    first_date TEXT,
+                    last_date TEXT,
+                    UNIQUE(month, part_number)
+                )
+                """
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_monthpagepart_month ON monthpagepart(month)"
             )
 
             await conn.execute(
@@ -746,5 +766,4 @@ async def optimize(engine):
 async def vacuum(engine):
     async with engine.begin() as conn:
         await conn.exec_driver_sql("VACUUM")
-
 

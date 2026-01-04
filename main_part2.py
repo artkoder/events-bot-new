@@ -1,14 +1,102 @@
-from __future__ import annotations
-
 import logging
+import os
 import re
+import asyncio
 import time as _time
+from datetime import date, timezone, datetime, timedelta
 from dataclasses import dataclass, field
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Any, Sequence, List, Mapping, Optional, Dict, Tuple, Collection, Literal, Awaitable
+from aiogram import Bot, types
 
+from aiohttp import web
 from telegraph import Telegraph
+from markup import md_to_html, telegraph_br
 
-from models import Event, Festival
+from models import Event, Festival, WeekPage, WeekendPage, MonthPage, MonthPagePart, VkMissRecord, VkMissReviewSession, User
+from poster_media import PosterMedia
+from db import Database
+from sqlalchemy import select, update, delete, text, func, or_, and_
+from sqlmodel.ext.asyncio.session import AsyncSession
+from scheduling import MONTHS_GEN
+from event_utils import format_event_md, is_recent
+
+if "LOCAL_TZ" not in globals():
+    LOCAL_TZ = timezone.utc
+
+if "format_day_pretty" not in globals():
+    _MONTHS = [
+        "января",
+        "февраля",
+        "марта",
+        "апреля",
+        "мая",
+        "июня",
+        "июля",
+        "августа",
+        "сентября",
+        "октября",
+        "ноября",
+        "декабря",
+    ]
+
+    def format_day_pretty(day: date) -> str:
+        return f"{day.day} {_MONTHS[day.month - 1]}"
+
+if "is_long_event_type" not in globals():
+
+    def is_long_event_type(event_type: str | None) -> bool:
+        if not event_type:
+            return False
+        return event_type.strip().casefold() in {"выставка", "ярмарка"}
+
+
+def clone_event_with_date(event: Event, day: date) -> Event:
+    payload = event.model_dump()
+    payload["date"] = day.isoformat()
+    return Event(**payload)
+
+if "month_name_prepositional" not in globals():
+    _MONTHS_PREP = [
+        "январе",
+        "феврале",
+        "марте",
+        "апреле",
+        "мае",
+        "июне",
+        "июле",
+        "августе",
+        "сентябре",
+        "октябре",
+        "ноябре",
+        "декабре",
+    ]
+
+    def month_name_prepositional(month: str) -> str:
+        y, m = month.split("-")
+        return f"{_MONTHS_PREP[int(m) - 1]} {y}"
+
+if "month_name_nominative" not in globals():
+    _MONTHS_NOM = [
+        "январь",
+        "февраль",
+        "март",
+        "апрель",
+        "май",
+        "июнь",
+        "июль",
+        "август",
+        "сентябрь",
+        "октябрь",
+        "ноябрь",
+        "декабрь",
+    ]
+
+    def month_name_nominative(month: str) -> str:
+        y, m = month.split("-")
+        name = _MONTHS_NOM[int(m) - 1]
+        if int(y) != datetime.now(LOCAL_TZ).year:
+            return f"{name} {y}"
+        return name
 
 
 def _normalize_title_and_emoji(title: str, emoji: str | None) -> tuple[str, str]:
@@ -52,6 +140,7 @@ def event_to_nodes(
     show_festival: bool = True,
     include_ics: bool = True,
     include_details: bool = True,
+    show_image: bool = False,
 ) -> list[dict]:
     md = format_event_md(
         e,
@@ -67,7 +156,29 @@ def event_to_nodes(
     body_md = "\n".join(body_lines) if body_lines else ""
     from telegraph.utils import html_to_nodes
 
-    nodes = [{"tag": "h4", "children": event_title_nodes(e)}]
+    nodes = []
+    # Show 3D preview as main image if available, otherwise use first photo
+    if show_image:
+        preview_url = getattr(e, "preview_3d_url", None)
+        if isinstance(preview_url, str):
+            preview_url = preview_url.strip()
+        if preview_url and isinstance(preview_url, str) and preview_url.startswith("http"):
+            # Use 3D preview as main image
+            nodes.append({
+                "tag": "figure",
+                "children": [{"tag": "img", "attrs": {"src": preview_url}, "children": []}]
+            })
+        elif e.photo_urls:
+            # Fallback to first photo
+            first_url = e.photo_urls[0]
+            if isinstance(first_url, str):
+                first_url = first_url.strip()
+            if isinstance(first_url, str) and first_url.startswith("http"):
+                nodes.append({
+                    "tag": "figure",
+                    "children": [{"tag": "img", "attrs": {"src": first_url}, "children": []}]
+                })
+    nodes.append({"tag": "h4", "children": event_title_nodes(e)})
     fest = festival if show_festival else None
     if fest is None and show_festival and e.festival:
         fest = getattr(e, "_festival", None)
@@ -184,7 +295,9 @@ def add_day_sections(
     *,
     use_markers: bool = False,
     include_ics: bool = True,
+
     include_details: bool = True,
+    show_images: bool = False,
 ):
     """Append event sections grouped by day to Telegraph content."""
     for d in days:
@@ -213,13 +326,14 @@ def add_day_sections(
                     log_fest_link=use_markers,
                     include_ics=include_ics,
                     include_details=include_details,
+                    show_image=show_images,
                 )
             )
         if use_markers:
             add_many([DAY_END(d)])
 
 
-def render_month_day_section(d: date, events: list[Event]) -> str:
+def render_month_day_section(d: date, events: list[Event], show_images: bool = False) -> str:
     """Return HTML snippet for a single day on a month page."""
     from telegraph.utils import nodes_to_html
 
@@ -234,7 +348,7 @@ def render_month_day_section(d: date, events: list[Event]) -> str:
     for ev in events:
         fest = getattr(ev, "_festival", None)
         nodes.extend(
-            event_to_nodes(ev, fest, fest_icon=True, log_fest_link=True)
+            event_to_nodes(ev, fest, fest_icon=True, log_fest_link=True, show_image=show_images)
         )
     return nodes_to_html(nodes)
 
@@ -250,6 +364,9 @@ async def get_month_data(db: Database, month: str, *, fallback: bool = True):
             .order_by(Event.date, Event.time)
         )
         events = result.scalars().all()
+        events = [
+            e for e in events if (e.event_type or "").casefold() != "ярмарка"
+        ]
 
         ex_result = await session.execute(
             select(Event)
@@ -295,6 +412,9 @@ async def build_month_page_content(
     *,
     include_ics: bool = True,
     include_details: bool = True,
+    page_number: int = 1,
+    first_date: date | None = None,
+    last_date: date | None = None,
 ) -> tuple[str, list, int]:
     if events is None or exhibitions is None:
         events, exhibitions = await get_month_data(db, month)
@@ -323,8 +443,11 @@ async def build_month_page_content(
             fest_index_url,
             include_ics,
             include_details,
+            page_number,
+            first_date,
+            last_date,
         )
-    logging.info("build_month_page_content size=%d", size)
+    logging.info("build_month_page_content size=%d page=%d", size, page_number)
     return title, content, size
 
 
@@ -338,6 +461,9 @@ def _build_month_page_content_sync(
     fest_index_url: str | None,
     include_ics: bool,
     include_details: bool,
+    page_number: int = 1,
+    first_date: date | None = None,
+    last_date: date | None = None,
 ) -> tuple[str, list, int]:
     # Ensure festivals have full Telegraph URLs for easy linking
     for fest in fest_map.values():
@@ -384,18 +510,21 @@ def _build_month_page_content_sync(
             if exceeded:
                 break
             add(n)
-    intro = (
-        f"Планируйте свой месяц заранее: интересные мероприятия Калининграда и 39 региона в {month_name_prepositional(month)} — от лекций и концертов до культурных шоу. "
-    )
-    intro_nodes = [
-        intro,
-        {
-            "tag": "a",
-            "attrs": {"href": "https://t.me/kenigevents"},
-            "children": ["Полюбить Калининград Анонсы"],
-        },
-    ]
-    add({"tag": "p", "children": intro_nodes})
+
+    # Only add intro paragraph on page 1
+    if page_number == 1:
+        intro = (
+            f"Планируйте свой месяц заранее: интересные мероприятия Калининграда и 39 региона в {month_name_prepositional(month)} — от лекций и концертов до культурных шоу. "
+        )
+        intro_nodes = [
+            intro,
+            {
+                "tag": "a",
+                "attrs": {"href": "https://t.me/kenigevents"},
+                "children": ["Полюбить Калининград Анонсы"],
+            },
+        ]
+        add({"tag": "p", "children": intro_nodes})
 
     add_day_sections(
         sorted(by_day),
@@ -405,6 +534,7 @@ def _build_month_page_content_sync(
         use_markers=True,
         include_ics=include_ics,
         include_details=include_details,
+        show_images=len(events) <= 30,
     )
 
     if exhibitions and not exceeded:
@@ -452,9 +582,25 @@ def _build_month_page_content_sync(
         )
         add_many(telegraph_br())
 
-    title = (
-        f"События Калининграда в {month_name_prepositional(month)}: полный анонс от Полюбить Калининград Анонсы"
-    )
+    # Generate title based on page number
+    # Check DEV_MODE flag to add TEST prefix for separate dev pages
+    import os
+    is_dev_mode = os.getenv("DEV_MODE") == "1"
+    test_prefix = "ТЕСТ " if is_dev_mode else ""
+    
+    if page_number == 1:
+        title = (
+            f"{test_prefix}События Калининграда в {month_name_prepositional(month)}: полный анонс от Полюбить Калининград Анонсы"
+        )
+    else:
+        # For continuation pages, use date range in title
+        year = int(month.split("-")[0])
+        month_num = int(month.split("-")[1])
+        month_gen = MONTHS_GEN[month_num]
+        if first_date and last_date:
+            title = f"{test_prefix}События Калининграда с {first_date.day} по {last_date.day} {month_gen} {year}"
+        else:
+            title = f"{test_prefix}События Калининграда в {month_name_prepositional(month)} (продолжение)"
     return title, content, size
 
 
@@ -511,7 +657,7 @@ async def _sync_month_page_inner(
                 db_page.content_hash2 = page.content_hash2
                 await s.commit()
 
-        if update_links:
+        if update_links and page.path:
             nav_block = await build_month_nav_block(db, month)
             nav_update_failed = False
             for path_attr, hash_attr in (("path", "content_hash"), ("path2", "content_hash2")):
@@ -776,6 +922,18 @@ async def build_weekend_page_content(
         )
         exhibitions = ex_res.scalars().all()
 
+        fair_res = await session.execute(
+            select(Event)
+            .where(
+                Event.event_type == "ярмарка",
+                Event.end_date.is_not(None),
+                Event.date <= sunday.isoformat(),
+                Event.end_date >= saturday.isoformat(),
+            )
+            .order_by(Event.date, Event.time)
+        )
+        fairs = fair_res.scalars().all()
+
         res_w = await session.execute(select(WeekendPage).order_by(WeekendPage.start))
         weekend_pages = res_w.scalars().all()
         res_m = await session.execute(select(MonthPage).order_by(MonthPage.month))
@@ -792,6 +950,14 @@ async def build_weekend_page_content(
             or (not e.end_date and e.date >= today.isoformat())
         )
     ]
+    fairs = [
+        e
+        for e in fairs
+        if (
+            (e.end_date and e.end_date >= today.isoformat())
+            or (not e.end_date and e.date >= today.isoformat())
+        )
+    ]
 
     async with db.get_session() as session:
         res_f = await session.execute(select(Festival))
@@ -799,7 +965,7 @@ async def build_weekend_page_content(
 
     fest_index_url = await get_setting_value(db, "fest_index_url")
 
-    for e in events:
+    for e in (*events, *fairs):
         fest = fest_map.get((e.festival or "").casefold())
         await ensure_event_telegraph_link(e, fest, db)
 
@@ -809,6 +975,27 @@ async def build_weekend_page_content(
         if not d:
             continue
         by_day.setdefault(d, []).append(e)
+
+    day_ids: dict[date, set[int]] = {
+        d: {e.id for e in by_day.get(d, []) if e.id is not None} for d in days
+    }
+    for fair in fairs:
+        start = parse_iso_date(fair.date)
+        end = parse_iso_date(fair.end_date) if fair.end_date else None
+        if not start or not end:
+            continue
+        if end < start:
+            start, end = end, start
+        for day in days:
+            if start <= day <= end:
+                if fair.id is not None and fair.id in day_ids.get(day, set()):
+                    continue
+                by_day.setdefault(day, []).append(clone_event_with_date(fair, day))
+                if fair.id is not None:
+                    day_ids.setdefault(day, set()).add(fair.id)
+
+    for day in by_day:
+        by_day[day].sort(key=lambda e: e.time or "99:99")
 
     content: list[dict] = []
     size = 0
@@ -855,7 +1042,7 @@ async def build_weekend_page_content(
         }
     )
 
-    add_day_sections(days, by_day, fest_map, add_many)
+    add_day_sections(days, by_day, fest_map, add_many, show_images=len(events) < 10)
 
     weekend_nav: list[dict] = []
     future_weekends = [w for w in weekend_pages if w.start >= start]
@@ -2370,6 +2557,26 @@ async def build_daily_posts(
             .order_by(Event.time)
         )
         events_today = res_today.scalars().all()
+        if len(events_today) < 6:
+            res_fairs = await session.execute(
+                select(Event)
+                .where(
+                    Event.event_type == "ярмарка",
+                    Event.end_date.is_not(None),
+                    Event.end_date >= today.isoformat(),
+                    Event.date <= today.isoformat(),
+                )
+                .order_by(Event.date, Event.time)
+            )
+            fairs_today = res_fairs.scalars().all()
+            if fairs_today:
+                seen_ids = {e.id for e in events_today if e.id is not None}
+                fairs_today = [e for e in fairs_today if e.id not in seen_ids]
+                if fairs_today:
+                    events_today.extend(
+                        clone_event_with_date(e, today) for e in fairs_today
+                    )
+                    events_today.sort(key=lambda e: e.time or "99:99")
         res_new = await session.execute(
             select(Event)
             .where(
@@ -2441,7 +2648,7 @@ async def build_daily_posts(
                 for e in new_events
                 if e.date in {sat.isoformat(), sun.isoformat()}
                 or (
-                    e.event_type == "выставка"
+                    is_long_event_type(e.event_type)
                     and e.end_date
                     and e.end_date >= sat.isoformat()
                     and e.date <= sun.isoformat()
@@ -2452,7 +2659,7 @@ async def build_daily_posts(
                 for e in events_today
                 if e.date in {sat.isoformat(), sun.isoformat()}
                 or (
-                    e.event_type == "выставка"
+                    is_long_event_type(e.event_type)
                     and e.end_date
                     and e.end_date >= sat.isoformat()
                     and e.date <= sun.isoformat()
@@ -2623,6 +2830,26 @@ async def build_daily_sections_vk(
             .order_by(Event.time)
         )
         events_today = res_today.scalars().all()
+        if len(events_today) < 6:
+            res_fairs = await session.execute(
+                select(Event)
+                .where(
+                    Event.event_type == "ярмарка",
+                    Event.end_date.is_not(None),
+                    Event.end_date >= today.isoformat(),
+                    Event.date <= today.isoformat(),
+                )
+                .order_by(Event.date, Event.time)
+            )
+            fairs_today = res_fairs.scalars().all()
+            if fairs_today:
+                seen_ids = {e.id for e in events_today if e.id is not None}
+                fairs_today = [e for e in fairs_today if e.id not in seen_ids]
+                if fairs_today:
+                    events_today.extend(
+                        clone_event_with_date(e, today) for e in fairs_today
+                    )
+                    events_today.sort(key=lambda e: e.time or "99:99")
         res_new = await session.execute(
             select(Event)
             .where(
@@ -2686,7 +2913,7 @@ async def build_daily_sections_vk(
                 for e in new_events
                 if e.date in {sat.isoformat(), sun.isoformat()}
                 or (
-                    e.event_type == "выставка"
+                    is_long_event_type(e.event_type)
                     and e.end_date
                     and e.end_date >= sat.isoformat()
                     and e.date <= sun.isoformat()
@@ -2697,7 +2924,7 @@ async def build_daily_sections_vk(
                 for e in events_today
                 if e.date in {sat.isoformat(), sun.isoformat()}
                 or (
-                    e.event_type == "выставка"
+                    is_long_event_type(e.event_type)
                     and e.end_date
                     and e.end_date >= sat.isoformat()
                     and e.date <= sun.isoformat()
@@ -4491,6 +4718,12 @@ async def show_festival_edit_menu(user_id: int, fest: Festival, bot: Bot):
                 callback_data=f"festmerge:{fest.id}",
             )
         ],
+        [
+            types.InlineKeyboardButton(
+                text="🔄 Обновить события",
+                callback_data=f"festsyncevents:{fest.id}",
+            )
+        ],
         [types.InlineKeyboardButton(text="Done", callback_data="festeditdone")],
     ]
     markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard)
@@ -5775,9 +6008,13 @@ async def handle_pages_rebuild(message: types.Message, db: Database, bot: Bot):
             inline_keyboard=buttons
             + [[types.InlineKeyboardButton(text="Все", callback_data="pages_rebuild:ALL")]]
         )
+        msg_text = "Выберите месяц для пересборки или «Все»"
+        if os.getenv("DEV_MODE") == "1":
+            msg_text = "⚠️ DEV MODE: Страницы будут созданы с префиксом ТЕСТ!\n\n" + msg_text
+
         await bot.send_message(
             message.chat.id,
-            "Выберите месяц для пересборки или «Все»",
+            msg_text,
             reply_markup=markup,
         )
         return
@@ -7861,8 +8098,9 @@ async def handle_vk_command(message: types.Message, db: Database, bot: Bot) -> N
         await bot.send_message(message.chat.id, "Access denied")
         return
     if not (VK_USER_TOKEN or VK_TOKEN or VK_TOKEN_AFISHA):
-        await bot.send_message(message.chat.id, "VK token not configured")
-        return
+        if os.getenv("DEV_MODE") != "1":
+            await bot.send_message(message.chat.id, "VK token not configured")
+            return
     buttons = [
         [types.KeyboardButton(text=VK_BTN_ADD_SOURCE)],
         [types.KeyboardButton(text=VK_BTN_LIST_SOURCES)],
@@ -7873,6 +8111,8 @@ async def handle_vk_command(message: types.Message, db: Database, bot: Bot) -> N
     ]
     markup = types.ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
     await bot.send_message(message.chat.id, "VK мониторинг", reply_markup=markup)
+
+
 
 
 async def handle_vk_add_start(message: types.Message, db: Database, bot: Bot) -> None:
@@ -7886,6 +8126,123 @@ async def handle_vk_add_start(message: types.Message, db: Database, bot: Bot) ->
         message.chat.id,
         "Отправьте ссылку или скриннейм, опционально локацию и время через |",
     )
+
+
+async def handle_pyramida_start(message: types.Message, db: Database, bot: Bot) -> None:
+    """Handle Pyramida button click - start waiting for URL input."""
+    async with db.get_session() as session:
+        user = await session.get(User, message.from_user.id)
+    if not (user and user.is_superadmin):
+        await bot.send_message(message.chat.id, "Access denied")
+        return
+    pyramida_input_sessions.add(message.from_user.id)
+    await bot.send_message(
+        message.chat.id,
+        "🔮 Отправьте текст со ссылками pyramida.info/tickets/...\n"
+        "Я извлеку все ссылки и парсю события.",
+    )
+
+
+async def handle_pyramida_input(message: types.Message, db: Database, bot: Bot) -> None:
+    """Handle text input with Pyramida URLs."""
+    if message.from_user.id not in pyramida_input_sessions:
+        return
+    pyramida_input_sessions.discard(message.from_user.id)
+    
+    text = (message.text or "").strip()
+    if not text:
+        await bot.send_message(message.chat.id, "❌ Пустой ввод")
+        return
+    
+    # Extract URLs
+    from source_parsing.pyramida import (
+        extract_pyramida_urls,
+        run_pyramida_kaggle_kernel,
+        parse_pyramida_output,
+        process_pyramida_events,
+    )
+    
+    urls = extract_pyramida_urls(text)
+    if not urls:
+        await bot.send_message(message.chat.id, "❌ Не найдены ссылки pyramida.info/tickets/")
+        return
+    
+    status_msg = await bot.send_message(message.chat.id, f"🔮 Найдено {len(urls)} ссылок. Запускаю Kaggle...")
+    
+    async def _status_cb(text: str):
+        try:
+            await bot.edit_message_text(
+                f"🔮 {text}",
+                chat_id=message.chat.id,
+                message_id=status_msg.message_id,
+            )
+        except Exception:
+            pass
+    
+    # Run Kaggle
+    try:
+        status, output_files, duration = await run_pyramida_kaggle_kernel(urls, status_callback=_status_cb)
+    except Exception as e:
+        logging.exception("pyramida_input: kaggle failed")
+        await bot.send_message(message.chat.id, f"❌ Ошибка Kaggle: {e}")
+        return
+    
+    if status != "complete":
+        await bot.send_message(message.chat.id, f"❌ Kaggle завершился с ошибкой: {status}")
+        return
+    
+    await bot.send_message(message.chat.id, f"✅ Kaggle завершён за {duration:.1f}с. Обрабатываю...")
+    
+    # Send JSON files to chat
+    for file_path in output_files:
+        try:
+            await bot.send_document(
+                message.chat.id,
+                types.FSInputFile(file_path),
+                caption=f"📄 {os.path.basename(file_path)}"
+            )
+        except Exception as e:
+            logging.error(f"Failed to send JSON file {file_path}: {e}")
+    
+    # Parse events
+    try:
+        events = parse_pyramida_output(output_files)
+    except Exception as e:
+        logging.exception("pyramida_input: parse failed")
+        await bot.send_message(message.chat.id, f"❌ Ошибка парсинга: {e}")
+        return
+    
+    if not events:
+        await bot.send_message(message.chat.id, "⚠️ Не найдено событий в результатах Kaggle")
+        return
+    
+    await bot.send_message(message.chat.id, f"📝 Обрабатываю {len(events)} событий...")
+    
+    # Process events
+    try:
+        stats = await process_pyramida_events(
+            db,
+            bot,
+            events,
+            chat_id=message.chat.id,
+            skip_pages_rebuild=True,
+        )
+    except Exception as e:
+        logging.exception("pyramida_input: processing failed")
+        await bot.send_message(message.chat.id, f"❌ Ошибка обработки: {e}")
+        return
+    
+    # Summary
+    summary_lines = [
+        "🔮 **Pyramida импорт завершён**",
+        f"✅ Добавлено: {stats.new_added}",
+    ]
+    if stats.ticket_updated:
+        summary_lines.append(f"🔄 Обновлено: {stats.ticket_updated}")
+    if stats.failed:
+        summary_lines.append(f"❌ Ошибок: {stats.failed}")
+    
+    await bot.send_message(message.chat.id, "\n".join(summary_lines), parse_mode="Markdown")
 
 
 async def handle_vk_add_message(message: types.Message, db: Database, bot: Bot) -> None:
@@ -9873,6 +10230,18 @@ async def _vkrev_show_next(chat_id: int, batch_id: str, operator_id: int, db: Da
                 text="Создать историю", callback_data=f"vkrev:story:{post.id}"
             )
         ],
+    ]
+    # Add Pyramida extraction button if post contains pyramida.info links
+    from source_parsing.pyramida import extract_pyramida_urls
+    pyramida_urls = extract_pyramida_urls(post.text or "")
+    if pyramida_urls:
+        inline_keyboard.append([
+            types.InlineKeyboardButton(
+                text=f"🔮 Извлечь из Pyramida ({len(pyramida_urls)})",
+                callback_data=f"vkrev:pyramida:{post.id}",
+            )
+        ])
+    inline_keyboard.extend([
         [types.InlineKeyboardButton(text="⏹ Стоп", callback_data=f"vkrev:stop:{batch_id}")],
         [
             types.InlineKeyboardButton(
@@ -9880,8 +10249,9 @@ async def _vkrev_show_next(chat_id: int, batch_id: str, operator_id: int, db: Da
                 callback_data=f"vkrev:finish:{batch_id}",
             )
         ],
-    ]
+    ])
     imported_event_id = getattr(post, "imported_event_id", None)
+
     if imported_event_id:
         async with db.get_session() as session:
             event = await session.get(Event, imported_event_id)
@@ -10676,7 +11046,133 @@ async def _vkrev_handle_story_choice(
     vk_review_story_sessions.pop(operator_id, None)
 
 
+async def _handle_pyramida_extraction(
+    chat_id: int,
+    operator_id: int,
+    inbox_id: int,
+    batch_id: str,
+    post_text: str,
+    db: Database,
+    bot: Bot,
+) -> None:
+    """Handle Pyramida event extraction from VK post.
+    
+    1. Extract pyramida.info URLs from post text
+    2. Run Kaggle kernel to parse events
+    3. Process events (add to DB without pages rebuild)
+    4. Mark post as imported
+    5. Show next post
+    """
+    from source_parsing.pyramida import (
+        extract_pyramida_urls,
+        run_pyramida_kaggle_kernel,
+        parse_pyramida_output,
+        process_pyramida_events,
+    )
+    
+    # 1. Extract URLs
+    urls = extract_pyramida_urls(post_text)
+    if not urls:
+        await bot.send_message(chat_id, "❌ Не найдены ссылки на pyramida.info")
+        await _vkrev_show_next(chat_id, batch_id, operator_id, db, bot)
+        return
+    
+    status_msg = await bot.send_message(chat_id, f"🔮 Найдено {len(urls)} ссылок. Запускаю Kaggle...")
+    
+    async def _status_cb(text: str):
+        try:
+            await bot.edit_message_text(
+                f"🔮 {text}",
+                chat_id=chat_id,
+                message_id=status_msg.message_id,
+            )
+        except Exception:
+            pass
+            
+    # 2. Run Kaggle kernel
+    try:
+        status, output_files, duration = await run_pyramida_kaggle_kernel(urls, status_callback=_status_cb)
+    except Exception as e:
+        logging.exception("pyramida_extraction: kaggle failed")
+        await bot.send_message(chat_id, f"❌ Ошибка Kaggle: {e}")
+        await _vkrev_show_next(chat_id, batch_id, operator_id, db, bot)
+        return
+    
+    if status != "complete":
+        await bot.send_message(chat_id, f"❌ Kaggle завершился с ошибкой: {status}")
+        await _vkrev_show_next(chat_id, batch_id, operator_id, db, bot)
+        return
+    
+    await bot.send_message(chat_id, f"✅ Kaggle завершён за {duration:.1f}с. Обрабатываю...")
+    
+    # Send JSON files to chat
+    for file_path in output_files:
+        try:
+            await bot.send_document(
+                chat_id,
+                types.FSInputFile(file_path),
+                caption=f"📄 {os.path.basename(file_path)}"
+            )
+        except Exception as e:
+            logging.error(f"Failed to send JSON file {file_path}: {e}")
+    
+    # 3. Parse and process events
+    try:
+        events = parse_pyramida_output(output_files)
+    except Exception as e:
+        logging.exception("pyramida_extraction: parse failed")
+        await bot.send_message(chat_id, f"❌ Ошибка парсинга: {e}")
+        await _vkrev_show_next(chat_id, batch_id, operator_id, db, bot)
+        return
+    
+    if not events:
+        await bot.send_message(chat_id, "⚠️ Не найдено событий в результатах Kaggle")
+        await _vkrev_show_next(chat_id, batch_id, operator_id, db, bot)
+        return
+    
+    await bot.send_message(chat_id, f"📝 Обрабатываю {len(events)} событий...")
+    
+    try:
+        stats = await process_pyramida_events(
+            db,
+            bot,
+            events,
+            chat_id=chat_id,
+            skip_pages_rebuild=True,
+        )
+    except Exception as e:
+        logging.exception("pyramida_extraction: processing failed")
+        await bot.send_message(chat_id, f"❌ Ошибка обработки: {e}")
+        await _vkrev_show_next(chat_id, batch_id, operator_id, db, bot)
+        return
+    
+    # 4. Send summary
+    summary_lines = [
+        "🔮 **Pyramida импорт завершён**",
+        f"✅ Добавлено: {stats.new_added}",
+    ]
+    if stats.ticket_updated:
+        summary_lines.append(f"🔄 Обновлено: {stats.ticket_updated}")
+    if stats.failed:
+        summary_lines.append(f"❌ Ошибок: {stats.failed}")
+    
+    await bot.send_message(chat_id, "\n".join(summary_lines), parse_mode="Markdown")
+    
+    # 5. Mark post as imported (use first event date or today)
+    from datetime import datetime, timezone
+    event_date = None
+    if events and events[0].parsed_date:
+        event_date = events[0].parsed_date
+    else:
+        event_date = datetime.now(timezone.utc).date().isoformat()
+    
+    # Don't mark as imported - let user decide with accept/reject buttons
+    # Just show next post
+    await _vkrev_show_next(chat_id, batch_id, operator_id, db, bot)
+
+
 async def handle_vk_review_cb(callback: types.CallbackQuery, db: Database, bot: Bot) -> None:
+
     assert callback.data
     parts = callback.data.split(":")
     action = parts[1] if len(parts) > 1 else ""
@@ -10702,6 +11198,22 @@ async def handle_vk_review_cb(callback: types.CallbackQuery, db: Database, bot: 
             if action == "accept" and len(parts) > 3:
                 force_arg = parts[3].strip().lower()
                 force_festival = force_arg in {"1", "true", "fest", "festival", "force"}
+            
+            # Atomic lock: try to switch content to 'importing' state
+            # This prevents double-clicks from spawning multiple import flows
+            async with db.raw_conn() as conn:
+                cur = await conn.execute(
+                    "UPDATE vk_inbox SET status='importing' WHERE id=? AND status IN ('locked', 'pending') RETURNING id",
+                    (inbox_id,),
+                )
+                locked_row = await cur.fetchone()
+                await conn.commit()
+            
+            if not locked_row:
+                # Already importing or processed
+                await callback.answer("⏳ Уже в обработке или завершено")
+                return
+
             await callback.answer("Запускаю импорт…")
             answered = True
             await bot.send_message(
@@ -10835,7 +11347,32 @@ async def handle_vk_review_cb(callback: types.CallbackQuery, db: Database, bot: 
         answered = True
         await callback.answer("Создаю историю…")
         await _vkrev_handle_story_choice(callback, placement, inbox_id, db, bot)
+    elif action == "pyramida":
+        # Handle Pyramida event extraction
+        inbox_id = int(parts[2]) if len(parts) > 2 else 0
+        async with db.raw_conn() as conn:
+            cur = await conn.execute(
+                "SELECT review_batch, text FROM vk_inbox WHERE id=?",
+                (inbox_id,),
+            )
+            row = await cur.fetchone()
+        if not row:
+            await callback.answer("Пост не найден", show_alert=True)
+            return
+        batch_id, post_text = row
+        await callback.answer("Извлекаю события из Pyramida…")
+        answered = True
+        await _handle_pyramida_extraction(
+            callback.message.chat.id,
+            callback.from_user.id,
+            inbox_id,
+            batch_id,
+            post_text or "",
+            db,
+            bot,
+        )
     elif action == "stop":
+
         async with db.raw_conn() as conn:
             await conn.execute(
                 "UPDATE vk_inbox SET status='pending', locked_by=NULL, locked_at=NULL WHERE locked_by=?",
@@ -12795,7 +13332,7 @@ async def _build_source_summary_block(
     elif default_date_str:
         time_part = ""
         if event_summary.time and event_summary.time != "00:00":
-            time_part = f" ⏰ {event_summary.time}"
+            time_part = f" в {event_summary.time}"
         date_line = f"🗓 {default_date_str}{time_part}"
     else:
         date_line = ""
@@ -12803,11 +13340,13 @@ async def _build_source_summary_block(
     date_line = date_line.strip()
     if date_line:
         escaped_date = html.escape(date_line)
-        if ics_url:
-            escaped_date += (
-                f' \U0001f4c5 <a href="{html.escape(ics_url)}">{ICS_LABEL}</a>'
-            )
         lines.append(escaped_date)
+    
+    # Add calendar link on separate line
+    if ics_url:
+        lines.append(
+            f'📅 <a href="{html.escape(ics_url)}">{ICS_LABEL}</a>'
+        )
 
     location_parts: list[str] = []
     existing_normalized: set[str] = set()
@@ -12853,12 +13392,12 @@ async def _build_source_summary_block(
         # Available tickets - add ✅ icon if ticket_status is explicitly 'available'
         status_icon = "✅ " if event_summary.ticket_status == "available" else ""
         if link_value:
-            ticket_segments.append(html.escape(f"{status_icon}🎟 "))
+            ticket_segments.append(html.escape(f"🎟 {status_icon}"))
             ticket_segments.append(_render_summary_anchor(link_value, "Билеты"))
             if price_text:
                 ticket_segments.append(html.escape(f" {price_text}"))
         elif price_text:
-            ticket_segments.append(html.escape(f"{status_icon}🎟 Билеты {price_text}"))
+            ticket_segments.append(html.escape(f"🎟 {status_icon}Билеты {price_text}"))
 
     if ticket_segments:
         lines.append("".join(ticket_segments).strip())
@@ -12883,6 +13422,7 @@ async def build_source_page_content(
     catbox_urls: list[str] | None = None,
     image_mode: Literal["tail", "inline"] = "tail",
     page_mode: Literal["default", "history"] = "default",
+    search_digest: str | None = None,
 ) -> tuple[str, str, int]:
     if image_mode not in {"tail", "inline"}:
         raise ValueError(f"unknown image_mode={image_mode}")
@@ -12923,6 +13463,13 @@ async def build_source_page_content(
         html_content += (
             f'<p>\U0001f4c5 <a href="{html.escape(ics_url)}">{ICS_LABEL}</a></p>'
         )
+    
+    # Add search_digest before long descriptions (> 500 chars)
+    text_len = len((text or "").strip())
+    if search_digest and search_digest.strip() and text_len > 500:
+        digest_escaped = html.escape(search_digest.strip())
+        html_content += f"<p>{digest_escaped}</p>"
+        html_content += "<hr/>"
     emoji_pat = re.compile(r"<tg-emoji[^>]*>(.*?)</tg-emoji>", re.DOTALL)
     spoiler_pat = re.compile(r"<tg-spoiler[^>]*>(.*?)</tg-spoiler>", re.DOTALL)
     tg_emoji_cleaned = 0
@@ -13386,7 +13933,10 @@ def create_app() -> web.Application:
     dp = Dispatcher()
     dp.include_router(ik_poster_router)
     db = Database(DB_PATH)
+    set_db(db)  # Set db in main.py's namespace for handlers
+    dp.include_router(special_router)  # must be after db init
     import video_announce.handlers as video_handlers
+    import preview_3d.handlers as preview_3d_handlers
 
     async def start_wrapper(message: types.Message):
         await handle_start(message, db, bot)
@@ -13584,6 +14134,15 @@ def create_app() -> web.Application:
     async def video_intro_wrapper(message: types.Message):
         await video_handlers.handle_intro_message(message, db, bot)
 
+    async def video_payload_wrapper(message: types.Message):
+        await video_handlers.handle_payload_import_message(message, db, bot)
+
+    async def preview_3di_wrapper(message: types.Message):
+        await preview_3d_handlers.handle_3di_command(message, db, bot)
+
+    async def preview_3di_cb_wrapper(callback: types.CallbackQuery):
+        await preview_3d_handlers.handle_3di_callback(callback, db, bot)
+
     async def edit_message_wrapper(message: types.Message):
         await handle_edit_message(message, db, bot)
 
@@ -13680,6 +14239,12 @@ def create_app() -> web.Application:
 
     async def vk_add_msg_wrapper(message: types.Message):
         await handle_vk_add_message(message, db, bot)
+
+    async def pyramida_start_wrapper(message: types.Message):
+        await handle_pyramida_start(message, db, bot)
+
+    async def pyramida_input_wrapper(message: types.Message):
+        await handle_pyramida_input(message, db, bot)
 
     async def vk_list_wrapper(message: types.Message):
         await handle_vk_list(message, db, bot)
@@ -13795,6 +14360,7 @@ def create_app() -> web.Application:
     dp.message.register(requests_wrapper, Command("requests"))
     dp.message.register(kaggle_test_wrapper, Command("kaggletest"))
     dp.message.register(video_cmd_wrapper, Command("v"))
+    dp.message.register(preview_3di_wrapper, Command("3di"))
     dp.message.register(usage_test_wrapper, Command("usage_test"))
     dp.callback_query.register(
         callback_wrapper,
@@ -13840,12 +14406,16 @@ def create_app() -> web.Application:
         or c.data.startswith("festimgs:")
         or c.data.startswith("festsetcover:")
         or c.data.startswith("festcover:")
+        or c.data.startswith("festsyncevents:")
         or c.data.startswith("requeue:")
         or c.data.startswith("tourist:")
     ,
     )
     dp.callback_query.register(
         video_cb_wrapper, lambda c: c.data and c.data.startswith("vid")
+    )
+    dp.callback_query.register(
+        preview_3di_cb_wrapper, lambda c: c.data and c.data.startswith("3di:")
     )
     dp.callback_query.register(
         festmerge_do_wrapper, lambda c: c.data and c.data.startswith("festmerge_do:")
@@ -13882,6 +14452,10 @@ def create_app() -> web.Application:
     dp.message.register(
         video_intro_wrapper,
         lambda m: video_handlers.is_waiting_intro_text(m.from_user.id),
+    )
+    dp.message.register(
+        video_payload_wrapper,
+        lambda m: video_handlers.is_waiting_payload_import(m.from_user.id),
     )
     dp.message.register(
         add_event_session_wrapper, lambda m: m.from_user.id in add_event_sessions
@@ -13922,7 +14496,10 @@ def create_app() -> web.Application:
     dp.message.register(vk_list_wrapper, lambda m: m.text == VK_BTN_LIST_SOURCES)
     dp.message.register(vk_check_wrapper, lambda m: m.text == VK_BTN_CHECK_EVENTS)
     dp.message.register(vk_queue_wrapper, lambda m: m.text == VK_BTN_QUEUE_SUMMARY)
+    dp.message.register(pyramida_start_wrapper, lambda m: m.text == VK_BTN_PYRAMIDA)
+    dp.message.register(pyramida_input_wrapper, lambda m: m.from_user.id in pyramida_input_sessions)
     dp.message.register(vk_add_msg_wrapper, lambda m: m.from_user.id in vk_add_source_sessions)
+
     dp.message.register(vk_extra_msg_wrapper, lambda m: m.from_user.id in vk_review_extra_sessions)
     dp.message.register(
         vk_story_instr_msg_wrapper,
@@ -14559,4 +15136,3 @@ if __name__ == "__main__":
         else:
             # Run in production mode with webhooks
             run_prod_mode()
-

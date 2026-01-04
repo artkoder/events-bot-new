@@ -6,39 +6,52 @@ description: Процедура релиза на продакшн
 
 // turbo-all
 
-1. Проверить что все тесты проходят:
+1. Убедиться что мы на ветке dev с актуальными изменениями:
+   ```bash
+   git checkout dev
+   git status
+   ```
+
+2. Проверить что все тесты проходят:
    ```bash
    pytest tests/ -v
    ```
 
-2. Определить тип версии (в VERSION файле):
+3. Определить тип версии (в VERSION файле):
    - MAJOR (X.0.0) — breaking changes
    - MINOR (0.X.0) — новый функционал
    - PATCH (0.0.X) — багфиксы
 
-3. Обновить VERSION файл с новой версией
+4. Обновить VERSION файл с новой версией
 
-4. Обновить CHANGELOG.md:
+5. Обновить CHANGELOG.md:
    - Переименовать [Unreleased] в [X.Y.Z] – YYYY-MM-DD
    - Создать новую пустую секцию [Unreleased]
 
-5. Закоммитить изменения:
+6. Закоммитить изменения в dev:
    ```bash
    git add -A
    git commit -m "chore: release vX.Y.Z"
+   git push origin dev
    ```
 
-6. Создать git tag:
+7. Смержить dev в main:
+   ```bash
+   git checkout main
+   git merge dev
+   ```
+
+8. Создать git tag:
    ```bash
    git tag -a vX.Y.Z -m "Release vX.Y.Z"
    ```
 
-7. Запушить с тегами:
+9. Запушить main с тегами:
    ```bash
    git push origin main --tags
    ```
 
-8. Задеплоить на Fly.io:
-   ```bash
-   fly deploy
-   ```
+10. Задеплоить на Fly.io:
+    ```bash
+    fly deploy
+    ```

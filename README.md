@@ -453,9 +453,9 @@ a new page.
 
 ## Telegraph page size
 
-Telegraph rejects pages larger than about 64&nbsp;kB. When a month contains too
-many events the bot automatically splits the announcement into two pages. The
-first one ends with a prominent link "<месяц> продолжение" leading to the second
+Telegraph rejects pages larger than about 64&nbsp;kB (configured limit defaults to 45&nbsp;kB). When a month contains too
+many events the bot automatically splits the announcement into multiple pages. The
+first one ends with a prominent link "<месяц> продолжение" leading to the next
 page.
 
 ## Production tips

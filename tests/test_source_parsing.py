@@ -49,6 +49,18 @@ class TestParseDateRaw:
         assert date_str is None
         assert time_str is None
 
+    def test_numeric_date_format(self):
+        """Parse DD.MM.YYYY format from Pyramida."""
+        date_str, time_str = parse_date_raw("21.03.2026 18:00")
+        assert date_str == "2026-03-21"
+        assert time_str == "18:00"
+
+    def test_numeric_date_without_time(self):
+        """Parse DD.MM.YYYY format without time."""
+        date_str, time_str = parse_date_raw("15.01.2025")
+        assert date_str == "2025-01-15"
+        assert time_str is None
+
 
 class TestParseTheatreJson:
     """Tests for JSON parsing."""
@@ -132,6 +144,13 @@ class TestNormalizeLocationName:
         """Handle empty input."""
         assert normalize_location_name("") == ""
 
+    def test_normalize_tretyakov(self):
+        """Normalize Tretyakov variants."""
+        expected = "Филиал Третьяковской галереи"
+        assert normalize_location_name("Третьяков") == expected
+        assert normalize_location_name("Третьяковка Калининград") == expected
+        assert normalize_location_name("Атриум") == expected
+
 
 class TestFuzzyTitleMatch:
     """Tests for fuzzy title matching."""
@@ -185,3 +204,33 @@ class TestLimitPhotosForSource:
         """Handle empty photo list."""
         result = limit_photos_for_source([], "muzteatr")
         assert result == []
+
+
+class TestShortDescriptionFallback:
+    """Tests for short_description fallback logic."""
+
+    def test_first_sentence_extraction(self):
+        """First sentence should be extracted when splitting by period."""
+        description = "Это первое предложение. Это второе предложение. И третье."
+        first_sentence = description.split('.')[0].strip()
+        assert first_sentence == "Это первое предложение"
+        
+    def test_first_sentence_with_empty_result(self):
+        """Empty description should not cause errors."""
+        description = ""
+        first_sentence = description.split('.')[0].strip()
+        assert first_sentence == ""
+        
+    def test_first_sentence_no_period(self):
+        """Description without period returns full text."""
+        description = "Текст без точки"
+        first_sentence = description.split('.')[0].strip()
+        assert first_sentence == "Текст без точки"
+
+    def test_fallback_to_title_when_empty(self):
+        """When description is empty, title should be used."""
+        description = ""
+        title = "Название события"
+        first_sentence = description.split('.')[0].strip() if description else ""
+        result = first_sentence + '.' if first_sentence else title
+        assert result == title

@@ -96,3 +96,31 @@ async def test_build_daily_posts_lists_recent_festivals(tmp_path):
 
     assert "ФЕСТИВАЛИ" in text
     assert "Fest-https://telegra.ph/Fest" in text
+
+
+@pytest.mark.asyncio
+async def test_build_daily_posts_includes_fair_when_few_events(tmp_path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    now = datetime(2026, 1, 3, 12, 0, tzinfo=timezone.utc)
+
+    async with db.get_session() as session:
+        session.add(
+            main.Event(
+                title="Fair",
+                description="Desc",
+                source_text="source",
+                date="2025-12-25",
+                end_date="2026-01-10",
+                time="10:00..17:30",
+                location_name="Market",
+                event_type="ярмарка",
+            )
+        )
+        await session.commit()
+
+    posts = await main.build_daily_posts(db, timezone.utc, now)
+    combined = "\n".join(p[0] for p in posts)
+    assert "Fair" in combined
+    assert main.format_day_pretty(now.date()) in combined

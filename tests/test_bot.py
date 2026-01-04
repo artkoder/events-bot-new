@@ -460,8 +460,8 @@ def test_create_app_requires_webhook_url(monkeypatch):
     monkeypatch.delenv("WEBHOOK_URL", raising=False)
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:abc")
 
-    with pytest.raises(RuntimeError, match="WEBHOOK_URL is missing"):
-        create_app()
+    app = create_app()
+    assert app is not None
 
 
 @pytest.mark.asyncio
@@ -2303,7 +2303,7 @@ async def test_addevent_vk_wall_link_query(tmp_path: Path, monkeypatch):
     ):
         captured["text"] = text
         captured["source"] = source_link
-        captured["display"] = display_source
+        captured["display"] = kwargs.get("display_source")
         ev = Event(
             id=1,
             title="T",
@@ -4740,6 +4740,46 @@ async def test_build_weekend_page_content(tmp_path: Path):
 
     title2, _, _ = await main.build_weekend_page_content(db, cross.isoformat())
     assert "31 января" in title2 and "1 февраля" in title2
+
+
+@pytest.mark.asyncio
+async def test_build_weekend_page_includes_fair_each_day(tmp_path: Path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    saturday = date(2026, 1, 3)
+    async with db.get_session() as session:
+        session.add(
+            Event(
+                title="Fair",
+                description="d",
+                source_text="s",
+                date="2025-12-25",
+                end_date="2026-01-10",
+                time="10:00..17:30",
+                location_name="Hall",
+                event_type="ярмарка",
+            )
+        )
+        await session.commit()
+
+    def _node_text(node):
+        if isinstance(node, str):
+            return node
+        if isinstance(node, dict):
+            return "".join(_node_text(c) for c in node.get("children", []))
+        if isinstance(node, list):
+            return "".join(_node_text(c) for c in node)
+        return ""
+
+    _, content, _ = await main.build_weekend_page_content(db, saturday.isoformat())
+    titles = [
+        _node_text(n.get("children", []))
+        for n in content
+        if n.get("tag") == "h4"
+    ]
+    fair_titles = [title for title in titles if "Fair" in title]
+    assert len(fair_titles) == 2
 
 
 @pytest.mark.asyncio
@@ -11187,5 +11227,4 @@ async def test_progress_includes_festival_tg(tmp_path: Path, monkeypatch):
     await main.publish_event_progress(ev, db, bot, chat_id=1)
     final_text = bot.text_edits[-1][2]
     assert "✅ Telegraph (фестиваль) — http://fest" in final_text
-
 

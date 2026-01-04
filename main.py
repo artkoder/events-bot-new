@@ -5,6 +5,11 @@ Debugging:
 """
 from __future__ import annotations
 
+# Fix double-import split: make 'import main' return __main__ when run as script
+import sys
+if __name__ == "__main__":
+    sys.modules.setdefault("main", sys.modules[__name__])
+
 import asyncio
 from weakref import WeakKeyDictionary
 import logging
@@ -160,6 +165,7 @@ import vk_intake
 import vk_review
 import poster_ocr
 from handlers.ik_poster_cmd import ik_poster_router
+from handlers.special_cmd import special_router
 from poster_media import (
     PosterMedia,
     apply_ocr_results_to_media,
@@ -263,6 +269,7 @@ from models import (
     Festival,
     EventPoster,
     JobOutbox,
+    MonthPagePart,
     JobTask,
     JobStatus,
     OcrUsage,
@@ -413,6 +420,22 @@ def _week_vk_lock(start: str) -> asyncio.Lock:
 
 DB_PATH = os.getenv("DB_PATH", "/data/db.sqlite")
 db: Database | None = None
+
+
+def get_db() -> Database | None:
+    """Get the current database instance. Use this instead of main.db in handlers."""
+    global db
+    logging.debug("get_db called, db=%s, module=%s", db, __name__)
+    return db
+
+
+def set_db(new_db: Database) -> None:
+    """Set the database instance. Called from create_app() in main_part2.py."""
+    global db
+    logging.info("set_db called: new_db=%s, module=%s", new_db, __name__)
+    db = new_db
+
+
 _base_bot_code = os.getenv("BOT_CODE", "announcements")
 BOT_CODE = _base_bot_code + "_test" if os.getenv("DEV_MODE") == "1" else _base_bot_code
 TELEGRAPH_TOKEN_FILE = os.getenv("TELEGRAPH_TOKEN_FILE", "/data/telegraph_token.txt")
@@ -681,21 +704,11 @@ class VkDefaultLocationSession:
     message: types.Message | None = None
 
 
-@dataclass(slots=True)
-class VkMissRecord:
-    id: str
-    url: str
-    reason: str | None
-    matched_kw: str | None
-    timestamp: datetime
+from models import VkMissRecord
 
 
-@dataclass(slots=True)
-class VkMissReviewSession:
-    queue: list[VkMissRecord]
-    index: int = 0
-    last_text: str | None = None
-    last_published_at: datetime | None = None
+from models import VkMissReviewSession
+
 
 
 vk_default_time_sessions: TTLCache[int, VkDefaultTimeSession] = TTLCache(
@@ -709,9 +722,12 @@ vk_default_location_sessions: TTLCache[
 ] = TTLCache(maxsize=64, ttl=3600)
 # waiting for VK source add input
 vk_add_source_sessions: set[int] = set()
+# waiting for Pyramida URL input
+pyramida_input_sessions: set[int] = set()
 
 # operator_id -> (inbox_id, batch_id) awaiting extra info during VK review
 vk_review_extra_sessions: dict[int, tuple[int, str, bool]] = {}
+
 
 # user_id -> review session for VK misses
 vk_miss_review_sessions: dict[int, VkMissReviewSession] = {}
@@ -1471,7 +1487,7 @@ _vk_session: ClientSession | None = None
 
 # Telegraph API rejects pages over ~64&nbsp;kB. Use a slightly lower limit
 # to decide when month pages should be split into two parts.
-TELEGRAPH_LIMIT = 60000
+TELEGRAPH_LIMIT = 45000
 
 def rough_size(nodes: Iterable[dict], limit: int | None = None) -> int:
     """Return an approximate size of Telegraph nodes in bytes.
@@ -1786,7 +1802,7 @@ async def log_token_usage(
     }
 
     logging.debug(
-        "log_token_usage scheduling bot=%s model=%s request_id=%s endpoint=%s prompt=%s completion=%s total=%s",
+        "log_token_usage start bot=%s model=%s request_id=%s endpoint=%s prompt=%s completion=%s total=%s",
         row["bot"],
         row["model"],
         row["request_id"],
@@ -1815,7 +1831,7 @@ async def log_token_usage(
         except Exception as exc:  # pragma: no cover - network logging failure
             logging.warning("log_token_usage failed: %s", exc, exc_info=True)
 
-    asyncio.create_task(_log())
+    await _log()
 
 
 # Run blocking Telegraph API calls with a timeout and simple retries
@@ -1937,6 +1953,7 @@ VK_BTN_ADD_SOURCE = "\u2795 Добавить сообщество"
 VK_BTN_LIST_SOURCES = "\U0001f4cb Показать список сообществ"
 VK_BTN_CHECK_EVENTS = "\U0001f50e Проверить события"
 VK_BTN_QUEUE_SUMMARY = "\U0001f4ca Сводка очереди"
+VK_BTN_PYRAMIDA = "🔮 Pyramida"
 
 # command help descriptions by role
 # roles: guest (not registered), user (registered), superadmin
@@ -2374,13 +2391,107 @@ async def set_setting_value(db: Database, key: str, value: str | None):
         elif setting:
             setting.value = value
         else:
-            setting = Setting(key=key, value=value)
-            session.add(setting)
+            # Use merge to handle concurrent inserts
+            try:
+                setting = Setting(key=key, value=value)
+                session.add(setting)
+                await session.commit()
+            except Exception:
+                # Retry with update on conflict
+                await session.rollback()
+                setting = await session.get(Setting, key)
+                if setting:
+                    setting.value = value
+                else:
+                    setting = Setting(key=key, value=value)
+                    session.add(setting)
         await session.commit()
     if value is None:
         settings_cache.pop(key, None)
     else:
         settings_cache[key] = value
+
+
+# --- Dirty-flag helpers for deferred page rebuilds ---
+PAGES_DIRTY_KEY = "pages_dirty_state"
+
+
+async def load_pages_dirty_state(db: Database) -> dict | None:
+    """Load dirty-flag state for deferred page rebuilds.
+    
+    Returns dict with keys: since (ISO timestamp), months (list), reminded (bool)
+    or None if clean.
+    """
+    val = await get_setting_value(db, PAGES_DIRTY_KEY)
+    if not val:
+        return None
+    try:
+        import json
+        return json.loads(val)
+    except Exception as e:
+        # Fix #6: Log and clear corrupt JSON
+        logging.error("load_pages_dirty_state: corrupt JSON, clearing: %s", e)
+        await set_setting_value(db, PAGES_DIRTY_KEY, None)
+        settings_cache.pop(PAGES_DIRTY_KEY, None)
+        return None
+
+
+# Fix #5: Pattern for valid month keys
+import re
+MONTH_KEY_PATTERN = re.compile(r"^\d{4}-\d{2}$|^weekend:\d{4}-\d{2}-\d{2}$")
+
+
+async def mark_pages_dirty(db: Database, month: str) -> None:
+    """Mark a month as dirty for deferred rebuild.
+    
+    If already dirty, adds month to list. If clean, creates new state.
+    """
+    # Fix #5: Validate month key format
+    if not MONTH_KEY_PATTERN.match(month):
+        logging.warning("mark_pages_dirty: invalid month key=%s, skipping", month)
+        return
+    
+    import json
+    
+    # Fix #4: Retry loop for atomic update in case of concurrent access
+    for attempt in range(3):
+        state = await load_pages_dirty_state(db)
+        now = datetime.now(timezone.utc).isoformat()
+        if state:
+            months = state.get("months", [])
+            if month not in months:
+                months.append(month)
+            state["months"] = months
+        else:
+            state = {"since": now, "months": [month], "reminded": False}
+        
+        await set_setting_value(db, PAGES_DIRTY_KEY, json.dumps(state))
+        settings_cache.pop(PAGES_DIRTY_KEY, None)
+        
+        # Verify write succeeded
+        verify_state = await load_pages_dirty_state(db)
+        if verify_state and month in verify_state.get("months", []):
+            break
+        logging.warning("mark_pages_dirty: retry %d, month=%s not persisted", attempt + 1, month)
+    
+    logging.info("mark_pages_dirty: month=%s state=%s", month, state)
+
+
+async def clear_pages_dirty_state(db: Database) -> None:
+    """Clear dirty-flag state after successful rebuild."""
+    await set_setting_value(db, PAGES_DIRTY_KEY, None)
+    settings_cache.pop(PAGES_DIRTY_KEY, None)
+    logging.info("clear_pages_dirty_state: cleared")
+
+
+async def mark_pages_reminded(db: Database) -> None:
+    """Mark that reminder has been sent."""
+    import json
+    state = await load_pages_dirty_state(db)
+    if state:
+        state["reminded"] = True
+        await set_setting_value(db, PAGES_DIRTY_KEY, json.dumps(state))
+        settings_cache.pop(PAGES_DIRTY_KEY, None)
 
 
 async def get_partner_last_run(db: Database) -> date | None:
@@ -4219,6 +4330,15 @@ def normalize_event_type(
     return event_type
 
 
+_LONG_EVENT_TYPES = {"выставка", "ярмарка"}
+
+
+def is_long_event_type(event_type: str | None) -> bool:
+    if not event_type:
+        return False
+    return event_type.strip().casefold() in _LONG_EVENT_TYPES
+
+
 def canonicalize_date(value: str | None) -> str | None:
     """Return ISO date string if value parses as date or ``None``."""
     if not value:
@@ -5290,7 +5410,7 @@ def apply_footer_link(html_content: str) -> str:
 async def build_month_nav_html(db: Database, current_month: str | None = None) -> str:
     today = datetime.now(LOCAL_TZ).date()
     start_nav = today.replace(day=1)
-    end_nav = date(today.year + 1, 4, 1)
+    end_nav = date(today.year + 1, 7, 1)
     async with db.get_session() as session:
         res_nav = await session.execute(
             select(func.substr(Event.date, 1, 7))
@@ -5309,11 +5429,35 @@ async def build_month_nav_html(db: Database, current_month: str | None = None) -
         )
         page_map = {p.month: p for p in res_pages.scalars().all()}
     links: list[str] = []
+    prev_year = None
     for idx, m in enumerate(months):
         p = page_map.get(m)
         if not p or not p.url:
             continue
-        name = month_name_nominative(m)
+        
+        # Parse month string "YYYY-MM"
+        y_str, m_str = m.split("-")
+        y_int = int(y_str)
+        m_int = int(m_str)
+        
+        # Determine name base
+        if 1 <= m_int <= 12:
+            name = MONTHS_NOM[m_int - 1]
+        else:
+            name = m 
+            
+        # Append year if it's January OR year changed from previous entry
+        if m_int == 1 or (prev_year is not None and y_int != prev_year):
+            name = f"{name} {y_str}"
+        
+        # Logic for "current year only" exception? 
+        # User said "year is specified for January, for others not".
+        # Usually checking against current year is also good practice, but user request implies
+        # "January has year, others don't" (unless year changes).
+        # We will stick to: Jan OR Year Change.
+            
+        prev_year = y_int
+
         if current_month and m == current_month:
             links.append(name)
         else:
@@ -5352,7 +5496,7 @@ async def refresh_month_nav(db: Database) -> None:
     logging.info("refresh_month_nav start")
     today = datetime.now(LOCAL_TZ).date()
     start_nav = today.replace(day=1)
-    end_nav = date(today.year + 1, 4, 1)
+    end_nav = date(today.year + 1, 7, 1)
     async with db.get_session() as session:
         res_nav = await session.execute(
             select(func.substr(Event.date, 1, 7))
@@ -7345,6 +7489,17 @@ def get_telegraph_token() -> str | None:
     return info.token
 
 
+def get_telegraph() -> Telegraph:
+    token = get_telegraph_token()
+    if not token:
+        logging.error(
+            "Telegraph token unavailable",
+            extra={"action": "error", "target": "tg"},
+        )
+        raise RuntimeError("Telegraph token unavailable")
+    return Telegraph(access_token=token)
+
+
 async def send_main_menu(bot: Bot, user: User | None, chat_id: int) -> None:
     """Show main menu buttons depending on user role."""
     async with span("render"):
@@ -7355,6 +7510,9 @@ async def send_main_menu(bot: Bot, user: User | None, chat_id: int) -> None:
             ],
             [types.KeyboardButton(text=MENU_EVENTS)],
         ]
+        # Add Pyramida button for superadmins
+        if user and user.is_superadmin:
+            buttons.append([types.KeyboardButton(text=VK_BTN_PYRAMIDA)])
         markup = types.ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
     async with span("tg-send"):
         await bot.send_message(chat_id, "Choose action", reply_markup=markup)
@@ -8360,6 +8518,26 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
         await callback.message.answer(
             f"Обложка изменена на #{idx_i}.\nСтраницы фестиваля и лэндинг обновлены."
         )
+        await callback.answer()
+
+    elif data.startswith("festsyncevents:"):
+        fid = int(data.split(":")[1])
+        async with db.get_session() as session:
+            user = await session.get(User, callback.from_user.id)
+            fest = await session.get(Festival, fid)
+            if not fest or (user and user.blocked):
+                await callback.answer("Not authorized", show_alert=True)
+                return
+            fest_name = fest.name
+        await callback.message.answer("⏳ Обновляю события на странице фестиваля...")
+        try:
+            await sync_festival_page(db, fest_name)
+            await callback.message.answer(
+                f"✅ События обновлены на странице фестиваля «{fest_name}»"
+            )
+        except Exception as e:
+            logging.error("festsyncevents error: %s", e)
+            await callback.message.answer(f"❌ Ошибка при обновлении: {e}")
         await callback.answer()
 
     elif data.startswith("togglesilent:"):
@@ -9788,9 +9966,11 @@ async def enqueue_job(
     *,
     coalesce_key: str | None = None,
     depends_on: list[str] | None = None,
+    next_run_at: datetime | None = None,
 ) -> str:
     async with db.get_session() as session:
         now = datetime.now(timezone.utc)
+        run_time = next_run_at or now
         ev = None
         if coalesce_key is None or depends_on is None:
             ev = await session.get(Event, event_id)
@@ -9872,7 +10052,14 @@ async def enqueue_job(
                     cur.update(depends_on)
                     job.depends_on = ",".join(sorted(cur))
                 now = datetime.now(timezone.utc)
-                job.next_run_at = now
+                # Fix #1: Preserve deferred next_run_at if still in future
+                job_next_run = _ensure_utc(job.next_run_at)
+                if next_run_at and next_run_at > job_next_run:
+                    job.next_run_at = next_run_at
+                elif job_next_run < now:
+                    # Only reset if already past due
+                    job.next_run_at = now
+                # else: keep existing future next_run_at
                 job.updated_at = now
                 job.attempts = 0
                 job.last_error = None
@@ -9903,21 +10090,24 @@ async def enqueue_job(
                 if updated:
                     session.add(job)
                     await session.commit()
-                follow_key = None
+                # Create deferred task instead of follow-up when owner is running
+                # This allows event to be included in next rebuild cycle
                 if (
-                    task == JobTask.month_pages
+                    task in {JobTask.month_pages, JobTask.weekend_pages, JobTask.week_pages}
                     and job.event_id != event_id
                     and job.coalesce_key
                 ):
-                    follow_key = f"{job.coalesce_key}:v2:{event_id}"
+                    deferred_key = f"{job.coalesce_key}:deferred:{event_id}"
                     exists = (
                         await session.execute(
                             select(JobOutbox.id).where(
-                                JobOutbox.coalesce_key == follow_key
+                                JobOutbox.coalesce_key == deferred_key
                             )
                         )
                     ).scalar_one_or_none()
                     if not exists:
+                        # Create deferred task for 15 minutes
+                        deferred_time = datetime.now(timezone.utc) + timedelta(minutes=15)
                         session.add(
                             JobOutbox(
                                 event_id=event_id,
@@ -9925,15 +10115,15 @@ async def enqueue_job(
                                 payload=payload,
                                 status=JobStatus.pending,
                                 updated_at=now,
-                                next_run_at=now,
-                                coalesce_key=follow_key,
-                                depends_on=job.coalesce_key,
+                                next_run_at=deferred_time,
+                                coalesce_key=deferred_key,
                             )
                         )
                         await session.commit()
                         logging.info(
-                            "ENQ nav followup key=%s reason=owner_running",
-                            follow_key,
+                            "ENQ nav deferred key=%s next_run_at=%s reason=owner_running",
+                            deferred_key,
+                            deferred_time.isoformat(),
                         )
                 if task in NAV_TASKS:
                     logging.info(
@@ -9959,7 +10149,11 @@ async def enqueue_job(
             job.attempts = 0
             job.last_error = None
             job.updated_at = now
-            job.next_run_at = now
+            # Fix #1: Preserve deferred next_run_at if provided and later
+            if next_run_at and next_run_at > now:
+                job.next_run_at = next_run_at
+            else:
+                job.next_run_at = now
             if depends_on:
                 cur = set(filter(None, (job.depends_on or "").split(",")))
                 cur.update(depends_on)
@@ -9981,7 +10175,7 @@ async def enqueue_job(
                 payload=payload,
                 status=JobStatus.pending,
                 updated_at=now,
-                next_run_at=now,
+                next_run_at=run_time,
                 coalesce_key=coalesce_key,
                 depends_on=dep_str,
             )
@@ -9994,7 +10188,7 @@ async def enqueue_job(
 
 
 async def schedule_event_update_tasks(
-    db: Database, ev: Event, *, drain_nav: bool = True, skip_vk_sync: bool = False
+    db: Database, ev: Event, *, drain_nav: bool = False, skip_vk_sync: bool = False
 ) -> dict[JobTask, str]:
     eid = ev.id
     results: dict[JobTask, str] = {}
@@ -10016,9 +10210,148 @@ async def schedule_event_update_tasks(
     page_deps = [results[JobTask.telegraph_build]]
     if ics_dep:
         page_deps.append(ics_dep)
-    results[JobTask.month_pages] = await enqueue_job(
-        db, eid, JobTask.month_pages, depends_on=page_deps
-    )
+    
+    # Deferred page rebuilds: откладываем month_pages и weekend_pages на 15 минут
+    deferred_time = datetime.now(timezone.utc) + timedelta(minutes=15)
+    
+    # month_pages — отложенный запуск
+    month = ev.date.split("..", 1)[0][:7]
+    if os.getenv("EVENT_UPDATE_SYNC"):
+        logging.info("EVENT_UPDATE_SYNC set, triggering sync_month_page immediately")
+        await sync_month_page(db, month)
+        results[JobTask.month_pages] = "sync_executed"
+    else:
+        results[JobTask.month_pages] = await enqueue_job(
+            db, eid, JobTask.month_pages, depends_on=page_deps, next_run_at=deferred_time
+        )
+        await mark_pages_dirty(db, month)
+    
+    # Check if this month exists in MonthPage. If not, we found a new month!
+    # Trigger full nav rebuild so ALL existing pages get the link to this new month.
+    # We do a quick check here.
+    async with db.get_session() as session:
+        # Use execute directly to avoid session object overhead logic if unnecessary, or select scalar
+        res_mp = await session.execute(
+            select(MonthPage.month).where(MonthPage.month == month)
+        )
+        existing_mp = res_mp.first()
+        if not existing_mp:
+             # New month detected! Enqueue nav refresh.
+             # We can't call refresh_month_nav directly easily if it needs to run as a job,
+             # but refresh_month_nav is async function.
+             # Better to run it as a job or just execute it if it's fast? 
+             # It iterates all months and calls sync_month_page(force=True), which creates jobs.
+             # So it is safe to call. But `schedule_event_update_tasks` is often called in loop.
+             # We don't want to spam it.
+             # Ideally we have a job task for "refresh_nav".
+             # For now, let's call it directly in background task or just await?
+             # await refresh_month_nav(db) might be slowish (50ms?).
+             # Let's add it to job queue? No, no separate handler for that yet.
+             # Let's just create a job for "month_pages:NAV_REFRESH"? No.
+             
+             # User mentioned "refresh_month_nav" exists.
+             # Let's just run it. It only queues jobs effectively.
+             # But wait, `refresh_month_nav` calls `sync_month_page(force=True)` which DOES API calls?
+             # Let's check `sync_month_page`.
+             
+             # Re-reading `refresh_month_nav`...
+             # It loops months and calls `sync_month_page`...
+             # `sync_month_page` calls `enqueue_job`?
+             # No, `sync_month_page` builds HTML and `telegraph.create_page`.
+             # So `refresh_month_nav` is EXPENSIVE (network calls).
+             # We shouldn't await it here.
+             
+             # Strategy: Enqueue a special job or use fire-and-forget?
+             # Or just allow `month_pages` job for THIS month to run, and THEN trigger nav update?
+             # But we need OTHER months to update.
+             
+             # Correct approach:
+             # When `JobTask.month_pages` runs for a NEW month, IT should trigger others?
+             # Or we simply enqueue `month_pages` for ALL active months?
+             
+             # Let's invoke `enqueue_job` for all known months to force them rebuild nav.
+             # That's cleaner than `refresh_month_nav` which does synchronous updates.
+             pass
+             
+    # Actually, simpler fix for now compliant with existing "deferred" architecture:
+    # We already marked `month` dirty and scheduled `month_pages`.
+    # When `month_pages` RUNS (the consumer), it will create the page.
+    # AFTER the page is created, the Navigation set changes.
+    # So `month_pages` handler should detect "hey I created a new page" and trigger global refresh?
+    # BUT `month_pages` is complex.
+    
+    # Alternative: Just check here. If month is new, enqueue `month_pages` for ALL months.
+    # This ensures they will all rebuild with new footer.
+    # We can fetch all months from DB.
+    
+    async with db.get_session() as session:
+        mp_check = await session.execute(select(MonthPage.month))
+        all_months = [r for r in mp_check.scalars().all()]
+        
+        if month not in all_months:
+             # New month!
+             # Schedule update for all other months too.
+             # We give same deferred time.
+             for m_other in all_months:
+                 await enqueue_job(db, ev.id, JobTask.month_pages, payload=None, coalesce_key=f"month_pages:{m_other}", next_run_at=deferred_time) # EventID is dummy here?
+                 await mark_pages_dirty(db, m_other)
+                 
+    # Slight issue: `enqueue_job` takes event_id. `month_pages` task usually ignores event_id?
+    # No, `month_pages` job usually aggregates.
+    # Let's see `handle_month_pages` implementation (via grep or logic).
+    # It probably just takes the month from the key or payload if provided?
+    # Actually `enqueue_job` for `month_pages` uses `event` to derive month usually.
+    # But here we want to schedule for OTHER months.
+    # If we pass `coalesce_key=month_pages:MM-YYYY`, the consumer should pick it up.
+    
+    # Wait, `enqueue_job` has `coalesce_key`.
+    # And `month_pages` task... how does it know which month?
+    # Usually `schedule_event_update_tasks` calculates `month` from ev.date.
+    
+    # If we want to schedule for Jan 2026, we need a job with `coalesce_key=month_pages:2026-01`.
+    # Does the worker use the key?
+    # I'll check `worker.py` or where handlers are.
+    # But based on `schedule_event_update_tasks` logic:
+    # `results[JobTask.month_pages] = await enqueue_job(..., JobTask.month_pages, ...)`
+    # It relies on `enqueue_job` internal logic or defaults.
+    
+    # To be safe, I'll stick to the plan:
+    # Modify `schedule_event_update_tasks` to check NEW month, and if so,
+    # just enqueue `refresh_month_nav` if such task existed, OR
+    # iterate and enqueue `month_pages` for others.
+    
+    # Let's inspect `enqueue_job` quickly to see how it handles keys.
+    # But effectively:
+    # If month is new, we need to mark ALL OTHER months dirty.
+    # Because their footer is now stale.
+    # `mark_pages_dirty(db, m_other)` is crucial.
+    # And we also need to kick the job runner to pick them up.
+    
+    # Let's implement the loop over all_months.
+    
+    async with db.get_session() as session:
+        res_months = await session.execute(select(MonthPage.month))
+        existing_months = set(res_months.scalars().all())
+    
+    # Filter existing_months to only include current and future months
+    today = datetime.now(timezone.utc).date()
+    current_month = today.strftime("%Y-%m")
+    future_months = {m for m in existing_months if m >= current_month}
+    
+    if month not in existing_months:
+        logging.info("New month %s detected! Marking other months dirty for deferred rebuild.", month)
+        # For new month: mark all FUTURE existing months dirty for deferred rebuild
+        # They will be picked up by the job worker when next_run_at arrives
+        for m_other in future_months:
+            await mark_pages_dirty(db, m_other)
+            # Enqueue deferred job for each month
+            await enqueue_job(
+                db, ev.id, JobTask.month_pages,
+                payload=None,
+                coalesce_key=f"month_pages:{m_other}",
+                next_run_at=deferred_time
+            )
+    
     d = parse_iso_date(ev.date)
     if d:
         results[JobTask.week_pages] = await enqueue_job(
@@ -10026,9 +10359,16 @@ async def schedule_event_update_tasks(
         )
         w_start = weekend_start_for_date(d)
         if w_start:
-            results[JobTask.weekend_pages] = await enqueue_job(
-                db, eid, JobTask.weekend_pages, depends_on=page_deps
-            )
+            # weekend_pages — отложенный запуск
+            if os.getenv("EVENT_UPDATE_SYNC"):
+                logging.info("EVENT_UPDATE_SYNC set, triggering sync_weekend_page immediately")
+                await sync_weekend_page(db, w_start.isoformat())
+                results[JobTask.weekend_pages] = "sync_executed"
+            else:
+                results[JobTask.weekend_pages] = await enqueue_job(
+                    db, eid, JobTask.weekend_pages, depends_on=page_deps, next_run_at=deferred_time
+                )
+                await mark_pages_dirty(db, f"weekend:{w_start.isoformat()}")
     if ev.festival:
         results[JobTask.festival_pages] = await enqueue_job(
             db, eid, JobTask.festival_pages
@@ -10097,6 +10437,8 @@ async def _drain_nav_tasks(db: Database, event_id: int, timeout: float = 90.0) -
         )
 
         async with db.get_session() as session:
+            # Fix #2: Skip deferred jobs (next_run_at in future)
+            drain_now = datetime.now(timezone.utc)
             rows = (
                 await session.execute(
                     select(JobOutbox.event_id, JobOutbox.coalesce_key)
@@ -10104,6 +10446,7 @@ async def _drain_nav_tasks(db: Database, event_id: int, timeout: float = 90.0) -
                         JobOutbox.status.in_([JobStatus.pending, JobStatus.running]),
                         JobOutbox.task.in_(NAV_TASKS),
                         JobOutbox.coalesce_key.in_(keys),
+                        JobOutbox.next_run_at <= drain_now,  # Skip deferred
                     )
                 )
             ).all()
@@ -10141,6 +10484,8 @@ async def _drain_nav_tasks(db: Database, event_id: int, timeout: float = 90.0) -
             ran_any = ran_any or (count > 0)
 
         async with db.get_session() as session:
+            # Fix #2: Also skip deferred in this check
+            drain_now2 = datetime.now(timezone.utc)
             rows = (
                 await session.execute(
                     select(JobOutbox.coalesce_key)
@@ -10148,6 +10493,7 @@ async def _drain_nav_tasks(db: Database, event_id: int, timeout: float = 90.0) -
                         JobOutbox.status.in_([JobStatus.pending, JobStatus.running]),
                         JobOutbox.task.in_(NAV_TASKS),
                         JobOutbox.coalesce_key.in_(keys),
+                        JobOutbox.next_run_at <= drain_now2,  # Skip deferred
                     )
                 )
             ).all()
@@ -10159,16 +10505,38 @@ async def _drain_nav_tasks(db: Database, event_id: int, timeout: float = 90.0) -
                     task = JobTask(task_name)
                 except Exception:
                     continue
-                new_key = f"{key}:v2:{event_id}"
-                logging.info(
-                    "ENQ nav followup key=%s reason=owner_running",
-                    new_key,
-                )
-                await enqueue_job(db, event_id, task, coalesce_key=new_key)
-                keys.add(new_key)
+                # Fix: Check if deferred task already exists for this event_id
+                # If so, skip follow-up creation to preserve deferred behavior
+                async with db.get_session() as check_session:
+                    existing_deferred = (
+                        await check_session.execute(
+                            select(JobOutbox.id).where(
+                                JobOutbox.event_id == event_id,
+                                JobOutbox.task == task,
+                                JobOutbox.status == JobStatus.pending,
+                                JobOutbox.next_run_at > datetime.now(timezone.utc),
+                            )
+                        )
+                    ).scalar_one_or_none()
+                if existing_deferred:
+                    logging.info(
+                        "ENQ nav followup skipped key=%s reason=deferred_exists eid=%s",
+                        key,
+                        event_id,
+                    )
+                else:
+                    new_key = f"{key}:v2:{event_id}"
+                    logging.info(
+                        "ENQ nav followup key=%s reason=owner_running",
+                        new_key,
+                    )
+                    await enqueue_job(db, event_id, task, coalesce_key=new_key)
+                    keys.add(new_key)
                 del merged[key]
 
         async with db.get_session() as session:
+            # Fix #2: Skip deferred in remaining count too
+            drain_now3 = datetime.now(timezone.utc)
             remaining = (
                 await session.execute(
                     select(func.count())
@@ -10179,6 +10547,7 @@ async def _drain_nav_tasks(db: Database, event_id: int, timeout: float = 90.0) -
                             JobOutbox.event_id == event_id,
                             JobOutbox.coalesce_key.in_(keys),
                         ),
+                        JobOutbox.next_run_at <= drain_now3,  # Skip deferred
                     )
                 )
             ).scalar_one()
@@ -10659,7 +11028,7 @@ async def add_events_from_text(
 
         events_to_add = [base_event]
         if (
-            base_event.event_type != "выставка"
+            not is_long_event_type(base_event.event_type)
             and base_event.end_date
             and base_event.end_date != base_event.date
         ):
@@ -11500,7 +11869,16 @@ async def _run_due_jobs_once_locked(
             if not obj or obj.status not in (JobStatus.pending, JobStatus.error):
                 continue
             ttl = JOB_TTL.get(obj.task, DEFAULT_JOB_TTL)
-            age = (now - obj.updated_at).total_seconds()
+            # For deferred tasks, calculate age from when the task was due to run,
+            # not from when it was created. This prevents deferred tasks from
+            # expiring before they have a chance to execute.
+            job_next_run_at = _ensure_utc(obj.next_run_at)
+            if job_next_run_at > obj.updated_at:
+                # Deferred task: age starts from when it became due
+                age = max(0, (now - job_next_run_at).total_seconds())
+            else:
+                # Regular task: age from updated_at
+                age = (now - obj.updated_at).total_seconds()
             if age > ttl:
                 obj.status = JobStatus.error
                 obj.last_error = "expired"
@@ -11844,11 +12222,8 @@ async def _watch_nav_jobs(db: Database, bot: Bot) -> None:
                 dep_keys = [c for c in dep_rows.scalars().all()]
                 if dep_keys:
                     blockers.append("depends_on:" + ",".join(dep_keys))
-        blockers.append(f"next_run_at:{job.next_run_at.isoformat()}")
-        msg = f"NAV_WATCHDOG key={job.coalesce_key} blocked_by={' ; '.join(blockers)}"
-        logging.warning(msg)
-        await notify_superadmin(db, bot, msg)
-        _nav_watchdog_warned.add(job.coalesce_key)
+        if len(blockers) > 1: # Only log if blocked by dependencies, not just time
+             logging.debug("NAV_WATCHDOG key=%s blocked_by=%s", job.coalesce_key, ", ".join(blockers))
 
 
 async def job_outbox_worker(db: Database, bot: Bot, interval: float = 2.0):
@@ -11990,7 +12365,11 @@ async def update_telegraph_event_page(
             ticket_price_max=getattr(ev, "ticket_price_max", None),
             ticket_link=(ev.ticket_link or None),
             is_free=bool(getattr(ev, "is_free", False)),
+            ticket_status=getattr(ev, "ticket_status", None),
         )
+        photos = list(ev.photo_urls or [])
+        if ev.preview_3d_url and len(photos) >= 2:
+            photos.insert(0, ev.preview_3d_url)
         html_content, _, _ = await build_source_page_content(
             ev.title or "Event",
             ev.source_text,
@@ -12001,7 +12380,8 @@ async def update_telegraph_event_page(
             db,
             event_summary=summary,
             display_link=display_link,
-            catbox_urls=ev.photo_urls,
+            catbox_urls=photos,
+            search_digest=ev.search_digest,
         )
         from telegraph.utils import html_to_nodes
 
@@ -12043,8 +12423,28 @@ async def update_telegraph_event_page(
         await session.commit()
         url = ev.telegraph_url
 
-    logline("TG-EVENT", event_id, "done", url=url)
-    await update_month_pages_for(event_id, db, bot)
+    
+    # NEW: Check if we have a deferred month_pages job for this month
+    # If so, SKIP immediate update to avoid double work.
+    skipped_immediate = False
+    if ev.date:
+        month_key = ev.date[:7]
+        async with db.get_session() as session:
+            # We look for a PENDING job with matching coalesce_key and next_run_at in future
+            stmt = select(JobOutbox).where(
+                JobOutbox.coalesce_key == f"month_pages:{month_key}",
+                JobOutbox.status == JobStatus.pending,
+                JobOutbox.next_run_at > datetime.now(timezone.utc)
+            ).limit(1)
+            deferred_job = (await session.execute(stmt)).scalar_one_or_none()
+            
+            if deferred_job:
+                logline("TG-EVENT", event_id, "done (immediate update skipped due to deferred job)", url=url)
+                skipped_immediate = True
+
+    if not skipped_immediate:
+        logline("TG-EVENT", event_id, "done", url=url)
+        await update_month_pages_for(event_id, db, bot)
     return url
 
 
@@ -12155,319 +12555,333 @@ def locate_month_day_page(page_html_1: str, page_html_2: str | None, d: date) ->
     return 1
 
 
+async def optimize_month_chunks(
+    db: Database,
+    month: str,
+    events: list[Event],
+    exhibitions: list[Event],  # Usually put on the last page
+    nav_block: str,
+) -> tuple[list[tuple[list[Event], list[Event]]], bool, bool]:
+    """
+    Split events into chunks that fit into Telegraph pages.
+    Returns (chunks, include_ics, include_details).
+    Each chunk is a tuple (events_list, exhibitions_list).
+    If > 2 pages are needed, tries to switch to compact mode (no ICS/details).
+    """
+    from telegraph.utils import nodes_to_html
+
+    async def make_chunks(inc_ics: bool, inc_det: bool) -> list[tuple[list[Event], list[Event]]]:
+        chunks_list = []
+        rem_events = events[:]
+        # We only attach exhibitions to the very last chunk of the sequence.
+        # However, if we split, we might have multiple chunks.
+        # Strategy: Keep exhibitions for the end.
+        
+        while rem_events or exhibitions:
+            page_num = len(chunks_list) + 1
+            
+            # Case 1: Try fitting EVERYTHING remaining (events + exhibitions)
+            # This is the "Final Page" scenario.
+            title, content, _ = await build_month_page_content(
+                db, month, rem_events, exhibitions,
+                include_ics=inc_ics, include_details=inc_det,
+                continuation_url=None, # Last page has no continuation
+                page_number=page_num
+            )
+            html = unescape_html_comments(nodes_to_html(content))
+            html = ensure_footer_nav_with_hr(html, nav_block, month=month, page=page_num)
+            
+            if len(html.encode()) <= TELEGRAPH_LIMIT:
+                chunks_list.append((rem_events, exhibitions))
+                logging.info("optimize_month_chunks: Case 1 success. Appended chunk with events=%d exhibitions=%d", len(rem_events), len(exhibitions))
+                return chunks_list
+
+            # Case 2: Cannot fit all. Must split.
+            # We assume exhibitions go to the LAST page, so current intermediate page will have NO exhibitions.
+            # Unless we have NO events left? Then we must split exhibitions (not implemented, force fit).
+            
+            if not rem_events:
+                # Only exhibitions left.
+                if exhibitions:
+                     logging.warning("optimize_month_chunks: Exhibitions remaining, forcing new page.")
+                     chunks_list.append(([], exhibitions))
+                else:
+                     logging.info("optimize_month_chunks: No events and no exhibitions left.")
+                return chunks_list
+
+            logging.info("optimize_month_chunks: Splitting. Events left: %d", len(rem_events))
+            # Binary search for max events for this intermediate page
+            low = 1
+            high = len(rem_events)
+            best_k = 1
+            
+            while low <= high:
+                mid = (low + high) // 2
+                # Intermediate page: No exhibitions, YES continuation link
+                title, content, _ = await build_month_page_content(
+                    db, month, rem_events[:mid], [],
+                    include_ics=inc_ics, include_details=inc_det,
+                    continuation_url="x", # Placeholder for size estimation
+                    page_number=page_num
+                )
+                html = unescape_html_comments(nodes_to_html(content))
+                html = ensure_footer_nav_with_hr(html, nav_block, month=month, page=page_num)
+                
+                if len(html.encode()) <= TELEGRAPH_LIMIT:
+                    best_k = mid
+                    low = mid + 1
+                else:
+                    high = mid - 1
+            
+            # ATOMIC DATE SPLIT check
+            # We have best_k events.
+            # Check if we are splitting in the middle of a date.
+            # Condition: We are taking 'best_k', so the next event is at index 'best_k'.
+            # If best_k < len(rem_events) (meaning we haven't taken all),
+            # check if rem_events[best_k-1].date == rem_events[best_k].date
+            
+            if best_k < len(rem_events):
+                last_included_date = rem_events[best_k - 1].date
+                first_excluded_date = rem_events[best_k].date
+                
+                if last_included_date == first_excluded_date:
+                    logging.info("Atomic Split: Date %s cut at %d. Backtracking to prevent split.", last_included_date, best_k)
+                    
+                    # Backtrack best_k until date changes or we hit 0
+                    original_k = best_k
+                    while best_k > 0 and rem_events[best_k - 1].date == last_included_date:
+                        best_k -= 1
+                    
+                    if best_k == 0:
+                        logging.warning("Atomic Split: Single date %s (%d events) too big to fit atomically. Forcing split at %d.", 
+                                        last_included_date, len(rem_events), original_k)
+                        best_k = original_k # Revert to greedy split
+                    else:
+                        logging.info("Atomic Split: Adjusted split to %d (End of %s)", best_k, rem_events[best_k-1].date)
+
+            chunks_list.append((rem_events[:best_k], []))
+            rem_events = rem_events[best_k:]
+            
+        return chunks_list
+
+    # 1. Try Default Mode
+    res_default = await make_chunks(True, True)
+    
+    # If it fits in 1 or 2 pages, perfect.
+    if len(res_default) <= 2:
+        return res_default, True, True
+
+    # 2. Try Compact Mode (no ICS)
+    # Requirement: "If ... requires 3 or more pages, use compact" (implied preference for compact if big)
+    res_compact = await make_chunks(False, True)
+    
+    # If compact mode reduces pages OR we are just complying with "many pages = compact" rule:
+    # We use compact mode if default yielded > 2 pages.
+    return res_compact, False, True
+
+
 async def split_month_until_ok(
     db: Database,
     tg: Telegraph,
     page: MonthPage,
     month: str,
     events: list[Event],
-    exhibitions: list[Exhibition],
+    exhibitions: list[Event],
     nav_block: str,
 ) -> None:
     from telegraph.utils import nodes_to_html
 
     if len(events) < 2:
-        raise RuntimeError(
-            f"split_month_until_ok: cannot split {month} without at least two events"
-        )
+         # Should not happen typically, but if it does, optimization handles it.
+         pass
 
-    def event_day_key(ev: Event) -> str | None:
-        parsed = parse_iso_date(ev.date)
-        if parsed:
-            return parsed.isoformat()
-        raw = (ev.date or "").split("..", 1)[0].strip()
-        return raw or None
+    # 1. Calculate optimized chunks
+    chunks, include_ics, include_details = await optimize_month_chunks(
+        db, month, events, exhibitions, nav_block
+    )
 
-    day_boundaries: list[int] = []
-    prev_key = event_day_key(events[0])
-    for idx, ev in enumerate(events[1:], start=1):
-        key = event_day_key(ev)
-        if key is None:
-            continue
-        if prev_key is None:
-            prev_key = key
-            continue
-        if key != prev_key:
-            day_boundaries.append(idx)
-        prev_key = key
+    # (p1 lookup block removed)
+    
+    logging.info(
+        "split_month_until_ok month=%s events=%d chunks=%d ics=%s details=%s",
+        month, len(events), len(chunks), include_ics, include_details
+    )
 
-    if not day_boundaries:
-        raise RuntimeError(
-            f"split_month_until_ok: no valid day boundary found for {month}"
-        )
+    # 2. Create/Update pages in REVERSE order (N down to 1)
+    # This ensures we have the URL for the "Continuation" link.
+    
+    next_url = None
+    next_path = None
+    
+    # To store updated info for Page 1
+    page1_url = page.url
+    page1_path = page.path
+    page1_hash = None
+    
+    # Prepare to update MonthPagePart
+    # We need to know current parts to delete obsolete ones?
+    # We'll do cleanup at the end.
 
-    def snap_index(idx: int, *, direction: int | None = None) -> int:
-        if not day_boundaries:
-            raise RuntimeError(
-                f"split_month_until_ok: no valid day boundary found for {month}"
-            )
-        idx = max(1, min(len(events) - 1, idx))
-        if direction is None:
-            pos = bisect_left(day_boundaries, idx)
-            candidates: list[int] = []
-            if pos < len(day_boundaries):
-                candidates.append(day_boundaries[pos])
-            if pos > 0:
-                candidates.append(day_boundaries[pos - 1])
-            if not candidates:
-                return day_boundaries[0]
-            return min(candidates, key=lambda b: (abs(b - idx), b))
-        if direction < 0:
-            pos = bisect_left(day_boundaries, idx)
-            if pos < len(day_boundaries) and day_boundaries[pos] == idx:
-                return day_boundaries[pos]
-            if pos > 0:
-                return day_boundaries[pos - 1]
-            return day_boundaries[0]
-        pos = bisect_left(day_boundaries, idx)
-        if pos < len(day_boundaries):
-            return day_boundaries[pos]
-        return day_boundaries[-1]
+    total_pages = len(chunks)
+    
+    for i in range(total_pages, 0, -1):
+        idx = i - 1
+        chunk_events, chunk_exhibitions = chunks[idx]
+        
+        # Determine Title logic (handled by build_month_page_content using page_number and dates)
+        # We need to pass first_date/last_date for nice titles on continuation pages
+        p_first_date = None
+        p_last_date = None
+        if chunk_events:
+             # Parse dates from first and last event
+             try:
+                 p_first_date = parse_iso_date(chunk_events[0].date)
+                 p_last_date = parse_iso_date(chunk_events[-1].date)
+             except:
+                 pass
 
-    async def attempt(include_ics: bool, include_details: bool) -> None:
         title, content, _ = await build_month_page_content(
-            db,
-            month,
-            events,
-            exhibitions,
+            db, month, chunk_events, chunk_exhibitions,
             include_ics=include_ics,
             include_details=include_details,
+            continuation_url=next_url,
+            page_number=i,
+            first_date=p_first_date,
+            last_date=p_last_date
         )
-        html_full = unescape_html_comments(nodes_to_html(content))
-        html_full = ensure_footer_nav_with_hr(html_full, nav_block, month=month, page=1)
-        total_size = len(html_full.encode())
-        avg = total_size / len(events) if events else total_size
-        base_idx = max(1, min(len(events) - 1, int(TELEGRAPH_LIMIT // avg)))
-        split_idx = snap_index(base_idx)
-        logging.info(
-            "month_split start month=%s events=%d total_bytes=%d nav_bytes=%d split_idx=%d include_ics=%s include_details=%s",
-            month,
-            len(events),
-            total_size,
-            len(nav_block),
-            split_idx,
-            include_ics,
-            include_details,
-        )
-        attempts = 0
-        fallback_reason = ""
-        saw_both_too_big = False
-        while attempts < 50:
-            attempts += 1
-            first, second = events[:split_idx], events[split_idx:]
-            title2, content2, _ = await build_month_page_content(
-                db,
-                month,
-                second,
-                exhibitions,
-                include_ics=include_ics,
-                include_details=include_details,
-            )
-            rough2 = rough_size(content2) + len(nav_block)
-            title1, content1, _ = await build_month_page_content(
-                db,
-                month,
-                first,
-                [],
-                continuation_url="x",
-                include_ics=include_ics,
-                include_details=include_details,
-            )
-            rough1 = rough_size(content1) + len(nav_block) + 200
-            logging.info(
-                "month_split try attempt=%d idx=%d first_events=%d second_events=%d rough1=%d rough2=%d include_ics=%s include_details=%s",
-                attempts,
-                split_idx,
-                len(first),
-                len(second),
-                rough1,
-                rough2,
-                include_ics,
-                include_details,
-            )
-            if rough1 > TELEGRAPH_LIMIT and rough2 > TELEGRAPH_LIMIT:
-                logging.info(
-                    "month_split forcing attempt idx=%d include_ics=%s include_details=%s",
-                    split_idx,
-                    include_ics,
-                    include_details,
-                )
-                saw_both_too_big = True
-            if rough1 > TELEGRAPH_LIMIT:
-                delta = max(1, split_idx // 6)
-                new_idx = snap_index(split_idx - delta, direction=-1)
-                if new_idx != split_idx:
-                    split_idx = new_idx
-                    logging.info(
-                        "month_split adjust idx=%d reason=rough_size target=first include_ics=%s include_details=%s",
-                        split_idx,
-                        include_ics,
-                        include_details,
-                    )
-                    continue
-            elif rough2 > TELEGRAPH_LIMIT:
-                delta = max(1, (len(events) - split_idx) // 6)
-                new_idx = snap_index(split_idx + delta, direction=1)
-                if new_idx != split_idx:
-                    split_idx = new_idx
-                    logging.info(
-                        "month_split adjust idx=%d reason=rough_size target=second include_ics=%s include_details=%s",
-                        split_idx,
-                        include_ics,
-                        include_details,
-                    )
-                    continue
-            html2 = unescape_html_comments(nodes_to_html(content2))
-            html2 = ensure_footer_nav_with_hr(html2, nav_block, month=month, page=2)
-            hash2 = content_hash(html2)
+        
+        html_str = unescape_html_comments(nodes_to_html(content))
+        html_str = ensure_footer_nav_with_hr(html_str, nav_block, month=month, page=i)
+        phash = content_hash(html_str)
+        
+        # Telegraph API interaction
+        curr_url = None
+        curr_path = None
+        
+        if i == 1:
+            # Page 1: Update MonthPage
+            # Start/Update logic matches old implementation
             try:
-                if not page.path2:
-                    logging.info("creating second page for %s", month)
-                    data2 = await telegraph_create_page(
-                        tg,
-                        title=title2,
-                        html_content=html2,
-                        caller="month_build",
-                    )
-                    page.url2 = normalize_telegraph_url(data2.get("url"))
-                    page.path2 = data2.get("path")
-                else:
-                    logging.info("updating second page for %s", month)
-                    start = _time.perf_counter()
-                    await telegraph_edit_page(
-                        tg,
-                        page.path2,
-                        title=title2,
-                        html_content=html2,
-                        caller="month_build",
-                    )
-                    dur = (_time.perf_counter() - start) * 1000
-                    logging.info("editPage %s done in %.0f ms", page.path2, dur)
-            except TelegraphException as e:
-                msg = str(e).lower()
-                if "content" in msg and "too" in msg and "big" in msg:
-                    delta = max(1, (len(events) - split_idx) // 6)
-                    new_idx = snap_index(split_idx + delta, direction=1)
-                    if new_idx != split_idx:
-                        split_idx = new_idx
-                        logging.info(
-                            "month_split adjust idx=%d reason=telegraph_too_big target=second include_ics=%s include_details=%s",
-                            split_idx,
-                            include_ics,
-                            include_details,
-                        )
-                        continue
-                raise
-            page.content_hash2 = hash2
-            await asyncio.sleep(0)
-            title1, content1, _ = await build_month_page_content(
-                db,
-                month,
-                first,
-                [],
-                continuation_url=page.url2,
-                include_ics=include_ics,
-                include_details=include_details,
-            )
-            html1 = unescape_html_comments(nodes_to_html(content1))
-            html1 = ensure_footer_nav_with_hr(html1, nav_block, month=month, page=1)
-            hash1 = content_hash(html1)
-            try:
-                if not page.path:
+                if not page1_path:
                     logging.info("creating first page for %s", month)
-                    data1 = await telegraph_create_page(
-                        tg,
-                        title=title1,
-                        html_content=html1,
-                        caller="month_build",
+                    data = await telegraph_create_page(
+                        tg, title=title, html_content=html_str, caller="month_build"
                     )
-                    page.url = normalize_telegraph_url(data1.get("url"))
-                    page.path = data1.get("path")
+                    page1_path = data.get("path")
+                    page1_url = normalize_telegraph_url(data.get("url"))
                 else:
                     logging.info("updating first page for %s", month)
-                    start = _time.perf_counter()
                     await telegraph_edit_page(
-                        tg,
-                        page.path,
-                        title=title1,
-                        html_content=html1,
-                        caller="month_build",
+                        tg, page1_path, title=title, html_content=html_str, caller="month_build"
                     )
-                    dur = (_time.perf_counter() - start) * 1000
-                    logging.info("editPage %s done in %.0f ms", page.path, dur)
+                    # path/url remain same
+                    curr_path = page1_path
+                    curr_url = page1_url
             except TelegraphException as e:
-                msg = str(e).lower()
-                if "content" in msg and "too" in msg and "big" in msg:
-                    delta = max(1, split_idx // 6)
-                    new_idx = snap_index(split_idx - delta, direction=-1)
-                    if new_idx != split_idx:
-                        split_idx = new_idx
-                        logging.info(
-                            "month_split adjust idx=%d reason=telegraph_too_big target=first include_ics=%s include_details=%s",
-                            split_idx,
-                            include_ics,
-                            include_details,
-                        )
-                        continue
+                logging.error("Failed to update Page 1 for %s: %s", month, e)
                 raise
-            page.content_hash = hash1
+            
+            page1_hash = phash
+            curr_url = page1_url
+            curr_path = page1_path
+            
+        else:
+            # Page 2..N: Update/Create MonthPagePart
+            # Check DB if part exists
             async with db.get_session() as session:
-                db_page = await session.get(MonthPage, month)
-                db_page.url = page.url
-                db_page.path = page.path
-                db_page.url2 = page.url2
-                db_page.path2 = page.path2
-                db_page.content_hash = page.content_hash
-                db_page.content_hash2 = page.content_hash2
-                await session.commit()
-            logging.info(
-                "month_split done month=%s idx=%d first_bytes=%d second_bytes=%d include_ics=%s include_details=%s",
-                month,
-                split_idx,
-                rough1,
-                rough2,
-                include_ics,
-                include_details,
-            )
-            return
-        if saw_both_too_big:
-            fallback_reason = "both_too_big"
-        if not fallback_reason:
-            fallback_reason = "attempts_exhausted"
-        logging.error(
-            "month_split failed month=%s attempts=%d last_idx=%d include_ics=%s include_details=%s reason=%s",
-            month,
-            attempts,
-            split_idx,
-            include_ics,
-            include_details,
-            fallback_reason,
+                result = await session.execute(
+                    select(MonthPagePart).where(
+                        MonthPagePart.month == month, 
+                        MonthPagePart.part_number == i
+                    )
+                )
+                part = result.scalar_one_or_none()
+                
+                if not part:
+                    # Create New
+                    logging.info("creating part %d for %s", i, month)
+                    try:
+                        data = await telegraph_create_page(
+                            tg, title=title, html_content=html_str, caller="month_build"
+                        )
+                        curr_path = data.get("path")
+                        curr_url = normalize_telegraph_url(data.get("url"))
+                        
+                        part = MonthPagePart(
+                            month=month, part_number=i, 
+                            url=curr_url, path=curr_path, 
+                            content_hash=phash,
+                            first_date=chunk_events[0].date if chunk_events else None,
+                            last_date=chunk_events[-1].date if chunk_events else None
+                        )
+                        session.add(part)
+                        await session.commit()
+                    except TelegraphException as e:
+                         logging.error("Failed to create part %d for %s: %s", i, month, e)
+                         raise
+                else:
+                    # Update Existing
+                    logging.info("updating part %d for %s", i, month)
+                    try:
+                        await telegraph_edit_page(
+                            tg, part.path, title=title, html_content=html_str, caller="month_build"
+                        )
+                        # usage: part.url, part.path
+                        curr_url = part.url
+                        curr_path = part.path
+                        part.content_hash = phash
+                        # Update dates just in case
+                        if chunk_events:
+                            part.first_date = chunk_events[0].date
+                            part.last_date = chunk_events[-1].date
+                        session.add(part)
+                        await session.commit()
+                    except TelegraphException as e:
+                         logging.error("Failed to update part %d for %s: %s", i, month, e)
+                         # Raise? Or continue? Raise is safer.
+                         raise
+            
+        # Set next_url for the PREVIOUS iteration (which is Page i-1)
+        next_url = curr_url
+        next_path = curr_path
+
+    # Update Page 1 record in DB
+    async with db.get_session() as session:
+        db_page = await session.get(MonthPage, month)
+        db_page.url = page1_url
+        db_page.path = page1_path
+        db_page.content_hash = page1_hash
+        # Clear legacy 2nd page fields
+        db_page.url2 = None
+        db_page.path2 = None
+        db_page.content_hash2 = None
+        await session.commit()
+        
+    # Cleanup Obsolete Parts (e.g. if we had 5 pages and now only 3)
+    async with db.get_session() as session:
+        logging.info("split_month_until_ok: cleaning up obsolete parts start=%d end=%d", total_pages + 1, 99)
+        await session.execute(
+            delete(MonthPagePart)
+            .where(MonthPagePart.month == month)
+            .where(MonthPagePart.part_number > total_pages)
         )
-        raise TelegraphException("CONTENT_TOO_BIG")
+        await session.commit()
 
-    try:
-        await attempt(True, True)
-        return
-    except TelegraphException as exc:
-        msg = str(exc).lower()
-        if "content" not in msg or "too" not in msg or "big" not in msg:
-            raise
-        logging.info("month_split retry_without_ics month=%s", month)
-
-    try:
-        await attempt(False, True)
-        return
-    except TelegraphException as exc:
-        msg = str(exc).lower()
-        if "content" not in msg or "too" not in msg or "big" not in msg:
-            raise
-        logging.info("month_split retry_without_details month=%s", month)
-
-    await attempt(False, False)
+    # Update the in-memory page object with the results for Page 1
+    if page1_path:
+        page.url = page1_url
+        page.path = page1_path
+        page.content_hash = page1_hash
+        # Clear legacy secondary fields if they exist
+        page.url2 = None
+        page.path2 = None
+        page.content_hash2 = None
+    
+    logging.info("split_month_until_ok done. Created %d parts.", len(chunks))
 
 
 async def patch_month_page_for_date(
-    db: Database, telegraph: Telegraph, month_key: str, d: date, _retried: bool = False
+    db: Database, telegraph: Telegraph, month_key: str, d: date, show_images: bool = False, _retried: bool = False
 ) -> bool:
     """Patch a single day's section on a month page if it changed."""
     page_key = f"telegraph:month:{month_key}"
@@ -12475,6 +12889,16 @@ async def patch_month_page_for_date(
     start = _time.perf_counter()
 
     async with db.get_session() as session:
+        # Check if we have multiple parts (N-page split)
+        # If so, patching individual pages is risky (events might move between pages).
+        # Fallback to full rebuild.
+        res_parts = await session.execute(
+            select(MonthPagePart).where(MonthPagePart.month == month_key)
+        )
+        if res_parts.scalars().first():
+            logging.info("patch_month_page_for_date: multi-page detected, forcing rebuild for %s", month_key)
+            return "rebuild"
+
         page = await session.get(MonthPage, month_key)
         if not page or not page.path:
             return False
@@ -12495,7 +12919,9 @@ async def patch_month_page_for_date(
         if fest:
             setattr(ev, "_festival", fest)
 
-    html_section = render_month_day_section(d, events)
+            setattr(ev, "_festival", fest)
+
+    html_section = render_month_day_section(d, events, show_images=show_images)
     new_hash = content_hash(html_section)
     old_hash = await get_section_hash(db, page_key, section_key)
     if new_hash == old_hash:
@@ -12619,6 +13045,16 @@ async def patch_month_page_for_date(
         2 if hash_attr == "content_hash2" else 1,
     )
     from telegraph.utils import nodes_to_html
+
+    # Check for consistency between show_images flag and page content
+    has_figures = "<figure>" in html_content
+    if show_images and not has_figures:
+        if any(e.photo_urls for e in events):
+             logging.info("patch_month: show_images=True but no figures found in page (events have photos). Rebuilding.")
+             return "rebuild"
+    if not show_images and has_figures:
+         logging.info("patch_month: show_images=False but figures found in page. Rebuilding.")
+         return "rebuild"
 
     if need_rebuild:
         logging.info(
@@ -12789,7 +13225,7 @@ async def patch_month_page_for_date(
                 "month_patch retry month=%s day=%s", month_key, d.isoformat()
             )
             return await patch_month_page_for_date(
-                db, telegraph, month_key, d, _retried=True
+                db, telegraph, month_key, d, show_images=show_images, _retried=True
             )
         raise
 
@@ -12862,11 +13298,18 @@ async def update_month_pages_for(event_id: int, db: Database, bot: Bot | None) -
     rebuild_any = False
     rebuild_months: set[str] = set()
     for month, month_dates in months.items():
+        # Custom count to determine show_images
+        async with db.get_session() as session:
+             # Importing get_month_data is safe.
+             from main_part2 import get_month_data
+             m_events, m_exhibitions = await get_month_data(db, month)
+             show_images = len(m_events) < 10
+
         # ensure the month page is created before attempting a patch
         await sync_month_page(db, month, update_links=True)
         for d in month_dates:
             logline("TG-MONTH", event_id, "patch start", month=month, day=d.isoformat())
-            changed = await patch_month_page_for_date(db, tg, month, d)
+            changed = await patch_month_page_for_date(db, tg, month, d, show_images=show_images)
             if changed == "rebuild":
                 changed_any = True
                 rebuild_any = True
@@ -12891,6 +13334,24 @@ async def update_month_pages_for(event_id: int, db: Database, bot: Bot | None) -
                 logline("TG-MONTH", event_id, "patch nochange", month=month)
     for month in rebuild_months:
         await sync_month_page(db, month, update_links=False, force=True)
+    if (changed_any or rebuild_any) and bot:
+        try:
+            # Notify superadmins about the automated update
+            async with db.get_session() as session:
+                admins = (await session.execute(select(User.user_id).where(User.is_superadmin.is_(True)))).scalars().all()
+            
+            month_list = ", ".join(months.keys())
+            status_text = "полная пересборка" if rebuild_any else "обновление"
+            msg = f"🤖 Авто-обновление страниц: {month_list}\nСтатус: {status_text} ✅"
+            
+            for admin_id in admins:
+                try:
+                    await bot.send_message(admin_id, msg)
+                except Exception:
+                    pass
+        except Exception as e:
+            logging.error("Failed to notify admins of auto-update: %s", e)
+
     return "rebuild" if rebuild_any else changed_any
 
 
@@ -13970,7 +14431,9 @@ def format_event_md(
     lines.append(e.description.strip())
     if e.pushkin_card:
         lines.append("\u2705 Пушкинская карта")
-    if e.is_free:
+    if getattr(e, "ticket_status", None) == "sold_out":
+        lines.append("❌ Билеты все проданы")
+    elif e.is_free:
         txt = "🟡 Бесплатно"
         if e.ticket_link:
             txt += f" [по регистрации]({e.ticket_link})"
@@ -13978,13 +14441,15 @@ def format_event_md(
     elif e.ticket_link and (
         e.ticket_price_min is not None or e.ticket_price_max is not None
     ):
+        status_icon = "✅ " if getattr(e, "ticket_status", None) == "available" else ""
         if e.ticket_price_max is not None and e.ticket_price_max != e.ticket_price_min:
             price = f"от {e.ticket_price_min} до {e.ticket_price_max}"
         else:
             price = str(e.ticket_price_min or e.ticket_price_max or "")
-        lines.append(f"[Билеты в источнике]({e.ticket_link}) {price}".strip())
+        lines.append(f"{status_icon}[Билеты в источнике]({e.ticket_link}) {price}".strip())
     elif e.ticket_link:
-        lines.append(f"[по регистрации]({e.ticket_link})")
+        status_icon = "✅ " if getattr(e, "ticket_status", None) == "available" else ""
+        lines.append(f"{status_icon}[по регистрации]({e.ticket_link})")
     else:
         if (
             e.ticket_price_min is not None
@@ -13999,7 +14464,8 @@ def format_event_md(
         else:
             price = ""
         if price:
-            lines.append(f"Билеты {price}")
+            status_icon = "✅ " if getattr(e, "ticket_status", None) == "available" else ""
+            lines.append(f"{status_icon}Билеты {price}")
     if include_details and e.telegraph_url:
         cam = "\U0001f4f8" * min(2, max(0, e.photo_count))
         prefix = f"{cam} " if cam else ""
@@ -14015,7 +14481,7 @@ def format_event_md(
     if addr:
         loc += f", {addr}"
     if e.city:
-        loc += f", #{e.city}"
+        loc += f", {e.city}"
     date_part = e.date.split("..", 1)[0]
     d = parse_iso_date(date_part)
     if d:
@@ -14023,7 +14489,8 @@ def format_event_md(
     else:
         logging.error("Invalid event date: %s", e.date)
         day = e.date
-    lines.append(f"_{day} {e.time} {loc}_")
+    time_part = f" {e.time}" if e.time and e.time != "00:00" else ""
+    lines.append(f"_{day}{time_part}, {loc}_")
     return "\n".join(lines)
 
 

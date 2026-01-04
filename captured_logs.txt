@@ -1,0 +1,106 @@
+[2m2026-01-01T11:36:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:__main__:daily_scheduler: start
+[2m2026-01-01T11:36:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:daily_scheduler: channel=-1002331532485 due=False last_daily=2026-01-01 now=13:36:00 target=08:00:00
+[2m2026-01-01T11:36:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:daily_scheduler: channel=-1002210431821 due=False last_daily=2026-01-01 now=13:36:00 target=08:00:00
+[2m2026-01-01T11:36:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:__main__:daily_scheduler: done
+[2m2026-01-01T11:36:25Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:WORKER_STATE pending=0 running=0 error=793 avg_age_s=0.0 lag_s=0.0
+[2m2026-01-01T11:36:55Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:WORKER_STATE pending=0 running=0 error=793 avg_age_s=0.0 lag_s=0.0
+[2m2026-01-01T11:37:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:__main__:daily_scheduler: start
+[2m2026-01-01T11:37:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:daily_scheduler: channel=-1002331532485 due=False last_daily=2026-01-01 now=13:37:00 target=08:00:00
+[2m2026-01-01T11:37:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:daily_scheduler: channel=-1002210431821 due=False last_daily=2026-01-01 now=13:37:00 target=08:00:00
+[2m2026-01-01T11:37:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:__main__:daily_scheduler: done
+[2m2026-01-01T11:37:25Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:WORKER_STATE pending=0 running=0 error=793 avg_age_s=0.0 lag_s=0.0
+[2m2026-01-01T11:37:55Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:WORKER_STATE pending=0 running=0 error=793 avg_age_s=0.0 lag_s=0.0
+[2m2026-01-01T11:38:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:__main__:daily_scheduler: start
+[2m2026-01-01T11:38:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:daily_scheduler: channel=-1002331532485 due=False last_daily=2026-01-01 now=13:38:00 target=08:00:00
+[2m2026-01-01T11:38:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:daily_scheduler: channel=-1002210431821 due=False last_daily=2026-01-01 now=13:38:00 target=08:00:00
+[2m2026-01-01T11:38:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:__main__:daily_scheduler: done
+[2m2026-01-01T11:38:26Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:WORKER_STATE pending=0 running=0 error=793 avg_age_s=0.0 lag_s=0.0
+[2m2026-01-01T11:38:56Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:WORKER_STATE pending=0 running=0 error=793 avg_age_s=0.0 lag_s=0.0
+[2m2026-01-01T11:39:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:__main__:daily_scheduler: start
+[2m2026-01-01T11:39:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:daily_scheduler: channel=-1002331532485 due=False last_daily=2026-01-01 now=13:39:00 target=08:00:00
+[2m2026-01-01T11:39:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:daily_scheduler: channel=-1002210431821 due=False last_daily=2026-01-01 now=13:39:00 target=08:00:00
+[2m2026-01-01T11:39:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:__main__:daily_scheduler: done
+[2m2026-01-01T11:39:26Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:WORKER_STATE pending=0 running=0 error=793 avg_age_s=0.0 lag_s=0.0
+[2m2026-01-01T11:39:56Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:WORKER_STATE pending=0 running=0 error=793 avg_age_s=0.0 lag_s=0.0
+[2m2026-01-01T11:40:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:__main__:daily_scheduler: start
+[2m2026-01-01T11:40:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:daily_scheduler: channel=-1002331532485 due=False last_daily=2026-01-01 now=13:40:00 target=08:00:00
+[2m2026-01-01T11:40:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:daily_scheduler: channel=-1002210431821 due=False last_daily=2026-01-01 now=13:40:00 target=08:00:00
+[2m2026-01-01T11:40:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:__main__:daily_scheduler: done
+[2m2026-01-01T11:40:26Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:WORKER_STATE pending=0 running=0 error=793 avg_age_s=0.0 lag_s=0.0
+[2m2026-01-01T11:40:56Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:WORKER_STATE pending=0 running=0 error=793 avg_age_s=0.0 lag_s=0.0
+[2m2026-01-01T11:41:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:__main__:daily_scheduler: start
+[2m2026-01-01T11:41:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:daily_scheduler: channel=-1002331532485 due=False last_daily=2026-01-01 now=13:41:00 target=08:00:00
+[2m2026-01-01T11:41:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:daily_scheduler: channel=-1002210431821 due=False last_daily=2026-01-01 now=13:41:00 target=08:00:00
+[2m2026-01-01T11:41:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:__main__:daily_scheduler: done
+[2m2026-01-01T11:41:26Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:WORKER_STATE pending=0 running=0 error=793 avg_age_s=0.0 lag_s=0.0
+[2m2026-01-01T11:41:56Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:WORKER_STATE pending=0 running=0 error=793 avg_age_s=0.0 lag_s=0.0
+[2m2026-01-01T11:42:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:__main__:daily_scheduler: start
+[2m2026-01-01T11:42:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:daily_scheduler: channel=-1002331532485 due=False last_daily=2026-01-01 now=13:42:00 target=08:00:00
+[2m2026-01-01T11:42:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:daily_scheduler: channel=-1002210431821 due=False last_daily=2026-01-01 now=13:42:00 target=08:00:00
+[2m2026-01-01T11:42:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:__main__:daily_scheduler: done
+[2m2026-01-01T11:42:26Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:WORKER_STATE pending=0 running=0 error=793 avg_age_s=0.0 lag_s=0.0
+[2m2026-01-01T11:42:56Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:WORKER_STATE pending=0 running=0 error=793 avg_age_s=0.0 lag_s=0.0
+[2m2026-01-01T11:43:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:__main__:daily_scheduler: start
+[2m2026-01-01T11:43:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:daily_scheduler: channel=-1002331532485 due=False last_daily=2026-01-01 now=13:43:00 target=08:00:00
+[2m2026-01-01T11:43:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:daily_scheduler: channel=-1002210431821 due=False last_daily=2026-01-01 now=13:43:00 target=08:00:00
+[2m2026-01-01T11:43:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:__main__:daily_scheduler: done
+[2m2026-01-01T11:43:26Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:WORKER_STATE pending=0 running=0 error=793 avg_age_s=0.0 lag_s=0.0
+[2m2026-01-01T11:43:57Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:WORKER_STATE pending=0 running=0 error=793 avg_age_s=0.0 lag_s=0.0
+[2m2026-01-01T11:44:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:__main__:daily_scheduler: start
+[2m2026-01-01T11:44:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:daily_scheduler: channel=-1002331532485 due=False last_daily=2026-01-01 now=13:44:00 target=08:00:00
+[2m2026-01-01T11:44:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:daily_scheduler: channel=-1002210431821 due=False last_daily=2026-01-01 now=13:44:00 target=08:00:00
+[2m2026-01-01T11:44:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:__main__:daily_scheduler: done
+[2m2026-01-01T11:44:27Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:WORKER_STATE pending=0 running=0 error=793 avg_age_s=0.0 lag_s=0.0
+[2m2026-01-01T11:44:43Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]DEBUG:apscheduler.scheduler:Looking for jobs to run
+[2m2026-01-01T11:44:43Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:JOB_SUBMITTED job_id=db_optimize run_id=9b3868f9a6dc454e863d4c4ca367272d next_run=2026-01-01 12:44:43.106859+00:00 took_ms=0 traceback_excerpt=None
+[2m2026-01-01T11:44:43Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:JOB_SUBMITTED job_id=db_wal_checkpoint run_id=fe8b4c90d46e46d5812a3af1e7d46694 next_run=2026-01-01 12:44:43.107034+00:00 took_ms=0 traceback_excerpt=None
+[2m2026-01-01T11:44:43Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]DEBUG:apscheduler.scheduler:Next wakeup is due at 2026-01-01 11:46:00+00:00 (in 76.892413 seconds)
+[2m2026-01-01T11:44:43Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:apscheduler.executors.default:Running job "_job_wrapper.<locals>._run (trigger: interval[1:00:00], next run at: 2026-01-01 12:44:43 UTC)" (scheduled at 2026-01-01 11:44:43.106859+00:00)
+[2m2026-01-01T11:44:43Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:apscheduler.executors.default:Running job "_job_wrapper.<locals>._run (trigger: interval[1:00:00], next run at: 2026-01-01 12:44:43 UTC)" (scheduled at 2026-01-01 11:44:43.107034+00:00)
+[2m2026-01-01T11:44:43Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:db_maintenance PRAGMA optimize done in 3 ms
+[2m2026-01-01T11:44:43Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:apscheduler.executors.default:Job "_job_wrapper.<locals>._run (trigger: interval[1:00:00], next run at: 2026-01-01 12:44:43 UTC)" executed successfully
+[2m2026-01-01T11:44:43Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:JOB_EXECUTED job_id=db_optimize run_id=9b3868f9a6dc454e863d4c4ca367272d next_run=2026-01-01 12:44:43.106859+00:00 took_ms=3 traceback_excerpt=None
+[2m2026-01-01T11:44:43Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:db_checkpoint result=[(0, 0, 0)]
+[2m2026-01-01T11:44:43Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:db_maintenance PRAGMA wal_checkpoint(TRUNCATE) done in 4 ms
+[2m2026-01-01T11:44:43Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:apscheduler.executors.default:Job "_job_wrapper.<locals>._run (trigger: interval[1:00:00], next run at: 2026-01-01 12:44:43 UTC)" executed successfully
+[2m2026-01-01T11:44:43Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:JOB_EXECUTED job_id=db_wal_checkpoint run_id=fe8b4c90d46e46d5812a3af1e7d46694 next_run=2026-01-01 12:44:43.107034+00:00 took_ms=5 traceback_excerpt=None
+[2m2026-01-01T11:44:57Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:WORKER_STATE pending=0 running=0 error=793 avg_age_s=0.0 lag_s=0.0
+[2m2026-01-01T11:45:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:__main__:daily_scheduler: start
+[2m2026-01-01T11:45:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:daily_scheduler: channel=-1002331532485 due=False last_daily=2026-01-01 now=13:45:00 target=08:00:00
+[2m2026-01-01T11:45:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:daily_scheduler: channel=-1002210431821 due=False last_daily=2026-01-01 now=13:45:00 target=08:00:00
+[2m2026-01-01T11:45:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:__main__:daily_scheduler: done
+[2m2026-01-01T11:45:27Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:WORKER_STATE pending=0 running=0 error=793 avg_age_s=0.0 lag_s=0.0
+[2m2026-01-01T11:45:57Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:WORKER_STATE pending=0 running=0 error=793 avg_age_s=0.0 lag_s=0.0
+[2m2026-01-01T11:46:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]DEBUG:apscheduler.scheduler:Looking for jobs to run
+[2m2026-01-01T11:46:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:JOB_SUBMITTED job_id=vk_scheduler run_id=c1da128c41e74412a5d06daee6c278ab next_run=2026-01-01 12:01:00+00:00 took_ms=0 traceback_excerpt=None
+[2m2026-01-01T11:46:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]DEBUG:apscheduler.scheduler:Next wakeup is due at 2026-01-01 11:47:00+00:00 (in 59.998279 seconds)
+[2m2026-01-01T11:46:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:__main__:daily_scheduler: start
+[2m2026-01-01T11:46:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:apscheduler.executors.default:Running job "_job_wrapper.<locals>._run (trigger: cron[minute='1,16,31,46'], next run at: 2026-01-01 12:01:00 UTC)" (scheduled at 2026-01-01 11:46:00+00:00)
+[2m2026-01-01T11:46:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]DEBUG:root:SPAN_START label=db
+[2m2026-01-01T11:46:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:daily_scheduler: channel=-1002331532485 due=False last_daily=2026-01-01 now=13:46:00 target=08:00:00
+[2m2026-01-01T11:46:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:daily_scheduler: channel=-1002210431821 due=False last_daily=2026-01-01 now=13:46:00 target=08:00:00
+[2m2026-01-01T11:46:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:__main__:daily_scheduler: done
+[2m2026-01-01T11:46:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]DEBUG:root:SPAN_DONE label=db dur_ms=5
+[2m2026-01-01T11:46:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:apscheduler.executors.default:Job "_job_wrapper.<locals>._run (trigger: cron[minute='1,16,31,46'], next run at: 2026-01-01 12:01:00 UTC)" executed successfully
+[2m2026-01-01T11:46:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:JOB_EXECUTED job_id=vk_scheduler run_id=c1da128c41e74412a5d06daee6c278ab next_run=2026-01-01 12:01:00+00:00 took_ms=6 traceback_excerpt=None
+[2m2026-01-01T11:46:15Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]2026/01/01 11:46:15 INFO New SSH session email=md.nikiforov@gmail.com verified=true
+[2m2026-01-01T11:46:27Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:WORKER_STATE pending=0 running=0 error=793 avg_age_s=0.0 lag_s=0.0
+[2m2026-01-01T11:46:57Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:WORKER_STATE pending=0 running=0 error=793 avg_age_s=0.0 lag_s=0.0
+[2m2026-01-01T11:47:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:__main__:daily_scheduler: start
+[2m2026-01-01T11:47:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]DEBUG:apscheduler.scheduler:Looking for jobs to run
+[2m2026-01-01T11:47:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:JOB_SUBMITTED job_id=vk_poll_scheduler run_id=66acd755794c4090b1e0af8ee493c67d next_run=2026-01-01 12:02:00+00:00 took_ms=0 traceback_excerpt=None
+[2m2026-01-01T11:47:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]DEBUG:apscheduler.scheduler:Next wakeup is due at 2026-01-01 12:01:00+00:00 (in 839.998455 seconds)
+[2m2026-01-01T11:47:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:apscheduler.executors.default:Running job "_job_wrapper.<locals>._run (trigger: cron[minute='2,17,32,47'], next run at: 2026-01-01 12:02:00 UTC)" (scheduled at 2026-01-01 11:47:00+00:00)
+[2m2026-01-01T11:47:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:daily_scheduler: channel=-1002331532485 due=False last_daily=2026-01-01 now=13:47:00 target=08:00:00
+[2m2026-01-01T11:47:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:daily_scheduler: channel=-1002210431821 due=False last_daily=2026-01-01 now=13:47:00 target=08:00:00
+[2m2026-01-01T11:47:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:__main__:daily_scheduler: done
+[2m2026-01-01T11:47:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]DEBUG:root:SPAN_DONE label=db dur_ms=107
+[2m2026-01-01T11:47:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:apscheduler.executors.default:Job "_job_wrapper.<locals>._run (trigger: cron[minute='2,17,32,47'], next run at: 2026-01-01 12:02:00 UTC)" executed successfully
+[2m2026-01-01T11:47:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:JOB_EXECUTED job_id=vk_poll_scheduler run_id=66acd755794c4090b1e0af8ee493c67d next_run=2026-01-01 12:02:00+00:00 took_ms=109 traceback_excerpt=None
+[2m2026-01-01T11:47:09Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]2026/01/01 11:47:09 INFO New SSH session email=md.nikiforov@gmail.com verified=true
+[2m2026-01-01T11:47:27Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:WORKER_STATE pending=0 running=0 error=793 avg_age_s=0.0 lag_s=0.0
+[2m2026-01-01T11:47:57Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:WORKER_STATE pending=0 running=0 error=793 avg_age_s=0.0 lag_s=0.0
+[2m2026-01-01T11:48:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:__main__:daily_scheduler: start
+[2m2026-01-01T11:48:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:daily_scheduler: channel=-1002331532485 due=False last_daily=2026-01-01 now=13:48:00 target=08:00:00
+[2m2026-01-01T11:48:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:root:daily_scheduler: channel=-1002210431821 due=False last_daily=2026-01-01 now=13:48:00 target=08:00:00
+[2m2026-01-01T11:48:00Z[0m app[48e42d5b714228] [32miad[0m [[34minfo[0m]INFO:__main__:daily_scheduler: done

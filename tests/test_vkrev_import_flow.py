@@ -213,8 +213,15 @@ async def test_vkrev_import_flow_persists_url_and_skips_vk_sync(tmp_path, monkey
 
     tasks = []
 
-    async def fake_enqueue_job(db_, eid, task, depends_on=None, coalesce_key=None):
+    async def fake_enqueue_job(db_, eid, task, depends_on=None, coalesce_key=None, **kwargs):
         tasks.append(task)
+        if task == JobTask.telegraph_build:
+            # Emulate worker: update event with telegraph_url so persist_event_and_pages loop can exit
+            async with db_.get_session() as session:
+                ev_ = await session.get(Event, eid)
+                if ev_:
+                    ev_.telegraph_url = "https://t.me/fake_page"
+                    await session.commit()
         return "job"
 
     async with db.get_session() as session:
@@ -319,7 +326,7 @@ async def test_vkrev_import_flow_reports_ocr_usage(tmp_path, monkeypatch):
     async def fake_mark_imported(db_, inbox_id, batch_id, operator_id, event_id, event_date):
         pass
 
-    async def fake_enqueue_job(db_, eid, task, depends_on=None, coalesce_key=None):
+    async def fake_enqueue_job(db_, eid, task, depends_on=None, coalesce_key=None, **kwargs):
         return "job"
 
     monkeypatch.setattr(main, "_vkrev_fetch_photos", fake_fetch)
@@ -520,8 +527,14 @@ async def test_vkrev_import_flow_handles_multiple_events(tmp_path, monkeypatch):
 
     tasks: list[str] = []
 
-    async def fake_enqueue_job(db_, eid, task, depends_on=None, coalesce_key=None):
+    async def fake_enqueue_job(db_, eid, task, depends_on=None, coalesce_key=None, **kwargs):
         tasks.append(task)
+        if task == JobTask.telegraph_build:
+             async with db_.get_session() as session:
+                 ev_ = await session.get(Event, eid)
+                 if ev_:
+                     ev_.telegraph_url = "https://t.me/fake_page_multi"
+                     await session.commit()
         return "job"
 
     async with db.get_session() as session:
@@ -896,7 +909,13 @@ async def test_vkrev_import_flow_creates_festival_and_reports_status(tmp_path, m
     async def fake_mark_imported(*args, **kwargs):
         pass
 
-    async def fake_enqueue_job(*args, **kwargs):
+    async def fake_enqueue_job(db_, eid, task, depends_on=None, coalesce_key=None, **kwargs):
+        if task == JobTask.telegraph_build:
+             async with db_.get_session() as session:
+                 ev_ = await session.get(Event, eid)
+                 if ev_:
+                     ev_.telegraph_url = "https://t.me/fake_page_fest_status"
+                     await session.commit()
         return "job"
 
     sync_calls: list[tuple[str, tuple]] = []
@@ -1667,8 +1686,14 @@ async def test_vkrev_import_flow_force_festival_accepts_full_name(monkeypatch, t
         captured["event_date"] = event_date
 
     async def fake_enqueue_job(
-        _db, _event_id, _task, depends_on=None, coalesce_key=None
+        db_, eid, task, depends_on=None, coalesce_key=None, **kwargs
     ):
+        if task == JobTask.telegraph_build:
+             async with db_.get_session() as session:
+                 ev_ = await session.get(Event, eid)
+                 if ev_:
+                     ev_.telegraph_url = "https://t.me/fake_page_manual_topics"
+                     await session.commit()
         return "job"
 
     async def fake_assign_event_topics(event_obj):

@@ -1,0 +1,14 @@
+{
+    "id": "zigomaro/preview-3d",
+    "title": "Preview 3D",
+    "code_file": "preview_3d.ipynb",
+    "language": "python",
+    "kernel_type": "notebook",
+    "is_private": true,
+    "enable_gpu": true,
+    "enable_internet": true,
+    "dataset_sources": [],
+    "competition_sources": [],
+    "kernel_sources": [],
+    "slug": "preview-3d"
+}

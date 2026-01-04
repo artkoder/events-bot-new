@@ -61,6 +61,6 @@ For Sunday:
 
 If a day has no events the header is omitted.
 
-When the generated content exceeds roughly 64&nbsp;kB the bot splits the month
-into two Telegraph pages. The first page ends with a bold link to the
-continuation.
+When the generated content exceeds the configured limit (approx. 45&nbsp;kB), the bot splits the month
+into multiple Telegraph pages. The first page ends with a bold link to the
+continuation. Subsequent pages use a title format indicating the date range (e.g. "С 15 по 31 января...").

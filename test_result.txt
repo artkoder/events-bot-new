@@ -1,0 +1,91 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.1, pytest-9.0.1, pluggy-1.6.0
+rootdir: /workspaces/events-bot-new
+configfile: pytest.ini
+plugins: anyio-4.12.0, asyncio-0.23.6
+asyncio: mode=Mode.STRICT
+collected 1 item
+
+tests/test_immediate_rebuild_skip.py F                                   [100%]
+
+=================================== FAILURES ===================================
+________________ test_skip_immediate_rebuild_if_deferred_exists ________________
+
+tmp_path = PosixPath('/tmp/pytest-of-codespace/pytest-13/test_skip_immediate_rebuild_if0')
+
+    @pytest.mark.asyncio
+    async def test_skip_immediate_rebuild_if_deferred_exists(tmp_path):
+        """
+        Verify that update_telegraph_event_page skips calling update_month_pages_for
+        if a deferred month_pages job exists for the same month.
+        """
+        db = Database(str(tmp_path / "db.sqlite"))
+        await db.init()
+    
+        # Setup: Create an event
+        async with db.get_session() as session:
+            ev = Event(
+                title="Test Event",
+                description="Test Description",
+                date="2026-05-15",
+                time="10:00",
+                location_name="Location",
+                source_text="src",
+                telegraph_url="https://telegra.ph/existing",
+                content_hash="old_hash"
+            )
+            session.add(ev)
+            await session.commit()
+            await session.refresh(ev)
+            event_id = ev.id
+    
+        # Mock dependencies
+        # We need to mock build_source_page_content, telegraph, etc. to avoid external calls
+        # but strictly speaking we only care about update_month_pages_for call.
+    
+        with patch("main.build_source_page_content") as mock_build, \
+             patch("main.Telegraph", new_callable=MagicMock) as mock_tg_cls, \
+             patch("main.update_month_pages_for", new_callable=AsyncMock) as mock_update_month, \
+             patch("main.get_telegraph_token", return_value="fake_token"), \
+             patch("main.content_hash", return_value="new_hash_diff"), \
+             patch("main.telegraph_create_page", new_callable=AsyncMock) as mock_create:
+    
+            mock_build.return_value = ("<html></html>", [], [])
+            mock_create.return_value = {"url": "https://t.ph/new", "path": "new_path"}
+    
+            # Case 1: No deferred job -> Should call update_month_pages_for
+>           await update_telegraph_event_page(event_id, db, None)
+
+tests/test_immediate_rebuild_skip.py:56: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+main.py:12322: in update_telegraph_event_page
+    nodes = html_to_nodes(html_content)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/home/codespace/.local/lib/python3.12/site-packages/telegraph/utils.py:134: in html_to_nodes
+    parser.feed(html_content)
+/usr/local/python/3.12.1/lib/python3.12/html/parser.py:111: in feed
+    self.goahead(0)
+/usr/local/python/3.12.1/lib/python3.12/html/parser.py:171: in goahead
+    k = self.parse_starttag(i)
+        ^^^^^^^^^^^^^^^^^^^^^^
+/usr/local/python/3.12.1/lib/python3.12/html/parser.py:338: in parse_starttag
+    self.handle_starttag(tag, attrs)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <telegraph.utils.HtmlToNodesParser object at 0x717a87d829c0>
+tag = 'html', attrs_list = []
+
+    def handle_starttag(self, tag, attrs_list):
+        if tag not in ALLOWED_TAGS:
+>           raise NotAllowedTag(f'{tag!r} tag is not allowed')
+E           telegraph.exceptions.NotAllowedTag: 'html' tag is not allowed
+
+/home/codespace/.local/lib/python3.12/site-packages/telegraph/utils.py:71: NotAllowedTag
+=========================== short test summary info ============================
+FAILED tests/test_immediate_rebuild_skip.py::test_skip_immediate_rebuild_if_deferred_exists
+============================== 1 failed in 0.65s ===============================
+Exception ignored in: <module 'threading' from '/usr/local/python/3.12.1/lib/python3.12/threading.py'>
+Traceback (most recent call last):
+  File "/usr/local/python/3.12.1/lib/python3.12/threading.py", line 1623, in _shutdown
+    lock.acquire()
+KeyboardInterrupt: 

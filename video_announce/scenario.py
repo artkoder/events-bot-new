@@ -79,6 +79,8 @@ MAX_CANDIDATE_LIMIT = 80
 DEFAULT_SELECTED_MIN = 6
 DEFAULT_SELECTED_MAX = 8
 PENDING_INSTRUCTION_TTL = 15 * 60
+IMPORT_PAYLOAD_FLAG_KEY = "imported_payload"
+IMPORT_PAYLOAD_JSON_KEY = "imported_payload_json"
 
 
 @dataclass
@@ -98,6 +100,16 @@ class PendingIntroText:
 
 
 _pending_intro_texts: TTLCache[int, PendingIntroText] = TTLCache(
+    maxsize=64, ttl=PENDING_INSTRUCTION_TTL
+)
+
+
+@dataclass
+class PendingPayloadImport:
+    profile_key: str
+
+
+_pending_payload_imports: TTLCache[int, PendingPayloadImport] = TTLCache(
     maxsize=64, ttl=PENDING_INSTRUCTION_TTL
 )
 
@@ -134,6 +146,18 @@ def take_pending_intro_text(
 
 def is_waiting_intro_text(user_id: int) -> bool:
     return user_id in _pending_intro_texts
+
+
+def set_pending_payload_import(user_id: int, pending: PendingPayloadImport) -> None:
+    _pending_payload_imports[user_id] = pending
+
+
+def take_pending_payload_import(user_id: int) -> PendingPayloadImport | None:
+    return _pending_payload_imports.pop(user_id, None)
+
+
+def is_waiting_payload_import(user_id: int) -> bool:
+    return user_id in _pending_payload_imports
 
 
 def read_positive_int_env(env_key: str, default: int) -> int:
@@ -449,7 +473,7 @@ class VideoAnnounceScenario:
         merged.update(preset)
         ctx = self._selection_ctx_from_params(profile, merged)
         try:
-            events = await fetch_candidates(self.db, ctx)
+            events, _, _ = await fetch_candidates(self.db, ctx)
         except Exception:
             logger.exception("video_announce: failed to fetch candidates for preset")
             return 0
@@ -513,6 +537,61 @@ class VideoAnnounceScenario:
             short_time = time_text[:5] if ":" in time_text else time_text
             return f"{date_label} {short_time}"
         return date_label
+
+    def _extract_schedule_map(self, params: dict[str, Any]) -> dict[int, str]:
+        raw = params.get("dedup_schedule")
+        if not isinstance(raw, dict):
+            return {}
+        result: dict[int, str] = {}
+        for key, value in raw.items():
+            try:
+                event_id = int(key)
+            except (TypeError, ValueError):
+                continue
+            if isinstance(value, str) and value.strip():
+                result[event_id] = value.strip()
+        return result
+
+    def _extract_occurrences_map(
+        self, params: dict[str, Any]
+    ) -> dict[int, list[dict[str, list[str]]]]:
+        raw = params.get("dedup_occurrences")
+        if not isinstance(raw, dict):
+            return {}
+        result: dict[int, list[dict[str, list[str]]]] = {}
+        for key, value in raw.items():
+            try:
+                event_id = int(key)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(value, list):
+                continue
+            cleaned: list[dict[str, list[str]]] = []
+            for entry in value:
+                if not isinstance(entry, dict):
+                    continue
+                date_value = entry.get("date")
+                times_value = entry.get("times")
+                if not isinstance(date_value, str):
+                    continue
+                times: list[str] = []
+                if isinstance(times_value, list):
+                    times = [t for t in times_value if isinstance(t, str)]
+                cleaned.append({"date": date_value, "times": times})
+            if cleaned:
+                result[event_id] = cleaned
+        return result
+
+    def _format_event_schedule(self, ev: Event, params: dict[str, Any]) -> str:
+        schedule_map = params.get("dedup_schedule")
+        raw = None
+        if isinstance(schedule_map, dict) and ev.id is not None:
+            raw = schedule_map.get(str(ev.id))
+            if raw is None:
+                raw = schedule_map.get(ev.id)
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip().replace("\n", " · ")
+        return self._format_event_datetime(ev)
 
     def _parse_event_datetime(self, ev: Event) -> datetime | None:
         try:
@@ -737,7 +816,11 @@ class VideoAnnounceScenario:
             [
                 types.InlineKeyboardButton(
                     text="🚀 Запустить подбор", callback_data=f"vidstart:{profile_key}"
-                )
+                ),
+                types.InlineKeyboardButton(
+                    text="📥 Импортировать payload",
+                    callback_data=f"vidimport:{profile_key}",
+                ),
             ]
         )
         markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard)
@@ -843,6 +926,117 @@ class VideoAnnounceScenario:
             self.user_id, PendingInstruction(session_id=obj.id, reuse_candidates=False)
         )
         await self._prompt_instruction(obj, ctx)
+
+    async def prompt_payload_import(self, profile_key: str) -> None:
+        if not await self.ensure_access():
+            return
+        existing = await self.has_rendering()
+        if existing:
+            await self.bot.send_message(
+                self.chat_id,
+                f"Сессия #{existing.id} уже рендерится, дождитесь завершения",
+            )
+            return
+        profiles = await fetch_profiles()
+        profile = next((p for p in profiles if p.key == profile_key), None)
+        if not profile:
+            await self.bot.send_message(self.chat_id, "Профиль не найден")
+            return
+        set_pending_payload_import(
+            self.user_id, PendingPayloadImport(profile_key=profile_key)
+        )
+        await self.bot.send_message(
+            self.chat_id,
+            "Пришлите JSON-файл payload.json для перезапуска рендера.",
+        )
+
+    def _parse_import_payload(self, raw_text: str) -> tuple[str, int]:
+        try:
+            data = json.loads(raw_text)
+        except json.JSONDecodeError as exc:
+            raise ValueError("Некорректный JSON") from exc
+        if not isinstance(data, dict):
+            raise ValueError("Payload должен быть JSON-объектом")
+        scenes = data.get("scenes")
+        intro = data.get("intro")
+        if not isinstance(scenes, list) or not isinstance(intro, dict):
+            raise ValueError("Payload должен содержать поля intro и scenes")
+        if not scenes:
+            raise ValueError("Payload не содержит сцен")
+        json_text = json.dumps(data, ensure_ascii=False, indent=2)
+        return json_text, len(scenes)
+
+    def _pick_default_kernel_ref(self) -> str | None:
+        local_kernels = sorted(
+            list_local_kernels(),
+            key=lambda k: (k.get("title") or k.get("ref") or ""),
+        )
+        if local_kernels:
+            ref = local_kernels[0].get("ref")
+            if isinstance(ref, str) and ref:
+                return ref
+        username = os.getenv("KAGGLE_USERNAME", "")
+        if username:
+            return f"{username}/video-announce-renderer"
+        return None
+
+    def _extract_import_payload_json(
+        self, session_obj: VideoAnnounceSession
+    ) -> str | None:
+        params = (
+            session_obj.selection_params
+            if isinstance(session_obj.selection_params, dict)
+            else {}
+        )
+        payload_json = params.get(IMPORT_PAYLOAD_JSON_KEY)
+        if isinstance(payload_json, str) and payload_json.strip():
+            return payload_json
+        return None
+
+    def _is_import_session(self, session_obj: VideoAnnounceSession) -> bool:
+        params = (
+            session_obj.selection_params
+            if isinstance(session_obj.selection_params, dict)
+            else {}
+        )
+        return bool(params.get(IMPORT_PAYLOAD_FLAG_KEY))
+
+    async def import_payload_and_render(
+        self, profile_key: str, payload_json: str, *, scene_count: int | None = None
+    ) -> str | None:
+        if not await self._has_access():
+            return "Not authorized"
+        existing = await self.has_rendering()
+        if existing:
+            return f"Сессия #{existing.id} уже рендерится, дождитесь завершения"
+        profiles = await fetch_profiles()
+        profile = next((p for p in profiles if p.key == profile_key), None)
+        if not profile:
+            return "Профиль не найден"
+        test_chat_id, main_chat_id = await self._get_profile_channels(profile_key)
+        async with self.db.get_session() as session:
+            obj = VideoAnnounceSession(
+                status=VideoAnnounceSessionStatus.CREATED,
+                profile_key=profile_key,
+                selection_params={
+                    IMPORT_PAYLOAD_FLAG_KEY: True,
+                    IMPORT_PAYLOAD_JSON_KEY: payload_json,
+                },
+                test_chat_id=test_chat_id,
+                main_chat_id=main_chat_id,
+            )
+            session.add(obj)
+            await session.commit()
+            await session.refresh(obj)
+        scene_note = f" ({scene_count} сцен)" if scene_count else ""
+        await self.bot.send_message(
+            self.chat_id,
+            f"Импортирован payload{scene_note}. Сессия #{obj.id} готова к запуску.",
+        )
+        kernel_msg = await self.show_kernel_selection(obj.id, message=None)
+        if kernel_msg != "Выбор kernel":
+            return kernel_msg
+        return None
 
     async def _prompt_instruction(
         self,
@@ -958,12 +1152,21 @@ class VideoAnnounceScenario:
         preserve_existing: bool = False,
     ) -> SelectionBuildResult:
         ctx = await self._build_selection_context(session_obj)
+        params = self._get_selection_params(session_obj)
+        schedule_map = (
+            self._extract_schedule_map(params) if candidates is not None else None
+        )
+        occurrences_map = (
+            self._extract_occurrences_map(params) if candidates is not None else None
+        )
         result = await build_selection(
             self.db,
             ctx,
             client=KaggleClient(),
             session_id=session_obj.id,
             candidates=candidates,
+            schedule_map=schedule_map,
+            occurrences_map=occurrences_map,
             bot=self.bot,
             notify_chat_id=self.chat_id,
         )
@@ -976,8 +1179,41 @@ class VideoAnnounceScenario:
                 result.ranked,
                 default_ready_ids=result.default_ready_ids,
             )
+        await self._persist_schedule_map(
+            session_obj, result.schedule_map, result.occurrences_map
+        )
         await self._persist_intro_text(session_obj, result.intro_text, valid=result.intro_text_valid)
         return result
+
+    async def _persist_schedule_map(
+        self,
+        session_obj: VideoAnnounceSession,
+        schedule_map: dict[int, str],
+        occurrences_map: dict[int, list[dict[str, list[str]]]],
+    ) -> None:
+        async with self.db.get_session() as session:
+            fresh = await session.get(VideoAnnounceSession, session_obj.id)
+            if not fresh:
+                return
+            params = self._get_selection_params(fresh)
+            if schedule_map:
+                params["dedup_schedule"] = {
+                    str(event_id): text for event_id, text in schedule_map.items()
+                }
+            else:
+                params.pop("dedup_schedule", None)
+            if occurrences_map:
+                params["dedup_occurrences"] = {
+                    str(event_id): value
+                    for event_id, value in occurrences_map.items()
+                }
+            else:
+                params.pop("dedup_occurrences", None)
+            fresh.selection_params = params
+            session.add(fresh)
+            await session.commit()
+            await session.refresh(fresh)
+            session_obj.selection_params = params
 
     async def _persist_intro_text(
         self, session_obj: VideoAnnounceSession, intro_text: str | None, valid: bool = True
@@ -1271,9 +1507,10 @@ class VideoAnnounceScenario:
         
         if not ready_pairs:
             return ("Нет выбранных событий", types.InlineKeyboardMarkup(inline_keyboard=[]))
-        
+
         # Get custom render order or use default position order
         render_order = self._get_render_order(session_obj)
+        params = self._get_selection_params(session_obj)
         
         # Sort by render_order if exists, otherwise by position
         if render_order:
@@ -1293,7 +1530,7 @@ class VideoAnnounceScenario:
         
         for render_pos, (item, ev) in enumerate(ready_pairs, start=1):
             emoji = self._normalize_emoji(ev.emoji)
-            date_label = self._format_event_datetime(ev)
+            date_label = self._format_event_schedule(ev, params)
             title = self._format_title(ev)
             # Show render position vs original LLM position
             lines.append(f"{render_pos}. #{item.position} · {date_label} · {emoji} {title}")
@@ -1455,7 +1692,7 @@ class VideoAnnounceScenario:
             r = ranked_map.get(ev.id)
             marker = "✅" if ev.id in result.default_ready_ids else "⬜"
             emoji = self._normalize_emoji(ev.emoji)
-            date_label = self._format_event_datetime(ev)
+            date_label = self._format_event_schedule(ev, params)
             include_count = getattr(ev, "video_include_count", 0) or 0
             promo_marker = " · 🔥PROMO" if (r and r.mandatory) or include_count > 0 else ""
             score = f" · {r.score:.1f}" if r and r.score is not None else ""
@@ -1593,57 +1830,61 @@ class VideoAnnounceScenario:
                     session_obj.id, status_chat_id, status_message_id
                 )
         finalized = []
+        if ranked:
+            try:
+                # We still might want finalized texts for debugging, but not for dataset export as per requirement 3
+                finalized = await prepare_final_texts(self.db, session_obj.id, ranked)
+            except Exception:
+                logger.exception("video_announce: failed to prepare final texts")
         try:
-            # We still might want finalized texts for debugging, but not for dataset export as per requirement 3
-            finalized = await prepare_final_texts(self.db, session_obj.id, ranked)
-        except Exception:
-            logger.exception("video_announce: failed to prepare final texts")
-        try:
-            payload = payload or await self._build_render_payload(session_obj, ranked)
-            json_text = payload_json or payload_as_json(payload, timezone.utc)
+            json_text = payload_json
+            if not json_text:
+                payload = payload or await self._build_render_payload(session_obj, ranked)
+                json_text = payload_as_json(payload, timezone.utc)
 
-            # Validation Step: Check for photo_urls presence
-            missing_photos = []
-            for item in payload.items:
-                 ev = next((e for e in payload.events if e.id == item.event_id), None)
-                 if ev and item.status == VideoAnnounceItemStatus.READY:
-                     urls = getattr(ev, "photo_urls", []) or []
-                     if not any(urls):
-                         missing_photos.append(ev.id)
+            if payload:
+                # Validation Step: Check for photo_urls presence
+                missing_photos = []
+                for item in payload.items:
+                    ev = next((e for e in payload.events if e.id == item.event_id), None)
+                    if ev and item.status == VideoAnnounceItemStatus.READY:
+                        urls = getattr(ev, "photo_urls", []) or []
+                        if not any(urls):
+                            missing_photos.append(ev.id)
 
-            if missing_photos:
-                 error_msg = f"Ошибка: у событий {missing_photos} отсутствуют photo_urls, запуск Kaggle отменён."
-                 await self.bot.send_message(self.chat_id, error_msg)
-                 await self._mark_failed(session_obj.id, error_msg)
-                 failed = await self._load_session(session_obj.id)
-                 if failed:
-                    await update_status_message(
-                        self.bot,
-                        failed,
-                        {},
-                        chat_id=status_chat_id,
-                        message_id=status_message_id,
-                        allow_send=True,
-                        note="Ошибка: нет фото",
+                if missing_photos:
+                    error_msg = f"Ошибка: у событий {missing_photos} отсутствуют photo_urls, запуск Kaggle отменён."
+                    await self.bot.send_message(self.chat_id, error_msg)
+                    await self._mark_failed(session_obj.id, error_msg)
+                    failed = await self._load_session(session_obj.id)
+                    if failed:
+                        await update_status_message(
+                            self.bot,
+                            failed,
+                            {},
+                            chat_id=status_chat_id,
+                            message_id=status_message_id,
+                            allow_send=True,
+                            note="Ошибка: нет фото",
+                        )
+                    return
+
+                preview_lines = []
+                event_map = {ev.id: ev for ev in payload.events}
+                item_map = {it.event_id: it for it in payload.items}
+                for r in ranked[:5]:
+                    ev = event_map.get(r.event.id)
+                    item = item_map.get(r.event.id)
+                    if not ev or not item:
+                        continue
+                    dt = ev.date.split("..", 1)[0]
+                    title = item.final_title or ev.title
+                    preview_lines.append(
+                        f"#{r.position} · {dt} · {ev.emoji or ''} {title} ({r.score})"
                     )
-                 return
-
-            preview_lines = []
-            event_map = {ev.id: ev for ev in payload.events}
-            item_map = {it.event_id: it for it in payload.items}
-            for r in ranked[:5]:
-                ev = event_map.get(r.event.id)
-                item = item_map.get(r.event.id)
-                if not ev or not item:
-                    continue
-                dt = ev.date.split("..", 1)[0]
-                title = item.final_title or ev.title
-                preview_lines.append(
-                    f"#{r.position} · {dt} · {ev.emoji or ''} {title} ({r.score})"
-                )
-            preview = "\n".join(preview_lines)
-            # JSON is already sent as file attachment, no need for text duplicate
-            await self.bot.send_message(self.chat_id, preview or "Нет событий")
+                preview = "\n".join(preview_lines)
+                # JSON is already sent as file attachment, no need for text duplicate
+                await self.bot.send_message(self.chat_id, preview or "Нет событий")
             dataset_slug = await self._create_dataset(session_obj, json_text, finalized)
             
             # Wait for Kaggle to fully process the dataset before attaching to kernel
@@ -1914,7 +2155,7 @@ class VideoAnnounceScenario:
         for item, ev in visible_pairs:
             marker = "✅" if item.status == VideoAnnounceItemStatus.READY else "⬜"
             emoji = self._normalize_emoji(ev.emoji)
-            date_label = self._format_event_datetime(ev)
+            date_label = self._format_event_schedule(ev, params)
             pin = ""
             include_count = item.include_count or getattr(ev, "video_include_count", 0) or 0
             if include_count > 0:
@@ -2173,6 +2414,11 @@ class VideoAnnounceScenario:
         if not await self._has_access():
              return "Not authorized"
 
+        logger.info(
+            "video_announce: kernel selected session_id=%s kernel_ref=%s",
+            session_id,
+            kernel_ref,
+        )
         async with self.db.get_session() as session:
             sess = await session.get(VideoAnnounceSession, session_id)
             if not sess:
@@ -2180,8 +2426,78 @@ class VideoAnnounceScenario:
             sess.kaggle_kernel_ref = kernel_ref
             session.add(sess)
             await session.commit()
+            await session.refresh(sess)
 
+        payload_json = self._extract_import_payload_json(sess)
+        if payload_json:
+            return await self.start_import_render(session_id, payload_json, message=message)
+        if self._is_import_session(sess):
+            return "Payload не найден, импортируйте заново"
         return await self.start_render(session_id, message=message)
+
+    async def start_import_render(
+        self,
+        session_id: int,
+        payload_json: str,
+        message: types.Message | None = None,
+    ) -> str:
+        if not await self._has_access():
+            return "Not authorized"
+        if await self.has_rendering():
+            return "Уже есть активный рендер"
+        if not payload_json.strip():
+            return "Payload не найден"
+        async with self.db.get_session() as session:
+            sess = await session.get(VideoAnnounceSession, session_id)
+            if not sess:
+                return "Сессия не найдена"
+            if not sess.kaggle_kernel_ref:
+                return "Kernel не выбран"
+            if sess.status == VideoAnnounceSessionStatus.RENDERING:
+                return "Сессия уже запущена"
+            sess.status = VideoAnnounceSessionStatus.RENDERING
+            sess.started_at = datetime.now(timezone.utc)
+            sess.finished_at = None
+            sess.error = None
+            sess.video_url = None
+            sess.kaggle_dataset = None
+            params = (
+                sess.selection_params
+                if isinstance(sess.selection_params, dict)
+                else {}
+            )
+            if params:
+                params.pop(IMPORT_PAYLOAD_JSON_KEY, None)
+                params.pop(IMPORT_PAYLOAD_FLAG_KEY, None)
+                sess.selection_params = params
+            session.add(sess)
+            await session.commit()
+            await session.refresh(sess)
+        await self.bot.send_message(
+            self.chat_id,
+            (
+                f"Сессия #{session_id} запущена, готовим материалы. "
+                f"Kernel: {sess.kaggle_kernel_ref}"
+            ),
+        )
+        status_message = await update_status_message(
+            self.bot,
+            sess,
+            {},
+            chat_id=self.chat_id,
+            allow_send=True,
+            note="Готовим Kaggle",
+        )
+        asyncio.create_task(
+            self._render_and_notify(
+                sess,
+                [],
+                status_message=status_message,
+                payload=None,
+                payload_json=payload_json,
+            )
+        )
+        return "Рендеринг запущен"
 
     async def start_render(self, session_id: int, message: types.Message | None = None) -> str:
         if not await self._has_access():
@@ -2279,20 +2595,16 @@ class VideoAnnounceScenario:
         if not ranked:
             await self.bot.send_message(self.chat_id, "Не удалось собрать события для рестарта")
             return
-        payload: RenderPayload | None = None
-        payload_json: str | None = None
         async with self.db.get_session() as session:
             obj = await session.get(VideoAnnounceSession, session_id)
             if not obj:
                 await self.bot.send_message(self.chat_id, "Сессия не найдена")
                 return
-            if obj.status != VideoAnnounceSessionStatus.FAILED:
-                await self.bot.send_message(self.chat_id, "Сессию можно рестартовать только после ошибки")
+            if obj.status == VideoAnnounceSessionStatus.RENDERING:
+                await self.bot.send_message(self.chat_id, "Сессия сейчас рендерится, дождитесь завершения")
                 return
-            payload = await self._build_render_payload(obj, ranked)
-            payload_json = payload_as_json(payload, timezone.utc)
-            obj.status = VideoAnnounceSessionStatus.RENDERING
-            obj.started_at = datetime.now(timezone.utc)
+            obj.status = VideoAnnounceSessionStatus.SELECTED
+            obj.started_at = None
             obj.finished_at = None
             obj.error = None
             obj.video_url = None
@@ -2302,29 +2614,12 @@ class VideoAnnounceScenario:
             await session.commit()
             await session.refresh(obj)
         await self.bot.send_message(
-            self.chat_id, f"Сессия #{session_id} перезапущена, готовим материалы"
+            self.chat_id,
+            f"Сессия #{session_id} подготовлена к перезапуску. Выберите kernel.",
         )
-        if payload_json:
-            await self._send_payload_file(
-                obj, payload_json, caption="Payload JSON перед запуском Kaggle"
-            )
-        status_message = await update_status_message(
-            self.bot,
-            obj,
-            {},
-            chat_id=self.chat_id,
-            allow_send=True,
-            note="Готовим Kaggle",
-        )
-        asyncio.create_task(
-            self._render_and_notify(
-                obj,
-                ranked,
-                status_message=status_message,
-                payload=payload,
-                payload_json=payload_json,
-            )
-        )
+        kernel_msg = await self.show_kernel_selection(session_id, message=None)
+        if kernel_msg != "Выбор kernel":
+            await self.bot.send_message(self.chat_id, kernel_msg)
 
     async def _store_kaggle_meta(
         self, session_id: int, dataset_slug: str, kernel_ref: str | None
@@ -2492,6 +2787,11 @@ async def handle_prefix_action(prefix: str, callback: types.CallbackQuery, scena
         _, profile = callback.data.split(":", 1)
         await scenario.start_session(profile)
         await callback.answer("Сбор профиля")
+        return True
+    if prefix == "vidimport":
+        _, profile = callback.data.split(":", 1)
+        await scenario.prompt_payload_import(profile)
+        await callback.answer("Ожидаю payload")
         return True
     if prefix == "vidstatus":
         await scenario.refresh_status()
