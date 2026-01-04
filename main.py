@@ -8593,6 +8593,52 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
             await callback.message.answer(f"❌ Ошибка при обновлении: {e}")
         await callback.answer()
 
+    elif data.startswith("festreparse:"):
+        fid = int(data.split(":")[1])
+        async with db.get_session() as session:
+            user = await session.get(User, callback.from_user.id)
+            fest = await session.get(Festival, fid)
+            if not fest or (user and user.blocked):
+                await callback.answer("Not authorized", show_alert=True)
+                return
+            if not fest.source_url:
+                await callback.answer("У фестиваля нет source_url для перепарсинга", show_alert=True)
+                return
+            source_url = fest.source_url
+            fest_name = fest.name
+        
+        await callback.message.answer(f"⏳ Запускаю парсер фестиваля с {source_url}...")
+        try:
+            from source_parsing.festival_parser import process_festival_url
+            
+            async def status_callback(status: str) -> None:
+                try:
+                    await callback.message.answer(f"📊 {status}")
+                except Exception:
+                    pass
+            
+            festival, uds_url, llm_log_url = await process_festival_url(
+                db=db,
+                bot=bot,
+                chat_id=callback.message.chat.id,
+                url=source_url,
+                status_callback=status_callback,
+            )
+            
+            lines = [f"✅ Фестиваль «{festival.name}» обновлён"]
+            if festival.telegraph_url:
+                lines.append(f"📄 [Страница фестиваля]({festival.telegraph_url})")
+            if uds_url:
+                lines.append(f"📊 [UDS JSON]({uds_url})")
+            if llm_log_url:
+                lines.append(f"🔍 [LLM лог]({llm_log_url})")
+            
+            await callback.message.answer("\n".join(lines), parse_mode="Markdown")
+        except Exception as e:
+            logging.error("festreparse error for %s: %s", fest_name, e)
+            await callback.message.answer(f"❌ Ошибка парсинга: {e}")
+        await callback.answer()
+
     elif data.startswith("togglesilent:"):
         eid = int(data.split(":")[1])
         async with db.get_session() as session:

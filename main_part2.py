@@ -2032,6 +2032,32 @@ async def build_festival_page_content(db: Database, fest: Festival) -> tuple[str
                     ],
                 }
             )
+        # UDS fields: phone, email
+        if fest.contacts_phone:
+            nodes.append({"tag": "p", "children": [f"📞 {fest.contacts_phone}"]})
+        if fest.contacts_email:
+            nodes.append({"tag": "p", "children": [f"✉️ {fest.contacts_email}"]})
+
+    # UDS fields: audience, source_url
+    if fest.audience:
+        nodes.extend(telegraph_br())
+        nodes.append({"tag": "p", "children": [f"👥 Аудитория: {fest.audience}"]})
+    
+    if fest.source_url:
+        nodes.extend(telegraph_br())
+        nodes.append(
+            {
+                "tag": "p",
+                "children": [
+                    "🔗 Источник: ",
+                    {
+                        "tag": "a",
+                        "attrs": {"href": fest.source_url},
+                        "children": [fest.source_url[:50] + "..." if len(fest.source_url) > 50 else fest.source_url],
+                    },
+                ],
+            }
+        )
 
     if events:
         nodes.extend(telegraph_br())
