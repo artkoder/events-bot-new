@@ -82,10 +82,10 @@ def _strip_code_fences(text: str) -> str:
 async def reason_with_gemma(
     distilled_content: str,
     api_key: str,
-    model: str = "gemma-3-27b",
+    model: str = "gemma-3-27b-it",
     llm_logger = None,
 ) -> tuple[dict | None, str | None]:
-    """Call Gemma 3-27B to extract festival information.
+    """Call LLM to extract festival information.
     
     Args:
         distilled_content: Prepared content for analysis
@@ -100,7 +100,13 @@ async def reason_with_gemma(
     
     genai.configure(api_key=api_key)
     
-    prompt = f"""Analyze this festival website content and extract structured information.
+    # For Gemma models, include system prompt in the main prompt
+    # (system_instruction not supported for gemma-3-*)
+    full_prompt = f"""{SYSTEM_PROMPT}
+
+---
+
+Analyze this festival website content and extract structured information.
 
 {distilled_content}
 
@@ -110,18 +116,17 @@ Output ONLY valid JSON matching the schema."""
     try:
         model_instance = genai.GenerativeModel(
             model_name=f"models/{model}",
-            system_instruction=SYSTEM_PROMPT,
         )
         
         if llm_logger:
             with llm_logger.track(
                 phase="reason",
                 model=model,
-                prompt=prompt,
+                prompt=full_prompt,
                 content_length=len(distilled_content),
             ) as tracker:
                 response = await model_instance.generate_content_async(
-                    prompt,
+                    full_prompt,
                     generation_config={
                         "temperature": 0.1,
                         "max_output_tokens": 8192,
@@ -131,7 +136,7 @@ Output ONLY valid JSON matching the schema."""
                 tracker.set_response(response_text)
         else:
             response = await model_instance.generate_content_async(
-                prompt,
+                full_prompt,
                 generation_config={
                     "temperature": 0.1,
                     "max_output_tokens": 8192,
@@ -202,8 +207,7 @@ Output the complete corrected JSON."""
 
     try:
         model = genai.GenerativeModel(
-            model_name="models/gemma-3-27b",
-            system_instruction="You are correcting a festival data extraction. Output only valid JSON.",
+            model_name="models/gemma-3-27b-it",
         )
         
         if llm_logger:
