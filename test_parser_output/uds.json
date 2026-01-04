@@ -1,14 +1,14 @@
 {
   "festival": {
     "title_full": "Зимние каникулы на Балтике",
-    "title_short": "Зимние каникулы на Балтике",
+    "title_short": "Зимние каникулы",
     "description_short": "Фестиваль искусств, предлагающий волшебные рождественские сказки, встречи с любимыми актерами и добрые фильмы для всей семьи. Незабываемые новогодние впечатления в Калининграде!",
     "dates": {
       "start": "2025-12-25",
       "end": "2026-01-09"
     },
     "is_annual": null,
-    "audience": "Семьи с детьми, любители искусства",
+    "audience": "Семьи с детьми, любители театра и кино",
     "links": {
       "website": "festdir.ru",
       "socials": [
@@ -20,7 +20,7 @@
     "registration": {
       "is_free": false,
       "common_url": "https://pyramida.info/",
-      "price_info": "Бесплатно (по обязательной регистрации) - 2000 руб"
+      "price_info": "от бесплатно"
     },
     "contacts": {
       "phone": "+7 4012 528-822",
@@ -39,7 +39,7 @@
       "price": null,
       "is_free": false,
       "ticket_url": "https://dramteatr39.ru/spektakli/dinastii",
-      "description": "Спектакль, объединяющий балет, поэзию и театр. Илзе Лиепа, Екатерина Рождественская и Александра Захарова делятся воспоминаниями о своих семьях.",
+      "description": "Спектакль «Династии», объединяющий балет, поэзию и театр. Илзе Лиепа, Екатерина Рождественская и Александра Захарова, дочери легендарных деятелей искусства, делятся личными воспоминаниями о своих семьях.",
       "performers": [
         "Илзе Лиепа",
         "Екатерина Рождественская",
@@ -52,11 +52,11 @@
       "date": "2025-12-25",
       "time_start": "20:00",
       "time_end": null,
-      "venue": "ГАУ КО «Кафедральный собор», ул. Канта, 1",
+      "venue": "ГАУ КО «Кафедральный собор», ул. Канта, 1",
       "price": null,
       "is_free": true,
       "ticket_url": "https://pyramida.info/tickets/puteshestvie-v-skazochnyy-son-vtoraya-partiya-biletov_53469831",
-      "description": "Интерактивное новогоднее шоу для всей семьи о спасении сказки от злого Анфилиуса.",
+      "description": "Интерактивное новогоднее шоу для всей семьи. Аля и Проша спасают сказку от злого Анфилиуса, собирая магические символы.",
       "performers": []
     },
     {
@@ -65,11 +65,11 @@
       "date": "2025-12-26",
       "time_start": "18:00",
       "time_end": null,
-      "venue": "ГАУ КО «Кафедральный собор», ул. Канта, 1",
+      "venue": "ГАУ КО «Кафедральный собор», ул. Канта, 1",
       "price": null,
       "is_free": true,
       "ticket_url": "https://pyramida.info/tickets/puteshestvie-v-skazochnyy-son-vtoraya-partiya-biletov_53469878",
-      "description": "Интерактивное новогоднее шоу для всей семьи о спасении сказки от злого Анфилиуса.",
+      "description": "Интерактивное новогоднее шоу для всей семьи. Аля и Проша спасают сказку от злого Анфилиуса, собирая магические символы.",
       "performers": []
     },
     {
@@ -78,11 +78,11 @@
       "date": "2025-12-26",
       "time_start": "20:00",
       "time_end": null,
-      "venue": "ГАУ КО «Кафедральный собор», ул. Канта, 1",
+      "venue": "ГАУ КО «Кафедральный собор», ул. Канта, 1",
       "price": null,
       "is_free": true,
       "ticket_url": "https://pyramida.info/tickets/puteshestvie-v-skazochnyy-son-vtoraya-partiya-biletov_53469889",
-      "description": "Интерактивное новогоднее шоу для всей семьи о спасении сказки от злого Анфилиуса.",
+      "description": "Интерактивное новогоднее шоу для всей семьи. Аля и Проша спасают сказку от злого Анфилиуса, собирая магические символы.",
       "performers": []
     },
     {
@@ -91,11 +91,11 @@
       "date": "2025-12-29",
       "time_start": "18:00",
       "time_end": null,
-      "venue": "ГАУ КО «Кафедральный собор», ул. Канта, 1",
+      "venue": "ГАУ КО «Кафедральный собор», ул. Канта, 1",
       "price": null,
       "is_free": true,
       "ticket_url": "https://pyramida.info/tickets/puteshestvie-v-skazochnyy-son-vtoraya-partiya-biletov_53469908",
-      "description": "Интерактивное новогоднее шоу для всей семьи о спасении сказки от злого Анфилиуса.",
+      "description": "Интерактивное новогоднее шоу для всей семьи. Аля и Проша спасают сказку от злого Анфилиуса, собирая магические символы.",
       "performers": []
     },
     {
@@ -104,11 +104,11 @@
       "date": "2025-12-29",
       "time_start": "20:00",
       "time_end": null,
-      "venue": "ГАУ КО «Кафедральный собор», ул. Канта, 1",
+      "venue": "ГАУ КО «Кафедральный собор», ул. Канта, 1",
       "price": null,
       "is_free": true,
       "ticket_url": "https://pyramida.info/tickets/puteshestvie-v-skazochnyy-son-vtoraya-partiya-biletov_53469928",
-      "description": "Интерактивное новогоднее шоу для всей семьи о спасении сказки от злого Анфилиуса.",
+      "description": "Интерактивное новогоднее шоу для всей семьи. Аля и Проша спасают сказку от злого Анфилиуса, собирая магические символы.",
       "performers": []
     },
     {
@@ -121,7 +121,7 @@
       "price": null,
       "is_free": true,
       "ticket_url": null,
-      "description": "Водно-акробатическое шоу о зажжении главной ёлки Нового года под водой.",
+      "description": "Водно-акробатическое шоу в подводном мире Балтики. Герои зажигают ёлку на воде.",
       "performers": []
     },
     {
@@ -134,7 +134,7 @@
       "price": null,
       "is_free": true,
       "ticket_url": null,
-      "description": "Водно-акробатическое шоу о зажжении главной ёлки Нового года под водой.",
+      "description": "Водно-акробатическое шоу в подводном мире Балтики. Герои зажигают ёлку на воде.",
       "performers": []
     },
     {
@@ -147,7 +147,7 @@
       "price": null,
       "is_free": true,
       "ticket_url": null,
-      "description": "Увлекательные мастер-классы по созданию новогодних подарков и украшений.",
+      "description": "Увлекательные мастер-классы для детей по созданию новогодних подарков и украшений.",
       "performers": []
     },
     {
@@ -207,7 +207,7 @@
       "price": null,
       "is_free": true,
       "ticket_url": "https://pyramida.info/tickets/kontsert-detskogo-khora-volshebnoe-rozhdestvo_53257919",
-      "description": "Рождественский концерт детского хора «Счастье» и Камерного оркестра филармонии.",
+      "description": "Рождественский концерт с участием Камерного оркестра и детского хора.",
       "performers": []
     },
     {
@@ -233,7 +233,7 @@
       "date": "2026-01-09",
       "time_start": "18:00",
       "time_end": null,
-      "venue": "Калининградский областной музыкальный колледж им. С.В. Рахманинова, ул. Фрунзе, 4",
+      "venue": "Калининградский областной музыкальный колледж им. С.В. Рахманинова",
       "price": null,
       "is_free": false,
       "ticket_url": "https://pyramida.info/tickets/vecher-klassicheskoy-muzyki-s-yuriem-demidovichem-i-abisalom-gergievym_54566307",
@@ -253,7 +253,7 @@
       "price": null,
       "is_free": true,
       "ticket_url": "https://pyramida.info/tickets/kinokontsert-ot-goshi-kutsenko-v-universale_53258389",
-      "description": "Музыкальный проект Гоши Куценко и Анастасии Приц с исполнением кинохитов.",
+      "description": "Музыкальный проект Гоши Куценко с исполнением песен из кинофильмов.",
       "performers": [
         "Гоша Куценко",
         "Екатерина Климова",
@@ -269,7 +269,7 @@
       "address": "пр-кт Мира, 4"
     },
     {
-      "title": "ГАУ КО «Кафедральный собор»",
+      "title": "ГАУ КО «Кафедральный собор»",
       "city": "Калининград",
       "address": "ул. Канта, 1"
     },
@@ -305,6 +305,6 @@
     }
   ],
   "images_festival": [
-    "https://static.tildacdn.com/tild3232-3133-4434-a164-626564623261/Group_33.png"
+    "https://static3.tildacdn.com/tild3232-3133-4434-a164-626564623261/Group_33.png"
   ]
 }

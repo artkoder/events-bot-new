@@ -62,7 +62,7 @@ Output ONLY valid JSON matching this schema:
       "price": "Exact price like '500 руб' or 'бесплатно' or null",
       "is_free": true/false,
       "ticket_url": "Direct URL to buy tickets for THIS event",
-      "description": "1-2 sentence description of the event",
+      "description": "DETAILED description - include all available info: what happens, who performs, program highlights, age restrictions, etc.",
       "performers": ["Names of performers/actors if mentioned"]
     }
   ],
