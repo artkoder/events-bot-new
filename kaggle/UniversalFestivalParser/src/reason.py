@@ -35,6 +35,7 @@ Output ONLY valid JSON matching this schema:
     "dates": {"start": "YYYY-MM-DD - REQUIRED", "end": "YYYY-MM-DD - REQUIRED"},
     "is_annual": true/false/null,
     "audience": "Target audience (e.g. 'families with children', 'music lovers')",
+    "age_restriction": "Age restriction like '0+', '6+', '12+', '16+', '18+' or null",
     "links": {
       "website": "Official URL - look for main domain",
       "socials": ["VK/TG/other social URLs"],
@@ -59,29 +60,43 @@ Output ONLY valid JSON matching this schema:
       "time_start": "HH:MM or null",
       "time_end": "HH:MM or null",
       "venue": "Full venue name with address if available",
-      "price": "Exact price like '500 руб' or 'бесплатно' or null",
+      "price": "Exact price like '500 руб' or 'от 500 руб' or 'бесплатно' - EXTRACT FROM PAGE!",
       "is_free": true/false,
       "ticket_url": "Direct URL to buy tickets for THIS event",
+      "ticket_status": "available/sold_out/registration_open/registration_closed/unknown",
       "description": "DETAILED description - include all available info: what happens, who performs, program highlights, age restrictions, etc.",
-      "performers": ["Names of performers/actors if mentioned"]
+      "performers": ["Names of performers/actors if mentioned"],
+      "age_restriction": "Age restriction like '0+', '6+', '12+', '16+', '18+' or null"
     }
   ],
   "venues": [
     {"title": "Full venue name", "city": "City", "address": "Full street address"}
   ],
-  "images_festival": ["Only real photo URLs, NOT .svg icons"]
+  "images_festival": [
+    {
+      "url": "Image URL (NOT .svg icons, only real photos)",
+      "ocr_text": "Any text visible on the image (dates, prices, names) or null",
+      "ocr_title": "Main title/heading from the image or null"
+    }
+  ]
 }
 
-EXTRACTION RULES (GREEDY):
+EXTRACTION RULES (GREEDY - MAXIMIZE DATA):
 1. Extract EVERY event from the program - don't skip any
 2. For EACH event, look for its specific ticket URL (pyramida.info, etc)
 3. Use CORRECT YEAR based on today's date context
 4. Dates MUST be in ISO 8601 format (YYYY-MM-DD)
 5. Extract performer names when mentioned
-6. Include price information for each event
-7. DO NOT include .svg icon URLs in images_festival
-8. If an event repeats on multiple dates, create SEPARATE entries
-9. Output ONLY the JSON, no explanations"""
+6. PRICE IS CRITICAL: Look for prices near ticket buttons, in event descriptions
+7. TICKET STATUS: 
+   - 'available' if tickets can be purchased
+   - 'sold_out' if SOLD OUT/распродано mentioned
+   - 'registration_open' if free registration is open
+   - 'registration_closed' if registration ended
+   - 'unknown' if status cannot be determined
+8. DO NOT include .svg icon URLs in images_festival
+9. If an event repeats on multiple dates, create SEPARATE entries
+10. Output ONLY the JSON, no explanations"""
 
 
 def _strip_code_fences(text: str) -> str:
