@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [1.8.1] - 2026-01-05
+
+### Fixed
+- **Channel Navigation Buttons**: Исправлено получение постов канала — добавлен `channel_post` в `allowed_updates` webhook.
+- **Channel Navigation Buttons**: Исправлен доступ к `db` и `bot` в хэндлере — теперь берутся из модуля `main`.
+- **Channel Navigation Buttons**: Исправлен фильтр команд — проверка `/` вынесена внутрь хэндлера.
+
 ## [1.8.0] - 2026-01-05
 
 ### Added
