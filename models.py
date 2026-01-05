@@ -557,6 +557,12 @@ class EventPoster(SQLModel, table=True):
     )
 
 
+class TomorrowPage(SQLModel, table=True):
+    date: str = Field(primary_key=True)  # YYYY-MM-DD
+    url: str
+    created_at: datetime = Field(default_factory=utc_now)
+
+
 class MonthPage(SQLModel, table=True):
     __table_args__ = {"extend_existing": True}
     month: str = Field(primary_key=True)

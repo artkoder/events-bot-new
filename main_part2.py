@@ -144,6 +144,7 @@ def event_to_nodes(
     include_ics: bool = True,
     include_details: bool = True,
     show_image: bool = False,
+    show_3d_only: bool = False,
 ) -> list[dict]:
     md = format_event_md(
         e,
@@ -160,19 +161,21 @@ def event_to_nodes(
     from telegraph.utils import html_to_nodes
 
     nodes = []
-    # Show 3D preview as main image if available, otherwise use first photo
-    if show_image:
-        preview_url = getattr(e, "preview_3d_url", None)
-        if isinstance(preview_url, str):
-            preview_url = preview_url.strip()
-        if preview_url and isinstance(preview_url, str) and preview_url.startswith("http"):
+    # Show 3D preview as main image if available
+    preview_url = getattr(e, "preview_3d_url", None)
+    if isinstance(preview_url, str):
+        preview_url = preview_url.strip()
+    has_3d_preview = preview_url and isinstance(preview_url, str) and preview_url.startswith("http")
+    
+    if show_image or show_3d_only:
+        if has_3d_preview:
             # Use 3D preview as main image
             nodes.append({
                 "tag": "figure",
                 "children": [{"tag": "img", "attrs": {"src": preview_url}, "children": []}]
             })
-        elif e.photo_urls:
-            # Fallback to first photo
+        elif show_image and e.photo_urls:
+            # Fallback to first photo (only if show_image=True, not show_3d_only)
             first_url = e.photo_urls[0]
             if isinstance(first_url, str):
                 first_url = first_url.strip()
@@ -301,6 +304,7 @@ def add_day_sections(
 
     include_details: bool = True,
     show_images: bool = False,
+    show_3d_only: bool = False,
 ):
     """Append event sections grouped by day to Telegraph content."""
     for d in days:
@@ -315,7 +319,10 @@ def add_day_sections(
         elif d.weekday() == 6:
             add_many([{ "tag": "h3", "children": ["🟥🟥 воскресенье 🟥🟥"] }])
         add_many([
-            {"tag": "h3", "children": [f"🟥🟥🟥 {format_day_pretty(d)} 🟥🟥🟥"]},
+            {
+                "tag": "h3",
+                "children": [f"🟥🟥🟥 {format_day_pretty(d)} 🟥🟥🟥"],
+            },
             {"tag": "br"},
         ])
         add_many(telegraph_br())
@@ -330,6 +337,7 @@ def add_day_sections(
                     include_ics=include_ics,
                     include_details=include_details,
                     show_image=show_images,
+                    show_3d_only=show_3d_only,
                 )
             )
         if use_markers:
@@ -538,6 +546,7 @@ def _build_month_page_content_sync(
         include_ics=include_ics,
         include_details=include_details,
         show_images=len(events) <= 30,
+        show_3d_only=True,  # Always show 3D preview if available
     )
 
     if exhibitions and not exceeded:
@@ -2829,16 +2838,25 @@ async def build_daily_posts(
         markup = types.InlineKeyboardMarkup(inline_keyboard=[[b] for b in buttons])
 
     combined = section1 + "\n\n\n" + section2
+    combined += "\u200b" # DAILY_MARKER
     if len(combined) <= 4096:
         return [(combined, markup)]
 
+    # Marker to identify daily posts (for channel_nav filtering)
+    DAILY_MARKER = "\u200b"
+
     posts: list[tuple[str, types.InlineKeyboardMarkup | None]] = []
+    
+    # helper to append marker
+    def _mark(t: str) -> str:
+        return t + DAILY_MARKER
+
     for part in split_text(section1):
-        posts.append((part, None))
+        posts.append((_mark(part), None))
     section2_parts = split_text(section2)
     for part in section2_parts[:-1]:
-        posts.append((part, None))
-    posts.append((section2_parts[-1], markup))
+        posts.append((_mark(part), None))
+    posts.append((_mark(section2_parts[-1]), markup))
     return posts
 
 
@@ -14387,6 +14405,8 @@ def create_app() -> web.Application:
     logging.info("FOUR_O_TOKEN found: %s", bool(os.getenv("FOUR_O_TOKEN")))
     dp = Dispatcher()
     dp.include_router(ik_poster_router)
+    from handlers.channel_nav import channel_nav_router
+    dp.include_router(channel_nav_router)
     db = Database(DB_PATH)
     set_db(db)  # Set db in main.py's namespace for handlers
     dp.include_router(special_router)  # must be after db init
@@ -15594,7 +15614,11 @@ async def run_dev_mode():
     
     try:
         # Start polling
-        await dp.start_polling(bot, allowed_updates=["message", "callback_query", "my_chat_member"])
+        await dp.start_polling(
+            bot, 
+            allowed_updates=["message", "callback_query", "my_chat_member", "channel_post", "edited_channel_post"],
+            db=db
+        )
     finally:
         # Cleanup - use the on_shutdown from app
         await app["bot"].session.close()
