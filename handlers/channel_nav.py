@@ -153,8 +153,15 @@ FULL_MONTH_NAMES = [
 ]
 
 @channel_nav_router.channel_post(~F.text.startswith("/"))
-async def handle_channel_post(message: types.Message, db: Database, bot: Bot):
+async def handle_channel_post(message: types.Message):
     """Handle new posts in channel."""
+    # Get db and bot from main module
+    import main
+    db = main.get_db()
+    bot = main.bot
+    if not db or not bot:
+        logger.warning("channel_nav: db or bot not initialized")
+        return
     
     # 1. Filter: Check if bot is admin (implicit if we can edit, but good to check context?)
     # Actually, we just try to edit.
