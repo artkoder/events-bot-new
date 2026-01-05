@@ -136,8 +136,7 @@ async def main():
             # Phase 5: FILTER (Regional)
             print(f"\n🟤 Phase 5: FILTER (Regional)")
             try:
-                import sys
-                sys.path.insert(0, str(Path(__file__).parent.parent / "kaggle/UniversalFestivalParser/src"))
+                # regional_filter already in sys.path from KAGGLE_SRC added at top
                 from regional_filter import filter_regional
                 uds, filter_result = filter_regional(uds)
                 print(f"   ✅ Kept {filter_result.events_kept}/{filter_result.events_total} events")
