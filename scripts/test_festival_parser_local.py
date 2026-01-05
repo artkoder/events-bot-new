@@ -133,6 +133,21 @@ async def main():
             except Exception as e:
                 print(f"   ⚠️ Enrich phase error: {e}")
             
+            # Phase 5: FILTER (Regional)
+            print(f"\n🟤 Phase 5: FILTER (Regional)")
+            try:
+                import sys
+                sys.path.insert(0, str(Path(__file__).parent.parent / "kaggle/UniversalFestivalParser/src"))
+                from regional_filter import filter_regional
+                uds, filter_result = filter_regional(uds)
+                print(f"   ✅ Kept {filter_result.events_kept}/{filter_result.events_total} events")
+                if filter_result.events_removed > 0:
+                    print(f"   ⚠️ Removed {filter_result.events_removed} events outside Kaliningrad oblast")
+                    for removed in filter_result.removed_events[:3]:
+                        print(f"      - {removed['title']}: {removed['reason']}")
+            except Exception as e:
+                print(f"   ⚠️ Filter phase error: {e}")
+            
             uds_path = output_dir / "uds.json"
             uds_path.write_text(json.dumps(uds, ensure_ascii=False, indent=2), encoding="utf-8")
             print(f"   ✅ UDS extracted and saved: {uds_path}")

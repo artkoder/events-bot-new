@@ -65,17 +65,17 @@ Output ONLY valid JSON matching this schema:
       "age_restriction": "Age restriction like '0+', '6+', '12+', '16+', '18+' or null",
       "ticket_url": "Direct URL to buy tickets for THIS event",
       "ticket_status": "available/sold_out/registration_open/registration_closed/ended/unknown",
-      "price": "Price like '500 руб' or 'от 500 руб' or 'бесплатно' - REQUIRED if not free!",
-      "tickets": [
-        {"category": "Взрослый/Детский/Льготный/VIP", "price": 500, "currency": "RUB"}
-      ],
+      "price": "Price text like '500 руб' or 'от 500 руб' or 'бесплатно'",
+      "price_min": 500,
+      "price_max": 1000,
       "is_free": true/false,
       "participants": [
         {"name": "Person name", "role": "Дирижёр/Актёр/Режиссёр/Исполнитель/Ведущий", "details": "Additional info or null"}
       ],
       "works": [
         {"title": "Work/film/play title", "author": "Composer/Director/Author or null", "details": "Additional info or null"}
-      ]
+      ],
+      "images_event": ["Image URLs for this specific event (posters, photos)"]
     }
   ],
   "venues": [
@@ -103,19 +103,20 @@ EXTRACTION RULES (GREEDY - MAXIMIZE DATA):
 4. Dates MUST be in ISO 8601 format (YYYY-MM-DD)
 5. PARTICIPANTS: Extract all performers/actors/directors with their roles
 6. WORKS: For concerts - extract musical pieces with composers; for films - extract film titles with directors
-7. TICKETS: If multiple price categories exist (adult/child/VIP), list each separately in tickets[]
+7. PRICES: Extract price_min and price_max (integers in RUB). If single price, min=max. If free, both=0
 8. GEO: Include latitude/longitude for venues if known (Калининград ~54.71, 20.51)
-9. TICKET STATUS (compare event date with today's date!): 
+9. IMAGES_EVENT: Extract poster/photo URLs specific to each event
+10. TICKET STATUS (compare event date with today's date!): 
    - 'available' if tickets can be purchased
    - 'sold_out' if SOLD OUT/распродано mentioned
    - 'registration_open' if free registration is open
    - 'registration_closed' if registration ended
    - 'ended' if event date has PASSED (before today's date)
    - 'unknown' if status cannot be determined
-10. DO NOT include .svg icon URLs in images_festival
-11. If an event repeats on multiple dates, create SEPARATE entries
-12. FESTIVAL TYPE: Identify type (music/film/theater/art/literature/food/sport/other)
-13. Output ONLY the JSON, no explanations"""
+11. DO NOT include .svg icon URLs in images
+12. If an event repeats on multiple dates, create SEPARATE entries
+13. FESTIVAL TYPE: Identify type (music/film/theater/art/literature/food/sport/other)
+14. Output ONLY the JSON, no explanations"""
 
 
 def _strip_code_fences(text: str) -> str:
