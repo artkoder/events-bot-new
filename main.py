@@ -420,6 +420,7 @@ def _week_vk_lock(start: str) -> asyncio.Lock:
 
 DB_PATH = os.getenv("DB_PATH", "/data/db.sqlite")
 db: Database | None = None
+bot: "Bot | None" = None
 
 
 def get_db() -> Database | None:
@@ -434,6 +435,19 @@ def set_db(new_db: Database) -> None:
     global db
     logging.info("set_db called: new_db=%s, module=%s", new_db, __name__)
     db = new_db
+
+
+def get_bot() -> "Bot | None":
+    """Get the current bot instance. Use this instead of main.bot in handlers."""
+    global bot
+    return bot
+
+
+def set_bot(new_bot: "Bot") -> None:
+    """Set the bot instance. Called from create_app() in main_part2.py."""
+    global bot
+    logging.info("set_bot called: new_bot=%s, module=%s", new_bot, __name__)
+    bot = new_bot
 
 
 _base_bot_code = os.getenv("BOT_CODE", "announcements")

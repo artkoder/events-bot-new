@@ -158,7 +158,7 @@ async def handle_channel_post(message: types.Message):
     # Get db and bot from main module
     import main
     db = main.get_db()
-    bot = main.bot
+    bot = main.get_bot()
     if not db or not bot:
         logger.warning("channel_nav: db or bot not initialized")
         return

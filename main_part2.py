@@ -14398,7 +14398,7 @@ def create_app() -> web.Application:
     # Webhook is optional - only required for production mode
     # In dev mode, we'll skip webhook setup
 
-    from main import IPv4AiohttpSession
+    from main import IPv4AiohttpSession, set_bot
     session = IPv4AiohttpSession(timeout=ClientTimeout(total=HTTP_TIMEOUT))
     bot = SafeBot(token, session=session)
     logging.info("DB_PATH=%s", DB_PATH)
@@ -14409,6 +14409,7 @@ def create_app() -> web.Application:
     dp.include_router(channel_nav_router)
     db = Database(DB_PATH)
     set_db(db)  # Set db in main.py's namespace for handlers
+    set_bot(bot)  # Set bot in main.py's namespace for handlers
     dp.include_router(special_router)  # must be after db init
     import video_announce.handlers as video_handlers
     import preview_3d.handlers as preview_3d_handlers
