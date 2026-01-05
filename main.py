@@ -420,6 +420,7 @@ def _week_vk_lock(start: str) -> asyncio.Lock:
 
 DB_PATH = os.getenv("DB_PATH", "/data/db.sqlite")
 db: Database | None = None
+bot: "Bot | None" = None
 
 
 def get_db() -> Database | None:
@@ -436,6 +437,19 @@ def set_db(new_db: Database) -> None:
     db = new_db
 
 
+def get_bot() -> "Bot | None":
+    """Get the current bot instance. Use this instead of main.bot in handlers."""
+    global bot
+    return bot
+
+
+def set_bot(new_bot: "Bot") -> None:
+    """Set the bot instance. Called from create_app() in main_part2.py."""
+    global bot
+    logging.info("set_bot called: new_bot=%s, module=%s", new_bot, __name__)
+    bot = new_bot
+
+
 _base_bot_code = os.getenv("BOT_CODE", "announcements")
 BOT_CODE = _base_bot_code + "_test" if os.getenv("DEV_MODE") == "1" else _base_bot_code
 TELEGRAPH_TOKEN_FILE = os.getenv("TELEGRAPH_TOKEN_FILE", "/data/telegraph_token.txt")
@@ -448,6 +462,39 @@ TELEGRAPH_AUTHOR_URL = os.getenv(
 HISTORY_TELEGRAPH_AUTHOR_URL = os.getenv(
     "HISTORY_TELEGRAPH_AUTHOR_URL", "https://t.me/kgdstories"
 )
+
+
+def is_e2e_tester(user_id: int) -> bool:
+    """Check if user is the E2E tester (only works in DEV_MODE).
+    
+    This allows automated E2E tests to run commands that require superadmin access.
+    The tester ID must be explicitly set via E2E_TESTER_ID environment variable.
+    
+    Security: This function ALWAYS returns False in production (when DEV_MODE != "1").
+    """
+    if os.getenv("DEV_MODE") != "1":
+        return False
+    tester_id = os.getenv("E2E_TESTER_ID")
+    if not tester_id:
+        return False
+    try:
+        return int(tester_id) == user_id
+    except ValueError:
+        return False
+
+
+def has_admin_access(user) -> bool:
+    """Check if user has admin access (superadmin or E2E tester in DEV_MODE).
+    
+    Use this instead of checking user.is_superadmin directly when you want
+    E2E tests to be able to execute admin commands.
+    """
+    if user is None:
+        return False
+    if user.is_superadmin:
+        return True
+    return is_e2e_tester(user.user_id)
+
 VK_MISS_REVIEW_COMMAND = os.getenv("VK_MISS_REVIEW_COMMAND", "/vk_misses")
 VK_MISS_REVIEW_FILE = os.getenv("VK_MISS_REVIEW_FILE", "/data/vk_miss_review.md")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -536,6 +583,17 @@ logging.info(
     "present" if VK_TOKEN_AFISHA else "missing",
     "present" if VK_SERVICE_TOKEN else "missing",
 )
+
+# Festival Parser: check GOOGLE_API_KEY for Gemma 3-27B LLM
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+if GOOGLE_API_KEY:
+    logging.info("festival_parser.config: GOOGLE_API_KEY=present (Festival Parser enabled)")
+else:
+    logging.warning(
+        "festival_parser.config: GOOGLE_API_KEY=MISSING! "
+        "Festival Parser will NOT work. "
+        "Set GOOGLE_API_KEY environment variable for production deployment."
+    )
 
 
 @dataclass
@@ -724,6 +782,8 @@ vk_default_location_sessions: TTLCache[
 vk_add_source_sessions: set[int] = set()
 # waiting for Pyramida URL input
 pyramida_input_sessions: set[int] = set()
+# waiting for Dom Iskusstv URL input
+dom_iskusstv_input_sessions: set[int] = set()
 
 # operator_id -> (inbox_id, batch_id) awaiting extra info during VK review
 vk_review_extra_sessions: dict[int, tuple[int, str, bool]] = {}
@@ -1069,11 +1129,12 @@ def build_event_card_message(
 def _user_can_label_event(user: User | None) -> bool:
     if not user or user.blocked:
         return False
-    if user.is_superadmin:
+    if has_admin_access(user):
         return True
     if user.is_partner:
         return False
     return True
+
 
 
 async def update_tourist_message(
@@ -1947,6 +2008,7 @@ def seconds_to_next_minute(now: datetime) -> float:
 
 # main menu buttons
 MENU_ADD_EVENT = "\u2795 Добавить событие"
+MENU_DOM_ISKUSSTV = "🏛 Дом искусств"
 MENU_ADD_FESTIVAL = "\u2795 Добавить фестиваль"
 MENU_EVENTS = "\U0001f4c5 События"
 VK_BTN_ADD_SOURCE = "\u2795 Добавить сообщество"
@@ -1954,6 +2016,7 @@ VK_BTN_LIST_SOURCES = "\U0001f4cb Показать список сообщест
 VK_BTN_CHECK_EVENTS = "\U0001f50e Проверить события"
 VK_BTN_QUEUE_SUMMARY = "\U0001f4ca Сводка очереди"
 VK_BTN_PYRAMIDA = "🔮 Pyramida"
+VK_BTN_DOM_ISKUSSTV = "🏛 Дом искусств"
 
 # command help descriptions by role
 # roles: guest (not registered), user (registered), superadmin
@@ -4079,7 +4142,7 @@ async def notify_event_added(
     db: Database, bot: Bot, user: User | None, event: Event, added: bool
 ) -> None:
     """Notify superadmin when a user or partner adds an event."""
-    if not added or not user or user.is_superadmin:
+    if not added or not user or has_admin_access(user):
         return
     role = "partner" if user.is_partner else "user"
     name = f"@{user.username}" if user.username else str(user.user_id)
@@ -7510,9 +7573,12 @@ async def send_main_menu(bot: Bot, user: User | None, chat_id: int) -> None:
             ],
             [types.KeyboardButton(text=MENU_EVENTS)],
         ]
-        # Add Pyramida button for superadmins
-        if user and user.is_superadmin:
-            buttons.append([types.KeyboardButton(text=VK_BTN_PYRAMIDA)])
+        # Add Pyramida button for admins
+        if has_admin_access(user):
+            buttons.append([
+                types.KeyboardButton(text=VK_BTN_PYRAMIDA),
+                types.KeyboardButton(text=MENU_DOM_ISKUSSTV),
+            ])
         markup = types.ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
     async with span("tg-send"):
         await bot.send_message(chat_id, "Choose action", reply_markup=markup)
@@ -7524,6 +7590,7 @@ async def handle_start(message: types.Message, db: Database, bot: Bot):
             result = await session.execute(select(User))
             user_count = len(result.scalars().all())
             user = await session.get(User, message.from_user.id)
+            logging.info(f"DEBUG_AUTH: user_id={message.from_user.id}, user_count={user_count}, user_found={user}")
             if user:
                 if user.blocked:
                     msg = "Access denied"
@@ -7568,7 +7635,7 @@ async def handle_help(message: types.Message, db: Database, bot: Bot) -> None:
         user = await session.get(User, message.from_user.id)
     role = "guest"
     if user and not user.blocked:
-        role = "superadmin" if user.is_superadmin else "user"
+        role = "superadmin" if has_admin_access(user) else "user"
     lines = [
         f"{item['usage']} — {item['desc']}"
         for item in HELP_COMMANDS
@@ -7580,7 +7647,7 @@ async def handle_help(message: types.Message, db: Database, bot: Bot) -> None:
 async def handle_ocrtest(message: types.Message, db: Database, bot: Bot) -> None:
     async with db.get_session() as session:
         user = await session.get(User, message.from_user.id)
-        if not user or not user.is_superadmin:
+        if not has_admin_access(user):
             await bot.send_message(message.chat.id, "Not authorized")
             return
 
@@ -7657,7 +7724,7 @@ async def handle_register(message: types.Message, db: Database, bot: Bot):
 async def handle_requests(message: types.Message, db: Database, bot: Bot):
     async with db.get_session() as session:
         user = await session.get(User, message.from_user.id)
-        if not user or not user.is_superadmin:
+        if not has_admin_access(user):
             return
         result = await session.execute(select(PendingUser))
         pending = result.scalars().all()
@@ -8540,6 +8607,52 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
             await callback.message.answer(f"❌ Ошибка при обновлении: {e}")
         await callback.answer()
 
+    elif data.startswith("festreparse:"):
+        fid = int(data.split(":")[1])
+        async with db.get_session() as session:
+            user = await session.get(User, callback.from_user.id)
+            fest = await session.get(Festival, fid)
+            if not fest or (user and user.blocked):
+                await callback.answer("Not authorized", show_alert=True)
+                return
+            if not fest.source_url:
+                await callback.answer("У фестиваля нет source_url для перепарсинга", show_alert=True)
+                return
+            source_url = fest.source_url
+            fest_name = fest.name
+        
+        await callback.message.answer(f"⏳ Запускаю парсер фестиваля с {source_url}...")
+        try:
+            from source_parsing.festival_parser import process_festival_url
+            
+            async def status_callback(status: str) -> None:
+                try:
+                    await callback.message.answer(f"📊 {status}")
+                except Exception:
+                    pass
+            
+            festival, uds_url, llm_log_url = await process_festival_url(
+                db=db,
+                bot=bot,
+                chat_id=callback.message.chat.id,
+                url=source_url,
+                status_callback=status_callback,
+            )
+            
+            lines = [f"✅ Фестиваль «{festival.name}» обновлён"]
+            if festival.telegraph_url:
+                lines.append(f"📄 [Страница фестиваля]({festival.telegraph_url})")
+            if uds_url:
+                lines.append(f"📊 [UDS JSON]({uds_url})")
+            if llm_log_url:
+                lines.append(f"🔍 [LLM лог]({llm_log_url})")
+            
+            await callback.message.answer("\n".join(lines), parse_mode="Markdown")
+        except Exception as e:
+            logging.error("festreparse error for %s: %s", fest_name, e)
+            await callback.message.answer(f"❌ Ошибка парсинга: {e}")
+        await callback.answer()
+
     elif data.startswith("togglesilent:"):
         eid = int(data.split(":")[1])
         async with db.get_session() as session:
@@ -8943,7 +9056,14 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
             user = await session.get(User, callback.from_user.id)
         filter_id = user.user_id if user and user.is_partner else None
         text, markup = await build_events_message(db, target, tz, filter_id)
-        await callback.message.edit_text(text, reply_markup=markup)
+        try:
+            await callback.message.edit_text(text, reply_markup=markup)
+        except TelegramBadRequest as e:
+            if "message is too long" in str(e).lower() or "MESSAGE_TOO_LONG" in str(e):
+                text, markup = await build_events_message_compact(db, target, tz, filter_id)
+                await callback.message.edit_text(text, reply_markup=markup, parse_mode="HTML")
+            else:
+                raise
         await callback.answer()
     elif data.startswith("unset:"):
         cid = int(data.split(":")[1])
@@ -9079,7 +9199,7 @@ async def handle_tz(message: types.Message, db: Database, bot: Bot):
         return
     async with db.get_session() as session:
         user = await session.get(User, message.from_user.id)
-        if not user or not user.is_superadmin:
+        if not has_admin_access(user):
             await bot.send_message(message.chat.id, "Not authorized")
             return
     await set_tz_offset(db, parts[1])
@@ -9089,7 +9209,7 @@ async def handle_tz(message: types.Message, db: Database, bot: Bot):
 async def handle_images(message: types.Message, db: Database, bot: Bot):
     async with db.get_session() as session:
         user = await session.get(User, message.from_user.id)
-        if not user or not user.is_superadmin:
+        if not has_admin_access(user):
             await bot.send_message(message.chat.id, "Not authorized")
             return
     new_value = not CATBOX_ENABLED
@@ -9105,7 +9225,7 @@ async def handle_vkgroup(message: types.Message, db: Database, bot: Bot):
         return
     async with db.get_session() as session:
         user = await session.get(User, message.from_user.id)
-        if not user or not user.is_superadmin:
+        if not has_admin_access(user):
             await bot.send_message(message.chat.id, "Not authorized")
             return
     if parts[1].lower() == "off":
@@ -9123,7 +9243,7 @@ async def handle_vktime(message: types.Message, db: Database, bot: Bot):
         return
     async with db.get_session() as session:
         user = await session.get(User, message.from_user.id)
-        if not user or not user.is_superadmin:
+        if not has_admin_access(user):
             await bot.send_message(message.chat.id, "Not authorized")
             return
     if not re.match(r"^\d{2}:\d{2}$", parts[2]):
@@ -9139,7 +9259,7 @@ async def handle_vktime(message: types.Message, db: Database, bot: Bot):
 async def handle_vkphotos(message: types.Message, db: Database, bot: Bot):
     async with db.get_session() as session:
         user = await session.get(User, message.from_user.id)
-        if not user or not user.is_superadmin:
+        if not has_admin_access(user):
             await bot.send_message(message.chat.id, "Not authorized")
             return
     new_value = not VK_PHOTOS_ENABLED
@@ -9166,7 +9286,7 @@ async def handle_vk_captcha(message: types.Message, db: Database, bot: Bot):
     _vk_captcha_awaiting_user = None
     async with db.get_session() as session:
         user = await session.get(User, message.from_user.id)
-        if not user or not user.is_superadmin:
+        if not has_admin_access(user):
             return
     invalid_markup = types.InlineKeyboardMarkup(
         inline_keyboard=[[types.InlineKeyboardButton(text="Отправить новый код", callback_data="captcha_refresh")]]
@@ -9262,7 +9382,7 @@ async def send_channels_list(
 ):
     async with db.get_session() as session:
         user = await session.get(User, message.from_user.id)
-        if not user or not user.is_superadmin:
+        if not has_admin_access(user):
             if not edit:
                 await bot.send_message(message.chat.id, "Not authorized")
             return
@@ -9306,7 +9426,7 @@ async def send_channels_list(
 async def send_users_list(message: types.Message, db: Database, bot: Bot, edit: bool = False):
     async with db.get_session() as session:
         user = await session.get(User, message.from_user.id)
-        if not user or not user.is_superadmin:
+        if not has_admin_access(user):
             if not edit:
                 await bot.send_message(message.chat.id, "Not authorized")
             return
@@ -9509,7 +9629,7 @@ async def send_setchannel_list(
 ):
     async with db.get_session() as session:
         user = await session.get(User, message.from_user.id)
-        if not user or not user.is_superadmin:
+        if not has_admin_access(user):
             if not edit:
                 await bot.send_message(message.chat.id, "Not authorized")
             return
@@ -9552,7 +9672,7 @@ async def send_regdaily_list(
 ):
     async with db.get_session() as session:
         user = await session.get(User, message.from_user.id)
-        if not user or not user.is_superadmin:
+        if not has_admin_access(user):
             if not edit:
                 await bot.send_message(message.chat.id, "Not authorized")
             return
@@ -9600,7 +9720,7 @@ async def send_daily_list(
 ):
     async with db.get_session() as session:
         user = await session.get(User, message.from_user.id)
-        if not user or not user.is_superadmin:
+        if not has_admin_access(user):
             if not edit:
                 await bot.send_message(message.chat.id, "Not authorized")
             return
@@ -12409,15 +12529,36 @@ async def update_telegraph_event_page(
             ev.telegraph_url = normalize_telegraph_url(data.get("url"))
             ev.telegraph_path = data.get("path")
         else:
-            await telegraph_edit_page(
-                tg,
-                ev.telegraph_path,
-                title=title,
-                content=nodes,
-                return_content=False,
-                caller="event_pipeline",
-                eid=ev.id,
-            )
+            try:
+                await telegraph_edit_page(
+                    tg,
+                    ev.telegraph_path,
+                    title=title,
+                    content=nodes,
+                    return_content=False,
+                    caller="event_pipeline",
+                    eid=ev.id,
+                )
+            except Exception as edit_err:
+                # Fallback: if edit fails (e.g., PAGE_ACCESS_DENIED), create new page
+                logging.warning(
+                    "Telegraph edit failed for event %d (path=%s): %s. Creating new page.",
+                    ev.id,
+                    ev.telegraph_path,
+                    edit_err,
+                )
+                # Clear old path and create new page
+                ev.telegraph_path = None
+                data = await telegraph_create_page(
+                    tg,
+                    title=title,
+                    content=nodes,
+                    return_content=False,
+                    caller="event_pipeline_fallback",
+                    eid=ev.id,
+                )
+                ev.telegraph_url = normalize_telegraph_url(data.get("url"))
+                ev.telegraph_path = data.get("path")
         ev.content_hash = new_hash
         session.add(ev)
         await session.commit()
@@ -13991,8 +14132,32 @@ async def update_all_festival_nav(event_id: int, db: Database, bot: Bot | None) 
 async def festivals_fix_nav(
     db: Database, bot: Bot | None = None
 ) -> tuple[int, int, int, int]:
+    today = datetime.now(LOCAL_TZ).date().isoformat()
     async with db.get_session() as session:
-        res = await session.execute(select(Festival))
+        # Build subquery for festival event date ranges - only future events
+        ev_dates = (
+            select(
+                Event.festival,
+                func.max(func.coalesce(Event.end_date, Event.date)).label("last_event_date"),
+            )
+            .where(Event.date >= today)
+            .group_by(Event.festival)
+            .subquery()
+        )
+
+        # Join festivals with their future events - filter out festivals with no future events
+        # and past end_date
+        stmt = (
+            select(Festival)
+            .outerjoin(ev_dates, ev_dates.c.festival == Festival.name)
+            .where(
+                or_(
+                    Festival.end_date >= today,  # Festival end date is today or future
+                    ev_dates.c.last_event_date.is_not(None),  # Has future events
+                )
+            )
+        )
+        res = await session.execute(stmt)
         fests = res.scalars().all()
 
     pages = 0

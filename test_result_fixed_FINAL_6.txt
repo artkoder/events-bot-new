@@ -1,0 +1,166 @@
+2026-01-04 07:03:36,067 [INFO] e2e.behave: ============================================================
+2026-01-04 07:03:36,068 [INFO] e2e.behave: E2E BDD Test Suite Starting
+2026-01-04 07:03:36,068 [INFO] e2e.behave: ============================================================
+2026-01-04 07:03:36,069 [INFO] telethon.network.mtprotosender: Connecting to 149.154.167.51:443/TcpFull...
+2026-01-04 07:03:36,219 [INFO] telethon.network.mtprotosender: Connection to 149.154.167.51:443/TcpFull complete!
+2026-01-04 07:03:37,187 [INFO] tests.e2e.human_client: Connected as: M (ID: 5130989066)
+2026-01-04 07:03:37,187 [INFO] e2e.behave: Connected! Testing bot: @eventsbotTestBot
+USING RUNNER: behave.runner:Runner
+Функция: Проверка парсера "Дом искусств" # tests/e2e/features/dom_iskusstv.feature:2
+
+  Функция: Проверка парсера "Дом искусств"  # tests/e2e/features/dom_iskusstv.feature:2
+2026-01-04 07:03:37,192 [INFO] e2e.behave: 
+📌 Сценарий: Проверка стартового меню
+
+  Сценарий: Проверка стартового меню                         # tests/e2e/features/dom_iskusstv.feature:8
+    Дано я авторизован в клиенте Telethon                    # tests/e2e/features/steps/bot_steps.py:49
+2026-01-04 07:03:37,193 [INFO] e2e.steps: ✓ Клиент авторизован
+    И я открыл чат с ботом                                   # tests/e2e/features/steps/bot_steps.py:57
+2026-01-04 07:03:37,465 [INFO] e2e.steps: ✓ Открыт чат с @eventsbotTestBot
+    Когда я отправляю команду "/start"                       # tests/e2e/features/steps/bot_steps.py:84
+2026-01-04 07:03:43,591 [INFO] tests.e2e.human_client: Sent message: /start
+2026-01-04 07:03:43,769 [INFO] tests.e2e.human_client: Got response from User(id=8365878972, is_self=False, contact=False, mutual_contact=False, deleted=False, bot=True, bot_chat_history=False, bot_nochats=False, verified=False, restricted=False, min=False, bot_inline_geo=False, support=False, scam=False, apply_min_photo=True, fake=False, bot_attach_menu=False, premium=False, attach_menu_enabled=False, bot_can_edit=False, close_friend=False, stories_hidden=False, stories_unavailable=True, contact_require_premium=False, bot_business=False, bot_has_main_app=False, bot_forum_view=False, access_hash=2218334829196132400, first_name='eventsbot-test-env', last_name=None, username='eventsbotTestBot', phone=None, photo=None, status=None, bot_info_version=1, restriction_reason=[], bot_inline_placeholder=None, lang_code=None, emoji_status=None, usernames=[], stories_max_id=None, color=None, profile_color=None, bot_active_users=None, bot_verification_icon=None, send_paid_messages_stars=None): You are partner...
+2026-01-04 07:03:43,769 [INFO] e2e.steps: → Отправлено: /start
+2026-01-04 07:03:43,769 [INFO] e2e.steps: ← Ответ: You are partner...
+    И я жду сообщения с текстом "Choose action"              # tests/e2e/features/steps/bot_steps.py:268
+2026-01-04 07:03:43,953 [INFO] e2e.steps: ✓ Найдено ожидаемое сообщение: 'Choose action'
+    Тогда под сообщением должна быть кнопка "🏛 Дом искусств" # tests/e2e/features/steps/bot_steps.py:234
+2026-01-04 07:03:43,954 [INFO] e2e.steps: ✓ Найдена кнопка: '🏛 Дом искусств'
+2026-01-04 07:03:43,954 [INFO] e2e.behave: ✅ Сценарий PASSED: Проверка стартового меню
+2026-01-04 07:03:43,954 [INFO] e2e.behave: 
+📌 Сценарий: Проверка меню VK
+
+  Сценарий: Проверка меню VK                                                                       # tests/e2e/features/dom_iskusstv.feature:13
+    Дано я авторизован в клиенте Telethon                                                          # tests/e2e/features/steps/bot_steps.py:49
+2026-01-04 07:03:43,955 [INFO] e2e.steps: ✓ Клиент авторизован
+    И я открыл чат с ботом                                                                         # tests/e2e/features/steps/bot_steps.py:57
+2026-01-04 07:03:44,144 [INFO] e2e.steps: ✓ Открыт чат с @eventsbotTestBot
+    И я добавляю в очередь VK пост с текстом "Спектакль https://домискусств.рф/skazka"             # tests/e2e/features/steps/bot_steps.py:371
+Seeded.
+Exception in thread Thread-1 (_connection_worker_thread):
+Traceback (most recent call last):
+  File "/home/codespace/.local/lib/python3.12/site-packages/aiosqlite/core.py", line 66, in _connection_worker_thread
+    future.get_loop().call_soon_threadsafe(set_result, future, result)
+  File "/usr/local/python/3.12.1/lib/python3.12/asyncio/base_events.py", line 837, in call_soon_threadsafe
+    self._check_closed()
+  File "/usr/local/python/3.12.1/lib/python3.12/asyncio/base_events.py", line 539, in _check_closed
+    raise RuntimeError('Event loop is closed')
+RuntimeError: Event loop is closed
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/usr/local/python/3.12.1/lib/python3.12/threading.py", line 1073, in _bootstrap_inner
+    self.run()
+  File "/usr/local/python/3.12.1/lib/python3.12/threading.py", line 1010, in run
+    self._target(*self._args, **self._kwargs)
+  File "/home/codespace/.local/lib/python3.12/site-packages/aiosqlite/core.py", line 75, in _connection_worker_thread
+    future.get_loop().call_soon_threadsafe(set_exception, future, e)
+  File "/usr/local/python/3.12.1/lib/python3.12/asyncio/base_events.py", line 837, in call_soon_threadsafe
+    self._check_closed()
+  File "/usr/local/python/3.12.1/lib/python3.12/asyncio/base_events.py", line 539, in _check_closed
+    raise RuntimeError('Event loop is closed')
+RuntimeError: Event loop is closed
+    Когда я отправляю команду "/vk"                                                                # tests/e2e/features/steps/bot_steps.py:84
+2026-01-04 07:03:50,352 [INFO] tests.e2e.human_client: Sent message: /vk
+2026-01-04 07:03:50,604 [INFO] tests.e2e.human_client: Got response from User(id=8365878972, is_self=False, contact=False, mutual_contact=False, deleted=False, bot=True, bot_chat_history=False, bot_nochats=False, verified=False, restricted=False, min=False, bot_inline_geo=False, support=False, scam=False, apply_min_photo=True, fake=False, bot_attach_menu=False, premium=False, attach_menu_enabled=False, bot_can_edit=False, close_friend=False, stories_hidden=False, stories_unavailable=True, contact_require_premium=False, bot_business=False, bot_has_main_app=False, bot_forum_view=False, access_hash=2218334829196132400, first_name='eventsbot-test-env', last_name=None, username='eventsbotTestBot', phone=None, photo=None, status=None, bot_info_version=1, restriction_reason=[], bot_inline_placeholder=None, lang_code=None, emoji_status=None, usernames=[], stories_max_id=None, color=None, profile_color=None, bot_active_users=None, bot_verification_icon=None, send_paid_messages_stars=None): VK мониторинг...
+2026-01-04 07:03:50,607 [INFO] e2e.steps: → Отправлено: /vk
+2026-01-04 07:03:50,607 [INFO] e2e.steps: ← Ответ: VK мониторинг...
+    Тогда под сообщением должна быть кнопка "Проверить события"                                    # tests/e2e/features/steps/bot_steps.py:234
+2026-01-04 07:03:50,608 [INFO] e2e.steps: ✓ Найдена кнопка: 'Проверить события'
+    Когда я нажимаю инлайн-кнопку "Проверить события"                                              # tests/e2e/features/steps/bot_steps.py:122
+2026-01-04 07:03:52,419 [INFO] e2e.steps: → Нажата кнопка: Проверить события
+2026-01-04 07:03:54,590 [INFO] e2e.steps: ← Получен обновлённый ответ
+    Тогда я жду медиа-сообщения                                                                    # tests/e2e/features/steps/bot_steps.py:419
+2026-01-04 07:03:54,809 [INFO] e2e.steps: ✓ Медиа-сообщение получено
+    И я жду сообщения с текстом "Спектакль"                                                        # tests/e2e/features/steps/bot_steps.py:268
+      ASSERT FAILED: Сообщение с текстом 'Спектакль' не получено за 5 секунд. Последние: ['⭐️ Уже 127 лет балет «Щелкунчик» остаётся главным спектаклем новогодних праздников по всему миру. \n \nВ карточках рассказали о том, как в других странах мира интерпретируют классику в разных декорациях и с национальными особенностями, но всегда под гениальную музыку Чайковского. \n \n*⃣ И сообщаем, где в Калининградской области можно насладиться балетом и музыкой новогоднего хита: \n \n🟡20 декабря — Московский областной государственный академический театр «Русский балет» представит балет в 2-х действиях на сцене Mузыкального колледжа им. С.В. Рахманинова (https://kgd.kassir.ru/teatr/schelkunchik); \n \n🟡26 декабря — Театр балета Сен-Мишель» из Санкт-Петербурга на сцене ДС «Янтарный» (https://kgd.kassir.ru/teatr/schelkunchik-3); \n \n🟡5 января — Сказка на сцене театра эстрады «Янтарь-холл» (https://kgd.kassir.ru/detyam/schelkunchik-novogodnyaya-skazka-1); \n \n🟡9 января — Московский Театр «Корона Русского Балета» представляет самую красивую рождественскую сказку – балет «Щелкунчик» на сцене Калининградского театра эстрады (Дом Искусств) (https://kgd.kassir.ru/teatr/balet-schelkunchik-47).\nАНО «Фестивальная дирекция»\n\nhttps://vk.com/wall-182104060_6453\n\n05 января 00:00\nСовпадений нет\n\nОпубликовано: 14 декабря 2025 20:28\nключи: спектаклем,праздников,музыку,музыкой | дата: да | в очереди: 35', '🔎 Проверить события', 'VK мониторинг', '/vk', 'Choose action']
+
+2026-01-04 07:04:01,832 [ERROR] e2e.behave: ❌ Сценарий FAILED: Проверка меню VK
+    И под сообщением должны быть кнопки: "✅ Добавить, ⏭ Пропустить, 🏛 Извлечь из Дом искусств (1)" # None
+2026-01-04 07:04:01,833 [INFO] e2e.behave: 
+📌 Сценарий: Парсинг событий по ссылке с Дома искусств
+
+  Сценарий: Парсинг событий по ссылке с Дома искусств                       # tests/e2e/features/dom_iskusstv.feature:22
+    Дано я авторизован в клиенте Telethon                                   # tests/e2e/features/steps/bot_steps.py:49
+2026-01-04 07:04:01,833 [INFO] e2e.steps: ✓ Клиент авторизован
+    И я открыл чат с ботом                                                  # tests/e2e/features/steps/bot_steps.py:57
+2026-01-04 07:04:02,002 [INFO] e2e.steps: ✓ Открыт чат с @eventsbotTestBot
+    Когда я отправляю команду "/start"                                      # tests/e2e/features/steps/bot_steps.py:84
+2026-01-04 07:04:10,363 [INFO] tests.e2e.human_client: Sent message: /start
+2026-01-04 07:04:10,576 [INFO] tests.e2e.human_client: Got response from User(id=8365878972, is_self=False, contact=False, mutual_contact=False, deleted=False, bot=True, bot_chat_history=False, bot_nochats=False, verified=False, restricted=False, min=False, bot_inline_geo=False, support=False, scam=False, apply_min_photo=True, fake=False, bot_attach_menu=False, premium=False, attach_menu_enabled=False, bot_can_edit=False, close_friend=False, stories_hidden=False, stories_unavailable=True, contact_require_premium=False, bot_business=False, bot_has_main_app=False, bot_forum_view=False, access_hash=2218334829196132400, first_name='eventsbot-test-env', last_name=None, username='eventsbotTestBot', phone=None, photo=None, status=None, bot_info_version=1, restriction_reason=[], bot_inline_placeholder=None, lang_code=None, emoji_status=None, usernames=[], stories_max_id=None, color=None, profile_color=None, bot_active_users=None, bot_verification_icon=None, send_paid_messages_stars=None): You are partner...
+2026-01-04 07:04:10,576 [INFO] e2e.steps: → Отправлено: /start
+2026-01-04 07:04:10,576 [INFO] e2e.steps: ← Ответ: You are partner...
+    И я жду сообщения с текстом "Choose action"                             # tests/e2e/features/steps/bot_steps.py:268
+2026-01-04 07:04:11,404 [INFO] e2e.steps: ✓ Найдено ожидаемое сообщение: 'Choose action'
+    И я логирую в консоль список всех кнопок, которые вижу                  # tests/e2e/features/steps/bot_steps.py:198
+2026-01-04 07:04:11,405 [INFO] e2e.steps: [REPORT] Всего кнопок: 5
+
+==================================================
+[REPORT] Текст сообщения: Choose action
+[REPORT] Видимые кнопки:
+  1. ➕ Добавить событие
+  2. ➕ Добавить фестиваль
+  3. 📅 События
+  4. 🔮 Pyramida
+  5. 🏛 Дом искусств
+==================================================
+
+    Тогда под сообщением должна быть кнопка "🏛 Дом искусств"                # tests/e2e/features/steps/bot_steps.py:234
+2026-01-04 07:04:11,405 [INFO] e2e.steps: ✓ Найдена кнопка: '🏛 Дом искусств'
+    Когда я отправляю сообщение "🏛 Дом искусств"                            # tests/e2e/features/steps/bot_steps.py:103
+2026-01-04 07:04:19,018 [INFO] tests.e2e.human_client: Sent message: 🏛 Дом искусств
+2026-01-04 07:04:19,231 [INFO] tests.e2e.human_client: Got response from User(id=8365878972, is_self=False, contact=False, mutual_contact=False, deleted=False, bot=True, bot_chat_history=False, bot_nochats=False, verified=False, restricted=False, min=False, bot_inline_geo=False, support=False, scam=False, apply_min_photo=True, fake=False, bot_attach_menu=False, premium=False, attach_menu_enabled=False, bot_can_edit=False, close_friend=False, stories_hidden=False, stories_unavailable=True, contact_require_premium=False, bot_business=False, bot_has_main_app=False, bot_forum_view=False, access_hash=2218334829196132400, first_name='eventsbot-test-env', last_name=None, username='eventsbotTestBot', phone=None, photo=None, status=None, bot_info_version=1, restriction_reason=[], bot_inline_placeholder=None, lang_code=None, emoji_status=None, usernames=[], stories_max_id=None, color=None, profile_color=None, bot_active_users=None, bot_verification_icon=None, send_paid_messages_stars=None): 🏛 Отправьте ссылку на спецпроект Дом искусств
+(например: https://домискусств.рф/skazka или https://x...
+2026-01-04 07:04:19,232 [INFO] e2e.steps: → Отправлено сообщение: 🏛 Дом искусств
+2026-01-04 07:04:19,232 [INFO] e2e.steps: ← Ответ: 🏛 Отправьте ссылку на спецпроект Дом искусств (например: https://домискусств.рф/skazka или https://x...
+    Тогда я должен увидеть сообщение, содержащее текст "Отправьте ссылку"   # tests/e2e/features/steps/bot_steps.py:161
+2026-01-04 07:04:19,232 [INFO] e2e.steps: ✓ Найден текст: 'Отправьте ссылку'
+    Когда я отправляю сообщение "https://xn--b1admiilxbaki.xn--p1ai/skazka" # tests/e2e/features/steps/bot_steps.py:103
+2026-01-04 07:04:37,696 [INFO] tests.e2e.human_client: Sent message: https://xn--b1admiilxbaki.xn--p1ai/skazka
+2026-01-04 07:04:37,988 [INFO] tests.e2e.human_client: Got response from User(id=8365878972, is_self=False, contact=False, mutual_contact=False, deleted=False, bot=True, bot_chat_history=False, bot_nochats=False, verified=False, restricted=False, min=False, bot_inline_geo=False, support=False, scam=False, apply_min_photo=True, fake=False, bot_attach_menu=False, premium=False, attach_menu_enabled=False, bot_can_edit=False, close_friend=False, stories_hidden=False, stories_unavailable=True, contact_require_premium=False, bot_business=False, bot_has_main_app=False, bot_forum_view=False, access_hash=2218334829196132400, first_name='eventsbot-test-env', last_name=None, username='eventsbotTestBot', phone=None, photo=None, status=None, bot_info_version=1, restriction_reason=[], bot_inline_placeholder=None, lang_code=None, emoji_status=None, usernames=[], stories_max_id=None, color=None, profile_color=None, bot_active_users=None, bot_verification_icon=None, send_paid_messages_stars=None): 🏛 Найдено 1 ссылок. Запускаю Kaggle......
+2026-01-04 07:04:37,991 [INFO] e2e.steps: → Отправлено сообщение: https://xn--b1admiilxbaki.xn--p1ai/skazka
+2026-01-04 07:04:37,991 [INFO] e2e.steps: ← Ответ: 🏛 Найдено 1 ссылок. Запускаю Kaggle......
+    Тогда я жду долгой операции с текстом "Добавлено событий"               # tests/e2e/features/steps/bot_steps.py:350
+2026-01-04 07:04:38,156 [INFO] e2e.steps: Waiting for 'Добавлено событий'... (5s)
+2026-01-04 07:04:48,499 [INFO] e2e.steps: Waiting for 'Добавлено событий'... (15s)
+2026-01-04 07:04:58,837 [INFO] e2e.steps: Waiting for 'Добавлено событий'... (25s)
+2026-01-04 07:05:09,188 [INFO] e2e.steps: Waiting for 'Добавлено событий'... (35s)
+2026-01-04 07:05:19,584 [INFO] e2e.steps: Waiting for 'Добавлено событий'... (45s)
+2026-01-04 07:05:20,377 [INFO] telethon.client.updates: Got difference for account updates
+2026-01-04 07:05:29,924 [INFO] e2e.steps: Waiting for 'Добавлено событий'... (55s)
+2026-01-04 07:05:40,272 [INFO] e2e.steps: Waiting for 'Добавлено событий'... (65s)
+2026-01-04 07:05:41,885 [INFO] telethon.client.updates: Got difference for account updates
+2026-01-04 07:05:50,704 [INFO] e2e.steps: Waiting for 'Добавлено событий'... (75s)
+2026-01-04 07:06:01,043 [INFO] e2e.steps: Waiting for 'Добавлено событий'... (85s)
+2026-01-04 07:06:11,382 [INFO] e2e.steps: Waiting for 'Добавлено событий'... (95s)
+2026-01-04 07:06:21,716 [INFO] e2e.steps: Waiting for 'Добавлено событий'... (105s)
+2026-01-04 07:06:32,052 [INFO] e2e.steps: Waiting for 'Добавлено событий'... (115s)
+2026-01-04 07:06:42,489 [INFO] e2e.steps: Waiting for 'Добавлено событий'... (125s)
+2026-01-04 07:06:52,827 [INFO] e2e.steps: Waiting for 'Добавлено событий'... (135s)
+2026-01-04 07:07:03,157 [INFO] e2e.steps: Waiting for 'Добавлено событий'... (145s)
+2026-01-04 07:07:03,811 [INFO] telethon.client.updates: Got difference for channel 1343978538 updates
+2026-01-04 07:07:13,488 [INFO] e2e.steps: Waiting for 'Добавлено событий'... (155s)
+2026-01-04 07:07:23,817 [INFO] e2e.steps: Waiting for 'Добавлено событий'... (165s)
+2026-01-04 07:07:34,195 [INFO] e2e.steps: Waiting for 'Добавлено событий'... (175s)
+      ASSERT FAILED: Timeout waiting for 'Добавлено событий'
+
+2026-01-04 07:07:44,367 [ERROR] e2e.behave: ❌ Сценарий FAILED: Парсинг событий по ссылке с Дома искусств
+    И я должен найти в ответе действующую ссылку на телеграф                # None
+
+2026-01-04 07:07:44,367 [INFO] telethon.network.mtprotosender: Disconnecting from 149.154.167.51:443/TcpFull...
+2026-01-04 07:07:44,368 [INFO] telethon.network.mtprotosender: Disconnection from 149.154.167.51:443/TcpFull complete!
+2026-01-04 07:07:44,368 [INFO] tests.e2e.human_client: Disconnected from Telegram
+2026-01-04 07:07:44,368 [INFO] e2e.behave: Client disconnected
+2026-01-04 07:07:44,368 [INFO] e2e.behave: ============================================================
+2026-01-04 07:07:44,369 [INFO] e2e.behave: E2E BDD Test Suite Finished
+2026-01-04 07:07:44,369 [INFO] e2e.behave: ============================================================
+
+Failing scenarios:
+  tests/e2e/features/dom_iskusstv.feature:13  Проверка меню VK
+  tests/e2e/features/dom_iskusstv.feature:22  Парсинг событий по ссылке с Дома искусств
+
+0 features passed, 1 failed, 0 skipped
+1 scenario passed, 2 failed, 0 skipped
+21 steps passed, 2 failed, 2 skipped
+Took 4min 7.167s

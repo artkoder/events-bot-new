@@ -1,0 +1,491 @@
+{
+  "festival": {
+    "title_full": "Зимние каникулы на Балтике",
+    "title_short": "Зимние каникулы",
+    "description_short": "Фестиваль искусств, предлагающий волшебные рождественские сказки, встречи с любимыми актерами и добрые фильмы для всей семьи. Незабываемые новогодние впечатления в Калининграде!",
+    "dates": {
+      "start": "2025-12-25",
+      "end": "2026-01-09"
+    },
+    "is_annual": null,
+    "audience": "Семьи с детьми",
+    "age_restriction": "6+",
+    "type": "theater",
+    "links": {
+      "website": "festdir.ru",
+      "socials": [
+        "https://vk.com/festdir",
+        "https://t.me/festdir"
+      ],
+      "tickets": "https://pyramida.info/"
+    },
+    "registration": {
+      "is_free": true,
+      "common_url": "https://pyramida.info/",
+      "price_info": "бесплатно"
+    },
+    "contacts": {
+      "phone": "+7 4012 528-822",
+      "email": "pr@festdir.ru"
+    },
+    "documents": []
+  },
+  "program": [
+    {
+      "title": "Спектакль «Династии»",
+      "type": "theater",
+      "date": "2025-12-25",
+      "time_start": "19:00",
+      "time_end": null,
+      "venue": "Калининградский областной драматический театр, пр-кт Мира, 4",
+      "description": "Спектакль «Династии», объединяющий балет, поэзию и театр. Илзе Лиепа, Екатерина Рождественская и Александра Захарова, дочери легендарных деятелей искусства, делятся личными воспоминаниями о своих семьях, внёсших неоценимый вклад в культуру страны.",
+      "age_restriction": "12+",
+      "ticket_url": "https://dramteatr39.ru/spektakli/dinastii",
+      "ticket_status": "available",
+      "price": "не указано",
+      "price_min": 0,
+      "price_max": 0,
+      "is_free": false,
+      "participants": [
+        {
+          "name": "Илзе Лиепа",
+          "role": "Актриса",
+          "details": null
+        },
+        {
+          "name": "Екатерина Рождественская",
+          "role": "Актриса",
+          "details": null
+        },
+        {
+          "name": "Александра Захарова",
+          "role": "Актриса",
+          "details": null
+        }
+      ],
+      "works": [],
+      "images_event": []
+    },
+    {
+      "title": "Детские спектакли «Путешествие в сказочный сон»",
+      "type": "theater",
+      "date": "2025-12-25",
+      "time_start": "20:00",
+      "time_end": null,
+      "venue": "ГАУ КО «Кафедральный собор», ул. Канта, 1",
+      "description": "Интерактивное новогоднее шоу для всей семьи. Аля, которая мало верит в чудеса, попадает в волшебный мир вместе со своим ожившим плюшевым другом Прошей. Им предстоит спасти сказку от злого Анфилиуса.",
+      "age_restriction": "0+",
+      "ticket_url": "https://pyramida.info/tickets/puteshestvie-v-skazochnyy-son-vtoraya-partiya-biletov_53469831",
+      "ticket_status": "registration_open",
+      "price": "бесплатно",
+      "price_min": 0,
+      "price_max": 0,
+      "is_free": true,
+      "participants": [],
+      "works": [],
+      "images_event": []
+    },
+    {
+      "title": "Детские спектакли «Путешествие в сказочный сон»",
+      "type": "theater",
+      "date": "2025-12-26",
+      "time_start": "18:00",
+      "time_end": null,
+      "venue": "ГАУ КО «Кафедральный собор», ул. Канта, 1",
+      "description": "Интерактивное новогоднее шоу для всей семьи. Аля, которая мало верит в чудеса, попадает в волшебный мир вместе со своим ожившим плюшевым другом Прошей. Им предстоит спасти сказку от злого Анфилиуса.",
+      "age_restriction": "0+",
+      "ticket_url": "https://pyramida.info/tickets/puteshestvie-v-skazochnyy-son-vtoraya-partiya-biletov_53469878",
+      "ticket_status": "registration_open",
+      "price": "бесплатно",
+      "price_min": 0,
+      "price_max": 0,
+      "is_free": true,
+      "participants": [],
+      "works": [],
+      "images_event": []
+    },
+    {
+      "title": "Детские спектакли «Путешествие в сказочный сон»",
+      "type": "theater",
+      "date": "2025-12-26",
+      "time_start": "20:00",
+      "time_end": null,
+      "venue": "ГАУ КО «Кафедральный собор», ул. Канта, 1",
+      "description": "Интерактивное новогоднее шоу для всей семьи. Аля, которая мало верит в чудеса, попадает в волшебный мир вместе со своим ожившим плюшевым другом Прошей. Им предстоит спасти сказку от злого Анфилиуса.",
+      "age_restriction": "0+",
+      "ticket_url": "https://pyramida.info/tickets/puteshestvie-v-skazochnyy-son-vtoraya-partiya-biletov_53469889",
+      "ticket_status": "registration_open",
+      "price": "бесплатно",
+      "price_min": 0,
+      "price_max": 0,
+      "is_free": true,
+      "participants": [],
+      "works": [],
+      "images_event": []
+    },
+    {
+      "title": "Детские спектакли «Путешествие в сказочный сон»",
+      "type": "theater",
+      "date": "2025-12-29",
+      "time_start": "18:00",
+      "time_end": null,
+      "venue": "ГАУ КО «Кафедральный собор», ул. Канта, 1",
+      "description": "Интерактивное новогоднее шоу для всей семьи. Аля, которая мало верит в чудеса, попадает в волшебный мир вместе со своим ожившим плюшевым другом Прошей. Им предстоит спасти сказку от злого Анфилиуса.",
+      "age_restriction": "0+",
+      "ticket_url": "https://pyramida.info/tickets/puteshestvie-v-skazochnyy-son-vtoraya-partiya-biletov_53469908",
+      "ticket_status": "registration_open",
+      "price": "бесплатно",
+      "price_min": 0,
+      "price_max": 0,
+      "is_free": true,
+      "participants": [],
+      "works": [],
+      "images_event": []
+    },
+    {
+      "title": "Детские спектакли «Путешествие в сказочный сон»",
+      "type": "theater",
+      "date": "2025-12-29",
+      "time_start": "20:00",
+      "time_end": null,
+      "venue": "ГАУ КО «Кафедральный собор», ул. Канта, 1",
+      "description": "Интерактивное новогоднее шоу для всей семьи. Аля, которая мало верит в чудеса, попадает в волшебный мир вместе со своим ожившим плюшевым другом Прошей. Им предстоит спасти сказку от злого Анфилиуса.",
+      "age_restriction": "0+",
+      "ticket_url": "https://pyramida.info/tickets/puteshestvie-v-skazochnyy-son-vtoraya-partiya-biletov_53469928",
+      "ticket_status": "registration_open",
+      "price": "бесплатно",
+      "price_min": 0,
+      "price_max": 0,
+      "is_free": true,
+      "participants": [],
+      "works": [],
+      "images_event": []
+    },
+    {
+      "title": "Киноконцерт от Гоши Куценко",
+      "type": "concert",
+      "date": "2026-01-09",
+      "time_start": "18:00",
+      "time_end": null,
+      "venue": "пространство «Универсал», пр-кт Мира, 41-43",
+      "description": "Музыка становится поводом для откровенного разговора! Артисты делятся личными переживаниями и любимыми моментами из мира кино, общаясь с залом напрямую.",
+      "age_restriction": "12+",
+      "ticket_url": "https://pyramida.info/tickets/kinokontsert-ot-goshi-kutsenko-v-universale_53258389",
+      "ticket_status": "registration_open",
+      "price": "бесплатно",
+      "price_min": 0,
+      "price_max": 0,
+      "is_free": true,
+      "participants": [
+        {
+          "name": "Гоша Куценко",
+          "role": "Исполнитель",
+          "details": null
+        },
+        {
+          "name": "Екатерина Климова",
+          "role": "Исполнитель",
+          "details": null
+        },
+        {
+          "name": "Катерина Шпица",
+          "role": "Исполнитель",
+          "details": null
+        },
+        {
+          "name": "Александр Метёлкин",
+          "role": "Исполнитель",
+          "details": null
+        }
+      ],
+      "works": [],
+      "images_event": []
+    },
+    {
+      "title": "Кинопоказ и творческая встреча с Михаилом Полицеймако",
+      "type": "film",
+      "date": "2026-01-03",
+      "time_start": "16:00",
+      "time_end": null,
+      "venue": "кинотеатр «Заря», Калининград, пр-т Мира, 41−43",
+      "description": "Творческая встреча с актером театра и кино Михаилом Полицеймако и показ фильма режиссёра Эльдара Рязанова «Гараж» с участием отца артиста Семёна Фарады.",
+      "age_restriction": "12+",
+      "ticket_url": "https://pyramida.info/tickets/tvorcheskaya-vstrecha-s-mikhailom-politseymako-i-pokaz-filma-garazh_53257325",
+      "ticket_status": "available",
+      "price": "не указано",
+      "price_min": 0,
+      "price_max": 0,
+      "is_free": false,
+      "participants": [
+        {
+          "name": "Михаил Полицеймако",
+          "role": "Актёр",
+          "details": null
+        },
+        {
+          "name": "Семён Фарада",
+          "role": "Актёр",
+          "details": null
+        }
+      ],
+      "works": [
+        {
+          "title": "Гараж",
+          "author": "Эльдар Рязанов",
+          "details": null
+        }
+      ],
+      "images_event": []
+    },
+    {
+      "title": "Кинопоказ и творческая встреча с Андреем Леоновым",
+      "type": "film",
+      "date": "2026-01-04",
+      "time_start": "16:00",
+      "time_end": null,
+      "venue": "Кинотеатр «Заря», Калининград, пр-т Мира, 41−43",
+      "description": "Творческая встреча с актером театра и кино Андреем Леоновым и показ фильма режиссёра Александра Серого «Джентльмены удачи» с участием отца артиста Евгения Леонова.",
+      "age_restriction": "12+",
+      "ticket_url": "https://pyramida.info/tickets/tvorcheskaya-vstrecha-s-andreem-leonovym-i-pokaz-filma-dzhentlmeny-udachi_53257428",
+      "ticket_status": "available",
+      "price": "не указано",
+      "price_min": 0,
+      "price_max": 0,
+      "is_free": false,
+      "participants": [
+        {
+          "name": "Андрей Леонов",
+          "role": "Актёр",
+          "details": null
+        },
+        {
+          "name": "Евгений Леонов",
+          "role": "Актёр",
+          "details": null
+        }
+      ],
+      "works": [
+        {
+          "title": "Джентльмены удачи",
+          "author": "Александр Серый",
+          "details": null
+        }
+      ],
+      "images_event": []
+    },
+    {
+      "title": "Кинопоказ и творческая встреча с Сергеем Шакуровым",
+      "type": "film",
+      "date": "2026-01-06",
+      "time_start": "16:00",
+      "time_end": null,
+      "venue": "Кинотеатр «Заря», Калининград, пр-т Мира, 41−43",
+      "description": "Творческая встреча с народным артистом РСФСР, Лауреатом Государственной премии СССР Сергеем Шакуровым, и показ фильма режиссёра Алексея Аксёнова «Родные».",
+      "age_restriction": "12+",
+      "ticket_url": "https://pyramida.info/tickets/tvorcheskaya-vstrecha-s-sergeem-shakurovym-i-pokaz-filma-rodnya_53257729",
+      "ticket_status": "available",
+      "price": "не указано",
+      "price_min": 0,
+      "price_max": 0,
+      "is_free": false,
+      "participants": [
+        {
+          "name": "Сергей Шакуров",
+          "role": "Актёр",
+          "details": null
+        }
+      ],
+      "works": [
+        {
+          "title": "Родные",
+          "author": "Алексей Аксёнов",
+          "details": null
+        }
+      ],
+      "images_event": []
+    },
+    {
+      "title": "Концерт детского хора «Волшебное Рождество»",
+      "type": "concert",
+      "date": "2026-01-07",
+      "time_start": "15:00",
+      "time_end": null,
+      "venue": "Калининградская областная филармония имени Е. Ф. Светланова",
+      "description": "В разных уголках мира рождественская история приобретает свои уникальные черты, но неизменно сохраняет ауру тепла, сердечности и чудес.",
+      "age_restriction": "0+",
+      "ticket_url": "https://pyramida.info/tickets/kontsert-detskogo-khora-volshebnoe-rozhdestvo_53257919",
+      "ticket_status": "registration_open",
+      "price": "бесплатно",
+      "price_min": 0,
+      "price_max": 0,
+      "is_free": true,
+      "participants": [],
+      "works": [],
+      "images_event": []
+    },
+    {
+      "title": "Кинопоказ и творческая встреча с Мариной Зудиной и Павлом Табаковым",
+      "type": "film",
+      "date": "2026-01-08",
+      "time_start": "16:00",
+      "time_end": null,
+      "venue": "Кинотеатр «Заря», Калининград, пр-т Мира, 41−43",
+      "description": "Творческая встреча с народной артисткой России Мариной Зудиной и её сыном, актёром театра и кино Павлом Табаковым. После встречи состоится показ фильма режиссёра Тиграна Кеосаяна «Президент и его внучка» с участием Олега Табакова.",
+      "age_restriction": "12+",
+      "ticket_url": "https://pyramida.info/tickets/tvorcheskaya-vstrecha-s-marinoy-zudinoy-i-pavlom-tabakovym-i-pokaz-filma-prezident-i-ego-vnuchka_53258178",
+      "ticket_status": "available",
+      "price": "не указано",
+      "price_min": 0,
+      "price_max": 0,
+      "is_free": false,
+      "participants": [
+        {
+          "name": "Марина Зудина",
+          "role": "Актриса",
+          "details": null
+        },
+        {
+          "name": "Павел Табаков",
+          "role": "Актёр",
+          "details": null
+        },
+        {
+          "name": "Олег Табаков",
+          "role": "Актёр",
+          "details": null
+        }
+      ],
+      "works": [
+        {
+          "title": "Президент и его внучка",
+          "author": "Тигран Кеосаян",
+          "details": null
+        }
+      ],
+      "images_event": []
+    },
+    {
+      "title": "Вечер классической музыки с Юрием Демидовичем и Абисалом Гергиевым",
+      "type": "concert",
+      "date": "2026-01-09",
+      "time_start": "18:00",
+      "time_end": null,
+      "venue": "Калининградский областной музыкальный колледж им. С.В. Рахманинова, ул. Фрунзе, 4",
+      "description": "В программе виртуозное исполнение Концерта для фортепиано с оркестром фа-диез минор ор. 20 Александра Скрябина и сюита из балета «Щелкунчик» Петра Ильича Чайковского.",
+      "age_restriction": "12+",
+      "ticket_url": "https://pyramida.info/tickets/vecher-klassicheskoy-muzyki-s-yuriem-demidovichem-i-abisalom-gergievym_54566307",
+      "ticket_status": "available",
+      "price": "не указано",
+      "price_min": 0,
+      "price_max": 0,
+      "is_free": false,
+      "participants": [
+        {
+          "name": "Юрий Демидович",
+          "role": "Дирижёр",
+          "details": null
+        },
+        {
+          "name": "Абисалом Гергиев",
+          "role": "Пианист",
+          "details": null
+        }
+      ],
+      "works": [
+        {
+          "title": "Концерт для фортепиано с оркестром фа-диез минор",
+          "author": "Александр Скрябин",
+          "details": null
+        },
+        {
+          "title": "Щелкунчик",
+          "author": "Пётр Ильич Чайковский",
+          "details": null
+        }
+      ],
+      "images_event": []
+    }
+  ],
+  "venues": [
+    {
+      "id": "venue1",
+      "title": "Калининградский областной драматический театр",
+      "city": "Калининград",
+      "address": "пр-кт Мира, 4",
+      "geo": {
+        "lat": 54.717992,
+        "lon": 20.46849
+      }
+    },
+    {
+      "id": "venue2",
+      "title": "ГАУ КО «Кафедральный собор»",
+      "city": "Калининград",
+      "address": "ул. Канта, 1",
+      "geo": {
+        "lat": 54.706429,
+        "lon": 20.512133
+      }
+    },
+    {
+      "id": "venue3",
+      "title": "Дворец спорта «Юность»",
+      "city": "Калининград",
+      "address": "ул. Маршала Баграмяна, 2",
+      "geo": null
+    },
+    {
+      "id": "venue4",
+      "title": "арт-резиденция «Дом молодёжи»",
+      "city": "Калининград",
+      "address": "ул. Октябрьская, 76",
+      "geo": null
+    },
+    {
+      "id": "venue5",
+      "title": "кинотеатр «Заря»",
+      "city": "Калининград",
+      "address": "пр-т Мира, 41−43",
+      "geo": {
+        "lat": 54.720547,
+        "lon": 20.483944
+      }
+    },
+    {
+      "id": "venue6",
+      "title": "Калининградская областная филармония имени Е. Ф. Светланова",
+      "city": "Калининград",
+      "address": "ул. Богдана Хмельницкого, 61А",
+      "geo": null
+    },
+    {
+      "id": "venue7",
+      "title": "Калининградский областной музыкальный колледж им. С.В. Рахманинова",
+      "city": "Калининград",
+      "address": "ул. Фрунзе, 4",
+      "geo": {
+        "lat": 54.711307,
+        "lon": 20.519632
+      }
+    },
+    {
+      "id": "venue8",
+      "title": "пространство «Универсал»",
+      "city": "Калининград",
+      "address": "пр-кт Мира, 41-43",
+      "geo": null
+    }
+  ],
+  "images_festival": [
+    {
+      "url": "https://static.tildacdn.com/tild3232-3133-4434-a164-626564623261/Group_33.png",
+      "ocr_text": null,
+      "ocr_title": null
+    },
+    {
+      "url": "https://mc.yandex.ru/watch/95551469",
+      "ocr_text": null,
+      "ocr_title": null
+    }
+  ]
+}

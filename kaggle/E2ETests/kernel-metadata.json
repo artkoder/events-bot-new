@@ -1,0 +1,14 @@
+{
+    "id": "zigomaro/events-bot-e2e",
+    "title": "events-bot-e2e",
+    "code_file": "e2e_tests.ipynb",
+    "language": "python",
+    "kernel_type": "notebook",
+    "is_private": true,
+    "enable_gpu": false,
+    "enable_internet": true,
+    "dataset_sources": [],
+    "competition_sources": [],
+    "kernel_sources": [],
+    "slug": "events-bot-e2e"
+}

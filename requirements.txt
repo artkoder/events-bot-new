@@ -17,3 +17,4 @@ imagekitio>=3.0.0
 pydantic>=2.4.1,<2.6
 requests>=2.31.0
 PyYAML>=6.0
+telethon>=1.34.0  # E2E testing with real Telegram accounts

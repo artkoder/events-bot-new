@@ -23,6 +23,9 @@ from event_utils import format_event_md, is_recent
 if "LOCAL_TZ" not in globals():
     LOCAL_TZ = timezone.utc
 
+if "dom_iskusstv_input_sessions" not in globals():
+    dom_iskusstv_input_sessions = set()
+
 if "format_day_pretty" not in globals():
     _MONTHS = [
         "января",
@@ -141,6 +144,7 @@ def event_to_nodes(
     include_ics: bool = True,
     include_details: bool = True,
     show_image: bool = False,
+    show_3d_only: bool = False,
 ) -> list[dict]:
     md = format_event_md(
         e,
@@ -157,19 +161,21 @@ def event_to_nodes(
     from telegraph.utils import html_to_nodes
 
     nodes = []
-    # Show 3D preview as main image if available, otherwise use first photo
-    if show_image:
-        preview_url = getattr(e, "preview_3d_url", None)
-        if isinstance(preview_url, str):
-            preview_url = preview_url.strip()
-        if preview_url and isinstance(preview_url, str) and preview_url.startswith("http"):
+    # Show 3D preview as main image if available
+    preview_url = getattr(e, "preview_3d_url", None)
+    if isinstance(preview_url, str):
+        preview_url = preview_url.strip()
+    has_3d_preview = preview_url and isinstance(preview_url, str) and preview_url.startswith("http")
+    
+    if show_image or show_3d_only:
+        if has_3d_preview:
             # Use 3D preview as main image
             nodes.append({
                 "tag": "figure",
                 "children": [{"tag": "img", "attrs": {"src": preview_url}, "children": []}]
             })
-        elif e.photo_urls:
-            # Fallback to first photo
+        elif show_image and e.photo_urls:
+            # Fallback to first photo (only if show_image=True, not show_3d_only)
             first_url = e.photo_urls[0]
             if isinstance(first_url, str):
                 first_url = first_url.strip()
@@ -298,6 +304,7 @@ def add_day_sections(
 
     include_details: bool = True,
     show_images: bool = False,
+    show_3d_only: bool = False,
 ):
     """Append event sections grouped by day to Telegraph content."""
     for d in days:
@@ -312,7 +319,10 @@ def add_day_sections(
         elif d.weekday() == 6:
             add_many([{ "tag": "h3", "children": ["🟥🟥 воскресенье 🟥🟥"] }])
         add_many([
-            {"tag": "h3", "children": [f"🟥🟥🟥 {format_day_pretty(d)} 🟥🟥🟥"]},
+            {
+                "tag": "h3",
+                "children": [f"🟥🟥🟥 {format_day_pretty(d)} 🟥🟥🟥"],
+            },
             {"tag": "br"},
         ])
         add_many(telegraph_br())
@@ -327,6 +337,7 @@ def add_day_sections(
                     include_ics=include_ics,
                     include_details=include_details,
                     show_image=show_images,
+                    show_3d_only=show_3d_only,
                 )
             )
         if use_markers:
@@ -535,6 +546,7 @@ def _build_month_page_content_sync(
         include_ics=include_ics,
         include_details=include_details,
         show_images=len(events) <= 30,
+        show_3d_only=True,  # Always show 3D preview if available
     )
 
     if exhibitions and not exceeded:
@@ -2029,13 +2041,41 @@ async def build_festival_page_content(db: Database, fest: Festival) -> tuple[str
                     ],
                 }
             )
+        # UDS fields: phone, email
+        if fest.contacts_phone:
+            nodes.append({"tag": "p", "children": [f"📞 {fest.contacts_phone}"]})
+        if fest.contacts_email:
+            nodes.append({"tag": "p", "children": [f"✉️ {fest.contacts_email}"]})
+
+    # UDS fields: audience, source_url
+    if fest.audience:
+        nodes.extend(telegraph_br())
+        nodes.append({"tag": "p", "children": [f"👥 Аудитория: {fest.audience}"]})
+    
+    if fest.source_url:
+        nodes.extend(telegraph_br())
+        nodes.append(
+            {
+                "tag": "p",
+                "children": [
+                    "🔗 Источник: ",
+                    {
+                        "tag": "a",
+                        "attrs": {"href": fest.source_url},
+                        "children": [fest.source_url[:50] + "..." if len(fest.source_url) > 50 else fest.source_url],
+                    },
+                ],
+            }
+        )
 
     if events:
         nodes.extend(telegraph_br())
         nodes.extend(telegraph_br())
         nodes.append({"tag": "h3", "children": ["Мероприятия фестиваля"]})
         for e in events:
-            nodes.extend(event_to_nodes(e, festival=fest, show_festival=False))
+            # Show 3D preview image if available for the event
+            has_preview = bool(getattr(e, "preview_3d_url", None))
+            nodes.extend(event_to_nodes(e, festival=fest, show_festival=False, show_image=has_preview))
     else:
         nodes.extend(telegraph_br())
         nodes.extend(telegraph_br())
@@ -2089,7 +2129,7 @@ async def sync_festival_page(
         tg = Telegraph(access_token=token)
         async with db.get_session() as session:
             result = await session.execute(
-                select(Festival).where(Festival.name == name)
+                select(Festival).where(func.lower(Festival.name) == name.lower())
             )
             fest = result.scalar_one_or_none()
             if not fest:
@@ -2097,6 +2137,7 @@ async def sync_festival_page(
             title = fest.full_name or fest.name
             path = fest.telegraph_path
             url = fest.telegraph_url
+            fest_id = fest.id
 
         changed = False
         try:
@@ -2160,7 +2201,7 @@ async def sync_festival_page(
 
         async with db.get_session() as session:
             result = await session.execute(
-                select(Festival).where(Festival.name == name)
+                select(Festival).where(Festival.id == fest_id)
             )
             fest_db = result.scalar_one_or_none()
             if fest_db:
@@ -2798,16 +2839,25 @@ async def build_daily_posts(
         markup = types.InlineKeyboardMarkup(inline_keyboard=[[b] for b in buttons])
 
     combined = section1 + "\n\n\n" + section2
+    combined += "\u200b" # DAILY_MARKER
     if len(combined) <= 4096:
         return [(combined, markup)]
 
+    # Marker to identify daily posts (for channel_nav filtering)
+    DAILY_MARKER = "\u200b"
+
     posts: list[tuple[str, types.InlineKeyboardMarkup | None]] = []
+    
+    # helper to append marker
+    def _mark(t: str) -> str:
+        return t + DAILY_MARKER
+
     for part in split_text(section1):
-        posts.append((part, None))
+        posts.append((_mark(part), None))
     section2_parts = split_text(section2)
     for part in section2_parts[:-1]:
-        posts.append((part, None))
-    posts.append((section2_parts[-1], markup))
+        posts.append((_mark(part), None))
+    posts.append((_mark(section2_parts[-1]), markup))
     return posts
 
 
@@ -4115,7 +4165,7 @@ async def init_db_and_scheduler(
         try:
             await bot.set_webhook(
                 hook,
-                allowed_updates=["message", "callback_query", "my_chat_member"],
+                allowed_updates=["message", "callback_query", "my_chat_member", "channel_post", "edited_channel_post"],
             )
         except Exception as e:
             logging.error("Failed to set webhook: %s", e)
@@ -4272,6 +4322,58 @@ async def build_events_message(db: Database, target_date: date, tz: timezone, cr
     markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard)
     return text, markup
 
+
+async def build_events_message_compact(db: Database, target_date: date, tz: timezone, creator_id: int | None = None):
+    """Compact version of events message - only ID and title with link.
+    
+    Used as fallback when full message exceeds Telegram's 4096 char limit.
+    """
+    async with db.get_session() as session:
+        stmt = select(Event).where(
+            (Event.date == target_date.isoformat())
+            | (Event.end_date == target_date.isoformat())
+        )
+        if creator_id is not None:
+            stmt = stmt.where(Event.creator_id == creator_id)
+        result = await session.execute(stmt.order_by(Event.time))
+        events = result.scalars().all()
+
+    lines = [f"📋 Events on {format_day(target_date, tz)} (compact mode)\n"]
+    
+    for e in events:
+        title = f"{e.emoji} {e.title}" if e.emoji else e.title
+        if e.telegraph_url:
+            # Clickable link to telegraph page
+            lines.append(f'{e.id}. <a href="{e.telegraph_url}">{title}</a>')
+        else:
+            lines.append(f"{e.id}. {title}")
+    
+    if len(events) == 0:
+        lines.append("No events")
+    else:
+        lines.append(f"\n<i>Total: {len(events)} events</i>")
+
+    # Simplified navigation keyboard (no per-event buttons)
+    today = datetime.now(tz).date()
+    prev_day = target_date - timedelta(days=1)
+    next_day = target_date + timedelta(days=1)
+    nav_row = []
+    if target_date > today:
+        nav_row.append(
+            types.InlineKeyboardButton(
+                text="◀", callback_data=f"nav:{prev_day.isoformat()}"
+            )
+        )
+    nav_row.append(
+        types.InlineKeyboardButton(
+            text="▶", callback_data=f"nav:{next_day.isoformat()}"
+        )
+    )
+    keyboard = [nav_row]
+
+    text = "\n".join(lines)
+    markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard)
+    return text, markup
 
 async def build_exhibitions_message(
     db: Database, tz: timezone
@@ -4632,7 +4734,17 @@ async def show_festival_edit_menu(user_id: int, fest: Festival, bot: Bot):
         f"vk: {fest.vk_url or ''}",
         f"tg: {fest.tg_url or ''}",
         f"ticket: {fest.ticket_url or ''}",
+        # New parser fields
+        f"source_url: {fest.source_url or ''}",
+        f"source_type: {fest.source_type or ''}",
+        f"phone: {fest.contacts_phone or ''}",
+        f"email: {fest.contacts_email or ''}",
+        f"audience: {fest.audience or ''}",
+        f"annual: {'✓' if fest.is_annual else '✗' if fest.is_annual is False else ''}",
     ]
+    if fest.last_parsed_at:
+        lines.append(f"last_parsed: {fest.last_parsed_at.strftime('%Y-%m-%d %H:%M')}")
+    
     keyboard = [
         [
             types.InlineKeyboardButton(
@@ -4694,6 +4806,25 @@ async def show_festival_edit_menu(user_id: int, fest: Festival, bot: Bot):
                 callback_data=f"festeditfield:{fest.id}:ticket",
             )
         ],
+        # New parser fields buttons
+        [
+            types.InlineKeyboardButton(
+                text=("Delete phone" if fest.contacts_phone else "Add phone"),
+                callback_data=f"festeditfield:{fest.id}:phone",
+            )
+        ],
+        [
+            types.InlineKeyboardButton(
+                text=("Delete email" if fest.contacts_email else "Add email"),
+                callback_data=f"festeditfield:{fest.id}:email",
+            )
+        ],
+        [
+            types.InlineKeyboardButton(
+                text=("Delete audience" if fest.audience else "Add audience"),
+                callback_data=f"festeditfield:{fest.id}:audience",
+            )
+        ],
         [
             types.InlineKeyboardButton(
                 text="Обновить обложку из Telegraph",
@@ -4724,8 +4855,16 @@ async def show_festival_edit_menu(user_id: int, fest: Festival, bot: Bot):
                 callback_data=f"festsyncevents:{fest.id}",
             )
         ],
-        [types.InlineKeyboardButton(text="Done", callback_data="festeditdone")],
     ]
+    # Add re-parse button only if source_url exists
+    if fest.source_url:
+        keyboard.append([
+            types.InlineKeyboardButton(
+                text="🔄 Перепарсить с сайта",
+                callback_data=f"festreparse:{fest.id}",
+            )
+        ])
+    keyboard.append([types.InlineKeyboardButton(text="Done", callback_data="festeditdone")])
     markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard)
     await bot.send_message(user_id, "\n".join(lines), reply_markup=markup)
 
@@ -5052,7 +5191,15 @@ async def handle_events(message: types.Message, db: Database, bot: Bot):
         creator_filter = user.user_id if user.is_partner else None
 
     text, markup = await build_events_message(db, day, tz, creator_filter)
-    await bot.send_message(message.chat.id, text, reply_markup=markup)
+    
+    # Try sending full message, fallback to compact format if too long
+    try:
+        await bot.send_message(message.chat.id, text, reply_markup=markup)
+    except TelegramBadRequest as e:
+        if "message is too long" in str(e).lower():
+            # Fallback to compact format
+            text, markup = await build_events_message_compact(db, day, tz, creator_filter)
+            await bot.send_message(message.chat.id, text, reply_markup=markup, parse_mode="HTML")
 
 
 async def show_digest_menu(message: types.Message, db: Database, bot: Bot) -> None:
@@ -7980,6 +8127,15 @@ async def handle_edit_message(message: types.Message, db: Database, bot: Bot):
     await show_edit_menu(message.from_user.id, event, bot)
 
 
+async def handle_dom_iskusstv_start(message: types.Message, db: Database, bot: Bot):
+    await bot.send_message(
+        message.chat.id,
+        "🎭 Отправьте ссылку на событие Дом искусств (domiskusstv.ru).\n"
+        "Бот автоматически распознает ссылку и запустит парсер.\n"
+        "Пример: https://дом-искусств.рф/events/...",
+    )
+
+
 async def handle_add_event_start(message: types.Message, db: Database, bot: Bot):
     """Initiate event creation via the menu."""
     logging.info("handle_add_event_start from user %s", message.from_user.id)
@@ -8008,7 +8164,10 @@ async def handle_add_festival_start(message: types.Message, db: Database, bot: B
         "handle_add_festival_start session opened for user %s",
         message.from_user.id,
     )
-    await bot.send_message(message.chat.id, "Пришлите текст фестиваля…")
+    await bot.send_message(
+        message.chat.id,
+        "Пришлите текст фестиваля или ссылку на его сайт…",
+    )
 
 
 async def handle_vk_link_command(message: types.Message, db: Database, bot: Bot):
@@ -8241,6 +8400,153 @@ async def handle_pyramida_input(message: types.Message, db: Database, bot: Bot) 
         summary_lines.append(f"🔄 Обновлено: {stats.ticket_updated}")
     if stats.failed:
         summary_lines.append(f"❌ Ошибок: {stats.failed}")
+    
+    await bot.send_message(message.chat.id, "\n".join(summary_lines), parse_mode="Markdown")
+
+
+async def handle_dom_iskusstv_start(message: types.Message, db: Database, bot: Bot) -> None:
+    """Handle Dom Iskusstv button click - start waiting for URL input."""
+    async with db.get_session() as session:
+        user = await session.get(User, message.from_user.id)
+    if not has_admin_access(user):
+        await bot.send_message(message.chat.id, "Access denied")
+        return
+    dom_iskusstv_input_sessions.add(message.from_user.id)
+    await bot.send_message(
+        message.chat.id,
+        "🏛 Отправьте ссылку на спецпроект Дом искусств\n"
+        "(например: https://домискусств.рф/skazka или https://xn--b1admiilxbaki.xn--p1ai/aladdin)",
+    )
+
+
+async def handle_dom_iskusstv_input(message: types.Message, db: Database, bot: Bot) -> None:
+    """Handle text input with Dom Iskusstv URLs."""
+    if message.from_user.id not in dom_iskusstv_input_sessions:
+        return
+    dom_iskusstv_input_sessions.discard(message.from_user.id)
+    
+    text = (message.text or "").strip()
+    if not text:
+        await bot.send_message(message.chat.id, "❌ Пустой ввод")
+        return
+    
+    # Extract URLs
+    from source_parsing.dom_iskusstv import (
+        extract_dom_iskusstv_urls,
+        run_dom_iskusstv_kaggle_kernel,
+        parse_dom_iskusstv_output,
+        process_dom_iskusstv_events,
+    )
+    
+    urls = extract_dom_iskusstv_urls(text)
+    if not urls:
+        await bot.send_message(message.chat.id, "❌ Не найдены ссылки на домискусств.рф")
+        return
+    
+    status_msg = await bot.send_message(message.chat.id, f"🏛 Найдено {len(urls)} ссылок. Запускаю Kaggle...")
+    
+    async def _status_cb(text: str):
+        try:
+            await bot.edit_message_text(
+                f"🏛 {text}",
+                chat_id=message.chat.id,
+                message_id=status_msg.message_id,
+            )
+        except Exception:
+            pass
+    
+    # Run Kaggle
+    try:
+        status, output_files, duration = await run_dom_iskusstv_kaggle_kernel(urls, status_callback=_status_cb)
+    except Exception as e:
+        logging.exception("dom_iskusstv_input: kaggle failed")
+        await bot.send_message(message.chat.id, f"❌ Ошибка Kaggle: {e}")
+        return
+    
+    if status != "complete":
+        await bot.send_message(message.chat.id, f"❌ Kaggle завершился с ошибкой: {status}")
+        # Send logs if available
+        for file_path in output_files:
+            if file_path.endswith(".log"):
+                try:
+                    await bot.send_document(
+                        message.chat.id,
+                        types.FSInputFile(file_path),
+                        caption=f"📝 Log: {os.path.basename(file_path)}"
+                    )
+                except Exception as e:
+                    logging.error(f"Failed to send log file {file_path}: {e}")
+        return
+    
+    await bot.send_message(message.chat.id, f"✅ Kaggle завершён за {duration:.1f}с. Обрабатываю...")
+    
+    # Send JSON files to chat
+    for file_path in output_files:
+        try:
+            await bot.send_document(
+                message.chat.id,
+                types.FSInputFile(file_path),
+                caption=f"📄 {os.path.basename(file_path)}"
+            )
+        except Exception as e:
+            logging.error(f"Failed to send JSON file {file_path}: {e}")
+    
+    # Parse events
+    try:
+        events = parse_dom_iskusstv_output(output_files)
+    except Exception as e:
+        logging.exception("dom_iskusstv_input: parse failed")
+        await bot.send_message(message.chat.id, f"❌ Ошибка парсинга: {e}")
+        return
+    
+    if not events:
+        await bot.send_message(message.chat.id, "⚠️ Не найдено событий в результатах Kaggle")
+        return
+    
+    await bot.send_message(message.chat.id, f"📝 Обрабатываю {len(events)} событий...")
+    
+    # Process events
+    try:
+        stats = await process_dom_iskusstv_events(
+            db,
+            bot,
+            events,
+            chat_id=message.chat.id,
+            skip_pages_rebuild=True,
+        )
+    except Exception as e:
+        logging.exception("dom_iskusstv_input: processing failed")
+        await bot.send_message(message.chat.id, f"❌ Ошибка обработки: {e}")
+        return
+    
+    # Summary
+    summary_lines = [
+        "🏛 **Дом искусств импорт завершён**",
+        f"✅ Добавлено: {stats.new_added}",
+    ]
+    if stats.ticket_updated:
+        summary_lines.append(f"🔄 Обновлено: {stats.ticket_updated}")
+    if stats.failed:
+        summary_lines.append(f"❌ Ошибок: {stats.failed}")
+
+    # Add Telegraph links
+    all_event_ids = stats.added_event_ids + stats.updated_event_ids
+    if all_event_ids:
+        from source_parsing.handlers import build_added_event_info
+        event_infos = []
+        for eid in all_event_ids:
+            # build_added_event_info is async
+            info = await build_added_event_info(db, eid, "dom_iskusstv")
+            if info:
+                event_infos.append(info)
+        
+        if event_infos:
+            summary_lines.append("")
+            summary_lines.append("🔗 **Ссылки:**")
+            for info in event_infos:
+                # Escape for Legacy Markdown
+                safe_title = info.title.replace("[", "\\[").replace("]", "\\]")
+                summary_lines.append(f"• [{safe_title}]({info.telegraph_url})")
     
     await bot.send_message(message.chat.id, "\n".join(summary_lines), parse_mode="Markdown")
 
@@ -10241,6 +10547,17 @@ async def _vkrev_show_next(chat_id: int, batch_id: str, operator_id: int, db: Da
                 callback_data=f"vkrev:pyramida:{post.id}",
             )
         ])
+    # Add Dom Iskusstv extraction button (always visible)
+    from source_parsing.dom_iskusstv import extract_dom_iskusstv_urls
+    dom_iskusstv_urls = extract_dom_iskusstv_urls(post.text or "")
+    logging.info(f"Adding Dom Iskusstv button. URLs found: {len(dom_iskusstv_urls)}")
+    # Always add the button, showing count (0 if none)
+    inline_keyboard.append([
+        types.InlineKeyboardButton(
+            text=f"🏛 Извлечь из Дом искусств ({len(dom_iskusstv_urls)})",
+            callback_data=f"vkrev:domiskusstv:{post.id}",
+        )
+    ])
     inline_keyboard.extend([
         [types.InlineKeyboardButton(text="⏹ Стоп", callback_data=f"vkrev:stop:{batch_id}")],
         [
@@ -11171,6 +11488,121 @@ async def _handle_pyramida_extraction(
     await _vkrev_show_next(chat_id, batch_id, operator_id, db, bot)
 
 
+async def _handle_dom_iskusstv_extraction(
+    chat_id: int,
+    operator_id: int,
+    inbox_id: int,
+    batch_id: str,
+    post_text: str,
+    db: Database,
+    bot: Bot,
+) -> None:
+    """Handle Dom Iskusstv event extraction from VK post.
+    
+    1. Extract домискусств.рф URLs from post text
+    2. Run Kaggle kernel to parse events
+    3. Process events (add to DB without pages rebuild)
+    4. Show next post
+    """
+    from source_parsing.dom_iskusstv import (
+        extract_dom_iskusstv_urls,
+        run_dom_iskusstv_kaggle_kernel,
+        parse_dom_iskusstv_output,
+        process_dom_iskusstv_events,
+    )
+    
+    # 1. Extract URLs
+    urls = extract_dom_iskusstv_urls(post_text)
+    if not urls:
+        await bot.send_message(chat_id, "❌ Не найдены ссылки на домискусств.рф")
+        await _vkrev_show_next(chat_id, batch_id, operator_id, db, bot)
+        return
+    
+    status_msg = await bot.send_message(chat_id, f"🏛 Найдено {len(urls)} ссылок. Запускаю Kaggle...")
+    
+    async def _status_cb(text: str):
+        try:
+            await bot.edit_message_text(
+                f"🏛 {text}",
+                chat_id=chat_id,
+                message_id=status_msg.message_id,
+            )
+        except Exception:
+            pass
+            
+    # 2. Run Kaggle kernel
+    try:
+        status, output_files, duration = await run_dom_iskusstv_kaggle_kernel(urls, status_callback=_status_cb)
+    except Exception as e:
+        logging.exception("dom_iskusstv_extraction: kaggle failed")
+        await bot.send_message(chat_id, f"❌ Ошибка Kaggle: {e}")
+        await _vkrev_show_next(chat_id, batch_id, operator_id, db, bot)
+        return
+    
+    if status != "complete":
+        await bot.send_message(chat_id, f"❌ Kaggle завершился с ошибкой: {status}")
+        await _vkrev_show_next(chat_id, batch_id, operator_id, db, bot)
+        return
+    
+    await bot.send_message(chat_id, f"✅ Kaggle завершён за {duration:.1f}с. Обрабатываю...")
+    
+    # Send JSON files to chat
+    for file_path in output_files:
+        try:
+            await bot.send_document(
+                chat_id,
+                types.FSInputFile(file_path),
+                caption=f"📄 {os.path.basename(file_path)}"
+            )
+        except Exception as e:
+            logging.error(f"Failed to send JSON file {file_path}: {e}")
+    
+    # 3. Parse and process events
+    try:
+        events = parse_dom_iskusstv_output(output_files)
+    except Exception as e:
+        logging.exception("dom_iskusstv_extraction: parse failed")
+        await bot.send_message(chat_id, f"❌ Ошибка парсинга: {e}")
+        await _vkrev_show_next(chat_id, batch_id, operator_id, db, bot)
+        return
+    
+    if not events:
+        await bot.send_message(chat_id, "⚠️ Не найдено событий в результатах Kaggle")
+        await _vkrev_show_next(chat_id, batch_id, operator_id, db, bot)
+        return
+    
+    await bot.send_message(chat_id, f"📝 Обрабатываю {len(events)} событий...")
+    
+    try:
+        stats = await process_dom_iskusstv_events(
+            db,
+            bot,
+            events,
+            chat_id=chat_id,
+            skip_pages_rebuild=True,
+        )
+    except Exception as e:
+        logging.exception("dom_iskusstv_extraction: processing failed")
+        await bot.send_message(chat_id, f"❌ Ошибка обработки: {e}")
+        await _vkrev_show_next(chat_id, batch_id, operator_id, db, bot)
+        return
+    
+    # 4. Send summary
+    summary_lines = [
+        "🏛 **Дом искусств импорт завершён**",
+        f"✅ Добавлено: {stats.new_added}",
+    ]
+    if stats.ticket_updated:
+        summary_lines.append(f"🔄 Обновлено: {stats.ticket_updated}")
+    if stats.failed:
+        summary_lines.append(f"❌ Ошибок: {stats.failed}")
+    
+    await bot.send_message(chat_id, "\n".join(summary_lines), parse_mode="Markdown")
+    
+    # Show next post
+    await _vkrev_show_next(chat_id, batch_id, operator_id, db, bot)
+
+
 async def handle_vk_review_cb(callback: types.CallbackQuery, db: Database, bot: Bot) -> None:
 
     assert callback.data
@@ -11363,6 +11795,40 @@ async def handle_vk_review_cb(callback: types.CallbackQuery, db: Database, bot: 
         await callback.answer("Извлекаю события из Pyramida…")
         answered = True
         await _handle_pyramida_extraction(
+            callback.message.chat.id,
+            callback.from_user.id,
+            inbox_id,
+            batch_id,
+            post_text or "",
+            db,
+            bot,
+        )
+    elif action == "domiskusstv":
+        # Handle Dom Iskusstv event extraction
+        inbox_id = int(parts[2]) if len(parts) > 2 else 0
+        async with db.raw_conn() as conn:
+            cur = await conn.execute(
+                "SELECT review_batch, text FROM vk_inbox WHERE id=?",
+                (inbox_id,),
+            )
+            row = await cur.fetchone()
+        if not row:
+            await callback.answer("Пост не найден", show_alert=True)
+            return
+        batch_id, post_text = row
+        
+        from source_parsing.dom_iskusstv import extract_dom_iskusstv_urls
+        if not extract_dom_iskusstv_urls(post_text or ""):
+            await callback.answer("Ссылки не найдены")
+            await bot.send_message(
+                callback.message.chat.id, 
+                "⚠️ В тексте поста не найдено ссылок на домискусств.рф (или tickets.domiskusstv.ru)."
+            )
+            return
+
+        await callback.answer("Извлекаю события из Дом искусств…")
+        answered = True
+        await _handle_dom_iskusstv_extraction(
             callback.message.chat.id,
             callback.from_user.id,
             inbox_id,
@@ -12344,6 +12810,13 @@ async def handle_festival_edit_message(message: types.Message, db: Database, bot
             fest.tg_url = None if text in {"", "-"} else text
         elif field == "ticket":
             fest.ticket_url = None if text in {"", "-"} else text
+        # New parser fields
+        elif field == "phone":
+            fest.contacts_phone = None if text in {"", "-"} else text
+        elif field == "email":
+            fest.contacts_email = None if text in {"", "-"} else text
+        elif field == "audience":
+            fest.audience = None if text in {"", "-"} else text
         await session.commit()
         logging.info("festival %s updated", fest.name)
     festival_edit_sessions[message.from_user.id] = (fid, None)
@@ -13926,14 +14399,18 @@ def create_app() -> web.Application:
     # Webhook is optional - only required for production mode
     # In dev mode, we'll skip webhook setup
 
+    from main import IPv4AiohttpSession, set_bot
     session = IPv4AiohttpSession(timeout=ClientTimeout(total=HTTP_TIMEOUT))
     bot = SafeBot(token, session=session)
     logging.info("DB_PATH=%s", DB_PATH)
     logging.info("FOUR_O_TOKEN found: %s", bool(os.getenv("FOUR_O_TOKEN")))
     dp = Dispatcher()
     dp.include_router(ik_poster_router)
+    from handlers.channel_nav import channel_nav_router
+    dp.include_router(channel_nav_router)
     db = Database(DB_PATH)
     set_db(db)  # Set db in main.py's namespace for handlers
+    set_bot(bot)  # Set bot in main.py's namespace for handlers
     dp.include_router(special_router)  # must be after db init
     import video_announce.handlers as video_handlers
     import preview_3d.handlers as preview_3d_handlers
@@ -14217,9 +14694,62 @@ def create_app() -> web.Application:
         )
         await handle_add_festival_start(message, db, bot)
 
+    async def dom_iskusstv_start_wrapper(message: types.Message):
+        await handle_dom_iskusstv_start(message, db, bot)
+
     async def add_event_session_wrapper(message: types.Message):
         logging.info("add_event_session_wrapper start: user=%s", message.from_user.id)
         session_mode = add_event_sessions.get(message.from_user.id)
+        
+        # Check for festival URL parsing
+        if session_mode == "festival":
+            text = (message.text or "").strip()
+            from source_parsing.festival_parser import is_valid_url, process_festival_url
+            
+            if is_valid_url(text):
+                # URL detected - use festival parser
+                logging.info("festival_url_detected: user=%s url=%s", message.from_user.id, text)
+                add_event_sessions.pop(message.from_user.id, None)
+                
+                await bot.send_message(message.chat.id, "🔄 Запускаю парсер фестиваля...")
+                
+                try:
+                    async def status_callback(status: str):
+                        await bot.send_message(message.chat.id, f"📊 {status}")
+                    
+                    festival, uds_url, llm_log_url = await process_festival_url(
+                        db=db,
+                        bot=bot,
+                        chat_id=message.chat.id,
+                        url=text,
+                        status_callback=status_callback,
+                    )
+                    
+                    # Build success message
+                    lines = [
+                        f"✅ Фестиваль добавлен: **{festival.name}**",
+                    ]
+                    if festival.telegraph_url:
+                        lines.append(f"📄 [Открыть страницу фестиваля]({festival.telegraph_url})")
+                    if uds_url:
+                        lines.append(f"📊 [JSON отчёт парсинга]({uds_url})")
+                    if llm_log_url:
+                        lines.append(f"🔍 [LLM лог (отладка)]({llm_log_url})")
+                    
+                    await bot.send_message(
+                        message.chat.id,
+                        "\n".join(lines),
+                        parse_mode="Markdown",
+                    )
+                    
+                except Exception as e:
+                    logging.exception("festival_parser_failed: %s", e)
+                    await bot.send_message(
+                        message.chat.id,
+                        f"❌ Парсинг завершился ошибкой: {e}",
+                    )
+                return
+        
         if message.media_group_id:
             await handle_add_event_media_group(message, db, bot)
         else:
@@ -14245,6 +14775,12 @@ def create_app() -> web.Application:
 
     async def pyramida_input_wrapper(message: types.Message):
         await handle_pyramida_input(message, db, bot)
+
+    async def dom_iskusstv_start_wrapper(message: types.Message):
+        await handle_dom_iskusstv_start(message, db, bot)
+
+    async def dom_iskusstv_input_wrapper(message: types.Message):
+        await handle_dom_iskusstv_input(message, db, bot)
 
     async def vk_list_wrapper(message: types.Message):
         await handle_vk_list(message, db, bot)
@@ -14407,6 +14943,7 @@ def create_app() -> web.Application:
         or c.data.startswith("festsetcover:")
         or c.data.startswith("festcover:")
         or c.data.startswith("festsyncevents:")
+        or c.data.startswith("festreparse:")
         or c.data.startswith("requeue:")
         or c.data.startswith("tourist:")
     ,
@@ -14480,6 +15017,7 @@ def create_app() -> web.Application:
     dp.message.register(events_menu_wrapper, lambda m: m.text == MENU_EVENTS)
     dp.message.register(events_date_wrapper, lambda m: m.from_user.id in events_date_sessions)
     dp.message.register(add_event_start_wrapper, lambda m: m.text == MENU_ADD_EVENT)
+    dp.message.register(dom_iskusstv_start_wrapper, lambda m: m.text == MENU_DOM_ISKUSSTV)
     dp.message.register(
         add_festival_start_wrapper, lambda m: m.text == MENU_ADD_FESTIVAL
     )
@@ -14498,6 +15036,8 @@ def create_app() -> web.Application:
     dp.message.register(vk_queue_wrapper, lambda m: m.text == VK_BTN_QUEUE_SUMMARY)
     dp.message.register(pyramida_start_wrapper, lambda m: m.text == VK_BTN_PYRAMIDA)
     dp.message.register(pyramida_input_wrapper, lambda m: m.from_user.id in pyramida_input_sessions)
+    dp.message.register(dom_iskusstv_start_wrapper, lambda m: m.text == VK_BTN_DOM_ISKUSSTV)
+    dp.message.register(dom_iskusstv_input_wrapper, lambda m: m.from_user.id in dom_iskusstv_input_sessions)
     dp.message.register(vk_add_msg_wrapper, lambda m: m.from_user.id in vk_add_source_sessions)
 
     dp.message.register(vk_extra_msg_wrapper, lambda m: m.from_user.id in vk_review_extra_sessions)
@@ -15076,7 +15616,11 @@ async def run_dev_mode():
     
     try:
         # Start polling
-        await dp.start_polling(bot, allowed_updates=["message", "callback_query", "my_chat_member"])
+        await dp.start_polling(
+            bot, 
+            allowed_updates=["message", "callback_query", "my_chat_member", "channel_post", "edited_channel_post"],
+            db=db
+        )
     finally:
         # Cleanup - use the on_shutdown from app
         await app["bot"].session.close()

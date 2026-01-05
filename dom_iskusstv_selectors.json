@@ -1,0 +1,11 @@
+{
+  "images": [
+    "img[data-original]",
+    ".t-bgimg[data-original]"
+  ],
+  "description": [
+    ".t-descr"
+  ],
+  "title": "title_tag",
+  "price": ""
+}

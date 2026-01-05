@@ -671,7 +671,8 @@ async def build_special_page_content(
 
         # Month navigation
         month_key = start_date.strftime("%Y-%m")
-        nav_html = await build_month_nav_block(db, current_month=month_key)
+        # Pass current_month=None so that the current month is also a link (clickable)
+        nav_html = await build_month_nav_block(db, current_month=None)
         if nav_html:
             from telegraph.utils import html_to_nodes
             content.extend(html_to_nodes(nav_html))
@@ -718,7 +719,8 @@ async def build_special_page_content(
             content.extend(render_special_group(group, show_image=False))
 
     month_key = start_date.strftime("%Y-%m")
-    nav_html = await build_month_nav_block(db, current_month=month_key)
+    # Pass current_month=None so that the current month is also a link (clickable)
+    nav_html = await build_month_nav_block(db, current_month=None)
     if nav_html:
         from telegraph.utils import html_to_nodes
         content.extend(html_to_nodes(nav_html))

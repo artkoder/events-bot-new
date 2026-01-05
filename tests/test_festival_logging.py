@@ -391,7 +391,7 @@ async def test_festivals_fix_nav_force(tmp_path: Path, monkeypatch, caplog):
     async with db.get_session() as session:
         f1 = Festival(name="Fest1", start_date=today, end_date=today, nav_hash="abc")
         f2 = Festival(name="Fest2", start_date=today, end_date=today, nav_hash="def")
-        f3 = Festival(name="Fest3", telegraph_path="f3", nav_hash="ghi")
+        f3 = Festival(name="Fest3", telegraph_path="f3", start_date=today, end_date=today, nav_hash="ghi")
         session.add_all([f1, f2, f3])
         await session.commit()
     await main.set_setting_value(db, "fest_nav_hash", "abc")

@@ -1,0 +1,109 @@
+[{"stream_name":"stderr","time":8.654988778,"data":"/usr/local/lib/python3.12/dist-packages/nbformat/__init__.py:96: MissingIDFieldWarning: Cell is missing an id field, this will become a hard error in future nbformat versions. You may want to use `normalize()` on your notebooks before validations (available since nbformat 5.1.4). Previous versions of nbformat are fixing this issue transparently, and will stop doing so in the future.\n"}
+,{"stream_name":"stderr","time":8.655086002000001,"data":"  validate(nb)\n"}
+,{"stream_name":"stderr","time":10.0603496,"data":"0.00s - Debugger warning: It seems that frozen modules are being used, which may\n"}
+,{"stream_name":"stderr","time":10.060399695,"data":"0.00s - make the debugger miss breakpoints. Please pass -Xfrozen_modules=off\n"}
+,{"stream_name":"stderr","time":10.060405974,"data":"0.00s - to python to disable frozen modules.\n"}
+,{"stream_name":"stderr","time":10.060410495,"data":"0.00s - Note: Debugging will proceed. Set PYDEVD_DISABLE_FILE_VALIDATION=1 to disable this validation.\n"}
+,{"stream_name":"stderr","time":11.002780113,"data":"0.00s - Debugger warning: It seems that frozen modules are being used, which may\n"}
+,{"stream_name":"stderr","time":11.002870565,"data":"0.00s - make the debugger miss breakpoints. Please pass -Xfrozen_modules=off\n"}
+,{"stream_name":"stderr","time":11.002879244,"data":"0.00s - to python to disable frozen modules.\n"}
+,{"stream_name":"stderr","time":11.00288633,"data":"0.00s - Note: Debugging will proceed. Set PYDEVD_DISABLE_FILE_VALIDATION=1 to disable this validation.\n"}
+,{"stream_name":"stderr","time":12.458320466,"data":"2026-01-03 19:38:50,094 - INFO - Installing dependencies: telethon, behave, requests, beautifulsoup4\n"}
+,{"stream_name":"stderr","time":12.458368793,"data":"\n"}
+,{"stream_name":"stderr","time":12.458376911,"data":"2026-01-03 19:38:50,094 - INFO - Installing dependencies: telethon, behave, requests, beautifulsoup4\n"}
+,{"stream_name":"stdout","time":17.599666486,"data":"   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 748.5/748.5 kB 29.5 MB/s eta 0:00:00\n"}
+,{"stream_name":"stdout","time":17.630475293,"data":"   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 223.6/223.6 kB 10.0 MB/s eta 0:00:00\n"}
+,{"stream_name":"stdout","time":17.803112487,"data":"   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 748.5/748.5 kB 29.5 MB/s eta 0:00:00\n"}
+,{"stream_name":"stdout","time":17.803179743,"data":"   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 223.6/223.6 kB 10.0 MB/s eta 0:00:00\n"}
+,{"stream_name":"stderr","time":24.384744238,"data":"2026-01-03 19:39:02,020 - INFO - Dependencies installed successfully.\n"}
+,{"stream_name":"stderr","time":24.384808063,"data":"\n"}
+,{"stream_name":"stderr","time":24.384816955,"data":"2026-01-03 19:39:02,020 - INFO - Dependencies installed successfully.\n"}
+,{"stream_name":"stderr","time":24.386195386,"data":"2026-01-03 19:39:02,021 - INFO - Setting up test files...\n"}
+,{"stream_name":"stderr","time":24.386237626,"data":"\n"}
+,{"stream_name":"stderr","time":24.386245788,"data":"2026-01-03 19:39:02,021 - INFO - Setting up test files...\n"}
+,{"stream_name":"stderr","time":24.387427946,"data":"2026-01-03 19:39:02,023 - INFO - Created features/bot_telegraph.feature\n"}
+,{"stream_name":"stderr","time":24.387474864,"data":"\n"}
+,{"stream_name":"stderr","time":24.387483363,"data":"2026-01-03 19:39:02,023 - INFO - Created features/bot_telegraph.feature\n"}
+,{"stream_name":"stderr","time":24.388650482,"data":"2026-01-03 19:39:02,024 - INFO - Created features/steps/definitions.py\n"}
+,{"stream_name":"stderr","time":24.388803352,"data":"\n"}
+,{"stream_name":"stderr","time":24.388815531,"data":"2026-01-03 19:39:02,024 - INFO - Created features/steps/definitions.py\n"}
+,{"stream_name":"stdout","time":24.39296459,"data":"./features/bot_telegraph.feature\n"}
+,{"stream_name":"stdout","time":24.393010902,"data":"./features/steps/definitions.py\n"}
+,{"stream_name":"stderr","time":24.406827269,"data":"2026-01-03 19:39:02,043 - INFO - UserSecretsClient initialized successfully\n"}
+,{"stream_name":"stderr","time":24.406883153,"data":"\n"}
+,{"stream_name":"stderr","time":24.406888674,"data":"2026-01-03 19:39:02,043 - INFO - UserSecretsClient initialized successfully\n"}
+,{"stream_name":"stderr","time":24.538019865,"data":"2026-01-03 19:39:02,174 - WARNING - Failed to get secret TELEGRAM_API_ID: Connection error trying to communicate with service.\n"}
+,{"stream_name":"stderr","time":24.538075509,"data":"\n"}
+,{"stream_name":"stderr","time":24.538085931,"data":"2026-01-03 19:39:02,174 - WARNING - Failed to get secret TELEGRAM_API_ID: Connection error trying to communicate with service.\n"}
+,{"stream_name":"stdout","time":24.588955768,"data":"Created files:\n"}
+,{"stream_name":"stdout","time":24.589019915,"data":"./features/bot_telegraph.feature\n"}
+,{"stream_name":"stdout","time":24.589026645,"data":"./features/steps/definitions.py\n"}
+,{"stream_name":"stderr","time":24.662868299,"data":"2026-01-03 19:39:02,298 - WARNING - Failed to get secret TELEGRAM_API_HASH: Connection error trying to communicate with service.\n"}
+,{"stream_name":"stderr","time":24.66292573,"data":"\n"}
+,{"stream_name":"stderr","time":24.662953651,"data":"2026-01-03 19:39:02,298 - WARNING - Failed to get secret TELEGRAM_API_HASH: Connection error trying to communicate with service.\n"}
+,{"stream_name":"stderr","time":24.778213042,"data":"2026-01-03 19:39:02,414 - WARNING - Failed to get secret TELEGRAM_SESSION: Connection error trying to communicate with service.\n"}
+,{"stream_name":"stderr","time":24.778262171,"data":"\n"}
+,{"stream_name":"stderr","time":24.778269258,"data":"2026-01-03 19:39:02,414 - WARNING - Failed to get secret TELEGRAM_SESSION: Connection error trying to communicate with service.\n"}
+,{"stream_name":"stderr","time":24.896833078,"data":"2026-01-03 19:39:02,533 - WARNING - Failed to get secret TELEGRAM_BOT_TOKEN: Connection error trying to communicate with service.\n"}
+,{"stream_name":"stderr","time":24.896873861,"data":"\n"}
+,{"stream_name":"stderr","time":24.896880188,"data":"2026-01-03 19:39:02,533 - WARNING - Failed to get secret TELEGRAM_BOT_TOKEN: Connection error trying to communicate with service.\n"}
+,{"stream_name":"stderr","time":24.898170585,"data":"2026-01-03 19:39:02,534 - WARNING - Missing environment variables: ['TELEGRAM_API_ID', 'TELEGRAM_API_HASH', 'TELEGRAM_SESSION', 'TELEGRAM_BOT_TOKEN']. Tests might fail.\n"}
+,{"stream_name":"stderr","time":24.898203498,"data":"\n"}
+,{"stream_name":"stderr","time":24.898209945,"data":"2026-01-03 19:39:02,534 - WARNING - Missing environment variables: ['TELEGRAM_API_ID', 'TELEGRAM_API_HASH', 'TELEGRAM_SESSION', 'TELEGRAM_BOT_TOKEN']. Tests might fail.\n"}
+,{"stream_name":"stderr","time":24.89920971,"data":"2026-01-03 19:39:02,535 - INFO - Starting BDD tests...\n"}
+,{"stream_name":"stderr","time":24.899230209,"data":"\n"}
+,{"stream_name":"stderr","time":24.899235445,"data":"2026-01-03 19:39:02,535 - INFO - Starting BDD tests...\n"}
+,{"stream_name":"stderr","time":25.862411968,"data":"2026-01-03 19:39:03,498 - INFO - Behave finished with return code: 1\n"}
+,{"stream_name":"stderr","time":25.8624515,"data":"\n"}
+,{"stream_name":"stderr","time":25.862470606,"data":"2026-01-03 19:39:03,498 - INFO - Behave finished with return code: 1\n"}
+,{"stream_name":"stdout","time":25.866782246,"data":"total 28\n"}
+,{"stream_name":"stdout","time":25.866811306,"data":"drwxr-xr-x 3 root root  4096 Jan  3 19:39 .\n"}
+,{"stream_name":"stdout","time":25.866816557,"data":"drwxr-xr-x 8 root root  4096 Jan  3 19:38 ..\n"}
+,{"stream_name":"stdout","time":25.866820548,"data":"drwxr-xr-x 3 root root  4096 Jan  3 19:39 features\n"}
+,{"stream_name":"stdout","time":25.866824537,"data":"---------- 1 root root 11942 Jan  3 19:38 __notebook__.ipynb\n"}
+,{"stream_name":"stdout","time":25.866828676,"data":"-rw-r--r-- 1 root root  3202 Jan  3 19:39 test_report.json\n"}
+,{"stream_name":"stderr","time":25.8705904,"data":"2026-01-03 19:39:03,506 - INFO - Test execution completed. Exiting with success code.\n"}
+,{"stream_name":"stderr","time":25.870628473,"data":"\n"}
+,{"stream_name":"stderr","time":25.870633933,"data":"2026-01-03 19:39:03,506 - INFO - Test execution completed. Exiting with success code.\n"}
+,{"stream_name":"stdout","time":25.872405931,"data":"BEHAVE OUTPUT:\n"}
+,{"stream_name":"stdout","time":25.872435362,"data":" USING RUNNER: behave.runner:Runner\n"}
+,{"stream_name":"stdout","time":25.872441431,"data":"\n"}
+,{"stream_name":"stdout","time":25.87244603,"data":"Errored scenarios:\n"}
+,{"stream_name":"stdout","time":25.87245001,"data":"  features/bot_telegraph.feature:3  Авторизоваться в боте\n"}
+,{"stream_name":"stdout","time":25.87245547,"data":"  features/bot_telegraph.feature:8  Проверить события на сегодня\n"}
+,{"stream_name":"stdout","time":25.872460816,"data":"\n"}
+,{"stream_name":"stdout","time":25.872465929,"data":"0 features passed, 0 failed, 1 error, 0 skipped\n"}
+,{"stream_name":"stdout","time":25.872470377,"data":"0 scenarios passed, 0 failed, 2 error, 0 skipped\n"}
+,{"stream_name":"stdout","time":25.872474316999998,"data":"0 steps passed, 0 failed, 2 error, 5 skipped\n"}
+,{"stream_name":"stdout","time":25.872478686,"data":"Took 0min 0.002s\n"}
+,{"stream_name":"stdout","time":25.872483344,"data":"\n"}
+,{"stream_name":"stdout","time":25.872487734,"data":"Files in working directory:\n"}
+,{"stream_name":"stdout","time":25.872492594,"data":"total 28\n"}
+,{"stream_name":"stdout","time":25.872497786,"data":"drwxr-xr-x 3 root root  4096 Jan  3 19:39 .\n"}
+,{"stream_name":"stdout","time":25.872502957000002,"data":"drwxr-xr-x 8 root root  4096 Jan  3 19:38 ..\n"}
+,{"stream_name":"stdout","time":25.872507322,"data":"drwxr-xr-x 3 root root  4096 Jan  3 19:39 features\n"}
+,{"stream_name":"stdout","time":25.872511525,"data":"---------- 1 root root 11942 Jan  3 19:38 __notebook__.ipynb\n"}
+,{"stream_name":"stdout","time":25.872515948,"data":"-rw-r--r-- 1 root root  3202 Jan  3 19:39 test_report.json\n"}
+,{"stream_name":"stdout","time":25.87252031,"data":"REPORT CONTENT (/kaggle/working/test_report.json):\n"}
+,{"stream_name":"stdout","time":25.872524754,"data":"[\n"}
+,{"stream_name":"stdout","time":25.872542025,"data":"{\"keyword\": \"Feature\", \"name\": \"\\u041f\\u0440\\u043e\\u0432\\u0435\\u0440\\u0438\\u0442\\u044c \\u0441\\u043e\\u0431\\u044b\\u0442\\u0438\\u0435 \\u043d\\u0430 \\u0441\\u0435\\u0433\\u043e\\u0434\\u043d\\u044f\", \"tags\": [], \"location\": \"features/bot_telegraph.feature:1\", \"status\": \"error\", \"elements\": [{\"type\": \"scenario\", \"keyword\": \"Scenario\", \"name\": \"\\u0410\\u0432\\u0442\\u043e\\u0440\\u0438\\u0437\\u043e\\u0432\\u0430\\u0442\\u044c\\u0441\\u044f \\u0432 \\u0431\\u043e\\u0442\\u0435\", \"tags\": [], \"location\": \"features/bot_telegraph.feature:3\", \"steps\": [{\"keyword\": \"Given\", \"step_type\": \"given\", \"name\": \"\\u044f \\u0430\\u0432\\u0442\\u043e\\u0440\\u0438\\u0437\\u043e\\u0432\\u0430\\u043d \\u0432 Telegram \\u0447\\u0435\\u0440\\u0435\\u0437 Telethon\", \"location\": \"features/bot_telegraph.feature:4\", \"match\": {\"location\": \"features/steps/definitions.py:14\", \"arguments\": []}, \"result\": {\"status\": \"error\", \"duration\": 0.0010225772857666016}}, {\"keyword\": \"When\", \"step_type\": \"when\", \"name\": \"\\u044f \\u043d\\u0430\\u0445\\u043e\\u0436\\u0443 \\u0431\\u043e\\u0442\\u0430 @eventsbotTestBot \\u0432 \\u0441\\u043f\\u0438\\u0441\\u043a\\u0435 \\u043c\\u043e\\u0438\\u0445 \\u043f\\u0435\\u0440\\u0435\\u043f\\u0438\\u0441\\u043e\\u043a\", \"location\": \"features/bot_telegraph.feature:5\"}, {\"keyword\": \"Then\", \"step_type\": \"then\", \"name\": \"\\u044f \\u0434\\u043e\\u043b\\u0436\\u0435\\u043d \\u0443\\u0432\\u0438\\u0434\\u0435\\u0442\\u044c \\u043f\\u0435\\u0440\\u0435\\u043f\\u0438\\u0441\\u043a\\u0443 \\u0441 \\u0431\\u043e\\u0442\\u043e\\u043c\", \"location\": \"features/bot_telegraph.feature:6\"}], \"status\": \"error\"}, {\"type\": \"scenario\", \"keyword\": \"Scenario\", \"name\": \"\\u041f\\u0440\\u043e\\u0432\\u0435\\u0440\\u0438\\u0442\\u044c \\u0441\\u043e\\u0431\\u044b\\u0442\\u0438\\u044f \\u043d\\u0430 \\u0441\\u0435\\u0433\\u043e\\u0434\\u043d\\u044f\", \"tags\": [], \"location\": \"features/bot_telegraph.feature:8\", \"steps\": [{\"keyword\": \"Given\", \"step_type\": \"given\", \"name\": \"\\u044f \\u0430\\u0432\\u0442\\u043e\\u0440\\u0438\\u0437\\u043e\\u0432\\u0430\\u043d \\u0432 \\u0431\\u043e\\u0442\\u0435 @eventsbotTestBot\", \"location\": \"features/bot_telegraph.feature:9\", \"match\": {\"location\": \"features/steps/definitions.py:47\", \"arguments\": []}, \"result\": {\"status\": \"error\", \"duration\": 0.0005328655242919922}}, {\"keyword\": \"When\", \"step_type\": \"when\", \"name\": \"\\u044f \\u0434\\u0435\\u043b\\u0430\\u044e /events\", \"location\": \"features/bot_telegraph.feature:10\"}, {\"keyword\": \"Then\", \"step_type\": \"then\", \"name\": \"\\u044f \\u0434\\u043e\\u043b\\u0436\\u0435\\u043d \\u043f\\u043e\\u043b\\u0443\\u0447\\u0438\\u0442\\u044c \\u043e\\u0442\\u0432\\u0435\\u0442 \\u043e\\u0442 \\u0431\\u043e\\u0442\\u0430 \\u0441\\u043e \\u0441\\u043f\\u0438\\u0441\\u043a\\u043e\\u043c \\u0441\\u043e\\u0431\\u044b\\u0442\\u0438\\u0439\", \"location\": \"features/bot_telegraph.feature:11\"}, {\"keyword\": \"And\", \"step_type\": \"then\", \"name\": \"\\u0432 \\u0441\\u043e\\u043e\\u0431\\u0449\\u0435\\u043d\\u0438\\u0438 \\u0441\\u043e \\u0441\\u043f\\u0438\\u0441\\u043a\\u043e\\u043c \\u0441\\u043e\\u0431\\u044b\\u0442\\u0438\\u0439 \\u0431\\u0443\\u0434\\u0435\\u0442 2 \\u0438\\u043d\\u043b\\u0430\\u0439\\u043d \\u043a\\u043d\\u043e\\u043f\\u043a\\u0438 \\u043e\\u0434\\u043d\\u0430 \\u0432\\u043b\\u0435\\u0432\\u043e, \\u0432\\u0434\\u0440\\u0443\\u0433\\u0430\\u044f \\u0432\\u043f\\u0440\\u0430\\u0432\\u043e\", \"location\": \"features/bot_telegraph.feature:12\"}], \"status\": \"error\"}]}\n"}
+,{"stream_name":"stdout","time":25.872595542,"data":"]\n"}
+,{"stream_name":"stdout","time":25.872599931,"data":"\n"}
+,{"stream_name":"stderr","time":25.877663969,"data":"/usr/local/lib/python3.12/dist-packages/IPython/core/interactiveshell.py:3561: UserWarning: To exit: use 'exit', 'quit', or Ctrl-D.\n"}
+,{"stream_name":"stderr","time":25.877704885,"data":"  warn(\"To exit: use 'exit', 'quit', or Ctrl-D.\", stacklevel=1)\n"}
+,{"stream_name":"stderr","time":25.877711841,"data":"\n"}
+,{"stream_name":"stderr","time":25.877716072,"data":"/usr/local/lib/python3.12/dist-packages/IPython/core/interactiveshell.py:3561: UserWarning: To exit: use 'exit', 'quit', or Ctrl-D.\n"}
+,{"stream_name":"stderr","time":25.877720592,"data":"  warn(\"To exit: use 'exit', 'quit', or Ctrl-D.\", stacklevel=1)\n"}
+,{"stream_name":"stderr","time":29.440690597,"data":"/usr/local/lib/python3.12/dist-packages/mistune.py:435: SyntaxWarning: invalid escape sequence '\\|'\n"}
+,{"stream_name":"stderr","time":29.440787804,"data":"  cells[i][c] = re.sub('\\\\\\\\\\|', '|', cell)\n"}
+,{"stream_name":"stderr","time":29.666182166,"data":"/usr/local/lib/python3.12/dist-packages/nbconvert/filters/filter_links.py:36: SyntaxWarning: invalid escape sequence '\\_'\n"}
+,{"stream_name":"stderr","time":29.666237858,"data":"  text = re.sub(r'_', '\\_', text) # Escape underscores in display text\n"}
+,{"stream_name":"stderr","time":30.535464647,"data":"/usr/local/lib/python3.12/dist-packages/traitlets/traitlets.py:2915: FutureWarning: --Exporter.preprocessors=[\"remove_papermill_header.RemovePapermillHeader\"] for containers is deprecated in traitlets 5.0. You can pass `--Exporter.preprocessors item` ... multiple times to add items to a list.\n"}
+,{"stream_name":"stderr","time":30.53551611,"data":"  warn(\n"}
+,{"stream_name":"stderr","time":30.580010558,"data":"[NbConvertApp] Converting notebook __notebook__.ipynb to notebook\n"}
+,{"stream_name":"stderr","time":31.022039519,"data":"[NbConvertApp] Writing 19505 bytes to __notebook__.ipynb\n"}
+,{"stream_name":"stderr","time":34.784605942,"data":"/usr/local/lib/python3.12/dist-packages/traitlets/traitlets.py:2915: FutureWarning: --Exporter.preprocessors=[\"nbconvert.preprocessors.ExtractOutputPreprocessor\"] for containers is deprecated in traitlets 5.0. You can pass `--Exporter.preprocessors item` ... multiple times to add items to a list.\n"}
+,{"stream_name":"stderr","time":34.784668027,"data":"  warn(\n"}
+,{"stream_name":"stderr","time":34.818458584,"data":"[NbConvertApp] Converting notebook __notebook__.ipynb to html\n"}
+,{"stream_name":"stderr","time":36.037012442,"data":"[NbConvertApp] Writing 307575 bytes to __results__.html\n"}
+]
