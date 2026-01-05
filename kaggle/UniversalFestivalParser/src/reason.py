@@ -36,6 +36,7 @@ Output ONLY valid JSON matching this schema:
     "is_annual": true/false/null,
     "audience": "Target audience (e.g. 'families with children', 'music lovers')",
     "age_restriction": "Age restriction like '0+', '6+', '12+', '16+', '18+' or null",
+    "type": "music/film/theater/art/literature/food/sport/other",
     "links": {
       "website": "Official URL - look for main domain",
       "socials": ["VK/TG/other social URLs"],
@@ -55,27 +56,40 @@ Output ONLY valid JSON matching this schema:
   "program": [
     {
       "title": "Event title - BE SPECIFIC",
-      "type": "theater/concert/workshop/lecture/film/show/other",
+      "type": "theater/concert/workshop/lecture/film/show/exhibition/other",
       "date": "YYYY-MM-DD - USE CORRECT YEAR!",
       "time_start": "HH:MM or null",
       "time_end": "HH:MM or null",
       "venue": "Full venue name with address if available",
-      "price": "Exact price like '500 руб' or 'от 500 руб' or 'бесплатно' - EXTRACT FROM PAGE!",
-      "is_free": true/false,
+      "description": "DETAILED description - include all available info",
+      "age_restriction": "Age restriction like '0+', '6+', '12+', '16+', '18+' or null",
       "ticket_url": "Direct URL to buy tickets for THIS event",
       "ticket_status": "available/sold_out/registration_open/registration_closed/ended/unknown",
-      "description": "DETAILED description - include all available info: what happens, who performs, program highlights, age restrictions, etc.",
-      "performers": ["Names of performers/actors if mentioned"],
-      "age_restriction": "Age restriction like '0+', '6+', '12+', '16+', '18+' or null"
+      "tickets": [
+        {"category": "Взрослый/Детский/Льготный/VIP", "price": 500, "currency": "RUB"}
+      ],
+      "is_free": true/false,
+      "participants": [
+        {"name": "Person name", "role": "Дирижёр/Актёр/Режиссёр/Исполнитель/Ведущий", "details": "Additional info or null"}
+      ],
+      "works": [
+        {"title": "Work/film/play title", "author": "Composer/Director/Author or null", "details": "Additional info or null"}
+      ]
     }
   ],
   "venues": [
-    {"title": "Full venue name", "city": "City", "address": "Full street address"}
+    {
+      "id": "venue1",
+      "title": "Full venue name",
+      "city": "City",
+      "address": "Full street address",
+      "geo": {"lat": 54.7075, "lon": 20.5079}
+    }
   ],
   "images_festival": [
     {
       "url": "Image URL (NOT .svg icons, only real photos)",
-      "ocr_text": "Any text visible on the image (dates, prices, names) or null",
+      "ocr_text": "Any text visible on the image or null",
       "ocr_title": "Main title/heading from the image or null"
     }
   ]
@@ -86,18 +100,21 @@ EXTRACTION RULES (GREEDY - MAXIMIZE DATA):
 2. For EACH event, look for its specific ticket URL (pyramida.info, etc)
 3. Use CORRECT YEAR based on today's date context
 4. Dates MUST be in ISO 8601 format (YYYY-MM-DD)
-5. Extract performer names when mentioned
-6. PRICE IS CRITICAL: Look for prices near ticket buttons, in event descriptions
-7. TICKET STATUS (compare event date with today's date!): 
+5. PARTICIPANTS: Extract all performers/actors/directors with their roles
+6. WORKS: For concerts - extract musical pieces with composers; for films - extract film titles with directors
+7. TICKETS: If multiple price categories exist (adult/child/VIP), list each separately in tickets[]
+8. GEO: Include latitude/longitude for venues if known (Калининград ~54.71, 20.51)
+9. TICKET STATUS (compare event date with today's date!): 
    - 'available' if tickets can be purchased
    - 'sold_out' if SOLD OUT/распродано mentioned
    - 'registration_open' if free registration is open
    - 'registration_closed' if registration ended
    - 'ended' if event date has PASSED (before today's date)
    - 'unknown' if status cannot be determined
-8. DO NOT include .svg icon URLs in images_festival
-9. If an event repeats on multiple dates, create SEPARATE entries
-10. Output ONLY the JSON, no explanations"""
+10. DO NOT include .svg icon URLs in images_festival
+11. If an event repeats on multiple dates, create SEPARATE entries
+12. FESTIVAL TYPE: Identify type (music/film/theater/art/literature/food/sport/other)
+13. Output ONLY the JSON, no explanations"""
 
 
 def _strip_code_fences(text: str) -> str:
