@@ -152,7 +152,7 @@ FULL_MONTH_NAMES = [
     "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"
 ]
 
-@channel_nav_router.channel_post(~F.text.startswith("/"))
+@channel_nav_router.channel_post()
 async def handle_channel_post(message: types.Message):
     """Handle new posts in channel."""
     # Get db and bot from main module
@@ -166,8 +166,13 @@ async def handle_channel_post(message: types.Message):
     # 1. Filter: Check if bot is admin (implicit if we can edit, but good to check context?)
     # Actually, we just try to edit.
     
-    # 2. Filter: Rubrics
+    # 2. Filter: Commands (skip /commands in channel)
     text = message.text or message.caption or ""
+    if text.startswith("/"):
+        logger.debug("channel_nav: skipping command post %s", message.message_id)
+        return
+    
+    # 3. Filter: Rubrics
     if is_rubric_post(text):
         logger.info("channel_nav: skipping rubric post %s", message.message_id)
         return
