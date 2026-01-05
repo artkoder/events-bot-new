@@ -4164,7 +4164,7 @@ async def init_db_and_scheduler(
         try:
             await bot.set_webhook(
                 hook,
-                allowed_updates=["message", "callback_query", "my_chat_member"],
+                allowed_updates=["message", "callback_query", "my_chat_member", "channel_post", "edited_channel_post"],
             )
         except Exception as e:
             logging.error("Failed to set webhook: %s", e)
