@@ -101,22 +101,43 @@ EXTRACTION RULES (GREEDY - MAXIMIZE DATA):
 2. For EACH event, look for its specific ticket URL (pyramida.info, etc)
 3. Use CORRECT YEAR based on today's date context
 4. Dates MUST be in ISO 8601 format (YYYY-MM-DD)
-5. PARTICIPANTS: Extract all performers/actors/directors with their roles
-6. WORKS: For concerts - extract musical pieces with composers; for films - extract film titles with directors
-7. PRICES: Extract price_min and price_max (integers in RUB). If single price, min=max. If free, both=0
+5. PARTICIPANTS: Extract ALL performers/actors/directors with roles (Дирижёр, Актёр, Режиссёр, Солист, Ведущий)
+6. WORKS: For concerts - musical pieces + composers; for films - title + director; for theater - play name + author
+7. PRICES - CRITICAL RULES:
+   - "от 500 руб" → price_min=500, price_max=null
+   - "500-1000 руб" → price_min=500, price_max=1000  
+   - "500 руб" → price_min=500, price_max=500
+   - "бесплатно"/free → price_min=0, price_max=0, is_free=true
+   - NO price info → price_min=null, price_max=null (NOT 0!)
 8. GEO: Include latitude/longitude for venues if known (Калининград ~54.71, 20.51)
-9. IMAGES_EVENT: Extract poster/photo URLs specific to each event
+9. IMAGES_EVENT - CRITICAL! For EACH event, look for:
+   - <img> tags near the event title/card
+   - Poster images (афиша, постер) 
+   - Background images in event sections
+   - Photo of performers for this event
+   - Extract URLs like https://example.com/poster.jpg (NOT .svg icons!)
+   - Example: "images_event": ["https://static.pyramida.info/event-poster.jpg"]
 10. TICKET STATUS (compare event date with today's date!): 
-   - 'available' if tickets can be purchased
-   - 'sold_out' if SOLD OUT/распродано mentioned
-   - 'registration_open' if free registration is open
-   - 'registration_closed' if registration ended
-   - 'ended' if event date has PASSED (before today's date)
-   - 'unknown' if status cannot be determined
-11. DO NOT include .svg icon URLs in images
+    - 'available' if tickets can be purchased
+    - 'sold_out' if SOLD OUT/распродано mentioned
+    - 'registration_open' if free registration is open
+    - 'ended' if event date has PASSED (before today's date)
+    - 'unknown' if status cannot be determined
+11. DO NOT include .svg/.ico icon URLs in images
 12. If an event repeats on multiple dates, create SEPARATE entries
 13. FESTIVAL TYPE: Identify type (music/film/theater/art/literature/food/sport/other)
-14. Output ONLY the JSON, no explanations"""
+14. Output ONLY valid JSON, no explanations
+
+EXAMPLE for a concert event:
+{
+  "title": "Концерт Чайковского",
+  "price": "от 500 руб",
+  "price_min": 500,
+  "price_max": null,
+  "participants": [{"name": "Юрий Демидович", "role": "Дирижёр", "details": null}],
+  "works": [{"title": "Лебединое озеро", "author": "П.И. Чайковский", "details": "сюита из балета"}],
+  "images_event": ["https://example.com/concert-poster.jpg"]
+}"""
 
 
 def _strip_code_fences(text: str) -> str:
