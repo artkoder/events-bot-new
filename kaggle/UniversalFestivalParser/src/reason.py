@@ -65,6 +65,7 @@ Output ONLY valid JSON matching this schema:
       "age_restriction": "Age restriction like '0+', '6+', '12+', '16+', '18+' or null",
       "ticket_url": "Direct URL to buy tickets for THIS event",
       "ticket_status": "available/sold_out/registration_open/registration_closed/ended/unknown",
+      "price": "Price like '500 руб' or 'от 500 руб' or 'бесплатно' - REQUIRED if not free!",
       "tickets": [
         {"category": "Взрослый/Детский/Льготный/VIP", "price": 500, "currency": "RUB"}
       ],

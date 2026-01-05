@@ -21,10 +21,25 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class RateLimitConfig:
-    """Configuration for rate limiting."""
-    rpm: int = 30  # Requests per minute
-    tpm: int = 15000  # Tokens per minute
+    """Configuration for rate limiting.
+    
+    Uses 15% safety margin by default to prevent hitting limits
+    when parallel processes also use Gemma API.
+    """
+    rpm: int = 30  # Requests per minute (actual limit)
+    tpm: int = 15000  # Tokens per minute (actual limit)
     rpd: int = 14400  # Requests per day (tracked externally)
+    safety_margin: float = 0.15  # 15% safety margin
+    
+    @property
+    def effective_rpm(self) -> int:
+        """RPM with safety margin applied."""
+        return int(self.rpm * (1 - self.safety_margin))  # 25.5 → 25
+    
+    @property
+    def effective_tpm(self) -> int:
+        """TPM with safety margin applied."""
+        return int(self.tpm * (1 - self.safety_margin))  # 12750
 
 
 class TokenBucket:
@@ -79,14 +94,14 @@ class GemmaRateLimiter:
     def __init__(self, config: Optional[RateLimitConfig] = None):
         self.config = config or RateLimitConfig()
         
-        # Token buckets for RPM and TPM
+        # Token buckets for RPM and TPM (with safety margin applied)
         self._rpm_bucket = TokenBucket(
-            capacity=self.config.rpm,
-            refill_rate=self.config.rpm / 60.0,  # tokens per second
+            capacity=self.config.effective_rpm,  # 25 (with 15% margin)
+            refill_rate=self.config.effective_rpm / 60.0,
         )
         self._tpm_bucket = TokenBucket(
-            capacity=self.config.tpm,
-            refill_rate=self.config.tpm / 60.0,
+            capacity=self.config.effective_tpm,  # 12750 (with 15% margin)
+            refill_rate=self.config.effective_tpm / 60.0,
         )
         
         # Tracking
