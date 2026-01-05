@@ -23,23 +23,31 @@ logger = logging.getLogger(__name__)
 class RateLimitConfig:
     """Configuration for rate limiting.
     
-    Uses 15% safety margin by default to prevent hitting limits
-    when parallel processes also use Gemma API.
+    Uses conservative safety margins to prevent hitting limits
+    when parallel processes also use Gemma API:
+    - 45% margin for RPM/TPM (minute limits)  
+    - 85% margin for RPD (daily limit)
     """
     rpm: int = 30  # Requests per minute (actual limit)
     tpm: int = 15000  # Tokens per minute (actual limit)
-    rpd: int = 14400  # Requests per day (tracked externally)
-    safety_margin: float = 0.15  # 15% safety margin
+    rpd: int = 14400  # Requests per day (actual limit)
+    minute_margin: float = 0.45  # 45% margin → use 55% of limit
+    daily_margin: float = 0.85  # 85% margin → use 15% of limit
     
     @property
     def effective_rpm(self) -> int:
-        """RPM with safety margin applied."""
-        return int(self.rpm * (1 - self.safety_margin))  # 25.5 → 25
+        """RPM with 45% safety margin applied."""
+        return int(self.rpm * (1 - self.minute_margin))  # 30 * 0.55 = 16
     
     @property
     def effective_tpm(self) -> int:
-        """TPM with safety margin applied."""
-        return int(self.tpm * (1 - self.safety_margin))  # 12750
+        """TPM with 45% safety margin applied."""
+        return int(self.tpm * (1 - self.minute_margin))  # 15000 * 0.55 = 8250
+    
+    @property
+    def effective_rpd(self) -> int:
+        """RPD with 85% safety margin applied."""
+        return int(self.rpd * (1 - self.daily_margin))  # 14400 * 0.15 = 2160
 
 
 class TokenBucket:
