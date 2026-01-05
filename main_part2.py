@@ -2129,7 +2129,7 @@ async def sync_festival_page(
         tg = Telegraph(access_token=token)
         async with db.get_session() as session:
             result = await session.execute(
-                select(Festival).where(Festival.name == name)
+                select(Festival).where(func.lower(Festival.name) == name.lower())
             )
             fest = result.scalar_one_or_none()
             if not fest:
@@ -2137,6 +2137,7 @@ async def sync_festival_page(
             title = fest.full_name or fest.name
             path = fest.telegraph_path
             url = fest.telegraph_url
+            fest_id = fest.id
 
         changed = False
         try:
@@ -2200,7 +2201,7 @@ async def sync_festival_page(
 
         async with db.get_session() as session:
             result = await session.execute(
-                select(Festival).where(Festival.name == name)
+                select(Festival).where(Festival.id == fest_id)
             )
             fest_db = result.scalar_one_or_none()
             if fest_db:
