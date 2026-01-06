@@ -319,6 +319,16 @@ class Database:
 
             await conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS tomorrowpage(
+                    date TEXT PRIMARY KEY,
+                    url TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+
+            await conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS weekpage(
                     start TEXT PRIMARY KEY,
                     vk_post_url TEXT,
