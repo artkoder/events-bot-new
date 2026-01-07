@@ -32,3 +32,4 @@ test_data/
 
 # Virtual environment (should not be committed)
 .venv/
+.devcontainer/.mcp-auth/

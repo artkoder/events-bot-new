@@ -29,6 +29,13 @@ RUBRIC_MARKERS = [
     "\u200b", # Invisible marker for split daily posts
 ]
 
+# Hashtags that TRIGGER button addition (EVE-13)
+# Buttons should ONLY be added if one of these tags is present.
+BUTTON_TRIGGER_HASHTAGS = [
+    "#анонс",
+    "#анонскалининград", 
+]
+
 # Regex to find hashtags
 HASHTAG_RE = re.compile(r"#\w+")
 
@@ -172,10 +179,19 @@ async def handle_channel_post(message: types.Message):
         logger.debug("channel_nav: skipping command post %s", message.message_id)
         return
     
-    # 3. Filter: Rubrics
-    if is_rubric_post(text):
-        logger.info("channel_nav: skipping rubric post %s", message.message_id)
+    # 3. Filter: Triggers (Allowlist Logic for EVE-13)
+    # Only add buttons if the post explicitly contains trigger hashtags.
+    text_lower = text.lower()
+    has_trigger = any(tag in text_lower for tag in BUTTON_TRIGGER_HASHTAGS)
+    
+    if not has_trigger:
+        # If it doesn't have the trigger, we don't add buttons.
+        # But maybe we should still respect the old logic?
+        # The task says: "buttons are added not only in announcement channel... make it controlled check for #hashtags"
+        # So correct logic is: If NO trigger -> RETURN.
         return
+
+    # 4. Generate Buttons
 
     # 3. Filter: Forwarded messages? User didn't strictly specify, but usually forwards are not "admin content"
     # But admin might forward. User said "admin writes or scheduled". 
