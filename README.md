@@ -135,6 +135,17 @@ line under the button row. The command accepts dates like `2025-07-10`,
 
 Подробности — в [user story](docs/tourist-label/user-story.md) и [исследовании](docs/tourist-label/research.md).
 
+## How to Navigate Documentation
+
+- **Start here:** `README.md` (what the bot does + quick start).
+- **How to run / operate:** `docs/operations/` (commands, cron, E2E testing, production data notes).
+- **How it works (high-level):** `docs/architecture/overview.md`.
+- **LLM integration:** `docs/llm/` (prompt sources, request format, topics classifier).
+- **Reference data used by prompts:** `docs/reference/` (locations, holidays, templates).
+- **Pipelines & parsers:** `docs/pipelines/` (source parsing, venue-specific parsers, festival pipeline notes).
+- **Implemented features:** `docs/features/implemented/` (feature docs that reflect current behavior).
+- **Backlog / specs (not implemented yet):** `docs/backlog/` — specifically `EVE-11`, `EVE-54`, `EVE-55` are backlog items and should be treated as design notes until implemented.
+
 ## Quick start
 
 1. Install dependencies:
