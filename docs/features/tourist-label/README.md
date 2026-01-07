@@ -6,6 +6,7 @@
 
 - User story: `docs/features/tourist-label/user-story.md`
 - Исследование: `docs/features/tourist-label/research.md`
+- Задачи/планы: `docs/features/tourist-label/tasks/README.md`
 
 ## Артефакты
 

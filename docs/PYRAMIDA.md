@@ -1,3 +1,3 @@
 # Redirect
 
-Актуальная версия: `docs/pipelines/pyramida.md`
+Актуальная версия: `docs/features/source-parsing/sources/pyramida/README.md`

@@ -1,3 +1,3 @@
 # Redirect
 
-Актуальная версия: `docs/pipelines/tretyakov-parser.md`
+Актуальная версия: `docs/features/source-parsing/sources/tretyakov/README.md`

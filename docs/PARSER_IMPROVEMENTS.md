@@ -1,3 +1,3 @@
 # Redirect
 
-Актуальная версия: `docs/pipelines/parser-improvements.md`
+Актуальная версия: `docs/features/source-parsing/tasks/parser-improvements.md`

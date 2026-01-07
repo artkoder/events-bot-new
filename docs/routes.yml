@@ -24,11 +24,12 @@ sections:
     recurring_events: docs/reference/recurring-events.md
     month_page_template: docs/reference/month-page-template.md
   pipelines:
-    source_parsing: docs/pipelines/source-parsing.md
-    dom_iskusstv: docs/pipelines/dom-iskusstv.md
-    festival_parser: docs/pipelines/festival-parser.md
-    tretyakov_parser: docs/pipelines/tretyakov-parser.md
-    pyramida: docs/pipelines/pyramida.md
+    source_parsing: docs/features/source-parsing/README.md
+    theatres: docs/features/source-parsing/sources/theatres/README.md
+    dom_iskusstv: docs/features/source-parsing/sources/dom-iskusstv/README.md
+    pyramida: docs/features/source-parsing/sources/pyramida/README.md
+    tretyakov_parser: docs/features/source-parsing/sources/tretyakov/README.md
+    festival_parser: docs/features/source-parsing/sources/festival-parser/README.md
   backlog:
     index: docs/backlog/
     linear:
@@ -47,6 +48,13 @@ features:
     docs: docs/features/digests/README.md
     entrypoints:
       - digests.py
+  source_parsing:
+    status: implemented
+    docs: docs/features/source-parsing/README.md
+    entrypoints:
+      - source_parsing/commands.py
+      - source_parsing/handlers.py
+      - source_parsing/parser.py
   tourist_label:
     status: implemented
     docs: docs/features/tourist-label/README.md

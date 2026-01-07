@@ -13,7 +13,7 @@
 - Эксплуатация: `docs/operations/` (как запускать/поддерживать)
 - LLM: `docs/llm/` (промпты, формат запросов, классификатор тем)
 - Справочники: `docs/reference/` (локации, праздники, шаблоны)
-- Пайплайны/парсеры: `docs/pipelines/`
+- Пайплайны/парсеры (каноника): `docs/features/source-parsing/` (в `docs/pipelines/` остаются redirect‑stub’ы для старых ссылок)
 - Фичи: `docs/features/`
 - Бэклог (не реализовано): `docs/backlog/`
 - Отчёты и планы: `docs/reports/`

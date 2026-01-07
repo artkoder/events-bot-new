@@ -8,7 +8,7 @@ The documentation structure has been reorganized to improve navigability and sep
 - **`docs/operations/`**: Guides for running and maintaining the bot (`commands.md`, `cron.md`, `e2e-testing.md`, `prod-data.md`).
 - **`docs/llm/`**: LLM-related documentation (`prompts.md`, `request-guide.md`, `topics.md`).
 - **`docs/reference/`**: Static reference data (`locations.md`, `holidays.md`, etc.).
-- **`docs/pipelines/`**: Documentation for various parsing pipelines (`source-parsing.md`, `festival-parser.md`, etc.).
+- **`docs/features/source-parsing/`**: Canonical documentation for parsing pipelines and source extraction (в `docs/pipelines/` остаются redirect‑stub’ы).
 - **`docs/features/`**: Documentation for existing features (`digests/`, `tourist-label/`).
 - **`docs/backlog/linear/`**: Detailed Linear task descriptions for upcoming work (`EVE-11`, `EVE-54`, `EVE-55`).
 - **`docs/reports/`**: Historic reports and plans.

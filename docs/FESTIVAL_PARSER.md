@@ -1,3 +1,3 @@
 # Redirect
 
-Актуальная версия: `docs/pipelines/festival-parser.md`
+Актуальная версия: `docs/features/source-parsing/sources/festival-parser/README.md`
