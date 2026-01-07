@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [1.8.2] - 2026-01-07
+
+### Fixed
+- **Channel Navigation Buttons**: Buttons ("Today", "Tomorrow" etc.) are now ONLY added if the post contains `#анонс`, `#анонсКалининград` or `#анонскалининград` hashtags. Fixes EVE-13 where buttons appeared in all channel posts.
+
 ## [1.8.1] - 2026-01-05
 
 ### Fixed
