@@ -133,7 +133,7 @@ line under the button row. The command accepts dates like `2025-07-10`,
 3. Меню причин хранится 15 минут, окно комментария — 10 минут; по тайм-ауту интерфейс возвращается к базовой клавиатуре.
 4. Команда `/tourist_export [--period | period=]` формирует `.jsonl` со всеми полями события и колонками `tourist_*` за выбранный период.
 
-Подробности — в [user story](docs/tourist-label/user-story.md) и [исследовании](docs/tourist-label/research.md).
+Подробности — в [user story](docs/features/tourist-label/user-story.md) и [исследовании](docs/features/tourist-label/research.md).
 
 ## How to Navigate Documentation
 
@@ -143,7 +143,7 @@ line under the button row. The command accepts dates like `2025-07-10`,
 - **LLM integration:** `docs/llm/` (prompt sources, request format, topics classifier).
 - **Reference data used by prompts:** `docs/reference/` (locations, holidays, templates).
 - **Pipelines & parsers:** `docs/pipelines/` (source parsing, venue-specific parsers, festival pipeline notes).
-- **Implemented features:** `docs/features/implemented/` (feature docs that reflect current behavior).
+- **Implemented features:** `docs/features/` (feature docs that reflect current behavior).
 - **Backlog / specs (not implemented yet):** `docs/backlog/` — specifically `EVE-11`, `EVE-54`, `EVE-55` are backlog items and should be treated as design notes until implemented.
 
 ## Quick start

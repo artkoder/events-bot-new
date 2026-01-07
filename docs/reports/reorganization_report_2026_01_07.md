@@ -9,7 +9,7 @@ The documentation structure has been reorganized to improve navigability and sep
 - **`docs/llm/`**: LLM-related documentation (`prompts.md`, `request-guide.md`, `topics.md`).
 - **`docs/reference/`**: Static reference data (`locations.md`, `holidays.md`, etc.).
 - **`docs/pipelines/`**: Documentation for various parsing pipelines (`source-parsing.md`, `festival-parser.md`, etc.).
-- **`docs/features/implemented/`**: Documentation for existing features (`digests.md`, `tourist-label/`).
+- **`docs/features/`**: Documentation for existing features (`digests/`, `tourist-label/`).
 - **`docs/backlog/linear/`**: Detailed Linear task descriptions for upcoming work (`EVE-11`, `EVE-54`, `EVE-55`).
 - **`docs/reports/`**: Historic reports and plans.
 
