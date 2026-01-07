@@ -2,6 +2,7 @@
     "name": "events-bot-new",
     "image": "mcr.microsoft.com/devcontainers/python:3.12",
     "postCreateCommand": "pip install -r requirements.txt",
+    "postStartCommand": "mkdir -p ~/.mcp-auth && cp -r .devcontainer/.mcp-auth/* ~/.mcp-auth/ 2>/dev/null || true",
     "customizations": {
         "vscode": {
             "extensions": [
