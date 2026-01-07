@@ -36,3 +36,60 @@ The following modules and files are considered critical paths and demand extra s
 
 ## Agent Guidance
 Future contributors and agents must treat this CODEX as required reading prior to any repository work. Confirm in your task notes that you have reviewed it.
+
+---
+
+# Codex CLI Cheatsheet (project defaults)
+
+## Output paths (важно)
+
+Чтобы не захламлять корень и не коммитить отчёты, складывай результаты Codex сюда:
+
+- отчёты: `artifacts/codex/reports/`
+- промежуточные файлы/черновики: `artifacts/codex/tasks/`
+
+Пример:
+```bash
+mkdir -p artifacts/codex/reports
+codex exec --sandbox workspace-write -o artifacts/codex/reports/PHASE-1.md "..."
+```
+
+## Basic commands
+
+### Verification & login
+```bash
+codex login status
+codex login --device-auth
+printenv OPENAI_API_KEY | codex login --with-api-key
+```
+
+## Execution modes
+
+### One-off task
+```bash
+codex exec --full-auto "внеси правки и обнови тесты"
+codex exec --json "проанализируй репозиторий" | jq
+codex exec -o artifacts/codex/reports/out.md "сгенерируй release notes"
+```
+
+### Sandbox & permissions
+```bash
+codex exec --sandbox workspace-write "checking changes"
+codex exec --sandbox danger-full-access "сделай массовый рефакторинг"
+```
+
+### Piping input
+```bash
+cat task.md | codex exec -
+```
+
+### Structured output (schema)
+```bash
+codex exec --output-schema ./schema.json -o artifacts/codex/reports/report.json \
+  "сделай краткий risk-report по изменениям"
+```
+
+## Workflow tips
+
+1. `codex exec resume --last "исправь найденные проблемы"`
+2. Всегда проверяй `git diff` перед коммитом.

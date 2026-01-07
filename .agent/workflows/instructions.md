@@ -115,8 +115,8 @@ description: Основные инструкции для AI-агента при
 
 ### Стандартный шаблон вызова:
 ```bash
-mkdir -p .codex/reports
-codex exec -m gpt-5.2-codex --sandbox workspace-write -o .codex/reports/<task_name>.md \
+mkdir -p artifacts/codex/reports
+codex exec -m gpt-5.2-codex --sandbox workspace-write -o artifacts/codex/reports/<task_name>.md \
   "Работай по фазам. После каждой фазы запиши промежуточный отчёт. <ЗАДАЧА>"
 ```
 
@@ -162,17 +162,18 @@ codex exec -m gpt-5.2-codex --sandbox workspace-write -o .codex/reports/<task_na
 
 ### Паттерн 1: Чекпойнты в файлы (рекомендуется)
 ```bash
-mkdir -p .codex/reports
+mkdir -p artifacts/codex/reports
 codex exec --sandbox workspace-write \
-  "Работай по фазам. После каждой фазы запиши отчёт в .codex/reports/PHASE-<n>.md"
+  "Работай по фазам. После каждой фазы запиши отчёт в artifacts/codex/reports/PHASE-<n>.md"
 ```
-Мониторинг: `ls -lt .codex/reports`
+Мониторинг: `ls -lt artifacts/codex/reports`
 
 ### Паттерн 3: Серия коротких exec (для оркестрации)
 ```bash
-codex exec -o .codex/01-analysis.md "Проанализируй проблему."
-codex exec -o .codex/02-plan.md     "Составь план работ."
-codex exec -o .codex/03-proposal.md "Дай рекомендации."
+mkdir -p artifacts/codex/tasks
+codex exec -o artifacts/codex/tasks/01-analysis.md "Проанализируй проблему."
+codex exec -o artifacts/codex/tasks/02-plan.md     "Составь план работ."
+codex exec -o artifacts/codex/tasks/03-proposal.md "Дай рекомендации."
 ```
 Так ты видишь результат после каждого шага и можешь скорректировать курс.
 
@@ -208,8 +209,8 @@ codex exec -o .codex/03-proposal.md "Дай рекомендации."
 2. Скрипт автоматически:
    - Пушит kernel в Kaggle
    - Ожидает завершения
-   - Скачивает результаты в `e2e_results/`
-3. Анализируй `e2e_results/test_report.json` для результатов.
+   - Скачивает результаты в `artifacts/e2e/e2e_results/`
+3. Анализируй `artifacts/e2e/e2e_results/test_report.json` для результатов.
 
 ## Secrets в Kaggle
 Необходимо настроить в Kaggle Secrets:
