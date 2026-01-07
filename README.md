@@ -80,7 +80,7 @@ Telegraph posts use the short form "D месяц" (e.g. `2 июля`).
 Dates are shown as `DD.MM.YYYY` in bot messages. Telegraph pages and other
 public posts use the format "D месяц" (for example, "2 июля").
 
-See `docs/COMMANDS.md` for available bot commands, including `/events` to
+See `docs/operations/commands.md` for available bot commands, including `/events` to
 browse upcoming announcements. Ticket links in this view are shortened via
 vk.cc, and when a short key exists the bot adds a `Статистика VK: https://vk.com/cc?act=stats&key=…`
 line under the button row. The command accepts dates like `2025-07-10`,
@@ -133,17 +133,18 @@ line under the button row. The command accepts dates like `2025-07-10`,
 3. Меню причин хранится 15 минут, окно комментария — 10 минут; по тайм-ауту интерфейс возвращается к базовой клавиатуре.
 4. Команда `/tourist_export [--period | period=]` формирует `.jsonl` со всеми полями события и колонками `tourist_*` за выбранный период.
 
-Подробности — в [user story](docs/tourist-label/user-story.md) и [исследовании](docs/tourist-label/research.md).
+Подробности — в [user story](docs/features/tourist-label/user-story.md) и [исследовании](docs/features/tourist-label/research.md).
 
 ## How to Navigate Documentation
 
 - **Start here:** `README.md` (what the bot does + quick start).
+- **Docs map:** `docs/README.md` (where to look / where to add new docs).
 - **How to run / operate:** `docs/operations/` (commands, cron, E2E testing, production data notes).
 - **How it works (high-level):** `docs/architecture/overview.md`.
 - **LLM integration:** `docs/llm/` (prompt sources, request format, topics classifier).
 - **Reference data used by prompts:** `docs/reference/` (locations, holidays, templates).
 - **Pipelines & parsers:** `docs/pipelines/` (source parsing, venue-specific parsers, festival pipeline notes).
-- **Implemented features:** `docs/features/implemented/` (feature docs that reflect current behavior).
+- **Features (implemented behavior):** `docs/features/` (feature docs that reflect current behavior).
 - **Backlog / specs (not implemented yet):** `docs/backlog/` — specifically `EVE-11`, `EVE-54`, `EVE-55` are backlog items and should be treated as design notes until implemented.
 
 ## Quick start
@@ -414,13 +415,15 @@ A VK service (server) token helps keep read-only API traffic away from the user 
    - Avoid heavy requests at startup; warm caches lazily in background workers.
 
 ## Files
-- `docs/COMMANDS.md` – full list of bot commands.
-- `docs/USER_STORIES.md` – user stories.
-- `docs/ARCHITECTURE.md` – system architecture.
-- `docs/PROMPTS.md` – base prompt for model 4o (edit this for parsing rules).
-- `docs/FOUR_O_REQUEST.md` – how requests to 4o are formed.
-- `docs/LOCATIONS.md` – list of standard venues used when parsing events.
-- `docs/RECURRING_EVENTS.md` – design notes for repeating events.
+- `AGENTS.md` – entrypoint for agents and new contributors.
+- `docs/README.md` – documentation map + “where to put what”.
+- `docs/operations/commands.md` – full list of bot commands.
+- `docs/backlog/user-stories.md` – user stories (backlog/spec notes).
+- `docs/architecture/overview.md` – system architecture.
+- `docs/llm/prompts.md` – base prompt for 4o (edit this for parsing rules).
+- `docs/llm/request-guide.md` – how requests to 4o are formed.
+- `docs/reference/locations.md` – list of standard venues used when parsing events.
+- `docs/reference/recurring-events.md` – design notes for repeating events.
 - `video_announce/` – video announcement pipeline (sessions, selection, pattern preview).
 - `kaggle/VideoAfisha/` – Kaggle notebook for video rendering.
 - `CHANGELOG.md` – project history.
@@ -436,7 +439,7 @@ only `edit_page(path=...)` accepts a `path` argument when updating existing page
 Editing an event lets you create or delete an ICS file for calendars. The file is uploaded to Supabase when `SUPABASE_URL` and `SUPABASE_KEY` are set. Files are named `Event-<id>-dd-mm-yyyy.ics` and include a link back to the event. Set `SUPABASE_BUCKET` if you use a bucket name other than `events-ics`.
 Supabase export is enabled by default; set `SUPABASE_EXPORT_ENABLED=0` to disable pushing VK crawl telemetry into Supabase. The exporter writes group metadata to `vk_groups`, stores per-run counters in `vk_crawl_snapshots`, and upserts sampled misses in `vk_misses_sample`. The 60-day retention window (`SUPABASE_RETENTION_DAYS`, default: 60) deletes snapshots and miss samples older than the cutoff on each run.
 
-Miss logging always inserts rows when keyword detection and date parsing disagree (`kw_ok XOR has_date`); other misses follow probabilistic sampling controlled by `VK_MISSES_SAMPLE_RATE` (default: 0.1). Post bodies are never uploaded—only IDs, URLs, timestamps, counters, and match metadata—so sensitive text stays in VK. Operators can confirm that inserts flow through by querying the Supabase dashboards documented in [`docs/COMMANDS.md`](docs/COMMANDS.md) via `/usage_test` and `/stats`.
+Miss logging always inserts rows when keyword detection and date parsing disagree (`kw_ok XOR has_date`); other misses follow probabilistic sampling controlled by `VK_MISSES_SAMPLE_RATE` (default: 0.1). Post bodies are never uploaded—only IDs, URLs, timestamps, counters, and match metadata—so sensitive text stays in VK. Operators can confirm that inserts flow through by querying the Supabase dashboards documented in [`docs/operations/commands.md`](docs/operations/commands.md) via `/usage_test` and `/stats`.
 When a calendar file exists the Telegraph page shows a link right under the title image: "📅 Добавить в календарь".
 Events may note support for the Пушкинская карта, shown as a separate line in postings.
 Run `/exhibitions` to see all ongoing exhibitions (events with a start and end date).

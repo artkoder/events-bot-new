@@ -2,6 +2,15 @@ __pycache__/
 *.pyc
 .db
 .env
+.pytest_cache/
+*.pid
+
+# Generated artifacts (keep docs/README inside)
+artifacts/*
+!artifacts/README.md
+
+# Codex scratch outputs (curate into docs/reports/ when needed)
+.codex/reports/
 
 # Production database snapshots and WAL files
 db_prod_snapshot.sqlite

@@ -321,7 +321,7 @@
 
 ### Added
 - **source_parsing**: Новый Kaggle-ноутбук `ParseTheatres` с полем `description`
-- **docs**: Документация `/parse` в `docs/SOURCE_PARSING.md`
+- **docs**: Документация `/parse` в `docs/pipelines/source-parsing.md`
 
 ### Fixed
 - **source_parsing**: События из `/parse` теперь корректно появляются в ежедневном анонсе — исправлен подсчёт новых vs обновлённых событий
@@ -421,7 +421,7 @@
 
 - VK crawler telemetry now exports group metadata, crawl snapshots, and sampled misses to Supabase (`vk_groups`, `vk_crawl_snapshots`, `vk_misses_sample`) with `SUPABASE_EXPORT_ENABLED`, `SUPABASE_RETENTION_DAYS` (default 60 days), and `VK_MISSES_SAMPLE_RATE` governing exports, sampling, and automatic cleanup.
 - VK stories now ask whether to collect extra editor instructions and forward the answer plus any guidance to the 4o prompts.
-- Добавлен справочник сезонных праздников (`docs/HOLIDAYS.md`), промпт 4o теперь перечисляет их с алиасами и описаниями, а импорт событий автоматически создаёт и переиспользует соответствующие фестивали.
+- Добавлен справочник сезонных праздников (`docs/reference/holidays.md`), промпт 4o теперь перечисляет их с алиасами и описаниями, а импорт событий автоматически создаёт и переиспользует соответствующие фестивали.
 - Log OpenAI token usage through Supabase inserts (guarded by `BOT_CODE`) and ship the `/usage_test` admin self-test so operators can verify the inserts and share usage snapshots during release comms.
 - `/stats` подтягивает сводку токенов напрямую из Supabase (`token_usage_daily`/`token_usage`) и только при ошибке падает обратно на локальный снапшот, чтобы в релизных отчётах отображались свежие значения.
 
@@ -772,7 +772,7 @@ This release ships the updates that were previously listed under “Unreleased.�
 ## v0.3.41 - VK group context for 4o
 
 - VK event imports now send the group title to 4o so venues can be inferred from
-  `docs/LOCATIONS.md` when posts omit them.
+  `docs/reference/locations.md` when posts omit them.
 
 ## v0.3.42 - VK review media
 - VK review: поддержаны фото из репостов (copy_history), link-preview, doc-preview; для video берём только превью-картинки, видео не загружаем

@@ -6,7 +6,8 @@ from db import Database
 from models import Event
 
 async def report():
-    db = Database("events.db")
+    db_path = os.getenv("EVENTS_DB_PATH", "artifacts/db/events.db")
+    db = Database(db_path)
     await db.init()
     async with db.get_session() as session:
         # Check event count for February 2026

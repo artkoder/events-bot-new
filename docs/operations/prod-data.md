@@ -208,13 +208,15 @@ events-bot-new/
 │   ├── sync_prod_db.sh          # Скачивание БД с Fly.io
 │   ├── dump_prod_db.sh          # Получение дампа через бота
 │   └── test_with_prod_data.py   # Утилиты для тестирования
+├── artifacts/
+│   └── db/                      # Снимки БД и scratch-копии (gitignored)
 ├── backups/                     # Автоматические бэкапы (gitignored)
 │   └── db_snapshot_*.sqlite
 ├── test_data/                   # Экспортированные примеры (gitignored)
 │   ├── sample_events.json
 │   └── sample_festivals.json
 ├── db_prod_snapshot.sqlite      # Снимок продакшн БД (gitignored)
-└── README_PROD_DATA.md          # Это руководство
+└── docs/operations/prod-data.md # Это руководство
 ```
 
 ## 🛠 Troubleshooting
