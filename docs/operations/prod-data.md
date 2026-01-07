@@ -214,7 +214,7 @@ events-bot-new/
 │   ├── sample_events.json
 │   └── sample_festivals.json
 ├── db_prod_snapshot.sqlite      # Снимок продакшн БД (gitignored)
-└── README_PROD_DATA.md          # Это руководство
+└── docs/operations/prod-data.md # Это руководство
 ```
 
 ## 🛠 Troubleshooting

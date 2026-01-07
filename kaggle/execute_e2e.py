@@ -77,8 +77,8 @@ async def run_e2e_tests():
         await asyncio.sleep(15)
         
     # Download output
-    output_dir = Path("e2e_results")
-    output_dir.mkdir(exist_ok=True)
+    output_dir = Path("artifacts/e2e/e2e_results")
+    output_dir.mkdir(parents=True, exist_ok=True)
     
     logger.info("Downloading outputs...")
     files = client.download_kernel_output(kernel_ref, path=output_dir, force=True)

@@ -1,15 +1,27 @@
 import sqlite3
 import json
+import os
+from pathlib import Path
 
 def compare_parsed_vs_db():
+    project_root = Path(__file__).resolve().parents[1]
     # Load parsed events from muzteatr
-    with open('muzteatr_parsed.json', 'r', encoding='utf-8') as f:
+    parsed_path = Path(
+        os.getenv(
+            "PARSED_JSON",
+            str(project_root / "artifacts" / "parser-output" / "json" / "muzteatr_parsed.json"),
+        )
+    )
+    with parsed_path.open('r', encoding='utf-8') as f:
         parsed = json.load(f)
     
     print(f"Parsed events from muzteatr.json: {len(parsed)}")
     
     # Connect to live database snapshot
-    conn = sqlite3.connect('db_live_verify.sqlite')
+    db_path = Path(
+        os.getenv("DB_PATH", str(project_root / "artifacts" / "db" / "db_live_verify.sqlite"))
+    )
+    conn = sqlite3.connect(str(db_path))
     cursor = conn.cursor()
     
     # Get events from Музыкальный театр
