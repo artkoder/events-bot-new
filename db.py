@@ -737,11 +737,15 @@ class Database:
     async def get_session(self):
         from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
         from sqlalchemy.orm import sessionmaker
-        from sqlalchemy.pool import NullPool
 
         if self._orm_engine is None:
+            engine_kwargs: dict[str, object] = {"future": True}
+            if os.getenv("PYTEST_CURRENT_TEST") or os.getenv("EVBOT_SQLITE_NULLPOOL") == "1":
+                from sqlalchemy.pool import NullPool
+
+                engine_kwargs["poolclass"] = NullPool
             self._orm_engine = create_async_engine(
-                f"sqlite+aiosqlite:///{self.path}", future=True, poolclass=NullPool
+                f"sqlite+aiosqlite:///{self.path}", **engine_kwargs
             )
         if self._sessionmaker is None:
             self._sessionmaker = sessionmaker(
@@ -753,11 +757,15 @@ class Database:
     @property
     def engine(self):
         from sqlalchemy.ext.asyncio import create_async_engine
-        from sqlalchemy.pool import NullPool
 
         if self._orm_engine is None:
+            engine_kwargs: dict[str, object] = {"future": True}
+            if os.getenv("PYTEST_CURRENT_TEST") or os.getenv("EVBOT_SQLITE_NULLPOOL") == "1":
+                from sqlalchemy.pool import NullPool
+
+                engine_kwargs["poolclass"] = NullPool
             self._orm_engine = create_async_engine(
-                f"sqlite+aiosqlite:///{self.path}", future=True, poolclass=NullPool
+                f"sqlite+aiosqlite:///{self.path}", **engine_kwargs
             )
         return self._orm_engine
 
