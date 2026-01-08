@@ -6442,7 +6442,7 @@ def get_holiday_record(value: str | None) -> HolidayRecord | None:
 
 @lru_cache(maxsize=1)
 def _read_base_prompt() -> str:
-    prompt_path = os.path.join("docs", "PROMPTS.md")
+    prompt_path = os.path.join("docs", "llm", "prompts.md")
     with open(prompt_path, "r", encoding="utf-8") as f:
         prompt = f.read()
     loc_path = os.path.join("docs", "LOCATIONS.md")

@@ -22,7 +22,7 @@ def test_clean_search_digest_complex():
 
 def test_prompts_file_content():
     """Smoke test to ensure PROMPTS.md will contain new rules"""
-    prompts_path = os.path.join(os.path.dirname(__file__), "..", "docs", "PROMPTS.md")
+    prompts_path = os.path.join(os.path.dirname(__file__), "..", "docs", "llm", "prompts.md")
     with open(prompts_path, "r", encoding="utf-8") as f:
         content = f.read()
 
