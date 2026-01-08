@@ -380,6 +380,16 @@ class Database:
             await _add_column(conn, "festival", "source_post_url TEXT")
             await _add_column(conn, "festival", "source_chat_id INTEGER")
             await _add_column(conn, "festival", "source_message_id INTEGER")
+            await _add_column(conn, "festival", "source_url TEXT")
+            await _add_column(conn, "festival", "source_type TEXT")
+            await _add_column(conn, "festival", "parser_run_id TEXT")
+            await _add_column(conn, "festival", "parser_version TEXT")
+            await _add_column(conn, "festival", "last_parsed_at TIMESTAMP")
+            await _add_column(conn, "festival", "uds_storage_path TEXT")
+            await _add_column(conn, "festival", "contacts_phone TEXT")
+            await _add_column(conn, "festival", "contacts_email TEXT")
+            await _add_column(conn, "festival", "is_annual BOOLEAN")
+            await _add_column(conn, "festival", "audience TEXT")
             await _add_column(
                 conn,
                 "festival",
@@ -727,10 +737,11 @@ class Database:
     async def get_session(self):
         from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
         from sqlalchemy.orm import sessionmaker
+        from sqlalchemy.pool import NullPool
 
         if self._orm_engine is None:
             self._orm_engine = create_async_engine(
-                f"sqlite+aiosqlite:///{self.path}", future=True
+                f"sqlite+aiosqlite:///{self.path}", future=True, poolclass=NullPool
             )
         if self._sessionmaker is None:
             self._sessionmaker = sessionmaker(
@@ -742,10 +753,11 @@ class Database:
     @property
     def engine(self):
         from sqlalchemy.ext.asyncio import create_async_engine
+        from sqlalchemy.pool import NullPool
 
         if self._orm_engine is None:
             self._orm_engine = create_async_engine(
-                f"sqlite+aiosqlite:///{self.path}", future=True
+                f"sqlite+aiosqlite:///{self.path}", future=True, poolclass=NullPool
             )
         return self._orm_engine
 
@@ -776,4 +788,3 @@ async def optimize(engine):
 async def vacuum(engine):
     async with engine.begin() as conn:
         await conn.exec_driver_sql("VACUUM")
-
