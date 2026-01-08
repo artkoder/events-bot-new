@@ -65,27 +65,30 @@ async def get_month_page_url(db: Database, target_date: date) -> str | None:
 async def get_tomorrow_page_url(db: Database, target_date: date) -> str | None:
     """Get or create URL for tomorrow's special page."""
     date_str = target_date.isoformat()
+    logger.info("get_tomorrow_page_url: starting for date=%s", date_str)
     
     async with db.get_session() as session:
         # Check cache
         cached = await session.get(TomorrowPage, date_str)
         if cached:
+            logger.info("get_tomorrow_page_url: cache HIT for %s, url=%s", date_str, cached.url)
             return cached.url
+    
+    logger.info("get_tomorrow_page_url: cache MISS for %s, generating new page...", date_str)
             
     # Generate new page
-    # Note: create_special_telegraph_page manages its own db session usually, 
-    # but looking at signature it takes 'db'.
-    # We need to ensure we don't have transaction conflicts if we reuse session?
-    # The signature in special_pages.py is: async def create_special_telegraph_page(db: "Database", ...)
-    # So we pass the db instance.
-    
     try:
-        url, _ = await create_special_telegraph_page(
+        url, used_days = await create_special_telegraph_page(
             db=db,
             start_date=target_date,
             days=1,
-            cover_url=None, # No cover for auto-generated daily tomorrow page
+            cover_url=None,  # No cover for auto-generated daily tomorrow page
             title="Афиша на завтра"
+        )
+        
+        logger.info(
+            "get_tomorrow_page_url: generated page for %s, url=%s, used_days=%d",
+            date_str, url, used_days
         )
         
         if url:
@@ -94,10 +97,16 @@ async def get_tomorrow_page_url(db: Database, target_date: date) -> str | None:
                 entry = TomorrowPage(date=date_str, url=url)
                 session.add(entry)
                 await session.commit()
+            logger.info("get_tomorrow_page_url: cached url for %s", date_str)
             return url
+        else:
+            logger.warning("get_tomorrow_page_url: create_special_telegraph_page returned empty url for %s", date_str)
             
     except Exception as e:
-        logger.error("Failed to generate tomorrow page for %s: %s", date_str, e)
+        logger.error(
+            "get_tomorrow_page_url: FAILED to generate page for %s: %s",
+            date_str, e, exc_info=True
+        )
         
     return None
 
@@ -114,25 +123,29 @@ def format_date_range(start: date, end: date) -> str:
     return f"{format_short_date(start)}-{format_short_date(end)}"
 
 async def get_weekend_page_data(db: Database, target_date: date) -> tuple[str | None, date | None]:
-    """Get URL and Friday date for weekend page."""
-    # Logic: Find Friday of the week
-    weekday = target_date.weekday() # 0=Mon, 6=Sun
+    """Get URL and Saturday date for weekend page."""
+    # Logic: Find Saturday of the week (WeekendPage is keyed by Saturday)
+    weekday = target_date.weekday()  # 0=Mon, 6=Sun
     
-    if weekday <= 2:
-        friday = target_date + timedelta(days=(4 - weekday))
-    else:
-        friday = target_date - timedelta(days=(weekday - 4))
-        
-    start_str = friday.isoformat()
+    # Calculate upcoming Saturday
+    if weekday <= 5:  # Mon-Sat
+        days_to_sat = (5 - weekday) % 7
+        if days_to_sat == 0 and weekday == 5:
+            days_to_sat = 0  # Today is Saturday
+        sat = target_date + timedelta(days=days_to_sat)
+    else:  # Sunday
+        sat = target_date + timedelta(days=6)  # Next Saturday
+    
+    start_str = sat.isoformat()
     
     async with db.get_session() as session:
         page = await session.get(WeekendPage, start_str)
         if page and page.url:
-            return page.url, friday
+            return page.url, sat
             
     # Fallback to MonthPage if no WeekendPage
-    url = await get_month_page_url(db, friday)
-    return url, friday
+    url = await get_month_page_url(db, sat)
+    return url, sat
 
 async def get_next_month_url(db: Database, current_date: date) -> str | None:
     """Get URL for next month."""
@@ -276,12 +289,56 @@ async def handle_channel_post(message: types.Message):
             second_btn = types.InlineKeyboardButton(text=f"📅 {nm_name}", url=nm_url)
             
     # Fallback logic if random selection yielded nothing
-    if not second_btn:
-        # Try Tomorrow
+    # Try remaining options in order: tomorrow -> weekend -> next_month
+    if not second_btn and selection != "tomorrow":
         tmr_url = await get_tomorrow_page_url(db, tomorrow)
         if tmr_url:
             second_btn = types.InlineKeyboardButton(text="📅 Завтра", url=tmr_url)
+            logger.info("channel_nav: fallback to Tomorrow succeeded, url=%s", tmr_url)
     
+    if not second_btn and selection != "weekend":
+        # Weekend fallback
+        weekday = today.weekday()
+        if weekday <= 5:
+            days_to_sat = (5 - weekday) % 7
+            if days_to_sat == 0 and weekday == 5:
+                days_to_sat = 0
+            sat = today + timedelta(days=days_to_sat)
+        else:
+            sat = today + timedelta(days=6)
+        
+        start_str = sat.isoformat()
+        async with db.get_session() as session:
+            page = await session.get(WeekendPage, start_str)
+            wk_url = page.url if page else None
+        
+        if not wk_url:
+            wk_url = await get_month_page_url(db, sat)
+        
+        if wk_url:
+            second_btn = types.InlineKeyboardButton(text="📅 Выходные", url=wk_url)
+            logger.info("channel_nav: fallback to Weekend succeeded, url=%s", wk_url)
+    
+    if not second_btn and selection != "next_month":
+        # Next month fallback
+        if today.month == 12:
+            next_month_date = date(today.year + 1, 1, 1)
+        else:
+            next_month_date = date(today.year, today.month + 1, 1)
+        
+        nm_url = await get_next_month_url(db, today)
+        if nm_url:
+            nm_name = FULL_MONTH_NAMES[next_month_date.month]
+            second_btn = types.InlineKeyboardButton(text=f"📅 {nm_name}", url=nm_url)
+            logger.info("channel_nav: fallback to NextMonth succeeded, url=%s", nm_url)
+    
+    # Log warning if all fallbacks failed
+    if not second_btn:
+        logger.warning(
+            "channel_nav: all fallback options failed for today=%s, selection=%s",
+            today, selection
+        )
+
     if second_btn:
         buttons.append(second_btn)
         

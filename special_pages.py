@@ -504,6 +504,11 @@ async def build_special_page_content(
     from datetime import datetime
     
     original_days = days
+    logger = logging.getLogger(__name__)
+    logger.info(
+        "build_special_page_content: start_date=%s, days=%d, title=%s",
+        start_date.isoformat(), days, title
+    )
     
     while days >= 1:
         end_date = start_date + timedelta(days=days - 1)
@@ -511,6 +516,11 @@ async def build_special_page_content(
             (start_date + timedelta(days=i)).isoformat()
             for i in range(days)
         ]
+        
+        logger.info(
+            "build_special_page_content: querying events for date_range=%s",
+            date_range
+        )
         
         # Fetch events
         async with db.get_session() as session:
@@ -520,6 +530,11 @@ async def build_special_page_content(
                 .order_by(Event.date, Event.time)
             )
             events = list(result.scalars().all())
+            
+            logger.info(
+                "build_special_page_content: found %d events for date_range",
+                len(events)
+            )
             
             # Fetch exhibitions that overlap with the period
             ex_result = await session.execute(
@@ -549,6 +564,11 @@ async def build_special_page_content(
             # Festival map for links
             fest_result = await session.execute(select(Festival))
             fest_map = {f.name.casefold(): f for f in fest_result.scalars().all()}
+        
+        logger.info(
+            "build_special_page_content: exhibitions=%d, fairs=%d",
+            len(exhibitions), len(fairs)
+        )
         
         # Expand fairs across the range
         if fairs:
@@ -583,10 +603,16 @@ async def build_special_page_content(
 
         # Filter out past events
         today = datetime.now(LOCAL_TZ).date()
+        events_before_filter = len(events)
         events = [
             e for e in events
             if max(e.date, e.end_date or e.date) >= today.isoformat()
         ]
+        
+        logger.info(
+            "build_special_page_content: after past-filter %d -> %d events (today=%s)",
+            events_before_filter, len(events), today.isoformat()
+        )
         
         # Ensure telegraph links
         for e in events:
@@ -595,6 +621,12 @@ async def build_special_page_content(
         
         # Group events
         grouped = group_events_for_special(events)
+        
+        total_groups = sum(len(g) for g in grouped.values())
+        logger.info(
+            "build_special_page_content: grouped into %d days, %d total groups",
+            len(grouped), total_groups
+        )
         
         # Build content
         content: list[dict] = []
@@ -743,16 +775,47 @@ async def create_special_telegraph_page(
     Returns:
         (telegraph_url, used_days)
     """
-    telegraph_create_page = require_main_attr("telegraph_create_page")
-    get_telegraph = require_main_attr("get_telegraph")
+    logger = logging.getLogger(__name__)
     
-    page_title, content, size, used_days = await build_special_page_content(
-        db, start_date, days, cover_url, title
-    )
+    try:
+        telegraph_create_page = require_main_attr("telegraph_create_page")
+        get_telegraph = require_main_attr("get_telegraph")
+    except RuntimeError as e:
+        logger.error(
+            "create_special_telegraph_page: failed to get main attrs: %s",
+            e
+        )
+        return "", 0
     
-    tg = get_telegraph()
-    result = await telegraph_create_page(tg, page_title, content)
-    url = result.get("url", "")
+    try:
+        page_title, content, size, used_days = await build_special_page_content(
+            db, start_date, days, cover_url, title
+        )
+    except Exception as e:
+        logger.error(
+            "create_special_telegraph_page: build_special_page_content failed: %s",
+            e, exc_info=True
+        )
+        return "", 0
+    
+    try:
+        tg = get_telegraph()
+    except RuntimeError as e:
+        logger.error(
+            "create_special_telegraph_page: get_telegraph() failed (token issue?): %s",
+            e
+        )
+        return "", 0
+    
+    try:
+        result = await telegraph_create_page(tg, page_title, content)
+        url = result.get("url", "")
+    except Exception as e:
+        logger.error(
+            "create_special_telegraph_page: telegraph_create_page failed: %s",
+            e, exc_info=True
+        )
+        return "", 0
     
     logging.info(
         "special_page created: url=%s size=%d days=%d",
@@ -760,3 +823,4 @@ async def create_special_telegraph_page(
     )
     
     return url, used_days
+

@@ -380,6 +380,16 @@ class Database:
             await _add_column(conn, "festival", "source_post_url TEXT")
             await _add_column(conn, "festival", "source_chat_id INTEGER")
             await _add_column(conn, "festival", "source_message_id INTEGER")
+            await _add_column(conn, "festival", "source_url TEXT")
+            await _add_column(conn, "festival", "source_type TEXT")
+            await _add_column(conn, "festival", "parser_run_id TEXT")
+            await _add_column(conn, "festival", "parser_version TEXT")
+            await _add_column(conn, "festival", "last_parsed_at TIMESTAMP")
+            await _add_column(conn, "festival", "uds_storage_path TEXT")
+            await _add_column(conn, "festival", "contacts_phone TEXT")
+            await _add_column(conn, "festival", "contacts_email TEXT")
+            await _add_column(conn, "festival", "is_annual BOOLEAN")
+            await _add_column(conn, "festival", "audience TEXT")
             await _add_column(
                 conn,
                 "festival",
@@ -729,8 +739,13 @@ class Database:
         from sqlalchemy.orm import sessionmaker
 
         if self._orm_engine is None:
+            engine_kwargs: dict[str, object] = {"future": True}
+            if os.getenv("PYTEST_CURRENT_TEST") or os.getenv("EVBOT_SQLITE_NULLPOOL") == "1":
+                from sqlalchemy.pool import NullPool
+
+                engine_kwargs["poolclass"] = NullPool
             self._orm_engine = create_async_engine(
-                f"sqlite+aiosqlite:///{self.path}", future=True
+                f"sqlite+aiosqlite:///{self.path}", **engine_kwargs
             )
         if self._sessionmaker is None:
             self._sessionmaker = sessionmaker(
@@ -744,8 +759,13 @@ class Database:
         from sqlalchemy.ext.asyncio import create_async_engine
 
         if self._orm_engine is None:
+            engine_kwargs: dict[str, object] = {"future": True}
+            if os.getenv("PYTEST_CURRENT_TEST") or os.getenv("EVBOT_SQLITE_NULLPOOL") == "1":
+                from sqlalchemy.pool import NullPool
+
+                engine_kwargs["poolclass"] = NullPool
             self._orm_engine = create_async_engine(
-                f"sqlite+aiosqlite:///{self.path}", future=True
+                f"sqlite+aiosqlite:///{self.path}", **engine_kwargs
             )
         return self._orm_engine
 
@@ -776,4 +796,3 @@ async def optimize(engine):
 async def vacuum(engine):
     async with engine.begin() as conn:
         await conn.exec_driver_sql("VACUUM")
-
