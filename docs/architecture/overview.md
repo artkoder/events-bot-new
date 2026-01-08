@@ -1,5 +1,6 @@
-# Architecture
+# Redirect
 
+<<<<<<<< HEAD:docs/architecture/overview.md
 The bot is built with **aiogram 3** and runs on Fly.io using a webhook.
 
 - **Web Server** – aiohttp application that receives updates on `/webhook`.
@@ -46,3 +47,6 @@ The video announce feature generates promotional video clips with event highligh
 - **Payload generation** — `payload_as_json()` produces the JSON for the Kaggle kernel, including `cities`, `date`, `pattern`, and scene data.
 - **Kaggle rendering** — the kernel (`kaggle/VideoAfisha/video_afisha.ipynb`) downloads assets, renders frames with MoviePy, and uploads the final video.
 - **Publication** — once complete, the video is sent to the test or main channel; events are marked as published and their counters decremented.
+========
+Актуальная версия: `docs/architecture/overview.md`
+>>>>>>>> dev:docs/ARCHITECTURE.md

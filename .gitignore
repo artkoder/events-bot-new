@@ -3,14 +3,6 @@ __pycache__/
 .db
 .env
 .pytest_cache/
-*.pid
-
-# Generated artifacts (keep docs/README inside)
-artifacts/*
-!artifacts/README.md
-
-# Codex scratch outputs (curate into docs/reports/ when needed)
-.codex/reports/
 
 # Production database snapshots and WAL files
 db_prod_snapshot.sqlite
@@ -42,3 +34,30 @@ test_data/
 # Virtual environment (should not be committed)
 .venv/
 .devcontainer/.mcp-auth/
+
+# Local artifacts (never commit)
+artifacts/*
+!artifacts/README.md
+
+# Codex scratch output (keep repo clean)
+.codex/reports/
+.codex/tasks/
+
+# Local DBs / sqlite WALs
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.db
+
+# Run outputs
+*.pid
+bot_logs.txt
+bot_output*.txt
+captured_logs.txt
+logs_analysis.txt
+
+# Local test outputs
+test_result*.txt
+test_*.txt
+test_parser_output/
+e2e_results*/

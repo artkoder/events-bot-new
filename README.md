@@ -143,8 +143,8 @@ line under the button row. The command accepts dates like `2025-07-10`,
 - **How it works (high-level):** `docs/architecture/overview.md`.
 - **LLM integration:** `docs/llm/` (prompt sources, request format, topics classifier).
 - **Reference data used by prompts:** `docs/reference/` (locations, holidays, templates).
-- **Pipelines & parsers:** `docs/pipelines/` (source parsing, venue-specific parsers, festival pipeline notes).
-- **Features (implemented behavior):** `docs/features/` (feature docs that reflect current behavior).
+- **Pipelines & parsers:** `docs/features/source-parsing/` (canonical docs; `docs/pipelines/` keeps redirect stubs for old links).
+- **Implemented features:** `docs/features/` (feature docs that reflect current behavior).
 - **Backlog / specs (not implemented yet):** `docs/backlog/` — specifically `EVE-11`, `EVE-54`, `EVE-55` are backlog items and should be treated as design notes until implemented.
 
 ## Quick start

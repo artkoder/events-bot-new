@@ -1,16 +1,18 @@
-# Artifacts (Generated Outputs)
+# Artifacts
 
-This directory is the home for **generated** and **temporary** files that should
-not clutter the repository root:
+Некоммитимые результаты локальных прогонов и диагностики.
 
-- logs
-- manual test outputs
-- E2E run outputs (JSON reports, screenshots)
-- database snapshots and scratch DBs
+## Структура
 
-## Rules
+- `artifacts/db/` — локальные sqlite/снапшоты/копии (и `*-wal`, `*-shm`)
+- `artifacts/logs/` — логи, дампы stdout/stderr
+- `artifacts/run/` — pid‑файлы и временные run‑файлы
+- `artifacts/test-results/` — отчёты/выводы тестов и локальные результаты
+- `artifacts/e2e/` — результаты E2E/BDD прогонов
+- `artifacts/parser-output/` — выход парсеров/экспортеров
 
-1. Do not put artifacts in the repository root.
-2. Prefer creating a dated subfolder: `artifacts/<type>/YYYY-MM-DD/`.
-3. Link from `docs/reports/` when an artifact matters for future readers.
+## Правила
 
+- Всё в `artifacts/` игнорируется git’ом.
+- Если нужен воспроизводимый пример для теста — используй минимальный fixture в `tests/` (а не артефакт прогона).
+- Если артефакт важно сохранить для чтения человеком — положи рядом краткий отчёт в `docs/reports/` и дай ссылку на папку.

@@ -1,0 +1,72 @@
+version: 1
+
+entrypoints:
+  root_readme: README.md
+  docs_index: docs/README.md
+  agent_routes: AGENTS.md
+
+sections:
+  architecture:
+    overview: docs/architecture/overview.md
+  operations:
+    commands: docs/operations/commands.md
+    cron: docs/operations/cron.md
+    e2e_testing: docs/operations/e2e-testing.md
+    prod_data: docs/operations/prod-data.md
+    vk_metrics: docs/operations/vk-metrics.md
+  llm:
+    prompts: docs/llm/prompts.md
+    request_guide: docs/llm/request-guide.md
+    topics: docs/llm/topics.md
+  reference:
+    locations: docs/reference/locations.md
+    holidays: docs/reference/holidays.md
+    recurring_events: docs/reference/recurring-events.md
+    month_page_template: docs/reference/month-page-template.md
+  pipelines:
+    source_parsing: docs/features/source-parsing/README.md
+    theatres: docs/features/source-parsing/sources/theatres/README.md
+    dom_iskusstv: docs/features/source-parsing/sources/dom-iskusstv/README.md
+    pyramida: docs/features/source-parsing/sources/pyramida/README.md
+    tretyakov_parser: docs/features/source-parsing/sources/tretyakov/README.md
+    festival_parser: docs/features/source-parsing/sources/festival-parser/README.md
+  backlog:
+    index: docs/backlog/
+    linear:
+      - docs/backlog/linear/EVE-11-llm-rate-limits.md
+      - docs/backlog/linear/EVE-54-kaggle-secrets.md
+      - docs/backlog/linear/EVE-55-gemma-integration.md
+  reports:
+    index: docs/reports/README.md
+  tools:
+    index: docs/tools/README.md
+    codex_cli: docs/tools/codex-cli.md
+
+features:
+  digests:
+    status: implemented
+    docs: docs/features/digests/README.md
+    entrypoints:
+      - digests.py
+  source_parsing:
+    status: implemented
+    docs: docs/features/source-parsing/README.md
+    entrypoints:
+      - source_parsing/commands.py
+      - source_parsing/handlers.py
+      - source_parsing/parser.py
+  tourist_label:
+    status: implemented
+    docs: docs/features/tourist-label/README.md
+    entrypoints:
+      - main.py
+      - db.py
+
+artifacts:
+  root: artifacts/
+  db: artifacts/db/
+  logs: artifacts/logs/
+  run: artifacts/run/
+  test_results: artifacts/test-results/
+  e2e: artifacts/e2e/
+  parser_output: artifacts/parser-output/

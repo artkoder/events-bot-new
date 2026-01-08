@@ -1,5 +1,6 @@
-# Prompt for model 4o
+# Redirect
 
+<<<<<<<< HEAD:docs/llm/prompts.md
 This repository uses an external LLM (model **4o**) for text parsing and
 normalisation. The current instruction set for the model is stored here so that
 it can be refined over time.
@@ -226,3 +227,6 @@ Edit this file to tweak how requests are sent to 4o.
 пяти уникальных строк из списка выше. Полная схема приведена в
 `topics.md`. Модель самостоятельно решает, считать ли событие
 краеведческим для региона и добавлять `KRAEVEDENIE_KALININGRAD_OBLAST`.
+========
+Актуальная версия: `docs/llm/prompts.md`
+>>>>>>>> dev:docs/PROMPTS.md

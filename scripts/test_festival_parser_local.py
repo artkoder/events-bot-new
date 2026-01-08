@@ -29,8 +29,9 @@ async def main():
         sys.exit(1)
     
     url = sys.argv[1]
-    output_dir = Path("test_parser_output")
-    output_dir.mkdir(exist_ok=True)
+    default_output_dir = PROJECT_ROOT / "artifacts" / "parser-output" / "festival-parser-local"
+    output_dir = Path(os.getenv("OUTPUT_DIR", str(default_output_dir))).expanduser()
+    output_dir.mkdir(parents=True, exist_ok=True)
     
     print(f"🎯 Testing Festival Parser locally")
     print(f"📍 URL: {url}")

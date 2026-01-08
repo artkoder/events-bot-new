@@ -1,74 +1,95 @@
-# Codex CLI Cheatsheet
+# CODEX
 
-## Basic Commands
+## Mandatory Rules
+- **ALWAYS** review this CODEX before starting any task on this repository.
+- **ALWAYS** keep documentation and automation artifacts synchronized with code changes.
+- **ALWAYS** run and update relevant smoke tests before requesting review or completing work.
+- **ALWAYS** update user-facing documentation (READMEs, help text, runbooks) when behavior changes or explicitly document why no update is required.
+- **ALWAYS** append relevant entries to the CHANGELOG describing user-impacting fixes and features.
+- **ALWAYS** verify new or modified functionality has appropriate logging coverage in place, consistent with the Definition of Done below.
+- **NEVER** merge or submit changes without passing smoke tests and linting checks.
+- **NEVER** introduce fixtures or test data that persist outside their intended scope.
 
-### Verification & Login
+## Definition of Done
+Every change must satisfy **all** of the following before it is considered complete:
+1. Smoke tests are executed and passing, or a justified exception is documented in the change description.
+2. Test fixtures are cleaned up, scoped appropriately, and free of side effects across the suite.
+3. The README, user-facing help, and CHANGELOG entries are updated (or explicitly confirmed as not needed) to reflect behavioral or interface changes.
+
+## Critical Code Paths
+The following modules and files are considered critical paths and demand extra scrutiny, regression testing, and reviewer visibility whenever touched:
+- `main`
+- `db`
+- `imagekit_poster`
+- `vk_intake`
+- `vk_review`
+- `markup`
+- `scheduling`
+- `digests`
+- `sections`
+- `shortlinks`
+- `supabase_export`
+- `safe_bot`
+- `span`
+- `net`
+- `models`
+
+## Agent Guidance
+Future contributors and agents must treat this CODEX as required reading prior to any repository work. Confirm in your task notes that you have reviewed it.
+
+---
+
+# Codex CLI Cheatsheet (project defaults)
+
+## Output paths (важно)
+
+Чтобы не захламлять корень и не коммитить отчёты, складывай результаты Codex сюда:
+
+- отчёты: `artifacts/codex/reports/`
+- промежуточные файлы/черновики: `artifacts/codex/tasks/`
+
+Пример:
 ```bash
-# Check login status
+mkdir -p artifacts/codex/reports
+codex exec --sandbox workspace-write -o artifacts/codex/reports/PHASE-1.md "..."
+```
+
+## Basic commands
+
+### Verification & login
+```bash
 codex login status
-
-# Login (Headless/Codespace)
 codex login --device-auth
-
-# Login via API Key (env)
 printenv OPENAI_API_KEY | codex login --with-api-key
 ```
 
-## Execution Modes
+## Execution modes
 
-### One-off Task (Non-interactive)
+### One-off task
 ```bash
-# Full auto execution (allows edits)
 codex exec --full-auto "внеси правки и обнови тесты"
-
-# JSON output for machine parsing
 codex exec --json "проанализируй репозиторий" | jq
-
-# Save output to file
-codex exec -o ./out.txt "сгенерируй release notes"
+codex exec -o artifacts/codex/reports/out.md "сгенерируй release notes"
 ```
 
-### Sandbox & Permissions
+### Sandbox & permissions
 ```bash
-# Sandbox with write permissions (default for --full-auto)
 codex exec --sandbox workspace-write "checking changes"
-
-# DANGER: Maximum access (only in isolated environments)
 codex exec --sandbox danger-full-access "сделай массовый рефакторинг"
 ```
 
-### Piping Input
+### Piping input
 ```bash
 cat task.md | codex exec -
 ```
 
-### Structured Output (Schema)
-generate schema.json first:
-```json
-{
-  "type": "object",
-  "properties": {
-    "summary": { "type": "string" },
-    "risks": { "type": "array", "items": { "type": "string" } }
-  },
-  "required": ["summary", "risks"],
-  "additionalProperties": false
-}
-```
-Run:
+### Structured output (schema)
 ```bash
-codex exec --output-schema ./schema.json -o ./report.json \
+codex exec --output-schema ./schema.json -o artifacts/codex/reports/report.json \
   "сделай краткий risk-report по изменениям"
 ```
 
-## Workflow Tips
-1. **Resume Session**: `codex exec resume --last "исправь найденные проблемы"`
-2. **Race Conditions**: `codex exec "проверь изменения на race conditions"`
-3. **Diff Check**: Always check `git diff` or `/diff` in TUI before commiting to changes made by Codex.
+## Workflow tips
 
-## Advanced Workflows
-Use Codex for high-level engineering tasks:
-- **Architecture Planning**: `codex exec --full-auto "спроектируй архитектуру модуля X"`
-- **Test Generation**: `codex exec "напиши автотесты для файла main.py с учетом граничных случаев"`
-- **Code Review**: `codex exec "проведи ревью изменений в ветке, ищи проблемы безопасности"`
-- **Complex Refactoring**: `codex exec --sandbox danger-full-access "выдели класс EventManager в отдельный файл и обнови импорты"`
+1. `codex exec resume --last "исправь найденные проблемы"`
+2. Всегда проверяй `git diff` перед коммитом.
