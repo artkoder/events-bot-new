@@ -315,6 +315,7 @@ async def test_vk_nav_only_skip_edit(tmp_path, monkeypatch, caplog):
     monkeypatch.setenv("VK_USER_TOKEN", "tok")
     monkeypatch.setenv("VK_NAV_FALLBACK", "skip")
     monkeypatch.setattr(main, "_vk_user_token_bad", None)
+    monkeypatch.setattr(main, "VK_USER_TOKEN", "tok", raising=False)
 
     async def fake_group_id(db):
         return "1"
@@ -324,7 +325,7 @@ async def test_vk_nav_only_skip_edit(tmp_path, monkeypatch, caplog):
     async def fake_nav_block(db, exclude=None, today=None, items=None):
         return [], ["nav"]
 
-    async def fake_vk_api(method, params, db, bot, token=None, token_kind=None):
+    async def fake_vk_api(*args, **kwargs):
         return {"response": [{"text": "base"}]}
 
     async def fake_edit(url, message, db, bot, attachments):
@@ -334,6 +335,7 @@ async def test_vk_nav_only_skip_edit(tmp_path, monkeypatch, caplog):
         assert False, "should not post"
 
     monkeypatch.setattr(main, "_build_festival_nav_block", fake_nav_block)
+    monkeypatch.setattr(main, "vk_api", fake_vk_api)
     monkeypatch.setattr(main, "_vk_api", fake_vk_api)
     monkeypatch.setattr(main, "edit_vk_post", fake_edit)
     monkeypatch.setattr(main, "post_to_vk", fake_post)
