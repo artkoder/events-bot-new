@@ -380,6 +380,17 @@ class Database:
             await _add_column(conn, "festival", "source_post_url TEXT")
             await _add_column(conn, "festival", "source_chat_id INTEGER")
             await _add_column(conn, "festival", "source_message_id INTEGER")
+            # Parser-related fields (Universal Festival Parser)
+            await _add_column(conn, "festival", "source_url TEXT")
+            await _add_column(conn, "festival", "source_type TEXT")
+            await _add_column(conn, "festival", "parser_run_id TEXT")
+            await _add_column(conn, "festival", "parser_version TEXT")
+            await _add_column(conn, "festival", "last_parsed_at TIMESTAMP")
+            await _add_column(conn, "festival", "uds_storage_path TEXT")
+            await _add_column(conn, "festival", "contacts_phone TEXT")
+            await _add_column(conn, "festival", "contacts_email TEXT")
+            await _add_column(conn, "festival", "is_annual BOOLEAN")
+            await _add_column(conn, "festival", "audience TEXT")
             await _add_column(
                 conn,
                 "festival",
