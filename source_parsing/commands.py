@@ -58,6 +58,36 @@ def _format_added_events_lines(added_events) -> list[str]:
     return lines
 
 
+def _format_updated_events_lines(updated_events) -> list[str]:
+    """Format updated events list for display."""
+    source_labels = {
+        "dramteatr": "Драмтеатр",
+        "muzteatr": "Музтеатр",
+        "sobor": "Собор",
+        "tretyakov": "Третьяковка",
+    }
+    lines = [f"🔄 **Обновлённые события:** {len(updated_events)}", ""]
+    for item in updated_events:
+        title = escape_md(item.title or "Без названия")
+        url = item.telegraph_url
+        if url:
+            line = f"• [{title}]({url})"
+        else:
+            line = f"• {title}"
+        suffix_parts = []
+        if item.date:
+            suffix_parts.append(escape_md(item.date))
+        if item.time:
+            suffix_parts.append(escape_md(item.time))
+        source_label = source_labels.get(item.source or "", item.source or "")
+        if source_label:
+            suffix_parts.append(escape_md(source_label))
+        if suffix_parts:
+            line += f" — {', '.join(suffix_parts)}"
+        lines.append(line)
+    return lines
+
+
 def _chunk_lines(lines: list[str], max_len: int = MAX_TG_MESSAGE_LEN) -> list[str]:
     chunks: list[str] = []
     current: list[str] = []
@@ -165,7 +195,18 @@ async def handle_parse_command(message: types.Message, db: Database, bot: Bot) -
                 "ℹ️ Новых событий не добавлено.",
             )
         
+        # Show updated events with Telegraph links
+        if getattr(result, "updated_events", None):
+            lines = _format_updated_events_lines(result.updated_events)
+            for chunk in _chunk_lines(lines):
+                await bot.send_message(
+                    message.chat.id,
+                    chunk,
+                    parse_mode="Markdown",
+                )
+        
         # Send JSON files if available
+        json_files_sent = 0
         if hasattr(result, 'json_file_paths') and result.json_file_paths:
             from aiogram.types import FSInputFile
             for json_path in result.json_file_paths:
@@ -176,8 +217,18 @@ async def handle_parse_command(message: types.Message, db: Database, bot: Bot) -
                         json_file = FSInputFile(json_path, filename=filename)
                         await bot.send_document(message.chat.id, json_file)
                         logger.info("source_parsing: sent JSON file %s", filename)
+                        json_files_sent += 1
+                    else:
+                        logger.warning("source_parsing: JSON file not found %s", json_path)
                 except Exception as e:
                     logger.warning("source_parsing: failed to send JSON %s: %s", json_path, e)
+        
+        # Warn if no JSON files were sent
+        if json_files_sent == 0 and result.total_events > 0:
+            await bot.send_message(
+                message.chat.id,
+                "⚠️ JSON файлы парсера недоступны (временные файлы удалены).",
+            )
         
         # Send log file if available
         if result.log_file_path:

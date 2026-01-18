@@ -61,6 +61,7 @@ class SourceParsingResult:
     errors: list[str] = field(default_factory=list)
     chat_id: int | None = None  # For progress messages
     added_events: list["AddedEventInfo"] = field(default_factory=list)
+    updated_events: list["UpdatedEventInfo"] = field(default_factory=list)
 
 
 @dataclass
@@ -72,6 +73,18 @@ class AddedEventInfo:
     date: str | None
     time: str | None
     source: str | None
+
+
+@dataclass
+class UpdatedEventInfo:
+    """Updated event (ticket status change) with Telegraph link for reporting."""
+    event_id: int
+    title: str
+    telegraph_url: str
+    date: str | None
+    time: str | None
+    source: str | None
+    update_type: str  # 'ticket_status', 'full_update'
 
 
 def _event_telegraph_url(event) -> str | None:
@@ -137,6 +150,40 @@ async def build_added_event_info(
         date=getattr(event, "date", None),
         time=getattr(event, "time", None),
         source=source,
+    )
+
+
+async def build_updated_event_info(
+    db: Database,
+    event_id: int,
+    source: str | None,
+    update_type: str,
+) -> UpdatedEventInfo | None:
+    """Build UpdatedEventInfo for a modified event."""
+    from models import Event
+
+    async with db.get_session() as session:
+        event = await session.get(Event, event_id)
+
+    if not event:
+        return None
+
+    url = _event_telegraph_url(event)
+    # Don't force rebuild for updates - URL should already exist
+    if not url:
+        logger.debug(
+            "source_parsing: no telegraph url for updated event_id=%d",
+            event_id,
+        )
+
+    return UpdatedEventInfo(
+        event_id=event_id,
+        title=event.title or "",
+        telegraph_url=url or "",
+        date=getattr(event, "date", None),
+        time=getattr(event, "time", None),
+        source=source,
+        update_type=update_type,
     )
 
 
@@ -814,6 +861,7 @@ async def run_source_parsing(
                 chat_id=chat_id,
                 progress_message_id=progress_message_id,
                 added_events=result.added_events if chat_id else None,
+                updated_events=result.updated_events if chat_id else None,
             )
             result.stats_by_source[source] = stats
             current_index += len(events)
@@ -912,6 +960,7 @@ async def process_source_events(
     chat_id: int | None = None,
     progress_message_id: int | None = None,
     added_events: list[AddedEventInfo] | None = None,
+    updated_events: list[UpdatedEventInfo] | None = None,
 ) -> tuple[SourceParsingStats, int | None]:
     """Process events from a single source.
     
@@ -924,6 +973,8 @@ async def process_source_events(
         total_count: Total events across all sources
         chat_id: Chat ID for progress messages
         progress_message_id: Message ID to edit for progress updates
+        added_events: List to populate with newly added events
+        updated_events: List to populate with updated events
     
     Returns:
         Tuple of (statistics, updated progress_message_id)
@@ -980,6 +1031,11 @@ async def process_source_events(
                     await schedule_existing_event_update(db, existing_id)
                     stats.ticket_updated += 1
                     result_tag = "existing_full_update"
+                    # Track updated event for reporting
+                    if updated_events is not None:
+                        info = await build_updated_event_info(db, existing_id, source, "full_update")
+                        if info:
+                            updated_events.append(info)
                 else:
                     stats.failed += 1
                     result_tag = "existing_full_update_failed"
@@ -995,6 +1051,11 @@ async def process_source_events(
                     await schedule_existing_event_update(db, existing_id)
                     stats.ticket_updated += 1
                     result_tag = "existing_ticket_update"
+                    # Track updated event for reporting
+                    if updated_events is not None:
+                        info = await build_updated_event_info(db, existing_id, source, "ticket_status")
+                        if info:
+                            updated_events.append(info)
                 else:
                     stats.already_exists += 1
                     result_tag = "existing_ticket_update_failed"
