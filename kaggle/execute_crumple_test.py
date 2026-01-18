@@ -108,6 +108,13 @@ async def run_crumple_test():
             shutil.copy2(audio_file, dataset_path / audio_file.name)
             logger.info("Copied audio file")
         
+        # Copy Blender XPBD scripts (critical for rendering!)
+        for script in ["blender_xpbd_paper.py", "run.py", "make_showreel_audio.py"]:
+            script_path = KERNEL_DIR / script
+            if script_path.exists():
+                shutil.copy2(script_path, dataset_path / script)
+                logger.info(f"Copied script: {script}")
+        
         # Create payload.json
         create_test_payload(TEST_AFISHA_DIR, dataset_path / "payload.json")
         
@@ -210,14 +217,26 @@ async def run_crumple_test():
         # Check for video file
         video_file = OUTPUT_DIR / "crumple_video_final.mp4"
         if video_file.exists():
-            logger.info(f"🎉 SUCCESS! Video saved: {video_file}")
-            logger.info(f"Video size: {video_file.stat().st_size / 1024 / 1024:.2f} MB")
+            video_size = video_file.stat().st_size
+            logger.info(f"Video saved: {video_file}")
+            logger.info(f"Video size: {video_size / 1024 / 1024:.2f} MB")
+            
+            # Validate video size (should be > 500KB for real content)
+            if video_size < 500000:
+                logger.error(f"❌ VALIDATION FAILED: Video too small ({video_size/1024:.1f} KB), likely empty!")
+                return False
+            
+            logger.info("🎉 SUCCESS! Video size validation passed!")
             return True
         else:
             # Check for any mp4
             mp4_files = list(OUTPUT_DIR.glob("*.mp4"))
             if mp4_files:
-                logger.info(f"🎉 SUCCESS! Found video: {mp4_files[0]}")
+                video_size = mp4_files[0].stat().st_size
+                if video_size < 500000:
+                    logger.error(f"❌ Video too small ({video_size/1024:.1f} KB)")
+                    return False
+                logger.info(f"🎉 SUCCESS! Found video: {mp4_files[0]} ({video_size/1024/1024:.2f} MB)")
                 return True
             else:
                 logger.warning("No video file found in output")
