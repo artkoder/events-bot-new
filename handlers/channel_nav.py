@@ -114,25 +114,35 @@ def format_date_range(start: date, end: date) -> str:
     return f"{format_short_date(start)}-{format_short_date(end)}"
 
 async def get_weekend_page_data(db: Database, target_date: date) -> tuple[str | None, date | None]:
-    """Get URL and Friday date for weekend page."""
-    # Logic: Find Friday of the week
-    weekday = target_date.weekday() # 0=Mon, 6=Sun
+    """Get URL and Saturday date for weekend page.
     
-    if weekday <= 2:
-        friday = target_date + timedelta(days=(4 - weekday))
-    else:
-        friday = target_date - timedelta(days=(weekday - 4))
-        
-    start_str = friday.isoformat()
+    WeekendPage is keyed by Saturday's date (the first day of the weekend).
+    """
+    # Calculate Saturday for this weekend
+    weekday = target_date.weekday()  # 0=Mon, 6=Sun
+    
+    if weekday == 6:  # Sunday -> Saturday was yesterday
+        sat = target_date - timedelta(days=1)
+    elif weekday == 5:  # Saturday -> today is Saturday
+        sat = target_date
+    else:  # Mon-Fri -> calculate next Saturday
+        days_to_sat = 5 - weekday
+        sat = target_date + timedelta(days=days_to_sat)
+    
+    start_str = sat.isoformat()
+    logger.info("get_weekend_page_data: target=%s weekday=%d sat=%s key=%s", 
+                target_date, weekday, sat, start_str)
     
     async with db.get_session() as session:
         page = await session.get(WeekendPage, start_str)
         if page and page.url:
-            return page.url, friday
+            logger.info("get_weekend_page_data: found WeekendPage url=%s", page.url)
+            return page.url, sat
             
     # Fallback to MonthPage if no WeekendPage
-    url = await get_month_page_url(db, friday)
-    return url, friday
+    logger.warning("get_weekend_page_data: no WeekendPage for %s, falling back to MonthPage", start_str)
+    url = await get_month_page_url(db, sat)
+    return url, sat
 
 async def get_next_month_url(db: Database, current_date: date) -> str | None:
     """Get URL for next month."""
