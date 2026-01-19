@@ -62,15 +62,22 @@ async def get_month_page_url(db: Database, target_date: date) -> str | None:
             return page.url
     return None
 
-async def get_tomorrow_page_url(db: Database, target_date: date) -> str | None:
-    """Get or create URL for tomorrow's special page."""
+async def get_tomorrow_page_url(db: Database, target_date: date, force_regenerate: bool = False) -> str | None:
+    """Get or create URL for tomorrow's special page.
+    
+    Args:
+        db: Database instance
+        target_date: Date to generate page for
+        force_regenerate: If True, always create new page and update DB cache
+    """
     date_str = target_date.isoformat()
     
-    async with db.get_session() as session:
-        # Check cache
-        cached = await session.get(TomorrowPage, date_str)
-        if cached:
-            return cached.url
+    if not force_regenerate:
+        async with db.get_session() as session:
+            # Check cache
+            cached = await session.get(TomorrowPage, date_str)
+            if cached:
+                return cached.url
             
     # Generate new page
     # Format title like weekend pages: "20 января — афиша"
@@ -88,10 +95,16 @@ async def get_tomorrow_page_url(db: Database, target_date: date) -> str | None:
         )
         
         if url:
-            # Cache it
+            # Update or create cache entry
             async with db.get_session() as session:
-                entry = TomorrowPage(date=date_str, url=url)
-                session.add(entry)
+                existing = await session.get(TomorrowPage, date_str)
+                if existing:
+                    existing.url = url
+                    logger.info("Updated TomorrowPage cache for %s: %s", date_str, url)
+                else:
+                    entry = TomorrowPage(date=date_str, url=url)
+                    session.add(entry)
+                    logger.info("Created TomorrowPage cache for %s: %s", date_str, url)
                 await session.commit()
             return url
             
