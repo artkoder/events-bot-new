@@ -380,6 +380,7 @@ class Database:
             await _add_column(conn, "festival", "source_post_url TEXT")
             await _add_column(conn, "festival", "source_chat_id INTEGER")
             await _add_column(conn, "festival", "source_message_id INTEGER")
+            # Parser-related fields (Universal Festival Parser)
             await _add_column(conn, "festival", "source_url TEXT")
             await _add_column(conn, "festival", "source_type TEXT")
             await _add_column(conn, "festival", "parser_run_id TEXT")
@@ -739,13 +740,8 @@ class Database:
         from sqlalchemy.orm import sessionmaker
 
         if self._orm_engine is None:
-            engine_kwargs: dict[str, object] = {"future": True}
-            if os.getenv("PYTEST_CURRENT_TEST") or os.getenv("EVBOT_SQLITE_NULLPOOL") == "1":
-                from sqlalchemy.pool import NullPool
-
-                engine_kwargs["poolclass"] = NullPool
             self._orm_engine = create_async_engine(
-                f"sqlite+aiosqlite:///{self.path}", **engine_kwargs
+                f"sqlite+aiosqlite:///{self.path}", future=True
             )
         if self._sessionmaker is None:
             self._sessionmaker = sessionmaker(
@@ -759,13 +755,8 @@ class Database:
         from sqlalchemy.ext.asyncio import create_async_engine
 
         if self._orm_engine is None:
-            engine_kwargs: dict[str, object] = {"future": True}
-            if os.getenv("PYTEST_CURRENT_TEST") or os.getenv("EVBOT_SQLITE_NULLPOOL") == "1":
-                from sqlalchemy.pool import NullPool
-
-                engine_kwargs["poolclass"] = NullPool
             self._orm_engine = create_async_engine(
-                f"sqlite+aiosqlite:///{self.path}", **engine_kwargs
+                f"sqlite+aiosqlite:///{self.path}", future=True
             )
         return self._orm_engine
 
@@ -796,3 +787,4 @@ async def optimize(engine):
 async def vacuum(engine):
     async with engine.begin() as conn:
         await conn.exec_driver_sql("VACUUM")
+

@@ -1,6 +1,5 @@
-# Redirect
+# 4o Request Guide
 
-<<<<<<<< HEAD:docs/llm/request-guide.md
 This document describes how the bot communicates with model **4o**.
 
 Requests are sent as HTTP `POST` to the URL stored in the environment variable
@@ -103,6 +102,3 @@ OpenAI usage resets daily at 00:00 UTC. The `four_o.usage` log records each
 request with its token count and the remaining budget as defined by
 `FOUR_O_DAILY_TOKEN_LIMIT` (1 000 000 tokens by default). Grafana dashboards can
 filter by the `four_o.usage` key to visualise daily token spend.
-========
-Актуальная версия: `docs/llm/request-guide.md`
->>>>>>>> dev:docs/FOUR_O_REQUEST.md

@@ -6626,9 +6626,9 @@ async def parse_event_via_4o(
     content = (
         data_raw.get("choices", [{}])[0]
         .get("message", {})
-        .get("content", "{}")
-        .strip()
-    )
+        .get("content")
+        or "{}"
+    ).strip()
     if logging.getLogger().isEnabledFor(logging.DEBUG):
         logging.debug("4o content snippet: %s", content[:1000])
     del data_raw

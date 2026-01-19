@@ -1054,7 +1054,14 @@ async def build_weekend_page_content(
         }
     )
 
-    add_day_sections(days, by_day, fest_map, add_many, show_images=len(events) < 10)
+    add_day_sections(
+        days,
+        by_day,
+        fest_map,
+        add_many,
+        show_images=len(events) < 10,
+        show_3d_only=True,  # Always show only 3D previews on weekend pages
+    )
 
     weekend_nav: list[dict] = []
     future_weekends = [w for w in weekend_pages if w.start >= start]

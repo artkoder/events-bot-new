@@ -496,9 +496,10 @@ async def build_special_page_content(
     Returns:
         (page_title, content_nodes, content_size, used_days)
     """
-    from models import Event, Festival
+    from models import Event, Festival, WeekendPage
     ensure_event_telegraph_link = require_main_attr("ensure_event_telegraph_link")
     format_day_pretty = require_main_attr("format_day_pretty")
+    format_weekend_range = require_main_attr("format_weekend_range")
     build_month_nav_block = require_main_attr("build_month_nav_block")
     LOCAL_TZ = require_main_attr("LOCAL_TZ")
     from datetime import datetime
@@ -564,6 +565,11 @@ async def build_special_page_content(
             # Festival map for links
             fest_result = await session.execute(select(Festival))
             fest_map = {f.name.casefold(): f for f in fest_result.scalars().all()}
+
+            res_w = await session.execute(
+                select(WeekendPage).order_by(WeekendPage.start)
+            )
+            weekend_pages = res_w.scalars().all()
         
         logger.info(
             "build_special_page_content: exhibitions=%d, fairs=%d",
@@ -701,6 +707,29 @@ async def build_special_page_content(
                 ex_nodes.extend(telegraph_br())
                 content.extend(ex_nodes)
 
+        weekend_nav: list[dict] = []
+        start = start_date.isoformat()
+        future_weekends = [w for w in weekend_pages if w.start >= start]
+        if future_weekends:
+            nav_children = []
+            for idx, w in enumerate(future_weekends):
+                s = date.fromisoformat(w.start)
+                label = format_weekend_range(s)
+                if w.start == start:
+                    nav_children.append(label)
+                else:
+                    nav_children.append(
+                        {"tag": "a", "attrs": {"href": w.url}, "children": [label]}
+                    )
+                if idx < len(future_weekends) - 1:
+                    nav_children.append(" ")
+            weekend_nav = [{"tag": "h4", "children": nav_children}]
+
+        if weekend_nav:
+            content.extend(telegraph_br())
+            content.extend(weekend_nav)
+            content.extend(telegraph_br())
+
         # Month navigation
         month_key = start_date.strftime("%Y-%m")
         # Pass current_month=None so that the current month is also a link (clickable)
@@ -749,6 +778,29 @@ async def build_special_page_content(
         
         for group in grouped[day]:
             content.extend(render_special_group(group, show_image=False))
+
+    weekend_nav: list[dict] = []
+    start = start_date.isoformat()
+    future_weekends = [w for w in weekend_pages if w.start >= start]
+    if future_weekends:
+        nav_children = []
+        for idx, w in enumerate(future_weekends):
+            s = date.fromisoformat(w.start)
+            label = format_weekend_range(s)
+            if w.start == start:
+                nav_children.append(label)
+            else:
+                nav_children.append(
+                    {"tag": "a", "attrs": {"href": w.url}, "children": [label]}
+                )
+            if idx < len(future_weekends) - 1:
+                nav_children.append(" ")
+        weekend_nav = [{"tag": "h4", "children": nav_children}]
+
+    if weekend_nav:
+        content.extend(telegraph_br())
+        content.extend(weekend_nav)
+        content.extend(telegraph_br())
 
     month_key = start_date.strftime("%Y-%m")
     # Pass current_month=None so that the current month is also a link (clickable)
