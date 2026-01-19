@@ -45,7 +45,7 @@ async def test_persist_event_creates_and_reuses_holiday(tmp_path, monkeypatch):
 
     target_date_token = main._normalize_holiday_date_token("31.10")
     halloween_doc_row = None
-    for raw_line in Path("docs/HOLIDAYS.md").read_text(encoding="utf-8").splitlines():
+    for raw_line in Path("docs/reference/holidays.md").read_text(encoding="utf-8").splitlines():
         if "|" not in raw_line:
             continue
         stripped = raw_line.strip()

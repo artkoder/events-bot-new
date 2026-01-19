@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import os
 import sys
@@ -10,6 +11,32 @@ import main
 import poster_ocr
 from models import PosterOcrCache
 from _helpers.no_network import no_network  # noqa: F401
+
+
+class _TickingEventLoopPolicy(asyncio.DefaultEventLoopPolicy):
+    def new_event_loop(self) -> asyncio.AbstractEventLoop:  # pragma: no cover
+        loop = super().new_event_loop()
+
+        def _tick() -> None:
+            if loop.is_closed():
+                return
+            loop.call_later(0.1, _tick)
+
+        loop.call_later(0.1, _tick)
+        return loop
+
+
+@pytest.fixture(scope="session")
+def event_loop_policy():
+    """
+    Ensure the asyncio loop wakes periodically during tests.
+
+    Some dependencies (e.g. `aiosqlite`) resolve awaitables from a background
+    thread via `call_soon_threadsafe`. If loop wakeups are unreliable in a
+    sandbox/CI runtime, this keeps the loop from sleeping indefinitely.
+    """
+
+    return _TickingEventLoopPolicy()
 
 
 @pytest.fixture(autouse=True)
