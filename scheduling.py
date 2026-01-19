@@ -620,6 +620,28 @@ def startup(
             _job_next_run(job),
         )
 
+    # Pinned button update at 18:00 Kaliningrad time (UTC+2 = 16:00 UTC)
+    from handlers.pinned_button import pinned_button_scheduler
+    
+    pinned_tz = ZoneInfo("Europe/Kaliningrad")
+    pinned_local = datetime.now(pinned_tz).replace(hour=18, minute=0, second=0, microsecond=0)
+    pinned_utc = pinned_local.astimezone(timezone.utc)
+    job = _scheduler.add_job(
+        _job_wrapper("pinned_button_scheduler", pinned_button_scheduler),
+        "cron",
+        id="pinned_button_scheduler",
+        hour=str(pinned_utc.hour),
+        minute=str(pinned_utc.minute),
+        args=[db, bot],
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=60,
+    )
+    logging.info(
+        "SCHED registered job id=%s next_run=%s", job.id, _job_next_run(job)
+    )
+
     async def _run_maintenance(job, name: str, timeout: float, run_id: str | None = None) -> None:
         start = _time.perf_counter()
         try:
