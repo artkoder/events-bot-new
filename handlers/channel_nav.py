@@ -73,11 +73,10 @@ async def get_tomorrow_page_url(db: Database, target_date: date) -> str | None:
             return cached.url
             
     # Generate new page
-    # Note: create_special_telegraph_page manages its own db session usually, 
-    # but looking at signature it takes 'db'.
-    # We need to ensure we don't have transaction conflicts if we reuse session?
-    # The signature in special_pages.py is: async def create_special_telegraph_page(db: "Database", ...)
-    # So we pass the db instance.
+    # Format title like weekend pages: "20 января — афиша"
+    day = target_date.day
+    month_name = MONTH_NAMES_GENITIVE[target_date.month]
+    formatted_title = f"{day} {month_name} — афиша"
     
     try:
         url, _ = await create_special_telegraph_page(
@@ -85,7 +84,7 @@ async def get_tomorrow_page_url(db: Database, target_date: date) -> str | None:
             start_date=target_date,
             days=1,
             cover_url=None, # No cover for auto-generated daily tomorrow page
-            title="Афиша на завтра"
+            title=formatted_title
         )
         
         if url:

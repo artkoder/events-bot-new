@@ -651,6 +651,15 @@ async def build_special_page_content(
         content.append({"tag": "h3", "children": [title]})
         content.extend(telegraph_br())
         
+        # Intro paragraph with event count
+        total_events = sum(len(g) for g in grouped.values())
+        if total_events > 0:
+            content.append({
+                "tag": "p",
+                "children": [f"Мы нашли для вас {total_events} событий. Наслаждайтесь культурной жизнью Калининграда!"]
+            })
+            content.extend(telegraph_br())
+        
         # Events by day
         sorted_days = sorted(grouped.keys())
         show_images = True
