@@ -9,6 +9,7 @@ sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 sys.path.append(os.path.dirname(__file__))
 import main
 import poster_ocr
+import db as db_module
 from models import PosterOcrCache
 from _helpers.no_network import no_network  # noqa: F401
 
@@ -117,3 +118,9 @@ def _mock_poster_ocr(monkeypatch, request):
         return results, 0, poster_ocr.DAILY_TOKEN_LIMIT
 
     monkeypatch.setattr(poster_ocr, "recognize_posters", fake_recognize)
+
+
+@pytest.fixture(autouse=True)
+async def _cleanup_databases():
+    yield
+    await db_module.close_known_databases()

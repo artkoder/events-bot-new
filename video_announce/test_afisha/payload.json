@@ -1,0 +1,19 @@
+{
+    "scenes": [
+        {
+            "image": "poster1.jpg",
+            "text": "Событие 1"
+        },
+        {
+            "image": "poster2.jpg",
+            "text": "Событие 2"
+        }
+    ],
+    "audio": "The_xx_-_Intro.mp3",
+    "font": "Oswald-VariableFont_wght.ttf",
+    "cover": {
+        "date": "20-21",
+        "month": "ЯНВАРЯ",
+        "title": "ВЫХОДНЫЕ"
+    }
+}

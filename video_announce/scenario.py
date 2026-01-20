@@ -76,8 +76,8 @@ DEFAULT_PRIMARY_WINDOW_DAYS = 3
 DEFAULT_FALLBACK_WINDOW_DAYS = 10
 DEFAULT_CANDIDATE_LIMIT = 80
 MAX_CANDIDATE_LIMIT = 80
-DEFAULT_SELECTED_MIN = 6
-DEFAULT_SELECTED_MAX = 8
+DEFAULT_SELECTED_MIN = 8
+DEFAULT_SELECTED_MAX = 12
 PENDING_INSTRUCTION_TTL = 15 * 60
 IMPORT_PAYLOAD_FLAG_KEY = "imported_payload"
 IMPORT_PAYLOAD_JSON_KEY = "imported_payload_json"
@@ -378,6 +378,7 @@ class VideoAnnounceScenario:
             "default_selected_max": DEFAULT_SELECTED_MAX,
             "required_periods": self._default_required_periods(now_local.date()),
             "selected_required_period": None,
+            "random_order": False,
         }
 
     def _normalize_required_periods(self, params: dict[str, Any]) -> list[dict[str, Any]]:
@@ -704,6 +705,7 @@ class VideoAnnounceScenario:
         )
         target_date = self._parse_target_date(str(params.get("target_date")))
         instruction = (str(params.get("instruction") or "").strip()) or None
+        random_order = bool(params.get("random_order"))
         return SelectionContext(
             tz=LOCAL_TZ,
             target_date=target_date,
@@ -716,6 +718,7 @@ class VideoAnnounceScenario:
             default_selected_min=max(default_selected_min, 1),
             default_selected_max=max(default_selected_max, default_selected_min),
             instruction=instruction,
+            random_order=random_order,
         )
 
     async def _build_selection_context(
@@ -843,6 +846,20 @@ class VideoAnnounceScenario:
         keyboard: list[list[types.InlineKeyboardButton]] = []
         profiles = await fetch_profiles()
         if not rendering:
+            keyboard.append(
+                [
+                    types.InlineKeyboardButton(
+                        text="🚀 Запуск Завтра (Auto)", callback_data="vidauto:tomorrow"
+                    )
+                ]
+            )
+            keyboard.append(
+                [
+                    types.InlineKeyboardButton(
+                        text="🧪 Тест Завтра (1 сц)", callback_data="vidauto:test_tomorrow"
+                    )
+                ]
+            )
             for p in profiles:
                 keyboard.append(
                     [
@@ -927,6 +944,90 @@ class VideoAnnounceScenario:
         )
         await self._prompt_instruction(obj, ctx)
 
+    async def run_tomorrow_pipeline(
+        self,
+        *,
+        profile_key: str = "default",
+        selected_max: int = DEFAULT_SELECTED_MAX,
+        test_mode: bool = False,
+    ) -> None:
+        if not await self.ensure_access():
+            return
+        existing = await self.has_rendering()
+        if existing:
+            await self.bot.send_message(
+                self.chat_id,
+                f"Сессия #{existing.id} уже рендерится, дождитесь завершения",
+            )
+            return
+
+        now_local = datetime.now(LOCAL_TZ)
+        tomorrow = now_local.date() + timedelta(days=1)
+
+        params = self._default_selection_params()
+        params.update(
+            {
+                "target_date": tomorrow.isoformat(),
+                "primary_window_days": 0,
+                "fallback_window_days": 0,
+                "random_order": True,
+                "default_selected_max": selected_max,
+                "selected_required_period": None,
+            }
+        )
+        params.pop("instruction", None)
+
+        kernel_ref = self._pick_crumple_kernel_ref() or self._pick_default_kernel_ref()
+        if not kernel_ref:
+            await self.bot.send_message(self.chat_id, "Не удалось подобрать kernel для Kaggle")
+            return
+
+        test_chat_id, main_chat_id = await self._get_profile_channels(profile_key)
+        async with self.db.get_session() as session:
+            obj = VideoAnnounceSession(
+                status=VideoAnnounceSessionStatus.SELECTED,
+                profile_key=profile_key,
+                selection_params=params,
+                test_chat_id=test_chat_id,
+                main_chat_id=main_chat_id,
+                kaggle_kernel_ref=kernel_ref,
+            )
+            session.add(obj)
+            await session.commit()
+            await session.refresh(obj)
+
+        await self.bot.send_message(
+            self.chat_id,
+            (
+                f"Сессия #{obj.id} запущена: завтра ({tomorrow.isoformat()}), "
+                f"случайный порядок, до {selected_max} событий"
+                f"{' (🧪 тест: 1 сц)' if test_mode else ''}. Kernel: {kernel_ref}"
+            ),
+        )
+
+        result = await self._build_and_store_selection(obj)
+        if not result.default_ready_ids:
+            await self.bot.send_message(
+                self.chat_id,
+                (
+                    f"Сессия #{obj.id}: не найдено подходящих событий "
+                    f"(нужны постеры с OCR) для {tomorrow.isoformat()}"
+                ),
+            )
+            return
+
+        await self.bot.send_message(
+            self.chat_id,
+            f"Сессия #{obj.id}: выбрано {len(result.default_ready_ids)} событий, запускаю Kaggle…",
+        )
+        msg = await self.start_render(
+            obj.id,
+            message=None,
+            limit_scenes=1 if test_mode else None,
+        )
+        if msg and msg != "Рендеринг запущен":
+            await self.bot.send_message(self.chat_id, f"Сессия #{obj.id}: {msg}")
+
     async def prompt_payload_import(self, profile_key: str) -> None:
         if not await self.ensure_access():
             return
@@ -978,6 +1079,19 @@ class VideoAnnounceScenario:
         username = os.getenv("KAGGLE_USERNAME", "")
         if username:
             return f"{username}/video-announce-renderer"
+        return None
+
+    def _pick_crumple_kernel_ref(self) -> str | None:
+        local_kernels = list_local_kernels()
+        for kernel in local_kernels:
+            ref = kernel.get("ref")
+            if ref == "local:CrumpleVideo":
+                return ref
+        for kernel in local_kernels:
+            ref = kernel.get("ref")
+            title = str(kernel.get("title") or "")
+            if isinstance(ref, str) and ref and "crumple" in title.casefold():
+                return ref
         return None
 
     def _extract_import_payload_json(
@@ -2499,12 +2613,22 @@ class VideoAnnounceScenario:
         )
         return "Рендеринг запущен"
 
-    async def start_render(self, session_id: int, message: types.Message | None = None) -> str:
+    async def start_render(
+        self,
+        session_id: int,
+        message: types.Message | None = None,
+        *,
+        limit_scenes: int | None = None,
+    ) -> str:
         if not await self._has_access():
             return "Not authorized"
         if await self.has_rendering():
             return "Уже есть активный рендер"
         ranked = await self._load_ranked_events(session_id, ready_only=True)
+        if limit_scenes is not None:
+            limit = int(limit_scenes)
+            if limit > 0:
+                ranked = ranked[:limit]
         if not ranked:
             return "Нет выбранных событий"
         payload: RenderPayload | None = None
@@ -2522,10 +2646,12 @@ class VideoAnnounceScenario:
                 return "Сессия уже запущена"
             
             # Load items and events for fill_missing_about
+            ranked_ids = [r.event.id for r in ranked if r.event.id is not None]
             res_items = await session.execute(
                 select(VideoAnnounceItem)
                 .where(VideoAnnounceItem.session_id == session_id)
                 .where(VideoAnnounceItem.status == VideoAnnounceItemStatus.READY)
+                .where(VideoAnnounceItem.event_id.in_(ranked_ids))
             )
             ready_items = list(res_items.scalars().all())
             event_ids = [item.event_id for item in ready_items]

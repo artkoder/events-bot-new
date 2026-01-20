@@ -90,6 +90,7 @@ class SelectionContext:
     fallback_window_days: int = 10
     promoted_event_ids: set[int] | None = None
     instruction: str | None = None
+    random_order: bool = False
 
 
 @dataclass
