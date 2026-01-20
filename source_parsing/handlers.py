@@ -798,7 +798,7 @@ async def run_source_parsing(
         def filter(self, record: logging.LogRecord) -> bool:
             return record.name.startswith("source_parsing")
 
-    log_dir = Path("tmp/parse_debug")
+    log_dir = Path("/data/parse_debug")
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"source_parsing_{run_id}.log"
     try:
