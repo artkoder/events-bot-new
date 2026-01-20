@@ -151,6 +151,71 @@ async def _get_new_events_gap(db: Database, min_images: int = 1) -> list[Event]:
     return candidates
 
 
+async def run_3di_new_only_scheduler(
+    db: Database,
+    bot,
+    *,
+    chat_id: int | None = None,
+    min_images: int = 1,
+) -> int:
+    """Run 3D preview generation for new events without UI callbacks."""
+    try:
+        events = await _get_new_events_gap(db, min_images=min_images)
+        if not events:
+            logger.info("3di_scheduler: no new events to process")
+            return 0
+
+        session_id = int(datetime.now(timezone.utc).timestamp() * 1000)
+        session = {
+            "status": "preparing",
+            "month": "New Events Gap",
+            "mode": "new_only",
+            "event_count": len(events),
+            "created_at": datetime.now(timezone.utc),
+            "chat_id": chat_id,
+            "message_id": None,
+        }
+        _active_sessions[session_id] = session
+
+        message_id = None
+        if bot and chat_id:
+            try:
+                sent = await bot.send_message(
+                    chat_id,
+                    _format_status_text(session),
+                    reply_markup=_build_status_keyboard(session_id),
+                    parse_mode="HTML",
+                )
+                message_id = sent.message_id
+            except Exception:
+                logger.warning("3di_scheduler: failed to post status message", exc_info=True)
+        session["message_id"] = message_id
+
+        payload = {
+            "events": [
+                {
+                    "event_id": e.id,
+                    "title": e.title,
+                    "images": (e.photo_urls or [])[:MAX_IMAGES_PER_EVENT],
+                }
+                for e in events
+            ]
+        }
+
+        await _run_kaggle_render(
+            db=db,
+            bot=bot,
+            chat_id=chat_id or 0,
+            session_id=session_id,
+            payload=payload,
+            month="New Events Gap",
+        )
+        return len(events)
+    except Exception:
+        logger.exception("3di_scheduler failed")
+        return 0
+
+
 def _build_main_menu(is_multy: bool = False) -> InlineKeyboardMarkup:
     """Build main menu for /3di command."""
     suffix = ":multy" if is_multy else ""

@@ -2,7 +2,14 @@
 
 ## [Unreleased]
 
-## [1.9.4] - 2026-01-20
+## [1.9.5] - 2026-01-20
+### Added
+- **Preview 3D**: Автоматическая генерация 3D-превью (`/3di`) по расписанию (`ENABLE_3DI_SCHEDULED=1`, `THREEDI_TIMES_LOCAL`).
+- **Source Parsing**: Поддержка дневного автозапуска (`ENABLE_SOURCE_PARSING_DAY`, `SOURCE_PARSING_DAY_TIME_LOCAL`).
+- **Source Parsing**: Защита от холостого парсинга — если сигнатуры страниц театров не изменились, повторный парсинг пропускается.
+
+### Changed
+- **Config**: Часовые пояса для шедулеров теперь настраиваются явно (`SOURCE_PARSING_TZ`, `SOURCE_PARSING_DAY_TZ`, `THREEDI_TZ`).
 ### Added
 - **Source Parsing**: Автозапуск парсинга по расписанию (по умолчанию 02:15 KGD). Настройка через `ENABLE_SOURCE_PARSING=1` и `SOURCE_PARSING_TIME_LOCAL`.
 - **Source Parsing**: Таймауты для OCR (60 сек) и скачивания изображений.
