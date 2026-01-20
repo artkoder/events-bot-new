@@ -448,7 +448,7 @@ async def add_new_event_via_queue(
         # Build source text for LLM - include title explicitly for normalization
         source_text = f"Название: {theatre_event.title}\n\n{full_description}"
         
-        location_name = normalize_location_name(theatre_event.location)
+        location_name = normalize_location_name(theatre_event.location, theatre_event.scene)
         
         # Limit photos for source
         photos = limit_photos_for_source(
@@ -706,6 +706,7 @@ def format_parsing_report(result: SourceParsingResult) -> str:
             "dramteatr": "Драмтеатр",
             "muzteatr": "Музтеатр",
             "sobor": "Собор",
+            "tretyakov": "🎨 Третьяковка",
         }.get(source, source)
         
         lines.append(f"• **{escape_md(source_label)}**:")
@@ -986,6 +987,7 @@ async def process_source_events(
         "dramteatr": "🎭 Драмтеатр",
         "muzteatr": "🎵 Музтеатр",
         "sobor": "⛪ Собор",
+        "tretyakov": "🎨 Третьяковка",
     }.get(source, source)
     
     for i, event in enumerate(events):
@@ -1011,7 +1013,7 @@ async def process_source_events(
             )
             continue
         
-        location_name = normalize_location_name(event.location)
+        location_name = normalize_location_name(event.location, event.scene)
         
         # Check for existing event
         existing_id, needs_full_update = await find_existing_event(

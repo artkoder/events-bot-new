@@ -151,6 +151,12 @@ class TestNormalizeLocationName:
         assert normalize_location_name("Третьяковка Калининград") == expected
         assert normalize_location_name("Атриум") == expected
 
+    def test_normalize_tretyakov_with_scene(self):
+        """Append scene for Tretyakov locations when provided."""
+        expected = "Филиал Третьяковской галереи (Атриум)"
+        assert normalize_location_name("Атриум", "Атриум") == expected
+        assert normalize_location_name("Филиал Третьяковской галереи", "Атриум") == expected
+
 
 class TestFuzzyTitleMatch:
     """Tests for fuzzy title matching."""

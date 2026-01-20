@@ -289,11 +289,12 @@ def parse_theatre_json(json_data: str | list | dict, source_name: str = "") -> l
     return events
 
 
-def normalize_location_name(location: str) -> str:
+def normalize_location_name(location: str, scene: str | None = None) -> str:
     """Normalize location name to match database format.
     
     Args:
         location: Raw location name from source
+        scene: Optional scene name for venue disambiguation
     
     Returns:
         Normalized location name matching database
@@ -302,11 +303,20 @@ def normalize_location_name(location: str) -> str:
         return ""
     
     normalized = location.strip().lower()
+    scene_name = (scene or "").strip()
+
+    def _with_tretyakov_scene(value: str) -> str:
+        if value == TRETYAKOV_LOCATION and scene_name:
+            return f"{TRETYAKOV_LOCATION} ({scene_name})"
+        return value
     
     # Direct mapping lookup
     for key, value in LOCATION_MAPPINGS.items():
         if key in normalized:
-            return value
+            return _with_tretyakov_scene(value)
+
+    if normalized == TRETYAKOV_LOCATION.lower():
+        return _with_tretyakov_scene(TRETYAKOV_LOCATION)
     
     # Return original if no mapping found
     return location.strip()

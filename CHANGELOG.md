@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 ### Fixed
+- **Source Parsing**: Исправлена нормализация локаций Третьяковки — теперь сохраняется информация о сцене (`Кинозал`/`Атриум`), что позволяет различать события в одном месте в одно время. Ранее события в разных залах ошибочно определялись как дубликаты.
+- **Source Parsing**: Добавлен label `🎨 Третьяковка` в отчёты `/parse`.
 - **Kaggle Assets**: Preserve existing Kaggle kernel dataset sources while appending new ones, and restore `generate_intro_image` in the CrumpleVideo notebook.
 - **CrumpleVideo**: Move `_resolve_image_path` to module scope so the main pipeline can call it safely.
 - **CrumpleVideo**: Define `is_last` before building the intro segment to avoid `UnboundLocalError` in production.
