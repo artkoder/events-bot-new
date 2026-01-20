@@ -585,12 +585,32 @@ def startup(
     # Source parsing from theatres (before daily announcement at 08:00)
     if os.getenv("ENABLE_SOURCE_PARSING") == "1":
         from source_parsing.commands import source_parsing_scheduler
+        parsing_time_raw = os.getenv("SOURCE_PARSING_TIME_LOCAL", "02:15").strip()
+        parsing_tz_name = os.getenv("SOURCE_PARSING_TZ", "Europe/Kaliningrad")
+        parsing_hour = "2"
+        parsing_minute = "0"
+        try:
+            if parsing_time_raw:
+                hh, mm = map(int, parsing_time_raw.split(":"))
+                parsing_tz = ZoneInfo(parsing_tz_name)
+                local_dt = datetime.now(parsing_tz).replace(
+                    hour=hh, minute=mm, second=0, microsecond=0
+                )
+                utc_dt = local_dt.astimezone(timezone.utc)
+                parsing_hour = str(utc_dt.hour)
+                parsing_minute = str(utc_dt.minute)
+        except Exception:
+            logging.warning(
+                "invalid SOURCE_PARSING_TIME_LOCAL=%s or SOURCE_PARSING_TZ=%s; using 02:00 UTC",
+                parsing_time_raw,
+                parsing_tz_name,
+            )
         job = _scheduler.add_job(
             _job_wrapper("source_parsing", source_parsing_scheduler),
             "cron",
             id="source_parsing",
-            hour="2",
-            minute="0",
+            hour=parsing_hour,
+            minute=parsing_minute,
             args=[db, bot],
             replace_existing=True,
             max_instances=1,

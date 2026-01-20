@@ -1,7 +1,17 @@
 # Changelog
 
 ## [Unreleased]
+
+## [1.9.4] - 2026-01-20
+### Added
+- **Source Parsing**: Автозапуск парсинга по расписанию (по умолчанию 02:15 KGD). Настройка через `ENABLE_SOURCE_PARSING=1` и `SOURCE_PARSING_TIME_LOCAL`.
+- **Source Parsing**: Таймауты для OCR (60 сек) и скачивания изображений.
+- **Source Parsing**: Детальная диагностика событий (через `SOURCE_PARSING_DIAG_TITLE`).
+- **Source Parsing**: Логи теперь сохраняются в Persistent Volume `/data/parse_debug`.
+
 ### Fixed
+- **Source Parsing**: Улучшена обработка ошибок в боте и на сервере, предотвращены "молчаливые" падения.
+- **Source Parsing**: OCR отключен по умолчанию для источника `tretyakov` (`SOURCE_PARSING_DISABLE_OCR_SOURCES`) для стабильности.
 - **CrumpleVideo**: Test "Tomorrow" renders now use lower samples and resolution to speed up single-scene previews.
 - **CrumpleVideo**: Test-mode intro previews now default to `STICKER_YELLOW` when no explicit pattern is provided.
 - **Intro Visuals**: Restored the dark default palette and added a yellow theme via `_YELLOW` patterns.

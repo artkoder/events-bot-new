@@ -585,7 +585,7 @@ async def add_new_event_via_queue(
                 end_date=draft.end_date or None,
                 is_free=bool(draft.is_free),
                 pushkin_card=bool(draft.pushkin_card),
-                source_text=draft.source_text or draft.title,
+                source_text=full_description or draft.source_text or draft.title,
                 photo_urls=photos,
                 photo_count=len(photos),
                 source_post_url=theatre_event.url,
