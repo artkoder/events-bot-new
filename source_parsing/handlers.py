@@ -32,6 +32,7 @@ from poster_media import PosterMedia, process_media
 logger = logging.getLogger(__name__)
 
 PARSE_EVENT_TIMEOUT_SECONDS = int(os.getenv("SOURCE_PARSING_EVENT_TIMEOUT_SECONDS", "180"))
+SOURCE_PARSING_OCR_TIMEOUT_SECONDS = int(os.getenv("SOURCE_PARSING_OCR_TIMEOUT_SECONDS", "60"))
 SOURCE_PARSING_DIAG_TITLE = os.getenv("SOURCE_PARSING_DIAG_TITLE", "джотто").strip().lower()
 
 # Delay between adding events to avoid overloading the system
@@ -1188,17 +1189,39 @@ async def process_source_events(
                 
                 if target_photos:
                     try:
-                        # Download images
-                        raw_images = await download_images(target_photos)
+                        if diag_enabled:
+                            logger.info(
+                                "source_parsing: diag ocr start title=%s photos=%d",
+                                event.title[:120],
+                                len(target_photos),
+                            )
+                        raw_images = await asyncio.wait_for(
+                            download_images(target_photos),
+                            timeout=SOURCE_PARSING_OCR_TIMEOUT_SECONDS,
+                        )
                         
                         if raw_images:
-                            # Process with OCR and Catbox upload
-                            # This matches standard flow: upload to persistent storage + recognize text
-                            poster_media_list, _ = await process_media(
-                                raw_images,
-                                need_catbox=True,
-                                need_ocr=True,
+                            poster_media_list, _ = await asyncio.wait_for(
+                                process_media(
+                                    raw_images,
+                                    need_catbox=True,
+                                    need_ocr=True,
+                                ),
+                                timeout=SOURCE_PARSING_OCR_TIMEOUT_SECONDS,
                             )
+                        if diag_enabled:
+                            logger.info(
+                                "source_parsing: diag ocr done title=%s raw=%d posters=%d",
+                                event.title[:120],
+                                len(raw_images),
+                                len(poster_media_list),
+                            )
+                    except asyncio.TimeoutError:
+                        logger.warning(
+                            "source_parsing: ocr timeout title=%s after %ss",
+                            event.title,
+                            SOURCE_PARSING_OCR_TIMEOUT_SECONDS,
+                        )
                     except Exception as e:
                         logger.warning("source_parsing: ocr failed event=%s error=%s", event.title, e)
 
