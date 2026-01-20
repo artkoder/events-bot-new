@@ -8,7 +8,8 @@
     "enable_gpu": false,
     "enable_internet": true,
     "dataset_sources": [
-        "zigomaro/afisha-dataset-2"
+        "zigomaro/afisha-dataset-2",
+        "zigomaro/video-announce-assets"
     ],
     "competition_sources": [],
     "kernel_sources": [],

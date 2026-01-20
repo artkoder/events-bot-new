@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [1.9.2] - 2026-01-20
+### Fixed
+- **Kaggle Assets**: Fixed `ModuleNotFoundError` by moving assets and `pattern_preview.py` to a dedicated Kaggle Dataset (`video-announce-assets`) and mounting it in the kernel.
+### Fixed
+- CrumpleVideo Kaggle kernel now loads `pattern_preview` via the `video-announce-assets` dataset instead of local files.
+
 ## [1.9.1] - 2026-01-20
 ### Fixed
 - **Kaggle Kernel ID**: Fixed a bug where `kaggle_client.py` was forcing the legacy `video-afisha` kernel ID, preventing `CrumpleVideo` updates.
