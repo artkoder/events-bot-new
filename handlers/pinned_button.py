@@ -49,12 +49,14 @@ def format_day_month(d: date) -> str:
 async def get_pinned_button_data(
     db: "Database",
     now: datetime,
+    force_regenerate: bool = True,
 ) -> tuple[str, str | None, str]:
     """Determine button label and URL for pinned message.
     
     Args:
         db: Database instance
         now: Current datetime (with timezone)
+        force_regenerate: If True, always create a new Telegraph page
         
     Returns:
         (label, url, button_type) where:
@@ -83,9 +85,9 @@ async def get_pinned_button_data(
         url, sat_date = await get_weekend_page_data(db, target_date)
         return label, url, "weekend"
     else:
-        # Weekday: show specific date
+        # Weekday: show specific date - always regenerate for fresh content
         label = f"📅 {format_day_month(target_date)}"
-        url = await get_tomorrow_page_url(db, target_date)
+        url = await get_tomorrow_page_url(db, target_date, force_regenerate=force_regenerate)
         return label, url, "today"
 
 

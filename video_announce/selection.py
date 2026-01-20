@@ -6,6 +6,7 @@ import json
 import logging
 import math
 import re
+import random
 from collections import defaultdict
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
@@ -1278,6 +1279,15 @@ async def build_selection(
         schedule_map = schedule_map or {}
         occurrences_map = occurrences_map or {}
 
+    random_ocr_texts: dict[int, str] | None = None
+    random_ocr_titles: dict[int, str] | None = None
+    if ctx.random_order and events:
+        event_ids = [e.id for e in events if e.id is not None]
+        ocr_texts, ocr_titles = await _load_poster_ocr_texts(db, event_ids)
+        events = [e for e in events if e.id is not None and e.id in ocr_texts]
+        random_ocr_texts = ocr_texts
+        random_ocr_titles = ocr_titles
+
     async def _rank_events(
         current_events: Sequence[Event],
     ) -> tuple[list[RankedEvent], set[int], set[int], str | None, bool]:
@@ -1301,6 +1311,80 @@ async def build_selection(
                 promoted=promoted_local,
             )
         )
+        if ctx.random_order:
+            ranked_local: list[RankedEvent] = []
+            selected_ids_local: set[int] = set()
+            intro_text_local: str | None = None
+            intro_valid_local: bool = True
+
+            ocr_texts = random_ocr_texts or {}
+            ocr_titles = random_ocr_titles or {}
+
+            ocr_events = [e for e in selected_local if e.id is not None and e.id in ocr_texts]
+            if not ocr_events:
+                return [], mandatory_ids_local, set(), None, True
+
+            mandatory_ocr = [e for e in ocr_events if e.id in mandatory_ids_local]
+            others_ocr = [e for e in ocr_events if e.id not in mandatory_ids_local]
+
+            others_with_title = [e for e in others_ocr if e.id in ocr_titles]
+            others_without_title = [e for e in others_ocr if e.id not in ocr_titles]
+            random.shuffle(others_with_title)
+            random.shuffle(others_without_title)
+
+            picked: list[Event] = []
+            seen: set[int] = set()
+            for ev in mandatory_ocr:
+                if ev.id is None or ev.id in seen:
+                    continue
+                picked.append(ev)
+                seen.add(ev.id)
+                if len(picked) >= ctx.default_selected_max:
+                    break
+
+            if len(picked) < ctx.default_selected_max:
+                for ev in others_with_title + others_without_title:
+                    if ev.id is None or ev.id in seen:
+                        continue
+                    picked.append(ev)
+                    seen.add(ev.id)
+                    if len(picked) >= ctx.default_selected_max:
+                        break
+
+            picked_ids = {e.id for e in picked if e.id is not None}
+            selected_ids_local = set(picked_ids)
+
+            remaining = [e for e in ocr_events if e.id is not None and e.id not in picked_ids]
+            remaining_sorted = sorted(remaining, key=_event_sort_key)
+            ordered = picked + remaining_sorted
+
+            scores = client.score(ordered)
+            for pos, ev in enumerate(ordered, start=1):
+                if ev.id is None:
+                    continue
+                is_selected = ev.id in picked_ids
+                ranked_local.append(
+                    RankedEvent(
+                        event=ev,
+                        score=scores.get(ev.id, 0.0),
+                        position=pos,
+                        reason="Random selection" if is_selected else None,
+                        mandatory=ev.id in mandatory_ids_local,
+                        selected=is_selected,
+                        about=(ocr_titles.get(ev.id) or ev.title) if is_selected else None,
+                        poster_ocr_text=ocr_texts.get(ev.id),
+                        poster_ocr_title=ocr_titles.get(ev.id),
+                    )
+                )
+
+            return (
+                ranked_local,
+                mandatory_ids_local,
+                selected_ids_local,
+                intro_text_local,
+                intro_valid_local,
+            )
+
         selected_ids_local = {ev.id for ev in selected_local}
         ranked_local, intro_text_local, intro_valid_local = await _rank_with_llm(
             db,
@@ -1316,6 +1400,7 @@ async def build_selection(
             notify_chat_id=notify_chat_id,
             limit=ctx.default_selected_max,
         )
+
         return ranked_local, mandatory_ids_local, selected_ids_local, intro_text_local, intro_valid_local
 
     ranked, mandatory_ids, selected_ids, intro_text, intro_valid = await _rank_events(events)

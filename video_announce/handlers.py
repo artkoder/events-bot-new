@@ -38,6 +38,10 @@ async def _load_user(db: Database, user_id: int) -> User | None:
 
 
 async def handle_video_command(message: types.Message, db: Database, bot) -> None:
+    user = await _load_user(db, message.from_user.id)
+    if not user or not user.is_superadmin:
+        await bot.send_message(message.chat.id, "Not authorized")
+        return
     token_info = get_telegraph_token_info(create_if_missing=False)
     logger.info(
         "telegraph_token_diagnostics",
@@ -157,6 +161,18 @@ async def handle_video_callback(
         return
     data = callback.data
     scenario = VideoAnnounceScenario(db, bot, callback.message.chat.id, callback.from_user.id)
+    if data.startswith("vidauto:"):
+        action = data.split(":", 1)[1]
+        if action == "tomorrow":
+            await callback.answer("Запускаю…")
+            await scenario.run_tomorrow_pipeline(profile_key="default", test_mode=False)
+            return
+        if action == "test_tomorrow":
+            await callback.answer("Запускаю тест…")
+            await scenario.run_tomorrow_pipeline(profile_key="default", test_mode=True)
+            return
+        await callback.answer("Неизвестное действие", show_alert=True)
+        return
     if data.startswith("vidkstat:"):
         try:
             _, raw_session_id = data.split(":", 1)

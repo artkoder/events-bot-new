@@ -62,22 +62,28 @@ async def get_month_page_url(db: Database, target_date: date) -> str | None:
             return page.url
     return None
 
-async def get_tomorrow_page_url(db: Database, target_date: date) -> str | None:
-    """Get or create URL for tomorrow's special page."""
+async def get_tomorrow_page_url(db: Database, target_date: date, force_regenerate: bool = False) -> str | None:
+    """Get or create URL for tomorrow's special page.
+    
+    Args:
+        db: Database instance
+        target_date: Date to generate page for
+        force_regenerate: If True, always create new page and update DB cache
+    """
     date_str = target_date.isoformat()
     
-    async with db.get_session() as session:
-        # Check cache
-        cached = await session.get(TomorrowPage, date_str)
-        if cached:
-            return cached.url
+    if not force_regenerate:
+        async with db.get_session() as session:
+            # Check cache
+            cached = await session.get(TomorrowPage, date_str)
+            if cached:
+                return cached.url
             
     # Generate new page
-    # Note: create_special_telegraph_page manages its own db session usually, 
-    # but looking at signature it takes 'db'.
-    # We need to ensure we don't have transaction conflicts if we reuse session?
-    # The signature in special_pages.py is: async def create_special_telegraph_page(db: "Database", ...)
-    # So we pass the db instance.
+    # Format title like weekend pages: "20 января — афиша"
+    day = target_date.day
+    month_name = MONTH_NAMES_GENITIVE[target_date.month]
+    formatted_title = f"{day} {month_name} — афиша"
     
     try:
         url, _ = await create_special_telegraph_page(
@@ -85,14 +91,20 @@ async def get_tomorrow_page_url(db: Database, target_date: date) -> str | None:
             start_date=target_date,
             days=1,
             cover_url=None, # No cover for auto-generated daily tomorrow page
-            title="Афиша на завтра"
+            title=formatted_title
         )
         
         if url:
-            # Cache it
+            # Update or create cache entry
             async with db.get_session() as session:
-                entry = TomorrowPage(date=date_str, url=url)
-                session.add(entry)
+                existing = await session.get(TomorrowPage, date_str)
+                if existing:
+                    existing.url = url
+                    logger.info("Updated TomorrowPage cache for %s: %s", date_str, url)
+                else:
+                    entry = TomorrowPage(date=date_str, url=url)
+                    session.add(entry)
+                    logger.info("Created TomorrowPage cache for %s: %s", date_str, url)
                 await session.commit()
             return url
             

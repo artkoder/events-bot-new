@@ -1828,7 +1828,7 @@ async def persist_event_and_pages(
         time=draft.time or "00:00",
         location_name=draft.venue or "",
         location_address=draft.location_address or None,
-        city=draft.city or None,
+        city=draft.city or "Калининград",
         ticket_price_min=draft.ticket_price_min,
         ticket_price_max=draft.ticket_price_max,
         ticket_link=(draft.links[0] if draft.links else None),

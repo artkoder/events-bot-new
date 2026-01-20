@@ -14896,6 +14896,27 @@ def create_app() -> web.Application:
     async def ics_fix_nav_wrapper(message: types.Message):
         await handle_ics_fix_nav(message, db, bot)
 
+    async def update_button_wrapper(message: types.Message):
+        """Handle /update_button command - manually update pinned button."""
+        from handlers.pinned_button import update_pinned_message_button
+        
+        async with db.get_session() as session:
+            user = await session.get(User, message.from_user.id)
+            if not has_admin_access(user):
+                await bot.send_message(message.chat.id, "Not authorized")
+                return
+        
+        await bot.send_message(message.chat.id, "🔄 Обновляю кнопку в закрепе...")
+        try:
+            result = await update_pinned_message_button(db, bot, "@kenigevents", 4)
+            if result:
+                await bot.send_message(message.chat.id, "✅ Кнопка обновлена!")
+            else:
+                await bot.send_message(message.chat.id, "❌ Не удалось обновить кнопку")
+        except Exception as e:
+            logging.exception("update_button failed: %s", e)
+            await bot.send_message(message.chat.id, f"❌ Ошибка: {e}")
+
     dp.message.register(help_wrapper, Command("help"))
     dp.message.register(ocrtest_wrapper, Command("ocrtest"))
     dp.message.register(start_wrapper, Command("start"))
@@ -14905,6 +14926,7 @@ def create_app() -> web.Application:
     dp.message.register(video_cmd_wrapper, Command("v"))
     dp.message.register(preview_3di_wrapper, Command("3di"))
     dp.message.register(usage_test_wrapper, Command("usage_test"))
+    dp.message.register(update_button_wrapper, Command("update_button"))
     dp.callback_query.register(
         callback_wrapper,
         lambda c: c.data.startswith("approve")

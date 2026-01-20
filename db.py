@@ -4,9 +4,12 @@ import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
+import weakref
 
 import aiosqlite
 from sqlalchemy.ext.asyncio import AsyncConnection
+
+_KNOWN_DATABASES: "weakref.WeakSet[Database]" = weakref.WeakSet()
 
 
 async def _add_column(conn, table: str, col_def: str) -> None:
@@ -23,6 +26,17 @@ class Database:
         self._conn: aiosqlite.Connection | None = None
         self._orm_engine = None
         self._sessionmaker = None
+        _KNOWN_DATABASES.add(self)
+
+    async def close(self) -> None:
+        if self._sessionmaker is not None:
+            self._sessionmaker = None
+        if self._orm_engine is not None:
+            await self._orm_engine.dispose()
+            self._orm_engine = None
+        if self._conn is not None:
+            await self._conn.close()
+            self._conn = None
 
     async def init(self) -> None:
         async with aiosqlite.connect(self.path) as conn:
@@ -738,10 +752,11 @@ class Database:
     async def get_session(self):
         from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
         from sqlalchemy.orm import sessionmaker
+        from sqlalchemy.pool import NullPool
 
         if self._orm_engine is None:
             self._orm_engine = create_async_engine(
-                f"sqlite+aiosqlite:///{self.path}", future=True
+                f"sqlite+aiosqlite:///{self.path}", future=True, poolclass=NullPool
             )
         if self._sessionmaker is None:
             self._sessionmaker = sessionmaker(
@@ -753,10 +768,11 @@ class Database:
     @property
     def engine(self):
         from sqlalchemy.ext.asyncio import create_async_engine
+        from sqlalchemy.pool import NullPool
 
         if self._orm_engine is None:
             self._orm_engine = create_async_engine(
-                f"sqlite+aiosqlite:///{self.path}", future=True
+                f"sqlite+aiosqlite:///{self.path}", future=True, poolclass=NullPool
             )
         return self._orm_engine
 
@@ -769,6 +785,14 @@ class Database:
                 return result.fetchall()
             except Exception:
                 return []
+
+
+async def close_known_databases() -> None:
+    for db in list(_KNOWN_DATABASES):
+        try:
+            await db.close()
+        except Exception:
+            logging.exception("db.close failed for %s", getattr(db, "path", None))
 
 
 async def wal_checkpoint_truncate(engine):
@@ -787,4 +811,3 @@ async def optimize(engine):
 async def vacuum(engine):
     async with engine.begin() as conn:
         await conn.exec_driver_sql("VACUUM")
-

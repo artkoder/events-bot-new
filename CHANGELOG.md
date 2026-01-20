@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [1.9.0] - 2026-01-20
+
+### Added
+- **Video Announce**: Automated "Tomorrow" pipeline (`/v` -> `🚀 Запуск Завтра`).
+- **Video Announce**: Test mode (`/v` -> `🧪 Тест Завтра`) for single-scene verification.
+- **Video Announce**: Randomize event order selection (prioritizing OCR candidates).
+- **Video Announce**: Visual improvements for City/Date intro layout.
+
 ## [1.8.2] - 2026-01-07
 
 ### Fixed
