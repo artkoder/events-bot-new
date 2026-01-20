@@ -1,6 +1,7 @@
 # Changelog
 
 ## [Unreleased]
+- Partner event notifications in the admin chat now include the first event photo plus Telegraph and VK links so operators know to review or edit the VK post.
 
 ## [1.8.2] - 2026-01-07
 
