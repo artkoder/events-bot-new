@@ -3,6 +3,7 @@
 ## [Unreleased]
 ### Fixed
 - **Kaggle Assets**: Preserve existing Kaggle kernel dataset sources while appending new ones, and restore `generate_intro_image` in the CrumpleVideo notebook.
+- **CrumpleVideo**: Move `_resolve_image_path` to module scope so the main pipeline can call it safely.
 
 ## [1.9.2] - 2026-01-20
 ### Fixed
