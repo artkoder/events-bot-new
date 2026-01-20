@@ -249,7 +249,11 @@ class KaggleClient:
             meta_data = json.loads(meta_path.read_text(encoding="utf-8"))
             
             # Set dataset sources for this session
-            meta_data["dataset_sources"] = [dataset_slug]
+            # Append new dataset source while preserving existing ones (like video-announce-assets)
+            existing_sources = meta_data.get("dataset_sources", [])
+            if dataset_slug not in existing_sources:
+                existing_sources.append(dataset_slug)
+            meta_data["dataset_sources"] = existing_sources
             # Ensure internet is enabled for pip installs
             meta_data["enable_internet"] = True
             
