@@ -1,0 +1,14 @@
+[
+  {
+    "key": "default",
+    "title": "Быстрый обзор",
+    "description": "Базовый сценарий с краткими подводками и ссылкой на афишу",
+    "prompt_name": "script"
+  },
+  {
+    "key": "family",
+    "title": "Семейный уикенд",
+    "description": "Отбор семейных событий и прогулок",
+    "prompt_name": "script"
+  }
+]

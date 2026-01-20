@@ -1,0 +1,8 @@
+[features]
+experimental_use_rmcp_client = true
+
+[mcp_servers.linear]
+command = "npx"
+args = ["-y", "mcp-remote", "https://mcp.linear.app/mcp"]
+startup_timeout_sec = 60
+

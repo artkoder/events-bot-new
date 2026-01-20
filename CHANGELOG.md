@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [1.9.1] - 2026-01-20
+### Fixed
+- **Kaggle Kernel ID**: Fixed a bug where `kaggle_client.py` was forcing the legacy `video-afisha` kernel ID, preventing `CrumpleVideo` updates.
+- **Intro Visuals**: Integrated verified `pattern_preview` logic into the `CrumpleVideo` kernel to ensure correct fonts and alignment in production.
+- **Outro Animation**: Disabled physics simulation (crumpling) for the Outro scene, ensuring it remains static/readable.
+
 ## [1.9.0] - 2026-01-20
 
 ### Added

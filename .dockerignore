@@ -3,3 +3,13 @@ pycache/
 *.db
 .env
 .git
+artifacts/
+.codex/
+.gemini/
+video_announce/test_output/
+video_announce/test_afisha/
+tmp/
+scripts/tmp_*
+tests/
+*.sqlite
+*.zip
