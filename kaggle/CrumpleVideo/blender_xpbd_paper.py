@@ -112,7 +112,7 @@ def _setup_world(scene, legacy=False):
         pass
 
 
-def setup_scene(res_x=864, res_y=1104, samples=64, legacy=False):
+def setup_scene(res_x=864, res_y=1104, samples=64, pct=100, legacy=False):
     bpy.ops.wm.read_factory_settings(use_empty=True)
     scene = bpy.context.scene
     _ensure_cycles(scene)
@@ -123,7 +123,7 @@ def setup_scene(res_x=864, res_y=1104, samples=64, legacy=False):
             scene.cycles.use_adaptive_sampling = False
     scene.render.resolution_x = res_x
     scene.render.resolution_y = res_y
-    scene.render.resolution_percentage = 100
+    scene.render.resolution_percentage = pct
     scene.render.image_settings.file_format = "PNG"
     scene.render.image_settings.color_mode = "RGBA"
     # Render paper with alpha so we can composite a background and also validate 'paper-only' pixels.
@@ -382,6 +382,7 @@ def main():
     nx = _as_int(args, "nx", 35)
     ny = _as_int(args, "ny", 45)
     samples = _as_int(args, "samples", 48)
+    pct = _as_int(args, "pct", 100)
 
     # XPBD parameters (tunable)
     pre_roll = _as_int(args, "pre_roll", 50)
@@ -406,7 +407,7 @@ def main():
     legacy = _is_legacy_blender()
     res_x = _as_int(args, "res_x", 864)
     res_y = _as_int(args, "res_y", 1104)
-    setup_scene(res_x=res_x, res_y=res_y, samples=samples, legacy=legacy)
+    setup_scene(res_x=res_x, res_y=res_y, samples=samples, pct=pct, legacy=legacy)
     # Note: setup_camera_and_light() will be called after building sheet
     bpy.context.scene.render.fps = int(round(fps))
 

@@ -20,9 +20,9 @@ FONT_PATH = os.path.join(_ASSETS_DIR, "BebasNeue-Bold.ttf")
 CITIES_FONT_PATH = os.path.join(_ASSETS_DIR, "Bebas-Neue-Pro-SemiExpanded-Bold-BF66cf3d78c1f4e.ttf")
 
 # Colors
-BG_ACCENT = (241, 156, 28, 255)
+BG_ACCENT = (241, 228, 75, 255)
 TEXT_BLACK = (0, 0, 0, 255)
-BG_CANVAS = (30, 30, 30)
+BG_CANVAS = (241, 228, 75)
 
 # Pattern names
 PATTERN_RISING = "RISING"
