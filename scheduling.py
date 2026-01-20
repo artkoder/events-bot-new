@@ -67,6 +67,36 @@ MONTHS_GEN = [
 ]
 
 
+def _cron_from_local(
+    time_raw: str,
+    tz_name: str,
+    *,
+    default_hour: str,
+    default_minute: str,
+    label: str,
+) -> tuple[str, str]:
+    hour = default_hour
+    minute = default_minute
+    try:
+        if time_raw:
+            hh, mm = map(int, time_raw.split(":"))
+            tz = ZoneInfo(tz_name)
+            local_dt = datetime.now(tz).replace(hour=hh, minute=mm, second=0, microsecond=0)
+            utc_dt = local_dt.astimezone(timezone.utc)
+            hour = str(utc_dt.hour)
+            minute = str(utc_dt.minute)
+    except Exception:
+        logging.warning(
+            "invalid %s time=%s tz=%s; using %s:%s UTC",
+            label,
+            time_raw,
+            tz_name,
+            default_hour,
+            default_minute,
+        )
+    return hour, minute
+
+
 class BatchProgress:
     """Track progress for a batch of event tasks."""
 
@@ -585,12 +615,21 @@ def startup(
     # Source parsing from theatres (before daily announcement at 08:00)
     if os.getenv("ENABLE_SOURCE_PARSING") == "1":
         from source_parsing.commands import source_parsing_scheduler
+        parsing_time_raw = os.getenv("SOURCE_PARSING_TIME_LOCAL", "02:15").strip()
+        parsing_tz_name = os.getenv("SOURCE_PARSING_TZ", "Europe/Kaliningrad")
+        parsing_hour, parsing_minute = _cron_from_local(
+            parsing_time_raw,
+            parsing_tz_name,
+            default_hour="2",
+            default_minute="0",
+            label="SOURCE_PARSING_TIME_LOCAL",
+        )
         job = _scheduler.add_job(
             _job_wrapper("source_parsing", source_parsing_scheduler),
             "cron",
             id="source_parsing",
-            hour="2",
-            minute="0",
+            hour=parsing_hour,
+            minute=parsing_minute,
             args=[db, bot],
             replace_existing=True,
             max_instances=1,
@@ -600,6 +639,67 @@ def startup(
         logging.info(
             "SCHED registered job id=%s next_run=%s", job.id, _job_next_run(job)
         )
+
+    if os.getenv("ENABLE_SOURCE_PARSING_DAY") == "1":
+        from source_parsing.commands import source_parsing_scheduler_if_changed
+        day_time_raw = os.getenv("SOURCE_PARSING_DAY_TIME_LOCAL", "14:15").strip()
+        day_tz_name = os.getenv("SOURCE_PARSING_DAY_TZ", "Europe/Kaliningrad")
+        day_hour, day_minute = _cron_from_local(
+            day_time_raw,
+            day_tz_name,
+            default_hour="12",
+            default_minute="15",
+            label="SOURCE_PARSING_DAY_TIME_LOCAL",
+        )
+        job = _scheduler.add_job(
+            _job_wrapper("source_parsing_day", source_parsing_scheduler_if_changed),
+            "cron",
+            id="source_parsing_day",
+            hour=day_hour,
+            minute=day_minute,
+            args=[db, bot],
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=30,
+        )
+        logging.info(
+            "SCHED registered job id=%s next_run=%s", job.id, _job_next_run(job)
+        )
+
+    if os.getenv("ENABLE_3DI_SCHEDULED") == "1":
+        from preview_3d.handlers import run_3di_new_only_scheduler
+        admin_chat_id = os.getenv("ADMIN_CHAT_ID")
+        run_chat_id = int(admin_chat_id) if admin_chat_id else None
+        three_di_times = os.getenv("THREEDI_TIMES_LOCAL", "03:15,15:15")
+        three_di_tz = os.getenv("THREEDI_TZ", "Europe/Kaliningrad")
+        for idx, t in enumerate(three_di_times.split(",")):
+            t = t.strip()
+            if not t:
+                continue
+            hour, minute = _cron_from_local(
+                t,
+                three_di_tz,
+                default_hour="3",
+                default_minute="15",
+                label="THREEDI_TIMES_LOCAL",
+            )
+            job = _scheduler.add_job(
+                _job_wrapper("3di_scheduler", run_3di_new_only_scheduler),
+                "cron",
+                id=f"3di_scheduler_{idx}",
+                hour=hour,
+                minute=minute,
+                args=[db, bot],
+                kwargs={"chat_id": run_chat_id},
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+                misfire_grace_time=30,
+            )
+            logging.info(
+                "SCHED registered job id=%s next_run=%s", job.id, _job_next_run(job)
+            )
 
     if os.getenv("ENABLE_NIGHTLY_PAGE_SYNC") == "1":
         job = _scheduler.add_job(
@@ -619,6 +719,28 @@ def startup(
             job.id,
             _job_next_run(job),
         )
+
+    # Pinned button update at 18:00 Kaliningrad time (UTC+2 = 16:00 UTC)
+    from handlers.pinned_button import pinned_button_scheduler
+    
+    pinned_tz = ZoneInfo("Europe/Kaliningrad")
+    pinned_local = datetime.now(pinned_tz).replace(hour=18, minute=0, second=0, microsecond=0)
+    pinned_utc = pinned_local.astimezone(timezone.utc)
+    job = _scheduler.add_job(
+        _job_wrapper("pinned_button_scheduler", pinned_button_scheduler),
+        "cron",
+        id="pinned_button_scheduler",
+        hour=str(pinned_utc.hour),
+        minute=str(pinned_utc.minute),
+        args=[db, bot],
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=60,
+    )
+    logging.info(
+        "SCHED registered job id=%s next_run=%s", job.id, _job_next_run(job)
+    )
 
     async def _run_maintenance(job, name: str, timeout: float, run_id: str | None = None) -> None:
         start = _time.perf_counter()

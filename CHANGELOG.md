@@ -2,6 +2,55 @@
 
 ## [Unreleased]
 
+## [1.9.5] - 2026-01-20
+### Added
+- **Preview 3D**: Автоматическая генерация 3D-превью (`/3di`) по расписанию (`ENABLE_3DI_SCHEDULED=1`, `THREEDI_TIMES_LOCAL`).
+- **Source Parsing**: Поддержка дневного автозапуска (`ENABLE_SOURCE_PARSING_DAY`, `SOURCE_PARSING_DAY_TIME_LOCAL`).
+- **Source Parsing**: Защита от холостого парсинга — если сигнатуры страниц театров не изменились, повторный парсинг пропускается.
+
+### Changed
+- **Config**: Часовые пояса для шедулеров теперь настраиваются явно (`SOURCE_PARSING_TZ`, `SOURCE_PARSING_DAY_TZ`, `THREEDI_TZ`).
+### Added
+- **Source Parsing**: Автозапуск парсинга по расписанию (по умолчанию 02:15 KGD). Настройка через `ENABLE_SOURCE_PARSING=1` и `SOURCE_PARSING_TIME_LOCAL`.
+- **Source Parsing**: Таймауты для OCR (60 сек) и скачивания изображений.
+- **Source Parsing**: Детальная диагностика событий (через `SOURCE_PARSING_DIAG_TITLE`).
+- **Source Parsing**: Логи теперь сохраняются в Persistent Volume `/data/parse_debug`.
+
+### Fixed
+- **Source Parsing**: Улучшена обработка ошибок в боте и на сервере, предотвращены "молчаливые" падения.
+- **Source Parsing**: OCR отключен по умолчанию для источника `tretyakov` (`SOURCE_PARSING_DISABLE_OCR_SOURCES`) для стабильности.
+- **CrumpleVideo**: Test "Tomorrow" renders now use lower samples and resolution to speed up single-scene previews.
+- **CrumpleVideo**: Test-mode intro previews now default to `STICKER_YELLOW` when no explicit pattern is provided.
+- **Intro Visuals**: Restored the dark default palette and added a yellow theme via `_YELLOW` patterns.
+
+## [1.9.3] - 2026-01-20
+### Fixed
+- **Source Parsing**: Исправлена нормализация локаций Третьяковки — теперь сохраняется информация о сцене (`Кинозал`/`Атриум`), что позволяет различать события в одном месте в одно время. Ранее события в разных залах ошибочно определялись как дубликаты.
+- **Source Parsing**: Добавлен label `🎨 Третьяковка` в отчёты `/parse`.
+- **Kaggle Assets**: Preserve existing Kaggle kernel dataset sources while appending new ones, and restore `generate_intro_image` in the CrumpleVideo notebook.
+- **CrumpleVideo**: Move `_resolve_image_path` to module scope so the main pipeline can call it safely.
+- **CrumpleVideo**: Define `is_last` before building the intro segment to avoid `UnboundLocalError` in production.
+
+## [1.9.2] - 2026-01-20
+### Fixed
+- **Kaggle Assets**: Fixed `ModuleNotFoundError` by moving assets and `pattern_preview.py` to a dedicated Kaggle Dataset (`video-announce-assets`) and mounting it in the kernel.
+### Fixed
+- CrumpleVideo Kaggle kernel now loads `pattern_preview` via the `video-announce-assets` dataset instead of local files.
+
+## [1.9.1] - 2026-01-20
+### Fixed
+- **Kaggle Kernel ID**: Fixed a bug where `kaggle_client.py` was forcing the legacy `video-afisha` kernel ID, preventing `CrumpleVideo` updates.
+- **Intro Visuals**: Integrated verified `pattern_preview` logic into the `CrumpleVideo` kernel to ensure correct fonts and alignment in production.
+- **Outro Animation**: Disabled physics simulation (crumpling) for the Outro scene, ensuring it remains static/readable.
+
+## [1.9.0] - 2026-01-20
+
+### Added
+- **Video Announce**: Automated "Tomorrow" pipeline (`/v` -> `🚀 Запуск Завтра`).
+- **Video Announce**: Test mode (`/v` -> `🧪 Тест Завтра`) for single-scene verification.
+- **Video Announce**: Randomize event order selection (prioritizing OCR candidates).
+- **Video Announce**: Visual improvements for City/Date intro layout.
+
 ## [1.8.2] - 2026-01-07
 
 ### Fixed

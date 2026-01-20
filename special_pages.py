@@ -647,25 +647,45 @@ async def build_special_page_content(
             })
             content.extend(telegraph_br())
         
-        # Title as h3
-        content.append({"tag": "h3", "children": [title]})
-        content.extend(telegraph_br())
+        # Title as h3 - only for multi-day pages (single-day uses Telegraph page title)
+        if days > 1:
+            content.append({"tag": "h3", "children": [title]})
+            content.extend(telegraph_br())
+        
+        # Intro paragraph with event count (with proper Russian declension)
+        total_events = sum(len(g) for g in grouped.values())
+        if total_events > 0:
+            # Russian plural forms: 1 событие, 2-4 события, 5-20 событий, 21 событие...
+            n = total_events
+            if n % 10 == 1 and n % 100 != 11:
+                event_word = "событие"
+            elif 2 <= n % 10 <= 4 and not (12 <= n % 100 <= 14):
+                event_word = "события"
+            else:
+                event_word = "событий"
+            
+            content.append({
+                "tag": "p",
+                "children": [f"Мы нашли для вас {total_events} {event_word}. Приятного досуга!"]
+            })
+            content.extend(telegraph_br())
         
         # Events by day
         sorted_days = sorted(grouped.keys())
         show_images = True
         
         for day in sorted_days:
-            # Day header
-            content.extend(telegraph_br())
-            if day.weekday() == 5:
-                content.append({"tag": "h3", "children": ["🟥🟥🟥 суббота 🟥🟥🟥"]})
-            elif day.weekday() == 6:
-                content.append({"tag": "h3", "children": ["🟥🟥 воскресенье 🟥🟥"]})
-            content.append(
-                {"tag": "h3", "children": [f"🟥🟥🟥 {format_day_pretty(day)} 🟥🟥🟥"]}
-            )
-            content.extend(telegraph_br())
+            # Day header - only for multi-day pages
+            if days > 1:
+                content.extend(telegraph_br())
+                if day.weekday() == 5:
+                    content.append({"tag": "h3", "children": ["🟥🟥🟥 суббота 🟥🟥🟥"]})
+                elif day.weekday() == 6:
+                    content.append({"tag": "h3", "children": ["🟥🟥 воскресенье 🟥🟥"]})
+                content.append(
+                    {"tag": "h3", "children": [f"🟥🟥🟥 {format_day_pretty(day)} 🟥🟥🟥"]}
+                )
+                content.extend(telegraph_br())
             
             # Events for this day
             for group in grouped[day]:
@@ -741,9 +761,9 @@ async def build_special_page_content(
         # Check size
         size = rough_size(content)
         if size <= size_limit:
-            page_title = f"{title} — {format_day_pretty(start_date)}"
-            if days > 1:
-                page_title = f"{title}"
+            # For single-day pages, title already contains the date
+            # For multi-day pages, use title as-is
+            page_title = title
             return page_title, content, size, days
         
         # Size exceeded, reduce days

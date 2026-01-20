@@ -8,6 +8,17 @@
 - Автозапуск по расписанию: `ENABLE_SOURCE_PARSING=1` (см. `source_parsing/commands.py`).
 - Из VK review UI: кнопки “Извлечь …” для ссылок на поддерживаемые источники.
 
+### Расписание автозапуска
+
+- `ENABLE_SOURCE_PARSING=1` — включить ежедневный запуск.
+- `SOURCE_PARSING_TIME_LOCAL=02:15` — локальное время запуска (HH:MM).
+- `SOURCE_PARSING_TZ=Europe/Kaliningrad` — таймзона для локального времени.
+- `ENABLE_SOURCE_PARSING_DAY=1` — включить дневной запуск.
+- `SOURCE_PARSING_DAY_TIME_LOCAL=14:15` — локальное время дневного запуска (HH:MM).
+- `SOURCE_PARSING_DAY_TZ=Europe/Kaliningrad` — таймзона дневного запуска.
+
+Если значения не заданы, используется 02:15 по Europe/Kaliningrad. Дневной запуск пропускает Kaggle, если страницы источников не изменились с последнего успешного прогона.
+
 ## Документация по источникам
 
 - Театры (/parse): `docs/features/source-parsing/sources/theatres/README.md`

@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import re
 import tempfile
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -27,6 +30,15 @@ from source_parsing.parser import (
 from poster_media import PosterMedia, process_media
 
 logger = logging.getLogger(__name__)
+
+PARSE_EVENT_TIMEOUT_SECONDS = int(os.getenv("SOURCE_PARSING_EVENT_TIMEOUT_SECONDS", "180"))
+SOURCE_PARSING_OCR_TIMEOUT_SECONDS = int(os.getenv("SOURCE_PARSING_OCR_TIMEOUT_SECONDS", "60"))
+SOURCE_PARSING_DIAG_TITLE = os.getenv("SOURCE_PARSING_DIAG_TITLE", "джотто").strip().lower()
+SOURCE_PARSING_DISABLE_OCR_SOURCES = {
+    s.strip().lower()
+    for s in os.getenv("SOURCE_PARSING_DISABLE_OCR_SOURCES", "tretyakov").split(",")
+    if s.strip()
+}
 
 # Delay between adding events to avoid overloading the system
 EVENT_ADD_DELAY_SECONDS = 5  # Delay for Telegraph creation
@@ -448,7 +460,7 @@ async def add_new_event_via_queue(
         # Build source text for LLM - include title explicitly for normalization
         source_text = f"Название: {theatre_event.title}\n\n{full_description}"
         
-        location_name = normalize_location_name(theatre_event.location)
+        location_name = normalize_location_name(theatre_event.location, theatre_event.scene)
         
         # Limit photos for source
         photos = limit_photos_for_source(
@@ -477,13 +489,33 @@ async def add_new_event_via_queue(
         )
         
         # Use existing event creation logic
-        drafts, _ = await build_event_drafts_from_vk(
-            text=source_text,
-            source_name=f"theatre:{theatre_event.source_type}",
-            location_hint=location_name,
-            default_ticket_link=theatre_event.url,
-            poster_media=poster_media,
-        )
+        diag_enabled = bool(SOURCE_PARSING_DIAG_TITLE) and SOURCE_PARSING_DIAG_TITLE in theatre_event.title.lower()
+        llm_start = time.monotonic()
+        try:
+            drafts, _ = await asyncio.wait_for(
+                build_event_drafts_from_vk(
+                    text=source_text,
+                    source_name=f"theatre:{theatre_event.source_type}",
+                    location_hint=location_name,
+                    default_ticket_link=theatre_event.url,
+                    poster_media=poster_media,
+                ),
+                timeout=PARSE_EVENT_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            logger.error(
+                "source_parsing: LLM timeout after %ss title=%s",
+                PARSE_EVENT_TIMEOUT_SECONDS,
+                theatre_event.title[:50],
+            )
+            return None, False
+        if diag_enabled:
+            logger.info(
+                "source_parsing: diag LLM done title=%s drafts=%d duration=%.2fs",
+                theatre_event.title[:120],
+                len(drafts or []),
+                time.monotonic() - llm_start,
+            )
         
         if not drafts:
             logger.warning(
@@ -553,7 +585,7 @@ async def add_new_event_via_queue(
                 end_date=draft.end_date or None,
                 is_free=bool(draft.is_free),
                 pushkin_card=bool(draft.pushkin_card),
-                source_text=draft.source_text or draft.title,
+                source_text=full_description or draft.source_text or draft.title,
                 photo_urls=photos,
                 photo_count=len(photos),
                 source_post_url=theatre_event.url,
@@ -706,6 +738,7 @@ def format_parsing_report(result: SourceParsingResult) -> str:
             "dramteatr": "Драмтеатр",
             "muzteatr": "Музтеатр",
             "sobor": "Собор",
+            "tretyakov": "🎨 Третьяковка",
         }.get(source, source)
         
         lines.append(f"• **{escape_md(source_label)}**:")
@@ -764,6 +797,27 @@ async def run_source_parsing(
     result = SourceParsingResult(chat_id=chat_id)
     kaggle_status_message_id: int | None = None
     kaggle_kernel_ref = ""
+    run_id = uuid.uuid4().hex[:8]
+    log_handler: logging.Handler | None = None
+
+    class _SourceParsingFilter(logging.Filter):
+        def filter(self, record: logging.LogRecord) -> bool:
+            return record.name.startswith("source_parsing")
+
+    log_dir = Path("/data/parse_debug")
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"source_parsing_{run_id}.log"
+    try:
+        log_handler = logging.FileHandler(log_path, encoding="utf-8")
+        log_handler.setLevel(logging.INFO)
+        log_handler.addFilter(_SourceParsingFilter())
+        log_handler.setFormatter(
+            logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+        )
+        logging.getLogger().addHandler(log_handler)
+        result.log_file_path = str(log_path)
+    except Exception as e:
+        logger.warning("source_parsing: failed to init log file: %s", e)
 
     async def _update_kaggle_status(
         phase: str,
@@ -796,158 +850,181 @@ async def run_source_parsing(
             DEBUG_MAX_EVENTS,
         )
     
-    # 1. Run Kaggle kernel
     try:
-        status, output_files, duration = await run_kaggle_kernel(
-            status_callback=_update_kaggle_status,
-        )
-        result.kernel_duration = duration
-        result.json_file_paths = output_files
-        
-        if status != "complete":
-            result.errors.append(f"Kaggle kernel failed: {status}")
-            return result
-            
-        logger.info(
-            "source_parsing: kaggle complete duration=%.1fs files=%d",
-            duration,
-            len(output_files),
-        )
-        
-    except Exception as e:
-        logger.error("source_parsing: kaggle error: %s", e, exc_info=True)
-        result.errors.append(f"Kaggle error: {str(e)}")
-        return result
-    
-    # 2. Parse all files first
-    events_by_source = {}
-    
-    for file_path_str in output_files:
+        # 1. Run Kaggle kernel
         try:
-            file_path = Path(file_path_str)
-            # Determine source from filename (e.g. sobor.json -> sobor)
-            source_name = file_path.stem
+            status, output_files, duration = await run_kaggle_kernel(
+                status_callback=_update_kaggle_status,
+            )
+            result.kernel_duration = duration
+            result.json_file_paths = [
+                path for path in output_files
+                if Path(path).suffix.lower() == ".json" and Path(path).exists()
+            ]
             
-            # Parse JSON
-            raw_content = file_path.read_text(encoding="utf-8")
-            events = parse_theatre_json(raw_content, source_name)
-            
-            if not events:
-                logger.warning("source_parsing: no events found in %s", file_path)
-                continue
+            if status != "complete":
+                result.errors.append(f"Kaggle kernel failed: {status}")
+                return result
                 
-            events_by_source[source_name] = events
+            logger.info(
+                "source_parsing: kaggle complete duration=%.1fs files=%d",
+                duration,
+                len(output_files),
+            )
             
         except Exception as e:
-            logger.error("source_parsing: failed to parse %s: %s", file_path_str, e, exc_info=True)
-            result.errors.append(f"File {file_path_str}: {str(e)}")
-    
-    # 3. Process events
-    total_count = sum(len(ev) for ev in events_by_source.values())
-    result.total_events = total_count
-    
-    current_index = 0
-    progress_message_id = None
-    
-    for source, events in events_by_source.items():
-        try:
-            stats, progress_message_id = await process_source_events(
-                db,
-                bot,
-                events,
-                source,
-                current_index,
-                total_count,
-                chat_id=chat_id,
-                progress_message_id=progress_message_id,
-                added_events=result.added_events if chat_id else None,
-                updated_events=result.updated_events if chat_id else None,
-            )
-            result.stats_by_source[source] = stats
-            current_index += len(events)
-        except Exception as e:
-            logger.error("source_parsing: failed to process events from %s: %s", source, e, exc_info=True)
-            # Escape error text as it may contain underscores/paths
-            result.errors.append(f"Source {escape_md(source)}: {escape_md(str(e))}")
-            
-    months = sorted({
-        event.parsed_date[:7]
-        for events in events_by_source.values()
-        for event in events
-        if event.parsed_date
-    })
-    if months:
-        logger.info("source_parsing: ensuring month_pages tasks for months=%s", months)
-        try:
-            import sys
-            from sqlalchemy import select
-            from models import Event, JobTask
-        except Exception as e:
-            logger.error(
-                "source_parsing: failed to prepare month_pages enqueue: %s",
-                e,
-            )
-        else:
-            main_mod = sys.modules.get("main") or sys.modules.get("__main__")
-            if main_mod is None:
-                logger.error("source_parsing: main module not found for month_pages enqueue")
+            logger.error("source_parsing: kaggle error: %s", e, exc_info=True)
+            result.errors.append(f"Kaggle error: {str(e)}")
+            return result
+
+        # 2. Parse all files first
+        events_by_source = {}
+
+        def _normalize_source_name(raw_name: str) -> str:
+            normalized = raw_name.strip().lower()
+            normalized = re.sub(r"\s*\(\d+\)\s*$", "", normalized)
+            if "dramteatr" in normalized or "драм" in normalized:
+                return "dramteatr"
+            if "muzteatr" in normalized or "муз" in normalized:
+                return "muzteatr"
+            if "sobor" in normalized or "собор" in normalized:
+                return "sobor"
+            if "tretyakov" in normalized or "трет" in normalized:
+                return "tretyakov"
+            return normalized
+        
+        for file_path_str in output_files:
+            try:
+                file_path = Path(file_path_str)
+                if file_path.suffix.lower() != ".json":
+                    continue
+                # Determine source from filename (e.g. sobor.json -> sobor)
+                source_name = _normalize_source_name(file_path.stem)
+                
+                # Parse JSON
+                raw_content = file_path.read_text(encoding="utf-8")
+                events = parse_theatre_json(raw_content, source_name)
+                
+                if not events:
+                    logger.warning("source_parsing: no events found in %s", file_path)
+                    continue
+                    
+                events_by_source[source_name] = events
+                
+            except Exception as e:
+                logger.error("source_parsing: failed to parse %s: %s", file_path_str, e, exc_info=True)
+                result.errors.append(f"File {file_path_str}: {str(e)}")
+        
+        # 3. Process events
+        total_count = sum(len(ev) for ev in events_by_source.values())
+        result.total_events = total_count
+        
+        current_index = 0
+        progress_message_id = None
+        
+        for source, events in events_by_source.items():
+            try:
+                stats, progress_message_id = await process_source_events(
+                    db,
+                    bot,
+                    events,
+                    source,
+                    current_index,
+                    total_count,
+                    chat_id=chat_id,
+                    progress_message_id=progress_message_id,
+                    added_events=result.added_events if chat_id else None,
+                    updated_events=result.updated_events if chat_id else None,
+                )
+                result.stats_by_source[source] = stats
+                current_index += len(events)
+            except Exception as e:
+                logger.error("source_parsing: failed to process events from %s: %s", source, e, exc_info=True)
+                # Escape error text as it may contain underscores/paths
+                result.errors.append(f"Source {escape_md(source)}: {escape_md(str(e))}")
+                
+        months = sorted({
+            event.parsed_date[:7]
+            for events in events_by_source.values()
+            for event in events
+            if event.parsed_date
+        })
+        if months:
+            logger.info("source_parsing: ensuring month_pages tasks for months=%s", months)
+            try:
+                import sys
+                from sqlalchemy import select
+                from models import Event, JobTask
+            except Exception as e:
+                logger.error(
+                    "source_parsing: failed to prepare month_pages enqueue: %s",
+                    e,
+                )
             else:
-                enqueue_job = main_mod.enqueue_job
-                mark_pages_dirty = main_mod.mark_pages_dirty
-                month_event_ids: dict[str, int] = {}
-                async with db.get_session() as session:
+                main_mod = sys.modules.get("main") or sys.modules.get("__main__")
+                if main_mod is None:
+                    logger.error("source_parsing: main module not found for month_pages enqueue")
+                else:
+                    enqueue_job = main_mod.enqueue_job
+                    mark_pages_dirty = main_mod.mark_pages_dirty
+                    month_event_ids: dict[str, int] = {}
+                    async with db.get_session() as session:
+                        for month in months:
+                            res = await session.execute(
+                                select(Event.id)
+                                .where(Event.date.like(f"{month}%"))
+                                .order_by(Event.id.desc())
+                                .limit(1)
+                            )
+                            event_id = res.scalar_one_or_none()
+                            if event_id:
+                                month_event_ids[month] = event_id
+
                     for month in months:
-                        res = await session.execute(
-                            select(Event.id)
-                            .where(Event.date.like(f"{month}%"))
-                            .order_by(Event.id.desc())
-                            .limit(1)
+                        event_id = month_event_ids.get(month)
+                        if not event_id:
+                            continue
+                        await enqueue_job(
+                            db,
+                            event_id,
+                            JobTask.month_pages,
+                            coalesce_key=f"month_pages:{month}",
                         )
-                        event_id = res.scalar_one_or_none()
-                        if event_id:
-                            month_event_ids[month] = event_id
+                        await mark_pages_dirty(db, month)
 
-                for month in months:
-                    event_id = month_event_ids.get(month)
-                    if not event_id:
-                        continue
-                    await enqueue_job(
-                        db,
-                        event_id,
-                        JobTask.month_pages,
-                        coalesce_key=f"month_pages:{month}",
-                    )
-                    await mark_pages_dirty(db, month)
-
-    # Final progress update
-    if bot and chat_id and progress_message_id:
-        try:
-            total_new = sum(s.new_added for s in result.stats_by_source.values())
-            total_fail = sum(s.failed for s in result.stats_by_source.values())
-            
-            final_text = (
-                f"✅ Обработка завершена\n"
-                f"Добавлено: {total_new}\n"
-                f"Ошибок: {total_fail}"
-            )
-            await bot.edit_message_text(
-                text=final_text,
-                chat_id=chat_id,
-                message_id=progress_message_id,
-            )
-        except Exception as e:
-            logger.warning("source_parsing: failed to update final progress: %s", e)
-    
-    result.processing_duration = time.time() - start_time
-    
-    logger.info(
-        "source_parsing: complete total=%d kernel=%.1fs processing=%.1fs",
-        total_count,
-        result.kernel_duration,
-        result.processing_duration,
-    )
-    
-    return result
+        # Final progress update
+        if bot and chat_id and progress_message_id:
+            try:
+                total_new = sum(s.new_added for s in result.stats_by_source.values())
+                total_fail = sum(s.failed for s in result.stats_by_source.values())
+                
+                final_text = (
+                    f"✅ Обработка завершена\n"
+                    f"Добавлено: {total_new}\n"
+                    f"Ошибок: {total_fail}"
+                )
+                await bot.edit_message_text(
+                    text=final_text,
+                    chat_id=chat_id,
+                    message_id=progress_message_id,
+                )
+            except Exception as e:
+                logger.warning("source_parsing: failed to update final progress: %s", e)
+        
+        result.processing_duration = time.time() - start_time
+        
+        logger.info(
+            "source_parsing: complete total=%d kernel=%.1fs processing=%.1fs",
+            total_count,
+            result.kernel_duration,
+            result.processing_duration,
+        )
+        
+        return result
+    finally:
+        if log_handler:
+            logging.getLogger().removeHandler(log_handler)
+            log_handler.close()
 
 
 async def process_source_events(
@@ -986,6 +1063,7 @@ async def process_source_events(
         "dramteatr": "🎭 Драмтеатр",
         "muzteatr": "🎵 Музтеатр",
         "sobor": "⛪ Собор",
+        "tretyakov": "🎨 Третьяковка",
     }.get(source, source)
     
     for i, event in enumerate(events):
@@ -994,6 +1072,23 @@ async def process_source_events(
         result_tag = "unknown"
         event_id: int | None = None
         llm_used = False
+        diag_enabled = bool(SOURCE_PARSING_DIAG_TITLE) and SOURCE_PARSING_DIAG_TITLE in (event.title or "").lower()
+
+        # Update progress message for every event (new or existing).
+        if bot and chat_id:
+            try:
+                progress_text = f"📝 Обработка {current_progress}/{total_count}: {event.title[:40]}"
+                if progress_message_id:
+                    await bot.edit_message_text(
+                        text=progress_text,
+                        chat_id=chat_id,
+                        message_id=progress_message_id,
+                    )
+                else:
+                    msg = await bot.send_message(chat_id, progress_text)
+                    progress_message_id = msg.message_id
+            except Exception as e:
+                logger.warning("source_parsing: failed to update progress: %s", e)
         
         if not event.parsed_date:
             logger.warning(
@@ -1010,133 +1105,180 @@ async def process_source_events(
                 time.monotonic() - event_start,
             )
             continue
+
+        if diag_enabled:
+            desc_len = len(event.description or "")
+            photos_count = len(event.photos or [])
+            logger.info(
+                "source_parsing: diag title=%s date_raw=%s parsed=%s %s url=%s photos=%d desc_len=%d",
+                event.title[:120],
+                event.date_raw,
+                event.parsed_date,
+                event.parsed_time or "",
+                event.url,
+                photos_count,
+                desc_len,
+            )
         
-        location_name = normalize_location_name(event.location)
-        
-        # Check for existing event
-        existing_id, needs_full_update = await find_existing_event(
-            db,
-            location_name,
-            event.parsed_date,
-            event.parsed_time or "00:00",
-            event.title,
-        )
-        
-        if existing_id:
-            event_id = existing_id
-            if needs_full_update:
-                # Update the placeholder event fully
-                success = await update_event_full(db, existing_id, event)
-                if success:
-                    await schedule_existing_event_update(db, existing_id)
-                    stats.ticket_updated += 1
-                    result_tag = "existing_full_update"
-                    # Track updated event for reporting
-                    if updated_events is not None:
-                        info = await build_updated_event_info(db, existing_id, source, "full_update")
-                        if info:
-                            updated_events.append(info)
+        try:
+            location_name = normalize_location_name(event.location, event.scene)
+            if diag_enabled:
+                logger.info(
+                    "source_parsing: diag normalized_location=%s",
+                    location_name,
+                )
+            
+            # Check for existing event
+            existing_id, needs_full_update = await find_existing_event(
+                db,
+                location_name,
+                event.parsed_date,
+                event.parsed_time or "00:00",
+                event.title,
+            )
+            
+            if existing_id:
+                event_id = existing_id
+                if needs_full_update:
+                    # Update the placeholder event fully
+                    success = await update_event_full(db, existing_id, event)
+                    if success:
+                        await schedule_existing_event_update(db, existing_id)
+                        stats.ticket_updated += 1
+                        result_tag = "existing_full_update"
+                        # Track updated event for reporting
+                        if updated_events is not None:
+                            info = await build_updated_event_info(db, existing_id, source, "full_update")
+                            if info:
+                                updated_events.append(info)
+                    else:
+                        stats.failed += 1
+                        result_tag = "existing_full_update_failed"
+                else:
+                    # Just update ticket status
+                    success = await update_event_ticket_status(
+                        db,
+                        existing_id,
+                        event.ticket_status,
+                        event.url,
+                    )
+                    if success:
+                        await schedule_existing_event_update(db, existing_id)
+                        stats.ticket_updated += 1
+                        result_tag = "existing_ticket_update"
+                        # Track updated event for reporting
+                        if updated_events is not None:
+                            info = await build_updated_event_info(db, existing_id, source, "ticket_status")
+                            if info:
+                                updated_events.append(info)
+                    else:
+                        stats.already_exists += 1
+                        result_tag = "existing_ticket_update_failed"
+                
+                # Always update linked events
+                await update_linked_events(db, existing_id, location_name, event.title)
+            else:
+                if diag_enabled:
+                    logger.info(
+                        "source_parsing: diag no existing match title=%s",
+                        event.title[:120],
+                    )
+                # Prepare images for OCR if any
+                poster_media_list = []
+                
+                # Filter photos first
+                target_photos = limit_photos_for_source(
+                    event.photos,
+                    event.source_type,
+                )
+
+                if event.source_type in SOURCE_PARSING_DISABLE_OCR_SOURCES:
+                    if diag_enabled:
+                        logger.info(
+                            "source_parsing: diag ocr skipped source=%s",
+                            event.source_type,
+                        )
+                    target_photos = []
+                
+                if target_photos:
+                    try:
+                        if diag_enabled:
+                            logger.info(
+                                "source_parsing: diag ocr start title=%s photos=%d",
+                                event.title[:120],
+                                len(target_photos),
+                            )
+                        raw_images = await asyncio.wait_for(
+                            download_images(target_photos),
+                            timeout=SOURCE_PARSING_OCR_TIMEOUT_SECONDS,
+                        )
+                        
+                        if raw_images:
+                            poster_media_list, _ = await asyncio.wait_for(
+                                process_media(
+                                    raw_images,
+                                    need_catbox=True,
+                                    need_ocr=True,
+                                ),
+                                timeout=SOURCE_PARSING_OCR_TIMEOUT_SECONDS,
+                            )
+                        if diag_enabled:
+                            logger.info(
+                                "source_parsing: diag ocr done title=%s raw=%d posters=%d",
+                                event.title[:120],
+                                len(raw_images),
+                                len(poster_media_list),
+                            )
+                    except asyncio.TimeoutError:
+                        logger.warning(
+                            "source_parsing: ocr timeout title=%s after %ss",
+                            event.title,
+                            SOURCE_PARSING_OCR_TIMEOUT_SECONDS,
+                        )
+                    except Exception as e:
+                        logger.warning("source_parsing: ocr failed event=%s error=%s", event.title, e)
+
+                # Add new event
+                llm_used = True
+                new_id, was_added = await add_new_event_via_queue(
+                    db,
+                    bot,
+                    event,
+                    current_progress,
+                    total_count,
+                    poster_media=poster_media_list,
+                )
+                
+                if new_id:
+                    event_id = new_id
+                    if was_added:
+                        stats.new_added += 1
+                        if added_events is not None:
+                            info = await build_added_event_info(db, new_id, source)
+                            if info:
+                                added_events.append(info)
+                        result_tag = "new_added"
+                    else:
+                        stats.skipped += 1  # Event existed, was updated but not new
+                        result_tag = "new_updated"
+                    # Delay between additions
+                    await asyncio.sleep(EVENT_ADD_DELAY_SECONDS)
+                    
+                    # DEBUG: Stop after max events
+                    if DEBUG_MAX_EVENTS and stats.new_added >= DEBUG_MAX_EVENTS:
+                        logger.info("source_parsing: DEBUG limit reached (%d events)", DEBUG_MAX_EVENTS)
+                        break
                 else:
                     stats.failed += 1
-                    result_tag = "existing_full_update_failed"
-            else:
-                # Just update ticket status
-                success = await update_event_ticket_status(
-                    db,
-                    existing_id,
-                    event.ticket_status,
-                    event.url,
-                )
-                if success:
-                    await schedule_existing_event_update(db, existing_id)
-                    stats.ticket_updated += 1
-                    result_tag = "existing_ticket_update"
-                    # Track updated event for reporting
-                    if updated_events is not None:
-                        info = await build_updated_event_info(db, existing_id, source, "ticket_status")
-                        if info:
-                            updated_events.append(info)
-                else:
-                    stats.already_exists += 1
-                    result_tag = "existing_ticket_update_failed"
-            
-            # Always update linked events
-            await update_linked_events(db, existing_id, location_name, event.title)
-        else:
-            # Update progress message (edit single message)
-            if bot and chat_id:
-                try:
-                    progress_text = f"📝 Обработка {current_progress}/{total_count}: {event.title[:40]}"
-                    if progress_message_id:
-                        await bot.edit_message_text(
-                            text=progress_text,
-                            chat_id=chat_id,
-                            message_id=progress_message_id,
-                        )
-                    else:
-                        msg = await bot.send_message(chat_id, progress_text)
-                        progress_message_id = msg.message_id
-                except Exception as e:
-                    logger.warning("source_parsing: failed to update progress: %s", e)
-            
-            # Prepare images for OCR if any
-            poster_media_list = []
-            
-            # Filter photos first
-            target_photos = limit_photos_for_source(
-                event.photos,
-                event.source_type,
+                    result_tag = "new_failed"
+        except Exception:
+            stats.failed += 1
+            result_tag = "exception"
+            logger.exception(
+                "source_parsing: event_exception source=%s title=%s",
+                source,
+                event.title[:80],
             )
-            
-            if target_photos:
-                try:
-                    # Download images
-                    raw_images = await download_images(target_photos)
-                    
-                    if raw_images:
-                        # Process with OCR and Catbox upload
-                        # This matches standard flow: upload to persistent storage + recognize text
-                        poster_media_list, _ = await process_media(
-                            raw_images,
-                            need_catbox=True,
-                            need_ocr=True,
-                        )
-                except Exception as e:
-                    logger.warning("source_parsing: ocr failed event=%s error=%s", event.title, e)
-
-            # Add new event
-            llm_used = True
-            new_id, was_added = await add_new_event_via_queue(
-                db,
-                bot,
-                event,
-                current_progress,
-                total_count,
-                poster_media=poster_media_list,
-            )
-            
-            if new_id:
-                event_id = new_id
-                if was_added:
-                    stats.new_added += 1
-                    if added_events is not None:
-                        info = await build_added_event_info(db, new_id, source)
-                        if info:
-                            added_events.append(info)
-                    result_tag = "new_added"
-                else:
-                    stats.skipped += 1  # Event existed, was updated but not new
-                    result_tag = "new_updated"
-                # Delay between additions
-                await asyncio.sleep(EVENT_ADD_DELAY_SECONDS)
-                
-                # DEBUG: Stop after max events
-                if DEBUG_MAX_EVENTS and stats.new_added >= DEBUG_MAX_EVENTS:
-                    logger.info("source_parsing: DEBUG limit reached (%d events)", DEBUG_MAX_EVENTS)
-                    break
-            else:
-                stats.failed += 1
-                result_tag = "new_failed"
 
         logger.info(
             "source_parsing: event_result source=%s title=%s date=%s time=%s result=%s event_id=%s llm=%s duration=%.2fs",

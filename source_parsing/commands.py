@@ -9,6 +9,10 @@ from __future__ import annotations
 import logging
 import os
 from functools import partial
+from datetime import datetime, timezone
+from pathlib import Path
+import hashlib
+import json
 
 import asyncio
 
@@ -23,10 +27,75 @@ from source_parsing.handlers import (
     escape_md,
     run_diagnostic_parse,
 )
+from net import http_call
 
 logger = logging.getLogger(__name__)
 
 MAX_TG_MESSAGE_LEN = 3800
+PARSE_LOCK = asyncio.Lock()
+
+SOURCE_PARSING_GUARD_PATH = Path("/data/parse_debug/source_parsing_guard.json")
+SOURCE_PARSING_GUARD_URLS = {
+    "dramteatr": "https://dramteatr39.ru/afisha",
+    "muzteatr": "https://muzteatr39.ru/action/cat/afisha/",
+    "sobor": "https://sobor39.ru/events/concerts/night/",
+    "tretyakov": "https://kaliningrad.tretyakovgallery.ru/events/",
+}
+
+
+def _load_source_parsing_guard() -> dict:
+    if not SOURCE_PARSING_GUARD_PATH.exists():
+        return {}
+    try:
+        return json.loads(SOURCE_PARSING_GUARD_PATH.read_text(encoding="utf-8"))
+    except Exception as e:
+        logger.warning("source_parsing: guard read failed: %s", e)
+        return {}
+
+
+def _save_source_parsing_guard(signatures: dict[str, str]) -> None:
+    payload = {
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "signatures": signatures,
+    }
+    try:
+        SOURCE_PARSING_GUARD_PATH.parent.mkdir(parents=True, exist_ok=True)
+        SOURCE_PARSING_GUARD_PATH.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except Exception as e:
+        logger.warning("source_parsing: guard write failed: %s", e)
+
+
+async def _collect_source_parsing_signatures() -> dict[str, str]:
+    signatures: dict[str, str] = {}
+    for name, url in SOURCE_PARSING_GUARD_URLS.items():
+        try:
+            response = await http_call(
+                f"source_parsing_guard_{name}",
+                "GET",
+                url,
+                timeout=20,
+                retries=2,
+                backoff=1.0,
+                headers={"User-Agent": "events-bot/1.0"},
+            )
+            if response.status_code >= 400:
+                raise RuntimeError(f"status={response.status_code}")
+            signatures[name] = hashlib.sha256(response.content).hexdigest()
+        except Exception as e:
+            logger.warning(
+                "source_parsing: guard fetch failed source=%s error=%s", name, e
+            )
+            return {}
+    return signatures
+
+
+async def _update_source_parsing_guard(signatures: dict[str, str] | None = None) -> None:
+    if signatures is None:
+        signatures = await _collect_source_parsing_signatures()
+    if signatures:
+        _save_source_parsing_guard(signatures)
 
 
 def _format_added_events_lines(added_events) -> list[str]:
@@ -165,88 +234,103 @@ async def handle_parse_command(message: types.Message, db: Database, bot: Bot) -
         return
     
     logger.info("source_parsing: starting parse for user_id=%s", message.from_user.id)
+
+    if PARSE_LOCK.locked():
+        await bot.send_message(
+            message.chat.id,
+            "⏳ Парсинг уже выполняется. Дождитесь завершения текущего запуска.",
+        )
+        return
     
     await bot.send_message(
         message.chat.id,
         "🔄 Запуск парсинга источников (Драмтеатр, Музтеатр, Кафедральный собор, Третьяковка)..."
     )
-    
-    try:
-        result = await run_source_parsing(db, bot, chat_id=message.chat.id)
-        report = format_parsing_report(result)
-        
-        await bot.send_message(
-            message.chat.id,
-            report,
-            parse_mode="Markdown",
-        )
 
-        if getattr(result, "added_events", None):
-            lines = _format_added_events_lines(result.added_events)
-            for chunk in _chunk_lines(lines):
-                await bot.send_message(
-                    message.chat.id,
-                    chunk,
-                    parse_mode="Markdown",
-                )
-        else:
-            await bot.send_message(
-                message.chat.id,
-                "ℹ️ Новых событий не добавлено.",
-            )
-        
-        # Show updated events with Telegraph links
-        if getattr(result, "updated_events", None):
-            lines = _format_updated_events_lines(result.updated_events)
-            for chunk in _chunk_lines(lines):
-                await bot.send_message(
-                    message.chat.id,
-                    chunk,
-                    parse_mode="Markdown",
-                )
-        
-        # Send JSON files if available
-        json_files_sent = 0
-        if hasattr(result, 'json_file_paths') and result.json_file_paths:
-            from aiogram.types import FSInputFile
-            for json_path in result.json_file_paths:
-                try:
-                    import os
-                    if os.path.exists(json_path):
-                        filename = os.path.basename(json_path)
-                        json_file = FSInputFile(json_path, filename=filename)
-                        await bot.send_document(message.chat.id, json_file)
-                        logger.info("source_parsing: sent JSON file %s", filename)
-                        json_files_sent += 1
-                    else:
-                        logger.warning("source_parsing: JSON file not found %s", json_path)
-                except Exception as e:
-                    logger.warning("source_parsing: failed to send JSON %s: %s", json_path, e)
-        
-        # Warn if no JSON files were sent
-        if json_files_sent == 0 and result.total_events > 0:
-            await bot.send_message(
-                message.chat.id,
-                "⚠️ JSON файлы парсера недоступны (временные файлы удалены).",
-            )
-        
-        # Send log file if available
-        if result.log_file_path:
+    async with PARSE_LOCK:
+        try:
+            result = await run_source_parsing(db, bot, chat_id=message.chat.id)
+            report = format_parsing_report(result)
+            
             try:
-                from aiogram.types import FSInputFile
-                import os
-                if os.path.exists(result.log_file_path):
-                    log_file = FSInputFile(result.log_file_path, filename="kaggle_log.txt")
-                    await bot.send_document(message.chat.id, log_file)
+                await bot.send_message(
+                    message.chat.id,
+                    report,
+                    parse_mode="Markdown",
+                )
             except Exception as e:
-                logger.warning("source_parsing: failed to send log file: %s", e)
-                
-    except Exception as e:
-        logger.exception("source_parsing: failed")
-        await bot.send_message(
-            message.chat.id,
-            f"❌ Ошибка парсинга: {e}"
-        )
+                logger.warning("source_parsing: failed to send report markdown: %s", e)
+                await bot.send_message(
+                    message.chat.id,
+                    report.replace("**", ""),
+                )
+
+            if getattr(result, "added_events", None):
+                lines = _format_added_events_lines(result.added_events)
+                for chunk in _chunk_lines(lines):
+                    await bot.send_message(
+                        message.chat.id,
+                        chunk,
+                        parse_mode="Markdown",
+                    )
+            else:
+                await bot.send_message(
+                    message.chat.id,
+                    "ℹ️ Новых событий не добавлено.",
+                )
+            
+            # Show updated events with Telegraph links
+            if getattr(result, "updated_events", None):
+                lines = _format_updated_events_lines(result.updated_events)
+                for chunk in _chunk_lines(lines):
+                    await bot.send_message(
+                        message.chat.id,
+                        chunk,
+                        parse_mode="Markdown",
+                    )
+            
+            # Send JSON files if available
+            json_files_sent = 0
+            if hasattr(result, 'json_file_paths') and result.json_file_paths:
+                from aiogram.types import FSInputFile
+                for json_path in result.json_file_paths:
+                    try:
+                        import os
+                        if os.path.exists(json_path):
+                            filename = os.path.basename(json_path)
+                            json_file = FSInputFile(json_path, filename=filename)
+                            await bot.send_document(message.chat.id, json_file)
+                            logger.info("source_parsing: sent JSON file %s", filename)
+                            json_files_sent += 1
+                        else:
+                            logger.warning("source_parsing: JSON file not found %s", json_path)
+                    except Exception as e:
+                        logger.warning("source_parsing: failed to send JSON %s: %s", json_path, e)
+            
+            # Warn if no JSON files were sent
+            if json_files_sent == 0 and result.total_events > 0:
+                await bot.send_message(
+                    message.chat.id,
+                    "⚠️ JSON файлы парсера недоступны (временные файлы удалены).",
+                )
+            
+            # Send log file if available
+            if result.log_file_path:
+                try:
+                    from aiogram.types import FSInputFile
+                    import os
+                    if os.path.exists(result.log_file_path):
+                        log_file = FSInputFile(result.log_file_path, filename="kaggle_log.txt")
+                        await bot.send_document(message.chat.id, log_file)
+                except Exception as e:
+                    logger.warning("source_parsing: failed to send log file: %s", e)
+                    
+        except Exception as e:
+            logger.exception("source_parsing: failed")
+            await bot.send_message(
+                message.chat.id,
+                f"❌ Ошибка парсинга: {e}"
+            )
 
 
 async def source_parsing_scheduler(db: Database, bot: Bot, *, run_id: str | None = None) -> None:
@@ -258,6 +342,10 @@ async def source_parsing_scheduler(db: Database, bot: Bot, *, run_id: str | None
     
     try:
         result = await run_source_parsing(db, bot)
+
+        should_update_guard = result.total_events > 0 or not result.errors
+        if should_update_guard:
+            await _update_source_parsing_guard()
         
         # Send report to admin chat if configured
         admin_chat_id = os.getenv("ADMIN_CHAT_ID")
@@ -279,6 +367,55 @@ async def source_parsing_scheduler(db: Database, bot: Bot, *, run_id: str | None
         )
     except Exception as e:
         logger.exception("source_parsing_scheduler failed run_id=%s", run_id)
+
+
+async def source_parsing_scheduler_if_changed(
+    db: Database,
+    bot: Bot,
+    *,
+    run_id: str | None = None,
+) -> None:
+    """Scheduled job for source parsing with change guard.
+
+    Skips Kaggle if source pages did not change since the last successful run.
+    """
+    logger.info("source_parsing_scheduler_if_changed started run_id=%s", run_id)
+    try:
+        signatures = await _collect_source_parsing_signatures()
+        if not signatures:
+            logger.info("source_parsing_guard: signatures unavailable, running parse")
+        else:
+            guard_state = _load_source_parsing_guard()
+            if guard_state.get("signatures") == signatures:
+                logger.info("source_parsing_guard: no changes, skipping parse")
+                return
+
+        result = await run_source_parsing(db, bot)
+        should_update_guard = result.total_events > 0 or not result.errors
+        if should_update_guard and signatures:
+            await _update_source_parsing_guard(signatures)
+        elif should_update_guard:
+            await _update_source_parsing_guard()
+
+        admin_chat_id = os.getenv("ADMIN_CHAT_ID")
+        if admin_chat_id and (result.stats_by_source or result.errors):
+            report = format_parsing_report(result)
+            try:
+                await bot.send_message(
+                    int(admin_chat_id),
+                    f"📊 Автоматический парсинг источников завершён\n\n{report}",
+                    parse_mode="Markdown",
+                )
+            except Exception as e:
+                logger.warning("source_parsing: failed to send report: %s", e)
+
+        logger.info(
+            "source_parsing_scheduler_if_changed complete run_id=%s total=%d",
+            run_id,
+            result.total_events,
+        )
+    except Exception:
+        logger.exception("source_parsing_scheduler_if_changed failed run_id=%s", run_id)
 
 
 def register_parse_command(dp, db: Database, bot: Bot) -> None:

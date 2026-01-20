@@ -248,22 +248,12 @@ class KaggleClient:
 
             meta_data = json.loads(meta_path.read_text(encoding="utf-8"))
             
-            # Update kernel id to match current user's account from env
-            # Use fixed slug - Kaggle handles versioning automatically
-            username = os.getenv("KAGGLE_USERNAME")
-            if username:
-                fixed_slug = "video-afisha"
-                new_id = f"{username}/{fixed_slug}"
-                old_id = meta_data.get("id", "")
-                
-                logger.info("kaggle: setting kernel id=%s (was %s)", new_id, old_id)
-                meta_data["id"] = new_id
-                meta_data["slug"] = fixed_slug
-                # Title must match slug pattern for Kaggle to accept
-                meta_data["title"] = "Video Afisha"
-            
             # Set dataset sources for this session
-            meta_data["dataset_sources"] = [dataset_slug]
+            # Append new dataset source while preserving existing ones (like video-announce-assets)
+            existing_sources = meta_data.get("dataset_sources", [])
+            if dataset_slug not in existing_sources:
+                existing_sources.append(dataset_slug)
+            meta_data["dataset_sources"] = existing_sources
             # Ensure internet is enabled for pip installs
             meta_data["enable_internet"] = True
             
