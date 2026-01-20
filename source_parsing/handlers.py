@@ -1114,116 +1114,135 @@ async def process_source_events(
                 desc_len,
             )
         
-        location_name = normalize_location_name(event.location, event.scene)
-        
-        # Check for existing event
-        existing_id, needs_full_update = await find_existing_event(
-            db,
-            location_name,
-            event.parsed_date,
-            event.parsed_time or "00:00",
-            event.title,
-        )
-        
-        if existing_id:
-            event_id = existing_id
-            if needs_full_update:
-                # Update the placeholder event fully
-                success = await update_event_full(db, existing_id, event)
-                if success:
-                    await schedule_existing_event_update(db, existing_id)
-                    stats.ticket_updated += 1
-                    result_tag = "existing_full_update"
-                    # Track updated event for reporting
-                    if updated_events is not None:
-                        info = await build_updated_event_info(db, existing_id, source, "full_update")
-                        if info:
-                            updated_events.append(info)
+        try:
+            location_name = normalize_location_name(event.location, event.scene)
+            if diag_enabled:
+                logger.info(
+                    "source_parsing: diag normalized_location=%s",
+                    location_name,
+                )
+            
+            # Check for existing event
+            existing_id, needs_full_update = await find_existing_event(
+                db,
+                location_name,
+                event.parsed_date,
+                event.parsed_time or "00:00",
+                event.title,
+            )
+            
+            if existing_id:
+                event_id = existing_id
+                if needs_full_update:
+                    # Update the placeholder event fully
+                    success = await update_event_full(db, existing_id, event)
+                    if success:
+                        await schedule_existing_event_update(db, existing_id)
+                        stats.ticket_updated += 1
+                        result_tag = "existing_full_update"
+                        # Track updated event for reporting
+                        if updated_events is not None:
+                            info = await build_updated_event_info(db, existing_id, source, "full_update")
+                            if info:
+                                updated_events.append(info)
+                    else:
+                        stats.failed += 1
+                        result_tag = "existing_full_update_failed"
+                else:
+                    # Just update ticket status
+                    success = await update_event_ticket_status(
+                        db,
+                        existing_id,
+                        event.ticket_status,
+                        event.url,
+                    )
+                    if success:
+                        await schedule_existing_event_update(db, existing_id)
+                        stats.ticket_updated += 1
+                        result_tag = "existing_ticket_update"
+                        # Track updated event for reporting
+                        if updated_events is not None:
+                            info = await build_updated_event_info(db, existing_id, source, "ticket_status")
+                            if info:
+                                updated_events.append(info)
+                    else:
+                        stats.already_exists += 1
+                        result_tag = "existing_ticket_update_failed"
+                
+                # Always update linked events
+                await update_linked_events(db, existing_id, location_name, event.title)
+            else:
+                if diag_enabled:
+                    logger.info(
+                        "source_parsing: diag no existing match title=%s",
+                        event.title[:120],
+                    )
+                # Prepare images for OCR if any
+                poster_media_list = []
+                
+                # Filter photos first
+                target_photos = limit_photos_for_source(
+                    event.photos,
+                    event.source_type,
+                )
+                
+                if target_photos:
+                    try:
+                        # Download images
+                        raw_images = await download_images(target_photos)
+                        
+                        if raw_images:
+                            # Process with OCR and Catbox upload
+                            # This matches standard flow: upload to persistent storage + recognize text
+                            poster_media_list, _ = await process_media(
+                                raw_images,
+                                need_catbox=True,
+                                need_ocr=True,
+                            )
+                    except Exception as e:
+                        logger.warning("source_parsing: ocr failed event=%s error=%s", event.title, e)
+
+                # Add new event
+                llm_used = True
+                new_id, was_added = await add_new_event_via_queue(
+                    db,
+                    bot,
+                    event,
+                    current_progress,
+                    total_count,
+                    poster_media=poster_media_list,
+                )
+                
+                if new_id:
+                    event_id = new_id
+                    if was_added:
+                        stats.new_added += 1
+                        if added_events is not None:
+                            info = await build_added_event_info(db, new_id, source)
+                            if info:
+                                added_events.append(info)
+                        result_tag = "new_added"
+                    else:
+                        stats.skipped += 1  # Event existed, was updated but not new
+                        result_tag = "new_updated"
+                    # Delay between additions
+                    await asyncio.sleep(EVENT_ADD_DELAY_SECONDS)
+                    
+                    # DEBUG: Stop after max events
+                    if DEBUG_MAX_EVENTS and stats.new_added >= DEBUG_MAX_EVENTS:
+                        logger.info("source_parsing: DEBUG limit reached (%d events)", DEBUG_MAX_EVENTS)
+                        break
                 else:
                     stats.failed += 1
-                    result_tag = "existing_full_update_failed"
-            else:
-                # Just update ticket status
-                success = await update_event_ticket_status(
-                    db,
-                    existing_id,
-                    event.ticket_status,
-                    event.url,
-                )
-                if success:
-                    await schedule_existing_event_update(db, existing_id)
-                    stats.ticket_updated += 1
-                    result_tag = "existing_ticket_update"
-                    # Track updated event for reporting
-                    if updated_events is not None:
-                        info = await build_updated_event_info(db, existing_id, source, "ticket_status")
-                        if info:
-                            updated_events.append(info)
-                else:
-                    stats.already_exists += 1
-                    result_tag = "existing_ticket_update_failed"
-            
-            # Always update linked events
-            await update_linked_events(db, existing_id, location_name, event.title)
-        else:
-            # Prepare images for OCR if any
-            poster_media_list = []
-            
-            # Filter photos first
-            target_photos = limit_photos_for_source(
-                event.photos,
-                event.source_type,
+                    result_tag = "new_failed"
+        except Exception:
+            stats.failed += 1
+            result_tag = "exception"
+            logger.exception(
+                "source_parsing: event_exception source=%s title=%s",
+                source,
+                event.title[:80],
             )
-            
-            if target_photos:
-                try:
-                    # Download images
-                    raw_images = await download_images(target_photos)
-                    
-                    if raw_images:
-                        # Process with OCR and Catbox upload
-                        # This matches standard flow: upload to persistent storage + recognize text
-                        poster_media_list, _ = await process_media(
-                            raw_images,
-                            need_catbox=True,
-                            need_ocr=True,
-                        )
-                except Exception as e:
-                    logger.warning("source_parsing: ocr failed event=%s error=%s", event.title, e)
-
-            # Add new event
-            llm_used = True
-            new_id, was_added = await add_new_event_via_queue(
-                db,
-                bot,
-                event,
-                current_progress,
-                total_count,
-                poster_media=poster_media_list,
-            )
-            
-            if new_id:
-                event_id = new_id
-                if was_added:
-                    stats.new_added += 1
-                    if added_events is not None:
-                        info = await build_added_event_info(db, new_id, source)
-                        if info:
-                            added_events.append(info)
-                    result_tag = "new_added"
-                else:
-                    stats.skipped += 1  # Event existed, was updated but not new
-                    result_tag = "new_updated"
-                # Delay between additions
-                await asyncio.sleep(EVENT_ADD_DELAY_SECONDS)
-                
-                # DEBUG: Stop after max events
-                if DEBUG_MAX_EVENTS and stats.new_added >= DEBUG_MAX_EVENTS:
-                    logger.info("source_parsing: DEBUG limit reached (%d events)", DEBUG_MAX_EVENTS)
-                    break
-            else:
-                stats.failed += 1
-                result_tag = "new_failed"
 
         logger.info(
             "source_parsing: event_result source=%s title=%s date=%s time=%s result=%s event_id=%s llm=%s duration=%.2fs",
