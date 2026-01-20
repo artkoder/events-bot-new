@@ -34,6 +34,11 @@ logger = logging.getLogger(__name__)
 PARSE_EVENT_TIMEOUT_SECONDS = int(os.getenv("SOURCE_PARSING_EVENT_TIMEOUT_SECONDS", "180"))
 SOURCE_PARSING_OCR_TIMEOUT_SECONDS = int(os.getenv("SOURCE_PARSING_OCR_TIMEOUT_SECONDS", "60"))
 SOURCE_PARSING_DIAG_TITLE = os.getenv("SOURCE_PARSING_DIAG_TITLE", "джотто").strip().lower()
+SOURCE_PARSING_DISABLE_OCR_SOURCES = {
+    s.strip().lower()
+    for s in os.getenv("SOURCE_PARSING_DISABLE_OCR_SOURCES", "tretyakov").split(",")
+    if s.strip()
+}
 
 # Delay between adding events to avoid overloading the system
 EVENT_ADD_DELAY_SECONDS = 5  # Delay for Telegraph creation
@@ -1186,6 +1191,14 @@ async def process_source_events(
                     event.photos,
                     event.source_type,
                 )
+
+                if event.source_type in SOURCE_PARSING_DISABLE_OCR_SOURCES:
+                    if diag_enabled:
+                        logger.info(
+                            "source_parsing: diag ocr skipped source=%s",
+                            event.source_type,
+                        )
+                    target_photos = []
                 
                 if target_photos:
                     try:
