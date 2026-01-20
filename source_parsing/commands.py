@@ -175,11 +175,18 @@ async def handle_parse_command(message: types.Message, db: Database, bot: Bot) -
         result = await run_source_parsing(db, bot, chat_id=message.chat.id)
         report = format_parsing_report(result)
         
-        await bot.send_message(
-            message.chat.id,
-            report,
-            parse_mode="Markdown",
-        )
+        try:
+            await bot.send_message(
+                message.chat.id,
+                report,
+                parse_mode="Markdown",
+            )
+        except Exception as e:
+            logger.warning("source_parsing: failed to send report markdown: %s", e)
+            await bot.send_message(
+                message.chat.id,
+                report.replace("**", ""),
+            )
 
         if getattr(result, "added_events", None):
             lines = _format_added_events_lines(result.added_events)

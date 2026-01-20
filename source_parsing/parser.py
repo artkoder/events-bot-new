@@ -421,10 +421,10 @@ async def find_existing_event(
             new_loc = (location_name or "").strip().lower()
             ev_addr = (ev.location_address or "").strip().lower()
             
-            # Exact location match
-            if ev_loc == new_loc:
+            # Exact location match requires title similarity
+            if ev_loc == new_loc and fuzzy_title_match(title, ev.title):
                 logger.info(
-                    "find_existing_event: MATCHED by location event_id=%d title=%s",
+                    "find_existing_event: MATCHED by location+title event_id=%d title=%s",
                     ev.id, ev.title[:50],
                 )
                 return ev.id, False
