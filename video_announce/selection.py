@@ -29,7 +29,7 @@ from models import (
 from .about import normalize_about_with_fallback
 from .kaggle_client import KaggleClient
 from .prompts import selection_prompt, selection_response_format, about_fill_prompt, about_fill_response_format
-from .types import (
+from .custom_types import (
     RankedChoice,
     RankedEvent,
     RenderPayload,

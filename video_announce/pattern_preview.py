@@ -20,9 +20,11 @@ FONT_PATH = os.path.join(_ASSETS_DIR, "BebasNeue-Bold.ttf")
 CITIES_FONT_PATH = os.path.join(_ASSETS_DIR, "Bebas-Neue-Pro-SemiExpanded-Bold-BF66cf3d78c1f4e.ttf")
 
 # Colors
-BG_ACCENT = (241, 228, 75, 255)
+BG_CANVAS = (30, 30, 30)
+BG_ACCENT = (241, 156, 28, 255)
+BG_YELLOW = (241, 228, 75)
+BG_ACCENT_YELLOW = (255, 255, 255, 255)
 TEXT_BLACK = (0, 0, 0, 255)
-BG_CANVAS = (241, 228, 75)
 
 # Pattern names
 PATTERN_RISING = "RISING"
@@ -30,6 +32,12 @@ PATTERN_STICKER = "STICKER"
 PATTERN_COMPACT = "COMPACT"
 
 ALL_PATTERNS = [PATTERN_RISING, PATTERN_STICKER, PATTERN_COMPACT]
+
+
+def _resolve_pattern_theme(pattern_name: str) -> tuple[str, tuple, tuple]:
+    if pattern_name.endswith("_YELLOW"):
+        return pattern_name[:-7], BG_YELLOW, BG_ACCENT_YELLOW
+    return pattern_name, BG_CANVAS, BG_ACCENT
 
 
 def _get_font(size: int, path: str = FONT_PATH) -> ImageFont.FreeTypeFont:
@@ -203,7 +211,12 @@ def _create_skewed_strip(
     return strip, content_h
 
 
-def _render_sticker(lines: list[dict], cities: str | None = None) -> Image.Image:
+def _render_sticker(
+    lines: list[dict],
+    cities: str | None = None,
+    bg_canvas: tuple = BG_CANVAS,
+    bg_accent: tuple = BG_ACCENT,
+) -> Image.Image:
     """Pattern STICKER: Messy alternating rotation."""
     all_items = list(lines)
     if cities:
@@ -215,14 +228,14 @@ def _render_sticker(lines: list[dict], cities: str | None = None) -> Image.Image
             "pad_y": 6 * SCALE,
         })
     
-    canvas = Image.new('RGB', (W * SCALE, H * SCALE), BG_CANVAS)
+    canvas = Image.new('RGB', (W * SCALE, H * SCALE), bg_canvas)
     curr_y = 600 * SCALE
     
     for item in all_items:
         f_path = item.get("font", FONT_PATH)
         py_ov = item.get("pad_y")
         img, content_h = _create_strip(
-            item["text"], item["size"], BG_ACCENT, TEXT_BLACK,
+            item["text"], item["size"], bg_accent, TEXT_BLACK,
             bevel_ratio=0.25, font_path=f_path, pad_y_override=py_ov
         )
         
@@ -238,7 +251,12 @@ def _render_sticker(lines: list[dict], cities: str | None = None) -> Image.Image
     return canvas.resize((W, H), resample=Image.LANCZOS)
 
 
-def _render_compact(lines: list[dict], cities: str | None = None) -> Image.Image:
+def _render_compact(
+    lines: list[dict],
+    cities: str | None = None,
+    bg_canvas: tuple = BG_CANVAS,
+    bg_accent: tuple = BG_ACCENT,
+) -> Image.Image:
     """Pattern COMPACT: Dynamic spacing based on rotated height."""
     all_items = list(lines)
     if cities:
@@ -250,14 +268,14 @@ def _render_compact(lines: list[dict], cities: str | None = None) -> Image.Image
             "pad_y": 6 * SCALE,
         })
     
-    canvas = Image.new('RGB', (W * SCALE, H * SCALE), BG_CANVAS)
+    canvas = Image.new('RGB', (W * SCALE, H * SCALE), bg_canvas)
     curr_y = 600 * SCALE
     
     for item in all_items:
         f_path = item.get("font", FONT_PATH)
         py_ov = item.get("pad_y")
         img, content_h = _create_strip(
-            item["text"], item["size"], BG_ACCENT, TEXT_BLACK,
+            item["text"], item["size"], bg_accent, TEXT_BLACK,
             bevel_ratio=0.25, font_path=f_path, pad_y_override=py_ov
         )
         
@@ -274,7 +292,12 @@ def _render_compact(lines: list[dict], cities: str | None = None) -> Image.Image
     return canvas.resize((W, H), resample=Image.LANCZOS)
 
 
-def _render_rising(lines: list[dict], cities: str | None = None) -> Image.Image:
+def _render_rising(
+    lines: list[dict],
+    cities: str | None = None,
+    bg_canvas: tuple = BG_CANVAS,
+    bg_accent: tuple = BG_ACCENT,
+) -> Image.Image:
     """Pattern RISING: Composite lines with number highlighting, unidirectional 7° shear.
     
     Lines can be:
@@ -302,7 +325,7 @@ def _render_rising(lines: list[dict], cities: str | None = None) -> Image.Image:
     GAP_PX = -12 * SCALE  # Negative gap for overlapping elements
     VERTICAL_SPACING = 0.82
     
-    canvas = Image.new('RGB', (W * SCALE, H * SCALE), BG_CANVAS)
+    canvas = Image.new('RGB', (W * SCALE, H * SCALE), bg_canvas)
     curr_y = 600 * SCALE
     
     line_images = []
@@ -310,7 +333,11 @@ def _render_rising(lines: list[dict], cities: str | None = None) -> Image.Image:
     for item in all_items:
         if item.get("composite"):
             # Composite line: multiple elements horizontally
-            line_img = _create_composite_line_rising(item["elements"], item["is_last"])
+            line_img = _create_composite_line_rising(
+                item["elements"],
+                item["is_last"],
+                bg_accent,
+            )
         else:
             # Simple text line
             f_path = item.get("font", FONT_PATH)
@@ -319,7 +346,7 @@ def _render_rising(lines: list[dict], cities: str | None = None) -> Image.Image:
             
             bevel = 0.20 if is_last else 0.0
             line_img, _ = _create_strip(
-                item["text"], item["size"], BG_ACCENT, TEXT_BLACK,
+                item["text"], item["size"], bg_accent, TEXT_BLACK,
                 bevel_ratio=bevel, font_path=f_path, pad_y_override=py_ov
             )
         
@@ -350,7 +377,7 @@ def _render_rising(lines: list[dict], cities: str | None = None) -> Image.Image:
         curr_y += int(content_h * VERTICAL_SPACING)
     
     # Actually we want top-to-bottom, then reverse z-order. Let me fix:
-    canvas = Image.new('RGB', (W * SCALE, H * SCALE), BG_CANVAS)
+    canvas = Image.new('RGB', (W * SCALE, H * SCALE), bg_canvas)
     curr_y = 600 * SCALE
     positions = []
     
@@ -366,7 +393,11 @@ def _render_rising(lines: list[dict], cities: str | None = None) -> Image.Image:
     return canvas.resize((W, H), resample=Image.LANCZOS)
 
 
-def _create_composite_line_rising(elements: list[dict], is_last_line: bool) -> Image.Image:
+def _create_composite_line_rising(
+    elements: list[dict],
+    is_last_line: bool,
+    bg_accent: tuple = BG_ACCENT,
+) -> Image.Image:
     """Create a composite line with multiple elements horizontally aligned.
     
     Elements have different sizes (e.g., big number, medium text).
@@ -383,7 +414,7 @@ def _create_composite_line_rising(elements: list[dict], is_last_line: bool) -> I
         
         # Use skewed strip function directly (no additional transform needed)
         strip_img, content_h = _create_skewed_strip(
-            elem["text"], elem["size"], BG_ACCENT, TEXT_BLACK,
+            elem["text"], elem["size"], bg_accent, TEXT_BLACK,
             strip_skew_deg=4.0,
             bevel_ratio=0.20,
             font_path=FONT_PATH,
@@ -743,21 +774,22 @@ def generate_intro_preview(
     Generate a pattern preview image.
     
     Args:
-        pattern_name: One of RISING, STICKER, COMPACT
+        pattern_name: One of RISING, STICKER, COMPACT (optionally with _YELLOW)
         intro_text: Multi-line intro text (e.g., "АФИША:\\nПЛАНЫ НА\\nВЫХОДНЫЕ")
         cities: Optional cities string (e.g., "Калининград, Светлогорск")
     
     Returns:
         PNG image bytes
     """
-    lines = _parse_intro_text(intro_text, pattern=pattern_name)
+    base_pattern, bg_canvas, bg_accent = _resolve_pattern_theme(pattern_name)
+    lines = _parse_intro_text(intro_text, pattern=base_pattern)
     
-    if pattern_name == PATTERN_RISING:
-        img = _render_rising(lines, cities)
-    elif pattern_name == PATTERN_COMPACT:
-        img = _render_compact(lines, cities)
+    if base_pattern == PATTERN_RISING:
+        img = _render_rising(lines, cities, bg_canvas=bg_canvas, bg_accent=bg_accent)
+    elif base_pattern == PATTERN_COMPACT:
+        img = _render_compact(lines, cities, bg_canvas=bg_canvas, bg_accent=bg_accent)
     else:  # Default to STICKER
-        img = _render_sticker(lines, cities)
+        img = _render_sticker(lines, cities, bg_canvas=bg_canvas, bg_accent=bg_accent)
     
     # Convert to bytes
     buf = io.BytesIO()

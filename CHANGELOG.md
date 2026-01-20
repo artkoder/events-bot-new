@@ -3,7 +3,8 @@
 ## [Unreleased]
 ### Fixed
 - **CrumpleVideo**: Test "Tomorrow" renders now use lower samples and resolution to speed up single-scene previews.
-- **Intro Visuals**: Updated intro background color to `#F1E44B` to match the requested yellow palette.
+- **CrumpleVideo**: Test-mode intro previews now default to `STICKER_YELLOW` when no explicit pattern is provided.
+- **Intro Visuals**: Restored the dark default palette and added a yellow theme via `_YELLOW` patterns.
 
 ## [1.9.3] - 2026-01-20
 ### Fixed

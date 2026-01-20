@@ -16,7 +16,7 @@ from poster_ocr import recognize_posters
 
 from .about import normalize_about_text, normalize_about_with_fallback
 from .prompts import FINAL_TEXT_RESPONSE_FORMAT, finalize_prompt
-from .types import FinalizedItem, PosterEnrichment, RankedEvent
+from .custom_types import FinalizedItem, PosterEnrichment, RankedEvent
 
 logger = logging.getLogger(__name__)
 
