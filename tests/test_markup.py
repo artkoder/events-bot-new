@@ -70,18 +70,18 @@ def test_expose_links_from_md():
 
 
 def test_linkify_phone_with_country_code():
-    """Phone with +7 country code becomes clickable tel: link."""
+    """Phone with +7 country code becomes clickable tg://resolve?phone= link."""
     assert (
         linkify_for_telegraph("+7 (495) 123-45-67")
-        == '<a href="tel:+74951234567">+7 (495) 123-45-67</a>'
+        == '<a href="tg://resolve?phone=74951234567">+7 (495) 123-45-67</a>'
     )
 
 
 def test_linkify_phone_with_8():
-    """Phone with 8 prefix converts to +7 in tel: link."""
+    """Phone with 8 prefix converts to +7 in tg://resolve?phone= link."""
     assert (
         linkify_for_telegraph("8-800-555-35-35")
-        == '<a href="tel:+78005553535">8-800-555-35-35</a>'
+        == '<a href="tg://resolve?phone=78005553535">8-800-555-35-35</a>'
     )
 
 
@@ -89,11 +89,32 @@ def test_linkify_phone_local():
     """Local phone without country code gets +7 prefix."""
     assert (
         linkify_for_telegraph("(4012) 12-34-56")
-        == '<a href="tel:+74012123456">(4012) 12-34-56</a>'
+        == '<a href="tg://resolve?phone=74012123456">(4012) 12-34-56</a>'
     )
 
 
 def test_linkify_phone_inside_anchor_untouched():
     """Phone already inside a link is not modified."""
-    html = '<a href="tel:+74951234567">+7 (495) 123-45-67</a>'
+    html = '<a href="tg://resolve?phone=+74951234567">+7 (495) 123-45-67</a>'
     assert linkify_for_telegraph(html) == html
+
+def test_linkify_phone_compact():
+    """Compact phone +79216118779 becomes clickable."""
+    assert (
+        linkify_for_telegraph("+79216118779")
+        == '<a href="tg://resolve?phone=79216118779">+79216118779</a>'
+    )
+
+def test_linkify_phone_in_text_context():
+    """Phone inside text with preposition works."""
+    assert (
+        linkify_for_telegraph("Запись по тел +79216118779")
+        == 'Запись по тел <a href="tg://resolve?phone=79216118779">+79216118779</a>'
+    )
+
+def test_linkify_phone_no_space_prefix():
+    """Phone without space after word works (edge case)."""
+    assert (
+        linkify_for_telegraph("тел+79216118779")
+        == 'тел<a href="tg://resolve?phone=79216118779">+79216118779</a>'
+    )

@@ -6,7 +6,7 @@ from db import Database
 from models import Event, EventPoster
 import main
 from video_announce import selection
-from video_announce.types import SelectionContext
+from video_announce.custom_types import SelectionContext
 
 
 @pytest.mark.asyncio

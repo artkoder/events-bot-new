@@ -87,7 +87,8 @@ def linkify_for_telegraph(text_or_html: str) -> str:
             # Local number without country code, assume +7 for Russia
             tel_country = "+7"
         tel_number = f"{tel_country}{area}{g2}{g3}{g4}"
-        return f'<a href="tel:{tel_number}">{original}</a>'
+        clean_number = tel_number.lstrip("+")
+        return f'<a href="tg://resolve?phone={clean_number}">{original}</a>'
 
     text = _VK_LINK_RE.sub(repl_vk, text_or_html)
     text = MD_LINK.sub(lambda m: f'<a href="{_unescape_md_url(m[2])}">{m[1]}</a>', text)
@@ -101,6 +102,13 @@ def linkify_for_telegraph(text_or_html: str) -> str:
     # Convert phone numbers to tel: links (only outside existing links)
     parts = re.split(r'(<a\b[^>]*>.*?</a>)', text, flags=re.IGNORECASE | re.DOTALL)
     for idx in range(0, len(parts), 2):
+        if "+7" in parts[idx] or " 8" in parts[idx]:
+            logging.info("DEBUG: linkify phone candidate part: %r", parts[idx])
+            match = _PHONE_RE.search(parts[idx])
+            if match:
+                logging.info("DEBUG: linkify phone match found: %s", match.group(0))
+            else:
+                logging.info("DEBUG: linkify phone NO match")
         parts[idx] = _PHONE_RE.sub(repl_phone, parts[idx])
     text = "".join(parts)
     return text

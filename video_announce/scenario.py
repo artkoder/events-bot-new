@@ -36,6 +36,7 @@ from main import (
     get_setting_value,
     set_setting_value,
 )
+from net import http_call
 from .about import normalize_about_with_fallback
 from .finalize import prepare_final_texts
 from .kaggle_client import DEFAULT_KERNEL_PATH, KaggleClient, list_local_kernels
@@ -976,6 +977,9 @@ class VideoAnnounceScenario:
             }
         )
         params.pop("instruction", None)
+        if test_mode:
+            params["mode"] = "test"
+            params["is_test"] = True
 
         kernel_ref = self._pick_crumple_kernel_ref() or self._pick_default_kernel_ref()
         if not kernel_ref:
@@ -1023,7 +1027,7 @@ class VideoAnnounceScenario:
         msg = await self.start_render(
             obj.id,
             message=None,
-            limit_scenes=1 if test_mode else None,
+            limit_scenes=3 if test_mode else None,
         )
         if msg and msg != "Рендеринг запущен":
             await self.bot.send_message(self.chat_id, f"Сессия #{obj.id}: {msg}")
@@ -2791,15 +2795,18 @@ class VideoAnnounceScenario:
         )
         return f"Сессия #{session_id} сброшена"
 
-    def _copy_assets(self, tmp_path: Path) -> None:
+    def _copy_assets(self, tmp_path: Path, *, audio_name: str | None = None) -> None:
         assets_dir = Path(__file__).resolve().parent / "assets"
-        # Requirement: "Kaggle dataset contains only: payload.json, original *.ttf, Pulsarium.mp3, dataset-metadata.json"
+        # Requirement: "Kaggle dataset contains only: payload.json, original *.ttf, Pulsarium.mp3, Final.png, dataset-metadata.json"
         # We need to find the font. The example says "Oswald-VariableFont_wght.ttf"
         font_name = "BebasNeue-Bold.ttf"
+        final_path = Path(__file__).resolve().parent / "crumple_references" / "Final.png"
         assets = [
             (assets_dir / font_name, tmp_path / font_name),
-            (assets_dir / "Pulsarium.mp3", tmp_path / "Pulsarium.mp3"),
+            (final_path, tmp_path / "Final.png"),
         ]
+        if audio_name:
+            assets.append((assets_dir / audio_name, tmp_path / audio_name))
         logger.info(
             "video_announce: copying assets from %s, looking for %s files",
             assets_dir,
@@ -2840,9 +2847,42 @@ class VideoAnnounceScenario:
                 "video_announce: created payload.json (%s bytes)",
                 payload_path.stat().st_size,
             )
-            # Removed final_texts.json and images as per Requirement 3
+            payload_obj = None
+            try:
+                payload_obj = json.loads(json_text)
+            except Exception:
+                logger.warning("video_announce: failed to parse payload json for prefetch")
 
-            self._copy_assets(tmp_path)
+            selection_params = {}
+            if isinstance(payload_obj, dict):
+                selection_params = payload_obj.get("selection_params") or {}
+            if not selection_params and isinstance(session_obj.selection_params, dict):
+                selection_params = session_obj.selection_params
+            is_test = False
+            if isinstance(selection_params, dict):
+                mode = selection_params.get("mode")
+                is_test = bool(
+                    selection_params.get("test")
+                    or selection_params.get("is_test")
+                    or (isinstance(mode, str) and mode.lower() == "test")
+                )
+
+            if is_test and isinstance(payload_obj, dict):
+                if "selection_params" not in payload_obj:
+                    payload_meta = {}
+                    for key in ("mode", "test", "is_test"):
+                        if key in selection_params:
+                            payload_meta[key] = selection_params.get(key)
+                    if payload_meta:
+                        payload_obj["selection_params"] = payload_meta
+                await self._prefetch_test_posters(payload_obj, tmp_path)
+                payload_path.write_text(
+                    json.dumps(payload_obj, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+            # Removed final_texts.json and images as per Requirement 3
+            audio_name = "The_xx_-_Intro.mp3" if is_test else "Pulsarium.mp3"
+            self._copy_assets(tmp_path, audio_name=audio_name)
             
             # Log all files in dataset before upload
             all_files = list(tmp_path.glob("*"))
@@ -2872,6 +2912,81 @@ class VideoAnnounceScenario:
                 await asyncio.to_thread(client.create_dataset, tmp_path)
         logger.info("video_announce: dataset created successfully id=%s", dataset_id)
         return dataset_id
+
+    async def _prefetch_test_posters(self, payload_obj: dict, tmp_path: Path) -> None:
+        scenes = payload_obj.get("scenes") or []
+        if not isinstance(scenes, list):
+            return
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+            ),
+            "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+        }
+        downloaded = 0
+        for idx, scene in enumerate(scenes):
+            if not isinstance(scene, dict):
+                continue
+            image = scene.get("image")
+            if isinstance(image, str) and image and not image.startswith("http"):
+                continue
+            images = scene.get("images") or []
+            if isinstance(images, str):
+                images = [images]
+            candidates: list[str] = []
+            for candidate in images:
+                if not isinstance(candidate, str):
+                    continue
+                candidate = candidate.strip()
+                if candidate.startswith("http") and candidate not in candidates:
+                    candidates.append(candidate)
+            if not candidates:
+                continue
+            prefetched = False
+            for url in candidates:
+                ext = Path(url.split("?", 1)[0]).suffix.lower()
+                if ext not in {".jpg", ".jpeg", ".png", ".webp"}:
+                    ext = ".jpg"
+                filename = f"poster_{idx + 1}{ext}"
+                dest = tmp_path / filename
+                try:
+                    resp = await http_call(
+                        "video_announce.poster_prefetch",
+                        "GET",
+                        url,
+                        timeout=20,
+                        retries=3,
+                        backoff=1.0,
+                        headers=headers,
+                    )
+                except Exception:
+                    logger.warning(
+                        "video_announce: failed to prefetch poster url=%s",
+                        url,
+                        exc_info=True,
+                    )
+                    continue
+                if resp.status_code != 200 or not resp.content:
+                    logger.warning(
+                        "video_announce: poster fetch failed status=%s url=%s",
+                        resp.status_code,
+                        url,
+                    )
+                    continue
+                dest.write_bytes(resp.content)
+                scene["image"] = filename
+                downloaded += 1
+                prefetched = True
+                break
+            if not prefetched:
+                logger.warning(
+                    "video_announce: all poster prefetch candidates failed scene=%s urls=%s",
+                    idx,
+                    candidates,
+                )
+        if downloaded:
+            logger.info("video_announce: prefetched %s test posters", downloaded)
 
     async def _push_kernel(
         self, client: KaggleClient, dataset_slug: str, kernel_ref: str | None = None

@@ -43,6 +43,7 @@ logger = logging.getLogger(__name__)
 TELEGRAPH_EXCERPT_LIMIT = 1200
 POSTER_OCR_EXCERPT_LIMIT = 800
 TRACE_MAX_LEN = 100_000
+MAX_POSTER_URLS = 3
 
 
 def _is_fair_event(ev: Event) -> bool:
@@ -1090,12 +1091,20 @@ def build_payload(
 
 def payload_as_json(payload: RenderPayload, tz: timezone) -> str:
     def _poster_urls(ev: Event) -> list[str]:
-        urls = []
+        urls: list[str] = []
+        seen: set[str] = set()
         for url in getattr(ev, "photo_urls", []) or []:
+            if not url:
+                continue
             if url.startswith("http:"):
                 url = "https:" + url[5:]
+            if url in seen:
+                continue
+            seen.add(url)
             urls.append(url)
-        return urls[:1]
+            if len(urls) >= MAX_POSTER_URLS:
+                break
+        return urls
 
     def _is_missing_time(t: str) -> bool:
         if not t:
@@ -1195,6 +1204,8 @@ def payload_as_json(payload: RenderPayload, tz: timezone) -> str:
 
     # Build date string from events
     intro_date_str = ""
+    min_date = None
+    max_date = None
     if payload.events:
         dates_list: list[date] = []
         for ev in payload.events:
@@ -1214,16 +1225,27 @@ def payload_as_json(payload: RenderPayload, tz: timezone) -> str:
     # Extract intro_pattern from selection_params
     intro_pattern = str(selection_params.get("intro_pattern") or "STICKER")
 
+    intro_payload = {
+        "count": len(scenes),
+        "text": intro_str,
+        "date": intro_date_str,
+        "cities": event_cities[:4],  # Limit to 4 cities
+        "pattern": intro_pattern,  # Add pattern for notebook
+        "date_start": min_date.isoformat() if min_date else None,
+        "date_end": max_date.isoformat() if max_date else None,
+    }
+
+    selection_meta = {}
+    for key in ("mode", "test", "is_test"):
+        if key in selection_params:
+            selection_meta[key] = selection_params.get(key)
+
     obj = {
-        "intro": {
-            "count": len(scenes),
-            "text": intro_str,
-            "date": intro_date_str,
-            "cities": event_cities[:4],  # Limit to 4 cities
-            "pattern": intro_pattern,  # Add pattern for notebook
-        },
+        "intro": intro_payload,
         "scenes": scenes,
     }
+    if selection_meta:
+        obj["selection_params"] = selection_meta
     return json.dumps(obj, ensure_ascii=False, indent=2)
 
 
@@ -1284,9 +1306,23 @@ async def build_selection(
     if ctx.random_order and events:
         event_ids = [e.id for e in events if e.id is not None]
         ocr_texts, ocr_titles = await _load_poster_ocr_texts(db, event_ids)
-        events = [e for e in events if e.id is not None and e.id in ocr_texts]
         random_ocr_texts = ocr_texts
         random_ocr_titles = ocr_titles
+        ocr_event_ids = set(ocr_texts) | set(ocr_titles)
+        if ocr_event_ids:
+            ocr_events = [e for e in events if e.id is not None and e.id in ocr_event_ids]
+            if len(ocr_events) >= max(1, ctx.default_selected_max):
+                events = ocr_events
+            else:
+                logger.warning(
+                    "video_announce: random_order OCR=%d < target=%d, mixing non-OCR events",
+                    len(ocr_events),
+                    ctx.default_selected_max,
+                )
+        else:
+            logger.warning(
+                "video_announce: random_order no OCR texts or titles, falling back to titles"
+            )
 
     async def _rank_events(
         current_events: Sequence[Event],
@@ -1320,7 +1356,22 @@ async def build_selection(
             ocr_texts = random_ocr_texts or {}
             ocr_titles = random_ocr_titles or {}
 
-            ocr_events = [e for e in selected_local if e.id is not None and e.id in ocr_texts]
+            ocr_events = [e for e in selected_local if e.id is not None]
+            ocr_event_ids = set(ocr_texts or {}) | set(ocr_titles or {})
+            if ocr_event_ids:
+                with_ocr = [e for e in ocr_events if e.id in ocr_event_ids]
+                if len(with_ocr) >= max(1, ctx.default_selected_max):
+                    ocr_events = with_ocr
+                elif with_ocr:
+                    logger.warning(
+                        "video_announce: random_order using %d OCR + %d non-OCR events",
+                        len(with_ocr),
+                        len(ocr_events) - len(with_ocr),
+                    )
+                else:
+                    logger.warning(
+                        "video_announce: random_order OCR missing for candidates, using titles",
+                    )
             if not ocr_events:
                 return [], mandatory_ids_local, set(), None, True
 

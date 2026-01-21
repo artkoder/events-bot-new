@@ -10,7 +10,7 @@ from aiogram import Bot, types
 
 from aiohttp import web
 from telegraph import Telegraph
-from markup import md_to_html, telegraph_br
+from markup import md_to_html, telegraph_br, linkify_for_telegraph
 
 from models import Event, Festival, WeekPage, WeekendPage, MonthPage, MonthPagePart, VkMissRecord, VkMissReviewSession, User
 from poster_media import PosterMedia
@@ -13949,7 +13949,8 @@ async def build_source_page_content(
     if search_digest and search_digest.strip() and text_len > 500:
         digest_escaped = html.escape(search_digest.strip())
         html_content += f"<p>{digest_escaped}</p>"
-        html_content += "<hr/>"
+        # Use spacer instead of <hr/> to prevent apply_month_nav from truncating content
+        html_content += BODY_SPACER_HTML
     emoji_pat = re.compile(r"<tg-emoji[^>]*>(.*?)</tg-emoji>", re.DOTALL)
     spoiler_pat = re.compile(r"<tg-spoiler[^>]*>(.*?)</tg-spoiler>", re.DOTALL)
     tg_emoji_cleaned = 0
@@ -14043,6 +14044,7 @@ async def build_source_page_content(
             sanitized = linkify_for_telegraph(sanitized)
         else:
             sanitized = md_to_html(text_value)
+            sanitized = linkify_for_telegraph(sanitized)
         sanitized = re.sub(r"<(\/?)h[12](\b)", r"<\1h3\2", sanitized, flags=re.IGNORECASE)
         sanitized = re.sub(r"<br\s*/?>", "<br/>", sanitized, flags=re.IGNORECASE)
         sanitized = sanitize_telegram_html(sanitized)
@@ -14071,6 +14073,9 @@ async def build_source_page_content(
         html_text = normalize_hashtag_dates(html_text)
         html_text = html_text.replace("\r\n", "\n")
         html_text = sanitize_telegram_html(html_text)
+        # Replace internal <hr> tags with visual spacers to prevent apply_month_nav
+        # from truncating content (it removes everything after the last <hr>)
+        html_text = re.sub(r"<hr\s*/?>", BODY_SPACER_HTML, html_text, flags=re.IGNORECASE)
         for k, v in CUSTOM_EMOJI_MAP.items():
             html_text = html_text.replace(k, v)
         html_text = _fix_heading_paragraph_mismatches(html_text)

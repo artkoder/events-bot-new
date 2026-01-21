@@ -152,10 +152,17 @@ async def update_status_message(
 
 
 def _find_video(files: Iterable[Path]) -> Path | None:
-    for file in files:
-        if file.suffix.lower() in {".mp4", ".mov", ".mkv", ".webm"}:
-            return file
-    return None
+    candidates = [
+        file
+        for file in files
+        if file.suffix.lower() in {".mp4", ".mov", ".mkv", ".webm"}
+    ]
+    if not candidates:
+        return None
+    preferred = [f for f in candidates if "final" in f.name.lower()]
+    if preferred:
+        return max(preferred, key=lambda f: f.stat().st_size if f.exists() else 0)
+    return max(candidates, key=lambda f: f.stat().st_size if f.exists() else 0)
 
 
 def _find_logs(files: Iterable[Path]) -> list[Path]:
@@ -679,6 +686,31 @@ async def run_kernel_poller(
                     )
             except Exception as e:
                 logger.warning("video_announce: failed to send video to main chat %s: %s", main_chat_id, e)
+    except Exception:
+        logger.exception(
+            "video_announce: failed to download kernel output session=%s kernel=%s",
+            session_obj.id,
+            kernel_ref,
+        )
+        session_obj = await _update_status(
+            db,
+            session_obj.id,
+            status=VideoAnnounceSessionStatus.FAILED,
+            error="kernel output download failed",
+        )
+        if session_obj:
+            await update_status_message(
+                bot,
+                session_obj,
+                status,
+                chat_id=status_chat_id,
+                message_id=status_message_id,
+                allow_send=True,
+            )
+        await bot.send_message(
+            notify_chat_id,
+            f"⚠️ Сессия #{session_obj.id}: не удалось скачать вывод kernel",
+        )
     finally:
         await _cleanup_dataset(client, dataset_slug)
 

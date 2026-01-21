@@ -145,4 +145,4 @@ async def test_run_tomorrow_pipeline_test_mode_limits_scenes(monkeypatch, tmp_pa
     scenario = VideoAnnounceScenario(db, bot, chat_id=123, user_id=1)
     await scenario.run_tomorrow_pipeline(test_mode=True)
 
-    assert started["limit_scenes"] == 1
+    assert started["limit_scenes"] == 3

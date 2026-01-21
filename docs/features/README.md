@@ -5,6 +5,7 @@
 ## Реализовано
 
 - `docs/features/digests/README.md` — дайджесты (подборки/превью/публикация)
+- `docs/features/crumple-video/README.md` — видео-анонсы `/v` (CrumpleVideo)
 - `docs/features/source-parsing/README.md` — извлечение/парсинг событий из внешних источников (в т.ч. `/parse`)
 - `docs/features/tourist-label/README.md` — туристическая метка (ручная разметка + экспорт)
 

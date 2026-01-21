@@ -48,6 +48,13 @@ features:
     docs: docs/features/digests/README.md
     entrypoints:
       - digests.py
+  crumple_video:
+    status: implemented
+    docs: docs/features/crumple-video/README.md
+    entrypoints:
+      - video_announce/scenario.py
+      - kaggle/execute_crumple_test.py
+      - kaggle/CrumpleVideo/crumple_video.ipynb
   source_parsing:
     status: implemented
     docs: docs/features/source-parsing/README.md
