@@ -1195,6 +1195,8 @@ def payload_as_json(payload: RenderPayload, tz: timezone) -> str:
 
     # Build date string from events
     intro_date_str = ""
+    min_date = None
+    max_date = None
     if payload.events:
         dates_list: list[date] = []
         for ev in payload.events:
@@ -1214,16 +1216,27 @@ def payload_as_json(payload: RenderPayload, tz: timezone) -> str:
     # Extract intro_pattern from selection_params
     intro_pattern = str(selection_params.get("intro_pattern") or "STICKER")
 
+    intro_payload = {
+        "count": len(scenes),
+        "text": intro_str,
+        "date": intro_date_str,
+        "cities": event_cities[:4],  # Limit to 4 cities
+        "pattern": intro_pattern,  # Add pattern for notebook
+        "date_start": min_date.isoformat() if min_date else None,
+        "date_end": max_date.isoformat() if max_date else None,
+    }
+
+    selection_meta = {}
+    for key in ("mode", "test", "is_test"):
+        if key in selection_params:
+            selection_meta[key] = selection_params.get(key)
+
     obj = {
-        "intro": {
-            "count": len(scenes),
-            "text": intro_str,
-            "date": intro_date_str,
-            "cities": event_cities[:4],  # Limit to 4 cities
-            "pattern": intro_pattern,  # Add pattern for notebook
-        },
+        "intro": intro_payload,
         "scenes": scenes,
     }
+    if selection_meta:
+        obj["selection_params"] = selection_meta
     return json.dumps(obj, ensure_ascii=False, indent=2)
 
 

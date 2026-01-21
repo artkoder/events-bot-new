@@ -976,6 +976,9 @@ class VideoAnnounceScenario:
             }
         )
         params.pop("instruction", None)
+        if test_mode:
+            params["mode"] = "test"
+            params["is_test"] = True
 
         kernel_ref = self._pick_crumple_kernel_ref() or self._pick_default_kernel_ref()
         if not kernel_ref:
@@ -2793,12 +2796,14 @@ class VideoAnnounceScenario:
 
     def _copy_assets(self, tmp_path: Path) -> None:
         assets_dir = Path(__file__).resolve().parent / "assets"
-        # Requirement: "Kaggle dataset contains only: payload.json, original *.ttf, Pulsarium.mp3, dataset-metadata.json"
+        # Requirement: "Kaggle dataset contains only: payload.json, original *.ttf, Pulsarium.mp3, Final.png, dataset-metadata.json"
         # We need to find the font. The example says "Oswald-VariableFont_wght.ttf"
         font_name = "BebasNeue-Bold.ttf"
+        final_path = Path(__file__).resolve().parent / "crumple_references" / "Final.png"
         assets = [
             (assets_dir / font_name, tmp_path / font_name),
             (assets_dir / "Pulsarium.mp3", tmp_path / "Pulsarium.mp3"),
+            (final_path, tmp_path / "Final.png"),
         ]
         logger.info(
             "video_announce: copying assets from %s, looking for %s files",

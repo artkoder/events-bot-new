@@ -23,6 +23,7 @@ import os
 import shutil
 import tempfile
 import time
+from datetime import date, timedelta
 from pathlib import Path
 
 from video_announce.kaggle_client import KaggleClient
@@ -46,7 +47,7 @@ def create_test_payload(afisha_dir: Path, output_path: Path) -> None:
     images = list(afisha_dir.glob("*.jpg")) + list(afisha_dir.glob("*.png"))
     
     scenes = []
-    for i, img in enumerate(images[:4]):  # Max 4 posters
+    for i, img in enumerate(images[:1]):  # Test run: 1 poster
         scenes.append({
             "about": f"Тестовое событие {i + 1}",
             "date": "25 декабря",
@@ -54,12 +55,19 @@ def create_test_payload(afisha_dir: Path, output_path: Path) -> None:
             "images": [img.name]  # Relative to dataset root
         })
     
+    test_date = date.today() + timedelta(days=1)
     payload = {
         "intro": {
             "count": len(scenes),
             "text": "СОБЫТИЯ КОТОРЫЕ СТОИТ ПОСЕТИТЬ",
             "date": "25-27 декабря",
-            "cities": ["Калининград"]
+            "cities": ["Калининград"],
+            "date_start": test_date.isoformat(),
+            "date_end": test_date.isoformat(),
+        },
+        "selection_params": {
+            "mode": "test",
+            "is_test": True,
         },
         "scenes": scenes
     }
@@ -157,9 +165,10 @@ async def run_crumple_test():
         logger.info(f"Pushing CrumpleVideo kernel with dataset: {dataset_slug}")
         try:
             # Use push_kernel directly with the correct dataset
+            assets_dataset = os.getenv("CRUMPLE_ASSETS_DATASET", "zigomaro/video-announce-assets")
             client.push_kernel(
                 kernel_path=KERNEL_DIR,
-                dataset_sources=[dataset_slug]
+                dataset_sources=[dataset_slug, assets_dataset],
             )
             # Get kernel ref from metadata
             meta = json.loads((KERNEL_DIR / "kernel-metadata.json").read_text())
