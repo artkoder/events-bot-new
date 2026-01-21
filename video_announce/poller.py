@@ -152,10 +152,17 @@ async def update_status_message(
 
 
 def _find_video(files: Iterable[Path]) -> Path | None:
-    for file in files:
-        if file.suffix.lower() in {".mp4", ".mov", ".mkv", ".webm"}:
-            return file
-    return None
+    candidates = [
+        file
+        for file in files
+        if file.suffix.lower() in {".mp4", ".mov", ".mkv", ".webm"}
+    ]
+    if not candidates:
+        return None
+    preferred = [f for f in candidates if "final" in f.name.lower()]
+    if preferred:
+        return max(preferred, key=lambda f: f.stat().st_size if f.exists() else 0)
+    return max(candidates, key=lambda f: f.stat().st_size if f.exists() else 0)
 
 
 def _find_logs(files: Iterable[Path]) -> list[Path]:
