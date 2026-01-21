@@ -14044,6 +14044,7 @@ async def build_source_page_content(
             sanitized = linkify_for_telegraph(sanitized)
         else:
             sanitized = md_to_html(text_value)
+            sanitized = linkify_for_telegraph(sanitized)
         sanitized = re.sub(r"<(\/?)h[12](\b)", r"<\1h3\2", sanitized, flags=re.IGNORECASE)
         sanitized = re.sub(r"<br\s*/?>", "<br/>", sanitized, flags=re.IGNORECASE)
         sanitized = sanitize_telegram_html(sanitized)
