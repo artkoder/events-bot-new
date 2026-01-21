@@ -2934,43 +2934,57 @@ class VideoAnnounceScenario:
             images = scene.get("images") or []
             if isinstance(images, str):
                 images = [images]
-            url = None
+            candidates: list[str] = []
             for candidate in images:
-                if isinstance(candidate, str) and candidate.startswith("http"):
-                    url = candidate
-                    break
-            if not url:
+                if not isinstance(candidate, str):
+                    continue
+                candidate = candidate.strip()
+                if candidate.startswith("http") and candidate not in candidates:
+                    candidates.append(candidate)
+            if not candidates:
                 continue
-            ext = Path(url.split("?", 1)[0]).suffix.lower()
-            if ext not in {".jpg", ".jpeg", ".png", ".webp"}:
-                ext = ".jpg"
-            filename = f"poster_{idx + 1}{ext}"
-            dest = tmp_path / filename
-            try:
-                resp = await http_call(
-                    "video_announce.poster_prefetch",
-                    "GET",
-                    url,
-                    timeout=20,
-                    retries=3,
-                    backoff=1.0,
-                    headers=headers,
-                )
-            except Exception:
+            prefetched = False
+            for url in candidates:
+                ext = Path(url.split("?", 1)[0]).suffix.lower()
+                if ext not in {".jpg", ".jpeg", ".png", ".webp"}:
+                    ext = ".jpg"
+                filename = f"poster_{idx + 1}{ext}"
+                dest = tmp_path / filename
+                try:
+                    resp = await http_call(
+                        "video_announce.poster_prefetch",
+                        "GET",
+                        url,
+                        timeout=20,
+                        retries=3,
+                        backoff=1.0,
+                        headers=headers,
+                    )
+                except Exception:
+                    logger.warning(
+                        "video_announce: failed to prefetch poster url=%s",
+                        url,
+                        exc_info=True,
+                    )
+                    continue
+                if resp.status_code != 200 or not resp.content:
+                    logger.warning(
+                        "video_announce: poster fetch failed status=%s url=%s",
+                        resp.status_code,
+                        url,
+                    )
+                    continue
+                dest.write_bytes(resp.content)
+                scene["image"] = filename
+                downloaded += 1
+                prefetched = True
+                break
+            if not prefetched:
                 logger.warning(
-                    "video_announce: failed to prefetch poster url=%s", url, exc_info=True
+                    "video_announce: all poster prefetch candidates failed scene=%s urls=%s",
+                    idx,
+                    candidates,
                 )
-                continue
-            if resp.status_code != 200 or not resp.content:
-                logger.warning(
-                    "video_announce: poster fetch failed status=%s url=%s",
-                    resp.status_code,
-                    url,
-                )
-                continue
-            dest.write_bytes(resp.content)
-            scene["image"] = filename
-            downloaded += 1
         if downloaded:
             logger.info("video_announce: prefetched %s test posters", downloaded)
 

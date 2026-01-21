@@ -43,6 +43,7 @@ logger = logging.getLogger(__name__)
 TELEGRAPH_EXCERPT_LIMIT = 1200
 POSTER_OCR_EXCERPT_LIMIT = 800
 TRACE_MAX_LEN = 100_000
+MAX_POSTER_URLS = 3
 
 
 def _is_fair_event(ev: Event) -> bool:
@@ -1090,12 +1091,20 @@ def build_payload(
 
 def payload_as_json(payload: RenderPayload, tz: timezone) -> str:
     def _poster_urls(ev: Event) -> list[str]:
-        urls = []
+        urls: list[str] = []
+        seen: set[str] = set()
         for url in getattr(ev, "photo_urls", []) or []:
+            if not url:
+                continue
             if url.startswith("http:"):
                 url = "https:" + url[5:]
+            if url in seen:
+                continue
+            seen.add(url)
             urls.append(url)
-        return urls[:1]
+            if len(urls) >= MAX_POSTER_URLS:
+                break
+        return urls
 
     def _is_missing_time(t: str) -> bool:
         if not t:
