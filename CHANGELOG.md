@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [1.9.7] - 2026-01-21
+### Changed
+- **CrumpleVideo**: Adjusted audio start timestamp to 1:17 (was 1:10) for better intro sync.
+- **CrumpleVideo**: Increased `is_test_mode` render quality: samples raised to 18, percentage to 70% for clearer previews.
+
+
 ## [1.9.6] - 2026-01-21
 ### Fixed
 - **Video Announce**: Improved random_order fallback and added notebook logging.
