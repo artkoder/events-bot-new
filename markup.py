@@ -90,7 +90,8 @@ def linkify_for_telegraph(text_or_html: str) -> str:
             # Local number without country code, assume +7 for Russia
             tel_country = "+7"
         tel_number = f"{tel_country}{area}{g2}{g3}{g4}"
-        return f'<a href="tel:{tel_number}">{original}</a>'
+        clean_number = tel_number.lstrip("+")
+        return f'<a href="tg://resolve?phone={clean_number}">{original}</a>'
 
     text = _VK_LINK_RE.sub(repl_vk, text_or_html)
     text = MD_LINK.sub(lambda m: f'<a href="{_unescape_md_url(m[2])}">{m[1]}</a>', text)
