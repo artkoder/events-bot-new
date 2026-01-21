@@ -1027,7 +1027,7 @@ class VideoAnnounceScenario:
         msg = await self.start_render(
             obj.id,
             message=None,
-            limit_scenes=1 if test_mode else None,
+            limit_scenes=3 if test_mode else None,
         )
         if msg and msg != "Рендеринг запущен":
             await self.bot.send_message(self.chat_id, f"Сессия #{obj.id}: {msg}")
