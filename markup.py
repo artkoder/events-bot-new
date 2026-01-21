@@ -101,6 +101,13 @@ def linkify_for_telegraph(text_or_html: str) -> str:
     # Convert phone numbers to tel: links (only outside existing links)
     parts = re.split(r'(<a\b[^>]*>.*?</a>)', text, flags=re.IGNORECASE | re.DOTALL)
     for idx in range(0, len(parts), 2):
+        if "+7" in parts[idx] or " 8" in parts[idx]:
+            logging.info("DEBUG: linkify phone candidate part: %r", parts[idx])
+            match = _PHONE_RE.search(parts[idx])
+            if match:
+                logging.info("DEBUG: linkify phone match found: %s", match.group(0))
+            else:
+                logging.info("DEBUG: linkify phone NO match")
         parts[idx] = _PHONE_RE.sub(repl_phone, parts[idx])
     text = "".join(parts)
     return text

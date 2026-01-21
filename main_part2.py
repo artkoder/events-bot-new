@@ -10,7 +10,7 @@ from aiogram import Bot, types
 
 from aiohttp import web
 from telegraph import Telegraph
-from markup import md_to_html, telegraph_br
+from markup import md_to_html, telegraph_br, linkify_for_telegraph
 
 from models import Event, Festival, WeekPage, WeekendPage, MonthPage, MonthPagePart, VkMissRecord, VkMissReviewSession, User
 from poster_media import PosterMedia
