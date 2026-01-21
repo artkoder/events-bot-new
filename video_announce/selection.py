@@ -1306,9 +1306,23 @@ async def build_selection(
     if ctx.random_order and events:
         event_ids = [e.id for e in events if e.id is not None]
         ocr_texts, ocr_titles = await _load_poster_ocr_texts(db, event_ids)
-        events = [e for e in events if e.id is not None and e.id in ocr_texts]
         random_ocr_texts = ocr_texts
         random_ocr_titles = ocr_titles
+        ocr_event_ids = set(ocr_texts) | set(ocr_titles)
+        if ocr_event_ids:
+            ocr_events = [e for e in events if e.id is not None and e.id in ocr_event_ids]
+            if len(ocr_events) >= max(1, ctx.default_selected_max):
+                events = ocr_events
+            else:
+                logger.warning(
+                    "video_announce: random_order OCR=%d < target=%d, mixing non-OCR events",
+                    len(ocr_events),
+                    ctx.default_selected_max,
+                )
+        else:
+            logger.warning(
+                "video_announce: random_order no OCR texts or titles, falling back to titles"
+            )
 
     async def _rank_events(
         current_events: Sequence[Event],
@@ -1342,7 +1356,22 @@ async def build_selection(
             ocr_texts = random_ocr_texts or {}
             ocr_titles = random_ocr_titles or {}
 
-            ocr_events = [e for e in selected_local if e.id is not None and e.id in ocr_texts]
+            ocr_events = [e for e in selected_local if e.id is not None]
+            ocr_event_ids = set(ocr_texts or {}) | set(ocr_titles or {})
+            if ocr_event_ids:
+                with_ocr = [e for e in ocr_events if e.id in ocr_event_ids]
+                if len(with_ocr) >= max(1, ctx.default_selected_max):
+                    ocr_events = with_ocr
+                elif with_ocr:
+                    logger.warning(
+                        "video_announce: random_order using %d OCR + %d non-OCR events",
+                        len(with_ocr),
+                        len(ocr_events) - len(with_ocr),
+                    )
+                else:
+                    logger.warning(
+                        "video_announce: random_order OCR missing for candidates, using titles",
+                    )
             if not ocr_events:
                 return [], mandatory_ids_local, set(), None, True
 
