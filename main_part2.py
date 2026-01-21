@@ -13908,6 +13908,7 @@ async def build_source_page_content(
         raise ValueError(f"unknown image_mode={image_mode}")
     if page_mode not in {"default", "history"}:
         raise ValueError(f"unknown page_mode={page_mode}")
+    logging.info("DEBUG: build_source_page_content text_len=%s html_text_len=%s", len(text or ""), len(html_text or ""))
     html_content = ""
     def strip_title(line_text: str) -> str:
         lines = line_text.splitlines()
