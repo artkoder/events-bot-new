@@ -49,6 +49,9 @@ def simple_md_to_html(text: str) -> str:
 
 def linkify_for_telegraph(text_or_html: str) -> str:
     """Преобразует голые URL, пары «текст (url)» и телефоны в кликабельные ссылки."""
+    if "+7" in text_or_html:
+        logging.info("DEBUG: linkify_for_telegraph input len=%d content=%r", len(text_or_html), text_or_html[:200])
+
     def repl_text(m: re.Match[str]) -> str:
         label, href = m.group(1).strip(), _unescape_md_url(m.group(2))
         return f'<a href="{href}">{label}</a>'
