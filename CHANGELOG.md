@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [1.9.6] - 2026-01-21
+### Fixed
+- **Video Announce**: Improved random_order fallback and added notebook logging.
+- **Tests**: Fixed import error in `test_video_announce_selection.py`.
+
+
 ## [1.9.5] - 2026-01-20
 ### Added
 - **Preview 3D**: Автоматическая генерация 3D-превью (`/3di`) по расписанию (`ENABLE_3DI_SCHEDULED=1`, `THREEDI_TIMES_LOCAL`).
