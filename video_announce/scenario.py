@@ -42,6 +42,7 @@ from .finalize import prepare_final_texts
 from .kaggle_client import DEFAULT_KERNEL_PATH, KaggleClient, list_local_kernels
 from .poller import (
     VIDEO_MAX_MB,
+    VIDEO_KAGGLE_TIMEOUT_MINUTES,
     remember_status_message,
     run_kernel_poller,
     update_status_message,
@@ -857,7 +858,7 @@ class VideoAnnounceScenario:
             keyboard.append(
                 [
                     types.InlineKeyboardButton(
-                        text="🧪 Тест Завтра (1 сц)", callback_data="vidauto:test_tomorrow"
+                        text="🧪 Тест Завтра (5 сцен)", callback_data="vidauto:test_tomorrow"
                     )
                 ]
             )
@@ -1005,7 +1006,7 @@ class VideoAnnounceScenario:
             (
                 f"Сессия #{obj.id} запущена: завтра ({tomorrow.isoformat()}), "
                 f"случайный порядок, до {selected_max} событий"
-                f"{' (🧪 тест: 1 сц)' if test_mode else ''}. Kernel: {kernel_ref}"
+                f"{' (🧪 тест: 5 сцен)' if test_mode else ''}. Kernel: {kernel_ref}"
             ),
         )
 
@@ -1027,7 +1028,7 @@ class VideoAnnounceScenario:
         msg = await self.start_render(
             obj.id,
             message=None,
-            limit_scenes=3 if test_mode else None,
+            limit_scenes=5 if test_mode else None,
         )
         if msg and msg != "Рендеринг запущен":
             await self.bot.send_message(self.chat_id, f"Сессия #{obj.id}: {msg}")
@@ -2072,7 +2073,7 @@ class VideoAnnounceScenario:
                 status_chat_id=status_chat_id,
                 status_message_id=status_message_id,
                 poll_interval=60,
-                timeout_minutes=40,
+                timeout_minutes=VIDEO_KAGGLE_TIMEOUT_MINUTES,
                 dataset_slug=dataset_slug,
             )
         )
@@ -2829,7 +2830,8 @@ class VideoAnnounceScenario:
         username = os.getenv("KAGGLE_USERNAME", "")
         if not username:
             raise RuntimeError("KAGGLE_USERNAME not set")
-        slug = f"video-session-{session_obj.id}"
+        # Match legacy VideoAfisha kernel dataset discovery pattern.
+        slug = f"video-afisha-session-{session_obj.id}"
         dataset_id = f"{username}/{slug}"
         meta = {
             "title": f"Video Afisha Session {session_obj.id}",

@@ -47,7 +47,7 @@ def create_test_payload(afisha_dir: Path, output_path: Path) -> None:
     images = list(afisha_dir.glob("*.jpg")) + list(afisha_dir.glob("*.png"))
     
     scenes = []
-    for i, img in enumerate(images[:1]):  # Test run: 1 poster
+    for i, img in enumerate(images[:5]):  # Test run: 5 posters
         scenes.append({
             "about": f"Тестовое событие {i + 1}",
             "date": "25 декабря",
@@ -181,7 +181,7 @@ async def run_crumple_test():
         
         # Poll for completion
         start_time = time.time()
-        max_wait = 1800  # 30 minutes (Blender rendering is slow)
+        max_wait = 9000  # 150 minutes (Blender rendering is slow)
         has_started = False
         
         while time.time() - start_time < max_wait:

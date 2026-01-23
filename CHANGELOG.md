@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [1.9.8] - 2026-01-23
+### Changed
+- **CrumpleVideo**: Updated test mode to use 5 scenes (was 1), samples=15, render_pct=84.
+- **Video Announce**: Increased Kaggle timeout from 40 to 150 minutes to handle queue delays.
+- **Kaggle Assets**: Fixed dataset slug format to `video-afisha-session-{id}` for compatibility.
+
 ## [1.9.7] - 2026-01-21
 ### Changed
 - **CrumpleVideo**: Adjusted audio start timestamp to 1:17 (was 1:10) for better intro sync.

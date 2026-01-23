@@ -47,7 +47,7 @@ def _read_positive_int(env_key: str, default: int) -> int:
 
 
 VIDEO_MAX_MB = _read_positive_int("VIDEO_MAX_MB", 50)
-VIDEO_KAGGLE_TIMEOUT_MINUTES = _read_positive_int("VIDEO_KAGGLE_TIMEOUT_MINUTES", 40)
+VIDEO_KAGGLE_TIMEOUT_MINUTES = _read_positive_int("VIDEO_KAGGLE_TIMEOUT_MINUTES", 150)
 
 logger.info(
     "video_announce: limits configured max_video_mb=%s kaggle_timeout_min=%s",
