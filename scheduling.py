@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from functools import partial
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
 from uuid import uuid4
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from apscheduler.events import (
     EVENT_JOB_ERROR,
@@ -95,6 +95,21 @@ def _cron_from_local(
             default_minute,
         )
     return hour, minute
+
+
+def _safe_zoneinfo(tz_name: str, *, label: str) -> timezone | ZoneInfo:
+    try:
+        return ZoneInfo(tz_name)
+    except ZoneInfoNotFoundError:
+        logging.warning("invalid %s timezone=%s; using UTC", label, tz_name)
+        return timezone.utc
+
+
+def _env_enabled(key: str, *, default: bool = False) -> bool:
+    raw = os.getenv(key)
+    if raw is None:
+        return default
+    return raw == "1"
 
 
 class BatchProgress:
@@ -471,6 +486,8 @@ def startup(
             }
         )
 
+    is_prod = os.getenv("DEV_MODE") != "1" and os.getenv("PYTEST_CURRENT_TEST") is None
+
     main_module = None
 
     def resolve(name: str, value):
@@ -506,7 +523,19 @@ def startup(
         else nightly_page_sync
     )
 
-    job = _scheduler.add_job(
+    def _register_job(job_id: str, *args, **kwargs):
+        try:
+            job = _scheduler.add_job(*args, **kwargs)
+        except Exception:
+            logging.exception("SCHED failed to register job id=%s", job_id)
+            return None
+        logging.info(
+            "SCHED registered job id=%s next_run=%s", job.id, _job_next_run(job)
+        )
+        return job
+
+    _register_job(
+        "vk_scheduler",
         _job_wrapper("vk_scheduler", vk_scheduler),
         "cron",
         id="vk_scheduler",
@@ -517,10 +546,8 @@ def startup(
         coalesce=True,
         misfire_grace_time=30,
     )
-    logging.info(
-        "SCHED registered job id=%s next_run=%s", job.id, _job_next_run(job)
-    )
-    job = _scheduler.add_job(
+    _register_job(
+        "vk_poll_scheduler",
         _job_wrapper("vk_poll_scheduler", vk_poll_scheduler),
         "cron",
         id="vk_poll_scheduler",
@@ -531,10 +558,8 @@ def startup(
         coalesce=True,
         misfire_grace_time=30,
     )
-    logging.info(
-        "SCHED registered job id=%s next_run=%s", job.id, _job_next_run(job)
-    )
-    job = _scheduler.add_job(
+    _register_job(
+        "cleanup_scheduler",
         _job_wrapper("cleanup_scheduler", cleanup_scheduler),
         "cron",
         id="cleanup_scheduler",
@@ -546,10 +571,8 @@ def startup(
         coalesce=True,
         misfire_grace_time=30,
     )
-    logging.info(
-        "SCHED registered job id=%s next_run=%s", job.id, _job_next_run(job)
-    )
-    job = _scheduler.add_job(
+    _register_job(
+        "partner_notification_scheduler",
         _job_wrapper("partner_notification_scheduler", partner_notification_scheduler),
         "cron",
         id="partner_notification_scheduler",
@@ -560,11 +583,8 @@ def startup(
         coalesce=True,
         misfire_grace_time=30,
     )
-    logging.info(
-        "SCHED registered job id=%s next_run=%s", job.id, _job_next_run(job)
-    )
-
-    job = _scheduler.add_job(
+    _register_job(
+        "fest_nav_rebuild",
         _job_wrapper("fest_nav_rebuild", rebuild_fest_nav_if_changed),
         "cron",
         id="fest_nav_rebuild",
@@ -576,15 +596,12 @@ def startup(
         coalesce=True,
         misfire_grace_time=30,
     )
-    logging.info(
-        "SCHED registered job id=%s next_run=%s", job.id, _job_next_run(job)
-    )
 
     times_raw = os.getenv(
         "VK_CRAWL_TIMES_LOCAL", "05:15,09:15,13:15,17:15,21:15,22:45"
     )
     tz_name = os.getenv("VK_CRAWL_TZ", "Europe/Kaliningrad")
-    tz = ZoneInfo(tz_name)
+    tz = _safe_zoneinfo(tz_name, label="VK_CRAWL_TZ")
     for idx, t in enumerate(times_raw.split(",")):
         t = t.strip()
         if not t:
@@ -596,7 +613,8 @@ def startup(
             continue
         now_local = datetime.now(tz).replace(hour=hh, minute=mm, second=0, microsecond=0)
         now_utc = now_local.astimezone(timezone.utc)
-        job = _scheduler.add_job(
+        _register_job(
+            f"vk_crawl_cron_{idx}",
             _job_wrapper("vk_crawl_cron", vk_crawl_cron),
             "cron",
             id=f"vk_crawl_cron_{idx}",
@@ -608,12 +626,10 @@ def startup(
             coalesce=True,
             misfire_grace_time=30,
         )
-        logging.info(
-            "SCHED registered job id=%s next_run=%s", job.id, _job_next_run(job)
-        )
 
     # Source parsing from theatres (before daily announcement at 08:00)
-    if os.getenv("ENABLE_SOURCE_PARSING") == "1":
+    enable_source_parsing = _env_enabled("ENABLE_SOURCE_PARSING", default=is_prod)
+    if enable_source_parsing:
         from source_parsing.commands import source_parsing_scheduler
         parsing_time_raw = os.getenv("SOURCE_PARSING_TIME_LOCAL", "02:15").strip()
         parsing_tz_name = os.getenv("SOURCE_PARSING_TZ", "Europe/Kaliningrad")
@@ -624,7 +640,8 @@ def startup(
             default_minute="0",
             label="SOURCE_PARSING_TIME_LOCAL",
         )
-        job = _scheduler.add_job(
+        _register_job(
+            "source_parsing",
             _job_wrapper("source_parsing", source_parsing_scheduler),
             "cron",
             id="source_parsing",
@@ -636,11 +653,11 @@ def startup(
             coalesce=True,
             misfire_grace_time=30,
         )
-        logging.info(
-            "SCHED registered job id=%s next_run=%s", job.id, _job_next_run(job)
-        )
+    else:
+        logging.info("SCHED skipping source_parsing (ENABLE_SOURCE_PARSING!=1)")
 
-    if os.getenv("ENABLE_SOURCE_PARSING_DAY") == "1":
+    enable_source_parsing_day = _env_enabled("ENABLE_SOURCE_PARSING_DAY", default=is_prod)
+    if enable_source_parsing_day:
         from source_parsing.commands import source_parsing_scheduler_if_changed
         day_time_raw = os.getenv("SOURCE_PARSING_DAY_TIME_LOCAL", "14:15").strip()
         day_tz_name = os.getenv("SOURCE_PARSING_DAY_TZ", "Europe/Kaliningrad")
@@ -651,7 +668,8 @@ def startup(
             default_minute="15",
             label="SOURCE_PARSING_DAY_TIME_LOCAL",
         )
-        job = _scheduler.add_job(
+        _register_job(
+            "source_parsing_day",
             _job_wrapper("source_parsing_day", source_parsing_scheduler_if_changed),
             "cron",
             id="source_parsing_day",
@@ -663,11 +681,11 @@ def startup(
             coalesce=True,
             misfire_grace_time=30,
         )
-        logging.info(
-            "SCHED registered job id=%s next_run=%s", job.id, _job_next_run(job)
-        )
+    else:
+        logging.info("SCHED skipping source_parsing_day (ENABLE_SOURCE_PARSING_DAY!=1)")
 
-    if os.getenv("ENABLE_3DI_SCHEDULED") == "1":
+    enable_3di = _env_enabled("ENABLE_3DI_SCHEDULED", default=is_prod)
+    if enable_3di:
         from preview_3d.handlers import run_3di_new_only_scheduler
         admin_chat_id = os.getenv("ADMIN_CHAT_ID")
         run_chat_id = int(admin_chat_id) if admin_chat_id else None
@@ -684,7 +702,8 @@ def startup(
                 default_minute="15",
                 label="THREEDI_TIMES_LOCAL",
             )
-            job = _scheduler.add_job(
+            _register_job(
+                f"3di_scheduler_{idx}",
                 _job_wrapper("3di_scheduler", run_3di_new_only_scheduler),
                 "cron",
                 id=f"3di_scheduler_{idx}",
@@ -697,12 +716,12 @@ def startup(
                 coalesce=True,
                 misfire_grace_time=30,
             )
-            logging.info(
-                "SCHED registered job id=%s next_run=%s", job.id, _job_next_run(job)
-            )
+    else:
+        logging.info("SCHED skipping 3di_scheduler (ENABLE_3DI_SCHEDULED!=1)")
 
     if os.getenv("ENABLE_NIGHTLY_PAGE_SYNC") == "1":
-        job = _scheduler.add_job(
+        _register_job(
+            "nightly_page_sync",
             _job_wrapper("nightly_page_sync", nightly_page_sync),
             "cron",
             id="nightly_page_sync",
@@ -714,19 +733,17 @@ def startup(
             coalesce=True,
             misfire_grace_time=30,
         )
-        logging.info(
-            "SCHED registered job id=%s next_run=%s",
-            job.id,
-            _job_next_run(job),
-        )
+    else:
+        logging.info("SCHED skipping nightly_page_sync (ENABLE_NIGHTLY_PAGE_SYNC!=1)")
 
     # Pinned button update at 18:00 Kaliningrad time (UTC+2 = 16:00 UTC)
     from handlers.pinned_button import pinned_button_scheduler
     
-    pinned_tz = ZoneInfo("Europe/Kaliningrad")
+    pinned_tz = _safe_zoneinfo("Europe/Kaliningrad", label="PINNED_BUTTON_TZ")
     pinned_local = datetime.now(pinned_tz).replace(hour=18, minute=0, second=0, microsecond=0)
     pinned_utc = pinned_local.astimezone(timezone.utc)
-    job = _scheduler.add_job(
+    _register_job(
+        "pinned_button_scheduler",
         _job_wrapper("pinned_button_scheduler", pinned_button_scheduler),
         "cron",
         id="pinned_button_scheduler",
@@ -737,9 +754,6 @@ def startup(
         max_instances=1,
         coalesce=True,
         misfire_grace_time=60,
-    )
-    logging.info(
-        "SCHED registered job id=%s next_run=%s", job.id, _job_next_run(job)
     )
 
     async def _run_maintenance(job, name: str, timeout: float, run_id: str | None = None) -> None:
@@ -756,7 +770,8 @@ def startup(
             logging.warning("db_maintenance %s failed", name, exc_info=True)
 
     if db is not None:
-        _scheduler.add_job(
+        _register_job(
+            "db_optimize",
             _job_wrapper("db_optimize", _run_maintenance),
             "interval",
             id="db_optimize",
@@ -767,7 +782,8 @@ def startup(
             coalesce=True,
             misfire_grace_time=30,
         )
-        _scheduler.add_job(
+        _register_job(
+            "db_wal_checkpoint",
             _job_wrapper("db_wal_checkpoint", _run_maintenance),
             "interval",
             id="db_wal_checkpoint",
@@ -778,7 +794,8 @@ def startup(
             coalesce=True,
             misfire_grace_time=30,
         )
-        _scheduler.add_job(
+        _register_job(
+            "db_vacuum",
             _job_wrapper("db_vacuum", _run_maintenance),
             "interval",
             id="db_vacuum",
