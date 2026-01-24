@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.10.2] - 2026-01-24
+### Fixed
+- Filtered out past events during parsing to prevent them from being announced.
+
 ## [1.10.1] - 2026-01-24
 ### Fixed
 - Fixed `TypeError` in parsing results summary when using date objects (Philharmonia parser).
