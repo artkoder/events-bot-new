@@ -981,7 +981,7 @@ async def run_source_parsing(
                 result.errors.append(f"Source {escape_md(source)}: {escape_md(str(e))}")
                 
         months = sorted({
-            event.parsed_date[:7]
+            str(event.parsed_date)[:7]
             for events in events_by_source.values()
             for event in events
             if event.parsed_date
@@ -1143,6 +1143,40 @@ async def process_source_events(
                 time.monotonic() - event_start,
             )
             continue
+
+        # Filter out past events
+        from datetime import datetime, timezone
+        
+        # We use current UTC date for filtering. 
+        # Ideally we should use local date, but UTC is a safe conservative baseline 
+        # so we don't filter out "today" events that might be technically "yesterday" in UTC late at night,
+        # or vice-versa. 
+        # Actually proper logic: 
+        # If event_date < current_date, it's in the past. 
+        # To be safe for timezone edge cases (late night parsing), 
+        # let's only filter if it's strictly before TODAY.
+        
+        current_date = datetime.now(timezone.utc).date()
+        
+        # For string dates, we can't easily compare, but they should be parsed objects here 
+        # thanks to our previous fixes (or at least Philharmonia ones are).
+        # We can try to convert if generic object.
+        event_date_obj = event.parsed_date
+        if isinstance(event_date_obj, str):
+             try:
+                 event_date_obj = datetime.strptime(event_date_obj, "%Y-%m-%d").date()
+             except:
+                 pass
+
+        if isinstance(event_date_obj, type(current_date)) and event_date_obj < current_date:
+             stats.skipped += 1
+             result_tag = "past_event"
+             logger.info(
+                "source_parsing: skipping past event title=%s date=%s",
+                event.title[:50],
+                event_date_obj,
+             )
+             continue
 
         if diag_enabled:
             desc_len = len(event.description or "")

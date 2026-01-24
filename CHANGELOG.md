@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.10.3] - 2026-01-24
+### Fixed
+- **3D Preview**: Fixed logic in automatic generation to reliably detect and process events with missing previews ("gaps"), scanning the last 14 days.
+- **3D Preview**: Added an extra scheduled run at 17:15 to ensure previews are ready for the 18:00 pinned button update.
+
+## [1.10.2] - 2026-01-24
+### Fixed
+- Filtered out past events during parsing to prevent them from being announced.
+
+## [1.10.1] - 2026-01-24
+### Fixed
+- Fixed `TypeError` in parsing results summary when using date objects (Philharmonia parser).
+
 ## [Unreleased]
 
 ## [1.10.0] - 2026-01-24
