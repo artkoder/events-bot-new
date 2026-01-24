@@ -389,7 +389,7 @@ def _job_next_run(job):
 
 
 def _job_wrapper(job_id: str, func):
-    async def _run(*args):
+    async def _run(*args, **kwargs):
         run_id, start = _run_meta.get(job_id, (uuid4().hex, _time.perf_counter()))
         done = asyncio.Event()
 
@@ -406,7 +406,7 @@ def _job_wrapper(job_id: str, func):
 
         hb_task = asyncio.create_task(heartbeat())
         try:
-            return await func(*args, run_id=run_id)
+            return await func(*args, run_id=run_id, **kwargs)
         finally:
             done.set()
             hb_task.cancel()

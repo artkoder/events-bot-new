@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [1.9.11] - 2026-01-24
+### Fixed
+- **Scheduler**: Fixed `_job_wrapper` to accept `**kwargs`, resolving `ValueError` when registering jobs with keyword arguments (like `3di_scheduler` with `chat_id`).
+
 ## [1.9.10] - 2026-01-24
 ### Fixed
 - **Scheduler**: Added `_register_job` wrapper to prevent scheduler startup crashes if a single job fails to register.
