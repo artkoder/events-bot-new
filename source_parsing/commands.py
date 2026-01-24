@@ -40,6 +40,7 @@ SOURCE_PARSING_GUARD_URLS = {
     "muzteatr": "https://muzteatr39.ru/action/cat/afisha/",
     "sobor": "https://sobor39.ru/events/concerts/night/",
     "tretyakov": "https://kaliningrad.tretyakovgallery.ru/events/",
+    "philharmonia": "https://filarmonia39.ru/?event",
 }
 
 
@@ -104,6 +105,7 @@ def _format_added_events_lines(added_events) -> list[str]:
         "muzteatr": "Музтеатр",
         "sobor": "Собор",
         "tretyakov": "Третьяковка",
+        "philharmonia": "Филармония",
     }
     lines = [f"📌 **Добавленные события:** {len(added_events)}", ""]
     for item in added_events:
@@ -134,6 +136,7 @@ def _format_updated_events_lines(updated_events) -> list[str]:
         "muzteatr": "Музтеатр",
         "sobor": "Собор",
         "tretyakov": "Третьяковка",
+        "philharmonia": "Филармония",
     }
     lines = [f"🔄 **Обновлённые события:** {len(updated_events)}", ""]
     for item in updated_events:
@@ -182,6 +185,7 @@ async def handle_parse_check_callback(callback_query: types.CallbackQuery, bot: 
         "parse_check_muzteatr": "muzteatr",
         "parse_check_sobor": "sobor",
         "parse_check_tretyakov": "tretyakov",
+        "parse_check_philharmonia": "philharmonia",
     }
     source = source_map.get(callback_query.data)
     if not source:
@@ -223,6 +227,9 @@ async def handle_parse_command(message: types.Message, db: Database, bot: Bot) -
             [
                 types.InlineKeyboardButton(text="Собор", callback_data="parse_check_sobor"),
                 types.InlineKeyboardButton(text="Третьяковка", callback_data="parse_check_tretyakov"),
+            ],
+            [
+                types.InlineKeyboardButton(text="Филармония", callback_data="parse_check_philharmonia"),
             ]
         ])
         await bot.send_message(

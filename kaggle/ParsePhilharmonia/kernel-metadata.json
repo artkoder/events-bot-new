@@ -1,0 +1,14 @@
+{
+    "id": "zigomaro/parse-philharmonia",
+    "title": "Parse Philharmonia",
+    "code_file": "parse_philharmonia.ipynb",
+    "language": "python",
+    "kernel_type": "notebook",
+    "is_private": true,
+    "enable_gpu": false,
+    "enable_internet": true,
+    "dataset_sources": [],
+    "competition_sources": [],
+    "kernel_sources": [],
+    "slug": "parse-philharmonia"
+}

@@ -2,9 +2,21 @@
 
 ## [Unreleased]
 
+## [1.10.0] - 2026-01-24
+### Added
+- **Source Parsing**: Added full support for **Kaliningrad Regional Philharmonia** (`filarmonia39.ru`).
+  - Implemented Kaggle parser (`ParsePhilharmonia`) that scans proper 6-month window using direct URL navigation.
+  - Integration in `/parse` command and scheduled jobs.
+  - Supports automatic ticket status updates (`available` / `unavailable`) and price extraction.
+  - Proper date normalization to avoid parsing errors.
+
+### Fixed
+- **Source Parsing**: Updated `requirements.txt` to include `beautifulsoup4` and `lxml` for local parsing utilities if needed.
+
 ## [1.9.13] - 2026-01-24
 ### Changed
 - **CrumpleVideo**: Minor metadata updates in notebook.
+
 
 ## [1.9.12] - 2026-01-24
 ### Added
