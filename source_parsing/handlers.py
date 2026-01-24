@@ -739,6 +739,7 @@ def format_parsing_report(result: SourceParsingResult) -> str:
             "muzteatr": "Музтеатр",
             "sobor": "Собор",
             "tretyakov": "🎨 Третьяковка",
+            "philharmonia": "🎵 Филармония",
         }.get(source, source)
         
         lines.append(f"• **{escape_md(source_label)}**:")
@@ -844,6 +845,13 @@ async def run_source_parsing(
                 "source_parsing: failed to update kaggle status message",
                 exc_info=True,
             )
+    
+    # Import Philharmonia runner
+    from source_parsing.philharmonia import (
+        run_philharmonia_kaggle_kernel,
+        parse_philharmonia_output,
+    )
+
     if DEBUG_MAX_EVENTS:
         logger.info(
             "source_parsing: DEBUG limit active max_new_events=%d",
@@ -851,33 +859,61 @@ async def run_source_parsing(
         )
     
     try:
-        # 1. Run Kaggle kernel
-        try:
-            status, output_files, duration = await run_kaggle_kernel(
-                status_callback=_update_kaggle_status,
-            )
-            result.kernel_duration = duration
-            result.json_file_paths = [
-                path for path in output_files
-                if Path(path).suffix.lower() == ".json" and Path(path).exists()
-            ]
-            
-            if status != "complete":
-                result.errors.append(f"Kaggle kernel failed: {status}")
-                return result
-                
-            logger.info(
-                "source_parsing: kaggle complete duration=%.1fs files=%d",
-                duration,
-                len(output_files),
-            )
-            
-        except Exception as e:
-            logger.error("source_parsing: kaggle error: %s", e, exc_info=True)
-            result.errors.append(f"Kaggle error: {str(e)}")
-            return result
+        # 1. Run Kaggle kernels (Parallel)
+        logger.info("source_parsing: starting kernels (theatres + philharmonia)")
+        
+        # We need independent callbacks for status updates if we want to show both.
+        # But for now, let's just let generic status callback handle generic theatre kernel.
+        # Philharmonia status might overwrite or we can use a wrapper.
+        # Ideally we should show multiple status messages or a combined one.
+        # For simplicity, I'll reuse the callback but separate messages or just let them race (not ideal).
+        # Let's run them successfully.
+        
+        task_theatres = asyncio.create_task(run_kaggle_kernel(status_callback=_update_kaggle_status))
+        task_phil = asyncio.create_task(run_philharmonia_kaggle_kernel()) # No callback for now to avoid mess
 
-        # 2. Parse all files first
+        results = await asyncio.gather(task_theatres, task_phil, return_exceptions=True)
+        
+        # Result 0: Theatres
+        # Result 1: Philharmonia
+        
+        # Process Theatres Result
+        res_theatres = results[0]
+        if isinstance(res_theatres, Exception):
+             logger.error("source_parsing: theatres kernel error: %s", res_theatres)
+             result.errors.append(f"Theatres kernel error: {res_theatres}")
+             theatre_files = []
+        else:
+             status_t, files_t, dur_t = res_theatres
+             result.kernel_duration = max(result.kernel_duration, dur_t)
+             if status_t == "complete":
+                 theatre_files = [f for f in files_t if Path(f).suffix.lower() == ".json"]
+                 result.json_file_paths.extend(theatre_files)
+             else:
+                 result.errors.append(f"Theatres kernel failed: {status_t}")
+                 theatre_files = []
+
+        # Process Philharmonia Result
+        res_phil = results[1]
+        if isinstance(res_phil, Exception):
+             logger.error("source_parsing: philharmonia kernel error: %s", res_phil)
+             result.errors.append(f"Philharmonia kernel error: {res_phil}")
+             phil_files = []
+        else:
+             status_p, files_p, dur_p = res_phil
+             result.kernel_duration = max(result.kernel_duration, dur_p)
+             if status_p == "complete":
+                 phil_files = [f for f in files_p if f.endswith("philharmonia_results.json")]
+                 # If exact name not matched, take all json from that run
+                 if not phil_files:
+                     phil_files = [f for f in files_p if Path(f).suffix.lower() == ".json"]
+                 
+                 result.json_file_paths.extend(phil_files)
+             else:
+                 result.errors.append(f"Philharmonia kernel failed: {status_p}")
+                 phil_files = []
+
+        # 2. Parse files
         events_by_source = {}
 
         def _normalize_source_name(raw_name: str) -> str:
@@ -893,27 +929,28 @@ async def run_source_parsing(
                 return "tretyakov"
             return normalized
         
-        for file_path_str in output_files:
+        # Parse Theatres
+        for file_path_str in theatre_files:
             try:
                 file_path = Path(file_path_str)
-                if file_path.suffix.lower() != ".json":
-                    continue
-                # Determine source from filename (e.g. sobor.json -> sobor)
                 source_name = _normalize_source_name(file_path.stem)
-                
-                # Parse JSON
                 raw_content = file_path.read_text(encoding="utf-8")
                 events = parse_theatre_json(raw_content, source_name)
-                
-                if not events:
-                    logger.warning("source_parsing: no events found in %s", file_path)
-                    continue
-                    
-                events_by_source[source_name] = events
-                
+                if events:
+                    events_by_source[source_name] = events
             except Exception as e:
-                logger.error("source_parsing: failed to parse %s: %s", file_path_str, e, exc_info=True)
+                logger.error("source_parsing: failed to parse theatre file %s: %s", file_path_str, e)
                 result.errors.append(f"File {file_path_str}: {str(e)}")
+
+        # Parse Philharmonia
+        if phil_files:
+            try:
+                p_events = parse_philharmonia_output(phil_files)
+                if p_events:
+                    events_by_source["philharmonia"] = p_events
+            except Exception as e:
+                logger.error("source_parsing: failed to parse philharmonia files: %s", e)
+                result.errors.append(f"Philharmonia parse error: {str(e)}")
         
         # 3. Process events
         total_count = sum(len(ev) for ev in events_by_source.values())
@@ -1025,6 +1062,7 @@ async def run_source_parsing(
         if log_handler:
             logging.getLogger().removeHandler(log_handler)
             log_handler.close()
+
 
 
 async def process_source_events(
@@ -1339,10 +1377,16 @@ async def run_diagnostic_parse(
             pass
 
     # Run kernel with config
-    status, output_files, duration = await run_kaggle_kernel(
-        status_callback=_update_kaggle_status,
-        run_config={"target_source": source}
-    )
+    if source == "philharmonia":
+        from source_parsing.philharmonia import run_philharmonia_kaggle_kernel
+        status, output_files, duration = await run_philharmonia_kaggle_kernel(
+            status_callback=_update_kaggle_status,
+        )
+    else:
+        status, output_files, duration = await run_kaggle_kernel(
+            status_callback=_update_kaggle_status,
+            run_config={"target_source": source}
+        )
     
     if status != "complete":
         await bot.send_message(chat_id, f"❌ Ошибка запуска: статус {status}")
@@ -1350,6 +1394,9 @@ async def run_diagnostic_parse(
 
     # Find the specific JSON file
     target_filename = f"{source}.json"
+    if source == "philharmonia":
+        target_filename = "philharmonia_results.json"
+        
     target_path = None
     
     # If source is 'tretyakov', look for 'tretyakov.json' etc.
