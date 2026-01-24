@@ -229,6 +229,15 @@ def _event_sort_key(ev: Event) -> tuple[date, int, int]:
     return (base_date, _time_sort_key(_short_time_text(ev.time)), ev.id or 0)
 
 
+def _has_meaningful_ocr_text(value: str | None) -> bool:
+    """Treat punctuation/whitespace-only OCR as empty for /v poster selection."""
+
+    text = (value or "").strip()
+    if not text:
+        return False
+    return bool(re.search(r"[0-9A-Za-zА-Яа-яЁё]", text))
+
+
 def _build_schedule_info(
     events: Sequence[Event],
 ) -> tuple[str, list[dict[str, list[str]]]]:
@@ -469,9 +478,9 @@ async def _load_poster_ocr_texts(
     for poster in posters:
         text = (poster.ocr_text or "").strip()
         title = (poster.ocr_title or "").strip()
-        if text:
+        if _has_meaningful_ocr_text(text):
             grouped_text[poster.event_id].append(text)
-        if title and poster.event_id not in titles:
+        if _has_meaningful_ocr_text(title) and poster.event_id not in titles:
             titles[poster.event_id] = title
 
     excerpts: dict[int, str] = {}
@@ -1183,6 +1192,8 @@ def payload_as_json(payload: RenderPayload, tz: timezone) -> str:
             )
 
         scene = {
+            "event_id": ev.id,
+            "title": (ev.title or "").strip(),
             "about": about_text,
             "description": item.final_description or "",
             "date": _format_scene_date(ev),
@@ -1301,28 +1312,33 @@ async def build_selection(
         schedule_map = schedule_map or {}
         occurrences_map = occurrences_map or {}
 
+    # Hard requirement for /v: posters must have non-empty OCR *text* (not just ocr_title),
+    # otherwise the viewer gets an "empty" poster with no actionable info.
+    prefetched_ocr_texts: dict[int, str] = {}
+    prefetched_ocr_titles: dict[int, str] = {}
+    if events:
+        event_ids = [e.id for e in events if e.id is not None]
+        ocr_texts, ocr_titles = await _load_poster_ocr_texts(db, event_ids)
+        prefetched_ocr_texts = ocr_texts
+        prefetched_ocr_titles = ocr_titles
+        with_text = {eid for eid in ocr_texts.keys()}
+        before = len(events)
+        events = [e for e in events if e.id is not None and e.id in with_text]
+        dropped = before - len(events)
+        if dropped:
+            logger.info(
+                "video_announce: dropped events without poster ocr_text total=%d kept=%d dropped=%d",
+                before,
+                len(events),
+                dropped,
+            )
+
     random_ocr_texts: dict[int, str] | None = None
     random_ocr_titles: dict[int, str] | None = None
     if ctx.random_order and events:
-        event_ids = [e.id for e in events if e.id is not None]
-        ocr_texts, ocr_titles = await _load_poster_ocr_texts(db, event_ids)
-        random_ocr_texts = ocr_texts
-        random_ocr_titles = ocr_titles
-        ocr_event_ids = set(ocr_texts) | set(ocr_titles)
-        if ocr_event_ids:
-            ocr_events = [e for e in events if e.id is not None and e.id in ocr_event_ids]
-            if len(ocr_events) >= max(1, ctx.default_selected_max):
-                events = ocr_events
-            else:
-                logger.warning(
-                    "video_announce: random_order OCR=%d < target=%d, mixing non-OCR events",
-                    len(ocr_events),
-                    ctx.default_selected_max,
-                )
-        else:
-            logger.warning(
-                "video_announce: random_order no OCR texts or titles, falling back to titles"
-            )
+        # Reuse OCR prefetch above (already filtered to ocr_text-only events).
+        random_ocr_texts = prefetched_ocr_texts
+        random_ocr_titles = prefetched_ocr_titles
 
     async def _rank_events(
         current_events: Sequence[Event],
