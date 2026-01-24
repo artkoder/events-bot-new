@@ -409,8 +409,18 @@ class GoogleAIClient:
         if max_output_tokens and "max_output_tokens" not in config:
             config["max_output_tokens"] = max_output_tokens
         
-        # Create model (use full model path for gemma)
-        model_name = model if model.startswith("models/") else f"models/{model}-it"
+        # Create model:
+        # - google.generativeai expects model_name like "models/gemma-3-27b-it"
+        # - For Gemma, "-it" is the tested interactive-tuned variant in this project.
+        # - For Gemini, use the model name as-is (no "-it" suffix).
+        model_clean = (model or "").strip()
+        if model_clean.startswith("models/"):
+            model_name = model_clean
+        else:
+            provider_model = model_clean
+            if provider_model.startswith("gemma-") and not provider_model.endswith("-it"):
+                provider_model = f"{provider_model}-it"
+            model_name = f"models/{provider_model}"
         gen_model = self.genai.GenerativeModel(model_name)
         
         # Generate content

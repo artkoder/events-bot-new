@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [1.9.12] - 2026-01-24
+### Added
+- **Video Announce**: Implemented "Poster Overlays" feature. Uses Google Gemma to check if posters are missing Title/Date/Time/Location. Adds an overlay badge to the video if critical info is missing.
+- **Dependencies**: Added `google-generativeai`.
+
 ## [1.9.11] - 2026-01-24
 ### Fixed
 - **Scheduler**: Fixed `_job_wrapper` to accept `**kwargs`, resolving `ValueError` when registering jobs with keyword arguments (like `3di_scheduler` with `chat_id`).

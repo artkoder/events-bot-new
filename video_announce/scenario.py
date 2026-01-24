@@ -39,6 +39,7 @@ from main import (
 from net import http_call
 from .about import normalize_about_with_fallback
 from .finalize import prepare_final_texts
+from .poster_overlay import enrich_payload_with_poster_overlays
 from .kaggle_client import DEFAULT_KERNEL_PATH, KaggleClient, list_local_kernels
 from .poller import (
     VIDEO_MAX_MB,
@@ -2688,6 +2689,13 @@ class VideoAnnounceScenario:
             session.add(sess)
             await session.commit()
             await session.refresh(sess)
+        if payload_json:
+            try:
+                payload_json = await enrich_payload_with_poster_overlays(
+                    self.db, payload_json
+                )
+            except Exception:
+                logger.exception("video_announce: failed to enrich payload with poster overlays")
         if message:
             try:
                 await self._update_selection_message(message, session_id)
