@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [1.9.10] - 2026-01-24
+### Fixed
+- **Scheduler**: Added `_register_job` wrapper to prevent scheduler startup crashes if a single job fails to register.
+- **Scheduler**: Added explicit "SCHED skipping" logs when optional jobs (source parsing, 3di) are disabled via env.
+
 ## [1.9.9] - 2026-01-24
 ### Fixed
 - **CrumpleVideo**: Improved FFmpeg robustness with file existence checks, audio merge validation, and mpeg4 fallback.
