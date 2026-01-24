@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [1.9.9] - 2026-01-24
+### Fixed
+- **CrumpleVideo**: Improved FFmpeg robustness with file existence checks, audio merge validation, and mpeg4 fallback.
+- **Video Announce**: Enhanced polling reliability with retry logic (3 attempts) and recursive file search in output directory.
+
 ## [1.9.8] - 2026-01-23
 ### Changed
 - **CrumpleVideo**: Updated test mode to use 5 scenes (was 1), samples=15, render_pct=84.

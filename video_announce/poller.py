@@ -155,7 +155,7 @@ def _find_video(files: Iterable[Path]) -> Path | None:
     candidates = [
         file
         for file in files
-        if file.suffix.lower() in {".mp4", ".mov", ".mkv", ".webm"}
+        if file.exists() and file.suffix.lower() in {".mp4", ".mov", ".mkv", ".webm"}
     ]
     if not candidates:
         return None
@@ -166,7 +166,26 @@ def _find_video(files: Iterable[Path]) -> Path | None:
 
 
 def _find_logs(files: Iterable[Path]) -> list[Path]:
-    return [f for f in files if f.suffix.lower() in {".txt", ".log", ".json"}]
+    return [
+        f
+        for f in files
+        if f.exists() and f.suffix.lower() in {".txt", ".log", ".json"}
+    ]
+
+
+def _expand_output_paths(paths: Iterable[Path]) -> list[Path]:
+    files: list[Path] = []
+    seen: set[Path] = set()
+    for p in paths:
+        if p.is_dir():
+            for child in p.rglob("*"):
+                if child.is_file() and child not in seen:
+                    files.append(child)
+                    seen.add(child)
+        elif p.is_file() and p not in seen:
+            files.append(p)
+            seen.add(p)
+    return files
 
 
 async def _update_status(
@@ -560,21 +579,38 @@ async def run_kernel_poller(
     output_dir = tmp_dir / f"videoannounce-{session_obj.id}"
     output_dir.mkdir(parents=True, exist_ok=True)
     try:
-        files = await asyncio.to_thread(
-            client.download_kernel_output,
-            kernel_ref,
-            path=output_dir,
-            force=True,
-            quiet=True,
-        )
-        paths = [output_dir / Path(f).name for f in files]
-        video_path = _find_video(paths)
-        log_files = _find_logs(paths)
+        max_attempts = 3
+        files: list[str] = []
+        for attempt in range(1, max_attempts + 1):
+            try:
+                files = await asyncio.to_thread(
+                    client.download_kernel_output,
+                    kernel_ref,
+                    path=output_dir,
+                    force=True,
+                    quiet=True,
+                )
+                break
+            except Exception:
+                logger.exception(
+                    "video_announce: kernel output download failed attempt=%s/%s session=%s",
+                    attempt,
+                    max_attempts,
+                    session_obj.id,
+                )
+                if attempt < max_attempts:
+                    await asyncio.sleep(5 * attempt)
+                else:
+                    raise
+        paths = [output_dir / f for f in files]
+        output_files = _expand_output_paths(paths)
+        video_path = _find_video(output_files)
+        log_files = _find_logs(output_files)
         if not video_path:
             logger.warning(
                 "video_announce: no video in output session=%s files=%s",
                 session_obj.id,
-                [p.name for p in paths],
+                files or [p.name for p in output_files],
             )
             session_obj = await _update_status(
                 db,
