@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.10.1] - 2026-01-24
+### Fixed
+- Fixed `TypeError` in parsing results summary when using date objects (Philharmonia parser).
+
 ## [Unreleased]
 
 ## [1.10.0] - 2026-01-24

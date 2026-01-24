@@ -981,7 +981,7 @@ async def run_source_parsing(
                 result.errors.append(f"Source {escape_md(source)}: {escape_md(str(e))}")
                 
         months = sorted({
-            event.parsed_date[:7]
+            str(event.parsed_date)[:7]
             for events in events_by_source.values()
             for event in events
             if event.parsed_date
