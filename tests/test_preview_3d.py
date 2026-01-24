@@ -163,17 +163,17 @@ async def test_get_new_events_gap(tmp_path):
         
     candidates = await _get_new_events_gap(db, min_images=1)
     
-    # Expect only event 4
-    # Event 3 skipped due to no images
-    # Event 2 stops the search
-    # Event 1 is behind event 2
+    # Updated logic: does NOT stop at barrier.
+    # Should get 4 (newest) AND 1 (oldest, behind barrier w/ proper images).
+    # Event 3 skipped due to no images.
     
-    assert len(candidates) == 1
-    assert candidates[0].id == 4
+    assert len(candidates) == 2
+    ids = sorted([e.id for e in candidates])
+    assert ids == [1, 4]
     
-    # Test with min_images=0, should get 4 and 3
+    # Test with min_images=0, should get 4, 3, 1
     candidates_all = await _get_new_events_gap(db, min_images=0)
-    assert len(candidates_all) == 2
+    assert len(candidates_all) == 3
     ids = sorted([e.id for e in candidates_all])
-    assert ids == [3, 4]
+    assert ids == [1, 3, 4]
 

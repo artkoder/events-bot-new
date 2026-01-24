@@ -689,7 +689,7 @@ def startup(
         from preview_3d.handlers import run_3di_new_only_scheduler
         admin_chat_id = os.getenv("ADMIN_CHAT_ID")
         run_chat_id = int(admin_chat_id) if admin_chat_id else None
-        three_di_times = os.getenv("THREEDI_TIMES_LOCAL", "03:15,15:15")
+        three_di_times = os.getenv("THREEDI_TIMES_LOCAL", "03:15,15:15,17:15")
         three_di_tz = os.getenv("THREEDI_TZ", "Europe/Kaliningrad")
         for idx, t in enumerate(three_di_times.split(",")):
             t = t.strip()

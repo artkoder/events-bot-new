@@ -118,35 +118,36 @@ async def _get_all_future_events_without_preview(db: Database, min_images: int =
 
 
 async def _get_new_events_gap(db: Database, min_images: int = 1) -> list[Event]:
-    """Get events added after the last event that has a 3D preview.
+    """Get recent events that are missing a 3D preview.
     
-    Walks backwards from newest events until it finds one with a 3D preview.
-    Returns all events encountered before that one, filtered by min_images.
+    Checks events from the last 14 days.
+    Does NOT stop at the first event with a preview, ensuring gaps are filled.
     """
     candidates: list[Event] = []
+    # Look back 14 days to ensure we cover recent additions
+    # (using current time which is fine for relative check)
+    cutoff_date = (datetime.now(timezone.utc) - timedelta(days=14)).date().isoformat()
     
     async with db.get_session() as session:
-        # Fetch events ordered by ID desc (newest first)
-        # We fetch in chunks to avoid loading entire DB if the gap is small
-        query = select(Event).order_by(Event.id.desc())
+        # Fetch events from last 14 days, ordered by ID desc (newest first)
+        query = (
+            select(Event)
+            .where(Event.date >= cutoff_date)
+            .order_by(Event.id.desc())
+        )
         
-        # Stream results to process one by one
-        result = await session.stream(query)
+        result = await session.execute(query)
+        events = result.scalars().all()
         
-        async for event in result.scalars():
+        for event in events:
+            # If already has preview, skip
             if event.preview_3d_url:
-                # Found the barrier - the latest event that HAS a preview
-                break
+                continue
             
             # Check image requirement
             urls = event.photo_urls or []
             if len(urls) >= min_images:
                 candidates.append(event)
-                
-            # safety break if gap is huge (optional, but good practice)
-            if len(candidates) > 200:
-                logger.warning("3di: _get_new_events_gap hit safety limit of 200")
-                break
                 
     return candidates
 
