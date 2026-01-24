@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [1.9.13] - 2026-01-24
+### Changed
+- **CrumpleVideo**: Minor metadata updates in notebook.
+
 ## [1.9.12] - 2026-01-24
 ### Added
 - **Video Announce**: Implemented "Poster Overlays" feature. Uses Google Gemma to check if posters are missing Title/Date/Time/Location. Adds an overlay badge to the video if critical info is missing.
