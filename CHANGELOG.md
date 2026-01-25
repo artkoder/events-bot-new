@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.11.0] - 2026-01-25
+### Added
+- **Telegram Monitor**: Full release of the Intelligent Monitoring System.
+  - **Standard Pipeline**: Events from Kaggle are now processed via the standard `/addevent` pipeline (GPT-4o + deduplication).
+  - **Secure Sessions**: Implemented Fernet-based session splitting (Key/Cipher) for Kaggle isolation.
+  - **Inline UI**: New `/tg` command with interactive buttons.
+  - **Docs**: Comprehensive walkthrough and setup guide.
+
 ## [1.10.6] - 2026-01-25
 ### Changed
 - **Video Announce**: Improved poster overlay text cleaning by stripping emojis from `ocr_text` and `description` to prevent font rendering issues.
