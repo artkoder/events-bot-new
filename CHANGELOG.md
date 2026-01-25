@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.10.6] - 2026-01-25
+### Changed
+- **Video Announce**: Improved poster overlay text cleaning by stripping emojis from `ocr_text` and `description` to prevent font rendering issues.
+
 ## [1.10.5] - 2026-01-25
 ### Added
 - **Video Announce**: Implemented `cross_month` layout for "Compact" intro pattern, allowing distinct date placement when events span across month boundaries.
