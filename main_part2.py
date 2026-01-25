@@ -13,6 +13,7 @@ from telegraph import Telegraph
 from markup import md_to_html, telegraph_br, linkify_for_telegraph
 
 from models import Event, Festival, WeekPage, WeekendPage, MonthPage, MonthPagePart, VkMissRecord, VkMissReviewSession, User
+from source_parsing.telegram.commands import tg_monitor_router
 from poster_media import PosterMedia
 from db import Database
 from sqlalchemy import select, update, delete, text, func, or_, and_
@@ -14424,6 +14425,7 @@ def create_app() -> web.Application:
     set_db(db)  # Set db in main.py's namespace for handlers
     set_bot(bot)  # Set bot in main.py's namespace for handlers
     dp.include_router(special_router)  # must be after db init
+    dp.include_router(tg_monitor_router)
     import video_announce.handlers as video_handlers
     import preview_3d.handlers as preview_3d_handlers
 

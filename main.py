@@ -166,6 +166,7 @@ import vk_review
 import poster_ocr
 from handlers.ik_poster_cmd import ik_poster_router
 from handlers.special_cmd import special_router
+from source_parsing.telegram.commands import tg_monitor_router
 from poster_media import (
     PosterMedia,
     apply_ocr_results_to_media,
