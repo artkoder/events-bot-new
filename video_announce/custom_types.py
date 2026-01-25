@@ -91,6 +91,7 @@ class SelectionContext:
     promoted_event_ids: set[int] | None = None
     instruction: str | None = None
     random_order: bool = False
+    allow_empty_ocr: bool = False
 
 
 @dataclass

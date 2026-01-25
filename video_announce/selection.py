@@ -501,12 +501,14 @@ async def _load_poster_ocr_texts(
 
 
 async def _filter_events_by_poster_ocr(
-    db: Database, events: Sequence[Event]
+    db: Database, events: Sequence[Event], *, allow_empty_ocr: bool = False
 ) -> tuple[list[Event], dict[int, str], dict[int, str]]:
     if not events:
         return [], {}, {}
     event_ids = [e.id for e in events if e.id is not None]
     ocr_texts, ocr_titles = await _load_poster_ocr_texts(db, event_ids)
+    if allow_empty_ocr:
+        return list(events), ocr_texts, ocr_titles
     with_text = set(ocr_texts.keys())
     before = len(events)
     filtered = [e for e in events if e.id is not None and e.id in with_text]
@@ -1268,7 +1270,7 @@ def payload_as_json(payload: RenderPayload, tz: timezone) -> str:
     }
 
     selection_meta = {}
-    for key in ("mode", "test", "is_test"):
+    for key in ("mode", "test", "is_test", "allow_empty_ocr"):
         if key in selection_params:
             selection_meta[key] = selection_params.get(key)
 
@@ -1348,7 +1350,11 @@ async def build_selection(
         found, schedule_local, occurrences_local = await fetch_candidates(db, current_ctx)
         schedule_local = schedule_local or {}
         occurrences_local = occurrences_local or {}
-        filtered, ocr_texts, ocr_titles = await _filter_events_by_poster_ocr(db, found)
+        filtered, ocr_texts, ocr_titles = await _filter_events_by_poster_ocr(
+            db,
+            found,
+            allow_empty_ocr=current_ctx.allow_empty_ocr,
+        )
         return filtered, schedule_local, occurrences_local, ocr_texts, ocr_titles
 
     min_posters = _parse_positive_int(auto_expand_min_posters)
@@ -1360,7 +1366,9 @@ async def build_selection(
         schedule_map = schedule_map or {}
         occurrences_map = occurrences_map or {}
         events, prefetched_ocr_texts, prefetched_ocr_titles = await _filter_events_by_poster_ocr(
-            db, events
+            db,
+            events,
+            allow_empty_ocr=ctx.allow_empty_ocr,
         )
     elif min_posters:
         base_fallback = max(ctx.fallback_window_days, ctx.primary_window_days, 0)
@@ -1404,7 +1412,9 @@ async def build_selection(
         schedule_map = schedule_map or {}
         occurrences_map = occurrences_map or {}
         events, prefetched_ocr_texts, prefetched_ocr_titles = await _filter_events_by_poster_ocr(
-            db, events
+            db,
+            events,
+            allow_empty_ocr=ctx.allow_empty_ocr,
         )
 
     random_ocr_texts: dict[int, str] | None = None
@@ -1447,21 +1457,22 @@ async def build_selection(
             ocr_titles = random_ocr_titles or {}
 
             ocr_events = [e for e in selected_local if e.id is not None]
-            ocr_event_ids = set(ocr_texts or {}) | set(ocr_titles or {})
-            if ocr_event_ids:
-                with_ocr = [e for e in ocr_events if e.id in ocr_event_ids]
-                if len(with_ocr) >= max(1, ctx.default_selected_max):
-                    ocr_events = with_ocr
-                elif with_ocr:
-                    logger.warning(
-                        "video_announce: random_order using %d OCR + %d non-OCR events",
-                        len(with_ocr),
-                        len(ocr_events) - len(with_ocr),
-                    )
-                else:
-                    logger.warning(
-                        "video_announce: random_order OCR missing for candidates, using titles",
-                    )
+            if not ctx.allow_empty_ocr:
+                ocr_event_ids = set(ocr_texts or {}) | set(ocr_titles or {})
+                if ocr_event_ids:
+                    with_ocr = [e for e in ocr_events if e.id in ocr_event_ids]
+                    if len(with_ocr) >= max(1, ctx.default_selected_max):
+                        ocr_events = with_ocr
+                    elif with_ocr:
+                        logger.warning(
+                            "video_announce: random_order using %d OCR + %d non-OCR events",
+                            len(with_ocr),
+                            len(ocr_events) - len(with_ocr),
+                        )
+                    else:
+                        logger.warning(
+                            "video_announce: random_order OCR missing for candidates, using titles",
+                        )
             if not ocr_events:
                 return [], mandatory_ids_local, set(), None, True
 
@@ -1495,9 +1506,7 @@ async def build_selection(
             picked_ids = {e.id for e in picked if e.id is not None}
             selected_ids_local = set(picked_ids)
 
-            remaining = [e for e in ocr_events if e.id is not None and e.id not in picked_ids]
-            remaining_sorted = sorted(remaining, key=_event_sort_key)
-            ordered = picked + remaining_sorted
+            ordered = sorted(ocr_events, key=_event_sort_key)
 
             scores = client.score(ordered)
             for pos, ev in enumerate(ordered, start=1):

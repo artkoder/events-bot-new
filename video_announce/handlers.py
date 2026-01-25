@@ -169,7 +169,11 @@ async def handle_video_callback(
             return
         if action == "test_tomorrow":
             await callback.answer("Запускаю тест…")
-            await scenario.run_tomorrow_pipeline(profile_key="default", test_mode=True)
+            await scenario.run_tomorrow_pipeline(
+                profile_key="default",
+                selected_max=7,
+                test_mode=True,
+            )
             return
         await callback.answer("Неизвестное действие", show_alert=True)
         return

@@ -712,6 +712,7 @@ class VideoAnnounceScenario:
         target_date = self._parse_target_date(str(params.get("target_date")))
         instruction = (str(params.get("instruction") or "").strip()) or None
         random_order = bool(params.get("random_order"))
+        allow_empty_ocr = bool(params.get("allow_empty_ocr"))
         return SelectionContext(
             tz=LOCAL_TZ,
             target_date=target_date,
@@ -725,6 +726,7 @@ class VideoAnnounceScenario:
             default_selected_max=max(default_selected_max, default_selected_min),
             instruction=instruction,
             random_order=random_order,
+            allow_empty_ocr=allow_empty_ocr,
         )
 
     async def _build_selection_context(
@@ -862,7 +864,8 @@ class VideoAnnounceScenario:
             keyboard.append(
                 [
                     types.InlineKeyboardButton(
-                        text="🧪 Тест Завтра (5 сцен)", callback_data="vidauto:test_tomorrow"
+                        text=f"🧪 Тест Завтра ({TOMORROW_TEST_MIN_POSTERS} сцен)",
+                        callback_data="vidauto:test_tomorrow",
                     )
                 ]
             )
@@ -982,9 +985,12 @@ class VideoAnnounceScenario:
             }
         )
         params.pop("instruction", None)
+        test_scene_limit = None
         if test_mode:
+            test_scene_limit = TOMORROW_TEST_MIN_POSTERS
             params["mode"] = "test"
             params["is_test"] = True
+            params["allow_empty_ocr"] = True
             params["auto_expand_min_posters"] = TOMORROW_TEST_MIN_POSTERS
             params["auto_expand_step_days"] = TOMORROW_TEST_EXPAND_STEP_DAYS
             params["auto_expand_max_days"] = TOMORROW_TEST_EXPAND_MAX_DAYS
@@ -1013,7 +1019,7 @@ class VideoAnnounceScenario:
             (
                 f"Сессия #{obj.id} запущена: завтра ({tomorrow.isoformat()}), "
                 f"случайный порядок, до {selected_max} событий"
-                f"{' (🧪 тест: 5 сцен)' if test_mode else ''}. Kernel: {kernel_ref}"
+                f"{f' (🧪 тест: {test_scene_limit} сцен)' if test_mode else ''}. Kernel: {kernel_ref}"
             ),
         )
 
@@ -1035,7 +1041,7 @@ class VideoAnnounceScenario:
         msg = await self.start_render(
             obj.id,
             message=None,
-            limit_scenes=5 if test_mode else None,
+            limit_scenes=test_scene_limit if test_mode else None,
         )
         if msg and msg != "Рендеринг запущен":
             await self.bot.send_message(self.chat_id, f"Сессия #{obj.id}: {msg}")
