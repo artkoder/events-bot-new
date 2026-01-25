@@ -500,6 +500,27 @@ async def _load_poster_ocr_texts(
     return excerpts, titles
 
 
+async def _filter_events_by_poster_ocr(
+    db: Database, events: Sequence[Event]
+) -> tuple[list[Event], dict[int, str], dict[int, str]]:
+    if not events:
+        return [], {}, {}
+    event_ids = [e.id for e in events if e.id is not None]
+    ocr_texts, ocr_titles = await _load_poster_ocr_texts(db, event_ids)
+    with_text = set(ocr_texts.keys())
+    before = len(events)
+    filtered = [e for e in events if e.id is not None and e.id in with_text]
+    dropped = before - len(filtered)
+    if dropped:
+        logger.info(
+            "video_announce: dropped events without poster ocr_text total=%d kept=%d dropped=%d",
+            before,
+            len(filtered),
+            dropped,
+        )
+    return filtered, ocr_texts, ocr_titles
+
+
 def _apply_repeat_limit(
     candidates: Sequence[Event], *, limit: int, hits: set[int], promoted: set[int]
 ) -> list[Event]:
@@ -1299,39 +1320,92 @@ async def build_selection(
     occurrences_map: dict[int, list[dict[str, list[str]]]] | None = None,
     bot: Any | None = None,
     notify_chat_id: int | None = None,
+    auto_expand_min_posters: int | None = None,
+    auto_expand_step_days: int | None = None,
+    auto_expand_max_days: int | None = None,
 ) -> SelectionBuildResult:
     client = client or KaggleClient()
 
-    # Removed auto-expansion loop (Task Requirement: Отключить любое авторасширение дат/периодов)
+    def _parse_positive_int(value: int | str | None) -> int | None:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed > 0 else None
+
+    prefetched_ocr_texts: dict[int, str] = {}
+    prefetched_ocr_titles: dict[int, str] = {}
+
+    async def _fetch_candidates_with_ocr(
+        current_ctx: SelectionContext,
+    ) -> tuple[
+        list[Event],
+        dict[int, str],
+        dict[int, list[dict[str, list[str]]]],
+        dict[int, str],
+        dict[int, str],
+    ]:
+        found, schedule_local, occurrences_local = await fetch_candidates(db, current_ctx)
+        schedule_local = schedule_local or {}
+        occurrences_local = occurrences_local or {}
+        filtered, ocr_texts, ocr_titles = await _filter_events_by_poster_ocr(db, found)
+        return filtered, schedule_local, occurrences_local, ocr_texts, ocr_titles
+
+    min_posters = _parse_positive_int(auto_expand_min_posters)
+    expand_step_days = _parse_positive_int(auto_expand_step_days) or 1
+    max_window_days = _parse_positive_int(auto_expand_max_days)
+
     if candidates is not None:
         events = _filter_events_with_posters(list(candidates))
         schedule_map = schedule_map or {}
         occurrences_map = occurrences_map or {}
+        events, prefetched_ocr_texts, prefetched_ocr_titles = await _filter_events_by_poster_ocr(
+            db, events
+        )
+    elif min_posters:
+        base_fallback = max(ctx.fallback_window_days, ctx.primary_window_days, 0)
+        max_window = max_window_days if max_window_days is not None else base_fallback
+        max_window = max(max_window, base_fallback)
+        fallback_days = base_fallback
+        events, schedule_map, occurrences_map, prefetched_ocr_texts, prefetched_ocr_titles = (
+            await _fetch_candidates_with_ocr(ctx)
+        )
+        expanded = False
+        while len(events) < min_posters and fallback_days < max_window:
+            next_fallback = min(max_window, fallback_days + expand_step_days)
+            if next_fallback == fallback_days:
+                break
+            fallback_days = next_fallback
+            expanded = True
+            current_ctx = replace(ctx, fallback_window_days=fallback_days)
+            (
+                events,
+                schedule_map,
+                occurrences_map,
+                prefetched_ocr_texts,
+                prefetched_ocr_titles,
+            ) = await _fetch_candidates_with_ocr(current_ctx)
+        if expanded:
+            logger.info(
+                "video_announce: auto-expanded selection window days=%d events=%d target=%d",
+                fallback_days,
+                len(events),
+                min_posters,
+            )
+            if len(events) < min_posters:
+                logger.warning(
+                    "video_announce: auto-expand limit reached days=%d events=%d target=%d",
+                    fallback_days,
+                    len(events),
+                    min_posters,
+                )
     else:
         events, schedule_map, occurrences_map = await fetch_candidates(db, ctx)
         schedule_map = schedule_map or {}
         occurrences_map = occurrences_map or {}
-
-    # Hard requirement for /v: posters must have non-empty OCR *text* (not just ocr_title),
-    # otherwise the viewer gets an "empty" poster with no actionable info.
-    prefetched_ocr_texts: dict[int, str] = {}
-    prefetched_ocr_titles: dict[int, str] = {}
-    if events:
-        event_ids = [e.id for e in events if e.id is not None]
-        ocr_texts, ocr_titles = await _load_poster_ocr_texts(db, event_ids)
-        prefetched_ocr_texts = ocr_texts
-        prefetched_ocr_titles = ocr_titles
-        with_text = {eid for eid in ocr_texts.keys()}
-        before = len(events)
-        events = [e for e in events if e.id is not None and e.id in with_text]
-        dropped = before - len(events)
-        if dropped:
-            logger.info(
-                "video_announce: dropped events without poster ocr_text total=%d kept=%d dropped=%d",
-                before,
-                len(events),
-                dropped,
-            )
+        events, prefetched_ocr_texts, prefetched_ocr_titles = await _filter_events_by_poster_ocr(
+            db, events
+        )
 
     random_ocr_texts: dict[int, str] | None = None
     random_ocr_titles: dict[int, str] | None = None
