@@ -60,4 +60,11 @@ logs_analysis.txt
 test_result*.txt
 test_*.txt
 test_parser_output/
-e2e_results*/
+
+# Video assets (CrumpleVideo)
+*.mp4
+*.mov
+*.avi
+output/
+frames/
+render/
