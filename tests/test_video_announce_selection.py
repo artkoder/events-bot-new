@@ -1,4 +1,4 @@
-from datetime import date, timezone
+from datetime import date, timedelta, timezone
 
 import pytest
 
@@ -135,3 +135,64 @@ async def test_build_selection_random_order_requires_poster_ocr(monkeypatch, tmp
     assert ranked_first.poster_ocr_text is not None
     assert ranked_first.poster_ocr_title == "OCR TITLE"
     assert ranked_first.about
+
+
+@pytest.mark.asyncio
+async def test_build_selection_auto_expands_for_min_posters(tmp_path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+
+    base_date = date(2026, 1, 1)
+    offsets = [0, 0, 1, 1, 1, 2, 2]
+
+    async with db.get_session() as session:
+        events = []
+        for idx, offset in enumerate(offsets, start=1):
+            ev = Event(
+                title=f"Event {idx}",
+                description="d",
+                source_text="s",
+                date=(base_date + timedelta(days=offset)).isoformat(),
+                time="19:00",
+                location_name=f"Loc {idx}",
+                city="City",
+                photo_urls=[f"https://example.com/{idx}.jpg"],
+                photo_count=1,
+            )
+            session.add(ev)
+            events.append(ev)
+        await session.commit()
+
+        for idx, ev in enumerate(events, start=1):
+            await session.refresh(ev)
+            session.add(
+                EventPoster(
+                    event_id=ev.id,
+                    poster_hash=f"h{idx}",
+                    ocr_text="TEXT",
+                    ocr_title="TITLE",
+                )
+            )
+        await session.commit()
+
+    ctx = SelectionContext(
+        tz=timezone.utc,
+        target_date=base_date,
+        random_order=True,
+        candidate_limit=80,
+        default_selected_min=1,
+        default_selected_max=8,
+        primary_window_days=0,
+        fallback_window_days=0,
+    )
+    result = await selection.build_selection(
+        db,
+        ctx,
+        auto_expand_min_posters=7,
+        auto_expand_step_days=1,
+        auto_expand_max_days=2,
+    )
+
+    assert len(result.candidates) == 7
+    max_date = max(date.fromisoformat(ev.date) for ev in result.candidates)
+    assert max_date == base_date + timedelta(days=2)

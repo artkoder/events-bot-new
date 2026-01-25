@@ -81,6 +81,9 @@ DEFAULT_CANDIDATE_LIMIT = 80
 MAX_CANDIDATE_LIMIT = 80
 DEFAULT_SELECTED_MIN = 8
 DEFAULT_SELECTED_MAX = 12
+TOMORROW_TEST_MIN_POSTERS = 7
+TOMORROW_TEST_EXPAND_STEP_DAYS = 1
+TOMORROW_TEST_EXPAND_MAX_DAYS = 30
 PENDING_INSTRUCTION_TTL = 15 * 60
 IMPORT_PAYLOAD_FLAG_KEY = "imported_payload"
 IMPORT_PAYLOAD_JSON_KEY = "imported_payload_json"
@@ -982,6 +985,9 @@ class VideoAnnounceScenario:
         if test_mode:
             params["mode"] = "test"
             params["is_test"] = True
+            params["auto_expand_min_posters"] = TOMORROW_TEST_MIN_POSTERS
+            params["auto_expand_step_days"] = TOMORROW_TEST_EXPAND_STEP_DAYS
+            params["auto_expand_max_days"] = TOMORROW_TEST_EXPAND_MAX_DAYS
 
         kernel_ref = self._pick_crumple_kernel_ref() or self._pick_default_kernel_ref()
         if not kernel_ref:
@@ -1279,6 +1285,17 @@ class VideoAnnounceScenario:
         occurrences_map = (
             self._extract_occurrences_map(params) if candidates is not None else None
         )
+
+        def _parse_positive_int(value: Any) -> int | None:
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                return None
+            return parsed if parsed > 0 else None
+
+        auto_expand_min_posters = _parse_positive_int(params.get("auto_expand_min_posters"))
+        auto_expand_step_days = _parse_positive_int(params.get("auto_expand_step_days"))
+        auto_expand_max_days = _parse_positive_int(params.get("auto_expand_max_days"))
         result = await build_selection(
             self.db,
             ctx,
@@ -1289,6 +1306,9 @@ class VideoAnnounceScenario:
             occurrences_map=occurrences_map,
             bot=self.bot,
             notify_chat_id=self.chat_id,
+            auto_expand_min_posters=auto_expand_min_posters,
+            auto_expand_step_days=auto_expand_step_days,
+            auto_expand_max_days=auto_expand_max_days,
         )
         if preserve_existing:
             await self._refresh_selection_items(session_obj, result)

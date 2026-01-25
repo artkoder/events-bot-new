@@ -10,6 +10,7 @@ CrumpleVideo/Blender. Этот документ собирает требова�
 
 - Состав: intro + 1 афиша + outro.
 - Должна использоваться одна реальная афиша из базы анонсов (не тестовый набор).
+- Если на завтра мало афиш с OCR, окно подбора расширяется вперёд до 7 афиш (лимит: 30 дней).
 
 ### Боевой запуск (`/v - Запуск завтра`)
 
@@ -194,6 +195,110 @@ position: absolute;
 width: 724px;
 height: 228px;
 left: 73px;
+top: 827px;
+
+font-family: 'Druk Cyr';
+font-style: normal;
+font-weight: 700;
+font-size: 180px;
+line-height: 228px;
+text-align: right;
+
+color: #100E0E;
+```
+
+#### Intro ref (different months)
+
+```css
+/* intro ref (different monhes) */
+
+position: relative;
+width: 1080px;
+height: 1572px;
+
+background: #F1E44B;
+
+
+/* КАЛИНИНГРАД СВЕТЛОГОРСК ЗЕЛЕНОГРАДСК */
+
+position: absolute;
+width: 357px;
+height: 267px;
+left: 435px;
+top: 1058px;
+
+font-family: 'Oswald';
+font-style: normal;
+font-weight: 400;
+font-size: 60px;
+line-height: 89px;
+text-align: right;
+
+color: #100E0E;
+
+
+
+/* ФЕВРАЛЯ */
+
+position: absolute;
+width: 480px;
+height: 228px;
+left: 317px;
+top: 827px;
+
+font-family: 'Druk Cyr';
+font-style: normal;
+font-weight: 700;
+font-size: 180px;
+line-height: 228px;
+
+color: #100E0E;
+
+
+
+/* ЯНВАРЯ — */
+
+position: absolute;
+width: 504px;
+height: 228px;
+left: 317px;
+top: 637px;
+
+font-family: 'Druk Cyr';
+font-style: normal;
+font-weight: 700;
+font-size: 180px;
+line-height: 228px;
+
+color: #100E0E;
+
+
+
+/* 31 */
+
+position: absolute;
+width: 107px;
+height: 228px;
+left: 157px;
+top: 637px;
+
+font-family: 'Druk Cyr';
+font-style: normal;
+font-weight: 700;
+font-size: 180px;
+line-height: 228px;
+text-align: right;
+
+color: #100E0E;
+
+
+
+/* 1 */
+
+position: absolute;
+width: 44px;
+height: 228px;
+left: 220px;
 top: 827px;
 
 font-family: 'Druk Cyr';

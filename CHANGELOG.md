@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.10.5] - 2026-01-25
+### Added
+- **Video Announce**: Implemented `cross_month` layout for "Compact" intro pattern, allowing distinct date placement when events span across month boundaries.
+
+## [1.10.4] - 2026-01-25
+### Changed
+- **Video Announce**: Refactored `_filter_events_by_poster_ocr` in selection logic to improve code organization and testability.
+
 ## [1.10.3] - 2026-01-24
 ### Fixed
 - **3D Preview**: Fixed logic in automatic generation to reliably detect and process events with missing previews ("gaps"), scanning the last 14 days.
