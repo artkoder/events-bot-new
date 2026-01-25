@@ -12,6 +12,7 @@ from .service import run_telegram_monitor
 
 tg_router = Router()
 logger = logging.getLogger(__name__)
+tg_monitor_router = tg_router
 
 # State management
 # user_id -> True/False
