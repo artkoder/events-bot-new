@@ -4184,6 +4184,13 @@ async def init_db_and_scheduler(
         scheduler_startup(db, bot)
     except Exception:
         logging.exception("scheduler_startup failed; continuing without scheduler")
+    try:
+        from kaggle_recovery import kaggle_recovery_scheduler
+        app["kaggle_recovery_once"] = asyncio.create_task(
+            kaggle_recovery_scheduler(db, bot)
+        )
+    except Exception:
+        logging.exception("kaggle_recovery startup failed")
     app["daily_scheduler"] = asyncio.create_task(daily_scheduler(db, bot))
     app["add_event_worker"] = asyncio.create_task(add_event_queue_worker(db, bot))
     app["add_event_watch"] = asyncio.create_task(_watch_add_event_worker(app, db, bot))

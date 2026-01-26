@@ -1,5 +1,6 @@
 # Philharmonia Parser (Филармония)
 
+> **Linear Task:** [EVE-21](https://linear.app/events-bot-new/issue/EVE-21/parsing-sajta-filarmonii-deep-parsing-and-formatting)
 > **Status:** 🚧 Partially Implemented
 > **Implemented:** Basic List Parsing (Title, Date, Time)
 > **Not Implemented:** Deep Parsing (Detail Page), Program Formatting

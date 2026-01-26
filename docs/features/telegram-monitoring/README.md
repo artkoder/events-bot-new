@@ -1,4 +1,6 @@
-# Интеллектуальный мониторинг ТГ-каналов (Kaggle + Telethon + Gemma)
+# Telegram Monitoring (Мониторинг каналов)
+> **Linear Task:** [EVE-51](https://linear.app/events-bot-new/issue/EVE-51/monitoring-telegram-kanalov-enhancements)
+> **Status:** Prototype (Kaggle Only) 🚧Telethon + Gemma)
 
 ## 1. Архитектура и Структура
 

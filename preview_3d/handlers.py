@@ -21,6 +21,7 @@ from db import Database
 from models import Event, MonthPage, User
 from sqlmodel import select
 from video_announce.kaggle_client import KaggleClient, KERNELS_ROOT_PATH
+from kaggle_registry import register_job, remove_job, list_jobs
 
 logger = logging.getLogger(__name__)
 
@@ -218,6 +219,112 @@ async def run_3di_new_only_scheduler(
     except Exception:
         logger.exception("3di_scheduler failed")
         return 0
+
+
+_preview3d_recovery_active: set[str] = set()
+
+
+async def resume_preview3d_jobs(
+    db: Database,
+    bot,
+    *,
+    chat_id: int | None = None,
+) -> int:
+    jobs = await list_jobs("preview3d")
+    if not jobs:
+        return 0
+    notify_chat_id = chat_id
+    if notify_chat_id is None:
+        admin_chat_id = os.getenv("ADMIN_CHAT_ID")
+        if admin_chat_id:
+            try:
+                notify_chat_id = int(admin_chat_id)
+            except ValueError:
+                notify_chat_id = None
+    client = KaggleClient()
+    recovered = 0
+    for job in jobs:
+        kernel_ref = str(job.get("kernel_ref") or "")
+        if not kernel_ref or kernel_ref in _preview3d_recovery_active:
+            continue
+        _preview3d_recovery_active.add(kernel_ref)
+        try:
+            try:
+                status = await asyncio.to_thread(client.get_kernel_status, kernel_ref)
+            except Exception:
+                logger.exception("3di_recovery: status fetch failed kernel=%s", kernel_ref)
+                continue
+            state = str(status.get("status") or "").lower()
+            meta = job.get("meta") if isinstance(job.get("meta"), dict) else {}
+            owner_pid = meta.get("pid")
+            if owner_pid == os.getpid():
+                continue
+            if state in {"error", "failed", "cancelled"}:
+                await remove_job("preview3d", kernel_ref)
+                if notify_chat_id and bot:
+                    await bot.send_message(
+                        notify_chat_id,
+                        f"⚠️ 3di recovery: kernel {kernel_ref} завершился ошибкой",
+                    )
+                continue
+            if state != "complete":
+                continue
+            raw_session_id = meta.get("session_id")
+            try:
+                session_id = int(raw_session_id)
+            except (TypeError, ValueError):
+                session_id = int(time.time() * 1000)
+            try:
+                results = await _download_kaggle_results(client, kernel_ref, session_id)
+                updated, errors, skipped = await update_previews_from_results(db, results)
+            except Exception:
+                logger.exception("3di_recovery: failed to apply results kernel=%s", kernel_ref)
+                continue
+            updated_event_ids: list[int] = []
+            seen_event_ids: set[int] = set()
+            for result in results:
+                status = (result.get("status") or "").lower()
+                if status != "ok" or not result.get("preview_url"):
+                    continue
+                raw_event_id = result.get("event_id")
+                try:
+                    event_id = int(raw_event_id)
+                except (TypeError, ValueError):
+                    continue
+                if event_id in seen_event_ids:
+                    continue
+                seen_event_ids.add(event_id)
+                updated_event_ids.append(event_id)
+            if updated_event_ids:
+                try:
+                    from main import schedule_event_update_tasks as schedule_tasks
+                except Exception:
+                    try:
+                        from main_part2 import schedule_event_update_tasks as schedule_tasks
+                    except Exception:
+                        logger.exception("3di_recovery: schedule_event_update_tasks import failed")
+                        schedule_tasks = None
+                if schedule_tasks:
+                    async with db.get_session() as db_session:
+                        result = await db_session.execute(
+                            select(Event).where(Event.id.in_(updated_event_ids))
+                        )
+                        updated_events = result.scalars().all()
+                    for event in updated_events:
+                        await schedule_tasks(db, event, skip_vk_sync=True)
+            await remove_job("preview3d", kernel_ref)
+            recovered += 1
+            if notify_chat_id and bot:
+                await bot.send_message(
+                    notify_chat_id,
+                    (
+                        f"✅ 3di recovery: kernel {kernel_ref} обработан. "
+                        f"updated={updated}, errors={errors}, skipped={skipped}"
+                    ),
+                )
+        finally:
+            _preview3d_recovery_active.discard(kernel_ref)
+    return recovered
 
 
 def _build_main_menu(is_multy: bool = False) -> InlineKeyboardMarkup:
@@ -479,6 +586,8 @@ async def _run_kaggle_render(
     if not session:
         return
     message_id = session.get("message_id")
+    kernel_ref = ""
+    registered = False
     try:
         year = month.split("-")[0]
         month_number = int(month.split("-")[1])
@@ -508,6 +617,20 @@ async def _run_kaggle_render(
             client = KaggleClient()
             kernel_ref = await _push_preview3d_kernel(client, dataset_id)
             session["kaggle_kernel_ref"] = kernel_ref
+            try:
+                await register_job(
+                    "preview3d",
+                    kernel_ref,
+                    meta={
+                        "session_id": session_id,
+                        "chat_id": chat_id,
+                        "month": month,
+                        "pid": os.getpid(),
+                    },
+                )
+                registered = True
+            except Exception:
+                logger.warning("3di: failed to register recovery job", exc_info=True)
             await _set_session_status(
                 session_id, "rendering", bot=bot, chat_id=chat_id, message_id=message_id
             )
@@ -628,11 +751,18 @@ async def _run_kaggle_render(
                         ]),
                         parse_mode="HTML",
                     )
+            if registered and kernel_ref:
+                await remove_job("preview3d", kernel_ref)
             finally:
                 shutil.rmtree(output_dir, ignore_errors=True)
     except Exception as exc:
         session["status"] = "error"
         session["error"] = str(exc)
+        if registered and kernel_ref:
+            try:
+                await remove_job("preview3d", kernel_ref)
+            except Exception:
+                logger.warning("3di: failed to remove recovery job after error", exc_info=True)
         if message_id:
             error_text = html.escape(str(exc))
             await bot.edit_message_text(
