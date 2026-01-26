@@ -158,9 +158,12 @@ async def run_3di_new_only_scheduler(
     *,
     chat_id: int | None = None,
     min_images: int = 1,
+    run_id: str | None = None,
 ) -> int:
     """Run 3D preview generation for new events without UI callbacks."""
     try:
+        if run_id:
+            logger.info("3di_scheduler: started run_id=%s", run_id)
         events = await _get_new_events_gap(db, min_images=min_images)
         if not events:
             logger.info("3di_scheduler: no new events to process")
