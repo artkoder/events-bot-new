@@ -28,6 +28,8 @@ from source_parsing.parser import (
     limit_photos_for_source,
 )
 from poster_media import PosterMedia, process_media
+from kaggle_registry import list_jobs, remove_job
+from video_announce.kaggle_client import KaggleClient
 
 logger = logging.getLogger(__name__)
 
@@ -779,6 +781,155 @@ def format_parsing_report(result: SourceParsingResult) -> str:
     return "\n".join(lines)
 
 
+async def _process_parsing_files(
+    db: Database,
+    bot: Bot | None,
+    *,
+    chat_id: int | None,
+    theatre_files: list[str],
+    phil_files: list[str],
+    result: SourceParsingResult,
+) -> None:
+    events_by_source: dict[str, list[TheatreEvent]] = {}
+
+    def _normalize_source_name(raw_name: str) -> str:
+        normalized = raw_name.strip().lower()
+        normalized = re.sub(r"\s*\(\d+\)\s*$", "", normalized)
+        if "dramteatr" in normalized or "драм" in normalized:
+            return "dramteatr"
+        if "muzteatr" in normalized or "муз" in normalized:
+            return "muzteatr"
+        if "sobor" in normalized or "собор" in normalized:
+            return "sobor"
+        if "tretyakov" in normalized or "трет" in normalized:
+            return "tretyakov"
+        return normalized
+
+    for file_path_str in theatre_files:
+        try:
+            file_path = Path(file_path_str)
+            source_name = _normalize_source_name(file_path.stem)
+            raw_content = file_path.read_text(encoding="utf-8")
+            events = parse_theatre_json(raw_content, source_name)
+            if events:
+                events_by_source[source_name] = events
+        except Exception as e:
+            logger.error("source_parsing: failed to parse theatre file %s: %s", file_path_str, e)
+            result.errors.append(f"File {file_path_str}: {str(e)}")
+
+    if phil_files:
+        try:
+            from source_parsing.philharmonia import parse_philharmonia_output
+            p_events = parse_philharmonia_output(phil_files)
+            if p_events:
+                events_by_source["philharmonia"] = p_events
+        except Exception as e:
+            logger.error("source_parsing: failed to parse philharmonia files: %s", e)
+            result.errors.append(f"Philharmonia parse error: {str(e)}")
+
+    total_count = sum(len(ev) for ev in events_by_source.values())
+    result.total_events = total_count
+
+    current_index = 0
+    progress_message_id = None
+
+    for source, events in events_by_source.items():
+        try:
+            stats, progress_message_id = await process_source_events(
+                db,
+                bot,
+                events,
+                source,
+                current_index,
+                total_count,
+                chat_id=chat_id,
+                progress_message_id=progress_message_id,
+                added_events=result.added_events if chat_id else None,
+                updated_events=result.updated_events if chat_id else None,
+            )
+            result.stats_by_source[source] = stats
+            current_index += len(events)
+        except Exception as e:
+            logger.error(
+                "source_parsing: failed to process events from %s: %s",
+                source,
+                e,
+                exc_info=True,
+            )
+            result.errors.append(f"Source {escape_md(source)}: {escape_md(str(e))}")
+
+    months = sorted({
+        str(event.parsed_date)[:7]
+        for events in events_by_source.values()
+        for event in events
+        if event.parsed_date
+    })
+    if months:
+        logger.info("source_parsing: ensuring month_pages tasks for months=%s", months)
+        try:
+            import sys
+            from sqlalchemy import select
+            from models import Event, JobTask
+        except Exception as e:
+            logger.error(
+                "source_parsing: failed to prepare month_pages enqueue: %s",
+                e,
+            )
+        else:
+            main_mod = sys.modules.get("main") or sys.modules.get("__main__")
+            if main_mod is None:
+                logger.error("source_parsing: main module not found for month_pages enqueue")
+            else:
+                enqueue_job = main_mod.enqueue_job
+                mark_pages_dirty = main_mod.mark_pages_dirty
+                month_event_ids: dict[str, int] = {}
+                async with db.get_session() as session:
+                    for month in months:
+                        res = await session.execute(
+                            select(Event.id)
+                            .where(Event.date.like(f"{month}%"))
+                            .order_by(Event.id.desc())
+                            .limit(1)
+                        )
+                        event_id = res.scalar_one_or_none()
+                        if event_id:
+                            month_event_ids[month] = event_id
+
+                for month in months:
+                    event_id = month_event_ids.get(month)
+                    if not event_id:
+                        continue
+                    await enqueue_job(
+                        db,
+                        event_id,
+                        JobTask.month_pages,
+                        coalesce_key=f"month_pages:{month}",
+                    )
+                    await mark_pages_dirty(db, month)
+
+    if bot and chat_id and progress_message_id:
+        try:
+            total_new = sum(s.new_added for s in result.stats_by_source.values())
+            total_fail = sum(s.failed for s in result.stats_by_source.values())
+
+            final_text = (
+                f"✅ Обработка завершена\n"
+                f"Добавлено: {total_new}\n"
+                f"Ошибок: {total_fail}"
+            )
+            await bot.edit_message_text(
+                text=final_text,
+                chat_id=chat_id,
+                message_id=progress_message_id,
+                parse_mode="Markdown",
+            )
+        except Exception:
+            logger.warning(
+                "source_parsing: failed final progress update",
+                exc_info=True,
+            )
+
+
 async def run_source_parsing(
     db: Database,
     bot: Bot | None = None,
@@ -849,7 +1000,6 @@ async def run_source_parsing(
     # Import Philharmonia runner
     from source_parsing.philharmonia import (
         run_philharmonia_kaggle_kernel,
-        parse_philharmonia_output,
     )
 
     if DEBUG_MAX_EVENTS:
@@ -913,140 +1063,14 @@ async def run_source_parsing(
                  result.errors.append(f"Philharmonia kernel failed: {status_p}")
                  phil_files = []
 
-        # 2. Parse files
-        events_by_source = {}
-
-        def _normalize_source_name(raw_name: str) -> str:
-            normalized = raw_name.strip().lower()
-            normalized = re.sub(r"\s*\(\d+\)\s*$", "", normalized)
-            if "dramteatr" in normalized or "драм" in normalized:
-                return "dramteatr"
-            if "muzteatr" in normalized or "муз" in normalized:
-                return "muzteatr"
-            if "sobor" in normalized or "собор" in normalized:
-                return "sobor"
-            if "tretyakov" in normalized or "трет" in normalized:
-                return "tretyakov"
-            return normalized
-        
-        # Parse Theatres
-        for file_path_str in theatre_files:
-            try:
-                file_path = Path(file_path_str)
-                source_name = _normalize_source_name(file_path.stem)
-                raw_content = file_path.read_text(encoding="utf-8")
-                events = parse_theatre_json(raw_content, source_name)
-                if events:
-                    events_by_source[source_name] = events
-            except Exception as e:
-                logger.error("source_parsing: failed to parse theatre file %s: %s", file_path_str, e)
-                result.errors.append(f"File {file_path_str}: {str(e)}")
-
-        # Parse Philharmonia
-        if phil_files:
-            try:
-                p_events = parse_philharmonia_output(phil_files)
-                if p_events:
-                    events_by_source["philharmonia"] = p_events
-            except Exception as e:
-                logger.error("source_parsing: failed to parse philharmonia files: %s", e)
-                result.errors.append(f"Philharmonia parse error: {str(e)}")
-        
-        # 3. Process events
-        total_count = sum(len(ev) for ev in events_by_source.values())
-        result.total_events = total_count
-        
-        current_index = 0
-        progress_message_id = None
-        
-        for source, events in events_by_source.items():
-            try:
-                stats, progress_message_id = await process_source_events(
-                    db,
-                    bot,
-                    events,
-                    source,
-                    current_index,
-                    total_count,
-                    chat_id=chat_id,
-                    progress_message_id=progress_message_id,
-                    added_events=result.added_events if chat_id else None,
-                    updated_events=result.updated_events if chat_id else None,
-                )
-                result.stats_by_source[source] = stats
-                current_index += len(events)
-            except Exception as e:
-                logger.error("source_parsing: failed to process events from %s: %s", source, e, exc_info=True)
-                # Escape error text as it may contain underscores/paths
-                result.errors.append(f"Source {escape_md(source)}: {escape_md(str(e))}")
-                
-        months = sorted({
-            str(event.parsed_date)[:7]
-            for events in events_by_source.values()
-            for event in events
-            if event.parsed_date
-        })
-        if months:
-            logger.info("source_parsing: ensuring month_pages tasks for months=%s", months)
-            try:
-                import sys
-                from sqlalchemy import select
-                from models import Event, JobTask
-            except Exception as e:
-                logger.error(
-                    "source_parsing: failed to prepare month_pages enqueue: %s",
-                    e,
-                )
-            else:
-                main_mod = sys.modules.get("main") or sys.modules.get("__main__")
-                if main_mod is None:
-                    logger.error("source_parsing: main module not found for month_pages enqueue")
-                else:
-                    enqueue_job = main_mod.enqueue_job
-                    mark_pages_dirty = main_mod.mark_pages_dirty
-                    month_event_ids: dict[str, int] = {}
-                    async with db.get_session() as session:
-                        for month in months:
-                            res = await session.execute(
-                                select(Event.id)
-                                .where(Event.date.like(f"{month}%"))
-                                .order_by(Event.id.desc())
-                                .limit(1)
-                            )
-                            event_id = res.scalar_one_or_none()
-                            if event_id:
-                                month_event_ids[month] = event_id
-
-                    for month in months:
-                        event_id = month_event_ids.get(month)
-                        if not event_id:
-                            continue
-                        await enqueue_job(
-                            db,
-                            event_id,
-                            JobTask.month_pages,
-                            coalesce_key=f"month_pages:{month}",
-                        )
-                        await mark_pages_dirty(db, month)
-
-        # Final progress update
-        if bot and chat_id and progress_message_id:
-            try:
-                total_new = sum(s.new_added for s in result.stats_by_source.values())
-                total_fail = sum(s.failed for s in result.stats_by_source.values())
-                
-                final_text = (
-                    f"✅ Обработка завершена\n"
-                    f"Добавлено: {total_new}\n"
-                    f"Ошибок: {total_fail}"
-                )
-                await bot.edit_message_text(
-                    text=final_text,
-                    chat_id=chat_id,
-                    message_id=progress_message_id,
-                )
-            except Exception as e:
-                logger.warning("source_parsing: failed to update final progress: %s", e)
+        await _process_parsing_files(
+            db,
+            bot,
+            chat_id=chat_id,
+            theatre_files=theatre_files,
+            phil_files=phil_files,
+            result=result,
+        )
         
         result.processing_duration = time.time() - start_time
         
@@ -1062,6 +1086,104 @@ async def run_source_parsing(
         if log_handler:
             logging.getLogger().removeHandler(log_handler)
             log_handler.close()
+
+
+_source_parsing_recovery_active: set[str] = set()
+
+
+async def resume_source_parsing_jobs(
+    db: Database,
+    bot: Bot | None,
+    *,
+    chat_id: int | None = None,
+) -> int:
+    jobs = await list_jobs()
+    parse_jobs = [
+        j
+        for j in jobs
+        if j.get("type") in {"parse_theatres", "parse_philharmonia"}
+    ]
+    if not parse_jobs:
+        return 0
+    notify_chat_id = chat_id
+    if notify_chat_id is None:
+        admin_chat_id = os.getenv("ADMIN_CHAT_ID")
+        if admin_chat_id:
+            try:
+                notify_chat_id = int(admin_chat_id)
+            except ValueError:
+                notify_chat_id = None
+    client = KaggleClient()
+    recovered = 0
+    for job in parse_jobs:
+        kernel_ref = str(job.get("kernel_ref") or "")
+        job_type = str(job.get("type") or "")
+        if not kernel_ref or kernel_ref in _source_parsing_recovery_active:
+            continue
+        _source_parsing_recovery_active.add(kernel_ref)
+        try:
+            meta = job.get("meta") if isinstance(job.get("meta"), dict) else {}
+            owner_pid = meta.get("pid")
+            if owner_pid == os.getpid():
+                continue
+            try:
+                status = await asyncio.to_thread(client.get_kernel_status, kernel_ref)
+            except Exception:
+                logger.exception("source_parsing_recovery: status fetch failed kernel=%s", kernel_ref)
+                continue
+            state = str(status.get("status") or "").lower()
+            if state in {"error", "failed", "cancelled"}:
+                await remove_job(job_type, kernel_ref)
+                if bot and notify_chat_id:
+                    await bot.send_message(
+                        notify_chat_id,
+                        f"⚠️ parse recovery: kernel {kernel_ref} завершился ошибкой",
+                    )
+                continue
+            if state != "complete":
+                continue
+            output_dir = Path(tempfile.gettempdir()) / f"source_parsing_recovery_{abs(hash(kernel_ref))}"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            files = await asyncio.to_thread(
+                client.download_kernel_output,
+                kernel_ref,
+                path=str(output_dir),
+                force=True,
+            )
+            file_paths = [str(output_dir / f) for f in files]
+            theatre_files: list[str] = []
+            phil_files: list[str] = []
+            if job_type == "parse_theatres":
+                theatre_files = [f for f in file_paths if Path(f).suffix.lower() == ".json"]
+            elif job_type == "parse_philharmonia":
+                phil_files = [f for f in file_paths if Path(f).suffix.lower() == ".json"]
+            if not theatre_files and not phil_files:
+                logger.warning(
+                    "source_parsing_recovery: no json files kernel=%s", kernel_ref
+                )
+                continue
+            result = SourceParsingResult(chat_id=notify_chat_id)
+            result.json_file_paths.extend(theatre_files + phil_files)
+            await _process_parsing_files(
+                db,
+                bot,
+                chat_id=notify_chat_id,
+                theatre_files=theatre_files,
+                phil_files=phil_files,
+                result=result,
+            )
+            await remove_job(job_type, kernel_ref)
+            recovered += 1
+            if bot and notify_chat_id:
+                report = format_parsing_report(result)
+                await bot.send_message(
+                    notify_chat_id,
+                    f"✅ parse recovery: kernel {kernel_ref} обработан\n\n{report}",
+                    parse_mode="Markdown",
+                )
+        finally:
+            _source_parsing_recovery_active.discard(kernel_ref)
+    return recovered
 
 
 

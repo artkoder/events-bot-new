@@ -109,7 +109,7 @@ def _env_enabled(key: str, *, default: bool = False) -> bool:
     raw = os.getenv(key)
     if raw is None:
         return default
-    return raw == "1"
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 class BatchProgress:
@@ -490,6 +490,25 @@ def startup(
 
     main_module = None
 
+    def _notify_admin_skip(job_name: str, reason: str) -> None:
+        admin_chat_id = os.getenv("ADMIN_CHAT_ID")
+        if not admin_chat_id:
+            return
+        try:
+            chat_id = int(admin_chat_id)
+        except (TypeError, ValueError):
+            logging.warning("SCHED invalid ADMIN_CHAT_ID=%r", admin_chat_id)
+            return
+        if bot is None or not hasattr(bot, "send_message"):
+            return
+        text = f"⚠️ SCHED: пропуск {job_name}. Причина: {reason}"
+        try:
+            asyncio.create_task(bot.send_message(chat_id, text))
+        except RuntimeError:
+            logging.warning("SCHED failed to notify admin: no running event loop")
+        except Exception:
+            logging.exception("SCHED failed to notify admin chat")
+
     def resolve(name: str, value):
         nonlocal main_module
         if value is not None:
@@ -655,6 +674,7 @@ def startup(
         )
     else:
         logging.info("SCHED skipping source_parsing (ENABLE_SOURCE_PARSING!=1)")
+        _notify_admin_skip("source_parsing", "ENABLE_SOURCE_PARSING!=1")
 
     enable_source_parsing_day = _env_enabled("ENABLE_SOURCE_PARSING_DAY", default=is_prod)
     if enable_source_parsing_day:
@@ -683,6 +703,7 @@ def startup(
         )
     else:
         logging.info("SCHED skipping source_parsing_day (ENABLE_SOURCE_PARSING_DAY!=1)")
+        _notify_admin_skip("source_parsing_day", "ENABLE_SOURCE_PARSING_DAY!=1")
 
     enable_3di = _env_enabled("ENABLE_3DI_SCHEDULED", default=is_prod)
     if enable_3di:
@@ -718,6 +739,31 @@ def startup(
             )
     else:
         logging.info("SCHED skipping 3di_scheduler (ENABLE_3DI_SCHEDULED!=1)")
+        _notify_admin_skip("3di_scheduler", "ENABLE_3DI_SCHEDULED!=1")
+
+    enable_kaggle_recovery = _env_enabled("ENABLE_KAGGLE_RECOVERY", default=is_prod)
+    if enable_kaggle_recovery:
+        from kaggle_recovery import kaggle_recovery_scheduler
+        interval_raw = os.getenv("KAGGLE_RECOVERY_INTERVAL_MINUTES", "5").strip()
+        try:
+            interval_min = max(1, int(interval_raw))
+        except ValueError:
+            interval_min = 5
+        _register_job(
+            "kaggle_recovery",
+            _job_wrapper("kaggle_recovery", kaggle_recovery_scheduler),
+            "interval",
+            id="kaggle_recovery",
+            minutes=interval_min,
+            args=[db, bot],
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=60,
+        )
+    else:
+        logging.info("SCHED skipping kaggle_recovery (ENABLE_KAGGLE_RECOVERY!=1)")
+        _notify_admin_skip("kaggle_recovery", "ENABLE_KAGGLE_RECOVERY!=1")
 
     if os.getenv("ENABLE_NIGHTLY_PAGE_SYNC") == "1":
         _register_job(
