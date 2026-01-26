@@ -44,7 +44,7 @@ notebook_content = {
     "TG_SESSION = os.environ.get('TG_SESSION') or 'YOUR_SESSION_STRING_HERE'\n",
     "API_ID = os.environ.get('TG_API_ID')\n",
     "API_HASH = os.environ.get('TG_API_HASH')\n",
-    "GEMMA_API_KEY = os.environ.get('GEMMA_API_KEY')\n",
+    "GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY')\n",
     "\n",
     "# Context from Server (Mock for now, should be injected)\n",
     "TELEGRAPH_URLS = os.environ.get('TELEGRAPH_URLS', '').split(',')\n",
@@ -53,7 +53,7 @@ notebook_content = {
     "if not TG_SESSION or not API_ID or not API_HASH:\n",
     "    raise ValueError(\"Missing Telegram credentials\")\n",
     "\n",
-    "genai.configure(api_key=GEMMA_API_KEY)"
+    "genai.configure(api_key=GOOGLE_API_KEY)"
    ]
   },
   {

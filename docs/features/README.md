@@ -8,6 +8,7 @@
 - `docs/features/crumple-video/README.md` — видео-анонсы `/v` (CrumpleVideo)
 - `docs/features/source-parsing/README.md` — извлечение/парсинг событий из внешних источников (в т.ч. `/parse`)
 - `docs/features/tourist-label/README.md` — туристическая метка (ручная разметка + экспорт)
+- `docs/features/llm-gateway/README.md` — управление лимитами Google AI (Gemma/Gemini) и ретраи
 
 ## Как добавлять новую фичу
 

@@ -12,6 +12,7 @@ sections:
     commands: docs/operations/commands.md
     cron: docs/operations/cron.md
     e2e_testing: docs/operations/e2e-testing.md
+    kaggle_secrets: docs/operations/kaggle-secrets.md
     prod_data: docs/operations/prod-data.md
     vk_metrics: docs/operations/vk-metrics.md
   llm:
@@ -20,6 +21,7 @@ sections:
     topics: docs/llm/topics.md
   reference:
     locations: docs/reference/locations.md
+    location_flags: docs/reference/location-flags.md
     holidays: docs/reference/holidays.md
     recurring_events: docs/reference/recurring-events.md
     month_page_template: docs/reference/month-page-template.md
@@ -32,6 +34,10 @@ sections:
     festival_parser: docs/features/source-parsing/sources/festival-parser/README.md
   backlog:
     index: docs/backlog/
+    features:
+      telegram_monitoring: docs/backlog/features/telegram-monitoring/README.md
+      smart_event_update: docs/backlog/features/smart-event-update/README.md
+      event_scoring: docs/backlog/features/event-scoring/README.md
     linear:
       - docs/backlog/linear/EVE-11-llm-rate-limits.md
       - docs/backlog/linear/EVE-54-kaggle-secrets.md
@@ -68,6 +74,13 @@ features:
     entrypoints:
       - main.py
       - db.py
+  llm_gateway:
+    status: implemented
+    docs: docs/features/llm-gateway/README.md
+    entrypoints:
+      - google_ai/client.py
+      - google_ai/exceptions.py
+      - google_ai/secrets.py
 
 artifacts:
   root: artifacts/
