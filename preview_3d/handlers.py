@@ -751,8 +751,8 @@ async def _run_kaggle_render(
                         ]),
                         parse_mode="HTML",
                     )
-            if registered and kernel_ref:
-                await remove_job("preview3d", kernel_ref)
+                if registered and kernel_ref:
+                    await remove_job("preview3d", kernel_ref)
             finally:
                 shutil.rmtree(output_dir, ignore_errors=True)
     except Exception as exc:
