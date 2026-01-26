@@ -155,12 +155,41 @@ def _filter_events_with_posters(events: Sequence[Event]) -> list[Event]:
     return filtered
 
 
+_SOLD_OUT_STATUSES = {
+    "sold_out",
+    "soldout",
+    "распродано",
+    "билетов_нет",
+    "нет_билетов",
+}
+
+
+def _normalize_ticket_status(value: str | None) -> str:
+    text = (value or "").strip().casefold()
+    if not text:
+        return ""
+    text = text.replace("-", "_").replace(" ", "_")
+    text = re.sub(r"_+", "_", text)
+    return text
+
+
+def _is_sold_out_status(value: str | None) -> bool:
+    normalized = _normalize_ticket_status(value)
+    if not normalized:
+        return False
+    return normalized in _SOLD_OUT_STATUSES
+
+
 def _filter_events_by_ticket_status(
     events: Sequence[Event], *, allow_sold_out: bool
 ) -> list[Event]:
     if allow_sold_out:
         return list(events)
-    filtered = [e for e in events if getattr(e, "ticket_status", None) != "sold_out"]
+    filtered = [
+        e
+        for e in events
+        if not _is_sold_out_status(getattr(e, "ticket_status", None))
+    ]
     if len(filtered) != len(events):
         logger.info(
             "video_announce: dropped sold_out events total=%d filtered=%d",  # noqa: G004
@@ -288,7 +317,7 @@ def _dedupe_events(
         schedule_events = [
             ev
             for ev in group_events
-            if getattr(ev, "ticket_status", None) != "sold_out"
+            if not _is_sold_out_status(getattr(ev, "ticket_status", None))
         ]
         if not schedule_events:
             continue

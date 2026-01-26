@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable
 
@@ -12,10 +12,12 @@ from aiogram.types import FSInputFile
 from sqlalchemy import select
 
 from db import Database
+from main import format_day_pretty
 from models import (
     Event,
     VideoAnnounceEventHit,
     VideoAnnounceItem,
+    VideoAnnounceItemStatus,
     VideoAnnounceSession,
     VideoAnnounceSessionStatus,
 )
@@ -77,6 +79,89 @@ def _get_status_lock(session_id: int) -> asyncio.Lock:
         lock = asyncio.Lock()
         _status_locks[session_id] = lock
     return lock
+
+
+def _parse_positive_int(value: object) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _format_date_range(dates: list[date]) -> str | None:
+    if not dates:
+        return None
+    min_date = min(dates)
+    max_date = max(dates)
+    if min_date == max_date:
+        return format_day_pretty(min_date)
+    return f"{format_day_pretty(min_date)} - {format_day_pretty(max_date)}"
+
+
+def _selection_render_limit(session_obj: VideoAnnounceSession) -> int | None:
+    params = (
+        session_obj.selection_params
+        if isinstance(session_obj.selection_params, dict)
+        else {}
+    )
+    return _parse_positive_int(params.get("render_scene_limit"))
+
+
+def _fallback_target_date_label(session_obj: VideoAnnounceSession) -> str | None:
+    params = (
+        session_obj.selection_params
+        if isinstance(session_obj.selection_params, dict)
+        else {}
+    )
+    raw = params.get("target_date")
+    if not raw:
+        return None
+    try:
+        parsed = date.fromisoformat(str(raw))
+    except ValueError:
+        return None
+    return format_day_pretty(parsed)
+
+
+async def _load_session_date_range(
+    db: Database, session_obj: VideoAnnounceSession
+) -> str | None:
+    limit = _selection_render_limit(session_obj)
+    async with db.get_session() as session:
+        res = await session.execute(
+            select(VideoAnnounceItem)
+            .where(VideoAnnounceItem.session_id == session_obj.id)
+            .where(VideoAnnounceItem.status == VideoAnnounceItemStatus.READY)
+            .order_by(VideoAnnounceItem.position)
+        )
+        items = res.scalars().all()
+        if limit:
+            items = items[:limit]
+        event_ids = [item.event_id for item in items]
+        if not event_ids:
+            return None
+        ev_res = await session.execute(select(Event).where(Event.id.in_(event_ids)))
+        events = ev_res.scalars().all()
+    dates: list[date] = []
+    for ev in events:
+        try:
+            raw_date = (ev.date or "").split("..", 1)[0]
+            dates.append(date.fromisoformat(raw_date))
+        except Exception:
+            continue
+    return _format_date_range(dates)
+
+
+async def _build_video_caption(
+    db: Database, session_obj: VideoAnnounceSession
+) -> str:
+    label = await _load_session_date_range(db, session_obj)
+    if not label:
+        label = _fallback_target_date_label(session_obj)
+    if not label:
+        label = format_day_pretty((datetime.now(timezone.utc) + timedelta(days=1)).date())
+    return f"Видео-анонс #{session_obj.id} на завтра {label}"
 
 
 def _format_kaggle_status(status: dict | None) -> str:
@@ -676,7 +761,7 @@ async def run_kernel_poller(
             message_id=status_message_id,
             allow_send=True,
         )
-        caption = f"Видео-анонс #{session_obj.id}"
+        caption = await _build_video_caption(db, session_obj)
         target_test = test_chat_id or notify_chat_id
         video_input = FSInputFile(video_path)
         try:
