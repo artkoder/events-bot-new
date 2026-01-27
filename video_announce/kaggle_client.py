@@ -162,6 +162,21 @@ class KaggleClient:
                     shutil.copy2(item, dest)
             meta_path = tmp_path / "kernel-metadata.json"
             meta_data = json.loads(meta_path.read_text(encoding="utf-8"))
+            username = (os.getenv("KAGGLE_USERNAME") or "").strip()
+            kernel_id = str(meta_data.get("id") or "").strip()
+            if username and kernel_id:
+                if "/" in kernel_id:
+                    owner, slug = kernel_id.split("/", 1)
+                else:
+                    owner, slug = "", kernel_id
+                if slug and owner != username:
+                    new_id = f"{username}/{slug}"
+                    logger.info(
+                        "kaggle: overriding kernel owner old_id=%s new_id=%s",
+                        kernel_id,
+                        new_id,
+                    )
+                    meta_data["id"] = new_id
             if dataset_sources is not None:
                 meta_data["dataset_sources"] = dataset_sources
                 meta_path.write_text(json.dumps(meta_data, ensure_ascii=False, indent=2))

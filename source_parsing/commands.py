@@ -41,6 +41,7 @@ SOURCE_PARSING_GUARD_URLS = {
     "sobor": "https://sobor39.ru/events/concerts/night/",
     "tretyakov": "https://kaliningrad.tretyakovgallery.ru/events/",
     "philharmonia": "https://filarmonia39.ru/?event",
+    "qtickets": "https://kaliningrad.qtickets.events",
 }
 
 
@@ -106,6 +107,7 @@ def _format_added_events_lines(added_events) -> list[str]:
         "sobor": "Собор",
         "tretyakov": "Третьяковка",
         "philharmonia": "Филармония",
+        "qtickets": "Qtickets",
     }
     lines = [f"📌 **Добавленные события:** {len(added_events)}", ""]
     for item in added_events:
@@ -137,6 +139,7 @@ def _format_updated_events_lines(updated_events) -> list[str]:
         "sobor": "Собор",
         "tretyakov": "Третьяковка",
         "philharmonia": "Филармония",
+        "qtickets": "Qtickets",
     }
     lines = [f"🔄 **Обновлённые события:** {len(updated_events)}", ""]
     for item in updated_events:

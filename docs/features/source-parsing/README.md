@@ -25,8 +25,8 @@
 - Дом искусств: `docs/features/source-parsing/sources/dom-iskusstv/README.md`
 - Pyramida: `docs/features/source-parsing/sources/pyramida/README.md`
 - Третьяковка: `docs/features/source-parsing/sources/tretyakov/README.md`
-- Третьяковка: `docs/features/source-parsing/sources/tretyakov/README.md`
 - Филармония: `docs/features/source-parsing/sources/philharmonia/README.md`
+- Qtickets: `docs/features/source-parsing/sources/qtickets/README.md`
 - Universal Festival Parser: `docs/features/source-parsing/sources/festival-parser/README.md`
 
 ## Артефакты

@@ -81,6 +81,22 @@ features:
       - google_ai/client.py
       - google_ai/exceptions.py
       - google_ai/secrets.py
+  telegram_monitoring:
+    status: implemented
+    docs: docs/features/telegram-monitoring/README.md
+    entrypoints:
+      - source_parsing/telegram/commands.py
+      - source_parsing/telegram/service.py
+      - source_parsing/telegram/handlers.py
+      - smart_event_update.py
+      - scheduling.py
+  smart_event_update:
+    status: implemented
+    docs: docs/features/smart-event-update/README.md
+    entrypoints:
+      - smart_event_update.py
+      - models.py
+      - db.py
 
 artifacts:
   root: artifacts/

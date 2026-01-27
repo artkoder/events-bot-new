@@ -2257,6 +2257,11 @@ HELP_COMMANDS = [
         "desc": "Parse events from theatre sources (Драмтеатр, Музтеатр, Кафедральный собор)",
         "roles": {"superadmin"},
     },
+    {
+        "usage": "/tg",
+        "desc": "Manage Telegram monitoring sources and запуск мониторинга",
+        "roles": {"superadmin"},
+    },
 ]
 
 HELP_COMMANDS.insert(
@@ -10760,6 +10765,7 @@ async def add_events_from_text(
     logging.info(
         "add_events_from_text start: len=%d source=%s", len(text), source_link
     )
+    from smart_event_update import EventCandidate, PosterCandidate, smart_event_update
     poster_items: list[PosterMedia] = []
     ocr_tokens_spent = 0
     ocr_tokens_remaining: int | None = None
@@ -10832,6 +10838,16 @@ async def add_events_from_text(
     catbox_urls = [item.catbox_url for item in poster_items if item.catbox_url]
     poster_texts = collect_poster_texts(poster_items)
     poster_summary = build_poster_summary(poster_items)
+    poster_candidates = [
+        PosterCandidate(
+            catbox_url=item.catbox_url,
+            sha256=item.digest,
+            phash=None,
+            ocr_text=item.ocr_text,
+            ocr_title=item.ocr_title,
+        )
+        for item in poster_items
+    ]
 
     llm_call_started = _time.monotonic()
     try:
@@ -11144,9 +11160,6 @@ async def add_events_from_text(
             base_event.date = start_dt.isoformat()
             base_event.end_date = date(start_dt.year, 12, 31).isoformat()
 
-        topics_meta_map: dict[int, tuple[list[str], int, str | None, bool]] = {}
-        topics_meta_map[id(base_event)] = await assign_event_topics(base_event)
-
         events_to_add = [base_event]
         if (
             not is_long_event_type(base_event.event_type)
@@ -11171,7 +11184,6 @@ async def add_events_from_text(
                     copy_e.end_date = None
                     copy_e.topics = list(base_event.topics or [])
                     copy_e.topics_manual = base_event.topics_manual
-                    topics_meta_map[id(copy_e)] = topics_meta_map[id(base_event)]
                     events_to_add.append(copy_e)
         for event in events_to_add:
             rejected_links: list[str] = []
@@ -11194,44 +11206,68 @@ async def add_events_from_text(
 
             # skip events that have already finished - disabled for consistency in tests
 
-            _meta_topics, meta_text_len, meta_error, meta_manual = topics_meta_map.get(
-                id(event),
-                (
-                    list(event.topics or []),
-                    _event_topic_text_length(event),
-                    None,
-                    bool(event.topics_manual),
+            candidate = EventCandidate(
+                source_type=(
+                    "telegram"
+                    if (source_chat_id or source_message_id or source_channel)
+                    else ("vk" if is_vk_wall_url(source_link) else "manual")
                 ),
+                source_url=source_link or source_marker,
+                source_text=source_text_clean,
+                title=event.title,
+                date=event.date,
+                time=event.time,
+                end_date=event.end_date,
+                festival=event.festival,
+                location_name=event.location_name,
+                location_address=event.location_address,
+                city=event.city,
+                ticket_link=event.ticket_link,
+                ticket_price_min=event.ticket_price_min,
+                ticket_price_max=event.ticket_price_max,
+                ticket_status=data.get("ticket_status"),
+                event_type=event.event_type,
+                emoji=event.emoji,
+                is_free=event.is_free,
+                pushkin_card=event.pushkin_card,
+                search_digest=event.search_digest,
+                raw_excerpt=event.description,
+                posters=poster_candidates,
+                source_chat_id=source_chat_id,
+                source_message_id=source_message_id,
+                source_chat_username=source_channel,
+                creator_id=creator_id,
             )
-
-            async with db.get_session() as session:
-                saved, added = await upsert_event(session, event)
-                await upsert_event_posters(session, saved.id, poster_items)
-                if rejected_links:
-                    for url in rejected_links:
-                        pattern = (
-                            "telegram_folder" if is_tg_folder_link(url) else "unknown"
-                        )
-                        logging.info(
-                            "ticket_link_rejected pattern=%s url=%s eid=%s",
-                            pattern,
-                            url,
-                            saved.id,
-                        )
-            if meta_manual:
+            update_result = await smart_event_update(
+                db,
+                candidate,
+                check_source_url=False,
+            )
+            saved: Event | None = None
+            if update_result.event_id:
+                async with db.get_session() as session:
+                    saved = await session.get(Event, update_result.event_id)
+            if saved is None:
+                results.append((None, False, ["smart_update_failed"], "error"))
+                continue
+            if rejected_links:
+                for url in rejected_links:
+                    pattern = (
+                        "telegram_folder" if is_tg_folder_link(url) else "unknown"
+                    )
+                    logging.info(
+                        "ticket_link_rejected pattern=%s url=%s eid=%s",
+                        pattern,
+                        url,
+                        saved.id,
+                    )
+            meta_text_len = _event_topic_text_length(saved)
+            if saved.topics_manual:
                 logging.info(
                     "event_topics_classify eid=%s text_len=%d topics=%s manual=True",
                     saved.id,
                     meta_text_len,
                     list(saved.topics or []),
-                )
-            elif meta_error:
-                logging.info(
-                    "event_topics_classify eid=%s text_len=%d topics=%s error=%s",
-                    saved.id,
-                    meta_text_len,
-                    list(saved.topics or []),
-                    meta_error,
                 )
             else:
                 logging.info(
@@ -11249,7 +11285,6 @@ async def add_events_from_text(
                 date=saved.date,
                 time=saved.time,
             )
-            await schedule_event_update_tasks(db, saved)
             d = parse_iso_date(saved.date)
             week = d.isocalendar().week if d else None
             w_start = weekend_start_for_date(d) if d else None
@@ -11311,8 +11346,17 @@ async def add_events_from_text(
                 lines.append(f"price_max: {saved.ticket_price_max}")
             if saved.ticket_link:
                 lines.append(f"ticket_link: {saved.ticket_link}")
-            status = "added" if added else "updated"
-            results.append((saved, added, lines, status))
+            added_flag = bool(update_result.created)
+            status = (
+                "added"
+                if update_result.created
+                else (
+                    "updated"
+                    if update_result.merged or update_result.status == "skipped_nochange"
+                    else "skipped"
+                )
+            )
+            results.append((saved, added_flag, lines, status))
             first = False
     if festival_obj and (fest_created or fest_updated):
         lines = [f"festival: {festival_obj.name}"]
@@ -11598,27 +11642,41 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
         html_text = html_text[len("/addevent_raw") :].lstrip()
     source_clean = html_text or parts[1]
 
-    event = Event(
+    from smart_event_update import EventCandidate, smart_event_update
+
+    source_marker = f"manual:{message.chat.id}/{message.message_id}"
+    candidate = EventCandidate(
+        source_type="manual",
+        source_url=source_marker,
+        source_text=source_clean,
         title=title,
-        description="",
-        festival=None,
         date=date_iso,
         time=time,
         location_name=location,
-        source_text=source_clean,
         creator_id=creator_id,
-        search_digest=None,
+    )
+    update_result = await smart_event_update(
+        db,
+        candidate,
+        check_source_url=False,
     )
     async with db.get_session() as session:
-        event, added = await upsert_event(session, event)
-    results = await schedule_event_update_tasks(db, event)
+        event = (
+            await session.get(Event, update_result.event_id)
+            if update_result.event_id
+            else None
+        )
+    if event is None:
+        await bot.send_message(message.chat.id, "Failed to save event")
+        return
+    results = None
     lines = [
         f"title: {event.title}",
         f"date: {event.date}",
         f"time: {event.time}",
         f"location_name: {event.location_name}",
     ]
-    status = "added" if added else "updated"
+    status = "added" if update_result.created else "updated"
     logging.info("handle_add_event_raw %s event id=%s", status, event.id)
     buttons_first: list[types.InlineKeyboardButton] = []
     if (

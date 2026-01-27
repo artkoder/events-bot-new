@@ -4616,7 +4616,7 @@ async def show_edit_menu(
     poster_lines: list[str] = []
     if database and event.id:
         from sqlmodel import select
-        from models import EventPoster
+        from models import EventPoster, EventSource
 
         async with database.get_session() as session:
             posters = (
@@ -4652,6 +4652,25 @@ async def show_edit_menu(
                     if len(url) > 120:
                         url = url[:117] + "..."
                     poster_lines.append(f"    catbox_url: {url}")
+            poster_lines.append("---")
+
+        sources = (
+            await session.execute(
+                select(EventSource)
+                .where(EventSource.event_id == event.id)
+                .order_by(EventSource.imported_at.desc())
+            )
+        ).scalars().all()
+        if sources:
+            poster_lines.append("Sources:")
+            for src in sources[:10]:
+                trust = src.trust_level or "—"
+                url = src.source_url or ""
+                if len(url) > 120:
+                    url = url[:117] + "..."
+                poster_lines.append(f"  - {src.source_type} | trust={trust} | {url}")
+            if len(sources) > 10:
+                poster_lines.append(f"  ... ещё {len(sources) - 10}")
             poster_lines.append("---")
 
     lines = []

@@ -1808,71 +1808,81 @@ async def persist_event_and_pages(
     main_mod = sys.modules.get("main") or sys.modules.get("__main__")
     if main_mod is None:  # pragma: no cover - defensive
         raise RuntimeError("main module not found")
-    upsert_event = main_mod.upsert_event
-    upsert_event_posters = main_mod.upsert_event_posters
-    assign_event_topics = main_mod.assign_event_topics
     schedule_event_update_tasks = main_mod.schedule_event_update_tasks
     rebuild_fest_nav_if_changed = main_mod.rebuild_fest_nav_if_changed
     ensure_festival = main_mod.ensure_festival
     get_holiday_record = getattr(main_mod, "get_holiday_record", None)
     sync_festival_page = getattr(main_mod, "sync_festival_page", None)
+    normalize_event_type = getattr(main_mod, "normalize_event_type", None)
 
     poster_urls = [m.catbox_url for m in draft.poster_media if m.catbox_url]
     photo_urls = poster_urls or list(photos or [])
+    from smart_event_update import EventCandidate, PosterCandidate, smart_event_update
 
-    event = Event(
+    posters: list[PosterCandidate] = [
+        PosterCandidate(
+            catbox_url=item.catbox_url,
+            sha256=item.digest,
+            phash=None,
+            ocr_text=item.ocr_text,
+            ocr_title=item.ocr_title,
+        )
+        for item in draft.poster_media
+    ]
+    if not posters and photo_urls:
+        posters = [PosterCandidate(catbox_url=url) for url in photo_urls]
+
+    normalized_event_type = (
+        normalize_event_type(draft.title or "", draft.description or "", draft.event_type)
+        if callable(normalize_event_type)
+        else (draft.event_type or None)
+    )
+
+    candidate = EventCandidate(
+        source_type="vk",
+        source_url=source_post_url,
+        source_text=draft.source_text or draft.title,
         title=draft.title,
-        description=(draft.description or ""),
-        festival=(draft.festival or None),
         date=draft.date or datetime.now(timezone.utc).date().isoformat(),
         time=draft.time or "00:00",
+        end_date=draft.end_date or None,
+        festival=draft.festival or None,
         location_name=draft.venue or "",
         location_address=draft.location_address or None,
         city=draft.city or "Калининград",
+        ticket_link=(draft.links[0] if draft.links else None),
         ticket_price_min=draft.ticket_price_min,
         ticket_price_max=draft.ticket_price_max,
-        ticket_link=(draft.links[0] if draft.links else None),
-        event_type=draft.event_type or None,
+        event_type=normalized_event_type,
         emoji=draft.emoji or None,
-        end_date=draft.end_date or None,
         is_free=bool(draft.is_free),
         pushkin_card=bool(draft.pushkin_card),
-        source_text=draft.source_text or draft.title,
-        photo_urls=photo_urls,
-        photo_count=len(photo_urls),
-        source_post_url=source_post_url,
         search_digest=draft.search_digest,
+        raw_excerpt=draft.description or "",
+        posters=posters,
     )
 
-    topics, text_length, error_text, manual_flag = await assign_event_topics(event)
-
+    update_result = await smart_event_update(
+        db,
+        candidate,
+        check_source_url=False,
+    )
     async with db.get_session() as session:
-        saved, _ = await upsert_event(session, event)
-        await upsert_event_posters(session, saved.id, draft.poster_media)
-    if manual_flag:
-        logging.info(
-            "event_topics_classify eid=%s text_len=%d topics=%s manual=True",
-            saved.id,
-            text_length,
-            list(saved.topics or []),
+        saved = (
+            await session.get(Event, update_result.event_id)
+            if update_result.event_id
+            else None
         )
-    elif error_text:
-        logging.info(
-            "event_topics_classify eid=%s text_len=%d topics=%s error=%s",
-            saved.id,
-            text_length,
-            list(saved.topics or []),
-            error_text,
-        )
-    else:
-        logging.info(
-            "event_topics_classify eid=%s text_len=%d topics=%s",
-            saved.id,
-            text_length,
-            list(saved.topics or []),
-        )
-    async with db.get_session() as session:
-        saved = await session.get(Event, saved.id)
+    if saved is None:
+        raise RuntimeError("smart_update failed to persist event")
+    text_length = len(saved.title or "") + len(saved.description or "") + len(saved.source_text or "")
+    logging.info(
+        "event_topics_classify eid=%s text_len=%d topics=%s manual=%s",
+        saved.id,
+        text_length,
+        list(saved.topics or []),
+        bool(saved.topics_manual),
+    )
     logging.info(
         "persist_event_and_pages: source_post_url=%s", saved.source_post_url
     )
@@ -1958,9 +1968,8 @@ async def persist_event_and_pages(
                         nav_update_needed = True
     if nav_update_needed:
         await rebuild_fest_nav_if_changed(db)
-    await schedule_event_update_tasks(db, saved)
-
-    await schedule_event_update_tasks(db, saved)
+    if update_result.status in ("skipped_nochange", "skipped_same_source_url"):
+        await schedule_event_update_tasks(db, saved)
 
     # Wait for Telegraph URL to become available (async job)
     # This prevents sending empty links in the operator report

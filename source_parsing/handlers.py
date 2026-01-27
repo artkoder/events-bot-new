@@ -544,20 +544,18 @@ async def add_new_event_via_queue(
         draft.ticket_link = theatre_event.url
         draft.pushkin_card = theatre_event.pushkin_card
         
-        # Use lightweight bulk insert - no Telegraph rebuild, no VK posting
+        # Use smart update (no VK posting here)
         try:
             import sys
+            import hashlib
             from datetime import datetime, timezone
             from models import Event
+            from smart_event_update import EventCandidate, PosterCandidate, smart_event_update
             
             main_mod = sys.modules.get("main") or sys.modules.get("__main__")
             if main_mod is None:
                 logger.error("source_parsing: main module not found")
-                return None
-            
-            upsert_event = main_mod.upsert_event
-            upsert_event_posters = main_mod.upsert_event_posters
-            assign_event_topics = main_mod.assign_event_topics
+                return None, False
             
             # Build final description - should come from LLM (short_description)
             # If LLM didn't return it, use title as fallback and log warning
@@ -568,14 +566,41 @@ async def add_new_event_via_queue(
                     theatre_event.title[:50],
                 )
                 final_description = draft.title
-            
-            # Build Event object
-            event = Event(
+
+            posters: list[PosterCandidate] = [
+                PosterCandidate(
+                    catbox_url=item.catbox_url,
+                    sha256=item.digest,
+                    phash=None,
+                    ocr_text=item.ocr_text,
+                    ocr_title=item.ocr_title,
+                )
+                for item in (poster_media or [])
+            ]
+            if not posters and photos:
+                posters = [PosterCandidate(catbox_url=url) for url in photos]
+
+            fallback_key = "|".join(
+                [
+                    theatre_event.source_type or "theatre",
+                    draft.title or "",
+                    str(draft.date or ""),
+                    str(draft.time or ""),
+                    location_name or "",
+                ]
+            )
+            fallback_hash = hashlib.sha256(fallback_key.encode("utf-8")).hexdigest()[:16]
+            source_url = theatre_event.url or f"parser:{theatre_event.source_type}:{fallback_hash}"
+
+            candidate = EventCandidate(
+                source_type=f"parser:{theatre_event.source_type}",
+                source_url=source_url,
+                source_text=full_description or draft.source_text or draft.title,
                 title=draft.title,
-                description=final_description,
-                festival=(draft.festival or None),
                 date=draft.date or datetime.now(timezone.utc).date().isoformat(),
                 time=draft.time or "00:00",
+                end_date=draft.end_date or None,
+                festival=(draft.festival or None),
                 location_name=draft.venue or "",
                 location_address=draft.location_address or None,
                 city=draft.city or None,
@@ -584,38 +609,61 @@ async def add_new_event_via_queue(
                 ticket_link=theatre_event.url,  # Always use parser URL, not LLM links
                 event_type=draft.event_type or None,
                 emoji=draft.emoji or None,
-                end_date=draft.end_date or None,
                 is_free=bool(draft.is_free),
                 pushkin_card=bool(draft.pushkin_card),
-                source_text=full_description or draft.source_text or draft.title,
-                photo_urls=photos,
-                photo_count=len(photos),
-                source_post_url=theatre_event.url,
                 search_digest=draft.search_digest,
+                raw_excerpt=final_description,
+                posters=posters,
             )
-            
-            # Assign topics (LLM classification)
-            await assign_event_topics(event)
-            
-            # Save to database
-            async with db.get_session() as session:
-                saved, was_added = await upsert_event(session, event)
-                await upsert_event_posters(session, saved.id, poster_media)
-            
-            event_id = saved.id
-            
-            # Reload saved event for schedule_event_update_tasks
+
+            logger.info(
+                "source_parsing: smart_update candidate source=%s url=%s title=%s date=%s time=%s location=%s photos=%d posters=%d",
+                theatre_event.source_type,
+                source_url,
+                theatre_event.title[:80],
+                candidate.date,
+                candidate.time,
+                location_name,
+                len(photos or []),
+                len(posters),
+            )
+
+            update_result = await smart_event_update(
+                db,
+                candidate,
+                check_source_url=False,
+                schedule_tasks=False,
+            )
+            event_id = update_result.event_id
+            was_added = bool(update_result.created)
+
+            if not event_id:
+                logger.error(
+                    "source_parsing: smart_update failed title=%s status=%s reason=%s",
+                    theatre_event.title[:80],
+                    update_result.status,
+                    update_result.reason,
+                )
+                return None, False
+
             async with db.get_session() as session:
                 saved = await session.get(Event, event_id)
-            
-            # Create Telegraph pages and other artifacts (NO VK posting, NO nav drain - updated in batch later)
-            schedule_event_update_tasks = main_mod.schedule_event_update_tasks
-            await schedule_event_update_tasks(db, saved, drain_nav=False, skip_vk_sync=True)
+
+            if saved:
+                schedule_event_update_tasks = main_mod.schedule_event_update_tasks
+                await schedule_event_update_tasks(
+                    db,
+                    saved,
+                    drain_nav=False,
+                    skip_vk_sync=True,
+                )
             
             logger.info(
-                "source_parsing: event created event_id=%d title=%s (Telegraph only, no nav update)",
+                "source_parsing: smart_update result event_id=%d status=%s created=%s merged=%s",
                 event_id,
-                theatre_event.title[:50],
+                update_result.status,
+                int(update_result.created),
+                int(update_result.merged),
             )
             
             # Update ticket status
@@ -788,6 +836,7 @@ async def _process_parsing_files(
     chat_id: int | None,
     theatre_files: list[str],
     phil_files: list[str],
+    qtickets_files: list[str],
     result: SourceParsingResult,
 ) -> None:
     events_by_source: dict[str, list[TheatreEvent]] = {}
@@ -826,6 +875,16 @@ async def _process_parsing_files(
         except Exception as e:
             logger.error("source_parsing: failed to parse philharmonia files: %s", e)
             result.errors.append(f"Philharmonia parse error: {str(e)}")
+
+    if qtickets_files:
+        try:
+            from source_parsing.qtickets import parse_qtickets_output
+            q_events = parse_qtickets_output(qtickets_files)
+            if q_events:
+                events_by_source["qtickets"] = q_events
+        except Exception as e:
+            logger.error("source_parsing: failed to parse qtickets files: %s", e)
+            result.errors.append(f"Qtickets parse error: {str(e)}")
 
     total_count = sum(len(ev) for ev in events_by_source.values())
     result.total_events = total_count
@@ -997,9 +1056,12 @@ async def run_source_parsing(
                 exc_info=True,
             )
     
-    # Import Philharmonia runner
+    # Import Philharmonia and Qtickets runners
     from source_parsing.philharmonia import (
         run_philharmonia_kaggle_kernel,
+    )
+    from source_parsing.qtickets import (
+        run_qtickets_kaggle_kernel,
     )
 
     if DEBUG_MAX_EVENTS:
@@ -1010,7 +1072,7 @@ async def run_source_parsing(
     
     try:
         # 1. Run Kaggle kernels (Parallel)
-        logger.info("source_parsing: starting kernels (theatres + philharmonia)")
+        logger.info("source_parsing: starting kernels (theatres + philharmonia + qtickets)")
         
         # We need independent callbacks for status updates if we want to show both.
         # But for now, let's just let generic status callback handle generic theatre kernel.
@@ -1021,8 +1083,9 @@ async def run_source_parsing(
         
         task_theatres = asyncio.create_task(run_kaggle_kernel(status_callback=_update_kaggle_status))
         task_phil = asyncio.create_task(run_philharmonia_kaggle_kernel()) # No callback for now to avoid mess
+        task_qtickets = asyncio.create_task(run_qtickets_kaggle_kernel()) # Qtickets kernel
 
-        results = await asyncio.gather(task_theatres, task_phil, return_exceptions=True)
+        results = await asyncio.gather(task_theatres, task_phil, task_qtickets, return_exceptions=True)
         
         # Result 0: Theatres
         # Result 1: Philharmonia
@@ -1063,12 +1126,33 @@ async def run_source_parsing(
                  result.errors.append(f"Philharmonia kernel failed: {status_p}")
                  phil_files = []
 
+        # Process Qtickets Result
+        res_qtickets = results[2]
+        if isinstance(res_qtickets, Exception):
+             logger.error("source_parsing: qtickets kernel error: %s", res_qtickets)
+             result.errors.append(f"Qtickets kernel error: {res_qtickets}")
+             qtickets_files = []
+        else:
+             status_q, files_q, dur_q = res_qtickets
+             result.kernel_duration = max(result.kernel_duration, dur_q)
+             if status_q == "complete":
+                 qtickets_files = [f for f in files_q if f.endswith("qtickets_events.json")]
+                 # If exact name not matched, take all json from that run
+                 if not qtickets_files:
+                     qtickets_files = [f for f in files_q if Path(f).suffix.lower() == ".json"]
+                 
+                 result.json_file_paths.extend(qtickets_files)
+             else:
+                 result.errors.append(f"Qtickets kernel failed: {status_q}")
+                 qtickets_files = []
+
         await _process_parsing_files(
             db,
             bot,
             chat_id=chat_id,
             theatre_files=theatre_files,
             phil_files=phil_files,
+            qtickets_files=qtickets_files,
             result=result,
         )
         
@@ -1153,23 +1237,27 @@ async def resume_source_parsing_jobs(
             file_paths = [str(output_dir / f) for f in files]
             theatre_files: list[str] = []
             phil_files: list[str] = []
+            qtickets_files: list[str] = []
             if job_type == "parse_theatres":
                 theatre_files = [f for f in file_paths if Path(f).suffix.lower() == ".json"]
             elif job_type == "parse_philharmonia":
                 phil_files = [f for f in file_paths if Path(f).suffix.lower() == ".json"]
-            if not theatre_files and not phil_files:
+            elif job_type == "parse_qtickets":
+                qtickets_files = [f for f in file_paths if Path(f).suffix.lower() == ".json"]
+            if not theatre_files and not phil_files and not qtickets_files:
                 logger.warning(
                     "source_parsing_recovery: no json files kernel=%s", kernel_ref
                 )
                 continue
             result = SourceParsingResult(chat_id=notify_chat_id)
-            result.json_file_paths.extend(theatre_files + phil_files)
+            result.json_file_paths.extend(theatre_files + phil_files + qtickets_files)
             await _process_parsing_files(
                 db,
                 bot,
                 chat_id=notify_chat_id,
                 theatre_files=theatre_files,
                 phil_files=phil_files,
+                qtickets_files=qtickets_files,
                 result=result,
             )
             await remove_job(job_type, kernel_ref)

@@ -210,6 +210,7 @@ class Database:
                     silent BOOLEAN DEFAULT 0,
                     telegraph_path TEXT,
                     source_text TEXT NOT NULL,
+                    source_texts JSON,
                     telegraph_url TEXT,
                     ics_url TEXT,
                     source_post_url TEXT,
@@ -234,6 +235,7 @@ class Database:
                 """
             )
             await _add_column(conn, "event", "photo_urls JSON")
+            await _add_column(conn, "event", "source_texts JSON")
             await _add_column(conn, "event", "ics_hash TEXT")
             await _add_column(conn, "event", "ics_file_id TEXT")
             await _add_column(conn, "event", "ics_updated_at TIMESTAMP")
@@ -257,6 +259,7 @@ class Database:
             )
             await _add_column(conn, "event", "search_digest TEXT")
             await _add_column(conn, "event", "ticket_status TEXT")
+            await _add_column(conn, "event", "ticket_trust_level TEXT")
             await _add_column(conn, "event", "linked_event_ids TEXT")
             await _add_column(conn, "event", "preview_3d_url TEXT")
             await conn.execute(
@@ -270,6 +273,7 @@ class Database:
                     event_id INTEGER NOT NULL,
                     catbox_url TEXT,
                     poster_hash TEXT NOT NULL,
+                    phash TEXT,
                     ocr_text TEXT,
                     ocr_title TEXT,
                     prompt_tokens INTEGER NOT NULL DEFAULT 0,
@@ -282,8 +286,79 @@ class Database:
                 """
             )
             await _add_column(conn, "eventposter", "ocr_title TEXT")
+            await _add_column(conn, "eventposter", "phash TEXT")
             await conn.execute(
                 "CREATE INDEX IF NOT EXISTS ix_eventposter_event ON eventposter(event_id)"
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_eventposter_phash ON eventposter(phash)"
+            )
+
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS event_source(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_id INTEGER NOT NULL,
+                    source_type TEXT NOT NULL,
+                    source_url TEXT NOT NULL,
+                    source_chat_username TEXT,
+                    source_chat_id INTEGER,
+                    source_message_id INTEGER,
+                    source_text TEXT,
+                    imported_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    trust_level TEXT,
+                    FOREIGN KEY(event_id) REFERENCES event(id) ON DELETE CASCADE,
+                    UNIQUE(event_id, source_url)
+                )
+                """
+            )
+            await _add_column(conn, "event_source", "source_text TEXT")
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_event_source_event ON event_source(event_id)"
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_event_source_type_url ON event_source(source_type, source_url)"
+            )
+
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS telegram_source(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    username TEXT NOT NULL UNIQUE,
+                    enabled BOOLEAN NOT NULL DEFAULT 1,
+                    default_location TEXT,
+                    default_ticket_link TEXT,
+                    trust_level TEXT,
+                    last_scanned_message_id INTEGER,
+                    last_scan_at TIMESTAMP
+                )
+                """
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_telegram_source_enabled ON telegram_source(enabled)"
+            )
+
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS telegram_scanned_message(
+                    source_id INTEGER NOT NULL,
+                    message_id INTEGER NOT NULL,
+                    message_date TIMESTAMP,
+                    processed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    status TEXT NOT NULL,
+                    events_extracted INTEGER NOT NULL DEFAULT 0,
+                    events_imported INTEGER NOT NULL DEFAULT 0,
+                    error TEXT,
+                    PRIMARY KEY (source_id, message_id),
+                    FOREIGN KEY(source_id) REFERENCES telegram_source(id) ON DELETE CASCADE
+                )
+                """
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_tg_scanned_source ON telegram_scanned_message(source_id)"
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_tg_scanned_processed_at ON telegram_scanned_message(processed_at)"
             )
 
             await conn.execute(

@@ -362,6 +362,7 @@ class Event(SQLModel, table=True):
     vk_ticket_short_key: Optional[str] = None
     vk_ics_short_url: Optional[str] = None
     vk_ics_short_key: Optional[str] = None
+    ticket_trust_level: Optional[str] = None
     event_type: Optional[str] = None
     emoji: Optional[str] = None
     end_date: Optional[str] = None
@@ -370,6 +371,7 @@ class Event(SQLModel, table=True):
     silent: bool = False
     telegraph_path: Optional[str] = None
     source_text: str
+    source_texts: list[str] = Field(default_factory=list, sa_column=Column(JSON))
     telegraph_url: Optional[str] = None
     ics_url: Optional[str] = None
     source_post_url: Optional[str] = None
@@ -540,6 +542,7 @@ class VideoAnnounceLLMTrace(SQLModel, table=True):
 class EventPoster(SQLModel, table=True):
     __table_args__ = (
         Index("ix_eventposter_event", "event_id"),
+        Index("ix_eventposter_phash", "phash"),
         UniqueConstraint("event_id", "poster_hash", name="ux_eventposter_event_hash"),
     )
 
@@ -547,6 +550,7 @@ class EventPoster(SQLModel, table=True):
     event_id: int = Field(foreign_key="event.id")
     catbox_url: Optional[str] = None
     poster_hash: str
+    phash: Optional[str] = None
     ocr_text: Optional[str] = None
     ocr_title: Optional[str] = None
     prompt_tokens: int = 0
@@ -555,6 +559,68 @@ class EventPoster(SQLModel, table=True):
     updated_at: datetime = Field(
         default_factory=utc_now, sa_column=Column(DateTime(timezone=True))
     )
+
+
+class EventSource(SQLModel, table=True):
+    __tablename__ = "event_source"
+    __table_args__ = (
+        Index("ix_event_source_event", "event_id"),
+        Index("ix_event_source_type_url", "source_type", "source_url"),
+        UniqueConstraint("event_id", "source_url", name="ux_event_source_event_url"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    event_id: int = Field(foreign_key="event.id")
+    source_type: str
+    source_url: str
+    source_chat_username: Optional[str] = None
+    source_chat_id: Optional[int] = None
+    source_message_id: Optional[int] = None
+    source_text: Optional[str] = None
+    imported_at: datetime = Field(
+        default_factory=utc_now, sa_column=Column(DateTime(timezone=True))
+    )
+    trust_level: Optional[str] = None
+
+
+class TelegramSource(SQLModel, table=True):
+    __tablename__ = "telegram_source"
+    __table_args__ = (
+        Index("ix_telegram_source_username", "username", unique=True),
+        Index("ix_telegram_source_enabled", "enabled"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    username: str
+    enabled: bool = Field(default=True, sa_column=Column(Boolean, default=True))
+    default_location: Optional[str] = None
+    default_ticket_link: Optional[str] = None
+    trust_level: Optional[str] = None
+    last_scanned_message_id: Optional[int] = None
+    last_scan_at: Optional[datetime] = Field(
+        default=None, sa_column=Column(DateTime(timezone=True))
+    )
+
+
+class TelegramScannedMessage(SQLModel, table=True):
+    __tablename__ = "telegram_scanned_message"
+    __table_args__ = (
+        Index("ix_tg_scanned_source", "source_id"),
+        Index("ix_tg_scanned_processed_at", "processed_at"),
+    )
+
+    source_id: int = Field(foreign_key="telegram_source.id", primary_key=True)
+    message_id: int = Field(primary_key=True)
+    message_date: Optional[datetime] = Field(
+        default=None, sa_column=Column(DateTime(timezone=True))
+    )
+    processed_at: datetime = Field(
+        default_factory=utc_now, sa_column=Column(DateTime(timezone=True))
+    )
+    status: str = "done"
+    events_extracted: int = 0
+    events_imported: int = 0
+    error: Optional[str] = None
 
 
 class TomorrowPage(SQLModel, table=True):

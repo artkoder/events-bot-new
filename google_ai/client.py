@@ -61,6 +61,7 @@ class RequestContext:
     account_name: Optional[str]
     model: str
     reserved_tpm: int
+    api_key_id: Optional[str] = None
     started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -221,7 +222,8 @@ class GoogleAIClient:
                 minute_bucket=reserve_result.minute_bucket,
                 day_bucket=reserve_result.day_bucket,
             )
-        
+
+        ctx.api_key_id = reserve_result.api_key_id
         self._log_event("google_ai.reserve_ok", ctx, attempt_no=attempt_no, reserve=reserve_result)
         
         # 2. Get API key
@@ -371,25 +373,42 @@ class GoogleAIClient:
         """Finalize request (record usage, reconcile TPM)."""
         if not self.supabase:
             return
-        
+
+        payload = {
+            "p_request_uid": ctx.request_uid,
+            "p_attempt_no": attempt_no,
+            "p_usage_input_tokens": usage.input_tokens if usage else None,
+            "p_usage_output_tokens": usage.output_tokens if usage else None,
+            "p_usage_total_tokens": usage.total_tokens if usage else None,
+            "p_duration_ms": duration_ms,
+            "p_provider_status": "succeeded" if not error else "failed",
+            "p_error_type": error.error_type if error else None,
+            "p_error_code": error.error_code if error else None,
+            "p_error_message": error.error_message if error else None,
+        }
+
         try:
-            self.supabase.rpc(
-                "google_ai_finalize",
-                {
-                    "p_request_uid": ctx.request_uid,
-                    "p_attempt_no": attempt_no,
-                    "p_usage_input_tokens": usage.input_tokens if usage else None,
-                    "p_usage_output_tokens": usage.output_tokens if usage else None,
-                    "p_usage_total_tokens": usage.total_tokens if usage else None,
-                    "p_duration_ms": duration_ms,
-                    "p_provider_status": "succeeded" if not error else "failed",
-                    "p_error_type": error.error_type if error else None,
-                    "p_error_code": error.error_code if error else None,
-                    "p_error_message": error.error_message if error else None,
-                }
-            ).execute()
+            self.supabase.rpc("google_ai_finalize", payload).execute()
+            return
         except Exception as e:
-            logger.warning("Failed to finalize: %s", e)
+            message = str(e)
+            if "PGRST202" not in message:
+                logger.warning("Failed to finalize: %s", e)
+                return
+            logger.info("google_ai_finalize missing, falling back to finalize_google_ai_usage")
+
+        legacy_payload = {
+            "p_request_uid": ctx.request_uid,
+            "p_api_key_id": ctx.api_key_id,
+            "p_model": ctx.model,
+            "p_actual_input_tokens": usage.input_tokens if usage else None,
+            "p_actual_output_tokens": usage.output_tokens if usage else None,
+            "p_status": "success" if not error else "failed",
+        }
+        try:
+            self.supabase.rpc("finalize_google_ai_usage", legacy_payload).execute()
+        except Exception as legacy_error:
+            logger.warning("Failed to finalize_google_ai_usage: %s", legacy_error)
     
     async def _call_provider(
         self,

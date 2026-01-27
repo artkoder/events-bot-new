@@ -705,6 +705,35 @@ def startup(
         logging.info("SCHED skipping source_parsing_day (ENABLE_SOURCE_PARSING_DAY!=1)")
         _notify_admin_skip("source_parsing_day", "ENABLE_SOURCE_PARSING_DAY!=1")
 
+    enable_tg_monitoring = _env_enabled("ENABLE_TG_MONITORING", default=is_prod)
+    if enable_tg_monitoring:
+        from source_parsing.telegram.service import telegram_monitor_scheduler
+        tg_time_raw = os.getenv("TG_MONITORING_TIME_LOCAL", "23:40").strip()
+        tg_tz_name = os.getenv("TG_MONITORING_TZ", "Europe/Kaliningrad")
+        tg_hour, tg_minute = _cron_from_local(
+            tg_time_raw,
+            tg_tz_name,
+            default_hour="23",
+            default_minute="40",
+            label="TG_MONITORING_TIME_LOCAL",
+        )
+        _register_job(
+            "tg_monitoring",
+            _job_wrapper("tg_monitoring", telegram_monitor_scheduler),
+            "cron",
+            id="tg_monitoring",
+            hour=tg_hour,
+            minute=tg_minute,
+            args=[db, bot],
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=60,
+        )
+    else:
+        logging.info("SCHED skipping tg_monitoring (ENABLE_TG_MONITORING!=1)")
+        _notify_admin_skip("tg_monitoring", "ENABLE_TG_MONITORING!=1")
+
     enable_3di = _env_enabled("ENABLE_3DI_SCHEDULED", default=is_prod)
     if enable_3di:
         from preview_3d.handlers import run_3di_new_only_scheduler
