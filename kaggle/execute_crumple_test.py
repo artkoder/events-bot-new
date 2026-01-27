@@ -55,15 +55,17 @@ def create_test_payload(afisha_dir: Path, output_path: Path) -> None:
             "images": [img.name]  # Relative to dataset root
         })
     
-    test_date = date.today() + timedelta(days=1)
+    test_date_start = date.today() + timedelta(days=1)
+    test_date_end = test_date_start + timedelta(days=2)
     payload = {
         "intro": {
             "count": len(scenes),
             "text": "СОБЫТИЯ КОТОРЫЕ СТОИТ ПОСЕТИТЬ",
             "date": "25-27 декабря",
-            "cities": ["Калининград"],
-            "date_start": test_date.isoformat(),
-            "date_end": test_date.isoformat(),
+            # Include multiple cities to exercise safe spacing with weekday-range titles.
+            "cities": ["Калининград", "Черняховск"],
+            "date_start": test_date_start.isoformat(),
+            "date_end": test_date_end.isoformat(),
         },
         "selection_params": {
             "mode": "test",
