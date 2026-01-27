@@ -26,6 +26,7 @@
 | `/ask4o <text>` | any text | Send query to model 4o and show plain response (superadmin only). |
 | `/ocrtest` | - | Сравнить распознавание афиш между gpt-4o-mini и gpt-4o (только супер-админ). |
 | `/kaggletest` | - | Суперадмин: проверка авторизации Kaggle (возвращает заголовок тестовой записи или ошибку API). |
+| `/tg` | - | Суперадмин: управление источниками Telegram Monitoring (добавить/удалить источник, ручной запуск). |
 | `/parse [check]` | optional `check` | Суперадмин: запуск парсинга источников (театры/собор/Третьяковка) через Kaggle. `check` — диагностический режим без сохранения в БД. См. `docs/features/source-parsing/sources/theatres/README.md`. |
 | `/events [DATE]` | optional date `YYYY-MM-DD`, `DD.MM.YYYY` or `D месяц [YYYY]` | List events for the day with delete, edit and VK rewrite buttons. The rewrite control launches the shortpost flow; it shows `✂️` when the event has no VK repost yet and `✅` once the saved `vk_repost_url` confirms publication. Ticket links appear as vk.cc short URLs, and each card includes a `Статистика VK: https://vk.com/cc?act=stats&key=…` line when a short key is available. Dates are shown as `DD.MM.YYYY`. Choosing **Edit** lists all fields with inline buttons including a toggle for "Бесплатно". |
 | `/setchannel` | - | Choose an admin channel and register it as an announcement or calendar asset source. |

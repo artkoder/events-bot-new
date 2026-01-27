@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import tempfile
 import time
 import shutil
@@ -16,6 +17,7 @@ from video_announce.kaggle_client import (
     KaggleClient,
     KERNELS_ROOT_PATH,
 )
+from kaggle_registry import register_job, remove_job
 from source_parsing.parser import TheatreEvent, parse_date_raw
 from source_parsing.handlers import (
     SourceParsingStats,
@@ -56,6 +58,7 @@ async def run_philharmonia_kaggle_kernel(
     client = KaggleClient()
     kernel_path = KERNELS_ROOT_PATH / PHILHARMONIA_KERNEL_FOLDER
     kernel_ref = f"zigomaro/parse-philharmonia"  # Default
+    registered = False
 
     async def _notify(phase: str, status: dict | None = None) -> None:
         if not status_callback:
@@ -113,6 +116,15 @@ async def run_philharmonia_kaggle_kernel(
             return "push_failed", [], time.time() - start_time
         
         await _notify("pushed")
+        try:
+            await register_job(
+                "parse_philharmonia",
+                kernel_ref,
+                meta={"kernel_folder": PHILHARMONIA_KERNEL_FOLDER, "pid": os.getpid()},
+            )
+            registered = True
+        except Exception:
+            logger.warning("philharmonia_kaggle: failed to register recovery job", exc_info=True)
 
         # Wait for Kaggle to start
         await asyncio.sleep(10)
@@ -170,6 +182,8 @@ async def run_philharmonia_kaggle_kernel(
                 final_status,
                 duration,
             )
+            if registered:
+                await remove_job("parse_philharmonia", kernel_ref)
             return final_status, [], duration
         
         # Download output files
@@ -181,6 +195,8 @@ async def run_philharmonia_kaggle_kernel(
             
         if final_status == "failed":
             logger.error("philharmonia_kaggle: kernel checked as failed, retrieved %d files", len(output_files))
+            if registered:
+                await remove_job("parse_philharmonia", kernel_ref)
             return "failed", output_files, duration
         
         logger.info(
@@ -188,7 +204,8 @@ async def run_philharmonia_kaggle_kernel(
             duration,
             len(output_files),
         )
-        
+        if registered:
+            await remove_job("parse_philharmonia", kernel_ref)
         return final_status, output_files, duration
         
     finally:

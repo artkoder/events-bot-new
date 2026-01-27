@@ -54,7 +54,8 @@ async def run_telegram_monitor(db: Database, tg_session: str, channels: list[str
         "TELEGRAPH_URLS": telegraph_urls,
         "TG_API_ID": os.environ.get("TG_API_ID"), 
         "TG_API_HASH": os.environ.get("TG_API_HASH"),
-        "GEMMA_API_KEY": os.environ.get("GEMMA_API_KEY") 
+        # Gemma/Gemini access via Google AI Studio.
+        "GOOGLE_API_KEY": os.environ.get("GOOGLE_API_KEY"),
     }
     
     client = KaggleClient()

@@ -2592,6 +2592,14 @@ async def build_daily_posts(
 ) -> list[tuple[str, types.InlineKeyboardMarkup | None]]:
     from models import Event, WeekendPage, MonthPage, Festival
 
+    def _is_sold_out_status(value: str | None) -> bool:
+        text = (value or "").strip().casefold()
+        if not text:
+            return False
+        text = text.replace("-", "_").replace(" ", "_")
+        text = re.sub(r"_+", "_", text)
+        return text in {"sold_out", "soldout", "распродано", "билетов_нет", "нет_билетов"}
+
     if now is None:
         now = datetime.now(tz)
     today = now.date()
@@ -2605,7 +2613,10 @@ async def build_daily_posts(
             .where(Event.date == today.isoformat())
             .order_by(Event.time)
         )
-        events_today = res_today.scalars().all()
+        events_today_all = res_today.scalars().all()
+        sold_out_today = [e for e in events_today_all if _is_sold_out_status(getattr(e, "ticket_status", None))]
+        events_today = [e for e in events_today_all if not _is_sold_out_status(getattr(e, "ticket_status", None))]
+        sold_out_ids: set[int] = {e.id for e in sold_out_today if e.id is not None}
         if len(events_today) < 6:
             res_fairs = await session.execute(
                 select(Event)
@@ -2620,7 +2631,18 @@ async def build_daily_posts(
             fairs_today = res_fairs.scalars().all()
             if fairs_today:
                 seen_ids = {e.id for e in events_today if e.id is not None}
-                fairs_today = [e for e in fairs_today if e.id not in seen_ids]
+                for e in fairs_today:
+                    if e.id is None or e.id in seen_ids:
+                        continue
+                    if _is_sold_out_status(getattr(e, "ticket_status", None)):
+                        sold_out_ids.add(e.id)
+                        sold_out_today.append(e)
+                fairs_today = [
+                    e
+                    for e in fairs_today
+                    if e.id not in seen_ids
+                    and not _is_sold_out_status(getattr(e, "ticket_status", None))
+                ]
                 if fairs_today:
                     events_today.extend(
                         clone_event_with_date(e, today) for e in fairs_today
@@ -2636,7 +2658,12 @@ async def build_daily_posts(
             )
             .order_by(Event.date, Event.time)
         )
-        events_new = res_new.scalars().all()
+        events_new_all = res_new.scalars().all()
+        events_new = [
+            e
+            for e in events_new_all
+            if not _is_sold_out_status(getattr(e, "ticket_status", None))
+        ]
 
         w_start = next_weekend_start(today)
         wpage = await session.get(WeekendPage, w_start.isoformat())
@@ -2747,6 +2774,8 @@ async def build_daily_posts(
         "",
         "<b><i>НЕ ПРОПУСТИТЕ СЕГОДНЯ</i></b>",
     ]
+    if sold_out_today:
+        lines1.append("⚠️ События, на которые билеты все проданы, сюда не включены.")
     for e in events_today:
         w_url = None
         d = parse_iso_date(e.date)
@@ -4184,6 +4213,13 @@ async def init_db_and_scheduler(
         scheduler_startup(db, bot)
     except Exception:
         logging.exception("scheduler_startup failed; continuing without scheduler")
+    try:
+        from kaggle_recovery import kaggle_recovery_scheduler
+        app["kaggle_recovery_once"] = asyncio.create_task(
+            kaggle_recovery_scheduler(db, bot)
+        )
+    except Exception:
+        logging.exception("kaggle_recovery startup failed")
     app["daily_scheduler"] = asyncio.create_task(daily_scheduler(db, bot))
     app["add_event_worker"] = asyncio.create_task(add_event_queue_worker(db, bot))
     app["add_event_watch"] = asyncio.create_task(_watch_add_event_worker(app, db, bot))

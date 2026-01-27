@@ -45,7 +45,7 @@ from .poller import (
     VIDEO_MAX_MB,
     VIDEO_KAGGLE_TIMEOUT_MINUTES,
     remember_status_message,
-    run_kernel_poller,
+    start_kernel_poller_task,
     update_status_message,
 )
 from .selection import (
@@ -2094,21 +2094,19 @@ class VideoAnnounceScenario:
                 )
             return
         test_chat_id, main_chat_id = await self._resolve_session_channels(session_obj)
-        asyncio.create_task(
-            run_kernel_poller(
-                self.db,
-                client,
-                session_obj,
-                bot=self.bot,
-                notify_chat_id=self.chat_id,
-                test_chat_id=test_chat_id,
-                main_chat_id=main_chat_id,
-                status_chat_id=status_chat_id,
-                status_message_id=status_message_id,
-                poll_interval=60,
-                timeout_minutes=VIDEO_KAGGLE_TIMEOUT_MINUTES,
-                dataset_slug=dataset_slug,
-            )
+        start_kernel_poller_task(
+            self.db,
+            client,
+            session_obj,
+            bot=self.bot,
+            notify_chat_id=self.chat_id,
+            test_chat_id=test_chat_id,
+            main_chat_id=main_chat_id,
+            status_chat_id=status_chat_id,
+            status_message_id=status_message_id,
+            poll_interval=60,
+            timeout_minutes=VIDEO_KAGGLE_TIMEOUT_MINUTES,
+            dataset_slug=dataset_slug,
         )
 
     async def _load_ranked_events(
@@ -2618,10 +2616,10 @@ class VideoAnnounceScenario:
                 if isinstance(sess.selection_params, dict)
                 else {}
             )
-            if params:
-                params.pop(IMPORT_PAYLOAD_JSON_KEY, None)
-                params.pop(IMPORT_PAYLOAD_FLAG_KEY, None)
-                sess.selection_params = params
+            params.pop(IMPORT_PAYLOAD_JSON_KEY, None)
+            params.pop(IMPORT_PAYLOAD_FLAG_KEY, None)
+            params["notify_chat_id"] = self.chat_id
+            sess.selection_params = params
             session.add(sess)
             await session.commit()
             await session.refresh(sess)

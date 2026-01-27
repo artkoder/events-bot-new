@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.11.1] - 2026-01-27
+### Changed
+- **CrumpleVideo**: Updated test mode configuration to use multiple scenes (Kaliningrad, Chernyakhovsk) and extended date range (2 days) for better verification.
+- **Testing**: Improvements in `execute_crumple_test.py` and `crumple_video.ipynb` to support multi-city intro testing.
+
 ## [1.11.0] - 2026-01-25
 ### Added
 - **Telegram Monitor**: Full release of the Intelligent Monitoring System.
