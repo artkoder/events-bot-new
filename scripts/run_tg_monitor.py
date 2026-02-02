@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from db import Database
 from models import TelegramSource
@@ -52,7 +52,26 @@ async def _ensure_source(db: Database, username: str) -> None:
             src.enabled = True
             session.add(src)
             await session.commit()
-        logging.info("tg_monitor.prep source_exists=%s enabled=%s", username, bool(src.enabled))
+    logging.info("tg_monitor.prep source_exists=%s enabled=%s", username, bool(src.enabled))
+
+
+async def _reset_source_marks(db: Database, username: str) -> None:
+    async with db.get_session() as session:
+        res = await session.execute(
+            select(TelegramSource).where(TelegramSource.username == username)
+        )
+        src = res.scalar_one_or_none()
+        if not src:
+            raise RuntimeError(f"Source @{username} not found for reset")
+        source_id = src.id
+        await session.execute(
+            text("DELETE FROM telegram_scanned_message WHERE source_id = :source_id"),
+            {"source_id": source_id},
+        )
+        src.last_scanned_message_id = None
+        session.add(src)
+        await session.commit()
+    logging.info("tg_monitor.prep reset_marks=%s", username)
 
 
 async def _run(args: argparse.Namespace) -> int:
@@ -68,6 +87,8 @@ async def _run(args: argparse.Namespace) -> int:
     await db.init()
 
     await _ensure_source(db, args.channel)
+    if args.reset_marks:
+        await _reset_source_marks(db, args.channel)
 
     run_id = args.run_id or f"tgtest_{uuid.uuid4().hex[:8]}"
     logging.info("tg_monitor.local run_id=%s", run_id)
@@ -92,6 +113,11 @@ def main() -> int:
     parser.add_argument("--run-id", default=None, help="Custom run_id")
     parser.add_argument("--print-json", action="store_true", help="Print telegram_results.json")
     parser.add_argument("--env-file", default=".env", help="Path to .env file to load")
+    parser.add_argument(
+        "--reset-marks",
+        action="store_true",
+        help="Clear telegram_scanned_message and last_scanned_message_id before run",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(

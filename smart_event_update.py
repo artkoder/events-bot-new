@@ -12,7 +12,7 @@ from typing import Any, Iterable, Sequence
 from sqlalchemy import and_, or_, select
 
 from db import Database
-from models import Event, EventPoster, EventSource
+from models import Event, EventPoster, EventSource, EventSourceFact
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +20,7 @@ _HALL_HINT_RE = re.compile(
     r"\b(зал|аудитория|лекторий|сцена|фойе|этаж|корпус)\b\s+([^\s,.;:]+)(?:\s+([^\s,.;:]+))?(?:\s+([^\s,.;:]+))?",
     re.IGNORECASE,
 )
+_HASHTAG_RE = re.compile(r"(?:(?<=\s)|^)#([\w-]+)", re.UNICODE)
 
 SMART_UPDATE_LLM = os.getenv("SMART_UPDATE_LLM", "gemma").strip().lower()
 SMART_UPDATE_MODEL = os.getenv(
@@ -127,6 +128,90 @@ MERGE_SCHEMA = MERGE_RESPONSE_FORMAT["json_schema"]["schema"]
 
 def _norm_space(text: str) -> str:
     return re.sub(r"\s+", " ", text.strip().lower())
+
+
+def _strip_hashtags(text: str | None) -> str | None:
+    if not text:
+        return None
+    cleaned = _HASHTAG_RE.sub("", text)
+    cleaned = re.sub(r"[ \t]+", " ", cleaned)
+    cleaned = re.sub(r" *\n", "\n", cleaned)
+    cleaned = cleaned.strip()
+    return cleaned or None
+
+
+def _format_ticket_price(
+    price_min: int | None, price_max: int | None
+) -> str | None:
+    if price_min is None and price_max is None:
+        return None
+    if price_min is not None and price_max is not None:
+        if price_min == price_max:
+            return f"{price_min} ₽"
+        return f"{price_min}–{price_max} ₽"
+    if price_min is not None:
+        return f"от {price_min} ₽"
+    return f"до {price_max} ₽"
+
+
+def _normalize_fact_item(value: str | None, limit: int = 200) -> str | None:
+    if not value:
+        return None
+    cleaned = re.sub(r"\s+", " ", value).strip()
+    if not cleaned:
+        return None
+    if len(cleaned) > limit:
+        cleaned = cleaned[: limit - 1].rstrip() + "…"
+    return cleaned
+
+
+def _initial_added_facts(candidate: EventCandidate) -> list[str]:
+    facts: list[str] = []
+    if candidate.date:
+        facts.append(f"Дата: {candidate.date}")
+    if candidate.end_date:
+        facts.append(f"Дата окончания: {candidate.end_date}")
+    if candidate.time:
+        facts.append(f"Время: {candidate.time}")
+    location_parts = [
+        candidate.location_name,
+        candidate.location_address,
+        candidate.city,
+    ]
+    location = ", ".join(part.strip() for part in location_parts if part and part.strip())
+    if location:
+        facts.append(f"Локация: {location}")
+    if candidate.is_free is True:
+        facts.append("Бесплатно")
+    price_text = _format_ticket_price(
+        candidate.ticket_price_min, candidate.ticket_price_max
+    )
+    if price_text:
+        facts.append(f"Цена: {price_text}")
+    if candidate.ticket_status == "sold_out":
+        facts.append("Билеты все проданы")
+    if candidate.ticket_link:
+        label = "Регистрация" if candidate.is_free else "Билеты"
+        facts.append(f"{label}: {candidate.ticket_link}")
+    if candidate.event_type:
+        facts.append(f"Тип: {candidate.event_type}")
+    if candidate.festival:
+        facts.append(f"Фестиваль: {candidate.festival}")
+    if candidate.pushkin_card is True:
+        facts.append("Пушкинская карта")
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for fact in facts:
+        cleaned = _normalize_fact_item(fact)
+        if not cleaned:
+            continue
+        key = cleaned.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(cleaned)
+    return normalized[:12]
 
 
 def _normalize_location(value: str | None) -> str:
@@ -295,6 +380,20 @@ def _is_http_url(url: str | None) -> bool:
         return False
     value = url.strip().lower()
     return value.startswith("http://") or value.startswith("https://")
+
+
+_VK_WALL_URL_RE = re.compile(
+    r"^https?://(?:m\\.)?vk\\.com/wall-?\\d+_\\d+/?$",
+    re.IGNORECASE,
+)
+
+
+def _is_vk_wall_url(url: str | None) -> bool:
+    if not url:
+        return False
+    if not _is_http_url(url):
+        return False
+    return bool(_VK_WALL_URL_RE.match(url.strip()))
 
 
 def _normalize_event_type_value(
@@ -648,14 +747,15 @@ def _apply_ticket_fields(
 
 
 def _candidate_has_new_text(candidate: EventCandidate, event: Event) -> bool:
-    candidate_text = (candidate.raw_excerpt or candidate.source_text or "").strip()
+    candidate_text = _strip_hashtags(candidate.raw_excerpt or candidate.source_text) or ""
     if not candidate_text:
         return False
-    if not event.description:
+    event_text = _strip_hashtags(event.description) or (event.description or "")
+    if not event_text:
         return True
     if len(candidate_text) < 40:
         return False
-    return candidate_text not in event.description
+    return candidate_text not in event_text
 
 
 async def smart_event_update(
@@ -702,6 +802,17 @@ async def smart_event_update(
         )
         return SmartUpdateResult(status="invalid", reason="missing_location")
 
+    clean_title = _strip_hashtags(candidate.title)
+    if not clean_title:
+        logger.warning(
+            "smart_update.invalid reason=title_only_hashtags source_type=%s source_url=%s",
+            candidate.source_type,
+            candidate.source_url,
+        )
+        return SmartUpdateResult(status="invalid", reason="title_only_hashtags")
+    clean_source_text = _strip_hashtags(candidate.source_text) or ""
+    clean_raw_excerpt = _strip_hashtags(candidate.raw_excerpt)
+
     if check_source_url and candidate.source_url:
         async with db.get_session() as session:
             exists = (
@@ -740,6 +851,14 @@ async def smart_event_update(
             ev for ev in shortlist if _location_matches(ev.location_name, candidate.location_name)
         ]
 
+    # Time is an anchor field: if candidate provides it, prefer matching only events with
+    # the same time (helps deterministic matching when LLM is unavailable).
+    cand_time = (candidate.time or "").strip()
+    if cand_time:
+        time_filtered = [ev for ev in shortlist if (ev.time or "").strip() == cand_time]
+        if time_filtered:
+            shortlist = time_filtered
+
     allow_parallel = _allow_parallel_events(candidate.location_name)
     candidate_hall = _extract_hall_hint(candidate.source_text)
     if allow_parallel and candidate_hall:
@@ -758,6 +877,12 @@ async def smart_event_update(
     else:
         event_ids = [ev.id for ev in shortlist if ev.id]
         posters_map = await _fetch_event_posters_map(db, event_ids)
+
+        # If after anchor filtering we have exactly one candidate, match it without LLM.
+        # This keeps /addevent_raw and other deterministic flows working in local/dev envs
+        # where Gemma matching may be unavailable.
+        match_event = shortlist[0] if len(shortlist) == 1 else None
+        match_reason = "single_candidate" if match_event is not None else ""
 
         candidate_hashes = _poster_hashes(candidate.posters)
         ticket_norm = _normalize_url(candidate.ticket_link)
@@ -781,8 +906,6 @@ async def smart_event_update(
             candidate.source_type,
             candidate.source_url,
         )
-        match_event = None
-        match_reason = ""
         if strong_matches:
             best = max(strong_matches.items(), key=lambda item: item[1])
             match_event = next((ev for ev in shortlist if ev.id == best[0]), None)
@@ -831,8 +954,8 @@ async def smart_event_update(
                 and (candidate.ticket_price_max in (0, None))
             )
         new_event = Event(
-            title=candidate.title or "",
-            description=(candidate.raw_excerpt or candidate.source_text or candidate.title or "").strip(),
+            title=clean_title,
+            description=(clean_raw_excerpt or clean_source_text or clean_title or "").strip(),
             festival=candidate.festival,
             date=candidate.date or "",
             time=candidate.time or "",
@@ -849,8 +972,8 @@ async def smart_event_update(
             end_date=candidate.end_date,
             is_free=is_free_value,
             pushkin_card=bool(candidate.pushkin_card),
-            source_text=candidate.source_text or "",
-            source_texts=[candidate.source_text] if candidate.source_text else [],
+            source_text=clean_source_text or "",
+            source_texts=[clean_source_text] if clean_source_text else [],
             source_post_url=candidate.source_url if _is_http_url(candidate.source_url) else None,
             source_chat_id=candidate.source_chat_id,
             source_message_id=candidate.source_message_id,
@@ -859,13 +982,8 @@ async def smart_event_update(
             photo_urls=[p.catbox_url for p in candidate.posters if p.catbox_url],
             photo_count=len([p for p in candidate.posters if p.catbox_url]),
         )
-        if candidate.source_url and _is_http_url(candidate.source_url):
-            try:
-                from main import is_vk_wall_url
-            except Exception:  # pragma: no cover - defensive
-                is_vk_wall_url = None
-            if is_vk_wall_url and is_vk_wall_url(candidate.source_url):
-                new_event.source_vk_post_url = candidate.source_url
+        if candidate.source_url and _is_vk_wall_url(candidate.source_url):
+            new_event.source_vk_post_url = candidate.source_url
 
         async with db.get_session() as session:
             session.add(new_event)
@@ -878,6 +996,10 @@ async def smart_event_update(
             )
             if candidate.source_text:
                 await _sync_source_texts(session, new_event)
+            await session.flush()
+            initial_facts = _initial_added_facts(candidate)
+            if initial_facts:
+                await _record_source_facts(session, new_event.id, candidate, initial_facts)
             await session.commit()
 
         await _classify_topics(db, new_event.id)
@@ -948,6 +1070,14 @@ async def smart_event_update(
         if not event_db:
             return SmartUpdateResult(status="error", reason="event_missing")
 
+        # Operator-entered sources are allowed to корректировать title even if the
+        # candidate doesn't bring enough new text/posters for LLM merge.
+        cand_title = clean_title
+        if candidate.source_type in ("bot", "manual") and cand_title and cand_title != event_db.title:
+            event_db.title = cand_title
+            updated_fields = True
+            updated_keys.append("title")
+
         if should_merge:
             posters_texts = [p.ocr_text for p in posters_map.get(existing.id or 0, []) if p.ocr_text]
             merge_data = await _llm_merge_event(
@@ -959,12 +1089,16 @@ async def smart_event_update(
             if merge_data:
                 title = merge_data.get("title")
                 description = merge_data.get("description")
-                if isinstance(title, str) and title.strip():
-                    event_db.title = title.strip()
+                clean_title = _strip_hashtags(title) if isinstance(title, str) else None
+                clean_description = (
+                    _strip_hashtags(description) if isinstance(description, str) else None
+                )
+                if clean_title:
+                    event_db.title = clean_title
                     updated_fields = True
                     updated_keys.append("title")
-                if isinstance(description, str) and description.strip():
-                    event_db.description = description.strip()
+                if clean_description:
+                    event_db.description = clean_description
                     updated_fields = True
                     updated_keys.append("description")
                 ticket_updates = _apply_ticket_fields(
@@ -1044,16 +1178,11 @@ async def smart_event_update(
             event_db.source_post_url = candidate.source_url
             updated_fields = True
             updated_keys.append("source_post_url")
-        if candidate.source_url and _is_http_url(candidate.source_url):
-            try:
-                from main import is_vk_wall_url
-            except Exception:  # pragma: no cover - defensive
-                is_vk_wall_url = None
-            if is_vk_wall_url and is_vk_wall_url(candidate.source_url):
-                if not event_db.source_vk_post_url:
-                    event_db.source_vk_post_url = candidate.source_url
-                    updated_fields = True
-                    updated_keys.append("source_vk_post_url")
+        if candidate.source_url and _is_vk_wall_url(candidate.source_url):
+            if not event_db.source_vk_post_url:
+                event_db.source_vk_post_url = candidate.source_url
+                updated_fields = True
+                updated_keys.append("source_vk_post_url")
         if not event_db.creator_id and candidate.creator_id:
             event_db.creator_id = candidate.creator_id
             updated_fields = True
@@ -1067,14 +1196,18 @@ async def smart_event_update(
         added_sources, same_source = await _ensure_event_source(
             session, event_db.id, candidate
         )
-        if candidate.source_text:
+        if clean_source_text:
             if same_source:
-                event_db.source_text = candidate.source_text
+                event_db.source_text = clean_source_text
                 updated_fields = True
                 updated_keys.append("source_text")
             if await _sync_source_texts(session, event_db):
                 updated_fields = True
                 updated_keys.append("source_texts")
+
+        await session.flush()
+        if added_facts:
+            await _record_source_facts(session, event_db.id, candidate, added_facts)
 
         if updated_fields:
             session.add(event_db)
@@ -1208,6 +1341,7 @@ async def _ensure_event_source(
 ) -> tuple[bool, bool]:
     if not event_id or not candidate.source_url:
         return False, False
+    clean_source_text = _strip_hashtags(candidate.source_text)
     existing = (
         await session.execute(
             select(EventSource).where(
@@ -1218,8 +1352,8 @@ async def _ensure_event_source(
     ).scalar_one_or_none()
     if existing:
         updated = False
-        if candidate.source_text and candidate.source_text != existing.source_text:
-            existing.source_text = candidate.source_text
+        if clean_source_text and clean_source_text != existing.source_text:
+            existing.source_text = clean_source_text
             existing.imported_at = datetime.now(timezone.utc)
             updated = True
             logger.info(
@@ -1241,12 +1375,48 @@ async def _ensure_event_source(
             source_chat_username=candidate.source_chat_username,
             source_chat_id=candidate.source_chat_id,
             source_message_id=candidate.source_message_id,
-            source_text=candidate.source_text or None,
+            source_text=clean_source_text,
             imported_at=datetime.now(timezone.utc),
             trust_level=candidate.trust_level,
         )
     )
     return True, False
+
+
+async def _record_source_facts(
+    session,
+    event_id: int | None,
+    candidate: EventCandidate,
+    facts: Sequence[str],
+) -> int:
+    if not event_id or not candidate.source_url or not facts:
+        return 0
+    source = (
+        await session.execute(
+            select(EventSource).where(
+                EventSource.event_id == event_id,
+                EventSource.source_url == candidate.source_url,
+            )
+        )
+    ).scalar_one_or_none()
+    if not source:
+        return 0
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    added = 0
+    for fact in facts:
+        cleaned = _normalize_fact_item(fact)
+        if not cleaned:
+            continue
+        session.add(
+            EventSourceFact(
+                event_id=event_id,
+                source_id=source.id,
+                fact=cleaned,
+                created_at=now,
+            )
+        )
+        added += 1
+    return added
 
 
 async def _sync_source_texts(session, event: Event) -> bool:

@@ -583,6 +583,22 @@ class EventSource(SQLModel, table=True):
     trust_level: Optional[str] = None
 
 
+class EventSourceFact(SQLModel, table=True):
+    __tablename__ = "event_source_fact"
+    __table_args__ = (
+        Index("ix_event_source_fact_event", "event_id"),
+        Index("ix_event_source_fact_source", "source_id"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    event_id: int = Field(foreign_key="event.id")
+    source_id: int = Field(foreign_key="event_source.id")
+    fact: str
+    created_at: datetime = Field(
+        default_factory=utc_now, sa_column=Column(DateTime(timezone=True))
+    )
+
+
 class TelegramSource(SQLModel, table=True):
     __tablename__ = "telegram_source"
     __table_args__ = (

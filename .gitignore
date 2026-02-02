@@ -26,6 +26,8 @@ test_output.txt
 # Secrets - NEVER commit!
 telegraph_token.txt
 telegraph_token_prod.txt
+id_rsa_fly
+id_rsa_fly-cert.pub
 
 # Backups and test data
 backups/

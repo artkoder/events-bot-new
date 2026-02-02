@@ -29,6 +29,66 @@ class TelegramMonitorReport:
     events_merged: int = 0
     events_skipped: int = 0
     errors: list[str] = field(default_factory=list)
+    created_events: list["TelegramMonitorEventInfo"] = field(default_factory=list)
+    merged_events: list["TelegramMonitorEventInfo"] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class TelegramMonitorEventInfo:
+    event_id: int
+    title: str
+    date: str | None
+    time: str | None
+    source_link: str | None
+    telegraph_url: str | None
+    source_excerpt: str | None
+
+
+def _event_telegraph_url(event) -> str | None:
+    url = getattr(event, "telegraph_url", None)
+    if url:
+        return url
+    path = getattr(event, "telegraph_path", None)
+    if path:
+        return f"https://telegra.ph/{path.lstrip('/')}"
+    return None
+
+
+def _build_excerpt(text: str | None, *, max_len: int = 160) -> str | None:
+    if not text:
+        return None
+    cleaned = " ".join(str(text).split())
+    if not cleaned:
+        return None
+    if len(cleaned) > max_len:
+        cleaned = cleaned[: max_len - 1].rstrip() + "…"
+    return cleaned
+
+
+async def _build_event_info(
+    db: Database,
+    *,
+    event_id: int | None,
+    source_link: str | None,
+    source_text: str | None,
+) -> TelegramMonitorEventInfo | None:
+    if not event_id:
+        return None
+    from models import Event
+
+    async with db.get_session() as session:
+        event = await session.get(Event, event_id)
+    if not event:
+        return None
+    return TelegramMonitorEventInfo(
+        event_id=event_id,
+        title=getattr(event, "title", "") or "",
+        date=getattr(event, "date", None),
+        time=getattr(event, "time", None),
+        source_link=source_link,
+        telegraph_url=_event_telegraph_url(event),
+        source_excerpt=_build_excerpt(source_text),
+    )
 
 
 def _parse_datetime(value: str | None) -> datetime | None:
@@ -65,6 +125,24 @@ def _clean_url(value: str | None) -> str | None:
     if re.match(r"^https?://t\.me/addlist/", raw):
         return None
     return raw
+
+
+def _norm_space(text: str | None) -> str:
+    if not text:
+        return ""
+    return re.sub(r"\s+", " ", text.strip().lower())
+
+
+def _location_matches(a: str | None, b: str | None) -> bool:
+    na = _norm_space(a)
+    nb = _norm_space(b)
+    if not na or not nb:
+        return False
+    if na == nb:
+        return True
+    if na in nb or nb in na:
+        return True
+    return False
 
 
 async def _get_or_create_source(db: Database, username: str) -> TelegramSource:
@@ -154,8 +232,21 @@ def _build_candidate(
     date_raw = event_data.get("date")
     time_raw = event_data.get("time") or ""
     end_date = event_data.get("end_date")
-    location_name = event_data.get("location_name") or source.default_location
+    extracted_location = event_data.get("location_name")
+    location_name = extracted_location or source.default_location
     location_address = event_data.get("location_address")
+    if extracted_location and source.default_location and not _location_matches(
+        extracted_location, source.default_location
+    ):
+        logger.warning(
+            "telegram: location mismatch for @%s msg=%s extracted=%s default=%s",
+            username,
+            message_id,
+            extracted_location,
+            source.default_location,
+        )
+        location_name = source.default_location
+        location_address = None
     if not location_name and location_address:
         location_name, location_address = location_address, None
     city = event_data.get("city") or "Калининград"
@@ -258,6 +349,10 @@ async def process_telegram_results(
         if message_id is None:
             report.errors.append(f"missing message_id for source {username}")
             continue
+        source_link = message.get("source_link")
+        if not source_link and username and message_id:
+            source_link = f"https://t.me/{username}/{message_id}"
+        source_text = message.get("text") or ""
         source = await _get_or_create_source(db, username)
         if not source.enabled:
             report.messages_skipped += 1
@@ -308,9 +403,25 @@ async def process_telegram_results(
                 if result.status == "created":
                     report.events_created += 1
                     events_imported += 1
+                    info = await _build_event_info(
+                        db,
+                        event_id=result.event_id,
+                        source_link=source_link,
+                        source_text=source_text,
+                    )
+                    if info:
+                        report.created_events.append(info)
                 elif result.status == "merged":
                     report.events_merged += 1
                     events_imported += 1
+                    info = await _build_event_info(
+                        db,
+                        event_id=result.event_id,
+                        source_link=source_link,
+                        source_text=source_text,
+                    )
+                    if info:
+                        report.merged_events.append(info)
                 elif result.status.startswith("skipped"):
                     report.events_skipped += 1
                 logger.info(

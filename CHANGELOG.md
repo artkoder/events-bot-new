@@ -39,6 +39,18 @@
 - Fixed `TypeError` in parsing results summary when using date objects (Philharmonia parser).
 
 ## [Unreleased]
+### Added
+- **Telegram Monitor**: `/tg` now shows live Kaggle kernel status (polling) and sends a detailed per-event report with Telegram + Telegraph links.
+- **Telegram Monitor**: Source list now includes per-channel stats (last scan/message, counts) and supports delete.
+
+### Changed
+- **Smart Event Update**: Incoming hashtags are stripped from titles/descriptions/source text before saving and Telegraph rendering.
+- **Telegram Monitor (Kaggle)**: Extraction/ OCR now use message date context and infer missing event years relative to the message date.
+- **Telegram Monitor (Kaggle)**: Auth now supports `TELEGRAM_AUTH_BUNDLE_S22` (bundle with device params); `TG_SESSION` remains a fallback.
+
+### Fixed
+- **Telegram Monitor (Kaggle)**: Fallback to local rate limiting when Supabase RPC is missing (PGRST202), so extraction keeps working in dev/test.
+- **E2E Telegram Monitoring**: Added dedicated feature file and more robust step handling for async bot updates.
 
 ## [1.10.0] - 2026-01-24
 ### Added

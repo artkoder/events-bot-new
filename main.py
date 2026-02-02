@@ -769,29 +769,38 @@ from models import VkMissRecord
 from models import VkMissReviewSession
 
 
+# These caches hold short-lived UI state (button flows, input awaiting, etc.).
+# Guard against module reloads (tests use importlib.reload(main)) so that
+# imported references stay valid.
+if "vk_default_time_sessions" not in globals():
+    vk_default_time_sessions: TTLCache[int, VkDefaultTimeSession] = TTLCache(
+        maxsize=64, ttl=3600
+    )
+if "vk_default_ticket_link_sessions" not in globals():
+    vk_default_ticket_link_sessions: TTLCache[
+        int, VkDefaultTicketLinkSession
+    ] = TTLCache(maxsize=64, ttl=3600)
+if "vk_default_location_sessions" not in globals():
+    vk_default_location_sessions: TTLCache[
+        int, VkDefaultLocationSession
+    ] = TTLCache(maxsize=64, ttl=3600)
+if "vk_add_source_sessions" not in globals():
+    # waiting for VK source add input
+    vk_add_source_sessions: set[int] = set()
+if "pyramida_input_sessions" not in globals():
+    # waiting for Pyramida URL input
+    pyramida_input_sessions: set[int] = set()
+if "dom_iskusstv_input_sessions" not in globals():
+    # waiting for Dom Iskusstv URL input
+    dom_iskusstv_input_sessions: set[int] = set()
 
-vk_default_time_sessions: TTLCache[int, VkDefaultTimeSession] = TTLCache(
-    maxsize=64, ttl=3600
-)
-vk_default_ticket_link_sessions: TTLCache[
-    int, VkDefaultTicketLinkSession
-] = TTLCache(maxsize=64, ttl=3600)
-vk_default_location_sessions: TTLCache[
-    int, VkDefaultLocationSession
-] = TTLCache(maxsize=64, ttl=3600)
-# waiting for VK source add input
-vk_add_source_sessions: set[int] = set()
-# waiting for Pyramida URL input
-pyramida_input_sessions: set[int] = set()
-# waiting for Dom Iskusstv URL input
-dom_iskusstv_input_sessions: set[int] = set()
+if "vk_review_extra_sessions" not in globals():
+    # operator_id -> (inbox_id, batch_id) awaiting extra info during VK review
+    vk_review_extra_sessions: dict[int, tuple[int, str, bool]] = {}
 
-# operator_id -> (inbox_id, batch_id) awaiting extra info during VK review
-vk_review_extra_sessions: dict[int, tuple[int, str, bool]] = {}
-
-
-# user_id -> review session for VK misses
-vk_miss_review_sessions: dict[int, VkMissReviewSession] = {}
+if "vk_miss_review_sessions" not in globals():
+    # user_id -> review session for VK misses
+    vk_miss_review_sessions: dict[int, VkMissReviewSession] = {}
 
 
 @dataclass
@@ -802,7 +811,8 @@ class VkReviewStorySession:
     awaiting_instructions: bool = False
 
 
-vk_review_story_sessions: dict[int, VkReviewStorySession] = {}
+if "vk_review_story_sessions" not in globals():
+    vk_review_story_sessions: dict[int, VkReviewStorySession] = {}
 
 @dataclass
 class VkShortpostOpState:
@@ -811,32 +821,40 @@ class VkShortpostOpState:
     preview_link_attachment: str | None = None
 
 
-# event_id -> operator chat id awaiting shortpost publication and cached preview
-vk_shortpost_ops: dict[int, VkShortpostOpState] = {}
-# admin user_id -> (event_id, admin_chat_message_id) awaiting custom shortpost text
-vk_shortpost_edit_sessions: dict[int, tuple[int, int]] = {}
+if "vk_shortpost_ops" not in globals():
+    # event_id -> operator chat id awaiting shortpost publication and cached preview
+    vk_shortpost_ops: dict[int, VkShortpostOpState] = {}
+if "vk_shortpost_edit_sessions" not in globals():
+    # admin user_id -> (event_id, admin_chat_message_id) awaiting custom shortpost text
+    vk_shortpost_edit_sessions: dict[int, tuple[int, int]] = {}
 
-# superadmin user_id -> pending partner user_id
-partner_info_sessions: TTLCache[int, int] = TTLCache(maxsize=64, ttl=3600)
-# user_id -> (festival_id, field?) for festival editing
-festival_edit_sessions: TTLCache[int, tuple[int, str | None]] = TTLCache(maxsize=64, ttl=3600)
+if "partner_info_sessions" not in globals():
+    # superadmin user_id -> pending partner user_id
+    partner_info_sessions: TTLCache[int, int] = TTLCache(maxsize=64, ttl=3600)
+if "festival_edit_sessions" not in globals():
+    # user_id -> (festival_id, field?) for festival editing
+    festival_edit_sessions: TTLCache[int, tuple[int, str | None]] = TTLCache(maxsize=64, ttl=3600)
 FESTIVAL_EDIT_FIELD_IMAGE = "image"
 
-# user_id -> cached festival inference for makefest flow
-makefest_sessions: TTLCache[int, dict[str, Any]] = TTLCache(maxsize=64, ttl=3600)
+if "makefest_sessions" not in globals():
+    # user_id -> cached festival inference for makefest flow
+    makefest_sessions: TTLCache[int, dict[str, Any]] = TTLCache(maxsize=64, ttl=3600)
 
-# cache for first image in Telegraph pages
-telegraph_first_image: TTLCache[str, str] = TTLCache(maxsize=128, ttl=24 * 3600)
+if "telegraph_first_image" not in globals():
+    # cache for first image in Telegraph pages
+    telegraph_first_image: TTLCache[str, str] = TTLCache(maxsize=128, ttl=24 * 3600)
 
 # pending event text/photo input
 AddEventMode = Literal["event", "festival"]
-add_event_sessions: TTLCache[int, AddEventMode] = TTLCache(maxsize=64, ttl=3600)
+if "add_event_sessions" not in globals():
+    add_event_sessions: TTLCache[int, AddEventMode] = TTLCache(maxsize=64, ttl=3600)
 
 
 class FestivalRequiredError(RuntimeError):
     """Raised when festival mode requires an explicit festival but none was found."""
 # waiting for a date for events listing
-events_date_sessions: TTLCache[int, bool] = TTLCache(maxsize=64, ttl=3600)
+if "events_date_sessions" not in globals():
+    events_date_sessions: TTLCache[int, bool] = TTLCache(maxsize=64, ttl=3600)
 
 @dataclass(frozen=True)
 class TouristFactor:
@@ -1687,6 +1705,13 @@ FOUR_O_PITCH_MAX_TOKENS = int(os.getenv("FOUR_O_PITCH_MAX_TOKENS", "200"))
 FOUR_O_DAILY_TOKEN_LIMIT = int(os.getenv("FOUR_O_DAILY_TOKEN_LIMIT", "1000000"))
 
 FOUR_O_TRACKED_MODELS: tuple[str, str] = ("gpt-4o", "gpt-4o-mini")
+
+# Event topic classifier LLM selection: gemma | 4o | off
+EVENT_TOPICS_LLM = (os.getenv("EVENT_TOPICS_LLM", "gemma") or "gemma").strip().lower()
+EVENT_TOPICS_MODEL = os.getenv(
+    "EVENT_TOPICS_MODEL",
+    os.getenv("TG_MONITORING_TEXT_MODEL", "gemma-3-27b-it"),
+).strip()
 
 
 def _current_utc_date() -> date:
@@ -7321,6 +7346,102 @@ def _extract_available_hashtags(event: Event) -> list[str]:
     return list(seen.keys())
 
 
+@lru_cache(maxsize=1)
+def _get_event_topics_gemma_client():
+    try:
+        from google_ai import GoogleAIClient, SecretsProvider
+    except Exception as exc:  # pragma: no cover - optional dependency
+        logger.warning("event_topics: gemma client unavailable: %s", exc)
+        return None
+    supabase = get_supabase_client()
+    return GoogleAIClient(
+        supabase_client=supabase,
+        secrets_provider=SecretsProvider(),
+        consumer="event_topics",
+    )
+
+
+def _event_topics_strip_code_fences(text: str) -> str:
+    if not text:
+        return ""
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```[a-zA-Z0-9_-]*\n", "", cleaned)
+        cleaned = cleaned.replace("```", "")
+    return cleaned.strip()
+
+
+def _event_topics_extract_json(text: str) -> dict[str, Any] | None:
+    if not text:
+        return None
+    cleaned = _event_topics_strip_code_fences(text)
+    try:
+        data = json.loads(cleaned)
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return None
+    try:
+        data = json.loads(cleaned[start : end + 1])
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        return None
+    return None
+
+
+async def _classify_event_topics_gemma(prompt_text: str) -> list[str]:
+    client = _get_event_topics_gemma_client()
+    if client is None:
+        return []
+    schema = EVENT_TOPIC_RESPONSE_FORMAT.get("json_schema", {}).get("schema", {})
+    schema_text = json.dumps(schema, ensure_ascii=False)
+    full_prompt = (
+        f"{EVENT_TOPIC_SYSTEM_PROMPT}\n\n"
+        f"{prompt_text}\n\n"
+        "Верни только JSON без markdown и комментариев.\n"
+        f"JSON schema:\n{schema_text}"
+    )
+    try:
+        raw, _usage = await client.generate_content_async(
+            model=EVENT_TOPICS_MODEL,
+            prompt=full_prompt,
+            generation_config={"temperature": 0},
+            max_output_tokens=FOUR_O_RESPONSE_LIMIT,
+        )
+    except Exception as exc:  # pragma: no cover - provider failures
+        logging.warning("Topic classification (gemma) failed: %s", exc)
+        return []
+    data = _event_topics_extract_json(raw or "")
+    if data is None:
+        fix_prompt = (
+            "Исправь JSON под схему. Верни только JSON без markdown.\n"
+            f"Schema:\n{schema_text}\n\n"
+            f"Input:\n{raw}"
+        )
+        try:
+            raw_fix, _usage = await client.generate_content_async(
+                model=EVENT_TOPICS_MODEL,
+                prompt=fix_prompt,
+                generation_config={"temperature": 0},
+                max_output_tokens=FOUR_O_RESPONSE_LIMIT,
+            )
+        except Exception as exc:  # pragma: no cover - provider failures
+            logging.warning("Topic classification (gemma) json_fix failed: %s", exc)
+            return []
+        data = _event_topics_extract_json(raw_fix or "")
+    if not isinstance(data, dict):
+        return []
+    topics = data.get("topics")
+    if not isinstance(topics, list):
+        return []
+    return topics
+
+
 async def classify_event_topics(event: Event) -> list[str]:
     allowed_topics = TOPIC_IDENTIFIERS
     title = (getattr(event, "title", "") or "").strip()
@@ -7359,32 +7480,37 @@ async def classify_event_topics(event: Event) -> list[str]:
         len(location_text),
         len(prompt_text),
     )
-    model_name = "gpt-4o-mini" if os.getenv("FOUR_O_MINI") == "1" else None
-    try:
-        raw = await ask_4o(
-            prompt_text,
-            system_prompt=EVENT_TOPIC_SYSTEM_PROMPT,
-            response_format=EVENT_TOPIC_RESPONSE_FORMAT,
-            max_tokens=FOUR_O_RESPONSE_LIMIT,
-            model=model_name,
-        )
-    except Exception as exc:
-        logging.warning("Topic classification request failed: %s", exc)
+    if EVENT_TOPICS_LLM in {"off", "none", "disabled", "0"}:
         return []
-    raw = (raw or "").strip()
-    if raw.startswith("```"):
-        raw = re.sub(r"^```[a-zA-Z]*\n", "", raw)
-        if raw.endswith("```"):
-            raw = raw[:-3]
-        raw = raw.strip()
-    try:
-        data = json.loads(raw)
-    except Exception as exc:
-        logging.warning("Topic classification JSON parse failed: %s", exc)
-        return []
-    topics = data.get("topics") if isinstance(data, dict) else None
+    if EVENT_TOPICS_LLM == "gemma":
+        topics = await _classify_event_topics_gemma(prompt_text)
+    else:
+        model_name = "gpt-4o-mini" if os.getenv("FOUR_O_MINI") == "1" else None
+        try:
+            raw = await ask_4o(
+                prompt_text,
+                system_prompt=EVENT_TOPIC_SYSTEM_PROMPT,
+                response_format=EVENT_TOPIC_RESPONSE_FORMAT,
+                max_tokens=FOUR_O_RESPONSE_LIMIT,
+                model=model_name,
+            )
+        except Exception as exc:
+            logging.warning("Topic classification request failed: %s", exc)
+            return []
+        raw = (raw or "").strip()
+        if raw.startswith("```"):
+            raw = re.sub(r"^```[a-zA-Z]*\n", "", raw)
+            if raw.endswith("```"):
+                raw = raw[:-3]
+            raw = raw.strip()
+        try:
+            data = json.loads(raw)
+        except Exception as exc:
+            logging.warning("Topic classification JSON parse failed: %s", exc)
+            return []
+        topics = data.get("topics") if isinstance(data, dict) else None
     if not isinstance(topics, list):
-        logging.warning("Topic classification response missing list: %s", raw)
+        logging.warning("Topic classification response missing list")
         return []
     result: list[str] = []
     seen: set[str] = set()
@@ -7408,6 +7534,33 @@ def _event_topic_text_length(event: Event) -> int:
     return sum(len(part) for part in parts)
 
 
+# Cache topics classification results to avoid repeated LLM calls for effectively
+# identical events (e.g. multi-day events created from one post).
+_EVENT_TOPICS_CACHE_MAX = int(os.getenv("EVENT_TOPICS_CACHE_MAX", "256"))
+_EVENT_TOPICS_CACHE: dict[str, list[str]] = {}
+
+
+def _event_topics_cache_key(event: Event) -> str:
+    """Build a stable cache key for topics classification.
+
+    Intentionally excludes date/end_date so multi-day duplicates share one key.
+    """
+
+    parts = [
+        getattr(event, "title", "") or "",
+        getattr(event, "description", "") or "",
+        getattr(event, "source_text", "") or "",
+        getattr(event, "location_name", "") or "",
+        getattr(event, "location_address", "") or "",
+        getattr(event, "city", "") or "",
+        getattr(event, "event_type", "") or "",
+    ]
+    normalized = "\n".join(
+        re.sub(r"\s+", " ", part.strip().lower()) for part in parts if part and part.strip()
+    )
+    return normalized[:2000]
+
+
 async def assign_event_topics(event: Event) -> tuple[list[str], int, str | None, bool]:
     """Populate ``event.topics`` using automatic classification."""
 
@@ -7417,7 +7570,17 @@ async def assign_event_topics(event: Event) -> tuple[list[str], int, str | None,
         return current, text_length, None, True
 
     try:
-        topics = await classify_event_topics(event)
+        cache_key = _event_topics_cache_key(event)
+        cached = _EVENT_TOPICS_CACHE.get(cache_key)
+        if cached is not None:
+            topics = list(cached)
+        else:
+            topics = await classify_event_topics(event)
+            _EVENT_TOPICS_CACHE[cache_key] = list(topics)
+            if _EVENT_TOPICS_CACHE_MAX > 0 and len(_EVENT_TOPICS_CACHE) > _EVENT_TOPICS_CACHE_MAX:
+                # Keep it simple: avoid unbounded growth.
+                _EVENT_TOPICS_CACHE.clear()
+                _EVENT_TOPICS_CACHE[cache_key] = list(topics)
         error_text: str | None = None
     except Exception as exc:  # pragma: no cover - defensive
         logging.exception("Topic classification raised an exception: %s", exc)
@@ -7946,6 +8109,21 @@ async def process_request(callback: types.CallbackQuery, db: Database, bot: Bot)
         if callback.from_user.id in editing_sessions:
             del editing_sessions[callback.from_user.id]
         await callback.message.answer("Editing finished")
+        await callback.answer()
+    elif data.startswith("sourcelog:"):
+        eid = int(data.split(":")[1])
+        async with db.get_session() as session:
+            user = await session.get(User, callback.from_user.id)
+            event = await session.get(Event, eid)
+            if not event or (user and user.blocked) or (
+                user and user.is_partner and event.creator_id != user.user_id
+            ):
+                await callback.answer("Not authorized", show_alert=True)
+                return
+            log_text = await build_event_source_log_text(session, eid, LOCAL_TZ)
+        if len(log_text) > TELEGRAM_MESSAGE_LIMIT:
+            log_text = _truncate_with_indicator(log_text, TELEGRAM_MESSAGE_LIMIT)
+        await callback.message.answer(log_text)
         await callback.answer()
     elif data.startswith("makefest:"):
         parts = data.split(":")
@@ -10757,6 +10935,8 @@ async def add_events_from_text(
     display_source: bool = True,
     source_channel: str | None = None,
     channel_title: str | None = None,
+    source_type_override: str | None = None,
+    source_url_override: str | None = None,
 
 
     bot: Bot | None = None,
@@ -10928,8 +11108,18 @@ async def add_events_from_text(
         if DEBUG:
             mem_info("LLM after")
         festival_info = getattr(parsed, "festival", None)
+        if not festival_info:
+            # Some callers (and tests) expose festival extraction via a side-channel
+            # attribute on the parser function.
+            festival_info = getattr(parse_event_via_4o, "_festival", None)
         if isinstance(festival_info, str):
             festival_info = {"name": festival_info}
+        # Avoid leaking parser-side channel into subsequent calls.
+        if hasattr(parse_event_via_4o, "_festival"):
+            try:
+                delattr(parse_event_via_4o, "_festival")
+            except Exception:
+                pass
         logging.info("LLM returned %d events", len(parsed))
     except Exception as e:
         elapsed_total = _time.monotonic() - llm_call_started
@@ -11206,13 +11396,14 @@ async def add_events_from_text(
 
             # skip events that have already finished - disabled for consistency in tests
 
+            computed_source_type = (
+                "telegram"
+                if (source_chat_id or source_message_id or source_channel)
+                else ("vk" if is_vk_wall_url(source_link) else "manual")
+            )
             candidate = EventCandidate(
-                source_type=(
-                    "telegram"
-                    if (source_chat_id or source_message_id or source_channel)
-                    else ("vk" if is_vk_wall_url(source_link) else "manual")
-                ),
-                source_url=source_link or source_marker,
+                source_type=source_type_override or computed_source_type,
+                source_url=source_url_override or source_link or source_marker,
                 source_text=source_text_clean,
                 title=event.title,
                 date=event.date,
@@ -11474,6 +11665,7 @@ async def handle_add_event(
             if html_lines and is_vk_wall_url(html_lines[0].strip()):
                 html_text = "\n".join(html_lines[1:]).lstrip()
     effective_force_festival = force_festival or session_mode == "festival"
+    bot_source_url = f"bot:{message.chat.id}/{message.message_id}"
     try:
         results = await add_events_from_text(
             db,
@@ -11487,6 +11679,8 @@ async def handle_add_event(
             creator_id=creator_id,
             display_source=False if source_link else True,
             source_channel=None,
+            source_type_override="bot" if not source_link else None,
+            source_url_override=bot_source_url if not source_link else None,
 
             bot=None,
         )
@@ -11644,9 +11838,9 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
 
     from smart_event_update import EventCandidate, smart_event_update
 
-    source_marker = f"manual:{message.chat.id}/{message.message_id}"
+    source_marker = f"bot:{message.chat.id}/{message.message_id}"
     candidate = EventCandidate(
-        source_type="manual",
+        source_type="bot",
         source_url=source_marker,
         source_text=source_clean,
         title=title,
@@ -11676,7 +11870,8 @@ async def handle_add_event_raw(message: types.Message, db: Database, bot: Bot):
         f"time: {event.time}",
         f"location_name: {event.location_name}",
     ]
-    status = "added" if update_result.created else "updated"
+    added = bool(update_result.created)
+    status = "added" if added else "updated"
     logging.info("handle_add_event_raw %s event id=%s", status, event.id)
     buttons_first: list[types.InlineKeyboardButton] = []
     if (
@@ -12531,6 +12726,7 @@ async def update_telegraph_event_page(
         ev = await session.get(Event, event_id)
         if not ev:
             return None
+        from models import EventSource, EventSourceFact
         display_link = False if ev.source_post_url else True
         summary = SourcePageEventSummary(
             date=getattr(ev, "date", None),
@@ -12549,6 +12745,38 @@ async def update_telegraph_event_page(
         photos = list(ev.photo_urls or [])
         if ev.preview_3d_url and len(photos) >= 2:
             photos.insert(0, ev.preview_3d_url)
+        sources_total = (
+            await session.scalar(
+                select(func.count())
+                .select_from(EventSource)
+                .where(EventSource.event_id == event_id)
+            )
+        ) or 0
+        last_fact_ts = await session.scalar(
+            select(func.max(EventSourceFact.created_at)).where(
+                EventSourceFact.event_id == event_id
+            )
+        )
+        if not last_fact_ts:
+            last_fact_ts = await session.scalar(
+                select(func.max(EventSource.imported_at)).where(
+                    EventSource.event_id == event_id
+                )
+            )
+        last_fact_dt = _ensure_utc(last_fact_ts)
+        tz_label = LOCAL_TZ.tzname(None) or "UTC"
+        if last_fact_dt:
+            last_fact_local = last_fact_dt.astimezone(LOCAL_TZ)
+            last_fact_text = f"{last_fact_local.strftime('%Y-%m-%d %H:%M')} ({tz_label})"
+        else:
+            last_fact_text = "—"
+        event_footer_html = (
+            "<p>"
+            + f"Источников: {sources_total}"
+            + "<br/>"
+            + f"Последнее обновление: {html.escape(last_fact_text)}"
+            + "</p>"
+        )
         html_content, _, _ = await build_source_page_content(
             ev.title or "Event",
             ev.source_text,
@@ -12561,6 +12789,7 @@ async def update_telegraph_event_page(
             display_link=display_link,
             catbox_urls=photos,
             search_digest=ev.search_digest,
+            event_footer_html=event_footer_html,
         )
         from telegraph.utils import html_to_nodes
 
@@ -13505,8 +13734,10 @@ async def update_month_pages_for(event_id: int, db: Database, bot: Bot | None) -
              m_events, m_exhibitions = await get_month_data(db, month)
              show_images = len(m_events) < 10
 
-        # ensure the month page is created before attempting a patch
-        await sync_month_page(db, month, update_links=True)
+        # Ensure the month page exists before attempting a patch.
+        # Keep the call signature simple so tests can monkeypatch sync_month_page
+        # without supporting extra kwargs.
+        await sync_month_page(db, month)
         for d in month_dates:
             logline("TG-MONTH", event_id, "patch start", month=month, day=d.isoformat())
             changed = await patch_month_page_for_date(db, tg, month, d, show_images=show_images)
@@ -13533,7 +13764,7 @@ async def update_month_pages_for(event_id: int, db: Database, bot: Bot | None) -
             else:
                 logline("TG-MONTH", event_id, "patch nochange", month=month)
     for month in rebuild_months:
-        await sync_month_page(db, month, update_links=False, force=True)
+        await sync_month_page(db, month)
     if (changed_any or rebuild_any) and bot:
         try:
             # Notify superadmins about the automated update

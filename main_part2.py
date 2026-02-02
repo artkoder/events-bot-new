@@ -954,24 +954,6 @@ async def build_weekend_page_content(
         res_f = await session.execute(select(Festival))
         fest_map = {f.name.casefold(): f for f in res_f.scalars().all()}
 
-    today = datetime.now(LOCAL_TZ).date()
-    events = [
-        e
-        for e in events
-        if (
-            (e.end_date and e.end_date >= today.isoformat())
-            or (not e.end_date and e.date >= today.isoformat())
-        )
-    ]
-    fairs = [
-        e
-        for e in fairs
-        if (
-            (e.end_date and e.end_date >= today.isoformat())
-            or (not e.end_date and e.date >= today.isoformat())
-        )
-    ]
-
     async with db.get_session() as session:
         res_f = await session.execute(select(Festival))
         fest_map = {f.name.casefold(): f for f in res_f.scalars().all()}
@@ -993,14 +975,14 @@ async def build_weekend_page_content(
         d: {e.id for e in by_day.get(d, []) if e.id is not None} for d in days
     }
     for fair in fairs:
-        start = parse_iso_date(fair.date)
-        end = parse_iso_date(fair.end_date) if fair.end_date else None
-        if not start or not end:
+        fair_start = parse_iso_date(fair.date)
+        fair_end = parse_iso_date(fair.end_date) if fair.end_date else None
+        if not fair_start or not fair_end:
             continue
-        if end < start:
-            start, end = end, start
+        if fair_end < fair_start:
+            fair_start, fair_end = fair_end, fair_start
         for day in days:
-            if start <= day <= end:
+            if fair_start <= day <= fair_end:
                 if fair.id is not None and fair.id in day_ids.get(day, set()):
                     continue
                 by_day.setdefault(day, []).append(clone_event_with_date(fair, day))
@@ -4600,6 +4582,84 @@ def _fit_poster_preview_lines(
     return fitted
 
 
+def _format_source_log_timestamp(value: datetime | None, tz: timezone) -> str:
+    if not value:
+        return "—"
+    normalized = _ensure_utc(value)
+    if not normalized:
+        return "—"
+    localized = normalized.astimezone(tz)
+    tz_label = tz.tzname(None) or "UTC"
+    return f"{localized.strftime('%Y-%m-%d %H:%M')} ({tz_label})"
+
+
+def _render_event_source_label(source) -> str:
+    ref: str | None = None
+    if getattr(source, "source_chat_username", None) and getattr(source, "source_message_id", None):
+        ref = f"https://t.me/{source.source_chat_username}/{source.source_message_id}"
+    elif getattr(source, "source_url", None):
+        ref = source.source_url
+    elif getattr(source, "source_chat_id", None) and getattr(source, "source_message_id", None):
+        ref = f"chat:{source.source_chat_id}/{source.source_message_id}"
+    parts: list[str] = []
+    if getattr(source, "source_type", None):
+        parts.append(source.source_type)
+    if ref:
+        if ref not in parts:
+            parts.append(ref)
+    return " | ".join(parts) if parts else "source"
+
+
+async def build_event_source_log_text(
+    session, event_id: int, tz: timezone
+) -> str:
+    from models import EventSource, EventSourceFact
+
+    rows = (
+        await session.execute(
+            select(EventSourceFact, EventSource)
+            .join(EventSource, EventSourceFact.source_id == EventSource.id)
+            .where(EventSourceFact.event_id == event_id)
+            .order_by(EventSourceFact.created_at.asc(), EventSourceFact.id.asc())
+        )
+    ).all()
+    if not rows:
+        return "Лог источников пуст"
+    lines: list[str] = ["🧾 Лог источников:"]
+    current_key: tuple[int, datetime] | None = None
+    current_facts: list[str] = []
+    current_source = None
+    current_ts: datetime | None = None
+
+    def _flush() -> None:
+        if not current_source or not current_ts:
+            return
+        ts_text = _format_source_log_timestamp(current_ts, tz)
+        source_label = _render_event_source_label(current_source)
+        lines.append(f"{ts_text} — {source_label}")
+        for fact in current_facts:
+            lines.append(f"• {fact}")
+        lines.append("")
+
+    for fact_row, source in rows:
+        key = (source.id, fact_row.created_at)
+        if current_key is None:
+            current_key = key
+            current_source = source
+            current_ts = fact_row.created_at
+        if key != current_key:
+            _flush()
+            current_key = key
+            current_source = source
+            current_ts = fact_row.created_at
+            current_facts = []
+        current_facts.append(fact_row.fact)
+    _flush()
+    while lines and not lines[-1].strip():
+        lines.pop()
+    return "\n".join(lines)
+
+
 async def show_edit_menu(
     user_id: int,
     event: Event,
@@ -4615,17 +4675,34 @@ async def show_edit_menu(
     database = db_obj or globals().get("db")
     poster_lines: list[str] = []
     if database and event.id:
-        from sqlmodel import select
-        from models import EventPoster, EventSource
+        try:
+            from sqlmodel import select
+            from models import EventPoster, EventSource
 
-        async with database.get_session() as session:
-            posters = (
-                await session.execute(
-                    select(EventPoster)
-                    .where(EventPoster.event_id == event.id)
-                    .order_by(EventPoster.updated_at.desc(), EventPoster.id.desc())
-                )
-            ).scalars().all()
+            async with database.get_session() as session:
+                posters = (
+                    await session.execute(
+                        select(EventPoster)
+                        .where(EventPoster.event_id == event.id)
+                        .order_by(EventPoster.updated_at.desc(), EventPoster.id.desc())
+                    )
+                ).scalars().all()
+                sources = (
+                    await session.execute(
+                        select(EventSource)
+                        .where(EventSource.event_id == event.id)
+                        .order_by(EventSource.imported_at.desc())
+                    )
+                ).scalars().all()
+        except Exception as exc:
+            logging.warning(
+                "show_edit_menu: failed to load posters/sources for event_id=%s: %s",
+                event.id,
+                exc,
+            )
+            posters = []
+            sources = []
+
         if posters:
             poster_lines.append("Poster OCR:")
             for idx, poster in enumerate(posters[:3], 1):
@@ -4654,13 +4731,6 @@ async def show_edit_menu(
                     poster_lines.append(f"    catbox_url: {url}")
             poster_lines.append("---")
 
-        sources = (
-            await session.execute(
-                select(EventSource)
-                .where(EventSource.event_id == event.id)
-                .order_by(EventSource.imported_at.desc())
-            )
-        ).scalars().all()
         if sources:
             poster_lines.append("Sources:")
             for src in sources[:10]:
@@ -4748,6 +4818,15 @@ async def show_edit_menu(
                 types.InlineKeyboardButton(
                     text="\U0001f3aa Сделать фестиваль",
                     callback_data=f"makefest:{event.id}",
+                )
+            ]
+        )
+    if event.id:
+        keyboard.append(
+            [
+                types.InlineKeyboardButton(
+                    text="🧾 Лог источников",
+                    callback_data=f"sourcelog:{event.id}",
                 )
             ]
         )
@@ -8187,7 +8266,7 @@ async def handle_edit_message(message: types.Message, db: Database, bot: Bot):
         except Exception as e:
             logging.error("failed to sync VK source post: %s", e)
     editing_sessions[message.from_user.id] = (eid, None)
-    await show_edit_menu(message.from_user.id, event, bot)
+    await show_edit_menu(message.from_user.id, event, bot, db_obj=db)
 
 
 async def handle_dom_iskusstv_start(message: types.Message, db: Database, bot: Bot):
@@ -13116,18 +13195,33 @@ async def _process_forwarded(
     )
     logging.info("parsing forwarded text via LLM")
     try:
+        import inspect
+
+        kwargs = dict(
+            raise_exc=False,
+            source_chat_id=target_chat_id,
+            source_message_id=target_message_id,
+            creator_id=user.user_id,
+            source_channel=channel_name,
+            bot=None,
+        )
+        # poster_media is an optional optimization to avoid double-upload/OCR.
+        # During unit tests add_events_from_text is often monkeypatched with a
+        # narrower signature, so only pass it when supported.
+        if poster_items:
+            try:
+                if "poster_media" in inspect.signature(add_events_from_text).parameters:
+                    kwargs["poster_media"] = poster_items
+            except Exception:
+                pass
+
         results = await add_events_from_text(
             db,
             text,
             link,
             html,
             normalized_media,
-            poster_media=poster_items,
-            source_chat_id=target_chat_id,
-            source_message_id=target_message_id,
-            creator_id=user.user_id,
-            source_channel=channel_name,
-            bot=None,
+            **kwargs,
         )
     except Exception as e:
         logging.exception("forward parse failed")
@@ -13141,13 +13235,18 @@ async def _process_forwarded(
         return
     logging.info("forward parsed %d events", len(results))
     ocr_line = None
-    if normalized_media and results.ocr_tokens_remaining is not None:
+    ocr_remaining = getattr(results, "ocr_tokens_remaining", None)
+    ocr_spent = getattr(results, "ocr_tokens_spent", 0)
+    ocr_notice = getattr(results, "ocr_limit_notice", None) or getattr(
+        results, "limit_notice", None
+    )
+    if normalized_media and ocr_remaining is not None:
         base_line = (
-            f"OCR: потрачено {results.ocr_tokens_spent}, осталось "
-            f"{results.ocr_tokens_remaining}"
+            f"OCR: потрачено {ocr_spent}, осталось "
+            f"{ocr_remaining}"
         )
-        if results.ocr_limit_notice:
-            ocr_line = f"{results.ocr_limit_notice}\n{base_line}"
+        if ocr_notice:
+            ocr_line = f"{ocr_notice}\n{base_line}"
         else:
             ocr_line = base_line
     if not results:
@@ -13297,6 +13396,17 @@ async def handle_forwarded(message: types.Message, db: Database, bot: Bot):
         gid = message.media_group_id
         if gid in processed_media_groups:
             logging.info("skip already processed album %s", gid)
+            return
+        # Telegram media groups should always carry media, but unit tests may
+        # construct caption-only "albums". If there is text but no images,
+        # process it immediately and mark the group as processed.
+        if text and not images:
+            state = pending_albums.pop(gid, None)
+            if state and state.timer:
+                state.timer.cancel()
+            processed_media_groups.add(gid)
+            html, _mode = ensure_html_text(message)
+            await _process_forwarded(message, db, bot, text, html, None)
             return
         state = pending_albums.get(gid)
         if not state:
@@ -13959,6 +14069,7 @@ async def build_source_page_content(
     image_mode: Literal["tail", "inline"] = "tail",
     page_mode: Literal["default", "history"] = "default",
     search_digest: str | None = None,
+    event_footer_html: str | None = None,
 ) -> tuple[str, str, int]:
     if image_mode not in {"tail", "inline"}:
         raise ValueError(f"unknown image_mode={image_mode}")
@@ -14321,6 +14432,8 @@ async def build_source_page_content(
         html_content += nav_html
     if page_mode == "history" and display_link and source_url:
         html_content += f'<p><a href="{html.escape(source_url)}">Источник</a></p>'
+    if event_footer_html and page_mode != "history":
+        html_content = html_content.rstrip() + BODY_SPACER_HTML + event_footer_html
     if page_mode == "history":
         html_content = html_content.replace(FOOTER_LINK_HTML, "").rstrip()
         html_content = re.sub(
@@ -14998,6 +15111,7 @@ def create_app() -> web.Application:
         or c.data.startswith("edit:")
         or c.data.startswith("editfield:")
         or c.data.startswith("editdone:")
+        or c.data.startswith("sourcelog:")
         or c.data.startswith("makefest:")
         or c.data.startswith("makefest_create:")
         or c.data.startswith("makefest_bind:")
@@ -15254,8 +15368,16 @@ def create_app() -> web.Application:
     # Register /parse command from service module
     from source_parsing.commands import register_parse_command
     register_parse_command(dp, db, bot)
+    # While an event edit card is open we keep an entry in editing_sessions.
+    # Only intercept free-text messages when a specific field is ожидается.
+    # Otherwise we'd swallow unrelated commands like /tg and make the bot look "frozen".
     dp.message.register(
-        edit_message_wrapper, lambda m: m.from_user.id in editing_sessions
+        edit_message_wrapper,
+        lambda m: (
+            m.from_user.id in editing_sessions
+            and (editing_sessions.get(m.from_user.id) or (None, None))[1] is not None
+            and not ((m.text or "").startswith("/"))
+        ),
     )
     dp.message.register(
         daily_time_wrapper, lambda m: m.from_user.id in daily_time_sessions

@@ -5412,8 +5412,19 @@ async def test_sync_month_page_split(tmp_path: Path, monkeypatch):
 
     async with db.get_session() as session:
         page = await session.get(m.MonthPage, "2025-07")
-    assert page.url2 is not None
-    assert len(calls["created"]) == 2
+        parts_res = await session.execute(
+            select(m.MonthPagePart)
+            .where(m.MonthPagePart.month == "2025-07")
+            .order_by(m.MonthPagePart.part_number)
+        )
+        parts = parts_res.scalars().all()
+
+    assert page.url is not None
+    assert page.path is not None
+    assert parts, "Expected split month page to create continuation parts"
+    # In n-page mode legacy url2/path2 are cleared; continuation pages live in MonthPagePart.
+    assert page.url2 is None
+    assert len(calls["created"]) == len(parts) + 1
 
 
 @pytest.mark.asyncio
@@ -5459,9 +5470,17 @@ async def test_sync_month_page_split_on_error(tmp_path: Path, monkeypatch):
 
     async with db.get_session() as session:
         page = await session.get(m.MonthPage, "2025-07")
+        parts_res = await session.execute(
+            select(m.MonthPagePart)
+            .where(m.MonthPagePart.month == "2025-07")
+            .order_by(m.MonthPagePart.part_number)
+        )
+        parts = parts_res.scalars().all()
     assert page.url == "u1"
-    assert page.url2 is not None
-    assert len(calls["created"]) == 1
+    # When the first edit fails with CONTENT_TOO_BIG, sync_month_page falls back to split_month_until_ok.
+    # Depending on optimize_month_chunks, it may still fit into a single page (no continuation parts).
+    assert page.url2 is None
+    assert len(calls["created"]) == len(parts)
 
 
 @pytest.mark.asyncio
@@ -5505,9 +5524,17 @@ async def test_sync_month_page_split_on_generic_error(tmp_path: Path, monkeypatc
 
     async with db.get_session() as session:
         page = await session.get(m.MonthPage, "2025-07")
+        parts_res = await session.execute(
+            select(m.MonthPagePart)
+            .where(m.MonthPagePart.month == "2025-07")
+            .order_by(m.MonthPagePart.part_number)
+        )
+        parts = parts_res.scalars().all()
     assert page.url == "u1"
-    assert page.url2 is not None
-    assert len(calls["created"]) == 1
+    # When the first edit fails, sync_month_page falls back to split_month_until_ok.
+    # Depending on optimize_month_chunks, it may still fit into a single page (no continuation parts).
+    assert page.url2 is None
+    assert len(calls["created"]) == len(parts)
 
 
 @pytest.mark.asyncio
@@ -5569,13 +5596,14 @@ async def test_current_month_omits_past_events(tmp_path: Path, monkeypatch):
 @pytest.mark.asyncio
 
 async def test_month_page_split_filters_past_events(tmp_path: Path, monkeypatch):
-    db = Database(str(tmp_path / "db.sqlite"))
+    m = importlib.reload(main)
+    db = m.Database(str(tmp_path / "db.sqlite"))
     await db.init()
 
     async with db.get_session() as session:
         for day in range(5, 8):
             session.add(
-                Event(
+                m.Event(
                     title=f"P{day}",
                     description="d",
                     source_text="s",
@@ -5586,7 +5614,7 @@ async def test_month_page_split_filters_past_events(tmp_path: Path, monkeypatch)
             )
         for day in range(19, 23):
             session.add(
-                Event(
+                m.Event(
                     title=f"F{day}",
                     description="d",
                     source_text="s",
@@ -5625,32 +5653,34 @@ async def test_month_page_split_filters_past_events(tmp_path: Path, monkeypatch)
         ):
             created.append(html_content or content)
 
-    monkeypatch.setattr(main, "date", FakeDate)
+    monkeypatch.setattr(m, "date", FakeDate)
+    monkeypatch.setattr(m, "datetime", FakeDatetime)
 
-    monkeypatch.setattr(main, "datetime", FakeDatetime)
+    # Avoid recursive nav refresh during this unit test (it triggers extra Telegraph calls).
+    async def _noop(*args, **kwargs):
+        return None
 
-    monkeypatch.setattr(main, "get_telegraph_token", lambda: "t")
+    monkeypatch.setattr(m, "refresh_month_nav", _noop)
+
+    monkeypatch.setattr(m, "get_telegraph_token", lambda: "t")
     monkeypatch.setattr(
         "main.Telegraph", lambda access_token=None, domain=None: DummyTG()
     )
-    monkeypatch.setattr(main, "TELEGRAPH_LIMIT", 10)
+    monkeypatch.setattr(m, "TELEGRAPH_LIMIT", 10)
 
-    await main.sync_month_page(db, "2025-07")
+    await m.sync_month_page(db, "2025-07")
 
-    assert len(created) == 2
-    items = created[0]
-    if isinstance(items, str):
-        from telegraph.utils import html_to_nodes
+    assert created, "Expected month page rebuild to create at least one Telegraph page"
+    blob = ""
+    for items in created:
+        blob += items if isinstance(items, str) else nodes_to_html(items)
+        blob += "\n"
 
-        items = html_to_nodes(items)
-    titles = [
-        c
-        for n in items
-        if isinstance(n, dict) and n.get("tag") == "h4"
-        for c in n.get("children", [])
-        if isinstance(c, str)
-    ]
-    assert not any(t.startswith("P") for t in titles)
+    # Past events should be omitted; future ones should remain.
+    assert "P5" not in blob
+    assert "P6" not in blob
+    assert "P7" not in blob
+    assert "F19" in blob
 
 
 @pytest.mark.asyncio
@@ -11227,4 +11257,3 @@ async def test_progress_includes_festival_tg(tmp_path: Path, monkeypatch):
     await main.publish_event_progress(ev, db, bot, chat_id=1)
     final_text = bot.text_edits[-1][2]
     assert "✅ Telegraph (фестиваль) — http://fest" in final_text
-

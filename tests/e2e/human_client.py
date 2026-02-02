@@ -12,6 +12,8 @@ Key features:
 """
 
 import asyncio
+import base64
+import json
 import os
 import random
 import logging
@@ -56,6 +58,11 @@ class HumanUserClient:
         api_id: int,
         api_hash: str,
         trust_level: float = 0.5,
+        device_model: Optional[str] = None,
+        system_version: Optional[str] = None,
+        app_version: Optional[str] = None,
+        lang_code: Optional[str] = None,
+        system_lang_code: Optional[str] = None,
     ):
         """
         Initialize HumanUserClient.
@@ -69,15 +76,16 @@ class HumanUserClient:
         self.trust_level = trust_level
         self._connected = False
         
+        resolved_lang = lang_code or self.LANG_CODE
         self.client = TelegramClient(
             StringSession(session_string),
             api_id,
             api_hash,
-            device_model=self.DEVICE_MODEL,
-            system_version=self.SYSTEM_VERSION,
-            app_version=self.APP_VERSION,
-            lang_code=self.LANG_CODE,
-            system_lang_code=self.LANG_CODE,
+            device_model=device_model or self.DEVICE_MODEL,
+            system_version=system_version or self.SYSTEM_VERSION,
+            app_version=app_version or self.APP_VERSION,
+            lang_code=resolved_lang,
+            system_lang_code=system_lang_code or resolved_lang,
         )
     
     async def connect(self) -> None:
@@ -86,7 +94,7 @@ class HumanUserClient:
         
         if not await self.client.is_user_authorized():
             raise ConnectionError(
-                "Client is not authorized. Check TELEGRAM_SESSION."
+                "Client is not authorized. Check TELEGRAM_SESSION or TELEGRAM_AUTH_BUNDLE_E2E."
             )
         
         self._connected = True
@@ -269,23 +277,68 @@ def create_human_client() -> HumanUserClient:
     Required env vars:
     - TELEGRAM_API_ID
     - TELEGRAM_API_HASH
-    - TELEGRAM_SESSION
+    - TELEGRAM_SESSION (or TELEGRAM_AUTH_BUNDLE_E2E)
     
     Optional:
     - E2E_TRUST_LEVEL (default: 0.5)
     """
-    api_id = os.environ.get("TELEGRAM_API_ID")
-    api_hash = os.environ.get("TELEGRAM_API_HASH")
+    # Historically the project uses TG_API_ID/TG_API_HASH for Telethon (monitoring),
+    # while some E2E utilities used TELEGRAM_API_ID/TELEGRAM_API_HASH. Support both.
+    api_id = os.environ.get("TELEGRAM_API_ID") or os.environ.get("TG_API_ID")
+    api_hash = os.environ.get("TELEGRAM_API_HASH") or os.environ.get("TG_API_HASH")
+    bundle_b64 = os.environ.get("TELEGRAM_AUTH_BUNDLE_E2E")
     session = os.environ.get("TELEGRAM_SESSION")
-    
-    if not all([api_id, api_hash, session]):
+    bundle = None
+
+    if bundle_b64:
+        try:
+            raw = base64.urlsafe_b64decode(bundle_b64.encode("ascii")).decode("utf-8")
+            bundle = json.loads(raw)
+        except Exception as exc:
+            raise EnvironmentError(
+                f"Invalid TELEGRAM_AUTH_BUNDLE_E2E: {exc}"
+            ) from exc
+
+    if not all([api_id, api_hash]):
         raise EnvironmentError(
-            "Missing required env vars: "
-            "TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_SESSION"
+            "Missing required env vars: TELEGRAM_API_ID/TELEGRAM_API_HASH (or TG_API_ID/TG_API_HASH)"
+        )
+
+    if not session and not bundle:
+        raise EnvironmentError(
+            "Missing TELEGRAM_SESSION or TELEGRAM_AUTH_BUNDLE_E2E"
         )
     
     trust_level = float(os.environ.get("E2E_TRUST_LEVEL", "0.5"))
     
+    if bundle:
+        session = bundle.get("session")
+        required_keys = [
+            "session",
+            "device_model",
+            "system_version",
+            "app_version",
+            "lang_code",
+            "system_lang_code",
+        ]
+        missing = [key for key in required_keys if not bundle.get(key)]
+        if missing:
+            raise EnvironmentError(
+                f"TELEGRAM_AUTH_BUNDLE_E2E missing keys: {', '.join(missing)}"
+            )
+
+        return HumanUserClient(
+            session_string=session,
+            api_id=int(api_id),
+            api_hash=api_hash,
+            trust_level=trust_level,
+            device_model=bundle.get("device_model"),
+            system_version=bundle.get("system_version"),
+            app_version=bundle.get("app_version"),
+            lang_code=bundle.get("lang_code"),
+            system_lang_code=bundle.get("system_lang_code"),
+        )
+
     return HumanUserClient(
         session_string=session,
         api_id=int(api_id),

@@ -3,13 +3,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import tempfile
 from contextlib import asynccontextmanager
-import weakref
 
 import aiosqlite
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-_KNOWN_DATABASES: "weakref.WeakSet[Database]" = weakref.WeakSet()
+_KNOWN_DATABASES: set["Database"] = set()
 
 
 async def _add_column(conn, table: str, col_def: str) -> None:
@@ -23,6 +23,21 @@ async def _add_column(conn, table: str, col_def: str) -> None:
 class Database:
     def __init__(self, path: str):
         self.path = path
+        # Ensure the directory exists for file-backed sqlite DBs.
+        # This avoids failures in local/test environments when DB_PATH points to /data/db.sqlite.
+        if path and not path.startswith((":memory:", "file:")):
+            parent = os.path.dirname(path)
+            if parent and parent not in (".", ""):
+                try:
+                    os.makedirs(parent, exist_ok=True)
+                except PermissionError:
+                    fallback = os.path.join(tempfile.gettempdir(), os.path.basename(path))
+                    logging.warning(
+                        "Database directory is not writable: %s. Falling back to %s",
+                        parent,
+                        fallback,
+                    )
+                    self.path = fallback
         self._conn: aiosqlite.Connection | None = None
         self._orm_engine = None
         self._sessionmaker = None
@@ -37,6 +52,7 @@ class Database:
         if self._conn is not None:
             await self._conn.close()
             self._conn = None
+        _KNOWN_DATABASES.discard(self)
 
     async def init(self) -> None:
         async with aiosqlite.connect(self.path) as conn:
@@ -318,6 +334,26 @@ class Database:
             )
             await conn.execute(
                 "CREATE INDEX IF NOT EXISTS ix_event_source_type_url ON event_source(source_type, source_url)"
+            )
+
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS event_source_fact(
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_id INTEGER NOT NULL,
+                    source_id INTEGER NOT NULL,
+                    fact TEXT NOT NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(event_id) REFERENCES event(id) ON DELETE CASCADE,
+                    FOREIGN KEY(source_id) REFERENCES event_source(id) ON DELETE CASCADE
+                )
+                """
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_event_source_fact_event ON event_source_fact(event_id)"
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_event_source_fact_source ON event_source_fact(source_id)"
             )
 
             await conn.execute(
@@ -868,6 +904,7 @@ async def close_known_databases() -> None:
             await db.close()
         except Exception:
             logging.exception("db.close failed for %s", getattr(db, "path", None))
+    _KNOWN_DATABASES.clear()
 
 
 async def wal_checkpoint_truncate(engine):

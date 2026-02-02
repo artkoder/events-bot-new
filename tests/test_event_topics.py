@@ -49,6 +49,7 @@ def test_topic_labels_include_kaliningrad_topic():
 
 @pytest.mark.asyncio
 async def test_classify_event_topics_filters_and_limits(monkeypatch):
+    monkeypatch.setenv("EVENT_TOPICS_LLM", "4o")
     monkeypatch.setenv("FOUR_O_MINI", "1")
     captured: dict[str, object] = {}
 
@@ -101,6 +102,7 @@ async def test_classify_event_topics_filters_and_limits(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_classify_event_topics_handles_invalid_json(monkeypatch):
+    monkeypatch.setenv("EVENT_TOPICS_LLM", "4o")
     async def fake_ask(*args, **kwargs):
         return "{invalid_json}"
 
@@ -156,6 +158,7 @@ def test_normalize_topic_identifier_legacy_aliases():
 
 @pytest.mark.asyncio
 async def test_classify_event_topics_handles_exception(monkeypatch):
+    monkeypatch.setenv("EVENT_TOPICS_LLM", "4o")
     async def fake_ask(*args, **kwargs):
         raise RuntimeError("network error")
 

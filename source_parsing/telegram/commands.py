@@ -1,14 +1,15 @@
 import logging
 import asyncio
 import shlex
+from datetime import datetime
 from aiogram import Router, types, Bot, F
 from aiogram.filters import Command, CommandObject
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-from sqlalchemy import select
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 
 from db import Database
-from models import TelegramSource
+from models import TelegramScannedMessage, TelegramSource
 from .service import run_telegram_monitor
 
 tg_router = Router()
@@ -88,6 +89,9 @@ async def handle_tg_callback(callback: CallbackQuery):
     elif action == "trust" and len(parts) >= 3:
         await cycle_trust(db, callback.message, int(parts[2]))
         await callback.answer()
+    elif action == "delete" and len(parts) >= 3:
+        await delete_source(db, callback.message, int(parts[2]))
+        await callback.answer()
 
 @tg_router.message(lambda m: m.from_user.id in adding_source_sessions)
 async def handle_source_input(message: types.Message):
@@ -121,7 +125,7 @@ async def run_monitor_task(bot: Bot, chat_id: int):
             await bot.send_message(chat_id, "⏳ Мониторинг уже запущен, ждём завершения.")
             return
         async with _monitor_lock:
-            await run_telegram_monitor(db, bot=bot, chat_id=chat_id)
+            await run_telegram_monitor(db, bot=bot, chat_id=chat_id, send_progress=True)
     except Exception as e:
         logger.exception("Manual monitor run failed")
         await bot.send_message(chat_id, f"❌ Monitor run failed: {e}")
@@ -206,15 +210,52 @@ async def list_sources(db: Database, message: types.Message):
     async with db.get_session() as session:
         result = await session.execute(select(TelegramSource))
         sources = result.scalars().all()
+        stats_rows = await session.execute(
+            select(
+                TelegramScannedMessage.source_id,
+                func.count(TelegramScannedMessage.message_id),
+                func.sum(TelegramScannedMessage.events_extracted),
+                func.sum(TelegramScannedMessage.events_imported),
+                func.max(TelegramScannedMessage.processed_at),
+            ).group_by(TelegramScannedMessage.source_id)
+        )
+        stats_map = {row[0]: row for row in stats_rows}
     if not sources:
         await message.answer("Источники не настроены.")
         return
     lines = ["<b>Telegram Sources:</b>"]
     keyboard = []
+
+    def _fmt_dt(value: datetime | None) -> str:
+        if not value:
+            return "—"
+        return value.strftime("%Y-%m-%d %H:%M:%S")
+
     for src in sources:
         status = "✅" if src.enabled else "⛔"
         trust = src.trust_level or "low"
         lines.append(f"{status} @{src.username} (trust={trust})")
+        stats = stats_map.get(src.id)
+        if stats:
+            _source_id, scanned_total, extracted_total, imported_total, last_processed = stats
+            scanned_total = int(scanned_total or 0)
+            extracted_total = int(extracted_total or 0)
+            imported_total = int(imported_total or 0)
+            lines.append(
+                "  ↳ "
+                f"last_scan: {_fmt_dt(src.last_scan_at)}; "
+                f"last_msg_id: {src.last_scanned_message_id or '—'}; "
+                f"scanned: {scanned_total}; "
+                f"events: {imported_total}/{extracted_total}; "
+                f"last_processed: {_fmt_dt(last_processed)}"
+            )
+        else:
+            lines.append(
+                "  ↳ "
+                f"last_scan: {_fmt_dt(src.last_scan_at)}; "
+                f"last_msg_id: {src.last_scanned_message_id or '—'}; "
+                "scanned: 0; events: 0/0"
+            )
         keyboard.append(
             [
                 InlineKeyboardButton(
@@ -225,6 +266,14 @@ async def list_sources(db: Database, message: types.Message):
                     text=f"Trust → {trust}",
                     callback_data=f"tg:trust:{src.id}",
                 ),
+            ]
+        )
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    text=f"🗑️ Удалить @{src.username}",
+                    callback_data=f"tg:delete:{src.id}",
+                )
             ]
         )
     await message.answer(
@@ -259,6 +308,23 @@ async def cycle_trust(db: Database, message: types.Message, source_id: int) -> N
             idx = 0
         src.trust_level = order[(idx + 1) % len(order)]
         await session.commit()
+    await list_sources(db, message)
+
+async def delete_source(db: Database, message: types.Message, source_id: int) -> None:
+    async with db.get_session() as session:
+        src = await session.get(TelegramSource, source_id)
+        if not src:
+            await message.answer("Источник не найден")
+            return
+        username = src.username
+        await session.execute(
+            delete(TelegramScannedMessage).where(
+                TelegramScannedMessage.source_id == source_id
+            )
+        )
+        await session.delete(src)
+        await session.commit()
+    await message.answer(f"🗑️ Источник @{username} удалён.")
     await list_sources(db, message)
 
 async def _get_user(db: Database, user_id: int):

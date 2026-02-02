@@ -13,7 +13,11 @@
 
 ```yaml
 locations:
-  # Пример: Научная библиотека может проводить несколько мероприятий в одно время.
+  # Научная библиотека может проводить несколько мероприятий в одно время.
+  - location_name: "Научная библиотека"
+    allow_parallel_events: true
+  - location_name: "Научная библиотека БФУ"
+    allow_parallel_events: true
   - location_name: "Научная библиотека, Мира 9, Калининград"
     allow_parallel_events: true
 
@@ -21,4 +25,3 @@ locations:
   # - location_name: "..."
   #   allow_parallel_events: true
 ```
-

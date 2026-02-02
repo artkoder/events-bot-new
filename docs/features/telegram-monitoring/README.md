@@ -10,6 +10,7 @@
   - создаёт новые события;
   - мерджит существующие;
   - добавляет источники в `event_source`.
+- В Kaggle используются только модели Gemma (текст/vision); 4o там не участвует.
 
 ## Точки входа
 
@@ -30,6 +31,16 @@
 - `event_source` — источники события (много на одно событие).
 - `eventposter.phash` — опциональный перцептивный хеш.
 
+## OCR
+
+- OCR выполняется **внутри Kaggle‑ноутбука** для сообщений с афишами, даже если в тексте поста уже есть описание.
+- Результаты OCR сохраняются в `telegram_results.json`:
+  - `messages[].posters[].ocr_text` и `messages[].posters[].ocr_title`;
+  - агрегированный `messages[].ocr_text` (для удобства дебага).
+- В UI (`/events` → Edit) OCR виден в блоке **Poster OCR**.
+- Проверка OCR в UI: см. `tests/e2e/features/telegram_monitoring.feature` (сценарий «Полный пользовательский поток мониторинга (UI)»).
+- Для каналов с заданным `default_location` неверно распознанная локация игнорируется, приоритет у `default_location`.
+
 ## ENV
 
 Минимум:
@@ -37,7 +48,7 @@
 - `ENABLE_TG_MONITORING=1`
 - `TG_MONITORING_TIME_LOCAL=23:40`
 - `TG_MONITORING_TZ=Europe/Kaliningrad`
-- `TG_SESSION`, `TG_API_ID`, `TG_API_HASH`
+- `TELEGRAM_AUTH_BUNDLE_S22`, `TG_API_ID`, `TG_API_HASH`
 - `GOOGLE_API_KEY`
 - `KAGGLE_USERNAME`
 
@@ -49,7 +60,41 @@
 - `TG_MONITORING_CONFIG_KEY`
 - `TG_MONITORING_TIMEOUT_MINUTES`
 - `TG_MONITORING_POLL_INTERVAL`
+- `TG_MONITORING_DAYS_BACK` — сколько дней сканировать назад (важно для E2E кейсов со старыми постами).
+- `TG_MONITORING_LIMIT` — лимит сообщений на источник за запуск.
+- `EVENT_TOPICS_LLM=gemma` — чтобы классификация тем не использовала 4o (Gemma-only).
+- `EVENT_TOPICS_MODEL` — модель Gemma для классификации тем (по умолчанию `TG_MONITORING_TEXT_MODEL`).
 
 ## Контракт результата
 
-Сервер ожидает файл `telegram_results.json` с `schema_version=1` (см. `docs/backlog/features/telegram-monitoring/README.md`).
+Сервер ожидает файл `telegram_results.json` с `schema_version=1`.
+
+- Producer (Kaggle): `kaggle/TelegramMonitor/telegram_monitor.ipynb`
+- Consumer (server): `source_parsing/telegram/handlers.py`
+
+## FloodWait (Telegram rate limits)
+
+Если в Kaggle логах появляется `FloodWaitError` или строки вида `Sleeping for Xs on GetHistoryRequest flood wait`, Telegram ограничил скорость запросов.
+
+Типовые причины:
+
+- Слишком большой объём сканирования: много источников и/или большой `TG_MONITORING_LIMIT`, `TG_MONITORING_DAYS_BACK` (особенно после очистки отметок мониторинга).
+- Слишком агрессивные задержки (`TG_MONITORING_DELAY_*`, `TG_MONITORING_SOURCE_PAUSE_*`).
+- Параллельные запуски мониторинга (ручной и scheduled) с одной и той же Telegram-сессией.
+
+Митигации (ENV, пробрасываются в Kaggle):
+
+- Увеличить “human-like” задержки: `TG_MONITORING_DELAY_MIN/MAX`, `TG_MONITORING_SOURCE_PAUSE_MIN/MAX`.
+- Настроить поведение Telethon при FloodWait:
+  - `TG_MONITORING_FLOOD_SLEEP_THRESHOLD` (по умолчанию 600) — авто-sleep при FloodWait до N секунд.
+  - `TG_MONITORING_FLOOD_WAIT_MAX` (по умолчанию 1800) — максимум ожидания на один FloodWait.
+  - `TG_MONITORING_FLOOD_MAX_RETRIES` (по умолчанию 4) — сколько раз подряд терпеть FloodWait на одном участке.
+  - `TG_MONITORING_FLOOD_WAIT_JITTER_MIN/MAX` — небольшой джиттер к ожиданию.
+
+Примечание: на сервере есть lock, который не даёт запустить два мониторинга одновременно в одном процессе (manual vs scheduler), но лучше всё равно избегать ручных запусков рядом с scheduled окном.
+
+## Acceptance (Gherkin)
+
+Канонические сценарии (UI): `tests/e2e/features/telegram_monitoring.feature`.
+
+Если нужно добавить/уточнить сценарий — правим `.feature` и шаги в `tests/e2e/features/steps/bot_steps.py`.

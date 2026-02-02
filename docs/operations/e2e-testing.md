@@ -189,6 +189,30 @@ def step_log(ctx): ...
 - [ ] Запустить бота локально с `DB_PATH=db_prod_snapshot.sqlite`
 - [ ] Убедиться что бот отвечает на `/start`
 - [ ] Проверить что нет конфликтов с production ботом
+- [ ] Установить `TELEGRAM_API_ID`/`TELEGRAM_API_HASH` (или `TG_API_ID`/`TG_API_HASH`) и одну из: `TELEGRAM_AUTH_BUNDLE_E2E` или `TELEGRAM_SESSION`
+
+#### TELEGRAM_AUTH_BUNDLE_E2E (формат и расшифровка)
+
+`TELEGRAM_AUTH_BUNDLE_E2E` — это **base64 (urlsafe) JSON** с данными Telethon‑сессии и параметрами устройства.
+
+Обязательные ключи в JSON:
+- `session`
+- `device_model`
+- `system_version`
+- `app_version`
+- `lang_code`
+- `system_lang_code`
+
+Пример расшифровки (локально, без логирования результата):
+```python
+import base64, json
+
+raw = base64.urlsafe_b64decode(B64.encode("ascii")).decode("utf-8")
+bundle = json.loads(raw)
+session = bundle["session"]
+```
+
+Важно: **не запускайте одну и ту же session строку параллельно** в двух процессах (иначе можно словить `AuthKeyDuplicatedError`). Разные session строки для одного аккаунта допустимы.
 
 ### Написание теста
 - [ ] Создать `.feature` файл с Gherkin сценариями

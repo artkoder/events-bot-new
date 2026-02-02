@@ -1,4 +1,6 @@
 import asyncio
+import base64
+import html
 import json
 import logging
 import os
@@ -8,14 +10,18 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from sqlalchemy import select
 
 from db import Database
 from models import TelegramSource
 from source_parsing.telegram.deduplication import get_month_context_urls
-from source_parsing.telegram.handlers import TelegramMonitorReport, process_telegram_results
+from source_parsing.telegram.handlers import (
+    TelegramMonitorEventInfo,
+    TelegramMonitorReport,
+    process_telegram_results,
+)
 from video_announce.kaggle_client import KaggleClient
 
 from .split_secrets import encrypt_secret
@@ -30,6 +36,11 @@ KEEP_DATASETS = os.getenv("TG_MONITORING_KEEP_DATASETS", "").strip().lower() in 
     "yes",
 }
 
+# Prevent overlapping runs (manual UI vs scheduler) in a single bot process.
+# Overlapping Kaggle kernels can reuse the same Telegram session concurrently and trigger
+# Telegram-side throttling / auth-key issues.
+_RUN_LOCK = asyncio.Lock()
+
 KERNEL_REF = os.getenv("TG_MONITORING_KERNEL_REF", "artkoder/telegram-monitor-bot")
 KERNEL_PATH = Path(os.getenv("TG_MONITORING_KERNEL_PATH", "kaggle/TelegramMonitor"))
 
@@ -37,13 +48,61 @@ DATASET_PROPAGATION_WAIT_SECONDS = int(os.getenv("TG_MONITORING_DATASET_WAIT", "
 POLL_INTERVAL_SECONDS = int(os.getenv("TG_MONITORING_POLL_INTERVAL", "30"))
 TIMEOUT_MINUTES = int(os.getenv("TG_MONITORING_TIMEOUT_MINUTES", "90"))
 KAGGLE_STARTUP_WAIT_SECONDS = int(os.getenv("TG_MONITORING_STARTUP_WAIT", "10"))
+MAX_TG_MESSAGE_LEN = int(os.getenv("TG_MONITORING_MAX_MESSAGE_LEN", "3800"))
+
+
+def _read_env_file_value(key: str) -> str | None:
+    path = Path(".env")
+    if not path.exists():
+        return None
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line or line.lstrip().startswith("#") or "=" not in line:
+                continue
+            name, value = line.split("=", 1)
+            if name.strip() == key:
+                return value.strip()
+    except Exception:
+        return None
+    return None
+
+
+def _get_env_value(key: str) -> str:
+    value = (os.getenv(key) or "").strip()
+    if value:
+        return value
+    fallback = _read_env_file_value(key)
+    return (fallback or "").strip()
 
 
 def _require_env(key: str) -> str:
-    value = (os.getenv(key) or "").strip()
+    value = _get_env_value(key)
     if not value:
         raise RuntimeError(f"{key} is missing")
     return value
+
+
+def _parse_auth_bundle(env_key: str) -> dict[str, Any] | None:
+    bundle_b64 = _get_env_value(env_key)
+    if not bundle_b64:
+        return None
+    try:
+        raw = base64.urlsafe_b64decode(bundle_b64.encode("ascii")).decode("utf-8")
+        bundle = json.loads(raw)
+    except Exception as exc:  # pragma: no cover - validation only
+        raise RuntimeError(f"Invalid {env_key}: {exc}") from exc
+    required_keys = [
+        "session",
+        "device_model",
+        "system_version",
+        "app_version",
+        "lang_code",
+        "system_lang_code",
+    ]
+    missing = [key for key in required_keys if not bundle.get(key)]
+    if missing:
+        raise RuntimeError(f"{env_key} missing keys: {', '.join(missing)}")
+    return bundle
 
 
 def _require_kaggle_username() -> str:
@@ -85,12 +144,36 @@ async def _build_config_payload(
 
 
 def _build_secrets_payload() -> str:
+    bundle_raw = _get_env_value("TELEGRAM_AUTH_BUNDLE_S22")
+    bundle = None
+    bundle_ok = False
+    if bundle_raw:
+        try:
+            bundle = _parse_auth_bundle("TELEGRAM_AUTH_BUNDLE_S22")
+            bundle_ok = True
+        except Exception as exc:  # pragma: no cover - validation only
+            logger.warning("tg_monitor.secrets_payload invalid bundle: %s", exc)
     payload = {
-        "TG_SESSION": _require_env("TG_SESSION"),
         "TG_API_ID": _require_env("TG_API_ID"),
         "TG_API_HASH": _require_env("TG_API_HASH"),
         "GOOGLE_API_KEY": _require_env("GOOGLE_API_KEY"),
     }
+    logger.info(
+        "tg_monitor.secrets_payload bundle_len=%s bundle_ok=%s tg_session=%s days_back=%s limit=%s",
+        len(bundle_raw) if bundle_raw else 0,
+        bundle_ok,
+        bool(_get_env_value("TG_SESSION")),
+        _get_env_value("TG_MONITORING_DAYS_BACK"),
+        _get_env_value("TG_MONITORING_LIMIT"),
+    )
+    if bundle_raw:
+        payload["TELEGRAM_AUTH_BUNDLE_S22"] = _require_env("TELEGRAM_AUTH_BUNDLE_S22")
+        if bundle and bundle.get("session"):
+            payload["TG_SESSION"] = bundle["session"]
+            payload["TG_MONITORING_ALLOW_TG_SESSION"] = "1"
+    else:
+        payload["TG_SESSION"] = _require_env("TG_SESSION")
+        payload["TG_MONITORING_ALLOW_TG_SESSION"] = "1"
     # Include any additional Google API keys for pooled rate limiting.
     for key, value in os.environ.items():
         if key.startswith("GOOGLE_API_KEY") and key not in payload and value:
@@ -268,16 +351,28 @@ async def _poll_kaggle_kernel(
     kernel_ref: str,
     *,
     run_id: str | None = None,
+    status_callback: Callable[[str, str, dict | None], Awaitable[None]] | None = None,
 ) -> tuple[str, dict | None, float]:
     started = time.monotonic()
     deadline = started + TIMEOUT_MINUTES * 60
     last_status: dict | None = None
     attempt = 0
+
+    async def _notify(phase: str, status: dict | None = None) -> None:
+        if not status_callback:
+            return
+        try:
+            await status_callback(phase, kernel_ref, status)
+        except Exception:
+            logger.exception("tg_monitor: status callback failed phase=%s", phase)
+
+    await _notify("poll", None)
     while time.monotonic() < deadline:
         attempt += 1
         status = await asyncio.to_thread(client.get_kernel_status, kernel_ref)
         last_status = status
         state = (status.get("status") or "").upper()
+        await _notify("poll", status)
         logger.info(
             "tg_monitor.kernel_poll run_id=%s kernel_ref=%s attempt=%s status=%s elapsed=%.1fs",
             run_id,
@@ -294,10 +389,13 @@ async def _poll_kaggle_kernel(
                 status,
             )
         if state == "COMPLETE":
+            await _notify("complete", last_status)
             return "complete", last_status, time.monotonic() - started
         if state in ("ERROR", "FAILED", "CANCELLED"):
+            await _notify("failed", last_status)
             return "failed", last_status, time.monotonic() - started
         await asyncio.sleep(POLL_INTERVAL_SECONDS)
+    await _notify("timeout", last_status)
     return "timeout", last_status, time.monotonic() - started
 
 
@@ -334,6 +432,123 @@ async def _download_results(
     raise RuntimeError("telegram_results.json not found in Kaggle output")
 
 
+def _chunk_lines(lines: list[str], max_len: int = MAX_TG_MESSAGE_LEN) -> list[str]:
+    chunks: list[str] = []
+    current: list[str] = []
+    current_len = 0
+    for line in lines:
+        line_len = len(line) + 1
+        if current and current_len + line_len > max_len:
+            chunks.append("\n".join(current))
+            current = [line]
+            current_len = line_len
+        else:
+            current.append(line)
+            current_len += line_len
+    if current:
+        chunks.append("\n".join(current))
+    return chunks
+
+
+def _format_kaggle_phase(phase: str) -> str:
+    labels = {
+        "prepare": "подготовка",
+        "pushed": "запуск в Kaggle",
+        "poll": "выполнение",
+        "complete": "завершено",
+        "failed": "ошибка",
+        "timeout": "таймаут",
+    }
+    return labels.get(phase, phase)
+
+
+def _format_kaggle_status(status: dict | None) -> str:
+    if not status:
+        return "неизвестен"
+    state = status.get("status")
+    failure_msg = status.get("failureMessage") or status.get("failure_message")
+    if not state:
+        return "неизвестен"
+    result = str(state)
+    if failure_msg:
+        result += f" ({failure_msg})"
+    return result
+
+
+def _format_kaggle_status_message(
+    phase: str,
+    kernel_ref: str,
+    status: dict | None,
+) -> str:
+    lines = [
+        "🛰️ Kaggle: Telegram Monitor",
+        f"Kernel: {kernel_ref or '—'}",
+        f"Этап: {_format_kaggle_phase(phase)}",
+    ]
+    if status is not None:
+        lines.append(f"Статус Kaggle: {_format_kaggle_status(status)}")
+    return "\n".join(lines)
+
+
+def _format_event_block(
+    label: str,
+    events: list[TelegramMonitorEventInfo],
+    *,
+    icon: str,
+) -> list[str]:
+    lines = [f"{icon} <b>{html.escape(label)}</b>: {len(events)}", ""]
+    for item in events:
+        title = html.escape(item.title or "Без названия")
+        if item.telegraph_url:
+            safe_url = html.escape(item.telegraph_url, quote=True)
+            line = f"• <a href=\"{safe_url}\">{title}</a>"
+        else:
+            line = f"• {title}"
+        line += f" (id={item.event_id})"
+        meta: list[str] = []
+        if item.date:
+            meta.append(item.date)
+        if item.time:
+            meta.append(item.time)
+        if meta:
+            line += f" — {' '.join(meta)}"
+        lines.append(line)
+        if item.source_link:
+            lines.append(f"TG: {item.source_link}")
+        if item.source_excerpt:
+            lines.append(f"Текст: {html.escape(item.source_excerpt)}")
+        if not item.telegraph_url:
+            lines.append("Telegraph: ⏳ в очереди")
+        lines.append("")
+    return lines
+
+
+async def _send_event_details(
+    bot,
+    chat_id: int,
+    report: TelegramMonitorReport,
+) -> None:
+    sections: list[list[str]] = []
+    if report.created_events:
+        sections.append(
+            _format_event_block("Созданные события", report.created_events, icon="✅")
+        )
+    if report.merged_events:
+        sections.append(
+            _format_event_block("Обновлённые события", report.merged_events, icon="🔄")
+        )
+    if not sections:
+        return
+    for lines in sections:
+        for chunk in _chunk_lines(lines):
+            await bot.send_message(
+                chat_id,
+                chunk,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+
+
 def format_report(report: TelegramMonitorReport) -> str:
     lines = [
         "🕵️ <b>Telegram Monitor</b>",
@@ -345,6 +560,7 @@ def format_report(report: TelegramMonitorReport) -> str:
         [
             f"Источников: {report.sources_total}",
             f"Сообщений (Kaggle): {report.messages_scanned}",
+            f"Сообщений с событиями: {report.messages_with_events}",
             f"Сообщений пропущено: {report.messages_skipped}",
             f"Событий извлечено: {report.events_extracted}",
             f"Создано: {report.events_created}",
@@ -368,9 +584,44 @@ async def run_telegram_monitor(
     bot=None,
     chat_id: int | None = None,
     run_id: str | None = None,
+    send_progress: bool = False,
 ) -> TelegramMonitorReport:
     run_id = run_id or uuid.uuid4().hex
     logger.info("tg_monitor.start run_id=%s", run_id)
+    if _RUN_LOCK.locked():
+        logger.warning("tg_monitor.skip reason=already_running run_id=%s", run_id)
+        if bot and chat_id:
+            try:
+                await bot.send_message(
+                    chat_id,
+                    "⏳ Мониторинг уже запущен, ждём завершения.",
+                    parse_mode="HTML",
+                )
+            except Exception:
+                logger.exception("tg_monitor: failed to notify already-running")
+        return TelegramMonitorReport(run_id=run_id, errors=["already_running"])
+
+    async with _RUN_LOCK:
+        return await _run_telegram_monitor_locked(
+            db,
+            bot=bot,
+            chat_id=chat_id,
+            run_id=run_id,
+            send_progress=send_progress,
+        )
+
+
+async def _run_telegram_monitor_locked(
+    db: Database,
+    *,
+    bot=None,
+    chat_id: int | None = None,
+    run_id: str,
+    send_progress: bool = False,
+) -> TelegramMonitorReport:
+    logger.info("tg_monitor.lock_acquired run_id=%s", run_id)
+    kaggle_status_message_id: int | None = None
+    kaggle_kernel_ref = KERNEL_REF
     config_payload = await _build_config_payload(db, run_id=run_id)
     sources = config_payload.get("sources") or []
     logger.info(
@@ -385,6 +636,45 @@ async def run_telegram_monitor(
             [src.get("username") for src in sources[:5]],
         )
     secrets_payload = _build_secrets_payload()
+    try:
+        payload_keys = sorted((json.loads(secrets_payload) or {}).keys())
+        logger.info("tg_monitor.secrets_payload_keys=%s", payload_keys)
+    except Exception as exc:
+        logger.warning("tg_monitor.secrets_payload_keys failed: %s", exc)
+
+    async def _notify(text: str) -> None:
+        if not (send_progress and bot and chat_id):
+            return
+        try:
+            await bot.send_message(chat_id, text, parse_mode="HTML")
+        except Exception:
+            logger.exception("tg_monitor: failed to send progress update")
+
+    async def _update_kaggle_status(
+        phase: str,
+        kernel_ref: str,
+        status: dict | None,
+    ) -> None:
+        nonlocal kaggle_status_message_id, kaggle_kernel_ref
+        if not (send_progress and bot and chat_id):
+            return
+        if kernel_ref:
+            kaggle_kernel_ref = kernel_ref
+        text = _format_kaggle_status_message(phase, kaggle_kernel_ref, status)
+        try:
+            if kaggle_status_message_id is None:
+                sent = await bot.send_message(chat_id, text)
+                kaggle_status_message_id = sent.message_id
+            else:
+                await bot.edit_message_text(
+                    text=text,
+                    chat_id=chat_id,
+                    message_id=kaggle_status_message_id,
+                )
+        except Exception:
+            logger.exception("tg_monitor: failed to update kaggle status")
+    await _notify("🔧 Подготовка конфигов и секретов для Kaggle…")
+    await _update_kaggle_status("prepare", kaggle_kernel_ref, None)
     client = KaggleClient()
     dataset_cipher = ""
     dataset_key = ""
@@ -395,6 +685,7 @@ async def run_telegram_monitor(
             secrets_payload=secrets_payload,
             run_id=run_id,
         )
+        await _notify("🗄️ Kaggle datasets готовы, запускаю kernel…")
         logger.info(
             "tg_monitor.datasets created run_id=%s cipher=%s key=%s",
             run_id,
@@ -409,6 +700,8 @@ async def run_telegram_monitor(
             await asyncio.sleep(DATASET_PROPAGATION_WAIT_SECONDS)
 
         kernel_ref = await _push_kernel(client, [dataset_cipher, dataset_key])
+        await _update_kaggle_status("pushed", kernel_ref, None)
+        await _notify(f"🛰️ Kaggle kernel запущен: {kernel_ref}")
         logger.info(
             "tg_monitor.kernel pushed run_id=%s kernel_ref=%s datasets=%s",
             run_id,
@@ -418,7 +711,10 @@ async def run_telegram_monitor(
         await asyncio.sleep(KAGGLE_STARTUP_WAIT_SECONDS)
 
         status, status_data, duration = await _poll_kaggle_kernel(
-            client, kernel_ref, run_id=run_id
+            client,
+            kernel_ref,
+            run_id=run_id,
+            status_callback=_update_kaggle_status,
         )
         logger.info(
             "tg_monitor.kernel status run_id=%s kernel_ref=%s status=%s duration=%.1fs",
@@ -429,9 +725,13 @@ async def run_telegram_monitor(
         )
         if status != "complete":
             failure = status_data.get("failureMessage") if status_data else ""
+            await _notify(
+                f"❌ Kaggle kernel завершился с ошибкой ({status}). {failure}".strip()
+            )
             raise RuntimeError(f"Kaggle kernel failed ({status}) {failure}".strip())
 
         results_path = await _download_results(client, kernel_ref, run_id)
+        await _notify("⬇️ Результаты Kaggle скачаны, запускаю импорт…")
         logger.info(
             "tg_monitor.results_downloaded run_id=%s kernel_ref=%s path=%s",
             run_id,
@@ -444,6 +744,7 @@ async def run_telegram_monitor(
         if bot and chat_id:
             try:
                 await bot.send_message(chat_id, format_report(report), parse_mode="HTML")
+                await _send_event_details(bot, chat_id, report)
             except Exception:
                 logger.exception("tg_monitor: failed to send report")
 

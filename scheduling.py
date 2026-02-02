@@ -728,7 +728,7 @@ def startup(
             replace_existing=True,
             max_instances=1,
             coalesce=True,
-            misfire_grace_time=60,
+            misfire_grace_time=30,
         )
     else:
         logging.info("SCHED skipping tg_monitoring (ENABLE_TG_MONITORING!=1)")
@@ -788,7 +788,7 @@ def startup(
             replace_existing=True,
             max_instances=1,
             coalesce=True,
-            misfire_grace_time=60,
+            misfire_grace_time=30,
         )
     else:
         logging.info("SCHED skipping kaggle_recovery (ENABLE_KAGGLE_RECOVERY!=1)")
@@ -828,7 +828,7 @@ def startup(
         replace_existing=True,
         max_instances=1,
         coalesce=True,
-        misfire_grace_time=60,
+        misfire_grace_time=30,
     )
 
     async def _run_maintenance(job, name: str, timeout: float, run_id: str | None = None) -> None:

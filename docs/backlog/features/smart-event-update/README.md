@@ -4,6 +4,8 @@
 > **Status:** Planning / In design  
 > **Цель:** автоматом мерджить одно событие из множества источников (VK, Telegram, сайты, ручной ввод) и формировать **наиболее полную** карточку события в боте.
 
+> **Актуальная реализация:** см. `docs/features/smart-event-update/README.md` (включая правило об очистке хештегов).
+
 ## 0. Ключевые требования (как “контракт”)
 
 1) **Без модерации и без UI мерджа**: всё работает автономно по правилам + LLM.
@@ -42,7 +44,7 @@
 
 - `id` (PK)
 - `event_id` (FK → event.id)
-- `source_type` (`telegram|vk|site|manual|other`)
+- `source_type` (`telegram|vk|site|bot|manual|other`)
 - `source_url` (TEXT, unique в рамках `event_id`)
 - `source_chat_username` (TEXT, nullable)
 - `source_chat_id` (INT, nullable)
