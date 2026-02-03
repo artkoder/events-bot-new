@@ -186,7 +186,7 @@ def step_log(ctx): ...
 ## Чеклист для нового E2E теста
 
 ### Подготовка
-- [ ] Запустить бота локально с `DB_PATH=db_prod_snapshot.sqlite`
+- [ ] Запустить бота локально в polling режиме: `DEV_MODE=1 DB_PATH=db_prod_snapshot.sqlite python main.py`
 - [ ] Убедиться что бот отвечает на `/start`
 - [ ] Проверить что нет конфликтов с production ботом
 - [ ] Установить `TELEGRAM_API_ID`/`TELEGRAM_API_HASH` (или `TG_API_ID`/`TG_API_HASH`) и одну из: `TELEGRAM_AUTH_BUNDLE_E2E` или `TELEGRAM_SESSION`
