@@ -33,6 +33,31 @@ _TICKETS_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Promotions / announcements that must not become events.
+# Includes discount/promo posts and non-event congratulatory posts with schedules.
+_PROMO_RE = re.compile(
+    r"\b("
+    r"акци(?:я|и|ю|ях)|"
+    r"скидк\w*|"
+    r"промокод\w*|"
+    r"спецпредложен\w*|"
+    r"бонус\w*|"
+    r"кэшбек\w*|кэшбэк\w*|кэшбэ\w*|"
+    r"подарок\w*|"
+    r"сертификат\w*|"
+    r"розыгрыш|разыгрыва\w*|розыгра\w*|конкурс|giveaway"
+    r")\b",
+    re.IGNORECASE,
+)
+_CONGRATS_RE = re.compile(
+    r"\b(поздравля\w*|с\s+дн[её]м\s+рождени\w*|юбиле\w*)\b",
+    re.IGNORECASE,
+)
+_CONGRATS_CONTEXT_RE = re.compile(
+    r"\b(ближайш\w*|спектакл\w*|концерт\w*|мероприят\w*|событи\w*)\b",
+    re.IGNORECASE,
+)
+
 SMART_UPDATE_LLM = os.getenv("SMART_UPDATE_LLM", "gemma").strip().lower()
 SMART_UPDATE_MODEL = os.getenv(
     "SMART_UPDATE_MODEL",
@@ -169,6 +194,18 @@ def _looks_like_ticket_giveaway(*texts: str | None) -> bool:
     value = combined.casefold()
     # Require both giveaway + tickets signals to reduce false positives.
     return bool(_GIVEAWAY_RE.search(value) and _TICKETS_RE.search(value))
+
+
+def _looks_like_promo_or_congrats(*texts: str | None) -> bool:
+    combined = "\n".join(t for t in texts if t and t.strip())
+    if not combined:
+        return False
+    value = combined.casefold()
+    if _PROMO_RE.search(value):
+        return True
+    if _CONGRATS_RE.search(value) and (_CONGRATS_CONTEXT_RE.search(value) or "|" in value):
+        return True
+    return False
 
 
 def _format_ticket_price(
@@ -991,6 +1028,16 @@ async def smart_event_update(
         )
         return SmartUpdateResult(status="skipped_giveaway", reason="ticket_giveaway")
 
+    # Promotions and non-event congratulatory posts must not become events or sources.
+    if _looks_like_promo_or_congrats(clean_title, clean_source_text, clean_raw_excerpt):
+        logger.info(
+            "smart_update.skip reason=promo_or_congrats source_type=%s source_url=%s title=%s",
+            candidate.source_type,
+            candidate.source_url,
+            _clip_title(clean_title),
+        )
+        return SmartUpdateResult(status="skipped_promo", reason="promo_or_congrats")
+
     if check_source_url and candidate.source_url:
         async with db.get_session() as session:
             exists = (
@@ -1422,7 +1469,7 @@ async def smart_event_update(
             session.add(event_db)
         await session.commit()
 
-    if updated_fields or added_posters:
+    if updated_fields or added_posters or (added_sources and not same_source):
         await _classify_topics(db, existing.id)
         if schedule_tasks:
             try:
@@ -1434,7 +1481,11 @@ async def smart_event_update(
             except Exception:
                 logger.warning("smart_update: schedule/update failed for event %s", existing.id, exc_info=True)
 
-    status = "merged" if updated_fields or added_posters else "skipped_nochange"
+    status = (
+        "merged"
+        if (updated_fields or added_posters or (added_sources and not same_source))
+        else "skipped_nochange"
+    )
     logger.info(
         "smart_update.merge event_id=%s status=%s updated=%s added_posters=%d added_sources=%s updated_keys=%s added_facts=%d skipped_conflicts=%d reason=%s",
         existing.id,

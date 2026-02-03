@@ -16,6 +16,7 @@
   - Telegram custom emoji (PUA / `<tg-emoji>`) вычищаются из текста перед публикацией.
 - Фильтры:
   - розыгрыши билетов (ticket giveaway) не импортируются как события (`skipped_giveaway`).
+  - акции/промо/поздравления (не‑ивент контент) не импортируются как события (`skipped_promo`).
 - Источники:
   - таблица `event_source` хранит все источники события;
   - idempotency по `telegram_scanned_message`.
