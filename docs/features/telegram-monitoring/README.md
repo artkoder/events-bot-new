@@ -118,3 +118,7 @@
 Канонические сценарии (UI): `tests/e2e/features/telegram_monitoring.feature`.
 
 Если нужно добавить/уточнить сценарий — правим `.feature` и шаги в `tests/e2e/features/steps/bot_steps.py`.
+
+## Отложенное обновление страниц
+
+Telegram Monitoring может обновлять/создавать много событий за один запуск, поэтому обновления month/weekend страниц делаются **отложенно и накопительно** (debounce 15 минут после последнего изменения). Каноническое описание механизма — в `docs/features/smart-event-update/README.md` («Отложенное обновление страниц (debounce)»).

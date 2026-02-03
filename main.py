@@ -10433,24 +10433,44 @@ async def enqueue_job(
                 if updated:
                     session.add(job)
                     await session.commit()
-                # Create deferred task instead of follow-up when owner is running
-                # This allows event to be included in next rebuild cycle
+                # Debounced nav rebuilds: while the coalesced job is running, don't create
+                # per-event deferred keys (they spam rebuilds + notifications).
+                # Instead, ensure a single deferred *coalesced* follow-up exists and push its
+                # next_run_at further on every change (15 minutes after the last update).
                 if (
-                    task in {JobTask.month_pages, JobTask.weekend_pages, JobTask.week_pages}
+                    task in {JobTask.month_pages, JobTask.weekend_pages}
                     and job.event_id != event_id
                     and job.coalesce_key
                 ):
-                    deferred_key = f"{job.coalesce_key}:deferred:{event_id}"
-                    exists = (
+                    deferred_time = next_run_at
+                    if not deferred_time or deferred_time <= now:
+                        deferred_time = datetime.now(timezone.utc) + timedelta(minutes=15)
+
+                    existing_followup = (
                         await session.execute(
-                            select(JobOutbox.id).where(
-                                JobOutbox.coalesce_key == deferred_key
+                            select(JobOutbox)
+                            .where(
+                                JobOutbox.coalesce_key == job.coalesce_key,
+                                JobOutbox.status == JobStatus.pending,
+                                JobOutbox.next_run_at > now,
                             )
+                            .order_by(JobOutbox.id.desc())
+                            .limit(1)
                         )
                     ).scalar_one_or_none()
-                    if not exists:
-                        # Create deferred task for 15 minutes
-                        deferred_time = datetime.now(timezone.utc) + timedelta(minutes=15)
+                    if existing_followup:
+                        follow_next = _ensure_utc(existing_followup.next_run_at)
+                        if deferred_time > follow_next:
+                            existing_followup.next_run_at = deferred_time
+                            existing_followup.updated_at = now
+                            session.add(existing_followup)
+                            await session.commit()
+                            logging.info(
+                                "ENQ nav deferred coalesced updated key=%s next_run_at=%s reason=owner_running",
+                                job.coalesce_key,
+                                deferred_time.isoformat(),
+                            )
+                    else:
                         session.add(
                             JobOutbox(
                                 event_id=event_id,
@@ -10459,13 +10479,13 @@ async def enqueue_job(
                                 status=JobStatus.pending,
                                 updated_at=now,
                                 next_run_at=deferred_time,
-                                coalesce_key=deferred_key,
+                                coalesce_key=job.coalesce_key,
                             )
                         )
                         await session.commit()
                         logging.info(
-                            "ENQ nav deferred key=%s next_run_at=%s reason=owner_running",
-                            deferred_key,
+                            "ENQ nav deferred coalesced new key=%s next_run_at=%s reason=owner_running",
+                            job.coalesce_key,
                             deferred_time.isoformat(),
                         )
                 if task in NAV_TASKS:
@@ -12946,11 +12966,15 @@ async def update_telegraph_event_page(
         month_key = ev.date[:7]
         async with db.get_session() as session:
             # We look for a PENDING job with matching coalesce_key and next_run_at in future
-            stmt = select(JobOutbox).where(
-                JobOutbox.coalesce_key == f"month_pages:{month_key}",
-                JobOutbox.status == JobStatus.pending,
-                JobOutbox.next_run_at > datetime.now(timezone.utc)
-            ).limit(1)
+            stmt = (
+                select(JobOutbox)
+                .where(
+                    JobOutbox.coalesce_key.like(f"month_pages:{month_key}%"),
+                    JobOutbox.status == JobStatus.pending,
+                    JobOutbox.next_run_at > datetime.now(timezone.utc),
+                )
+                .limit(1)
+            )
             deferred_job = (await session.execute(stmt)).scalar_one_or_none()
             
             if deferred_job:
