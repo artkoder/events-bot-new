@@ -12786,6 +12786,44 @@ async def update_telegraph_event_page(
         if not ev:
             return None
         from models import EventPoster, EventSource, EventSourceFact
+        # Backfill legacy single-source fields into event_source so Telegraph footer
+        # shows a meaningful "Источников: N" even for older events.
+        try:
+            now = datetime.now(timezone.utc)
+
+            def _infer_type(url: str) -> str:
+                u = (url or "").lower()
+                if "t.me/" in u:
+                    return "telegram"
+                if "vk.com/wall" in u:
+                    return "vk"
+                return "site"
+
+            legacy_urls: list[str] = []
+            if getattr(ev, "source_post_url", None):
+                legacy_urls.append(str(ev.source_post_url).strip())
+            if getattr(ev, "source_vk_post_url", None):
+                legacy_urls.append(str(ev.source_vk_post_url).strip())
+            for url in [u for u in legacy_urls if u and u.startswith(("http://", "https://"))]:
+                exists = await session.scalar(
+                    select(func.count())
+                    .select_from(EventSource)
+                    .where(EventSource.event_id == event_id, EventSource.source_url == url)
+                )
+                if exists:
+                    continue
+                session.add(
+                    EventSource(
+                        event_id=event_id,
+                        source_type=_infer_type(url),
+                        source_url=url,
+                        source_text=(getattr(ev, "source_text", None) or "")[:4000],
+                        imported_at=now,
+                    )
+                )
+            await session.flush()
+        except Exception:
+            logging.warning("telegraph: legacy event_source backfill failed for %s", event_id, exc_info=True)
         display_link = False if ev.source_post_url else True
         summary = SourcePageEventSummary(
             date=getattr(ev, "date", None),
