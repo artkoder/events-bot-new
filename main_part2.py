@@ -14110,6 +14110,13 @@ async def build_source_page_content(
     urls = [
         u for u in urls if not re.search(r"\.(?:mp4|webm|mkv|mov)(?:\?|$)", u, re.I)
     ][:12]
+    # Telegram does not always generate cached_page/Instant View when the first image is WEBP.
+    # Prefer a non-WEBP cover image if available.
+    if len(urls) >= 2 and re.search(r"\.webp(?:\?|$)", (urls[0] or ""), re.I):
+        for idx in range(1, len(urls)):
+            if not re.search(r"\.webp(?:\?|$)", (urls[idx] or ""), re.I):
+                urls[0], urls[idx] = urls[idx], urls[0]
+                break
     cover = urls[:1]
     tail = urls[1:]
     if cover:

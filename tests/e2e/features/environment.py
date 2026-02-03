@@ -210,6 +210,9 @@ def after_all(context):
 def before_scenario(context, scenario):
     """Log scenario start."""
     logger.info(f"\n📌 Сценарий: {scenario.name}")
+    if "manual" in getattr(scenario, "effective_tags", []):
+        if os.getenv("E2E_RUN_MANUAL") != "1":
+            scenario.skip("manual scenario (set E2E_RUN_MANUAL=1 to run)")
     _cleanup_test_smart_update_data()
 
 

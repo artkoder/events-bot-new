@@ -24,6 +24,12 @@
     Тогда я должен увидеть сообщение, содержащее текст "@kaliningradlibrary"
     И я не должен увидеть сообщение, содержащее текст "@meowafisha"
 
+  @manual
+  Сценарий: Telegram cached preview для telegra.ph ссылки
+    Когда я проверяю telegram web preview для ссылки "https://telegra.ph/Mezhdu-Fevralyami-Tvorcheskij-vecher-Sergeya-Mihajlova-02-03-5"
+    Тогда telegram web preview содержит cached_page
+    И telegram web preview содержит фото
+
   Сценарий: Полный пользовательский поток мониторинга — импорт постера и лог источников
     Дано в списке источников Telegram настроены:
       | username           | trust_level | default_location   |

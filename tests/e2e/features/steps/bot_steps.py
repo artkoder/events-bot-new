@@ -1738,6 +1738,62 @@ def step_event_card_has_catbox_url(context):
     logger.info("✓ В карточке события есть catbox_url")
 
 
+@when('я проверяю telegram web preview для ссылки "{url}"')
+def step_check_telegram_web_preview(context, url):
+    """Fetch Telegram web preview (MessageMediaWebPage) for a given URL.
+
+    Note: cached_page/photo availability is decided by Telegram servers and can be impacted by
+    preview image reachability (e.g. external hosts).
+    """
+    import asyncio
+    from telethon.tl.types import MessageMediaWebPage
+
+    url = (url or "").strip()
+    if not url.startswith(("http://", "https://")):
+        raise AssertionError(f"Invalid URL: {url}")
+
+    async def _check():
+        sent = await context.client.client.send_message("me", url)
+        # web preview metadata may arrive slightly later
+        for _ in range(10):
+            msg = await context.client.client.get_messages("me", ids=sent.id)
+            media = getattr(msg, "media", None)
+            if isinstance(media, MessageMediaWebPage):
+                return media.webpage
+            await asyncio.sleep(1.0)
+        return None
+
+    webpage = run_async(context, _check())
+    if not webpage:
+        raise AssertionError("Telegram did not attach web preview (MessageMediaWebPage)")
+    context.last_webpage_preview = webpage
+    logger.info(
+        "✓ Telegram web preview: title=%r site=%r photo=%s cached_page=%s",
+        getattr(webpage, "title", None),
+        getattr(webpage, "site_name", None),
+        bool(getattr(webpage, "photo", None)),
+        bool(getattr(webpage, "cached_page", None)),
+    )
+
+
+@then("telegram web preview содержит cached_page")
+def step_web_preview_has_cached_page(context):
+    webpage = getattr(context, "last_webpage_preview", None)
+    if not webpage:
+        raise AssertionError("Нет last_webpage_preview (сначала вызовите шаг проверки web preview)")
+    assert getattr(webpage, "cached_page", None), "cached_page отсутствует (Instant View не сформирован)"
+    logger.info("✓ cached_page присутствует")
+
+
+@then("telegram web preview содержит фото")
+def step_web_preview_has_photo(context):
+    webpage = getattr(context, "last_webpage_preview", None)
+    if not webpage:
+        raise AssertionError("Нет last_webpage_preview (сначала вызовите шаг проверки web preview)")
+    assert getattr(webpage, "photo", None), "photo отсутствует (Telegram не смог скачать preview image)"
+    logger.info("✓ photo присутствует")
+
+
 @then('в OCR есть текст "{needle}"')
 def step_event_card_ocr_contains(context, needle):
     """Ensure OCR block includes specific text fragment."""
