@@ -9,10 +9,13 @@
   - LLM‑матчинг (JSON‑ответ с `match_event_id`, `confidence`).
 - Мердж:
   - якорные поля (`date/time/location_name/location_address/end_date`) не меняются автоматически;
-  - описание и необязательные поля обогащаются через LLM;
+  - описание и необязательные поля обогащаются через LLM (для Telegram‑импорта — журналистский рерайт, не дословно);
   - конфликты фиксируются в логах (`added_facts`, `skipped_conflicts`).
 - Санитаризация текста:
   - входящие хештеги удаляются из `title/description/source_text`, чтобы они не попадали на Telegraph страницы.
+  - Telegram custom emoji (PUA / `<tg-emoji>`) вычищаются из текста перед публикацией.
+- Фильтры:
+  - розыгрыши билетов (ticket giveaway) не импортируются как события (`skipped_giveaway`).
 - Источники:
   - таблица `event_source` хранит все источники события;
   - idempotency по `telegram_scanned_message`.

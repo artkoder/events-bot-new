@@ -3752,6 +3752,12 @@ async def send_daily_announcement(
                     )
             sent += 1
         except Exception as e:
+            # In local/dev/E2E the bot often doesn't have access to prod channels
+            # from the DB snapshot. Treat these as "skip" to avoid retries/flood.
+            msg = str(e).lower()
+            if "chat not found" in msg or "forbidden" in msg:
+                logging.warning("daily send skipped for %s: %s", channel_id, e)
+                return
             logging.error("daily send failed for %s: %s", channel_id, e)
             if "message is too long" in str(e):
                 continue
@@ -4835,25 +4841,33 @@ async def show_edit_menu(
     )
     markup = types.InlineKeyboardMarkup(inline_keyboard=keyboard)
 
-    base_text = "\n".join(lines)
-    base_len = len(base_text)
     poster_block: list[str] = []
-    if poster_lines:
-        newline_between_blocks = 1 if lines else 0
-        poster_budget = TELEGRAM_MESSAGE_LIMIT - base_len - newline_between_blocks
-        if poster_budget <= 0:
-            notice_budget = TELEGRAM_MESSAGE_LIMIT - base_len - newline_between_blocks
-            poster_block = _fit_poster_preview_lines(
-                [POSTER_PREVIEW_UNAVAILABLE], notice_budget
-            )
-        else:
-            poster_block = _fit_poster_preview_lines(poster_lines, poster_budget)
-            if not poster_block and poster_budget > 0:
-                poster_block = _fit_poster_preview_lines(
-                    [POSTER_PREVIEW_UNAVAILABLE], poster_budget
-                )
+    message_lines: list[str]
 
-    message_lines = poster_block + lines if poster_block else lines
+    if poster_lines:
+        # Always include Poster OCR preview if posters exist, even if we need to trim the
+        # base event fields. Operators rely on OCR to validate title/time/location.
+        preferred_budget = int(os.getenv("POSTER_PREVIEW_BUDGET", "1200"))
+        poster_budget = min(max(preferred_budget, 200), TELEGRAM_MESSAGE_LIMIT)
+
+        poster_block = _fit_poster_preview_lines(poster_lines, poster_budget)
+        if not poster_block:
+            poster_block = (
+                _fit_poster_preview_lines([POSTER_PREVIEW_UNAVAILABLE], poster_budget)
+                or [POSTER_PREVIEW_UNAVAILABLE]
+            )
+
+        remaining = TELEGRAM_MESSAGE_LIMIT - len("\n".join(poster_block))
+        if lines:
+            remaining -= 1
+        if remaining <= 0:
+            message_lines = poster_block
+        else:
+            base_block = _fit_poster_preview_lines(lines, remaining)
+            message_lines = poster_block + base_block if base_block else poster_block
+    else:
+        message_lines = lines
+
     message_text = "\n".join(message_lines)
     if len(message_text) > TELEGRAM_MESSAGE_LIMIT:
         message_text = _truncate_with_indicator(
@@ -14252,7 +14266,8 @@ async def build_source_page_content(
         clean_text = normalize_hashtag_dates(clean_text)
         tg_emoji_cleaned = len(emoji_pat.findall(clean_text))
         tg_spoiler_unwrapped = len(spoiler_pat.findall(clean_text))
-        clean_text = emoji_pat.sub(r"\1", clean_text)
+        # Custom Telegram emoji (<tg-emoji>) is not portable to Telegraph; strip it fully.
+        clean_text = emoji_pat.sub("", clean_text)
         clean_text = spoiler_pat.sub(r"\1", clean_text)
         for k, v in CUSTOM_EMOJI_MAP.items():
             clean_text = clean_text.replace(k, v)

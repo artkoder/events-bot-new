@@ -692,6 +692,49 @@ def step_dramteatr_events_loaded(context):
     logger.info("✓ Найдено событие драмтеатра (id=%s)", row[0])
 
 
+@then("существует смерженное событие драмтеатра с источниками Telegram и site")
+def step_dramteatr_has_merged_sources(context):
+    """Find at least one event that has both dramteatr39 Telegram source and dramteatr site source."""
+    db_path = _db_path()
+    conn = sqlite3.connect(db_path, timeout=30)
+    try:
+        _ensure_event_source_table(conn)
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT e.id, e.title, e.telegraph_url,
+                   (SELECT COUNT(*) FROM event_source es WHERE es.event_id = e.id) AS sources_total
+            FROM event e
+            WHERE EXISTS (
+                SELECT 1 FROM event_source es
+                WHERE es.event_id = e.id AND es.source_url LIKE '%t.me/dramteatr39/%'
+            )
+              AND EXISTS (
+                SELECT 1 FROM event_source es
+                WHERE es.event_id = e.id AND es.source_url LIKE '%dramteatr39%ru%'
+            )
+            ORDER BY e.id DESC
+            LIMIT 5
+            """
+        )
+        rows = cur.fetchall()
+    finally:
+        conn.close()
+    if not rows:
+        raise AssertionError(
+            "Не найдено смерженных событий драмтеатра (ожидали источники t.me/dramteatr39 + dramteatr39.ru)"
+        )
+    context.merged_dramteatr_events = [
+        {"id": int(r["id"]), "title": r["title"], "telegraph_url": r["telegraph_url"], "sources_total": int(r["sources_total"] or 0)}
+        for r in rows
+    ]
+    logger.info(
+        "✓ Найдено смерженных событий драмтеатра: %s",
+        [(r["id"], (r["telegraph_url"] or "")) for r in context.merged_dramteatr_events],
+    )
+
+
 @given('в базе есть событие "{title}" на дату "{date}" и время "{time}"')
 def step_event_exists_in_db(context, title, date, time):
     """Ensure event exists in DB by title/date/time."""
@@ -1400,16 +1443,23 @@ def step_wait_long_operation(context, text):
 
         text_norm = (text or "").strip().lower()
         if text_norm == "telegram monitor":
-            timeout_sec = int(os.getenv("E2E_TG_MONITOR_TIMEOUT_SEC", str(20 * 60)))
+            # Kaggle can be slow (kernel cold start + OCR/vision). Keep a generous default,
+            # still overridable via env for faster local runs.
+            timeout_sec = int(os.getenv("E2E_TG_MONITOR_TIMEOUT_SEC", str(35 * 60)))
+            poll_sec = float(os.getenv("E2E_TG_MONITOR_POLL_SEC", "4"))
         else:
             timeout_sec = int(os.getenv("E2E_LONG_OPERATION_TIMEOUT_SEC", str(5 * 60)))
+            poll_sec = float(os.getenv("E2E_LONG_OPERATION_POLL_SEC", "2"))
+        poll_max = float(os.getenv("E2E_LONG_OPERATION_MAX_POLL_SEC", "10"))
 
         reconnect_attempts = 0
         min_id = getattr(context, "monitor_started_message_id", None)
-        for i in range(int(timeout_sec / 0.5)):
+        elapsed = 0.0
+        messages = []
+        while elapsed < timeout_sec:
             try:
                 messages = await context.client.client.get_messages(
-                    context.bot_entity, limit=10
+                    context.bot_entity, limit=8
                 )
             except Exception as exc:
                 msg = str(exc)
@@ -1445,9 +1495,12 @@ def step_wait_long_operation(context, text):
                         "Сообщений пропущено": _extract_report_stat(msg.text, "Сообщений пропущено"),
                         "Создано": _extract_report_stat(msg.text, "Создано"),
                     }
-                    logger.info(f"✓ Найден результат долгой операции: '{text}' (за {i*0.5:.1f}с)")
+                    logger.info(f"✓ Найден результат долгой операции: '{text}' (за {elapsed:.1f}с)")
                     return
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(poll_sec)
+            elapsed += poll_sec
+            if poll_sec < poll_max:
+                poll_sec = min(poll_max, poll_sec * 1.15)
         
         last_texts = [m.text[:100] if m.text else "(no text)" for m in messages[:3]]
         raise AssertionError(
@@ -1498,6 +1551,8 @@ def step_no_new_events_created(context):
 @then('событие содержит новые изображения из поста "{post_url}"')
 def step_event_has_images_from_post(context, post_url):
     """Verify telegraph pages include poster images from the Telegram post."""
+    import time
+
     run_id = getattr(context, "last_monitor_run_id", None)
     if not run_id:
         raise AssertionError("Не найден run_id последнего мониторинга")
@@ -1533,6 +1588,45 @@ def step_event_has_images_from_post(context, post_url):
         text = context.last_response.text if context.last_response else ""
         links = re.findall(r"https://telegra\\.ph/[a-zA-Z0-9_-]+", text)
     if not links:
+        # Telegraph build is async; resolve the event via DB and wait a bit for telegraph_url to appear.
+        wait_sec = int(os.getenv("E2E_TELEGRAPH_WAIT_SEC", "240"))
+        event_id = getattr(context, "control_event_id", None)
+        if not event_id:
+            # Best-effort: resolve by post URL from event_source (same logic as open card step).
+            db_path = _db_path()
+            conn = sqlite3.connect(db_path, timeout=30)
+            try:
+                conn.row_factory = sqlite3.Row
+                cur = conn.cursor()
+                _ensure_event_source_table(conn)
+                cur.execute(
+                    "SELECT event_id FROM event_source WHERE source_url = ? ORDER BY imported_at DESC LIMIT 1",
+                    (post_url,),
+                )
+                row = cur.fetchone()
+                if row:
+                    event_id = int(row["event_id"])
+            finally:
+                conn.close()
+
+        if event_id:
+            deadline = time.time() + wait_sec
+            while time.time() < deadline:
+                db_path = _db_path()
+                conn = sqlite3.connect(db_path, timeout=30)
+                try:
+                    cur = conn.cursor()
+                    cur.execute("SELECT telegraph_url FROM event WHERE id = ?", (int(event_id),))
+                    row = cur.fetchone()
+                finally:
+                    conn.close()
+                url = (row[0] if row else None) if row is not None else None
+                url = (url or "").strip()
+                if url.startswith("https://telegra.ph/"):
+                    links = [url]
+                    break
+                time.sleep(3)
+    if not links:
         raise AssertionError("Нет Telegraph ссылок для проверки изображений")
 
     async def _verify():
@@ -1547,6 +1641,14 @@ def step_event_has_images_from_post(context, post_url):
         raise AssertionError("Catbox URL из поста не найден на Telegraph страницах")
 
     run_async(context, _verify())
+
+
+@then("событие содержит изображения из контрольного поста")
+def step_event_has_images_from_control_post(context):
+    url = getattr(context, "control_post_url", None)
+    if not url:
+        raise AssertionError("Не задан control_post_url (сначала выберите контрольный пост)")
+    step_event_has_images_from_post(context, url)
 
 
 @then("телеграф сохраняет исходные изображения")

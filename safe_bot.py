@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from aiogram import Bot
-from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
 from cachetools import TTLCache
 
 BACKOFF_DELAYS = [0.5, 1, 2, 4, 8]
@@ -12,6 +12,12 @@ NO_RETRY_MESSAGES = (
     "message is not modified",
     "message can't be deleted",
     "message to delete not found",
+    # Permanent delivery failures
+    "chat not found",
+    "bot was blocked by the user",
+    "user is deactivated",
+    "have no rights",
+    "not enough rights",
 )
 
 
@@ -49,6 +55,10 @@ class SafeBot(Bot):
                     logging.info("tg no-retry error: %s", e.message)
                     return None
                 last_exc = e
+            except TelegramForbiddenError as e:
+                # Permanent: bot is blocked / chat is inaccessible.
+                logging.info("tg forbidden (no-retry): %s", getattr(e, "message", str(e)))
+                return None
             except TelegramRetryAfter as e:
                 last_exc = e
                 delay = max(delay, int(getattr(e, "retry_after", delay)))

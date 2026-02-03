@@ -453,7 +453,29 @@ def set_bot(new_bot: "Bot") -> None:
 
 _base_bot_code = os.getenv("BOT_CODE", "announcements")
 BOT_CODE = _base_bot_code + "_test" if os.getenv("DEV_MODE") == "1" else _base_bot_code
-TELEGRAPH_TOKEN_FILE = os.getenv("TELEGRAPH_TOKEN_FILE", "/data/telegraph_token.txt")
+
+def _resolve_telegraph_token_file() -> str:
+    """Pick a writable Telegraph token path for local/dev runs.
+
+    In production we usually have a writable `/data`, but in local sandboxes that path
+    can be read-only. Without a token file, Telegraph pages won't be created/updated.
+    """
+    env = (os.getenv("TELEGRAPH_TOKEN_FILE") or "").strip()
+    if env:
+        return env
+    default = "/data/telegraph_token.txt"
+    try:
+        os.makedirs(os.path.dirname(default), exist_ok=True)
+        # Touch-test write access.
+        with open(default, "a", encoding="utf-8"):
+            pass
+        return default
+    except Exception:
+        # Workspace-relative fallback (keeps token between runs).
+        return "artifacts/run/telegraph_token.txt"
+
+
+TELEGRAPH_TOKEN_FILE = _resolve_telegraph_token_file()
 TELEGRAPH_AUTHOR_NAME = os.getenv(
     "TELEGRAPH_AUTHOR_NAME", "Полюбить Калининград Анонсы"
 )
@@ -1974,7 +1996,9 @@ async def telegraph_create_page(
     kwargs.setdefault("author_name", TELEGRAPH_AUTHOR_NAME)
     if TELEGRAPH_AUTHOR_URL:
         kwargs.setdefault("author_url", TELEGRAPH_AUTHOR_URL)
-    if eid is not None and caller != "event_pipeline":
+    # Guard: month/week/festival aggregators must never create event pages.
+    # Allow event pipeline variants (e.g. fallback on PAGE_ACCESS_DENIED).
+    if eid is not None and not caller.startswith("event_pipeline"):
         logging.error(
             "AGGREGATE_SHOULD_NOT_TOUCH_EVENTS create caller=%s eid=%s", caller, eid
         )
@@ -2003,7 +2027,9 @@ async def telegraph_edit_page(
     kwargs.setdefault("author_name", TELEGRAPH_AUTHOR_NAME)
     if TELEGRAPH_AUTHOR_URL:
         kwargs.setdefault("author_url", TELEGRAPH_AUTHOR_URL)
-    if eid is not None and caller != "event_pipeline":
+    # Guard: month/week/festival aggregators must never edit event pages.
+    # Allow event pipeline variants (e.g. fallback on PAGE_ACCESS_DENIED).
+    if eid is not None and not caller.startswith("event_pipeline"):
         logging.error(
             "AGGREGATE_SHOULD_NOT_TOUCH_EVENTS edit caller=%s eid=%s", caller, eid
         )
@@ -6203,13 +6229,26 @@ async def tg_ics_post(event_id: int, db: Database, bot: Bot, progress=None) -> b
                     caption=caption,
                     parse_mode=parse_mode,
                 )
-        except TelegramBadRequest:
+        except TelegramBadRequest as e:
+            # In local/dev/E2E we might have a prod DB snapshot where the bot has no access
+            # to the configured channel. Don't retry these forever.
+            if "chat not found" in (getattr(e, "message", "") or "").lower():
+                logline("ICS", event_id, "telegram skipped", reason="chat_not_found")
+                return False
             async with span("tg-send"):
                 msg = await bot.send_document(
                     channel.channel_id,
                     file,
                     caption=caption,
                 )
+        except Exception as e:
+            # Treat delivery issues as non-fatal to keep pipelines (monitoring/smart update)
+            # running in dev environments.
+            msg_l = str(e).lower()
+            if "chat not found" in msg_l or "forbidden" in msg_l:
+                logline("ICS", event_id, "telegram skipped", reason="no_access")
+                return False
+            raise
 
         tg_file_id = msg.document.file_id
         tg_post_id = msg.message_id
@@ -12726,7 +12765,7 @@ async def update_telegraph_event_page(
         ev = await session.get(Event, event_id)
         if not ev:
             return None
-        from models import EventSource, EventSourceFact
+        from models import EventPoster, EventSource, EventSourceFact
         display_link = False if ev.source_post_url else True
         summary = SourcePageEventSummary(
             date=getattr(ev, "date", None),
@@ -12743,6 +12782,26 @@ async def update_telegraph_event_page(
             ticket_status=getattr(ev, "ticket_status", None),
         )
         photos = list(ev.photo_urls or [])
+        # Keep Telegraph pages resilient: some ingestion paths populate EventPoster rows
+        # but don't keep Event.photo_urls fully in sync.
+        try:
+            poster_urls = (
+                await session.execute(
+                    select(EventPoster.catbox_url).where(
+                        EventPoster.event_id == event_id, EventPoster.catbox_url.is_not(None)
+                    )
+                )
+            ).scalars().all()
+        except Exception:
+            poster_urls = []
+        merged_photo_urls = False
+        for url in poster_urls:
+            if url and url not in photos:
+                photos.append(url)
+                merged_photo_urls = True
+        if merged_photo_urls:
+            ev.photo_urls = list(photos)
+            ev.photo_count = len(ev.photo_urls)
         if ev.preview_3d_url and len(photos) >= 2:
             photos.insert(0, ev.preview_3d_url)
         sources_total = (
@@ -14642,29 +14701,46 @@ def next_month(month: str) -> str:
 
 _TG_TAG_RE = re.compile(r"</?tg-(?:emoji|spoiler)[^>]*?>", re.IGNORECASE)
 _ESCAPED_TG_TAG_RE = re.compile(r"&lt;/?tg-(?:emoji|spoiler).*?&gt;", re.IGNORECASE)
+_TG_EMOJI_BLOCK_RE = re.compile(r"<tg-emoji\b[^>]*>.*?</tg-emoji>", re.IGNORECASE | re.DOTALL)
+_TG_EMOJI_SELF_RE = re.compile(r"<tg-emoji\b[^>]*/>", re.IGNORECASE)
+_ESCAPED_TG_EMOJI_BLOCK_RE = re.compile(
+    r"&lt;tg-emoji\b[^&]*&gt;.*?&lt;/tg-emoji&gt;",
+    re.IGNORECASE | re.DOTALL,
+)
+_ESCAPED_TG_EMOJI_SELF_RE = re.compile(r"&lt;tg-emoji\b[^&]*/&gt;", re.IGNORECASE)
 
 
 def sanitize_telegram_html(html: str) -> str:
-    """Remove Telegram-specific HTML wrappers while keeping inner text.
+    """Remove Telegram-specific HTML wrappers.
+
+    For Telegraph rendering we strip Telegram-only tags:
+    - ``tg-spoiler``: unwrap, keep inner text.
+    - ``tg-emoji`` (custom emoji): remove entirely because Telegraph can't render it reliably.
 
     >>> sanitize_telegram_html("<tg-emoji e=1/>")
     ''
     >>> sanitize_telegram_html("<tg-emoji e=1></tg-emoji>")
     ''
     >>> sanitize_telegram_html("<tg-emoji e=1>➡</tg-emoji>")
-    '➡'
+    ''
     >>> sanitize_telegram_html("&lt;tg-emoji e=1/&gt;")
     ''
     >>> sanitize_telegram_html("&lt;tg-emoji e=1&gt;&lt;/tg-emoji&gt;")
     ''
     >>> sanitize_telegram_html("&lt;tg-emoji e=1&gt;➡&lt;/tg-emoji&gt;")
-    '➡'
+    ''
     """
     raw = len(_TG_TAG_RE.findall(html))
     escaped = len(_ESCAPED_TG_TAG_RE.findall(html))
     if raw or escaped:
         logging.info("telegraph:sanitize tg-tags raw=%d escaped=%d", raw, escaped)
-    cleaned = _TG_TAG_RE.sub("", html)
+    # Custom emoji breaks on Telegraph: remove it completely (including the inner placeholder).
+    cleaned = _TG_EMOJI_BLOCK_RE.sub("", html)
+    cleaned = _TG_EMOJI_SELF_RE.sub("", cleaned)
+    cleaned = _ESCAPED_TG_EMOJI_BLOCK_RE.sub("", cleaned)
+    cleaned = _ESCAPED_TG_EMOJI_SELF_RE.sub("", cleaned)
+    # Unwrap spoiler tags (keep inner text) + remove any leftover tg-* wrappers.
+    cleaned = _TG_TAG_RE.sub("", cleaned)
     cleaned = _ESCAPED_TG_TAG_RE.sub("", cleaned)
     return cleaned
 

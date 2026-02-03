@@ -21,6 +21,17 @@ _HALL_HINT_RE = re.compile(
     re.IGNORECASE,
 )
 _HASHTAG_RE = re.compile(r"(?:(?<=\s)|^)#([\w-]+)", re.UNICODE)
+_PRIVATE_USE_RE = re.compile(r"[\uE000-\uF8FF]")
+
+# Ticket giveaways must not become events.
+_GIVEAWAY_RE = re.compile(
+    r"\b(розыгрыш|разыгрыва\w*|розыгра\w*|выигра\w*|конкурс|giveaway)\b",
+    re.IGNORECASE,
+)
+_TICKETS_RE = re.compile(
+    r"\b(билет\w*|пригласительн\w*|абонемент\w*)\b",
+    re.IGNORECASE,
+)
 
 SMART_UPDATE_LLM = os.getenv("SMART_UPDATE_LLM", "gemma").strip().lower()
 SMART_UPDATE_MODEL = os.getenv(
@@ -138,6 +149,26 @@ def _strip_hashtags(text: str | None) -> str | None:
     cleaned = re.sub(r" *\n", "\n", cleaned)
     cleaned = cleaned.strip()
     return cleaned or None
+
+
+def _strip_private_use(text: str | None) -> str | None:
+    """Remove PUA chars that may appear as Telegram custom emoji placeholders."""
+    if not text:
+        return None
+    cleaned = _PRIVATE_USE_RE.sub("", text)
+    cleaned = re.sub(r"[ \t]+", " ", cleaned)
+    cleaned = re.sub(r" *\n", "\n", cleaned)
+    cleaned = cleaned.strip()
+    return cleaned or None
+
+
+def _looks_like_ticket_giveaway(*texts: str | None) -> bool:
+    combined = "\n".join(t for t in texts if t and t.strip())
+    if not combined:
+        return False
+    value = combined.casefold()
+    # Require both giveaway + tickets signals to reduce false positives.
+    return bool(_GIVEAWAY_RE.search(value) and _TICKETS_RE.search(value))
 
 
 def _format_ticket_price(
@@ -328,6 +359,80 @@ async def _ask_gemma_json(
     return _extract_json(raw_fix or "")
 
 
+async def _ask_gemma_text(
+    prompt: str,
+    *,
+    max_tokens: int,
+    label: str,
+    temperature: float = 0.0,
+) -> str | None:
+    client = _get_gemma_client()
+    if client is None:
+        return None
+    try:
+        raw, _usage = await client.generate_content_async(
+            model=SMART_UPDATE_MODEL,
+            prompt=prompt,
+            generation_config={"temperature": temperature},
+            max_output_tokens=max_tokens,
+        )
+    except Exception as exc:  # pragma: no cover - provider failures
+        logger.warning("smart_update: gemma %s failed: %s", label, exc)
+        return None
+    cleaned = _strip_code_fences(raw or "").strip()
+    return cleaned or None
+
+
+async def _rewrite_description_journalistic(candidate: EventCandidate) -> str | None:
+    """Produce a non-verbatim, journalist-style description for Telegram imports.
+
+    Keep this best-effort: failures must not block event creation.
+    """
+    if SMART_UPDATE_LLM != "gemma":
+        return None
+    if candidate.source_type != "telegram":
+        return None
+
+    base = _strip_hashtags(candidate.raw_excerpt or candidate.source_text) or ""
+    base = _strip_private_use(base) or base
+    if len(base) < 80:
+        return None
+
+    payload = {
+        "title": candidate.title,
+        "date": candidate.date,
+        "time": candidate.time,
+        "end_date": candidate.end_date,
+        "location_name": candidate.location_name,
+        "location_address": candidate.location_address,
+        "city": candidate.city,
+        "ticket_link": candidate.ticket_link,
+        "ticket_status": candidate.ticket_status,
+        "is_free": candidate.is_free,
+        "event_type": candidate.event_type,
+        "festival": candidate.festival,
+        "raw_excerpt": _clip(candidate.raw_excerpt, 800),
+        "source_text": _clip(candidate.source_text, 1200),
+        "poster_texts": [_clip(p.ocr_text, 350) for p in candidate.posters if p.ocr_text][:2],
+    }
+    prompt = (
+        "Ты — культурный журналист. Сделай журналистский рерайт анонса мероприятия. "
+        "Передай суть и атмосферу, но НЕ копируй исходные фразы дословно. "
+        "Не добавляй выдуманных фактов, используй только то, что есть в данных. "
+        "Без эмодзи и без хэштегов. Один абзац, 2–5 предложений.\n\n"
+        f"Данные:\n{json.dumps(payload, ensure_ascii=False)}"
+    )
+    text = await _ask_gemma_text(prompt, max_tokens=420, label="rewrite", temperature=0.0)
+    if not text:
+        return None
+    cleaned = _strip_hashtags(text) or text
+    cleaned = _strip_private_use(cleaned) or cleaned
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if not cleaned:
+        return None
+    return _clip(cleaned, 1400)
+
+
 def _parse_iso_date(value: str | None) -> date | None:
     if not value:
         return None
@@ -394,6 +499,66 @@ def _is_vk_wall_url(url: str | None) -> bool:
     if not _is_http_url(url):
         return False
     return bool(_VK_WALL_URL_RE.match(url.strip()))
+
+
+def _infer_source_type_from_url(url: str | None) -> str:
+    """Infer EventSource.source_type for legacy source urls.
+
+    We historically stored a single source link in Event.source_post_url / Event.source_vk_post_url.
+    With Smart Update we moved to an explicit event_source table. When merging/updating an older
+    event, we backfill that legacy link so the operator can see >=2 sources after a merge.
+    """
+    value = (url or "").strip().lower()
+    if not value:
+        return "site"
+    if "t.me/" in value:
+        return "telegram"
+    if _is_vk_wall_url(value):
+        return "vk"
+    return "site"
+
+
+async def _ensure_legacy_event_sources(session, event: Event | None) -> int:
+    """Ensure legacy single-source fields are represented in event_source.
+
+    Returns number of sources added.
+    """
+    if not event or not event.id:
+        return 0
+
+    urls: list[str] = []
+    if _is_http_url(event.source_post_url):
+        urls.append(str(event.source_post_url).strip())
+    if _is_http_url(event.source_vk_post_url):
+        urls.append(str(event.source_vk_post_url).strip())
+    if not urls:
+        return 0
+
+    clean_source_text = _strip_private_use(_strip_hashtags(event.source_text)) or _strip_hashtags(event.source_text)
+    now = datetime.now(timezone.utc)
+    added = 0
+    for url in urls:
+        exists = (
+            await session.execute(
+                select(EventSource.id).where(
+                    EventSource.event_id == event.id,
+                    EventSource.source_url == url,
+                )
+            )
+        ).scalar_one_or_none()
+        if exists:
+            continue
+        session.add(
+            EventSource(
+                event_id=event.id,
+                source_type=_infer_source_type_from_url(url),
+                source_url=url,
+                source_text=clean_source_text,
+                imported_at=now,
+            )
+        )
+        added += 1
+    return added
 
 
 def _normalize_event_type_value(
@@ -677,6 +842,8 @@ async def _llm_merge_event(
         "Никогда не меняй якорные поля (дата/время/площадка/адрес). "
         "Если кандидат содержит противоречия в якорных полях, игнорируй их. "
         "Добавляй только непротиворечивые факты. "
+        "Описание должно быть журналистским рерайтом (не дословно), без эмодзи и хэштегов, без выдуманных деталей. "
+        "Если в тексте есть URL или телефоны, не искажай их (лучше перенеси в конец, чем потерять). "
         "Верни JSON с полями title (если нужно улучшить), description (обязательно), "
         "ticket_link, ticket_price_min/max, ticket_status, added_facts, skipped_conflicts."
         "\n\n"
@@ -802,7 +969,7 @@ async def smart_event_update(
         )
         return SmartUpdateResult(status="invalid", reason="missing_location")
 
-    clean_title = _strip_hashtags(candidate.title)
+    clean_title = _strip_private_use(_strip_hashtags(candidate.title)) or _strip_hashtags(candidate.title)
     if not clean_title:
         logger.warning(
             "smart_update.invalid reason=title_only_hashtags source_type=%s source_url=%s",
@@ -810,8 +977,19 @@ async def smart_event_update(
             candidate.source_url,
         )
         return SmartUpdateResult(status="invalid", reason="title_only_hashtags")
-    clean_source_text = _strip_hashtags(candidate.source_text) or ""
-    clean_raw_excerpt = _strip_hashtags(candidate.raw_excerpt)
+    clean_source_text = _strip_private_use(_strip_hashtags(candidate.source_text)) or (
+        _strip_hashtags(candidate.source_text) or ""
+    )
+    clean_raw_excerpt = _strip_private_use(_strip_hashtags(candidate.raw_excerpt)) or _strip_hashtags(candidate.raw_excerpt)
+
+    if _looks_like_ticket_giveaway(clean_title, clean_source_text, clean_raw_excerpt):
+        logger.info(
+            "smart_update.skip reason=ticket_giveaway source_type=%s source_url=%s title=%s",
+            candidate.source_type,
+            candidate.source_url,
+            _clip_title(clean_title),
+        )
+        return SmartUpdateResult(status="skipped_giveaway", reason="ticket_giveaway")
 
     if check_source_url and candidate.source_url:
         async with db.get_session() as session:
@@ -953,9 +1131,18 @@ async def smart_event_update(
                 candidate.ticket_price_min == 0
                 and (candidate.ticket_price_max in (0, None))
             )
+        description_value = (clean_raw_excerpt or clean_source_text or clean_title or "").strip()
+        if candidate.source_type == "telegram":
+            try:
+                rewritten = await _rewrite_description_journalistic(candidate)
+            except Exception:  # pragma: no cover - defensive
+                logger.warning("smart_update: description rewrite failed", exc_info=True)
+                rewritten = None
+            if rewritten:
+                description_value = rewritten
         new_event = Event(
             title=clean_title,
-            description=(clean_raw_excerpt or clean_source_text or clean_title or "").strip(),
+            description=description_value,
             festival=candidate.festival,
             date=candidate.date or "",
             time=candidate.time or "",
@@ -1091,7 +1278,11 @@ async def smart_event_update(
                 description = merge_data.get("description")
                 clean_title = _strip_hashtags(title) if isinstance(title, str) else None
                 clean_description = (
-                    _strip_hashtags(description) if isinstance(description, str) else None
+                    (
+                        _strip_private_use(_strip_hashtags(description)) or _strip_hashtags(description)
+                    )
+                    if isinstance(description, str)
+                    else None
                 )
                 if clean_title:
                     event_db.title = clean_title
@@ -1193,6 +1384,11 @@ async def smart_event_update(
             updated_fields = True
             updated_keys.append("posters")
 
+        # Backfill legacy source fields into event_source for older events (e.g. /parse imports
+        # created before event_source existed). This is required for deterministic merges like
+        # dramteatr (site + telegram) in E2E and for operator transparency.
+        await _ensure_legacy_event_sources(session, event_db)
+
         added_sources, same_source = await _ensure_event_source(
             session, event_db.id, candidate
         )
@@ -1206,8 +1402,21 @@ async def smart_event_update(
                 updated_keys.append("source_texts")
 
         await session.flush()
-        if added_facts:
-            await _record_source_facts(session, event_db.id, candidate, added_facts)
+        facts_to_record: list[str] = list(added_facts or [])
+        if not facts_to_record:
+            # LLM merge can be unavailable in local/dev or for transient outages.
+            # Keep source log useful and E2E-deterministic: record what we did change.
+            if added_posters:
+                facts_to_record.append(f"Добавлены афиши: {added_posters}")
+            if added_sources:
+                facts_to_record.append("Добавлен источник")
+            if updated_keys:
+                keys = [k for k in updated_keys if k not in {"source_text", "source_texts"}]
+                if keys:
+                    facts_to_record.append(f"Обновлено: {', '.join(keys[:6])}")
+
+        if facts_to_record:
+            await _record_source_facts(session, event_db.id, candidate, facts_to_record)
 
         if updated_fields:
             session.add(event_db)
@@ -1341,7 +1550,7 @@ async def _ensure_event_source(
 ) -> tuple[bool, bool]:
     if not event_id or not candidate.source_url:
         return False, False
-    clean_source_text = _strip_hashtags(candidate.source_text)
+    clean_source_text = _strip_private_use(_strip_hashtags(candidate.source_text)) or _strip_hashtags(candidate.source_text)
     existing = (
         await session.execute(
             select(EventSource).where(

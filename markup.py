@@ -87,8 +87,8 @@ def linkify_for_telegraph(text_or_html: str) -> str:
             # Local number without country code, assume +7 for Russia
             tel_country = "+7"
         tel_number = f"{tel_country}{area}{g2}{g3}{g4}"
-        clean_number = tel_number.lstrip("+")
-        return f'<a href="tg://resolve?phone={clean_number}">{original}</a>'
+        # Use tel: for Telegraph pages (web-friendly). Keep original text as-is.
+        return f'<a href="tel:{tel_number}">{original}</a>'
 
     text = _VK_LINK_RE.sub(repl_vk, text_or_html)
     text = MD_LINK.sub(lambda m: f'<a href="{_unescape_md_url(m[2])}">{m[1]}</a>', text)
@@ -102,13 +102,6 @@ def linkify_for_telegraph(text_or_html: str) -> str:
     # Convert phone numbers to tel: links (only outside existing links)
     parts = re.split(r'(<a\b[^>]*>.*?</a>)', text, flags=re.IGNORECASE | re.DOTALL)
     for idx in range(0, len(parts), 2):
-        if "+7" in parts[idx] or " 8" in parts[idx]:
-            logging.info("DEBUG: linkify phone candidate part: %r", parts[idx])
-            match = _PHONE_RE.search(parts[idx])
-            if match:
-                logging.info("DEBUG: linkify phone match found: %s", match.group(0))
-            else:
-                logging.info("DEBUG: linkify phone NO match")
         parts[idx] = _PHONE_RE.sub(repl_phone, parts[idx])
     text = "".join(parts)
     return text
@@ -223,28 +216,47 @@ FEST_INDEX_INTRO_END: Marker = Marker("<!-- festivals-index:intro:end -->")
 
 _TG_TAG_RE = re.compile(r"</?tg-(?:emoji|spoiler)[^>]*?>", re.IGNORECASE)
 _ESCAPED_TG_TAG_RE = re.compile(r"&lt;/?tg-(?:emoji|spoiler).*?&gt;", re.IGNORECASE)
+_TG_EMOJI_BLOCK_RE = re.compile(r"<tg-emoji\b[^>]*>.*?</tg-emoji>", re.IGNORECASE | re.DOTALL)
+_TG_EMOJI_SELF_RE = re.compile(r"<tg-emoji\b[^>]*/>", re.IGNORECASE)
+_ESCAPED_TG_EMOJI_BLOCK_RE = re.compile(
+    r"&lt;tg-emoji\b[^&]*&gt;.*?&lt;/tg-emoji&gt;",
+    re.IGNORECASE | re.DOTALL,
+)
+_ESCAPED_TG_EMOJI_SELF_RE = re.compile(r"&lt;tg-emoji\b[^&]*/&gt;", re.IGNORECASE)
 
 def sanitize_telegram_html(html: str) -> str:
-    """Remove Telegram-specific HTML wrappers while keeping inner text.
+    """Remove Telegram-specific HTML wrappers.
+
+    For Telegraph rendering we strip Telegram-only tags:
+    - ``tg-spoiler``: unwrap, keep inner text.
+    - ``tg-emoji`` (custom emoji): remove entirely because Telegraph can't render it reliably.
 
     >>> sanitize_telegram_html("<tg-emoji e=1/>")
     ''
     >>> sanitize_telegram_html("<tg-emoji e=1></tg-emoji>")
     ''
     >>> sanitize_telegram_html("<tg-emoji e=1>➡</tg-emoji>")
-    '➡'
+    ''
     >>> sanitize_telegram_html("&lt;tg-emoji e=1/&gt;")
     ''
     >>> sanitize_telegram_html("&lt;tg-emoji e=1&gt;&lt;/tg-emoji&gt;")
     ''
     >>> sanitize_telegram_html("&lt;tg-emoji e=1&gt;➡&lt;/tg-emoji&gt;")
-    '➡'
+    ''
     """
     raw = len(_TG_TAG_RE.findall(html))
     escaped = len(_ESCAPED_TG_TAG_RE.findall(html))
     if raw or escaped:
         logging.info("telegraph:sanitize tg-tags raw=%d escaped=%d", raw, escaped)
-    cleaned = _TG_TAG_RE.sub("", html)
+
+    # Custom emoji breaks on Telegraph: remove it completely (including the inner placeholder).
+    cleaned = _TG_EMOJI_BLOCK_RE.sub("", html)
+    cleaned = _TG_EMOJI_SELF_RE.sub("", cleaned)
+    cleaned = _ESCAPED_TG_EMOJI_BLOCK_RE.sub("", cleaned)
+    cleaned = _ESCAPED_TG_EMOJI_SELF_RE.sub("", cleaned)
+
+    # Unwrap spoiler tags (keep inner text) + remove any leftover tg-* wrappers.
+    cleaned = _TG_TAG_RE.sub("", cleaned)
     cleaned = _ESCAPED_TG_TAG_RE.sub("", cleaned)
     return cleaned
 

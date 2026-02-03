@@ -74,9 +74,13 @@ async def handle_tg_callback(callback: CallbackQuery):
     elif action == "add":
         adding_source_sessions[user_id] = "add"
         await callback.message.answer(
-            "✍️ Отправьте юзернейм или ссылку.\n"
-            "Можно добавить опции: trust=high|medium|low location=... ticket=...\n"
-            "Пример: @artkoder_events trust=high location='Научная библиотека' ticket='https://...'"
+            "✍️ Пришлите @username или ссылку вида https://t.me/username.\n"
+            "Примеры:\n"
+            "  @meowafisha\n"
+            "  https://t.me/meowafisha\n"
+            "\n"
+            "Уровень доверия и параметры источника можно настроить позже через «📋 Список источников».\n"
+            "Отмена: /cancel"
         )
         await callback.answer()
         
