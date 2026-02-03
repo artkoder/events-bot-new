@@ -3867,22 +3867,120 @@ async def cleanup_old_events(db: Database, now_utc: datetime | None = None) -> i
     """Delete events that finished more than a week ago."""
     cutoff = (now_utc or datetime.now(timezone.utc)) - timedelta(days=7)
     cutoff_str = cutoff.date().isoformat()
+    deleted_ids: list[int] = []
+    poster_paths: list[str] = []
+    ics_paths: list[str] = []
+
     async with db.get_session() as session:
         async with session.begin():
             start_t = _time.perf_counter()
-            res1 = await session.execute(
-                delete(Event).where(
-                    Event.end_date.is_not(None), Event.end_date < cutoff_str
+
+            ids1 = (
+                await session.execute(
+                    select(Event.id).where(
+                        Event.end_date.is_not(None), Event.end_date < cutoff_str
+                    )
                 )
-            )
-            res2 = await session.execute(
-                delete(Event).where(
-                    Event.end_date.is_(None), Event.date < cutoff_str
+            ).scalars().all()
+            ids2 = (
+                await session.execute(
+                    select(Event.id).where(
+                        Event.end_date.is_(None), Event.date < cutoff_str
+                    )
                 )
+            ).scalars().all()
+            id_set = {int(x) for x in (ids1 or []) + (ids2 or []) if x is not None}
+            deleted_ids = sorted(id_set)
+            if deleted_ids:
+                try:
+                    from models import EventPoster
+
+                    poster_paths = (
+                        await session.execute(
+                            select(EventPoster.supabase_path).where(
+                                EventPoster.event_id.in_(deleted_ids),
+                                EventPoster.supabase_path.is_not(None),
+                            )
+                        )
+                    ).scalars().all()
+                except Exception:
+                    poster_paths = []
+                try:
+                    ics_urls = (
+                        await session.execute(
+                            select(Event.ics_url).where(
+                                Event.id.in_(deleted_ids), Event.ics_url.is_not(None)
+                            )
+                        )
+                    ).scalars().all()
+                except Exception:
+                    ics_urls = []
+
+                # Collect Supabase object paths for ICS files (if the stored link is a Supabase public URL).
+                from urllib.parse import urlparse
+
+                bucket = (os.getenv("SUPABASE_BUCKET") or "events-ics").strip()
+
+                def _extract_storage_path(public_url: str | None) -> str | None:
+                    if not public_url:
+                        return None
+                    try:
+                        u = urlparse(str(public_url))
+                    except Exception:
+                        return None
+                    parts = [p for p in (u.path or "").split("/") if p]
+                    # Typical: /storage/v1/object/public/<bucket>/<path...>
+                    for idx, part in enumerate(parts):
+                        if part == bucket and idx + 1 < len(parts):
+                            return "/".join(parts[idx + 1 :])
+                    return None
+
+                for url in ics_urls or []:
+                    path = _extract_storage_path(url)
+                    if path:
+                        ics_paths.append(path)
+
+                await session.execute(delete(Event).where(Event.id.in_(deleted_ids)))
+
+            dur = (_time.perf_counter() - start_t) * 1000
+            logging.debug("db cleanup_old_events took %.1f ms", dur)
+
+    deleted = len(deleted_ids)
+
+    # Best-effort cleanup for Supabase Storage so we don't exceed storage limits.
+    # Do not block DB cleanup if Supabase is unavailable.
+    storage_paths: list[str] = []
+    for path in poster_paths or []:
+        if path and str(path) not in storage_paths:
+            storage_paths.append(str(path))
+    for path in ics_paths or []:
+        if path and str(path) not in storage_paths:
+            storage_paths.append(str(path))
+
+    if storage_paths and os.getenv("SUPABASE_DISABLED") != "1":
+        try:
+            from main import get_supabase_client
+
+            client = get_supabase_client()
+            if client:
+                bucket = (os.getenv("SUPABASE_BUCKET") or "events-ics").strip()
+                await asyncio.to_thread(
+                    client.storage.from_(bucket).remove,
+                    storage_paths,
+                )
+                logging.info(
+                    "cleanup_supabase_ok deleted=%s objects=%s",
+                    deleted,
+                    len(storage_paths),
+                )
+        except Exception:
+            logging.warning(
+                "cleanup_supabase_failed deleted=%s objects=%s",
+                deleted,
+                len(storage_paths),
+                exc_info=True,
             )
-        dur = (_time.perf_counter() - start_t) * 1000
-        logging.debug("db cleanup_old_events took %.1f ms", dur)
-    deleted = (res1.rowcount or 0) + (res2.rowcount or 0)
+
     return deleted
 
 
@@ -4735,6 +4833,11 @@ async def show_edit_menu(
                     if len(url) > 120:
                         url = url[:117] + "..."
                     poster_lines.append(f"    catbox_url: {url}")
+                if getattr(poster, "supabase_url", None):
+                    url = str(getattr(poster, "supabase_url"))
+                    if len(url) > 120:
+                        url = url[:117] + "..."
+                    poster_lines.append(f"    supabase_url: {url}")
             poster_lines.append("---")
 
         if sources:

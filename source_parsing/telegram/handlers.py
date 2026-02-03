@@ -274,6 +274,8 @@ def _build_candidate(
         posters.append(
             PosterCandidate(
                 catbox_url=item.get("catbox_url"),
+                supabase_url=item.get("supabase_url"),
+                supabase_path=item.get("supabase_path"),
                 sha256=sha,
                 phash=item.get("phash"),
                 ocr_text=item.get("ocr_text"),

@@ -549,6 +549,10 @@ class EventPoster(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     event_id: int = Field(foreign_key="event.id")
     catbox_url: Optional[str] = None
+    # Optional fallback storage for posters to make Telegraph previews more reliable
+    # and to survive Catbox outages/TLS issues.
+    supabase_url: Optional[str] = None
+    supabase_path: Optional[str] = None
     poster_hash: str
     phash: Optional[str] = None
     ocr_text: Optional[str] = None

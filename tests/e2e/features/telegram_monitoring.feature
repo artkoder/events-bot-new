@@ -26,7 +26,7 @@
 
   @manual
   Сценарий: Telegram cached preview для telegra.ph ссылки
-    Когда я проверяю telegram web preview для ссылки "https://telegra.ph/Mezhdu-Fevralyami-Tvorcheskij-vecher-Sergeya-Mihajlova-02-03-5"
+    Когда я проверяю telegram web preview для ссылки "https://telegra.ph/Mezhdu-Fevralyami-Tvorcheskij-vecher-Sergeya-Mihajlova-02-03-6"
     Тогда telegram web preview содержит cached_page
     И telegram web preview содержит фото
 
@@ -52,6 +52,7 @@
     Тогда под сообщением должна быть кнопка "🧾 Лог источников"
     Когда я нажимаю инлайн-кнопку "🧾 Лог источников"
     Тогда я вижу лог источников с датой, временем, источником и фактами
+    И в логе источников есть факт с URL афиши
     И я закрываю карточку события
 
   Сценарий: Мониторинг драмтеатра — мердж с сайтом (>=2 источника)
@@ -64,3 +65,4 @@
     И я нажимаю инлайн-кнопку "🚀 Запустить мониторинг"
     Тогда я жду долгой операции с текстом "Telegram Monitor"
     Тогда существует смерженное событие драмтеатра с источниками Telegram и site
+    И страница Telegraph смерженного события драмтеатра содержит счётчик источников

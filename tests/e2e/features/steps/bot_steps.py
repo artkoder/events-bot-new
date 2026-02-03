@@ -735,6 +735,64 @@ def step_dramteatr_has_merged_sources(context):
     )
 
 
+@then("страница Telegraph смерженного события драмтеатра содержит счётчик источников")
+def step_dramteatr_merged_event_has_sources_footer(context):
+    import time
+    import aiohttp
+
+    items = getattr(context, "merged_dramteatr_events", None) or []
+    if not items:
+        raise AssertionError("Нет списка смерженных событий драмтеатра (сначала выполните поиск)")
+    item = items[0]
+    event_id = int(item.get("id") or 0)
+    sources_total = int(item.get("sources_total") or 0)
+    if sources_total < 2:
+        raise AssertionError(f"Ожидали >=2 источника у смерженного события, получили {sources_total} (event_id={event_id})")
+
+    url = (item.get("telegraph_url") or "").strip()
+    if not url:
+        wait_sec = int(os.getenv("E2E_TELEGRAPH_WAIT_SEC", "240"))
+        deadline = time.time() + wait_sec
+        while time.time() < deadline:
+            conn = sqlite3.connect(_db_path(), timeout=30)
+            try:
+                cur = conn.cursor()
+                cur.execute("SELECT telegraph_url FROM event WHERE id = ?", (event_id,))
+                row = cur.fetchone()
+            finally:
+                conn.close()
+            candidate = (row[0] if row else "") if row is not None else ""
+            candidate = (candidate or "").strip()
+            if candidate.startswith("https://telegra.ph/"):
+                url = candidate
+                break
+            time.sleep(3)
+    if not url:
+        raise AssertionError(f"У смерженного события нет telegraph_url (event_id={event_id})")
+
+    async def _fetch():
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=20)) as resp:
+                return await resp.text()
+
+    # Telegraph rebuild runs via the bot worker queue; give it a bit of time to catch up.
+    wait_sec = int(os.getenv("E2E_TELEGRAPH_FOOTER_WAIT_SEC", "480"))
+    deadline = time.time() + wait_sec
+    last_html = ""
+    while time.time() < deadline:
+        last_html = run_async(context, _fetch())
+        m = re.search(r"Источников:\s*(\d+)", last_html)
+        if m:
+            n = int(m.group(1))
+            if n >= 2:
+                logger.info("✓ Telegraph footer: Источников=%s (%s)", n, url)
+                return
+        time.sleep(12)
+    if not re.search(r"Источников:\s*(\d+)", last_html or ""):
+        raise AssertionError(f"На странице {url} не найден счётчик 'Источников: N'")
+    raise AssertionError(f"Счётчик 'Источников' не достиг 2+ за {wait_sec}s: {url}")
+
+
 @given('в базе есть событие "{title}" на дату "{date}" и время "{time}"')
 def step_event_exists_in_db(context, title, date, time):
     """Ensure event exists in DB by title/date/time."""
@@ -1580,9 +1638,13 @@ def step_event_has_images_from_post(context, post_url):
     if not target:
         raise AssertionError(f"Пост {post_url} не найден в telegram_results.json")
     posters = target.get("posters") or []
-    catbox_urls = [p.get("catbox_url") for p in posters if p.get("catbox_url")]
-    if not catbox_urls:
-        raise AssertionError(f"Нет catbox_url для поста {post_url}")
+    poster_urls: list[str] = []
+    for p in posters:
+        url = p.get("supabase_url") or p.get("catbox_url")
+        if url and url not in poster_urls:
+            poster_urls.append(url)
+    if not poster_urls:
+        raise AssertionError(f"Нет URL афиш (catbox_url/supabase_url) для поста {post_url}")
     links = getattr(context, "telegraph_links", None)
     if not links:
         text = context.last_response.text if context.last_response else ""
@@ -1635,10 +1697,10 @@ def step_event_has_images_from_post(context, post_url):
             for link in links:
                 async with session.get(link, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                     html = await resp.text()
-                    if any(url in html for url in catbox_urls):
+                    if any(url in html for url in poster_urls):
                         logger.info("✓ Найдена картинка из поста на странице %s", link)
                         return
-        raise AssertionError("Catbox URL из поста не найден на Telegraph страницах")
+        raise AssertionError("URL афиш из поста не найден на Telegraph страницах")
 
     run_async(context, _verify())
 
@@ -1717,6 +1779,26 @@ def step_source_facts_log_present(context):
         raise AssertionError("В логе нет фактов (ожидаются bullets)")
 
     logger.info("✓ Лог источников содержит дату/время, источник и факты")
+
+
+@then("в логе источников есть факт с URL афиши")
+def step_source_log_has_poster_url_fact(context):
+    msg = context.last_response
+    text = msg.text if msg and msg.text else ""
+
+    if not text or "Лог источников" not in text:
+        async def _fetch():
+            messages = await context.client.client.get_messages(context.bot_entity, limit=20)
+            for candidate in messages:
+                if candidate.text and "Лог источников" in candidate.text:
+                    return candidate.text
+            return ""
+
+        text = run_async(context, _fetch())
+
+    if not re.search(r"(?:Добавлена афиша|Афиша в источнике):\s+https?://\S+", text or ""):
+        raise AssertionError("В логе источников не найден факт с URL афиши")
+    logger.info("✓ Лог источников содержит факт с URL афиши")
 
 
 @then("в карточке события отображается блок OCR")

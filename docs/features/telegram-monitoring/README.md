@@ -6,6 +6,7 @@
 
 - По расписанию запускает Kaggle‑kernel `TelegramMonitor`.
 - Kaggle читает сообщения источников, грузит медиа в Catbox, делает OCR и извлекает события.
+- Для афиш (постеров) также делает загрузку в Supabase Storage (fallback), чтобы Telegraph/Telegram preview не зависели от доступности Catbox.
 - Сервер скачивает `telegram_results.json` и импортирует события через Smart Update:
   - создаёт новые события;
   - мерджит существующие;
@@ -30,6 +31,7 @@
 - `telegram_scanned_message` — идемпотентность сообщений.
 - `event_source` — источники события (много на одно событие).
 - `eventposter.phash` — опциональный перцептивный хеш.
+- `eventposter.supabase_url/supabase_path` — fallback URL/путь в Supabase Storage для афиш (для надёжного preview и контролируемой очистки).
 
 ## OCR
 
@@ -103,6 +105,13 @@
   - `TG_MONITORING_FLOOD_WAIT_JITTER_MIN/MAX` — небольшой джиттер к ожиданию.
 
 Примечание: на сервере есть lock, который не даёт запустить два мониторинга одновременно в одном процессе (manual vs scheduler), но лучше всё равно избегать ручных запусков рядом с scheduled окном.
+
+## Очистка (DB + Supabase)
+
+- Ежедневная очистка удаляет события, завершившиеся более 7 дней назад (по `end_date`, либо по `date` если `end_date` пуст).
+- В рамках той же очистки (best-effort) удаляются связанные объекты из Supabase Storage:
+  - ICS файлы события;
+  - fallback афиши по `eventposter.supabase_path`.
 
 ## Acceptance (Gherkin)
 

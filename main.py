@@ -12802,8 +12802,35 @@ async def update_telegraph_event_page(
         if merged_photo_urls:
             ev.photo_urls = list(photos)
             ev.photo_count = len(ev.photo_urls)
-        if ev.preview_3d_url and len(photos) >= 2:
-            photos.insert(0, ev.preview_3d_url)
+        # For rendering (Telegraph + Telegram cached previews), prefer Supabase URLs when available.
+        render_photos = list(photos)
+        try:
+            poster_rows = (
+                await session.execute(
+                    select(EventPoster.catbox_url, EventPoster.supabase_url).where(
+                        EventPoster.event_id == event_id
+                    )
+                )
+            ).all()
+        except Exception:
+            poster_rows = []
+        catbox_to_supabase: dict[str, str] = {}
+        poster_render_urls: list[str] = []
+        for catbox_url, supabase_url in poster_rows:
+            if catbox_url and supabase_url:
+                catbox_to_supabase[str(catbox_url)] = str(supabase_url)
+            url = supabase_url or catbox_url
+            if url:
+                url_s = str(url)
+                if url_s not in poster_render_urls:
+                    poster_render_urls.append(url_s)
+        render_photos = [catbox_to_supabase.get(u, u) for u in render_photos]
+        for url in poster_render_urls:
+            if url not in render_photos:
+                render_photos.append(url)
+
+        if ev.preview_3d_url and len(render_photos) >= 2:
+            render_photos.insert(0, ev.preview_3d_url)
         sources_total = (
             await session.scalar(
                 select(func.count())
@@ -12846,7 +12873,7 @@ async def update_telegraph_event_page(
             db,
             event_summary=summary,
             display_link=display_link,
-            catbox_urls=photos,
+            catbox_urls=render_photos,
             search_digest=ev.search_digest,
             event_footer_html=event_footer_html,
         )

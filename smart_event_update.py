@@ -21,7 +21,9 @@ _HALL_HINT_RE = re.compile(
     re.IGNORECASE,
 )
 _HASHTAG_RE = re.compile(r"(?:(?<=\s)|^)#([\w-]+)", re.UNICODE)
-_PRIVATE_USE_RE = re.compile(r"[\uE000-\uF8FF]")
+# Telegram custom emoji placeholders can land in PUA (Private Use Area) ranges.
+# Keep this broader than just BMP to avoid "tofu" boxes on Telegraph pages.
+_PRIVATE_USE_RE = re.compile(r"[\uE000-\uF8FF\U000F0000-\U000FFFFD\U00100000-\U0010FFFD]")
 
 # Ticket giveaways must not become events.
 _GIVEAWAY_RE = re.compile(
@@ -68,6 +70,8 @@ SMART_UPDATE_MODEL = os.getenv(
 @dataclass(slots=True)
 class PosterCandidate:
     catbox_url: str | None = None
+    supabase_url: str | None = None
+    supabase_path: str | None = None
     sha256: str | None = None
     phash: str | None = None
     ocr_text: str | None = None
@@ -203,7 +207,8 @@ def _looks_like_promo_or_congrats(*texts: str | None) -> bool:
     value = combined.casefold()
     if _PROMO_RE.search(value):
         return True
-    if _CONGRATS_RE.search(value) and (_CONGRATS_CONTEXT_RE.search(value) or "|" in value):
+    # Congratulation posts are treated as non-event content by product requirements.
+    if _CONGRATS_RE.search(value):
         return True
     return False
 
@@ -1224,7 +1229,9 @@ async def smart_event_update(
             await session.commit()
             await session.refresh(new_event)
 
-            added_posters = await _apply_posters(session, new_event.id, candidate.posters)
+            added_posters, added_poster_urls = await _apply_posters(
+                session, new_event.id, candidate.posters
+            )
             added_sources, _same_source = await _ensure_event_source(
                 session, new_event.id, candidate
             )
@@ -1232,6 +1239,18 @@ async def smart_event_update(
                 await _sync_source_texts(session, new_event)
             await session.flush()
             initial_facts = _initial_added_facts(candidate)
+            # Always include at least one poster URL in the source log when present.
+            poster_seen: set[str] = set()
+            for p in candidate.posters:
+                url = (p.supabase_url or p.catbox_url or "").strip()
+                if not url or url in poster_seen:
+                    continue
+                poster_seen.add(url)
+                initial_facts.append(f"Афиша в источнике: {url}")
+                if len(poster_seen) >= 2:
+                    break
+            for url in (added_poster_urls or [])[:3]:
+                initial_facts.append(f"Добавлена афиша: {url}")
             if initial_facts:
                 await _record_source_facts(session, new_event.id, candidate, initial_facts)
             await session.commit()
@@ -1426,7 +1445,9 @@ async def smart_event_update(
             updated_fields = True
             updated_keys.append("creator_id")
 
-        added_posters = await _apply_posters(session, event_db.id, candidate.posters)
+        added_posters, added_poster_urls = await _apply_posters(
+            session, event_db.id, candidate.posters
+        )
         if added_posters:
             updated_fields = True
             updated_keys.append("posters")
@@ -1450,6 +1471,21 @@ async def smart_event_update(
 
         await session.flush()
         facts_to_record: list[str] = list(added_facts or [])
+        poster_seen: set[str] = set()
+        for p in candidate.posters:
+            url = (p.supabase_url or p.catbox_url or "").strip()
+            if not url or url in poster_seen:
+                continue
+            poster_seen.add(url)
+            facts_to_record.append(f"Афиша в источнике: {url}")
+            if len(poster_seen) >= 2:
+                break
+        for url in (added_poster_urls or [])[:3]:
+            facts_to_record.append(f"Добавлена афиша: {url}")
+        if "description" in updated_keys:
+            snippet = _normalize_fact_item(candidate.raw_excerpt or candidate.source_text, limit=140)
+            if snippet:
+                facts_to_record.append(f"Текст дополнен: {snippet}")
         if not facts_to_record:
             # LLM merge can be unavailable in local/dev or for transient outages.
             # Keep source log useful and E2E-deterministic: record what we did change.
@@ -1515,9 +1551,9 @@ async def _apply_posters(
     session,
     event_id: int | None,
     posters: Sequence[PosterCandidate],
-) -> int:
+) -> tuple[int, list[str]]:
     if not event_id or not posters:
-        return 0
+        return 0, []
     existing = (
         await session.execute(select(EventPoster).where(EventPoster.event_id == event_id))
     ).scalars()
@@ -1525,17 +1561,37 @@ async def _apply_posters(
     added = 0
     now = datetime.now(timezone.utc)
     extra_urls: list[str] = []
+    added_urls: list[str] = []
+
+    def _pick_display_url(p: PosterCandidate) -> str | None:
+        return p.supabase_url or p.catbox_url
+
+    def _remember_url(url: str | None) -> None:
+        if url and url not in added_urls:
+            added_urls.append(url)
 
     for poster in posters:
         digest = poster.sha256
         if not digest:
-            if poster.catbox_url:
-                extra_urls.append(poster.catbox_url)
+            url = _pick_display_url(poster)
+            if url:
+                extra_urls.append(url)
             continue
         row = existing_map.get(digest)
         if row:
+            changed = False
             if poster.catbox_url:
-                row.catbox_url = poster.catbox_url
+                if row.catbox_url != poster.catbox_url:
+                    row.catbox_url = poster.catbox_url
+                    changed = True
+            if poster.supabase_url:
+                if getattr(row, "supabase_url", None) != poster.supabase_url:
+                    row.supabase_url = poster.supabase_url
+                    changed = True
+            if poster.supabase_path:
+                if getattr(row, "supabase_path", None) != poster.supabase_path:
+                    row.supabase_path = poster.supabase_path
+                    changed = True
             if poster.phash:
                 row.phash = poster.phash
             if poster.ocr_text is not None:
@@ -1543,11 +1599,15 @@ async def _apply_posters(
             if poster.ocr_title is not None:
                 row.ocr_title = poster.ocr_title
             row.updated_at = now
+            if changed:
+                _remember_url(_pick_display_url(poster))
         else:
             session.add(
                 EventPoster(
                     event_id=event_id,
                     catbox_url=poster.catbox_url,
+                    supabase_url=poster.supabase_url,
+                    supabase_path=poster.supabase_path,
                     poster_hash=digest,
                     phash=poster.phash,
                     ocr_text=poster.ocr_text,
@@ -1556,6 +1616,7 @@ async def _apply_posters(
                 )
             )
             added += 1
+            _remember_url(_pick_display_url(poster))
 
     # Update event.photo_urls if possible
     result = await session.execute(select(Event).where(Event.id == event_id))
@@ -1591,7 +1652,7 @@ async def _apply_posters(
         event.photo_count = len(current)
         session.add(event)
 
-    return added
+    return added, added_urls
 
 
 async def _ensure_event_source(

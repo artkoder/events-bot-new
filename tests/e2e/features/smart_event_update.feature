@@ -56,6 +56,48 @@
     И для события "TEST SU created" лог фактов содержит "Время: 18:00"
     И я очищаю тестовые события
 
+  Сценарий: Поздравления не импортируются как события
+    Когда я запускаю Smart Update с кандидатом:
+      | field         | value                                  |
+      | title         | TEST SU congrats                       |
+      | source_type   | telegram                               |
+      | source_url    | test://smart-update/congrats/1         |
+      | date          | 2026-03-07                             |
+      | time          | 19:00                                  |
+      | location_name | Тестовая площадка                      |
+      | source_text   | Поздравляем с днем рождения актера!    |
+      | raw_excerpt   | Поздравляем с днем рождения актера!    |
+      | city          | Калининград                            |
+    Тогда результат Smart Update имеет статус "skipped_promo"
+
+  Сценарий: Акции/скидки не импортируются как события
+    Когда я запускаю Smart Update с кандидатом:
+      | field         | value                                  |
+      | title         | TEST SU promo                          |
+      | source_type   | telegram                               |
+      | source_url    | test://smart-update/promo/1            |
+      | date          | 2026-03-08                             |
+      | time          | 18:00                                  |
+      | location_name | Тестовая площадка                      |
+      | source_text   | Акция! Скидка 50% по промокоду         |
+      | raw_excerpt   | Акция! Скидка 50% по промокоду         |
+      | city          | Калининград                            |
+    Тогда результат Smart Update имеет статус "skipped_promo"
+
+  Сценарий: Розыгрыш билетов не импортируется как событие
+    Когда я запускаю Smart Update с кандидатом:
+      | field         | value                                      |
+      | title         | TEST SU giveaway                           |
+      | source_type   | telegram                                   |
+      | source_url    | test://smart-update/giveaway/1             |
+      | date          | 2026-03-09                                 |
+      | time          | 20:00                                      |
+      | location_name | Тестовая площадка                          |
+      | source_text   | Розыгрыш билетов на концерт, выиграй билет |
+      | raw_excerpt   | Розыгрыш билетов на концерт, выиграй билет |
+      | city          | Калининград                                |
+    Тогда результат Smart Update имеет статус "skipped_giveaway"
+
   Сценарий: Хештеги удаляются при создании события
     Когда я запускаю Smart Update с кандидатом:
       | field         | value                          |

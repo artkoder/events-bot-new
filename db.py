@@ -288,6 +288,8 @@ class Database:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     event_id INTEGER NOT NULL,
                     catbox_url TEXT,
+                    supabase_url TEXT,
+                    supabase_path TEXT,
                     poster_hash TEXT NOT NULL,
                     phash TEXT,
                     ocr_text TEXT,
@@ -303,6 +305,8 @@ class Database:
             )
             await _add_column(conn, "eventposter", "ocr_title TEXT")
             await _add_column(conn, "eventposter", "phash TEXT")
+            await _add_column(conn, "eventposter", "supabase_url TEXT")
+            await _add_column(conn, "eventposter", "supabase_path TEXT")
             await conn.execute(
                 "CREATE INDEX IF NOT EXISTS ix_eventposter_event ON eventposter(event_id)"
             )
