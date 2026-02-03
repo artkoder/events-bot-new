@@ -12822,7 +12822,8 @@ async def update_telegraph_event_page(
         if merged_photo_urls:
             ev.photo_urls = list(photos)
             ev.photo_count = len(ev.photo_urls)
-        # For rendering (Telegraph + Telegram cached previews), prefer Supabase URLs when available.
+        # For rendering (Telegraph + Telegram cached previews), prefer Catbox.
+        # Supabase is used strictly as a fallback to avoid exhausting a small Storage quota.
         render_photos = list(photos)
         try:
             poster_rows = (
@@ -12834,17 +12835,17 @@ async def update_telegraph_event_page(
             ).all()
         except Exception:
             poster_rows = []
-        catbox_to_supabase: dict[str, str] = {}
+        prefer_supabase = (os.getenv("TELEGRAPH_PREFER_SUPABASE") or "").strip() in {"1", "true", "yes"}
         poster_render_urls: list[str] = []
         for catbox_url, supabase_url in poster_rows:
-            if catbox_url and supabase_url:
-                catbox_to_supabase[str(catbox_url)] = str(supabase_url)
-            url = supabase_url or catbox_url
+            if prefer_supabase and supabase_url:
+                url = supabase_url
+            else:
+                url = catbox_url or supabase_url
             if url:
                 url_s = str(url)
                 if url_s not in poster_render_urls:
                     poster_render_urls.append(url_s)
-        render_photos = [catbox_to_supabase.get(u, u) for u in render_photos]
         for url in poster_render_urls:
             if url not in render_photos:
                 render_photos.append(url)

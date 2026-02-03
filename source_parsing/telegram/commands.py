@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 tg_monitor_router = tg_router
 
 # State management
-# user_id -> mode
+# user_id -> mode ("add" | "loc:<source_id>" | "ticket:<source_id>")
 adding_source_sessions: dict[int, str] = {}
 _monitor_lock = asyncio.Lock()
 
@@ -96,6 +96,30 @@ async def handle_tg_callback(callback: CallbackQuery):
     elif action == "delete" and len(parts) >= 3:
         await delete_source(db, callback.message, int(parts[2]))
         await callback.answer()
+    elif action == "reset" and len(parts) >= 3:
+        await reset_source_marks(db, callback.message, int(parts[2]))
+        await callback.answer()
+    elif action == "loc" and len(parts) >= 3:
+        source_id = int(parts[2])
+        adding_source_sessions[user_id] = f"loc:{source_id}"
+        await callback.message.answer(
+            "📍 Пришлите default_location для источника (как будет сохраняться в событиях),\n"
+            "например: Научная библиотека\n"
+            "Чтобы очистить — отправьте `-`.\n"
+            "Отмена: /cancel",
+            parse_mode="Markdown",
+        )
+        await callback.answer()
+    elif action == "ticket" and len(parts) >= 3:
+        source_id = int(parts[2])
+        adding_source_sessions[user_id] = f"ticket:{source_id}"
+        await callback.message.answer(
+            "🎟 Пришлите default_ticket_link (https://...), который будет подставляться, если в посте нет ссылки.\n"
+            "Чтобы очистить — отправьте `-`.\n"
+            "Отмена: /cancel",
+            parse_mode="Markdown",
+        )
+        await callback.answer()
 
 @tg_router.message(lambda m: m.from_user.id in adding_source_sessions)
 async def handle_source_input(message: types.Message):
@@ -104,7 +128,7 @@ async def handle_source_input(message: types.Message):
     db = main.get_db()
     
     user_id = message.from_user.id
-    text = message.text.strip()
+    text = (message.text or "").strip()
     
     if text.lower() == "/cancel":
         adding_source_sessions.pop(user_id, None)
@@ -112,9 +136,23 @@ async def handle_source_input(message: types.Message):
         return
 
     try:
-        username, options = parse_source_input(text)
-        await add_source(db, message, username, options)
-        adding_source_sessions.pop(user_id, None)
+        mode = adding_source_sessions.get(user_id) or "add"
+        if mode == "add":
+            username, options = parse_source_input(text)
+            await add_source(db, message, username, options)
+            adding_source_sessions.pop(user_id, None)
+            return
+        if mode.startswith("loc:"):
+            source_id = int(mode.split(":", 1)[1])
+            await set_source_location(db, message, source_id, text)
+            adding_source_sessions.pop(user_id, None)
+            return
+        if mode.startswith("ticket:"):
+            source_id = int(mode.split(":", 1)[1])
+            await set_source_ticket(db, message, source_id, text)
+            adding_source_sessions.pop(user_id, None)
+            return
+        raise ValueError("unknown session mode")
     except Exception as e:
         logger.error(f"Error adding source: {e}")
         await message.answer(f"❌ Error: {e}")
@@ -272,6 +310,32 @@ async def list_sources(db: Database, message: types.Message):
                 ),
             ]
         )
+        loc_label = (src.default_location or "—").strip()
+        if len(loc_label) > 24:
+            loc_label = loc_label[:23] + "…"
+        ticket_label = (src.default_ticket_link or "—").strip()
+        if len(ticket_label) > 24:
+            ticket_label = ticket_label[:23] + "…"
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    text=f"📍 Локация → {loc_label}",
+                    callback_data=f"tg:loc:{src.id}",
+                ),
+                InlineKeyboardButton(
+                    text=f"🎟 Ticket → {ticket_label}",
+                    callback_data=f"tg:ticket:{src.id}",
+                ),
+            ]
+        )
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    text=f"♻️ Сбросить отметки @{src.username}",
+                    callback_data=f"tg:reset:{src.id}",
+                )
+            ]
+        )
         keyboard.append(
             [
                 InlineKeyboardButton(
@@ -329,6 +393,53 @@ async def delete_source(db: Database, message: types.Message, source_id: int) ->
         await session.delete(src)
         await session.commit()
     await message.answer(f"🗑️ Источник @{username} удалён.")
+    await list_sources(db, message)
+
+async def set_source_location(db: Database, message: types.Message, source_id: int, value: str) -> None:
+    raw = (value or "").strip()
+    new_val = None if raw in {"", "-"} else raw
+    async with db.get_session() as session:
+        src = await session.get(TelegramSource, source_id)
+        if not src:
+            await message.answer("Источник не найден")
+            return
+        src.default_location = new_val
+        await session.commit()
+    await message.answer(f"✅ default_location обновлён для @{src.username}: {new_val or '—'}")
+    await list_sources(db, message)
+
+async def set_source_ticket(db: Database, message: types.Message, source_id: int, value: str) -> None:
+    raw = (value or "").strip()
+    new_val = None if raw in {"", "-"} else raw
+    if new_val and not new_val.lower().startswith(("http://", "https://")):
+        await message.answer("⚠️ Ticket link должен быть http(s) URL или '-' для очистки.")
+        return
+    async with db.get_session() as session:
+        src = await session.get(TelegramSource, source_id)
+        if not src:
+            await message.answer("Источник не найден")
+            return
+        src.default_ticket_link = new_val
+        await session.commit()
+    await message.answer(f"✅ default_ticket_link обновлён для @{src.username}: {new_val or '—'}")
+    await list_sources(db, message)
+
+async def reset_source_marks(db: Database, message: types.Message, source_id: int) -> None:
+    """Reset last scanned message id and scanned marks for a Telegram source (operator UI)."""
+    async with db.get_session() as session:
+        src = await session.get(TelegramSource, source_id)
+        if not src:
+            await message.answer("Источник не найден")
+            return
+        await session.execute(
+            delete(TelegramScannedMessage).where(
+                TelegramScannedMessage.source_id == source_id
+            )
+        )
+        src.last_scanned_message_id = None
+        src.last_scan_at = None
+        await session.commit()
+    await message.answer(f"♻️ Отметки мониторинга для @{src.username} сброшены.")
     await list_sources(db, message)
 
 async def _get_user(db: Database, user_id: int):

@@ -446,6 +446,47 @@ def _run_tg_monitor(context) -> None:
     step_wait_for_message_text(context, "Starting Telegram Monitor")
     step_wait_long_operation(context, "Telegram Monitor")
 
+def _find_row_buttons_for_username(message, username: str):
+    """Return (toggle_btn, trust_btn, loc_btn, ticket_btn, reset_btn, delete_btn) for a username on /tg list message."""
+    uname = username.lstrip("@").strip()
+    if not message or not getattr(message, "buttons", None):
+        return None, None, None, None, None, None
+    toggle_btn = trust_btn = loc_btn = ticket_btn = reset_btn = delete_btn = None
+    rows = list(message.buttons or [])
+    for idx, row in enumerate(rows):
+        texts = [getattr(b, "text", "") for b in row]
+        has_toggle_row = any(
+            (("Disable" in t or "Enable" in t) and f"@{uname}" in t) for t in texts
+        )
+        if not has_toggle_row:
+            continue
+        for b in row:
+            t = getattr(b, "text", "")
+            if f"@{uname}" in t and ("Disable" in t or "Enable" in t):
+                toggle_btn = b
+            if "Trust" in t:
+                trust_btn = b
+        # Next rows are in a fixed order in the UI.
+        if idx + 1 < len(rows):
+            for b in rows[idx + 1]:
+                t = getattr(b, "text", "")
+                if t.startswith("📍 "):
+                    loc_btn = b
+                if t.startswith("🎟 "):
+                    ticket_btn = b
+        if idx + 2 < len(rows):
+            for b in rows[idx + 2]:
+                t = getattr(b, "text", "")
+                if t.startswith("♻️") and f"@{uname}" in t:
+                    reset_btn = b
+        if idx + 3 < len(rows):
+            for b in rows[idx + 3]:
+                t = getattr(b, "text", "")
+                if t.startswith("🗑️") and f"@{uname}" in t:
+                    delete_btn = b
+        break
+    return toggle_btn, trust_btn, loc_btn, ticket_btn, reset_btn, delete_btn
+
 
 # =============================================================================
 # Предыстория (Background)
@@ -515,6 +556,7 @@ def step_configure_sources_table(context):
 
 
 @given('я выбираю контрольный пост с постером в канале "{channel}"')
+@then('я выбираю контрольный пост с постером в канале "{channel}"')
 def step_pick_control_post(context, channel):
     """Pick a recent Telegram message with a poster to make monitoring assertions deterministic.
 
@@ -673,23 +715,31 @@ def step_sources_have_valid_event(context):
 
 
 @given('события драмтеатра уже загружены через "/parse"')
+@then('события драмтеатра уже загружены через "/parse"')
 def step_dramteatr_events_loaded(context):
-    """Verify dramteatr events exist in DB."""
+    """Verify dramteatr events (site parser) exist in DB."""
     db_path = _db_path()
     conn = sqlite3.connect(db_path, timeout=30)
     try:
         cur = conn.cursor()
         cur.execute(
-            "SELECT id FROM event WHERE title LIKE ? LIMIT 1",
-            ("%Вишнёвый сад%",),
+            """
+            SELECT id, title
+            FROM event
+            WHERE location_name = ?
+              AND source_post_url LIKE ?
+            ORDER BY date DESC
+            LIMIT 1
+            """,
+            ("Драматический театр", "https://dramteatr39.ru/%"),
         )
         row = cur.fetchone()
     finally:
         conn.close()
     if not row:
-        raise AssertionError("В БД нет событий драмтеатра (например, Вишнёвый сад)")
-    context.dramteatr_event_id = row[0]
-    logger.info("✓ Найдено событие драмтеатра (id=%s)", row[0])
+        raise AssertionError("В БД нет событий драмтеатра с источником dramteatr39.ru")
+    context.dramteatr_event_id = int(row[0])
+    logger.info("✓ Найдено событие драмтеатра (id=%s title=%s)", row[0], row[1])
 
 
 @then("существует смерженное событие драмтеатра с источниками Telegram и site")
@@ -820,32 +870,118 @@ def step_event_exists_in_db(context, title, date, time):
 
 
 @given('очищены отметки мониторинга для "{username}"')
+@then('очищены отметки мониторинга для "{username}"')
 def step_reset_monitor_marks(context, username):
-    """Reset telegram_scanned_message and last_scanned_message_id for a source."""
-    db_path = _db_path()
-    conn = sqlite3.connect(db_path, timeout=30)
-    try:
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT id FROM telegram_source WHERE username=?",
-            (username.lstrip("@"),),
-        )
-        row = cur.fetchone()
-        if not row:
-            raise AssertionError(f"Источник @{username} не найден в БД")
-        source_id = row[0]
-        cur.execute(
-            "DELETE FROM telegram_scanned_message WHERE source_id=?",
-            (source_id,),
-        )
-        cur.execute(
-            "UPDATE telegram_source SET last_scanned_message_id=NULL WHERE id=?",
-            (source_id,),
-        )
-        conn.commit()
-    finally:
-        conn.close()
-    logger.info("✓ Сброшены отметки мониторинга для @%s", username)
+    """Reset telegram monitoring marks via the real UI (/tg -> list -> reset)."""
+    uname = username.lstrip("@").strip()
+    if not uname:
+        raise AssertionError("Пустой username для сброса отметок")
+    step_send_command(context, "/tg")
+    step_click_inline_button(context, "📋 Список источников")
+    step_click_inline_button(context, f"♻️ Сбросить отметки @{uname}")
+    step_wait_for_message_text(context, "сброшены")
+    logger.info("✓ Сброшены отметки мониторинга для @%s (UI)", uname)
+
+
+@given("я очищаю список источников Telegram через UI")
+def step_clear_all_sources_ui(context):
+    """Delete all Telegram sources using the real UI buttons."""
+    step_send_command(context, "/tg")
+    step_click_inline_button(context, "📋 Список источников")
+
+    async def _clear():
+        import asyncio
+
+        # Keep clicking delete buttons until none remain.
+        for _ in range(20):
+            msg = context.last_response
+            buttons = get_all_buttons(msg)
+            delete_buttons = [b for b in buttons if b.startswith("🗑️ Удалить @")]
+            if not delete_buttons:
+                return
+            # Click first delete button
+            btn_text = delete_buttons[0]
+            btn = find_button(msg, btn_text)
+            if not btn:
+                return
+            await context.client._gaussian_delay(0.5, 1.2)
+            await btn.click()
+            # Allow bot to send confirmation + refreshed list
+            await asyncio.sleep(2.5)
+            messages = await context.client.client.get_messages(context.bot_entity, limit=2)
+            if messages:
+                context.last_response = messages[0]
+        raise AssertionError("Не удалось очистить список источников Telegram за 20 попыток")
+
+    run_async(context, _clear())
+    logger.info("✓ Список Telegram источников очищен (UI)")
+
+
+@given('trust для источника "{username}" установлен в "{level}"')
+@then('trust для источника "{username}" установлен в "{level}"')
+def step_set_source_trust_ui(context, username, level):
+    """Cycle trust button until the desired trust_level is shown in the list."""
+    uname = username.lstrip("@").strip()
+    desired = (level or "").strip().lower()
+    if desired not in {"low", "medium", "high"}:
+        raise AssertionError("trust должен быть low|medium|high")
+
+    for _ in range(6):
+        step_send_command(context, "/tg")
+        step_click_inline_button(context, "📋 Список источников")
+        msg = context.last_response
+        text = (msg.text or "")
+        if f"@{uname} (trust={desired})" in text:
+            logger.info("✓ trust уже установлен: @%s trust=%s", uname, desired)
+            return
+        _toggle, trust_btn, _loc, _ticket, _reset, _delete = _find_row_buttons_for_username(msg, uname)
+        if not trust_btn:
+            raise AssertionError(
+                f"Не найдена кнопка Trust для @{uname}. Кнопки: {get_all_buttons(msg)}"
+            )
+        async def _click():
+            import asyncio
+            await context.client._gaussian_delay(0.4, 1.0)
+            await trust_btn.click()
+            await asyncio.sleep(2.0)
+            messages = await context.client.client.get_messages(context.bot_entity, limit=1)
+            if messages:
+                context.last_response = messages[0]
+        run_async(context, _click())
+    raise AssertionError(f"Не удалось выставить trust={desired} для @{uname} через UI")
+    logger.info("✓ trust=%s установлен для @%s (UI)", desired, uname)
+
+
+@given('default_location для источника "{username}" установлен в "{location}"')
+@then('default_location для источника "{username}" установлен в "{location}"')
+def step_set_source_location_ui(context, username, location):
+    uname = username.lstrip("@").strip()
+    loc = (location or "").strip()
+    if not uname:
+        raise AssertionError("Пустой username для default_location")
+    if not loc:
+        raise AssertionError("Пустой default_location")
+
+    step_send_command(context, "/tg")
+    step_click_inline_button(context, "📋 Список источников")
+    msg = context.last_response
+    _toggle, _trust, loc_btn, _ticket, _reset, _delete = _find_row_buttons_for_username(msg, uname)
+    if not loc_btn:
+        raise AssertionError(f"Не найдена кнопка '📍 Локация' для @{uname}. Кнопки: {get_all_buttons(msg)}")
+
+    async def _set():
+        import asyncio
+        await context.client._gaussian_delay(0.4, 1.0)
+        await loc_btn.click()
+        await asyncio.sleep(1.5)
+        await context.client.human_send_and_wait(context.bot_entity, loc, timeout=30)
+        await asyncio.sleep(2.0)
+        messages = await context.client.client.get_messages(context.bot_entity, limit=1)
+        if messages:
+            context.last_response = messages[0]
+
+    run_async(context, _set())
+    logger.info("✓ default_location установлен для @%s: %s (UI)", uname, loc)
 
 
 # =============================================================================
@@ -1067,6 +1203,47 @@ def step_open_event_card_from_selected_post(context):
 
     run_async(context, _click())
     logger.info("✓ Открыта карточка контрольного события: id=%s", event_id)
+
+
+@then("описание события отрерайчено (не дословно)")
+def step_description_is_rewritten(context):
+    """Basic guard: description must not equal the latest telegram source text verbatim."""
+    event_id = getattr(context, "control_event_id", None)
+    if not event_id:
+        # Fallback to any last event id if a scenario opened a card by title.
+        event_id = getattr(context, "last_event_id", None)
+    if not event_id:
+        raise AssertionError("Нет event_id для проверки рерайта")
+
+    db_path = _db_path()
+    conn = sqlite3.connect(db_path, timeout=30)
+    try:
+        _ensure_event_source_table(conn)
+        cur = conn.cursor()
+        row = cur.execute(
+            """
+            SELECT e.description, es.source_text
+            FROM event e
+            JOIN event_source es ON es.event_id = e.id
+            WHERE e.id = ?
+              AND es.source_type LIKE 'telegram%'
+            ORDER BY es.imported_at DESC
+            LIMIT 1
+            """,
+            (int(event_id),),
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        raise AssertionError(f"Для события id={event_id} не найден telegram source_text")
+    desc, src_text = (row[0] or "").strip(), (row[1] or "").strip()
+    if not desc:
+        raise AssertionError("Пустое описание события")
+    if not src_text:
+        raise AssertionError("Пустой source_text у telegram источника")
+    if _normalize_text(desc) == _normalize_text(src_text):
+        raise AssertionError("Описание совпадает дословно с текстом источника (ожидался рерайт)")
+    logger.info("✓ Описание не совпадает дословно с source_text (рерайт присутствует)")
 
 
 @when("я закрываю карточку события")

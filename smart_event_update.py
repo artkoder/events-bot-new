@@ -35,9 +35,9 @@ _TICKETS_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Promotions / announcements that must not become events.
-# Includes discount/promo posts and non-event congratulatory posts with schedules.
-_PROMO_RE = re.compile(
+# Promotions are often mixed into real event announcements. Product requirement:
+# strip purely promotional fragments, but keep actual event facts (date/time/place/contacts).
+_PROMO_STRIP_RE = re.compile(
     r"\b("
     r"акци(?:я|и|ю|ях)|"
     r"скидк\w*|"
@@ -46,8 +46,7 @@ _PROMO_RE = re.compile(
     r"бонус\w*|"
     r"кэшбек\w*|кэшбэк\w*|кэшбэ\w*|"
     r"подарок\w*|"
-    r"сертификат\w*|"
-    r"розыгрыш|разыгрыва\w*|розыгра\w*|конкурс|giveaway"
+    r"сертификат\w*"
     r")\b",
     re.IGNORECASE,
 )
@@ -205,12 +204,22 @@ def _looks_like_promo_or_congrats(*texts: str | None) -> bool:
     if not combined:
         return False
     value = combined.casefold()
-    if _PROMO_RE.search(value):
-        return True
     # Congratulation posts are treated as non-event content by product requirements.
     if _CONGRATS_RE.search(value):
         return True
     return False
+
+
+def _strip_promo_lines(text: str | None) -> str | None:
+    if not text:
+        return None
+    lines: list[str] = []
+    for line in str(text).splitlines():
+        if _PROMO_STRIP_RE.search(line):
+            continue
+        lines.append(line)
+    cleaned = "\n".join(lines).strip()
+    return cleaned or None
 
 
 def _format_ticket_price(
@@ -426,16 +435,17 @@ async def _ask_gemma_text(
 
 
 async def _rewrite_description_journalistic(candidate: EventCandidate) -> str | None:
-    """Produce a non-verbatim, journalist-style description for Telegram imports.
+    """Produce a non-verbatim, journalist-style description for external imports.
 
-    Keep this best-effort: failures must not block event creation.
+    Keep this best-effort: failures must not block event creation/merge.
     """
     if SMART_UPDATE_LLM != "gemma":
         return None
-    if candidate.source_type != "telegram":
+    if candidate.source_type in ("bot", "manual"):
         return None
 
     base = _strip_hashtags(candidate.raw_excerpt or candidate.source_text) or ""
+    base = _strip_promo_lines(base) or base
     base = _strip_private_use(base) or base
     if len(base) < 80:
         return None
@@ -453,15 +463,18 @@ async def _rewrite_description_journalistic(candidate: EventCandidate) -> str | 
         "is_free": candidate.is_free,
         "event_type": candidate.event_type,
         "festival": candidate.festival,
-        "raw_excerpt": _clip(candidate.raw_excerpt, 800),
-        "source_text": _clip(candidate.source_text, 1200),
+        "source_type": candidate.source_type,
+        "raw_excerpt": _clip(_strip_promo_lines(candidate.raw_excerpt) or candidate.raw_excerpt, 800),
+        "source_text": _clip(_strip_promo_lines(candidate.source_text) or candidate.source_text, 1200),
         "poster_texts": [_clip(p.ocr_text, 350) for p in candidate.posters if p.ocr_text][:2],
     }
     prompt = (
         "Ты — культурный журналист. Сделай журналистский рерайт анонса мероприятия. "
         "Передай суть и атмосферу, но НЕ копируй исходные фразы дословно. "
         "Не добавляй выдуманных фактов, используй только то, что есть в данных. "
-        "Без эмодзи и без хэштегов. Один абзац, 2–5 предложений.\n\n"
+        "Без эмодзи и без хэштегов. "
+        "Если в исходных данных есть URL/телефоны/контакты, не искажай их: лучше перенеси в конец, чем потерять. "
+        "Один абзац, 2–6 предложений.\n\n"
         f"Данные:\n{json.dumps(payload, ensure_ascii=False)}"
     )
     text = await _ask_gemma_text(prompt, max_tokens=420, label="rewrite", temperature=0.0)
@@ -774,8 +787,8 @@ async def _llm_match_event(
             "location_address": candidate.location_address,
             "city": candidate.city,
             "ticket_link": candidate.ticket_link,
-            "text": _clip(candidate.source_text, 1200),
-            "raw_excerpt": _clip(candidate.raw_excerpt, 800),
+            "text": _clip(_strip_promo_lines(candidate.source_text) or candidate.source_text, 1200),
+            "raw_excerpt": _clip(_strip_promo_lines(candidate.raw_excerpt) or candidate.raw_excerpt, 800),
             "poster_texts": [
                 _clip(p.ocr_text, 400) for p in candidate.posters if p.ocr_text
             ][:3],
@@ -855,8 +868,8 @@ async def _llm_merge_event(
         },
         "candidate": {
             "title": candidate.title,
-            "raw_excerpt": _clip(candidate.raw_excerpt, 1200),
-            "text": _clip(candidate.source_text, 2000),
+            "raw_excerpt": _clip(_strip_promo_lines(candidate.raw_excerpt) or candidate.raw_excerpt, 1200),
+            "text": _clip(_strip_promo_lines(candidate.source_text) or candidate.source_text, 2000),
             "ticket_link": candidate.ticket_link,
             "ticket_price_min": candidate.ticket_price_min,
             "ticket_price_max": candidate.ticket_price_max,
@@ -957,6 +970,7 @@ def _apply_ticket_fields(
 
 def _candidate_has_new_text(candidate: EventCandidate, event: Event) -> bool:
     candidate_text = _strip_hashtags(candidate.raw_excerpt or candidate.source_text) or ""
+    candidate_text = _strip_promo_lines(candidate_text) or candidate_text
     if not candidate_text:
         return False
     event_text = _strip_hashtags(event.description) or (event.description or "")
@@ -1019,12 +1033,13 @@ async def smart_event_update(
             candidate.source_url,
         )
         return SmartUpdateResult(status="invalid", reason="title_only_hashtags")
-    clean_source_text = _strip_private_use(_strip_hashtags(candidate.source_text)) or (
+    raw_source_text = _strip_private_use(_strip_hashtags(candidate.source_text)) or (
         _strip_hashtags(candidate.source_text) or ""
     )
-    clean_raw_excerpt = _strip_private_use(_strip_hashtags(candidate.raw_excerpt)) or _strip_hashtags(candidate.raw_excerpt)
+    raw_excerpt = _strip_private_use(_strip_hashtags(candidate.raw_excerpt)) or _strip_hashtags(candidate.raw_excerpt)
 
-    if _looks_like_ticket_giveaway(clean_title, clean_source_text, clean_raw_excerpt):
+    # Skip hard non-events before promo stripping.
+    if _looks_like_ticket_giveaway(clean_title, raw_source_text, raw_excerpt):
         logger.info(
             "smart_update.skip reason=ticket_giveaway source_type=%s source_url=%s title=%s",
             candidate.source_type,
@@ -1033,8 +1048,8 @@ async def smart_event_update(
         )
         return SmartUpdateResult(status="skipped_giveaway", reason="ticket_giveaway")
 
-    # Promotions and non-event congratulatory posts must not become events or sources.
-    if _looks_like_promo_or_congrats(clean_title, clean_source_text, clean_raw_excerpt):
+    # Congratulation posts must not become events or sources.
+    if _looks_like_promo_or_congrats(clean_title, raw_source_text, raw_excerpt):
         logger.info(
             "smart_update.skip reason=promo_or_congrats source_type=%s source_url=%s title=%s",
             candidate.source_type,
@@ -1042,6 +1057,9 @@ async def smart_event_update(
             _clip_title(clean_title),
         )
         return SmartUpdateResult(status="skipped_promo", reason="promo_or_congrats")
+
+    clean_source_text = _strip_promo_lines(raw_source_text) or raw_source_text or ""
+    clean_raw_excerpt = _strip_promo_lines(raw_excerpt) or raw_excerpt
 
     if check_source_url and candidate.source_url:
         async with db.get_session() as session:
@@ -1089,12 +1107,28 @@ async def smart_event_update(
         if time_filtered:
             shortlist = time_filtered
 
+    posters_map: dict[int, list[EventPoster]] = {}
+    if shortlist:
+        event_ids = [ev.id for ev in shortlist if ev.id]
+        posters_map = await _fetch_event_posters_map(db, event_ids)
+
     allow_parallel = _allow_parallel_events(candidate.location_name)
-    candidate_hall = _extract_hall_hint(candidate.source_text)
-    if allow_parallel and candidate_hall:
+    candidate_poster_texts = [p.ocr_text for p in candidate.posters if p.ocr_text]
+    candidate_hall = _extract_hall_hint(
+        (candidate.source_text or "") + "\n" + "\n".join(candidate_poster_texts)
+    )
+    if allow_parallel and candidate_hall and shortlist:
         filtered: list[Event] = []
         for ev in shortlist:
-            hall = _extract_hall_hint((ev.source_text or "") + "\n" + (ev.description or ""))
+            ev_posters = posters_map.get(ev.id or 0, [])
+            ev_poster_texts = [p.ocr_text for p in ev_posters if p.ocr_text]
+            hall = _extract_hall_hint(
+                (ev.source_text or "")
+                + "\n"
+                + (ev.description or "")
+                + "\n"
+                + "\n".join(ev_poster_texts)
+            )
             if hall and hall != candidate_hall:
                 continue
             filtered.append(ev)
@@ -1103,10 +1137,7 @@ async def smart_event_update(
     if not shortlist:
         match_event = None
         match_reason = "shortlist_empty"
-        posters_map: dict[int, list[EventPoster]] = {}
     else:
-        event_ids = [ev.id for ev in shortlist if ev.id]
-        posters_map = await _fetch_event_posters_map(db, event_ids)
 
         # If after anchor filtering we have exactly one candidate, match it without LLM.
         # This keeps /addevent_raw and other deterministic flows working in local/dev envs
@@ -1184,14 +1215,13 @@ async def smart_event_update(
                 and (candidate.ticket_price_max in (0, None))
             )
         description_value = (clean_raw_excerpt or clean_source_text or clean_title or "").strip()
-        if candidate.source_type == "telegram":
-            try:
-                rewritten = await _rewrite_description_journalistic(candidate)
-            except Exception:  # pragma: no cover - defensive
-                logger.warning("smart_update: description rewrite failed", exc_info=True)
-                rewritten = None
-            if rewritten:
-                description_value = rewritten
+        try:
+            rewritten = await _rewrite_description_journalistic(candidate)
+        except Exception:  # pragma: no cover - defensive
+            logger.warning("smart_update: description rewrite failed", exc_info=True)
+            rewritten = None
+        if rewritten:
+            description_value = rewritten
         new_event = Event(
             title=clean_title,
             description=description_value,
@@ -1662,7 +1692,8 @@ async def _ensure_event_source(
 ) -> tuple[bool, bool]:
     if not event_id or not candidate.source_url:
         return False, False
-    clean_source_text = _strip_private_use(_strip_hashtags(candidate.source_text)) or _strip_hashtags(candidate.source_text)
+    raw = _strip_private_use(_strip_hashtags(candidate.source_text)) or _strip_hashtags(candidate.source_text)
+    clean_source_text = _strip_promo_lines(raw) or raw
     existing = (
         await session.execute(
             select(EventSource).where(
