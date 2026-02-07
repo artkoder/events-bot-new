@@ -34,6 +34,7 @@
 - Fixed `TypeError` in parsing results summary when using date objects (Philharmonia parser).
 
 ## [Unreleased]
+- Partner event notifications in the admin chat now include the first event photo plus Telegraph and VK links so operators know to review or edit the VK post.
 
 ## [1.10.0] - 2026-01-24
 ### Added
