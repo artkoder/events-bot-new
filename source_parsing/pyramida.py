@@ -31,6 +31,9 @@ from source_parsing.handlers import (
     add_new_event_via_queue,
     update_event_ticket_status,
     update_linked_events,
+    event_has_parser_source,
+    unpack_add_event_result,
+    classify_add_event_outcome,
     find_existing_event,
     normalize_location_name,
     EVENT_ADD_DELAY_SECONDS,
@@ -433,9 +436,17 @@ async def process_pyramida_events(
             event.title,
         )
         
+        parser_source_present = False
         if existing_id:
+            parser_source_present = await event_has_parser_source(
+                db,
+                existing_id,
+                event.source_type,
+                event.url,
+            )
+
+        if existing_id and parser_source_present:
             # Update ticket status
-            from source_parsing.handlers import update_event_ticket_status
             success = await update_event_ticket_status(
                 db,
                 existing_id,
@@ -475,24 +486,30 @@ async def process_pyramida_events(
                     logger.warning("pyramida_process: ocr failed: %s", e)
             
             # Add new event
-            new_id, was_added = await add_new_event_via_queue(
-                db,
-                bot,
-                event,
-                current_progress,
-                len(events),
-                poster_media=poster_media_list,
+            new_id, was_added, status = unpack_add_event_result(
+                await add_new_event_via_queue(
+                    db,
+                    bot,
+                    event,
+                    current_progress,
+                    len(events),
+                    poster_media=poster_media_list,
+                )
             )
-            
-            if new_id:
-                if was_added:
-                    stats.new_added += 1
-                else:
-                    stats.skipped += 1
-                # Delay between additions
-                await asyncio.sleep(EVENT_ADD_DELAY_SECONDS)
+
+            outcome = classify_add_event_outcome(new_id, was_added, status)
+            if outcome == "added" and new_id:
+                stats.new_added += 1
+            elif outcome == "updated" and new_id:
+                stats.ticket_updated += 1
+            elif outcome == "skipped":
+                stats.skipped += 1
             else:
                 stats.failed += 1
+
+            if new_id and outcome in {"added", "updated"}:
+                # Delay between additions/merges
+                await asyncio.sleep(EVENT_ADD_DELAY_SECONDS)
     
     logger.info(
         "pyramida_process: complete total=%d added=%d updated=%d failed=%d",

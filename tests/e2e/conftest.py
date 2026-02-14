@@ -17,8 +17,46 @@ from tests.e2e.human_client import HumanUserClient, create_human_client
 logger = logging.getLogger(__name__)
 
 
+def _load_dotenv_local() -> None:
+    """Best-effort `.env` loader for local dev/E2E.
+
+    Pytest does not auto-export `.env` into os.environ; many IDE runs rely on it.
+    We set only missing variables to avoid overriding explicit env configuration.
+    """
+    try:
+        from pathlib import Path
+
+        env_path = Path(__file__).resolve().parents[2] / ".env"
+    except Exception:
+        return
+    if not env_path.exists():
+        return
+    try:
+        lines = env_path.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return
+    for line in lines:
+        s = (line or "").strip()
+        if not s or s.startswith("#"):
+            continue
+        if s.startswith("export "):
+            s = s[len("export ") :].strip()
+        if "=" not in s:
+            continue
+        k, v = s.split("=", 1)
+        key = (k or "").strip()
+        if not key or key in os.environ:
+            continue
+        val = (v or "").strip()
+        if (len(val) >= 2) and ((val[0] == val[-1]) and val[0] in ("'", '"')):
+            val = val[1:-1]
+        if val:
+            os.environ[key] = val
+
+
 def pytest_configure(config):
     """Register custom markers."""
+    _load_dotenv_local()
     config.addinivalue_line(
         "markers",
         "e2e: marks tests as E2E tests requiring real Telegram credentials"

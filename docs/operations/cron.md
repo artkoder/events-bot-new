@@ -7,10 +7,13 @@ The bot uses APScheduler to run periodic maintenance tasks on a fixed schedule. 
 - **partner reminders** – reminds inactive partners after 09:00 local time.
 - **cleanup old events** – removes past events after 03:00 local time and notifies the superadmin.
 - **VK daily posts and polls** – publishes daily announcements and festival polls when posting times are reached and a VK group is configured.
+- **VK auto queue import** – imports queued VK posts (`vk_inbox`) via Smart Update on a fixed schedule when enabled.
 - **Telegraph pages sync** – refreshes month and weekend Telegraph pages after 01:00 local time. Disabled by default; enable with `ENABLE_NIGHTLY_PAGE_SYNC=1`. Nightly runs update both page content and the month navigation block.
 - **festival navigation rebuild** – rebuilds festival navigation and landing page nightly.
 - **source parsing** – nightly + midday `/parse` runs when enabled (midday skips Kaggle if source pages did not change).
-- **3D previews** – scheduled `/3di` run for new events only.
+- **3D previews** – scheduled `/3di` run for “new” events:
+  - events without `preview_3d_url` and with `photo_count >= 2`;
+  - events whose 3D preview was invalidated because the illustration set changed (Smart Update clears `preview_3d_url` when `photo_urls` change).
 - **Telegram monitoring** – scheduled daily import from Telegram sources (channels/groups) via Kaggle when enabled.
 - **kaggle recovery** – resumes in-flight Kaggle jobs after restarts.
 
@@ -27,6 +30,9 @@ The bot uses APScheduler to run periodic maintenance tasks on a fixed schedule. 
 - `THREEDI_TIMES_LOCAL` / `THREEDI_TZ` – `/3di` schedule times in local time zone.
 - `ENABLE_TG_MONITORING` – enable daily Telegram monitoring job.
 - `TG_MONITORING_TIME_LOCAL` / `TG_MONITORING_TZ` – Telegram monitoring schedule time in local time zone.
+- `ENABLE_VK_AUTO_IMPORT` – enable VK inbox auto import job.
+- `VK_AUTO_IMPORT_TIMES_LOCAL` / `VK_AUTO_IMPORT_TZ` – VK auto-import schedule times in local time zone.
+- `VK_AUTO_IMPORT_LIMIT` – max number of VK inbox rows to process per scheduled run.
 - `ENABLE_KAGGLE_RECOVERY` – enable background Kaggle recovery loop.
 - `KAGGLE_RECOVERY_INTERVAL_MINUTES` – recovery interval in minutes (default: 5).
 - `KAGGLE_JOBS_PATH` – path to Kaggle recovery registry JSON (default: `/data/kaggle_jobs.json`).

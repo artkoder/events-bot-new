@@ -15,7 +15,7 @@ from typing import Any, Awaitable, Callable
 from sqlalchemy import select
 
 from db import Database
-from models import TelegramSource
+from models import TelegramSource, TelegramSourceForceMessage
 from source_parsing.telegram.deduplication import get_month_context_urls
 from source_parsing.telegram.handlers import (
     TelegramMonitorEventInfo,
@@ -27,6 +27,28 @@ from video_announce.kaggle_client import KaggleClient
 from .split_secrets import encrypt_secret
 
 logger = logging.getLogger(__name__)
+
+_BOT_USERNAME_CACHE: str | None = None
+
+
+async def _resolve_bot_username(bot) -> str | None:
+    global _BOT_USERNAME_CACHE
+    if _BOT_USERNAME_CACHE:
+        return _BOT_USERNAME_CACHE
+    try:
+        me = await bot.get_me()
+        username = (getattr(me, "username", None) or "").strip().lstrip("@")
+        if username:
+            _BOT_USERNAME_CACHE = username
+            return username
+    except Exception:
+        return None
+    return None
+
+
+def _log_deeplink(bot_username: str, event_id: int) -> str:
+    safe = (bot_username or "").strip().lstrip("@")
+    return f"https://t.me/{safe}?start=log_{int(event_id)}"
 
 CONFIG_DATASET_CIPHER = os.getenv("TG_MONITORING_CONFIG_CIPHER", "telegram-monitor-cipher")
 CONFIG_DATASET_KEY = os.getenv("TG_MONITORING_CONFIG_KEY", "telegram-monitor-key")
@@ -49,6 +71,11 @@ POLL_INTERVAL_SECONDS = int(os.getenv("TG_MONITORING_POLL_INTERVAL", "30"))
 TIMEOUT_MINUTES = int(os.getenv("TG_MONITORING_TIMEOUT_MINUTES", "90"))
 KAGGLE_STARTUP_WAIT_SECONDS = int(os.getenv("TG_MONITORING_STARTUP_WAIT", "10"))
 MAX_TG_MESSAGE_LEN = int(os.getenv("TG_MONITORING_MAX_MESSAGE_LEN", "3800"))
+KEEP_FORCE_MESSAGE_IDS = (os.getenv("TG_MONITORING_KEEP_FORCE_MESSAGE_IDS") or "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+}
 
 
 def _read_env_file_value(key: str) -> str | None:
@@ -122,6 +149,25 @@ async def _build_config_payload(
             select(TelegramSource).where(TelegramSource.enabled.is_(True))
         )
         sources = res.scalars().all()
+        force_map: dict[int, list[int]] = {}
+        source_ids = [src.id for src in sources if src.id is not None]
+        if source_ids:
+            res_force = await session.execute(
+                select(TelegramSourceForceMessage).where(
+                    TelegramSourceForceMessage.source_id.in_(source_ids)
+                )
+            )
+            for row in res_force.scalars().all():
+                force_map.setdefault(row.source_id, []).append(row.message_id)
+            if force_map and not KEEP_FORCE_MESSAGE_IDS:
+                # Treat force-message requests as one-shot by default to avoid re-processing
+                # the same old posts on every monitoring run.
+                await session.execute(
+                    TelegramSourceForceMessage.__table__.delete().where(
+                        TelegramSourceForceMessage.source_id.in_(list(force_map.keys()))
+                    )
+                )
+                await session.commit()
     payload = {
         "schema_version": 1,
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -132,6 +178,7 @@ async def _build_config_payload(
                 "default_location": src.default_location,
                 "default_ticket_link": src.default_ticket_link,
                 "trust_level": src.trust_level,
+                "force_message_ids": sorted(set(force_map.get(src.id or -1, []))),
             }
             for src in sources
         ],
@@ -247,6 +294,24 @@ def _create_dataset(
             logger.exception(
                 "tg_monitor.dataset_create_failed retry=delete dataset=%s", slug
             )
+            # Common case on frequent E2E/prod reruns: dataset id already exists.
+            # Prefer creating a new dataset version instead of hard failing.
+            try:
+                client.create_dataset_version(
+                    tmp_path,
+                    version_notes=f"refresh {slug_suffix}",
+                    quiet=True,
+                    convert_to_csv=False,
+                    dir_mode="zip",
+                )
+                logger.info(
+                    "tg_monitor.dataset_version_created dataset=%s", slug
+                )
+                return slug
+            except Exception:
+                logger.exception(
+                    "tg_monitor.dataset_version_failed dataset=%s", slug
+                )
             try:
                 client.delete_dataset(slug, no_confirm=True)
             except Exception:
@@ -495,6 +560,7 @@ def _format_event_block(
     events: list[TelegramMonitorEventInfo],
     *,
     icon: str,
+    bot_username: str | None = None,
 ) -> list[str]:
     lines = [f"{icon} <b>{html.escape(label)}</b>: {len(events)}", ""]
     for item in events:
@@ -514,11 +580,68 @@ def _format_event_block(
             line += f" — {' '.join(meta)}"
         lines.append(line)
         if item.source_link:
-            lines.append(f"TG: {item.source_link}")
+            lines.append(f"Источник: {html.escape(item.source_link)}")
+        if item.telegraph_url:
+            lines.append(f"Telegraph: {html.escape(item.telegraph_url)}")
+        else:
+            lines.append("Telegraph: ⏳ в очереди")
+        if item.log_cmd:
+            if bot_username:
+                href = html.escape(_log_deeplink(bot_username, int(item.event_id)), quote=True)
+                text = html.escape(item.log_cmd)
+                lines.append(f"Лог: <a href=\"{href}\">{text}</a>")
+            else:
+                lines.append(f"Лог: {html.escape(item.log_cmd)}")
+        ics_url = (item.ics_url or "").strip()
+        if ics_url:
+            lines.append(f"ICS: {html.escape(ics_url)}")
+        else:
+            # If there's a time, ICS is expected; otherwise it's optional.
+            if (item.time or "").strip():
+                lines.append("ICS: ⏳")
+            else:
+                lines.append("ICS: —")
+        stats = item.fact_stats or {}
+        try:
+            photos = int(getattr(item, "photo_count", None) or 0)
+        except Exception:
+            photos = 0
+        added_posters_raw = getattr(item, "added_posters", None)
+        try:
+            added_posters = int(added_posters_raw) if added_posters_raw is not None else None
+        except Exception:
+            added_posters = None
+        if added_posters is None:
+            photos_label = f"Иллюстрации: {'⚠️0' if photos == 0 else photos}"
+        else:
+            photos_label = f"Иллюстрации: +{added_posters}, всего {'⚠️0' if photos == 0 else photos}"
+        if stats:
+            added = int(stats.get("added") or 0)
+            dup = int(stats.get("duplicate") or 0)
+            conf = int(stats.get("conflict") or 0)
+            note = int(stats.get("note") or 0)
+            lines.append(f"Факты: ✅{added} ↩️{dup} ⚠️{conf} ℹ️{note} | {photos_label}")
+        else:
+            lines.append(f"Факты: — | {photos_label}")
+        metrics = item.metrics or {}
+        if isinstance(metrics, dict) and metrics:
+            parts: list[str] = []
+            views = metrics.get("views")
+            likes = metrics.get("likes")
+            if isinstance(views, int) and views >= 0:
+                parts.append(f"views={views}")
+            if isinstance(likes, int) and likes >= 0:
+                parts.append(f"likes={likes}")
+            reactions = metrics.get("reactions")
+            if isinstance(reactions, dict):
+                for k in ("👍", "❤", "❤️", "🔥"):
+                    v = reactions.get(k)
+                    if isinstance(v, int) and v > 0:
+                        parts.append(f"{k}={v}")
+            if parts:
+                lines.append(f"Метрики: {html.escape(' '.join(parts))}")
         if item.source_excerpt:
             lines.append(f"Текст: {html.escape(item.source_excerpt)}")
-        if not item.telegraph_url:
-            lines.append("Telegraph: ⏳ в очереди")
         lines.append("")
     return lines
 
@@ -528,16 +651,38 @@ async def _send_event_details(
     chat_id: int,
     report: TelegramMonitorReport,
 ) -> None:
+    bot_username = await _resolve_bot_username(bot) if bot else None
     sections: list[list[str]] = []
     if report.created_events:
         sections.append(
-            _format_event_block("Созданные события", report.created_events, icon="✅")
+            _format_event_block(
+                "Созданные события",
+                report.created_events,
+                icon="✅",
+                bot_username=bot_username,
+            )
         )
     if report.merged_events:
         sections.append(
-            _format_event_block("Обновлённые события", report.merged_events, icon="🔄")
+            _format_event_block(
+                "Обновлённые события",
+                report.merged_events,
+                icon="🔄",
+                bot_username=bot_username,
+            )
         )
     if not sections:
+        await bot.send_message(
+            chat_id,
+            (
+                "ℹ️ <b>Smart Update (детали событий)</b>\n"
+                "✅ Созданные события: 0\n"
+                "🔄 Обновлённые события: 0\n"
+                "Изменений по событиям в этом прогоне нет."
+            ),
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
         return
     for lines in sections:
         for chunk in _chunk_lines(lines):
@@ -740,6 +885,74 @@ async def _run_telegram_monitor_locked(
         )
         report = await process_telegram_results(results_path, db)
         logger.info("tg_monitor: completed in %.1fs", duration)
+
+        # Optional: drain only the jobs for the affected events. This makes local/E2E runs
+        # deterministic without enabling a global outbox worker that would try to process
+        # the entire prod snapshot backlog.
+        drain_raw = (os.getenv("TG_MONITORING_DRAIN_EVENT_JOBS") or "").strip().lower()
+        if drain_raw:
+            drain = drain_raw in {"1", "true", "yes"}
+        else:
+            # Default for operator-triggered runs: build Telegraph/ICS for the touched events
+            # so the report contains actionable links (Telegraph + /log + ICS).
+            if bot and chat_id:
+                drain = True
+            else:
+                # Non-interactive runs (no chat context): follow worker presence.
+                worker_raw = (os.getenv("ENABLE_JOB_OUTBOX_WORKER") or "1").strip().lower()
+                drain = worker_raw not in {"1", "true", "yes"}
+
+        event_ids = sorted(
+            {
+                int(info.event_id)
+                for info in (report.created_events + report.merged_events)
+                if getattr(info, "event_id", None)
+            }
+        )
+
+        drain_max = int(os.getenv("TG_MONITORING_DRAIN_MAX_EVENTS", "12") or 12)
+        should_drain = bool(drain and bot and event_ids and len(event_ids) <= max(1, drain_max))
+        if drain and bot and event_ids and not should_drain and chat_id:
+            await bot.send_message(
+                chat_id,
+                f"ℹ️ Пропускаю синхронный drain (events={len(event_ids)} > max={drain_max}). "
+                "Telegraph/ICS появятся позже через JobOutbox.",
+                disable_web_page_preview=True,
+            )
+        if should_drain and bot and event_ids:
+            try:
+                from main import JobTask, run_event_update_jobs
+
+                allowed = {JobTask.ics_publish, JobTask.telegraph_build}
+                if chat_id:
+                    await bot.send_message(
+                        chat_id,
+                        "⏳ Обновляю Telegraph/ICS для созданных/обновлённых событий…",
+                        disable_web_page_preview=True,
+                    )
+                for eid in event_ids:
+                    await run_event_update_jobs(
+                        db,
+                        bot,
+                        event_id=eid,
+                        allowed_tasks=allowed,
+                    )
+                logger.info(
+                    "tg_monitor.drain_jobs completed events=%d allowed=%s",
+                    len(event_ids),
+                    [t.value for t in sorted(allowed, key=lambda x: x.value)],
+                )
+            except Exception:
+                logger.exception("tg_monitor.drain_jobs failed")
+
+        # Refresh per-event URLs/stats after optional draining so operator report is actionable.
+        try:
+            from source_parsing.telegram.handlers import refresh_telegram_monitor_event_info
+
+            for info in (report.created_events + report.merged_events):
+                await refresh_telegram_monitor_event_info(db, info)
+        except Exception:
+            logger.exception("tg_monitor.refresh_event_info failed")
 
         if bot and chat_id:
             try:

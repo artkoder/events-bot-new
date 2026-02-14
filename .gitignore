@@ -3,11 +3,13 @@ __pycache__/
 .db
 .env
 .pytest_cache/
+.vscode/
 
 # Production database snapshots and WAL files
 db_prod_snapshot.sqlite
 db_prod_snapshot.sqlite-shm
 db_prod_snapshot.sqlite-wal
+*.downloaded_at
 
 # Local database WAL files
 db.sqlite-shm
@@ -53,6 +55,8 @@ artifacts/*
 
 # Run outputs
 *.pid
+*.session
+*.session-journal
 bot_logs.txt
 bot_output*.txt
 captured_logs.txt

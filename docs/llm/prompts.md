@@ -4,6 +4,9 @@ This repository uses an external LLM (model **4o**) for text parsing and
 normalisation. The current instruction set for the model is stored here so that
 it can be refined over time.
 
+Note: this prompt is used by the **4o-based draft extraction/parsing** flow (e.g. `/parse` helpers and VK draft extraction).
+Smart Update (merge/match/rewrite/facts) uses **Gemma via Google AI** with 4o as a fallback only when Gemma fails; see `docs/features/smart-event-update/README.md`.
+
 ```
 MASTER-PROMPT for Codex ― Telegram Event Bot
 You receive long multi-line text describing one **or several** events.
@@ -25,7 +28,7 @@ ticket_price_max  - maximum ticket price as integer or null
 ticket_link       - URL for purchasing tickets **or** registration form if present; ignore map service links such as https://yandex.ru/maps/
 is_free           - true if explicitly stated the event is free
 pushkin_card     - true if the event accepts the Пушкинская карта
-event_type       - one of: спектакль, выставка, концерт, ярмарка, лекция, встреча, мастер-класс, кинопоказ
+event_type       - one of: спектакль, выставка, концерт, ярмарка, лекция, встреча, мастер-класс, кинопоказ, спорт
 emoji            - an optional emoji representing the event
 end_date         - end date for multi-day events or null
 search_digest    - search summary text (see guidelines below)

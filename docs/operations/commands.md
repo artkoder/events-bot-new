@@ -14,6 +14,8 @@
 | `/vkgroup <id|off>` | required id or `off` | Set or disable VK group for daily announcements. |
 | `/vktime today|added <HH:MM>` | required type and time | Change VK posting times (default 08:00/20:00). |
 | `/vkphotos` | - | Toggle sending images to VK posts. |
+| `/vk_auto_import [N|all] [--include-skipped]` | optional limit flags | Суперадмин: авторазбор очереди VK (таблица `vk_inbox`) через Smart Update. По умолчанию без аргументов обрабатывает всю активную очередь; `N` ограничивает количество постов. Показывает прогресс `X/Y`, унифицированный отчёт с фактами и количеством добавленных иллюстраций, ссылки на Telegraph и `/log`. |
+| `/vk_auto_import_stop` | - | Суперадмин: запросить остановку текущего прогона `/vk_auto_import` (остановка после завершения текущего поста). |
 | `/imp_groups_30d` | - | Суперадмин. Показать агрегированную статистику импорта за 30 дней по группам из Supabase-вьюха `vk_import_by_group`. Пример ответа:<br>`Импорт из VK по группам за последние 30 дн.:`<br>`1. club123: Импорт: 12, Отклонено: 4`. |
 | `/imp_daily_14d` | - | Суперадмин. Сводка импорта по дням за последние 14 дней из `vk_import_daily`. Пример:<br>`Импорт из VK по дням за последние 14 дн.:`<br>`2024-05-17: Импорт: 6, Отклонено: 1`. |
 | `/vk_misses [N]` | optional limit (default 10) | Суперадмин выгружает свежие пропуски из Supabase (`vk_misses_sample`), бот показывает карточки с текстом, ссылкой и причинами фильтрации, прикладывает до 10 изображений и добавляет кнопки «Отклонено верно»/«На доработку». Кнопка доработки записывает Markdown в `VK_MISS_REVIEW_FILE` (по умолчанию `/data/vk_miss_review.md`). |

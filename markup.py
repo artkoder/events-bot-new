@@ -13,22 +13,24 @@ _TEXT_LINK_RE = re.compile(r'([^<\[]+?)\s*\((https?://(?:\\\)|[^)])+)\)')
 _VK_LINK_RE = re.compile(r'\[([^|\]]+)\|([^\]]+)\]')
 _TG_MENTION_RE = re.compile(r'(?<![\w/@])@([a-zA-Z0-9_]{4,32})')
 
-# Phone number patterns for tel: links
-# Matches: +7 (495) 123-45-67, 8-800-555-35-35, +7 999 123 45 67, (4012) 12-34-56
+# Phone number patterns for tel: links (Telegraph).
+# We intentionally match only phone-looking sequences (starting with +7 / 8 / "(...)" )
+# to avoid false positives like dates ("2026-02-13").
+#
+# Examples we want to match:
+# - +7 (495) 123-45-67
+# - 8-800-555-35-35
+# - +7 999 123 45 67
+# - (4012) 12-34-56
+# - 8 401 43 3 19 17
 _PHONE_RE = re.compile(
-    r'(?<![/\d])'  # Not preceded by / or digit (avoid matching parts of URLs)
-    r'(\+7|8)?'  # Optional country code
-    r'\s*'
-    r'[\s(-]*'
-    r'(\d{3,4})'  # Area code or first group
-    r'[\s)-]*'
-    r'(\d{2,3})'  # Second group
-    r'[\s-]*'
-    r'(\d{2})'  # Third group
-    r'[\s-]*'
-    r'(\d{2})'  # Fourth group
-    r'(?![/\d])',  # Not followed by / or digit
-    re.VERBOSE
+    r"(?<![/\w])"
+    r"("
+    r"(?:\+7|8)\s*[\s(-]*\d{3,5}[\s)-]*[\d\s-]{5,}\d"
+    r"|\(\d{3,5}\)\s*[\d\s-]{5,}\d"
+    r")"
+    r"(?![/\w])",
+    re.IGNORECASE,
 )
 
 
@@ -43,7 +45,29 @@ def simple_md_to_html(text: str) -> str:
     text = MD_BOLD.sub(r'<b>\2</b>', text)
     text = MD_ITALIC.sub(r'<i>\2</i>', text)
 
-    return text.replace('\n', '<br>')
+    # Blockquotes: lines starting with "> " become <blockquote> blocks.
+    # Note: at this point the input is already HTML-escaped, so ">" becomes "&gt;".
+    lines = text.split("\n")
+    out: list[str] = []
+    quote_lines: list[str] = []
+
+    def flush_quote() -> None:
+        nonlocal quote_lines
+        if not quote_lines:
+            return
+        out.append("<blockquote>" + "\n".join(quote_lines) + "</blockquote>")
+        quote_lines = []
+
+    for raw in lines:
+        m = re.match(r"^\s*&gt;\s+(.+)$", raw)
+        if m:
+            quote_lines.append(m.group(1))
+            continue
+        flush_quote()
+        out.append(raw)
+    flush_quote()
+
+    return "\n".join(out).replace("\n", "<br>")
 
 
 
@@ -67,30 +91,19 @@ def linkify_for_telegraph(text_or_html: str) -> str:
         return f'<a href="https://t.me/{username}">@{username}</a>'
 
     def repl_phone(m: re.Match[str]) -> str:
-        # Reconstruct the original matched text
-        original = m.group(0)
-        # Extract parts: country_code, area, group2, group3, group4
-        country = m.group(1) or ""
-        area = m.group(2)
-        g2 = m.group(3)
-        g3 = m.group(4)
-        g4 = m.group(5)
-        # Build normalized phone number for tel: link
-        # Convert 8 to +7 for Russian numbers
-        if country == "8":
-            tel_country = "+7"
-        elif country == "+7":
-            tel_country = "+7"
-        elif country:
-            tel_country = country
-        else:
-            # Local number without country code, assume +7 for Russia
-            tel_country = "+7"
-        tel_number = f"{tel_country}{area}{g2}{g3}{g4}"
-        # Telegraph strips some URI schemes. Use Telegram-native resolve links so taps work
-        # both inside Telegram and in Instant View.
-        phone_digits = re.sub(r"\D", "", tel_number)
-        return f'<a href="tg://resolve?phone={phone_digits}">{original}</a>'
+        original = m.group(1) or m.group(0)
+        digits = re.sub(r"\D", "", original or "")
+        if not digits:
+            return original
+        # Normalize Russian numbers:
+        # - 8XXXXXXXXXX -> +7XXXXXXXXXX
+        # - XXXXXXXXXX  -> +7XXXXXXXXXX
+        if len(digits) == 11 and digits.startswith("8"):
+            digits = "7" + digits[1:]
+        if len(digits) == 10 and not digits.startswith("7"):
+            digits = "7" + digits
+        href = f"tel:+{digits}" if len(digits) >= 10 else f"tel:{digits}"
+        return f'<a href="{href}">{original}</a>'
 
     text = _VK_LINK_RE.sub(repl_vk, text_or_html)
     text = MD_LINK.sub(lambda m: f'<a href="{_unescape_md_url(m[2])}">{m[1]}</a>', text)

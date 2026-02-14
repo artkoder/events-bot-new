@@ -51,7 +51,7 @@ def recent_cutoff(tz: timezone, now: datetime | None = None) -> datetime:
     return start_local.astimezone(timezone.utc)
 
 def is_recent(e: Event, tz: timezone | None = None, now: datetime | None = None) -> bool:
-    if e.added_at is None or e.silent:
+    if e.added_at is None or e.silent or getattr(e, "lifecycle_status", "active") != "active":
         return False
     if tz is None:
         tz = LOCAL_TZ

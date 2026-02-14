@@ -4,6 +4,7 @@ import os
 import sys
 
 import pytest
+import pytest_asyncio
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 sys.path.append(os.path.dirname(__file__))
@@ -120,7 +121,7 @@ def _mock_poster_ocr(monkeypatch, request):
     monkeypatch.setattr(poster_ocr, "recognize_posters", fake_recognize)
 
 
-@pytest.fixture(autouse=True)
+@pytest_asyncio.fixture(autouse=True)
 async def _cleanup_databases():
     yield
     await db_module.close_known_databases()

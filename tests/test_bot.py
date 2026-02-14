@@ -1631,14 +1631,13 @@ async def test_create_source_page_reuse_urls(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_create_source_page_normalizes_hashtags(monkeypatch):
+async def test_create_source_page_preserves_hashtags(monkeypatch):
     class DummyTG:
         def __init__(self, access_token=None):
             self.access_token = access_token
 
         def create_page(self, title, html_content=None, **_):
-            assert "#1_августа" not in html_content
-            assert "1 августа" in html_content
+            assert "#1_августа" in html_content
             return {"url": "https://telegra.ph/test", "path": "test"}
 
     monkeypatch.setenv("TELEGRAPH_TOKEN", "t")
@@ -5730,14 +5729,13 @@ async def test_update_source_page_footer(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_update_source_page_normalizes_hashtags(monkeypatch):
+async def test_update_source_page_preserves_hashtags(monkeypatch):
     class DummyTG:
         def get_page(self, path, return_html=True):
             return {"content": ""}
 
         def edit_page(self, path, title, html_content=None, **kwargs):
-            assert "#1_августа" not in html_content
-            assert "1 августа" in html_content
+            assert "#1_августа" in html_content
 
     monkeypatch.setattr("main.get_telegraph_token", lambda: "t")
     monkeypatch.setattr(

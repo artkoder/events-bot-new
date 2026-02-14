@@ -131,6 +131,32 @@ class KaggleClient:
         )
         logger.info("kaggle: dataset created successfully from folder=%s", folder)
 
+    def create_dataset_version(
+        self,
+        folder: str | Path,
+        *,
+        version_notes: str = "update",
+        quiet: bool = True,
+        convert_to_csv: bool = False,
+        delete_old_versions: bool = False,
+        dir_mode: str = "zip",
+    ) -> None:
+        api = self._get_api()
+        logger.info(
+            "kaggle: creating dataset version folder=%s notes=%s",
+            folder,
+            version_notes,
+        )
+        api.dataset_create_version(
+            str(folder),
+            version_notes=version_notes,
+            quiet=quiet,
+            convert_to_csv=convert_to_csv,
+            delete_old_versions=delete_old_versions,
+            dir_mode=dir_mode,
+        )
+        logger.info("kaggle: dataset version created successfully folder=%s", folder)
+
     def delete_dataset(self, dataset: str, *, no_confirm: bool = True) -> None:
         api = self._get_api()
         if "/" in dataset:

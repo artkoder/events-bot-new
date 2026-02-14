@@ -553,98 +553,102 @@ def startup(
         )
         return job
 
-    _register_job(
-        "vk_scheduler",
-        _job_wrapper("vk_scheduler", vk_scheduler),
-        "cron",
-        id="vk_scheduler",
-        minute="1,16,31,46",
-        args=[db, bot],
-        replace_existing=True,
-        max_instances=1,
-        coalesce=True,
-        misfire_grace_time=30,
-    )
-    _register_job(
-        "vk_poll_scheduler",
-        _job_wrapper("vk_poll_scheduler", vk_poll_scheduler),
-        "cron",
-        id="vk_poll_scheduler",
-        minute="2,17,32,47",
-        args=[db, bot],
-        replace_existing=True,
-        max_instances=1,
-        coalesce=True,
-        misfire_grace_time=30,
-    )
-    _register_job(
-        "cleanup_scheduler",
-        _job_wrapper("cleanup_scheduler", cleanup_scheduler),
-        "cron",
-        id="cleanup_scheduler",
-        hour="2",
-        minute="7",
-        args=[db, bot],
-        replace_existing=True,
-        max_instances=1,
-        coalesce=True,
-        misfire_grace_time=30,
-    )
-    _register_job(
-        "partner_notification_scheduler",
-        _job_wrapper("partner_notification_scheduler", partner_notification_scheduler),
-        "cron",
-        id="partner_notification_scheduler",
-        minute="5",
-        args=[db, bot],
-        replace_existing=True,
-        max_instances=1,
-        coalesce=True,
-        misfire_grace_time=30,
-    )
-    _register_job(
-        "fest_nav_rebuild",
-        _job_wrapper("fest_nav_rebuild", rebuild_fest_nav_if_changed),
-        "cron",
-        id="fest_nav_rebuild",
-        hour="3",
-        minute="0",
-        args=[db],
-        replace_existing=True,
-        max_instances=1,
-        coalesce=True,
-        misfire_grace_time=30,
-    )
-
-    times_raw = os.getenv(
-        "VK_CRAWL_TIMES_LOCAL", "05:15,09:15,13:15,17:15,21:15,22:45"
-    )
-    tz_name = os.getenv("VK_CRAWL_TZ", "Europe/Kaliningrad")
-    tz = _safe_zoneinfo(tz_name, label="VK_CRAWL_TZ")
-    for idx, t in enumerate(times_raw.split(",")):
-        t = t.strip()
-        if not t:
-            continue
-        try:
-            hh, mm = map(int, t.split(":"))
-        except ValueError:
-            logging.warning("invalid VK_CRAWL_TIMES_LOCAL entry: %s", t)
-            continue
-        now_local = datetime.now(tz).replace(hour=hh, minute=mm, second=0, microsecond=0)
-        now_utc = now_local.astimezone(timezone.utc)
+    enable_core_schedulers = _env_enabled("ENABLE_CORE_SCHEDULERS", default=True)
+    if enable_core_schedulers:
         _register_job(
-            f"vk_crawl_cron_{idx}",
-            _job_wrapper("vk_crawl_cron", vk_crawl_cron),
+            "vk_scheduler",
+            _job_wrapper("vk_scheduler", vk_scheduler),
             "cron",
-            id=f"vk_crawl_cron_{idx}",
-            hour=str(now_utc.hour),
-            minute=str(now_utc.minute),
+            id="vk_scheduler",
+            minute="1,16,31,46",
             args=[db, bot],
             replace_existing=True,
             max_instances=1,
             coalesce=True,
             misfire_grace_time=30,
         )
+        _register_job(
+            "vk_poll_scheduler",
+            _job_wrapper("vk_poll_scheduler", vk_poll_scheduler),
+            "cron",
+            id="vk_poll_scheduler",
+            minute="2,17,32,47",
+            args=[db, bot],
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=30,
+        )
+        _register_job(
+            "cleanup_scheduler",
+            _job_wrapper("cleanup_scheduler", cleanup_scheduler),
+            "cron",
+            id="cleanup_scheduler",
+            hour="2",
+            minute="7",
+            args=[db, bot],
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=30,
+        )
+        _register_job(
+            "partner_notification_scheduler",
+            _job_wrapper("partner_notification_scheduler", partner_notification_scheduler),
+            "cron",
+            id="partner_notification_scheduler",
+            minute="5",
+            args=[db, bot],
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=30,
+        )
+        _register_job(
+            "fest_nav_rebuild",
+            _job_wrapper("fest_nav_rebuild", rebuild_fest_nav_if_changed),
+            "cron",
+            id="fest_nav_rebuild",
+            hour="3",
+            minute="0",
+            args=[db],
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=30,
+        )
+
+        times_raw = os.getenv(
+            "VK_CRAWL_TIMES_LOCAL", "05:15,09:15,13:15,17:15,21:15,22:45"
+        )
+        tz_name = os.getenv("VK_CRAWL_TZ", "Europe/Kaliningrad")
+        tz = _safe_zoneinfo(tz_name, label="VK_CRAWL_TZ")
+        for idx, t in enumerate(times_raw.split(",")):
+            t = t.strip()
+            if not t:
+                continue
+            try:
+                hh, mm = map(int, t.split(":"))
+            except ValueError:
+                logging.warning("invalid VK_CRAWL_TIMES_LOCAL entry: %s", t)
+                continue
+            now_local = datetime.now(tz).replace(hour=hh, minute=mm, second=0, microsecond=0)
+            now_utc = now_local.astimezone(timezone.utc)
+            _register_job(
+                f"vk_crawl_cron_{idx}",
+                _job_wrapper("vk_crawl_cron", vk_crawl_cron),
+                "cron",
+                id=f"vk_crawl_cron_{idx}",
+                hour=str(now_utc.hour),
+                minute=str(now_utc.minute),
+                args=[db, bot],
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+                misfire_grace_time=30,
+            )
+    else:
+        logging.info("SCHED skipping core schedulers (ENABLE_CORE_SCHEDULERS!=1)")
 
     # Source parsing from theatres (before daily announcement at 08:00)
     enable_source_parsing = _env_enabled("ENABLE_SOURCE_PARSING", default=is_prod)
@@ -733,6 +737,40 @@ def startup(
     else:
         logging.info("SCHED skipping tg_monitoring (ENABLE_TG_MONITORING!=1)")
         _notify_admin_skip("tg_monitoring", "ENABLE_TG_MONITORING!=1")
+
+    enable_vk_auto_import = _env_enabled("ENABLE_VK_AUTO_IMPORT", default=False)
+    if enable_vk_auto_import:
+        from vk_auto_queue import vk_auto_import_scheduler
+
+        vk_auto_times = os.getenv("VK_AUTO_IMPORT_TIMES_LOCAL", "06:30,18:30").strip()
+        vk_auto_tz = os.getenv("VK_AUTO_IMPORT_TZ", "Europe/Kaliningrad").strip()
+        for idx, t in enumerate(vk_auto_times.split(",")):
+            t = t.strip()
+            if not t:
+                continue
+            hour, minute = _cron_from_local(
+                t,
+                vk_auto_tz,
+                default_hour="6",
+                default_minute="30",
+                label="VK_AUTO_IMPORT_TIMES_LOCAL",
+            )
+            _register_job(
+                f"vk_auto_import_{idx}",
+                _job_wrapper("vk_auto_import", vk_auto_import_scheduler),
+                "cron",
+                id=f"vk_auto_import_{idx}",
+                hour=hour,
+                minute=minute,
+                args=[db, bot],
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+                misfire_grace_time=30,
+            )
+    else:
+        logging.info("SCHED skipping vk_auto_import (ENABLE_VK_AUTO_IMPORT!=1)")
+        _notify_admin_skip("vk_auto_import", "ENABLE_VK_AUTO_IMPORT!=1")
 
     enable_3di = _env_enabled("ENABLE_3DI_SCHEDULED", default=is_prod)
     if enable_3di:

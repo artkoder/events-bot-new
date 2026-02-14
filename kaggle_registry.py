@@ -7,7 +7,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-_REGISTRY_PATH = Path(os.getenv("KAGGLE_JOBS_PATH", "/data/kaggle_jobs.json"))
+def _resolve_registry_path() -> Path:
+    env = (os.getenv("KAGGLE_JOBS_PATH") or "").strip()
+    if env:
+        return Path(env)
+    # In Fly production /data is a writable volume; in local/dev it may be missing
+    # or protected. Fall back to artifacts to avoid PermissionError.
+    if os.path.isdir("/data") and os.access("/data", os.W_OK):
+        return Path("/data/kaggle_jobs.json")
+    return Path("artifacts/run/kaggle_jobs.json")
+
+
+_REGISTRY_PATH = _resolve_registry_path()
 _LOCK = asyncio.Lock()
 
 

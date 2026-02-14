@@ -24,6 +24,9 @@ from source_parsing.handlers import (
     add_new_event_via_queue,
     update_event_ticket_status,
     update_linked_events,
+    event_has_parser_source,
+    unpack_add_event_result,
+    classify_add_event_outcome,
     find_existing_event,
     normalize_location_name,
     EVENT_ADD_DELAY_SECONDS,
@@ -354,7 +357,16 @@ async def process_philharmonia_events(
             db, location_name, event.parsed_date, event.parsed_time or "00:00", event.title
         )
         
+        parser_source_present = False
         if existing_id:
+            parser_source_present = await event_has_parser_source(
+                db,
+                existing_id,
+                event.source_type,
+                event.url,
+            )
+
+        if existing_id and parser_source_present:
             success = await update_event_ticket_status(
                 db, existing_id, event.ticket_status, event.url
             )
@@ -376,15 +388,24 @@ async def process_philharmonia_events(
                 if images:
                     poster_media_list, _ = await process_media(images, need_catbox=True, need_ocr=True)
             
-            new_id, was_added = await add_new_event_via_queue(
-                db, bot, event, current_progress, len(events), poster_media=poster_media_list
+            new_id, was_added, status = unpack_add_event_result(
+                await add_new_event_via_queue(
+                    db, bot, event, current_progress, len(events), poster_media=poster_media_list
+                )
             )
-            
-            if new_id and was_added:
+
+            outcome = classify_add_event_outcome(new_id, was_added, status)
+            if outcome == "added" and new_id:
                 stats.new_added += 1
-                await asyncio.sleep(EVENT_ADD_DELAY_SECONDS)
-            else:
+            elif outcome == "updated" and new_id:
+                stats.ticket_updated += 1
+            elif outcome == "skipped":
                 stats.skipped += 1
+            else:
+                stats.failed += 1
+
+            if new_id and outcome in {"added", "updated"}:
+                await asyncio.sleep(EVENT_ADD_DELAY_SECONDS)
                 
     logger.info("philharmonia_process: done added=%d updated=%d", stats.new_added, stats.ticket_updated)
     return stats

@@ -11,6 +11,8 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 _KNOWN_DATABASES: set["Database"] = set()
 
+_VALID_JOURNAL_MODES = {"WAL", "DELETE", "TRUNCATE", "PERSIST", "MEMORY", "OFF"}
+
 
 async def _add_column(conn, table: str, col_def: str) -> None:
     try:
@@ -43,6 +45,49 @@ class Database:
         self._sessionmaker = None
         _KNOWN_DATABASES.add(self)
 
+    @staticmethod
+    def _read_float_env(name: str, default: float) -> float:
+        raw = (os.getenv(name) or "").strip()
+        if not raw:
+            return default
+        try:
+            return float(raw)
+        except Exception:
+            return default
+
+    @classmethod
+    def _sqlite_timeout_sec(cls) -> float:
+        # sqlite3 "timeout" is busy_timeout (seconds). Keep reasonably high
+        # to avoid flaky "database is locked" under concurrent async workers.
+        return max(0.1, min(cls._read_float_env("DB_TIMEOUT_SEC", 15.0), 120.0))
+
+    @classmethod
+    def _sqlite_busy_timeout_ms(cls) -> int:
+        raw = (os.getenv("DB_BUSY_TIMEOUT_MS") or "").strip()
+        if raw:
+            try:
+                return int(raw)
+            except Exception:
+                pass
+        return int(cls._sqlite_timeout_sec() * 1000)
+
+    @staticmethod
+    def _sqlite_journal_mode() -> str:
+        journal_mode = (os.getenv("DB_JOURNAL_MODE") or "WAL").strip().upper()
+        if journal_mode not in _VALID_JOURNAL_MODES:
+            journal_mode = "WAL"
+        return journal_mode
+
+    async def _apply_sqlite_pragmas(self, conn: aiosqlite.Connection) -> None:
+        journal_mode = self._sqlite_journal_mode()
+        await conn.execute(f"PRAGMA journal_mode={journal_mode}")
+        await conn.execute("PRAGMA synchronous=NORMAL")
+        await conn.execute("PRAGMA foreign_keys=ON")
+        await conn.execute("PRAGMA temp_store=MEMORY")
+        await conn.execute("PRAGMA cache_size=-40000")
+        await conn.execute(f"PRAGMA busy_timeout={self._sqlite_busy_timeout_ms()}")
+        await conn.execute("PRAGMA mmap_size=134217728")
+
     async def close(self) -> None:
         if self._sessionmaker is not None:
             self._sessionmaker = None
@@ -56,17 +101,44 @@ class Database:
 
     async def init(self) -> None:
         async with aiosqlite.connect(self.path) as conn:
-            await conn.execute("PRAGMA journal_mode=WAL")
+            debug = (os.getenv("DB_INIT_DEBUG") or "").strip().lower() in {"1", "true", "yes"}
+            minimal_mode = (os.getenv("DB_INIT_MINIMAL") or "").strip().lower() in {"1", "true", "yes"}
+            skip_posterocr_migration = minimal_mode or (
+                (os.getenv("DB_INIT_SKIP_POSTER_OCR_MIGRATION") or "").strip().lower() in {"1", "true", "yes"}
+            )
+
+            def dbg(msg: str) -> None:
+                if debug:
+                    logging.info("db.init %s", msg)
+
+            dbg(f"start path={self.path}")
+            # WAL is fast but can be problematic on some filesystems (e.g. network/virtual mounts).
+            # Allow overriding for local dev snapshots.
+            journal_mode = (os.getenv("DB_JOURNAL_MODE") or "WAL").strip().upper()
+            if journal_mode not in {"WAL", "DELETE", "TRUNCATE", "PERSIST", "MEMORY", "OFF"}:
+                journal_mode = "WAL"
+            if journal_mode != "WAL" and self.path and not self.path.startswith((":memory:", "file:")):
+                # Best-effort cleanup of leftover WAL artifacts from previous runs.
+                for suffix in ("-wal", "-shm"):
+                    try:
+                        os.remove(self.path + suffix)
+                    except FileNotFoundError:
+                        pass
+                    except Exception:
+                        logging.debug("Failed to remove sqlite artifact %s", self.path + suffix)
+            await conn.execute(f"PRAGMA journal_mode={journal_mode}")
             await conn.execute("PRAGMA synchronous=NORMAL")
             await conn.execute("PRAGMA foreign_keys=ON")
             await conn.execute("PRAGMA temp_store=MEMORY")
             await conn.execute("PRAGMA cache_size=-40000")
             await conn.execute("PRAGMA busy_timeout=5000")
             await conn.execute("PRAGMA mmap_size=134217728")
+            dbg(f"pragmas journal_mode={journal_mode}")
 
             pragma_cursor = await conn.execute("PRAGMA table_info('posterocrcache')")
             poster_ocr_columns = await pragma_cursor.fetchall()
             await pragma_cursor.close()
+            dbg(f"posterocrcache columns={len(poster_ocr_columns)}")
 
             detail_exists = any(col[1] == "detail" for col in poster_ocr_columns)
             model_exists = any(col[1] == "model" for col in poster_ocr_columns)
@@ -87,7 +159,7 @@ class Database:
                 elif pk_columns != expected_pk:
                     needs_posterocr_migration = True
 
-            if needs_posterocr_migration:
+            if needs_posterocr_migration and not skip_posterocr_migration:
                 await conn.execute("DROP TABLE IF EXISTS posterocrcache_new")
                 await conn.execute(
                     """
@@ -224,6 +296,7 @@ class Database:
                     is_free BOOLEAN DEFAULT 0,
                     pushkin_card BOOLEAN DEFAULT 0,
                     silent BOOLEAN DEFAULT 0,
+                    lifecycle_status TEXT NOT NULL DEFAULT 'active',
                     telegraph_path TEXT,
                     source_text TEXT NOT NULL,
                     source_texts JSON,
@@ -250,6 +323,7 @@ class Database:
                 )
                 """
             )
+            dbg("event core columns")
             await _add_column(conn, "event", "photo_urls JSON")
             await _add_column(conn, "event", "source_texts JSON")
             await _add_column(conn, "event", "ics_hash TEXT")
@@ -258,6 +332,7 @@ class Database:
             await _add_column(conn, "event", "ics_post_url TEXT")
             await _add_column(conn, "event", "ics_post_id INTEGER")
             await _add_column(conn, "event", "vk_repost_url TEXT")
+            await _add_column(conn, "event", "vk_source_hash TEXT")
             await _add_column(conn, "event", "vk_ticket_short_url TEXT")
             await _add_column(conn, "event", "vk_ticket_short_key TEXT")
             await _add_column(conn, "event", "vk_ics_short_url TEXT")
@@ -273,6 +348,9 @@ class Database:
             await _add_column(
                 conn, "event", "video_include_count INTEGER NOT NULL DEFAULT 0"
             )
+            await _add_column(
+                conn, "event", "lifecycle_status TEXT NOT NULL DEFAULT 'active'"
+            )
             await _add_column(conn, "event", "search_digest TEXT")
             await _add_column(conn, "event", "ticket_status TEXT")
             await _add_column(conn, "event", "ticket_trust_level TEXT")
@@ -281,6 +359,7 @@ class Database:
             await conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_event_tourist_label ON event(tourist_label)"
             )
+            dbg("eventposter")
 
             await conn.execute(
                 """
@@ -314,6 +393,7 @@ class Database:
                 "CREATE INDEX IF NOT EXISTS ix_eventposter_phash ON eventposter(phash)"
             )
 
+            dbg("event_source")
             await conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS event_source(
@@ -339,7 +419,14 @@ class Database:
             await conn.execute(
                 "CREATE INDEX IF NOT EXISTS ix_event_source_type_url ON event_source(source_type, source_url)"
             )
+            # Smart Update часто проверяет идемпотентность по `source_url` без знания `event_id`.
+            # Индексы (event_id, source_url) и (source_type, source_url) не ускоряют такой lookup,
+            # поэтому держим отдельный индекс по source_url.
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_event_source_url ON event_source(source_url)"
+            )
 
+            dbg("event_source_fact")
             await conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS event_source_fact(
@@ -347,12 +434,15 @@ class Database:
                     event_id INTEGER NOT NULL,
                     source_id INTEGER NOT NULL,
                     fact TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'added',
                     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY(event_id) REFERENCES event(id) ON DELETE CASCADE,
                     FOREIGN KEY(source_id) REFERENCES event_source(id) ON DELETE CASCADE
                 )
                 """
             )
+            # Schema evolution (older snapshots may lack the status column).
+            await _add_column(conn, "event_source_fact", "status TEXT NOT NULL DEFAULT 'added'")
             await conn.execute(
                 "CREATE INDEX IF NOT EXISTS ix_event_source_fact_event ON event_source_fact(event_id)"
             )
@@ -360,6 +450,7 @@ class Database:
                 "CREATE INDEX IF NOT EXISTS ix_event_source_fact_source ON event_source_fact(source_id)"
             )
 
+            dbg("telegram_source")
             await conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS telegram_source(
@@ -378,6 +469,7 @@ class Database:
                 "CREATE INDEX IF NOT EXISTS ix_telegram_source_enabled ON telegram_source(enabled)"
             )
 
+            dbg("telegram_scanned_message")
             await conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS telegram_scanned_message(
@@ -400,6 +492,30 @@ class Database:
             await conn.execute(
                 "CREATE INDEX IF NOT EXISTS ix_tg_scanned_processed_at ON telegram_scanned_message(processed_at)"
             )
+
+            dbg("telegram_source_force_message")
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS telegram_source_force_message(
+                    source_id INTEGER NOT NULL,
+                    message_id INTEGER NOT NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (source_id, message_id),
+                    FOREIGN KEY(source_id) REFERENCES telegram_source(id) ON DELETE CASCADE
+                )
+                """
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_tg_force_source ON telegram_source_force_message(source_id)"
+            )
+
+            # For local/offline regression runs we sometimes only need the core tables
+            # (event + Smart Update + Telegram monitoring metadata). Building the full
+            # schema and optional indexes on a prod snapshot can be slow.
+            if (os.getenv("DB_INIT_MINIMAL") or "").strip().lower() in {"1", "true", "yes"}:
+                dbg("minimal mode: returning after core tables")
+                await conn.commit()
+                return
 
             await conn.execute(
                 """
@@ -596,6 +712,29 @@ class Database:
 
             await _add_column(conn, "vk_source", "default_ticket_link TEXT")
 
+            # Seed well-known VK sources with stable defaults so live E2E / fresh prod
+            # snapshots don't lose operator UX improvements after DB refresh.
+            try:
+                await conn.execute(
+                    """
+                    UPDATE vk_source
+                    SET location = ?
+                    WHERE group_id = ?
+                      AND (
+                        location IS NULL
+                        OR TRIM(location) = ''
+                        OR location IN (
+                            'Гаражка, Калининград',
+                            'Гаражка Калининград',
+                            'Garazhka Kaliningrad'
+                        )
+                      )
+                    """,
+                    ("Понарт, Судостроительная 6/2, Калининград", 226847232),
+                )
+            except Exception:
+                logging.warning("db.init: failed to seed vk_source defaults", exc_info=True)
+
             await conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS vk_tmp_post(
@@ -680,6 +819,21 @@ class Database:
                     finished_at  TIMESTAMP
                 )
                 """
+            )
+
+            # VK inbox -> imported events mapping (VK posts may yield multiple events).
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS vk_inbox_import_event (
+                    inbox_id   INTEGER NOT NULL,
+                    event_id   INTEGER NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (inbox_id, event_id)
+                )
+                """
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_vk_inbox_import_event_event ON vk_inbox_import_event(event_id)"
             )
 
             await conn.execute(
@@ -855,7 +1009,8 @@ class Database:
 
     async def _ensure_conn(self) -> aiosqlite.Connection:
         if self._conn is None:
-            self._conn = await aiosqlite.connect(self.path, timeout=15)
+            self._conn = await aiosqlite.connect(self.path, timeout=self._sqlite_timeout_sec())
+            await self._apply_sqlite_pragmas(self._conn)
         return self._conn
 
     @asynccontextmanager
@@ -871,7 +1026,10 @@ class Database:
 
         if self._orm_engine is None:
             self._orm_engine = create_async_engine(
-                f"sqlite+aiosqlite:///{self.path}", future=True, poolclass=NullPool
+                f"sqlite+aiosqlite:///{self.path}",
+                future=True,
+                poolclass=NullPool,
+                connect_args={"timeout": self._sqlite_timeout_sec()},
             )
         if self._sessionmaker is None:
             self._sessionmaker = sessionmaker(
@@ -887,7 +1045,10 @@ class Database:
 
         if self._orm_engine is None:
             self._orm_engine = create_async_engine(
-                f"sqlite+aiosqlite:///{self.path}", future=True, poolclass=NullPool
+                f"sqlite+aiosqlite:///{self.path}",
+                future=True,
+                poolclass=NullPool,
+                connect_args={"timeout": self._sqlite_timeout_sec()},
             )
         return self._orm_engine
 

@@ -9,6 +9,9 @@
 - `docs/features/source-parsing/README.md` — извлечение/парсинг событий из внешних источников (в т.ч. `/parse`)
 - `docs/features/tourist-label/README.md` — туристическая метка (ручная разметка + экспорт)
 - `docs/features/llm-gateway/README.md` — управление лимитами Google AI (Gemma/Gemini) и ретраи
+- `docs/features/smart-event-update/README.md` — единый Smart Update (match/merge, лог фактов, Telegraph)
+- `docs/features/vk-auto-queue/README.md` — авторазбор очереди VK постов
+- `docs/features/exhibitions-smart-update/README.md` — поддержка выставок через Smart Update
 
 ## Как добавлять новую фичу
 

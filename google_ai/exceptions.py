@@ -37,6 +37,7 @@ class ProviderError(Exception):
     error_message: Optional[str] = None
     retryable: bool = False
     status_code: Optional[int] = None
+    retry_after_ms: Optional[int] = None
     
     def __str__(self) -> str:
         msg = f"Provider error: {self.error_type}"
@@ -44,6 +45,8 @@ class ProviderError(Exception):
             msg += f" ({self.error_code})"
         if self.error_message:
             msg += f": {self.error_message}"
+        if self.retry_after_ms:
+            msg += f" (retry after {self.retry_after_ms}ms)"
         return msg
 
 

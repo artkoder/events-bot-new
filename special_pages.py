@@ -527,7 +527,11 @@ async def build_special_page_content(
         async with db.get_session() as session:
             result = await session.execute(
                 select(Event)
-                .where(Event.date.in_(date_range))
+                .where(
+                    Event.date.in_(date_range),
+                    Event.lifecycle_status == "active",
+                    Event.silent.is_(False),
+                )
                 .order_by(Event.date, Event.time)
             )
             events = list(result.scalars().all())
@@ -545,6 +549,8 @@ async def build_special_page_content(
                     Event.end_date.is_not(None),
                     Event.date <= end_date.isoformat(),
                     Event.end_date >= start_date.isoformat(),
+                    Event.lifecycle_status == "active",
+                    Event.silent.is_(False),
                 )
                 .order_by(Event.date)
             )
@@ -557,6 +563,8 @@ async def build_special_page_content(
                     Event.end_date.is_not(None),
                     Event.date <= end_date.isoformat(),
                     Event.end_date >= start_date.isoformat(),
+                    Event.lifecycle_status == "active",
+                    Event.silent.is_(False),
                 )
                 .order_by(Event.date, Event.time)
             )
@@ -895,4 +903,3 @@ async def create_special_telegraph_page(
     )
     
     return url, used_days
-

@@ -369,6 +369,7 @@ class Event(SQLModel, table=True):
     is_free: bool = False
     pushkin_card: bool = False
     silent: bool = False
+    lifecycle_status: str = "active"  # active|cancelled|postponed
     telegraph_path: Optional[str] = None
     source_text: str
     source_texts: list[str] = Field(default_factory=list, sa_column=Column(JSON))
@@ -376,6 +377,9 @@ class Event(SQLModel, table=True):
     ics_url: Optional[str] = None
     source_post_url: Optional[str] = None
     source_vk_post_url: Optional[str] = None
+    # Hash of the latest VK source-post payload (used to avoid redundant wall edits).
+    # Kept separate from `content_hash` (Telegraph HTML hash).
+    vk_source_hash: Optional[str] = None
     vk_repost_url: Optional[str] = None
     ics_hash: Optional[str] = None
     ics_file_id: Optional[str] = None
@@ -598,6 +602,12 @@ class EventSourceFact(SQLModel, table=True):
     event_id: int = Field(foreign_key="event.id")
     source_id: int = Field(foreign_key="event_source.id")
     fact: str
+    # Status of this fact in this source-iteration.
+    # - added: applied to event (and should generally reflect in Telegraph content)
+    # - duplicate: observed in source but already present -> not applied
+    # - conflict: anchor conflict / ignored change
+    # - note: technical/service note (filters, snippets, poster actions)
+    status: str = Field(default="added")
     created_at: datetime = Field(
         default_factory=utc_now, sa_column=Column(DateTime(timezone=True))
     )
@@ -641,6 +651,17 @@ class TelegramScannedMessage(SQLModel, table=True):
     events_extracted: int = 0
     events_imported: int = 0
     error: Optional[str] = None
+
+
+class TelegramSourceForceMessage(SQLModel, table=True):
+    __tablename__ = "telegram_source_force_message"
+    __table_args__ = (Index("ix_tg_force_source", "source_id"),)
+
+    source_id: int = Field(foreign_key="telegram_source.id", primary_key=True)
+    message_id: int = Field(primary_key=True)
+    created_at: datetime = Field(
+        default_factory=utc_now, sa_column=Column(DateTime(timezone=True))
+    )
 
 
 class TomorrowPage(SQLModel, table=True):

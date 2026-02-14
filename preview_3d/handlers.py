@@ -69,7 +69,7 @@ async def _is_authorized(db: Database, user_id: int) -> bool:
         return user is not None and user.is_superadmin
 
 
-async def _get_events_for_month(db: Database, month: str, min_images: int = 1) -> list[Event]:
+async def _get_events_for_month(db: Database, month: str, min_images: int = 2) -> list[Event]:
     """Get all events for a month that have images."""
     start = date.fromisoformat(f"{month}-01")
     next_start = (start.replace(day=28) + timedelta(days=4)).replace(day=1)
@@ -89,13 +89,13 @@ async def _get_events_for_month(db: Database, month: str, min_images: int = 1) -
     return [e for e in events if e.photo_urls and len(e.photo_urls) >= min_images]
 
 
-async def _get_events_without_preview(db: Database, month: str, min_images: int = 1) -> list[Event]:
+async def _get_events_without_preview(db: Database, month: str, min_images: int = 2) -> list[Event]:
     """Get events that don't have a 3D preview yet."""
     events = await _get_events_for_month(db, month, min_images=min_images)
     return [e for e in events if not e.preview_3d_url]
 
 
-async def _get_all_future_events_without_preview(db: Database, min_images: int = 1) -> list[Event]:
+async def _get_all_future_events_without_preview(db: Database, min_images: int = 2) -> list[Event]:
     """Get ALL future events (date >= today) that don't have a 3D preview.
     
     Searches across all months, not limited to a single month.
@@ -118,7 +118,7 @@ async def _get_all_future_events_without_preview(db: Database, min_images: int =
     return [e for e in events if e.photo_urls and len(e.photo_urls) >= min_images]
 
 
-async def _get_new_events_gap(db: Database, min_images: int = 1) -> list[Event]:
+async def _get_new_events_gap(db: Database, min_images: int = 2) -> list[Event]:
     """Get recent events that are missing a 3D preview.
     
     Checks events from the last 14 days.
@@ -158,7 +158,7 @@ async def run_3di_new_only_scheduler(
     bot,
     *,
     chat_id: int | None = None,
-    min_images: int = 1,
+    min_images: int = 2,
     run_id: str | None = None,
 ) -> int:
     """Run 3D preview generation for new events without UI callbacks."""

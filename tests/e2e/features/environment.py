@@ -11,6 +11,9 @@ import logging
 import json
 import urllib.request
 import sqlite3
+import subprocess
+import time
+import contextlib
 from pathlib import Path
 
 # Add project root to path for imports
@@ -25,8 +28,126 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 )
 
+def _is_offline_mode() -> bool:
+    return (os.getenv("E2E_OFFLINE") or "").strip() in {"1", "true", "yes"}
+
+def _ensure_db_path_env() -> None:
+    """Set DB_PATH for local E2E runs when it's missing.
+
+    The bot defaults DB_PATH to /data/db.sqlite, but E2E steps fall back to a
+    prod snapshot sqlite in repo root. If DB_PATH is not set, tests and bot end
+    up using different DB files, which makes Telegram Monitoring look broken
+    (sources=0, no events).
+    """
+    if (os.getenv("DB_PATH") or "").strip():
+        return
+    candidates = [
+        project_root / "db_prod_snapshot.sqlite",
+        project_root / "db_prod_snapshot_2026-01-28_154329.sqlite",
+    ]
+    for p in candidates:
+        if p.exists():
+            os.environ["DB_PATH"] = str(p)
+            return
+
+
+def _ensure_isolated_e2e_db_copy() -> None:
+    """Create a per-run DB copy when using a prod snapshot.
+
+    Live E2E runs mutate the sqlite DB (events created/updated, queue statuses,
+    scan marks). If we use `db_prod_snapshot.sqlite` directly, the file ceases
+    to be a snapshot and subsequent runs become non-deterministic (and can fool
+    staleness checks that rely on file mtime).
+
+    Default: enabled. Set E2E_DB_ISOLATE=0 to opt out.
+    """
+    raw = (os.getenv("E2E_DB_ISOLATE") or "1").strip().lower()
+    if raw in {"0", "false", "no", "off"}:
+        return
+
+    db_path = (os.environ.get("DB_PATH") or "").strip()
+    if not db_path:
+        return
+
+    src = Path(db_path)
+    if not src.is_absolute():
+        # Behave is usually started from repo root; interpret relative DB_PATH
+        # as repo-root relative to keep isolation logic predictable.
+        src = (project_root / src).resolve()
+    if not src.exists() or not src.is_file():
+        return
+
+    # Only auto-isolate "prod snapshot" DBs in repo root.
+    if src.parent != project_root:
+        return
+    if not (src.name.startswith("db_prod_snapshot") and src.suffix == ".sqlite"):
+        return
+
+    out_dir = project_root / "artifacts" / "test-results"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    dst = out_dir / f"db_e2e_{ts}.sqlite"
+
+    try:
+        con_src = sqlite3.connect(str(src))
+        con_dst = sqlite3.connect(str(dst))
+        try:
+            con_src.backup(con_dst)
+        finally:
+            con_dst.close()
+            con_src.close()
+    except Exception as exc:
+        logger.warning("Failed to isolate E2E DB copy (will use DB_PATH as-is): %s", exc)
+        return
+
+    os.environ["E2E_DB_BASE_PATH"] = str(src)
+    os.environ["DB_PATH"] = str(dst)
+    logger.info("E2E DB isolated copy: %s -> %s", src.name, dst.name)
+
+
+def _load_dotenv_from_repo_root() -> None:
+    """Best-effort .env loader for local dev/E2E runs.
+
+    Behave is often started from an IDE where `.env` is not automatically exported
+    into the process environment. We keep this minimal and safe:
+    - only sets variables that are currently missing;
+    - ignores malformed lines and comments;
+    - supports `export KEY=...` and simple quoted values.
+    """
+    env_path = project_root / ".env"
+    if not env_path.exists():
+        return
+    try:
+        lines = env_path.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return
+    for line in lines:
+        s = (line or "").strip()
+        if not s or s.startswith("#"):
+            continue
+        if s.startswith("export "):
+            s = s[len("export ") :].strip()
+        if "=" not in s:
+            continue
+        k, v = s.split("=", 1)
+        key = (k or "").strip()
+        if not key or key in os.environ:
+            continue
+        val = (v or "").strip()
+        if (len(val) >= 2) and ((val[0] == val[-1]) and val[0] in ("'", '"')):
+            val = val[1:-1]
+        if val:
+            os.environ[key] = val
+
+
 def _resolve_bot_username() -> str:
     """Resolve bot username from TELEGRAM_BOT_TOKEN via Telegram Bot API."""
+    forced = (os.environ.get("E2E_BOT_USERNAME") or "").strip()
+    if forced:
+        forced = forced.lstrip("@").strip()
+        if not forced:
+            raise EnvironmentError("E2E_BOT_USERNAME is set but empty after stripping '@'")
+        return forced
     token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
     if not token:
         raise EnvironmentError("Missing TELEGRAM_BOT_TOKEN (required for E2E bot username resolution)")
@@ -43,6 +164,31 @@ def _resolve_bot_username() -> str:
     if not username:
         raise EnvironmentError("Telegram getMe returned empty username")
     return username
+
+
+def _maybe_disable_catbox_for_e2e() -> None:
+    """Disable Catbox uploads during E2E when the service is unreachable.
+
+    Live E2E should not "hang" on repeated Catbox retries/timeouts. When Catbox
+    is unavailable from the current environment, fall back to VK URLs for posters.
+
+    Override:
+    - Set CATBOX_FORCE_ENABLED=1/0 explicitly to control behaviour.
+    - Set E2E_SKIP_CATBOX_CHECK=1 to skip reachability probing.
+    """
+    if (os.getenv("CATBOX_FORCE_ENABLED") or "").strip():
+        return
+    if (os.getenv("E2E_SKIP_CATBOX_CHECK") or "").strip().lower() in {"1", "true", "yes"}:
+        return
+    try:
+        req = urllib.request.Request("https://catbox.moe", method="HEAD")
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            ok = 200 <= int(getattr(resp, "status", 0) or 0) < 500
+    except Exception:
+        ok = False
+    if not ok:
+        os.environ["CATBOX_FORCE_ENABLED"] = "0"
+        logger.info("E2E: Catbox unreachable, forcing CATBOX_FORCE_ENABLED=0")
 
 
 def _ensure_e2e_user_in_db(user_id: int, username: str | None) -> None:
@@ -143,6 +289,75 @@ def _cleanup_test_smart_update_data() -> None:
     finally:
         conn.close()
 
+def _tail_text_file(path: Path, max_lines: int = 120) -> str:
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except Exception:
+        return ""
+    if len(lines) <= max_lines:
+        return "\n".join(lines)
+    return "\n".join(lines[-max_lines:])
+
+
+def _start_local_bot_process() -> tuple[subprocess.Popen, Path]:
+    """Start local bot in DEV_MODE polling, so E2E is self-contained.
+
+    Without a running bot process, Telegram will accept /start but nobody will
+    reply, which makes E2E look like a timeout/flakiness issue.
+    """
+    enabled = (os.getenv("E2E_START_LOCAL_BOT") or "1").strip().lower()
+    if enabled in {"0", "false", "no"}:
+        raise RuntimeError("E2E_START_LOCAL_BOT=0 (local bot autostart disabled)")
+
+    out_dir = project_root / "artifacts" / "test-results"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ts = time.strftime("%Y%m%d_%H%M%S", time.gmtime())
+    log_path = out_dir / f"e2e_local_bot_{ts}.log"
+
+    env = os.environ.copy()
+    env.setdefault("DEV_MODE", "1")
+    # Be explicit: DEV mode uses polling; webhook must be empty/ignored.
+    env.pop("WEBHOOK_URL", None)
+
+    # Run main.py which exec()s main_part2.py and will start polling in DEV_MODE.
+    cmd = [sys.executable, str(project_root / "main.py")]
+    with open(log_path, "w", encoding="utf-8") as f:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(project_root),
+            env=env,
+            stdout=f,
+            stderr=subprocess.STDOUT,
+        )
+    return proc, log_path
+
+
+def _wait_for_bot_ready(proc: subprocess.Popen, log_path: Path, timeout_sec: int = 90) -> None:
+    deadline = time.monotonic() + float(timeout_sec)
+    needle = "DEV MODE READY: Bot is now polling for updates"
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            tail = _tail_text_file(log_path)
+            raise RuntimeError(
+                "Local bot process exited during startup.\n"
+                f"log={log_path}\n"
+                f"tail:\n{tail}"
+            )
+        try:
+            if log_path.exists():
+                txt = log_path.read_text(encoding="utf-8", errors="replace")
+                if needle in txt:
+                    return
+        except Exception:
+            pass
+        time.sleep(0.5)
+    tail = _tail_text_file(log_path)
+    raise RuntimeError(
+        "Local bot process did not become ready in time.\n"
+        f"log={log_path}\n"
+        f"tail:\n{tail}"
+    )
+
 
 def before_all(context):
     """Initialize async event loop and HumanUserClient before all tests."""
@@ -153,7 +368,37 @@ def before_all(context):
     # Create event loop for async operations
     context.loop = asyncio.new_event_loop()
     asyncio.set_event_loop(context.loop)
-    
+    # Some environments fail to wake the selector loop for thread-safe callbacks
+    # (`call_soon_threadsafe`), which can deadlock libraries that use worker threads
+    # (e.g. aiosqlite). Keep a tiny periodic tick so the loop processes callbacks.
+    async def _loop_tick():
+        import asyncio as _asyncio
+
+        while True:
+            await _asyncio.sleep(0.05)
+
+    context._loop_tick_task = context.loop.create_task(_loop_tick())
+
+    # Ensure `.env` variables are available (common in local dev).
+    _load_dotenv_from_repo_root()
+    _ensure_db_path_env()
+    _ensure_isolated_e2e_db_copy()
+    _maybe_disable_catbox_for_e2e()
+
+    context.offline = _is_offline_mode()
+    if context.offline:
+        # Offline mode is meant for DB-only E2E scenarios (no Telegram/Telethon, no network).
+        # Speed-up: DB snapshots already contain schema; avoid running full db.init migrations.
+        os.environ.setdefault("E2E_SKIP_DB_INIT", "1")
+        # Avoid network-only topic classification calls in offline runs.
+        os.environ.setdefault("EVENT_TOPICS_LLM", "off")
+        context.client = None
+        context.bot_username = None
+        context.last_message = None
+        context.last_response = None
+        logger.info("E2E OFFLINE mode enabled (E2E_OFFLINE=1): skipping Telethon/Telegram API setup")
+        return
+
     # Check required environment variables
     # TELEGRAM_API_* are preferred names for E2E, but TG_API_* are used across the repo.
     required = ["TELEGRAM_BOT_TOKEN"]
@@ -171,6 +416,22 @@ def before_all(context):
         raise EnvironmentError(
             f"Missing required environment variables: {', '.join(missing)}"
         )
+
+    # Start local bot process by default to avoid silent timeouts when bot isn't running.
+    # This can be disabled via E2E_START_LOCAL_BOT=0 for runs against a remotely hosted bot.
+    context.bot_proc = None
+    context.bot_log_path = None
+    try:
+        proc, log_path = _start_local_bot_process()
+        context.bot_proc = proc
+        context.bot_log_path = log_path
+        logger.info("Starting local bot process for E2E: log=%s", log_path)
+        _wait_for_bot_ready(proc, log_path, timeout_sec=int(os.getenv("E2E_LOCAL_BOT_READY_TIMEOUT_SEC", "90")))
+        logger.info("Local bot is ready (polling)")
+    except Exception as exc:
+        # If local bot can't be started, E2E may still work if bot is hosted elsewhere.
+        # Keep running, but log a loud warning for diagnostics.
+        logger.warning("Local bot autostart failed: %s", exc)
     
     # Initialize HumanUserClient
     context.client = create_human_client()
@@ -198,8 +459,25 @@ def after_all(context):
     if hasattr(context, "client") and context.client:
         context.loop.run_until_complete(context.client.disconnect())
         logger.info("Client disconnected")
+
+    # Stop local bot process if we started one.
+    proc = getattr(context, "bot_proc", None)
+    if proc is not None:
+        try:
+            proc.terminate()
+            proc.wait(timeout=15)
+        except Exception:
+            with contextlib.suppress(Exception):
+                proc.kill()
     
     if hasattr(context, "loop") and context.loop:
+        tick = getattr(context, "_loop_tick_task", None)
+        if tick is not None:
+            try:
+                tick.cancel()
+                context.loop.run_until_complete(asyncio.gather(tick, return_exceptions=True))
+            except Exception:
+                pass
         context.loop.close()
     
     logger.info("=" * 60)
@@ -210,6 +488,9 @@ def after_all(context):
 def before_scenario(context, scenario):
     """Log scenario start."""
     logger.info(f"\n📌 Сценарий: {scenario.name}")
+    if getattr(context, "offline", False):
+        if "offline" not in getattr(scenario, "effective_tags", []):
+            scenario.skip("requires Telegram/Telethon (run without E2E_OFFLINE=1)")
     if "manual" in getattr(scenario, "effective_tags", []):
         if os.getenv("E2E_RUN_MANUAL") != "1":
             scenario.skip("manual scenario (set E2E_RUN_MANUAL=1 to run)")

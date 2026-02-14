@@ -114,7 +114,7 @@ async def refresh_vk_event_ts_hints(db: Database) -> int:
                 """
                 SELECT id, text, date, event_ts_hint
                 FROM vk_inbox
-                WHERE status IN ('pending', 'locked', 'skipped')
+                WHERE status IN ('pending', 'locked', 'skipped', 'failed')
                 """
             )
             rows = await cursor.fetchall()
@@ -216,13 +216,23 @@ def _get_far_history(operator_id: int, limit: int) -> Optional[deque[str]]:
     return history
 
 
-async def pick_next(db: Database, operator_id: int, batch_id: str) -> Optional[InboxPost]:
+async def pick_next(
+    db: Database,
+    operator_id: int,
+    batch_id: str,
+    *,
+    requeue_skipped: bool = True,
+    prefer_oldest: bool = False,
+) -> Optional[InboxPost]:
     """Select the next inbox item and lock it for the operator.
 
-    Rows in ``pending`` state are preferred.  When none are available, all
-    rows in ``skipped`` state are moved back to ``pending`` and the selection is
-    repeated.  Items are ordered by ``event_ts_hint`` ascending and, within the
-    same hint, by ``date`` and ``id`` descending.  The selected row is
+    Rows in ``pending`` state are preferred. When none are available and
+    ``requeue_skipped`` is enabled, all rows in ``skipped`` state are moved
+    back to ``pending`` and the selection is repeated. Items are ordered by
+    ``event_ts_hint`` ascending and, within the same hint, by ``date`` and
+    ``id`` descending by default. For auto-import flows that must process
+    VK posts chronologically (oldest -> newest), pass ``prefer_oldest=True``.
+    The selected row is
     atomically updated to ``locked`` state with ``locked_by`` and ``locked_at``
     set and ``review_batch`` recorded so later imports can accumulate months
     for this batch.
@@ -312,6 +322,8 @@ async def pick_next(db: Database, operator_id: int, batch_id: str) -> Optional[I
         final_weight_config: dict[str, float] = {}
         far_gap_k = max(_int_from_env("VK_REVIEW_FAR_GAP_K", 5), 0)
         history = _get_far_history(operator_id, far_gap_k)
+        date_order = "ASC" if prefer_oldest else "DESC"
+        id_order = "ASC" if prefer_oldest else "DESC"
         while True:
             bucket_name_for_history: Optional[str] = None
             weight_config_for_log: dict[str, float] = {}
@@ -328,20 +340,25 @@ async def pick_next(db: Database, operator_id: int, batch_id: str) -> Optional[I
             )
             has_pending = await cur.fetchone() is not None
             if not has_pending:
-                await conn.execute(
-                    "UPDATE vk_inbox SET status='pending' WHERE status='skipped' AND (event_ts_hint IS NULL OR event_ts_hint >= ?)",
-                    (reject_cutoff,),
-                )
+                if requeue_skipped:
+                    await conn.execute(
+                        "UPDATE vk_inbox SET status='pending' WHERE status='skipped' AND (event_ts_hint IS NULL OR event_ts_hint >= ?)",
+                        (reject_cutoff,),
+                    )
+                    # Re-check now that we've moved skipped back to pending.
+                    continue
+                else:
+                    return None
 
             cursor = await conn.execute(
-                """
+                f"""
                 WITH next AS (
                     SELECT id FROM vk_inbox
                     WHERE status='pending'
                       AND event_ts_hint IS NOT NULL
                       AND event_ts_hint >= ?
                       AND event_ts_hint < ?
-                    ORDER BY event_ts_hint ASC, date DESC, id DESC
+                    ORDER BY event_ts_hint ASC, date {date_order}, id {id_order}
                     LIMIT 1
                 )
                 UPDATE vk_inbox
@@ -461,13 +478,13 @@ async def pick_next(db: Database, operator_id: int, batch_id: str) -> Optional[I
                             SELECT c.id
                             FROM candidates c
                             LEFT JOIN group_penalties gp ON c.group_id = gp.group_id
-                            ORDER BY c.event_ts_hint ASC,
-                                     (ABS(RANDOM()) / 9223372036854775808.0) * 0.001 *
-                                         COALESCE(gp.penalty, 1.0) ASC,
-                                     c.date DESC,
-                                     c.id DESC
-                            LIMIT 1
-                        )
+	                            ORDER BY c.event_ts_hint ASC,
+	                                     c.date {date_order},
+	                                     c.id {id_order},
+	                                     (ABS(RANDOM()) / 9223372036854775808.0) * 0.001 *
+	                                         COALESCE(gp.penalty, 1.0) ASC
+	                            LIMIT 1
+	                        )
                         UPDATE vk_inbox
                         SET status='locked', locked_by=?, locked_at=CURRENT_TIMESTAMP, review_batch=?
                         WHERE id = (SELECT id FROM ranked)
@@ -483,12 +500,12 @@ async def pick_next(db: Database, operator_id: int, batch_id: str) -> Optional[I
 
                 if not row:
                     cursor = await conn.execute(
-                        """
+                        f"""
                         WITH next AS (
                             SELECT id FROM vk_inbox
                             WHERE status='pending' AND (event_ts_hint IS NULL OR event_ts_hint >= ?)
                             ORDER BY CASE WHEN event_ts_hint IS NULL THEN 1 ELSE 0 END,
-                                     event_ts_hint ASC, date DESC, id DESC
+                                     event_ts_hint ASC, date {date_order}, id {id_order}
                             LIMIT 1
                         )
                         UPDATE vk_inbox
@@ -563,6 +580,15 @@ async def mark_skipped(db: Database, inbox_id: int) -> None:
         await conn.commit()
 
 
+async def mark_failed(db: Database, inbox_id: int) -> None:
+    async with db.raw_conn() as conn:
+        await conn.execute(
+            "UPDATE vk_inbox SET status='failed', locked_by=NULL, locked_at=NULL WHERE id=?",
+            (inbox_id,),
+        )
+        await conn.commit()
+
+
 async def mark_rejected(db: Database, inbox_id: int) -> None:
     async with db.raw_conn() as conn:
         await conn.execute(
@@ -580,15 +606,47 @@ async def mark_imported(
     event_id: int | None,
     event_date: str | None,
 ) -> None:
-    """Mark inbox row as imported and accumulate affected month.
+    """Backward-compatible wrapper for :func:`mark_imported_events`."""
+    event_ids = [int(event_id)] if event_id else []
+    event_dates = [event_date] if event_date else []
+    await mark_imported_events(
+        db,
+        inbox_id=inbox_id,
+        batch_id=batch_id,
+        operator_id=operator_id,
+        event_ids=event_ids,
+        event_dates=event_dates,
+    )
 
-    ``event_date`` should be in ISO ``YYYY-MM-DD`` format.  The month part is
-    stored in ``vk_review_batch.months_csv`` as a comma separated set.  The
-    row is unlocked and linked with ``event_id`` (which may be ``None`` when
-    only a festival record is created).
+
+async def mark_imported_events(
+    db: Database,
+    *,
+    inbox_id: int,
+    batch_id: str,
+    operator_id: int,
+    event_ids: list[int] | None = None,
+    event_dates: list[str | None] | None = None,
+) -> None:
+    """Mark inbox row as imported and link it with one or more events.
+
+    VK posts may yield multiple events. We keep ``vk_inbox.imported_event_id`` as
+    a convenience pointer to the first imported event (if any) and store the full
+    mapping in ``vk_inbox_import_event``.
+
+    ``event_dates`` may contain either ``YYYY-MM-DD`` or ``YYYY-MM`` strings; we
+    extract month parts and accumulate them in ``vk_review_batch.months_csv``.
     """
 
-    month = (event_date or "")[:7]
+    ids = [int(v) for v in (event_ids or []) if v]
+    primary_event_id = ids[0] if ids else None
+
+    months: set[str] = set()
+    for raw in (event_dates or []):
+        month = (raw or "")[:7]
+        if month:
+            months.add(month)
+
     async with db.raw_conn() as conn:
         if not batch_id:
             cur = await conn.execute(
@@ -606,8 +664,16 @@ async def mark_imported(
                 imported_event_id=?, review_batch=?
             WHERE id=?
             """,
-            (event_id, batch_id, inbox_id),
+            (primary_event_id, batch_id, inbox_id),
         )
+
+        if ids:
+            for eid in ids:
+                await conn.execute(
+                    "INSERT OR IGNORE INTO vk_inbox_import_event(inbox_id, event_id) VALUES(?,?)",
+                    (inbox_id, eid),
+                )
+
         if batch_id:
             await conn.execute(
                 """
@@ -621,11 +687,8 @@ async def mark_imported(
                 (batch_id,),
             )
             row = await cur.fetchone()
-            months: set[str] = set()
             if row and row[0]:
-                months = set(filter(None, row[0].split(',')))
-            if month:
-                months.add(month)
+                months.update(set(filter(None, str(row[0]).split(","))))
             months_csv = ",".join(sorted(months))
             await conn.execute(
                 "UPDATE vk_review_batch SET months_csv=?, finished_at=NULL WHERE batch_id=?",
@@ -636,16 +699,18 @@ async def mark_imported(
                 "vk_review mark_imported missing_batch",
                 extra={
                     "inbox_id": inbox_id,
-                    "event_id": event_id,
-                    "event_date": event_date,
+                    "event_ids": ids,
+                    "event_dates": event_dates,
                 },
             )
         await conn.commit()
+
     logging.info(
-        "vk_review mark_imported inbox_id=%s event_id=%s month=%s",
+        "vk_review mark_imported_events inbox_id=%s primary_event_id=%s events=%s months=%s",
         inbox_id,
-        event_id,
-        month,
+        primary_event_id,
+        len(ids),
+        ",".join(sorted(months)),
     )
 
 

@@ -1,5 +1,6 @@
 import logging
 import os
+import html
 import re
 import asyncio
 import time as _time
@@ -372,7 +373,12 @@ async def get_month_data(db: Database, month: str, *, fallback: bool = True):
     async with db.get_session() as session:
         result = await session.execute(
             select(Event)
-            .where(Event.date >= start.isoformat(), Event.date < next_start.isoformat())
+            .where(
+                Event.date >= start.isoformat(),
+                Event.date < next_start.isoformat(),
+                Event.lifecycle_status == "active",
+                Event.silent.is_(False),
+            )
             .order_by(Event.date, Event.time)
         )
         events = result.scalars().all()
@@ -387,6 +393,8 @@ async def get_month_data(db: Database, month: str, *, fallback: bool = True):
                 Event.end_date >= start.isoformat(),
                 Event.date <= next_start.isoformat(),
                 Event.event_type == "выставка",
+                Event.lifecycle_status == "active",
+                Event.silent.is_(False),
             )
             .order_by(Event.date)
         )
@@ -918,7 +926,11 @@ async def build_weekend_page_content(
     async with db.get_session() as session:
         result = await session.execute(
             select(Event)
-            .where(Event.date.in_([d.isoformat() for d in days]))
+            .where(
+                Event.date.in_([d.isoformat() for d in days]),
+                Event.lifecycle_status == "active",
+                Event.silent.is_(False),
+            )
             .order_by(Event.date, Event.time)
         )
         events = result.scalars().all()
@@ -930,6 +942,8 @@ async def build_weekend_page_content(
                 Event.end_date.is_not(None),
                 Event.date <= sunday.isoformat(),
                 Event.end_date >= saturday.isoformat(),
+                Event.lifecycle_status == "active",
+                Event.silent.is_(False),
             )
             .order_by(Event.date)
         )
@@ -942,6 +956,8 @@ async def build_weekend_page_content(
                 Event.end_date.is_not(None),
                 Event.date <= sunday.isoformat(),
                 Event.end_date >= saturday.isoformat(),
+                Event.lifecycle_status == "active",
+                Event.silent.is_(False),
             )
             .order_by(Event.date, Event.time)
         )
@@ -1301,7 +1317,11 @@ async def build_week_vk_message(db: Database, start: str) -> str:
         async with db.get_session() as session:
             result = await session.execute(
                 select(Event)
-                .where(Event.date.in_([d.isoformat() for d in days]))
+                .where(
+                    Event.date.in_([d.isoformat() for d in days]),
+                    Event.lifecycle_status == "active",
+                    Event.silent.is_(False),
+                )
                 .order_by(Event.date, Event.time)
             )
             events = result.scalars().all()
@@ -1372,7 +1392,11 @@ async def build_weekend_vk_message(db: Database, start: str) -> str:
         async with db.get_session() as session:
             result = await session.execute(
                 select(Event)
-                .where(Event.date.in_([d.isoformat() for d in days]))
+                .where(
+                    Event.date.in_([d.isoformat() for d in days]),
+                    Event.lifecycle_status == "active",
+                    Event.silent.is_(False),
+                )
                 .order_by(Event.date, Event.time)
             )
             events = result.scalars().all()
@@ -2592,7 +2616,11 @@ async def build_daily_posts(
     async with db.get_session() as session:
         res_today = await session.execute(
             select(Event)
-            .where(Event.date == today.isoformat())
+            .where(
+                Event.date == today.isoformat(),
+                Event.lifecycle_status == "active",
+                Event.silent.is_(False),
+            )
             .order_by(Event.time)
         )
         events_today_all = res_today.scalars().all()
@@ -2607,6 +2635,8 @@ async def build_daily_posts(
                     Event.end_date.is_not(None),
                     Event.end_date >= today.isoformat(),
                     Event.date <= today.isoformat(),
+                    Event.lifecycle_status == "active",
+                    Event.silent.is_(False),
                 )
                 .order_by(Event.date, Event.time)
             )
@@ -2637,6 +2667,7 @@ async def build_daily_posts(
                 Event.added_at.is_not(None),
                 Event.added_at >= yesterday_utc,
                 Event.silent.is_(False),
+                Event.lifecycle_status == "active",
             )
             .order_by(Event.date, Event.time)
         )
@@ -2660,6 +2691,8 @@ async def build_daily_posts(
                 select(Event).where(
                     Event.added_at.is_not(None),
                     Event.added_at >= yesterday_utc,
+                    Event.lifecycle_status == "active",
+                    Event.silent.is_(False),
                 )
             )
         ).scalars().all()
@@ -2895,7 +2928,11 @@ async def build_daily_sections_vk(
     async with db.get_session() as session:
         res_today = await session.execute(
             select(Event)
-            .where(Event.date == today.isoformat())
+            .where(
+                Event.date == today.isoformat(),
+                Event.lifecycle_status == "active",
+                Event.silent.is_(False),
+            )
             .order_by(Event.time)
         )
         events_today = res_today.scalars().all()
@@ -2907,6 +2944,8 @@ async def build_daily_sections_vk(
                     Event.end_date.is_not(None),
                     Event.end_date >= today.isoformat(),
                     Event.date <= today.isoformat(),
+                    Event.lifecycle_status == "active",
+                    Event.silent.is_(False),
                 )
                 .order_by(Event.date, Event.time)
             )
@@ -2926,6 +2965,7 @@ async def build_daily_sections_vk(
                 Event.added_at.is_not(None),
                 Event.added_at >= yesterday_utc,
                 Event.silent.is_(False),
+                Event.lifecycle_status == "active",
             )
             .order_by(Event.date, Event.time)
         )
@@ -2954,6 +2994,8 @@ async def build_daily_sections_vk(
                 select(Event).where(
                     Event.added_at.is_not(None),
                     Event.added_at >= yesterday_utc,
+                    Event.lifecycle_status == "active",
+                    Event.silent.is_(False),
                 )
             )
         ).scalars().all()
@@ -4277,6 +4319,11 @@ async def init_db_and_scheduler(
     await get_tz_offset(db)
     global CATBOX_ENABLED
     CATBOX_ENABLED = await get_catbox_enabled(db)
+    force_catbox_raw = (os.getenv("CATBOX_FORCE_ENABLED") or "").strip().lower()
+    if force_catbox_raw in {"1", "true", "yes", "on"}:
+        CATBOX_ENABLED = True
+    elif force_catbox_raw in {"0", "false", "no", "off"}:
+        CATBOX_ENABLED = False
     logging.info("CATBOX_ENABLED resolved to %s", CATBOX_ENABLED)
     global VK_PHOTOS_ENABLED
     VK_PHOTOS_ENABLED = await get_vk_photos_enabled(db)
@@ -4300,16 +4347,31 @@ async def init_db_and_scheduler(
     except Exception:
         logging.exception("scheduler_startup failed; continuing without scheduler")
     try:
-        from kaggle_recovery import kaggle_recovery_scheduler
-        app["kaggle_recovery_once"] = asyncio.create_task(
-            kaggle_recovery_scheduler(db, bot)
-        )
+        raw = (os.getenv("ENABLE_KAGGLE_RECOVERY") or "").strip().lower()
+        if raw:
+            enable_kaggle_recovery_once = raw in {"1", "true", "yes"}
+        else:
+            # Keep startup behavior aligned with scheduler defaults:
+            # enabled by default in prod, disabled by default in dev.
+            dev_mode = (os.getenv("DEV_MODE") or "").strip().lower() in {"1", "true", "yes"}
+            enable_kaggle_recovery_once = not dev_mode
+        if enable_kaggle_recovery_once:
+            from kaggle_recovery import kaggle_recovery_scheduler
+
+            app["kaggle_recovery_once"] = asyncio.create_task(
+                kaggle_recovery_scheduler(db, bot)
+            )
+        else:
+            logging.info("SCHED skipping kaggle_recovery_once (ENABLE_KAGGLE_RECOVERY!=1)")
     except Exception:
         logging.exception("kaggle_recovery startup failed")
     app["daily_scheduler"] = asyncio.create_task(daily_scheduler(db, bot))
     app["add_event_worker"] = asyncio.create_task(add_event_queue_worker(db, bot))
     app["add_event_watch"] = asyncio.create_task(_watch_add_event_worker(app, db, bot))
-    app["job_outbox_worker"] = asyncio.create_task(job_outbox_worker(db, bot))
+    if (os.getenv("ENABLE_JOB_OUTBOX_WORKER") or "1").strip().lower() in {"1", "true", "yes"}:
+        app["job_outbox_worker"] = asyncio.create_task(job_outbox_worker(db, bot))
+    else:
+        logging.info("SCHED skipping job_outbox_worker (ENABLE_JOB_OUTBOX_WORKER!=1)")
     gc.collect()
     logging.info("BOOT_OK pid=%s", os.getpid())
 
@@ -4717,7 +4779,7 @@ def _render_event_source_label(source) -> str:
 async def build_event_source_log_text(
     session, event_id: int, tz: timezone
 ) -> str:
-    from models import EventSource, EventSourceFact
+    from models import Event, EventSource, EventSourceFact
 
     rows = (
         await session.execute(
@@ -4729,9 +4791,24 @@ async def build_event_source_log_text(
     ).all()
     if not rows:
         return "Лог источников пуст"
+    ev = await session.get(Event, event_id)
+    telegraph_url: str | None = None
+    if ev:
+        raw_url = getattr(ev, "telegraph_url", None)
+        raw_path = getattr(ev, "telegraph_path", None)
+        raw_source = getattr(ev, "source_post_url", None)
+        if raw_url and str(raw_url).strip().startswith(("http://", "https://")):
+            telegraph_url = str(raw_url).strip()
+        elif raw_path and str(raw_path).strip():
+            telegraph_url = f"https://telegra.ph/{str(raw_path).strip().lstrip('/')}"
+        elif raw_source and str(raw_source).strip().startswith(("http://", "https://")):
+            telegraph_url = str(raw_source).strip()
     lines: list[str] = ["🧾 Лог источников:"]
+    if telegraph_url:
+        lines.append(f"📄 Telegraph: {telegraph_url}")
+        lines.append("")
     current_key: tuple[int, datetime] | None = None
-    current_facts: list[str] = []
+    current_facts: list[tuple[str, str]] = []
     current_source = None
     current_ts: datetime | None = None
 
@@ -4741,8 +4818,51 @@ async def build_event_source_log_text(
         ts_text = _format_source_log_timestamp(current_ts, tz)
         source_label = _render_event_source_label(current_source)
         lines.append(f"{ts_text} — {source_label}")
-        for fact in current_facts:
-            lines.append(f"• {fact}")
+        icons = {
+            "added": "✅",
+            "duplicate": "↩️",
+            "conflict": "⚠️",
+            "note": "ℹ️",
+        }
+        status_order = ["added", "duplicate", "conflict", "note"]
+        url_re = re.compile(
+            r"^(?P<kind>Афиша в источнике|Добавлена афиша):\s+(?P<url>https?://\S+)\s*$",
+            re.IGNORECASE,
+        )
+        added_urls: set[str] = set()
+        parsed: list[tuple[str, str, str, str]] = []
+        passthrough: list[tuple[str, str]] = []
+        for status, fact in current_facts:
+            m = url_re.match((fact or "").strip())
+            if not m:
+                passthrough.append((status, fact))
+                continue
+            kind = (m.group("kind") or "").strip().lower()
+            url = (m.group("url") or "").strip()
+            parsed.append((status, fact, kind, url))
+            if "добавлена" in kind:
+                added_urls.add(url)
+        filtered: list[tuple[str, str]] = []
+        for status, fact, kind, url in parsed:
+            if "афиша в источнике" in kind and url in added_urls:
+                continue
+            filtered.append((status, fact))
+        filtered.extend(passthrough)
+        grouped: dict[str, list[str]] = {k: [] for k in status_order}
+        other: list[tuple[str, str]] = []
+        for status, fact in filtered:
+            st = (status or "").strip().lower()
+            if st in grouped:
+                grouped[st].append(fact)
+            else:
+                other.append((status, fact))
+        for st in status_order:
+            icon = icons.get(st, "•")
+            for fact in grouped.get(st) or []:
+                lines.append(f"• {icon} {fact}")
+        for st, fact in other:
+            icon = icons.get((st or "").strip().lower(), "•")
+            lines.append(f"• {icon} {fact}")
         lines.append("")
 
     for fact_row, source in rows:
@@ -4757,7 +4877,8 @@ async def build_event_source_log_text(
             current_source = source
             current_ts = fact_row.created_at
             current_facts = []
-        current_facts.append(fact_row.fact)
+        status = getattr(fact_row, "status", None) or "added"
+        current_facts.append((str(status), fact_row.fact))
     _flush()
     while lines and not lines[-1].strip():
         lines.pop()
@@ -4959,6 +5080,11 @@ async def show_edit_menu(
                 _fit_poster_preview_lines([POSTER_PREVIEW_UNAVAILABLE], poster_budget)
                 or [POSTER_PREVIEW_UNAVAILABLE]
             )
+
+        # Ensure the edit card always contains the event id, even when the poster
+        # preview consumes most of the Telegram message budget.
+        if event.id:
+            poster_block = [f"id: {event.id}"] + poster_block
 
         remaining = TELEGRAM_MESSAGE_LIMIT - len("\n".join(poster_block))
         if lines:
@@ -5459,6 +5585,85 @@ async def handle_events(message: types.Message, db: Database, bot: Bot):
             # Fallback to compact format
             text, markup = await build_events_message_compact(db, day, tz, creator_filter)
             await bot.send_message(message.chat.id, text, reply_markup=markup, parse_mode="HTML")
+
+
+async def handle_edit_command(message: types.Message, db: Database, bot: Bot) -> None:
+    """Open edit menu for an event by id (admin / partner helper).
+
+    This is intentionally simple and helps E2E when /events falls back to compact mode
+    (no per-event ✎ buttons due to Telegram 4096 char limit).
+    """
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) != 2 or not parts[1].strip().isdigit():
+        await bot.send_message(message.chat.id, "Usage: /edit <event_id>")
+        return
+    eid = int(parts[1].strip())
+    async with db.get_session() as session:
+        user = await session.get(User, message.from_user.id)
+        event = await session.get(Event, eid)
+    if not user or user.blocked:
+        await bot.send_message(message.chat.id, "Not authorized")
+        return
+    if not event:
+        await bot.send_message(message.chat.id, f"Event not found: {eid}")
+        return
+    if user.is_partner and event.creator_id != user.user_id:
+        await bot.send_message(message.chat.id, "Not authorized")
+        return
+    editing_sessions[message.from_user.id] = (eid, None)
+    await show_edit_menu(message.from_user.id, event, bot, db_obj=db)
+
+
+async def handle_log_command(message: types.Message, db: Database, bot: Bot) -> None:
+    """Send operator source log for an event by id (shortcut for the inline button)."""
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) != 2 or not parts[1].strip().isdigit():
+        await bot.send_message(message.chat.id, "Usage: /log <event_id>")
+        return
+    eid = int(parts[1].strip())
+    async with db.get_session() as session:
+        user = await session.get(User, message.from_user.id)
+        event = await session.get(Event, eid)
+        if not user or user.blocked:
+            await bot.send_message(message.chat.id, "Not authorized")
+            return
+        if not event:
+            await bot.send_message(message.chat.id, f"Event not found: {eid}")
+            return
+        if user.is_partner and event.creator_id != user.user_id:
+            await bot.send_message(message.chat.id, "Not authorized")
+            return
+        log_text = await build_event_source_log_text(session, eid, LOCAL_TZ)
+    if len(log_text) > TELEGRAM_MESSAGE_LIMIT:
+        log_text = _truncate_with_indicator(log_text, TELEGRAM_MESSAGE_LIMIT)
+    await bot.send_message(message.chat.id, log_text)
+
+
+async def handle_rebuild_event_command(message: types.Message, db: Database, bot: Bot) -> None:
+    """Force rebuild of an event pipeline (Telegraph + dependent pages) by event id."""
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) != 2 or not parts[1].strip().isdigit():
+        await bot.send_message(message.chat.id, "Usage: /rebuild_event <event_id>")
+        return
+    eid = int(parts[1].strip())
+    async with db.get_session() as session:
+        user = await session.get(User, message.from_user.id)
+        event = await session.get(Event, eid)
+    if not user or user.blocked or not user.is_superadmin:
+        await bot.send_message(message.chat.id, "Not authorized")
+        return
+    if not event:
+        await bot.send_message(message.chat.id, f"Event not found: {eid}")
+        return
+
+    results = await schedule_event_update_tasks(db, event)
+    parts_out = [f"{k.value}={v}" for k, v in results.items()]
+    tail = ", ".join(parts_out) if parts_out else "no_jobs"
+    await bot.send_message(
+        message.chat.id,
+        f"✅ Rebuild enqueued for event_id={eid}: {tail}",
+        disable_web_page_preview=True,
+    )
 
 
 async def show_digest_menu(message: types.Message, db: Database, bot: Bot) -> None:
@@ -8795,7 +9000,7 @@ async def handle_dom_iskusstv_input(message: types.Message, db: Database, bot: B
         event_infos = []
         for eid in all_event_ids:
             # build_added_event_info is async
-            info = await build_added_event_info(db, eid, "dom_iskusstv")
+            info = await build_added_event_info(db, eid, "dom_iskusstv", source_url=None)
             if info:
                 event_infos.append(info)
         
@@ -9596,6 +9801,7 @@ async def handle_vk_queue(message: types.Message, db: Database, bot: Bot) -> Non
         f"pending: {counts.get('pending', 0)}",
         f"locked: {counts.get('locked', 0)}",
         f"skipped: {counts.get('skipped', 0)}",
+        f"failed: {counts.get('failed', 0)}",
         f"imported: {counts.get('imported', 0)}",
         f"rejected: {counts.get('rejected', 0)}",
     ]
@@ -9614,6 +9820,128 @@ async def handle_vk_queue(message: types.Message, db: Database, bot: Bot) -> Non
         resize_keyboard=True,
     )
     await bot.send_message(message.chat.id, "\n".join(lines), reply_markup=markup)
+
+
+async def handle_vk_auto_import(message: types.Message, db: Database, bot: Bot) -> None:
+    """Auto-import VK inbox queue via Smart Update (LLM)."""
+    import shlex
+    import time
+
+    async with db.get_session() as session:
+        user = await session.get(User, message.from_user.id)
+    if not user:
+        await bot.send_message(message.chat.id, "Not authorized")
+        return
+
+    # Manual operator command defaults to "all" to keep UX simple:
+    # `/vk_auto_import` processes the whole active queue.
+    # Scheduler runs still use VK_AUTO_IMPORT_LIMIT (default 25).
+    limit: int = 0
+    # `skipped` is operator-controlled deferral; don't requeue it implicitly.
+    include_skipped = False
+    text = message.text or ""
+    try:
+        tokens = shlex.split(text)
+    except ValueError:
+        tokens = text.split()
+    for tok in tokens[1:]:
+        low_tok = tok.strip().lower()
+        if low_tok in {"all", "*", "max", "infinite", "inf"}:
+            limit = 0
+            continue
+        if tok.isdigit():
+            limit = int(tok)
+            continue
+        if tok.startswith("--limit="):
+            raw = (tok.split("=", 1)[1] or "").strip()
+            low = raw.lower()
+            if low in {"all", "*", "max", "infinite", "inf"}:
+                limit = 0
+            else:
+                try:
+                    limit = int(raw)
+                except ValueError:
+                    pass
+            continue
+        if tok.strip().lower() in {"--all", "--limit-all", "--limit_all"}:
+            limit = 0
+            continue
+        flag = tok.strip().lower()
+        if flag in {"--include-skipped", "--include_skipped", "--requeue-skipped", "--requeue_skipped"}:
+            include_skipped = True
+        if flag in {"--only-pending", "--only_pending", "--pending-only", "--pending_only", "--no-include-skipped", "--no-include_skipped"}:
+            include_skipped = False
+
+    from vk_auto_queue import run_vk_auto_import
+
+    limit_label = "all" if int(limit) <= 0 else str(int(limit))
+    eligible_hint = ""
+    try:
+        from vk_review import release_stale_locks
+
+        await release_stale_locks(db)
+        async with db.raw_conn() as conn:
+            cur = await conn.execute("SELECT status, COUNT(*) FROM vk_inbox GROUP BY status")
+            rows = await cur.fetchall()
+            counts = {str(r[0]): int(r[1]) for r in (rows or []) if r and r[0] is not None}
+            reject_window_h = float(os.getenv("VK_REVIEW_REJECT_H", "2") or "2")
+            reject_window_h = max(0.0, reject_window_h)
+            reject_cutoff = int(time.time()) + int(reject_window_h * 3600)
+            statuses = ("pending", "skipped") if include_skipped else ("pending",)
+            placeholders = ",".join("?" for _ in statuses)
+            cur = await conn.execute(
+                f"""
+                SELECT COUNT(1)
+                FROM vk_inbox
+                WHERE status IN ({placeholders})
+                  AND (event_ts_hint IS NULL OR event_ts_hint >= ?)
+                """,
+                (*statuses, int(reject_cutoff)),
+            )
+            row = await cur.fetchone()
+            eligible = int((row[0] if row else 0) or 0)
+        eligible_hint = (
+            f" (к разбору сейчас: {eligible}; pending={counts.get('pending', 0)}, "
+            f"locked={counts.get('locked', 0)}, skipped={counts.get('skipped', 0)})"
+        )
+    except Exception:
+        eligible_hint = ""
+    await bot.send_message(
+        message.chat.id,
+        f"Запускаю авторазбор VK очереди (limit={limit_label}, include_skipped={int(include_skipped)})…{eligible_hint}",
+        disable_web_page_preview=True,
+    )
+    await run_vk_auto_import(
+        db,
+        bot,
+        chat_id=message.chat.id,
+        limit=limit,
+        operator_id=message.from_user.id,
+        include_skipped=include_skipped,
+    )
+
+
+async def handle_vk_auto_import_stop(message: types.Message, db: Database, bot: Bot) -> None:
+    """Request cancellation of a running /vk_auto_import in this chat."""
+    async with db.get_session() as session:
+        user = await session.get(User, message.from_user.id)
+    if not user:
+        await bot.send_message(message.chat.id, "Not authorized")
+        return
+    if not has_admin_access(user):
+        return
+
+    from vk_auto_queue import request_vk_auto_import_cancel
+
+    request_vk_auto_import_cancel(
+        chat_id=int(message.chat.id),
+        operator_id=int(message.from_user.id),
+    )
+    await bot.send_message(
+        message.chat.id,
+        "🛑 Запрошена остановка VK auto import. Остановлюсь после завершения текущего поста.",
+        disable_web_page_preview=True,
+    )
 
 
 async def handle_vk_requeue_imported(
@@ -11273,8 +11601,13 @@ async def _vkrev_import_flow(
     if not persist_results:
         if festival_obj:
             fest_month_hint = fest_start_date or fest_end_date or ""
-            await vk_review.mark_imported(
-                db, inbox_id, batch_id, operator_id, None, fest_month_hint
+            await vk_review.mark_imported_events(
+                db,
+                inbox_id=inbox_id,
+                batch_id=batch_id,
+                operator_id=operator_id,
+                event_ids=[],
+                event_dates=[fest_month_hint],
             )
             vk_review_actions_total["imported"] += 1
             message_lines = ["Импортировано только фестиваль"]
@@ -11297,9 +11630,19 @@ async def _vkrev_import_flow(
             logging.exception("vk_import_result.supabase_failed")
         return
 
-    first_res = persist_results[0][1]
-    await vk_review.mark_imported(
-        db, inbox_id, batch_id, operator_id, first_res.event_id, first_res.event_date
+    imported_event_ids: list[int] = []
+    imported_event_dates: list[str | None] = []
+    for _draft, res, _event_obj in persist_results:
+        if res.event_id:
+            imported_event_ids.append(int(res.event_id))
+            imported_event_dates.append(res.event_date)
+    await vk_review.mark_imported_events(
+        db,
+        inbox_id=inbox_id,
+        batch_id=batch_id,
+        operator_id=operator_id,
+        event_ids=imported_event_ids,
+        event_dates=imported_event_dates,
     )
     try:
         mark_vk_import_result(
@@ -11307,7 +11650,7 @@ async def _vkrev_import_flow(
             post_id=post_id,
             url=source_post_url,
             outcome="imported",
-            event_id=first_res.event_id,
+            event_id=imported_event_ids[0] if imported_event_ids else None,
         )
     except Exception:
         logging.exception("vk_import_result.supabase_failed")
@@ -13982,6 +14325,7 @@ class SourcePageEventSummary:
     end_date: str | None = None
     time: str | None = None
     event_type: str | None = None
+    lifecycle_status: str | None = None  # active|cancelled|postponed
     location_name: str | None = None
     location_address: str | None = None
     city: str | None = None
@@ -14044,6 +14388,96 @@ def _format_ticket_price(min_price: int | None, max_price: int | None) -> str:
     return ""
 
 
+def _parse_iso_date_safe(value: str | None) -> date | None:
+    raw = (value or "").strip()
+    if not raw:
+        return None
+    try:
+        return date.fromisoformat(raw.split("..", 1)[0].strip())
+    except ValueError:
+        return None
+
+
+def _format_day_month_text(value: date) -> str:
+    return f"{value.day} {MONTHS[value.month - 1]}"
+
+
+def _summary_time_suffix(time_text: str | None) -> str:
+    t = (time_text or "").strip()
+    if not t or t == "00:00":
+        return ""
+    return f" {t}"
+
+
+def _format_exhibition_period_line(
+    *,
+    start_date: date | None,
+    end_date: date | None,
+    time_text: str | None,
+) -> str:
+    if not end_date and not start_date:
+        return ""
+    suffix = _summary_time_suffix(time_text)
+    today = date.today()
+
+    if end_date and start_date and start_date <= today <= end_date:
+        return f"🗓 по {_format_day_month_text(end_date)}{suffix}"
+    if end_date and start_date:
+        if start_date.year == end_date.year and start_date.month == end_date.month:
+            return f"🗓 {start_date.day}-{end_date.day} {MONTHS[start_date.month - 1]}{suffix}"
+        start_text = _format_day_month_text(start_date)
+        end_text = _format_day_month_text(end_date)
+        if start_date.year != end_date.year:
+            start_text = f"{start_text} {start_date.year}"
+            end_text = f"{end_text} {end_date.year}"
+        return f"🗓 с {start_text} по {end_text}{suffix}"
+    if end_date:
+        return f"🗓 по {_format_day_month_text(end_date)}{suffix}"
+    return f"🗓 {_format_day_month_text(start_date)}{suffix}" if start_date else ""
+
+
+def _canonicalize_summary_location_fields(
+    location_name: str | None,
+    location_address: str | None,
+    city: str | None,
+) -> tuple[str | None, str | None, str | None]:
+    name = (location_name or "").strip() or None
+    address = (location_address or "").strip() or None
+    city_value = (city or "").strip() or None
+
+    name_norm = _normalize_location_part(name)
+    address_norm = _normalize_location_part(address)
+    combined_norm = " ".join(x for x in [name_norm, address_norm] if x).strip()
+
+    if "бфу" not in combined_norm and (
+        "калининградская областная научная библиотека" in combined_norm
+        or combined_norm.startswith("научная библиотека")
+    ):
+        return "Научная библиотека", "Мира 9", "Калининград"
+
+    if "дом китобоя" in combined_norm:
+        return "Дом китобоя", "Мира 9", "Калининград"
+
+    if (
+        "фридланд" not in combined_norm
+        and (
+            "закхайм" in combined_norm
+            or "закхейм" in combined_norm
+            or combined_norm in {"ворота", "арт пространство ворота", "артпространство ворота"}
+            or ("ворота" in combined_norm and "литовск" in combined_norm)
+        )
+    ):
+        return "Закхаймские ворота", "Литовский Вал 61", "Калининград"
+
+    if address and "мира 9" in address_norm:
+        if "дом китобоя" in name_norm:
+            address = "Мира 9"
+        elif "бфу" not in name_norm and "научная библиотека" in name_norm:
+            address = "Мира 9"
+
+    return name, address, city_value
+
+
 async def _build_source_summary_block(
     event_summary: SourcePageEventSummary | None,
     *,
@@ -14054,12 +14488,16 @@ async def _build_source_summary_block(
 
     lines: list[str] = []
 
-    start_date: date | None = None
-    try:
-        if event_summary.date:
-            start_date = date.fromisoformat(event_summary.date)
-    except ValueError:
-        start_date = None
+    lifecycle = (event_summary.lifecycle_status or "").strip().casefold()
+    if lifecycle and lifecycle != "active":
+        if lifecycle == "cancelled":
+            lines.append(html.escape("❌ Отменено"))
+        elif lifecycle == "postponed":
+            lines.append(html.escape("⏸ Перенесено"))
+        else:
+            lines.append(html.escape(f"⛔ Статус: {event_summary.lifecycle_status}"))
+
+    start_date = _parse_iso_date_safe(event_summary.date)
 
     if start_date:
         default_date_str = f"{start_date.day} {MONTHS[start_date.month - 1]}"
@@ -14072,26 +14510,21 @@ async def _build_source_summary_block(
     else:
         default_date_str = ""
 
-    end_date_obj: date | None = None
-    if event_summary.end_date:
+    end_date_obj = _parse_iso_date_safe(event_summary.end_date)
+    if not end_date_obj and event_summary.date and ".." in event_summary.date:
         try:
-            end_date_obj = date.fromisoformat(event_summary.end_date)
+            end_date_obj = date.fromisoformat(event_summary.date.split("..", 1)[-1].strip())
         except ValueError:
             end_date_obj = None
 
-    ongoing_exhibition = (
-        (event_summary.event_type or "").strip().casefold() == "выставка"
-        and start_date is not None
-        and end_date_obj is not None
-        and start_date <= date.today() <= end_date_obj
-    )
+    is_exhibition = (event_summary.event_type or "").strip().casefold() == "выставка"
 
-    if ongoing_exhibition and end_date_obj is not None:
-        end_month_name = MONTHS[end_date_obj.month - 1]
-        year_suffix = ""
-        if start_date.year != end_date_obj.year:
-            year_suffix = f" {end_date_obj.year}"
-        date_line = f"🗓 по {end_date_obj.day} {end_month_name}{year_suffix}"
+    if is_exhibition:
+        date_line = _format_exhibition_period_line(
+            start_date=start_date,
+            end_date=end_date_obj,
+            time_text=event_summary.time,
+        )
     elif default_date_str:
         time_part = ""
         if event_summary.time and event_summary.time != "00:00":
@@ -14111,20 +14544,68 @@ async def _build_source_summary_block(
             f'📅 <a href="{html.escape(ics_url)}">{ICS_LABEL}</a>'
         )
 
+    (
+        location_name,
+        location_address,
+        location_city,
+    ) = _canonicalize_summary_location_fields(
+        event_summary.location_name,
+        event_summary.location_address,
+        event_summary.city,
+    )
+    # Avoid duplicated address/city artefacts from upstream parsers.
+    # Common failure mode: city field accidentally stores the full address.
+    if location_address and location_city:
+        addr_norm = _normalize_location_part(location_address)
+        city_norm = _normalize_location_part(location_city)
+        if city_norm and addr_norm and city_norm == addr_norm:
+            location_city = None
+        else:
+            location_address = strip_city_from_address(location_address, location_city)
+            if location_address:
+                location_address = location_address.strip() or None
+            # If "city" still looks like an address, drop it.
+            if location_city and re.search(r"(?i)\\b(ул\\.?|просп\\.?|пр-т|дом|д\\.|корп\\.?|кв\\.|\\d)\\b", location_city):
+                location_city = None
+
     location_parts: list[str] = []
-    existing_normalized: set[str] = set()
-    for part in (event_summary.location_name, event_summary.location_address):
-        if part and part.strip():
-            location_parts.append(part)
-            normalized = _normalize_location_part(part)
-            if normalized:
-                existing_normalized.add(normalized)
-    if event_summary.city and event_summary.city.strip():
-        city_normalized = _normalize_location_part(event_summary.city)
-        if not city_normalized or city_normalized not in existing_normalized:
-            location_parts.append(event_summary.city)
-            if city_normalized:
-                existing_normalized.add(city_normalized)
+
+    name_norm = _normalize_location_part(location_name)
+    addr_norm = _normalize_location_part(location_address)
+    city_norm = _normalize_location_part(location_city)
+
+    def _contains_longer(haystack: str, needle: str, *, min_len: int) -> bool:
+        if not haystack or not needle:
+            return False
+        if len(needle) < min_len:
+            return False
+        return needle in haystack
+
+    if location_name and location_name.strip():
+        location_parts.append(location_name)
+
+    # Avoid duplicated address when location_name already embeds it, e.g.:
+    # "Bar Sovetov, Mira 118, Kaliningrad" + "Mira 118".
+    if location_address and location_address.strip():
+        drop_addr = False
+        if addr_norm and name_norm:
+            if addr_norm == name_norm:
+                drop_addr = True
+            elif _contains_longer(name_norm, addr_norm, min_len=8):
+                drop_addr = True
+        if not drop_addr:
+            location_parts.append(location_address)
+
+    # Add city only if it's not already present in name/address.
+    if location_city and location_city.strip():
+        drop_city = False
+        if city_norm:
+            if _contains_longer(name_norm, city_norm, min_len=4):
+                drop_city = True
+            elif _contains_longer(addr_norm, city_norm, min_len=4):
+                drop_city = True
+        if not drop_city:
+            location_parts.append(location_city)
 
     location_line = ""
     if location_parts:
@@ -14183,6 +14664,7 @@ async def build_source_page_content(
     event_summary: SourcePageEventSummary | None = None,
     display_link: bool = True,
     catbox_urls: list[str] | None = None,
+    force_cover_url: str | None = None,
     image_mode: Literal["tail", "inline"] = "tail",
     page_mode: Literal["default", "history"] = "default",
     search_digest: str | None = None,
@@ -14193,6 +14675,7 @@ async def build_source_page_content(
     if page_mode not in {"default", "history"}:
         raise ValueError(f"unknown page_mode={page_mode}")
     html_content = ""
+
     def strip_title(line_text: str) -> str:
         lines = line_text.splitlines()
         if lines and lines[0].strip() == title.strip():
@@ -14213,15 +14696,27 @@ async def build_source_page_content(
     urls = [
         u for u in urls if not re.search(r"\.(?:mp4|webm|mkv|mov)(?:\?|$)", u, re.I)
     ][:12]
+    # If caller provided a "must-be-cover" URL (e.g. preview_3d), keep it first.
+    force_applied = False
+    if force_cover_url:
+        forced = str(force_cover_url).strip()
+        if forced and forced in urls:
+            urls = [forced] + [u for u in urls if u != forced]
+            force_applied = True
     # Telegram does not always generate cached_page/Instant View when the first image is WEBP.
     # Prefer a non-WEBP cover image if available.
-    if len(urls) >= 2 and re.search(r"\.webp(?:\?|$)", (urls[0] or ""), re.I):
+    if (not force_applied) and len(urls) >= 2 and re.search(r"\.webp(?:\?|$)", (urls[0] or ""), re.I):
         for idx in range(1, len(urls)):
             if not re.search(r"\.webp(?:\?|$)", (urls[idx] or ""), re.I):
                 urls[0], urls[idx] = urls[idx], urls[0]
                 break
     cover = urls[:1]
     tail = urls[1:]
+    if TELEGRAPH_IMAGE_UPLOAD and cover:
+        hosted_cover = await upload_telegraph_image_from_url(cover[0])
+        if hosted_cover and hosted_cover != cover[0]:
+            logging.info("telegraph.cover hosted src=%s dst=%s", cover[0], hosted_cover)
+            cover[0] = hosted_cover
     if cover:
         html_content += f'<figure><img src="{html.escape(cover[0])}"/></figure>'
     summary_html = await _build_source_summary_block(
@@ -14335,7 +14830,6 @@ async def build_source_page_content(
             sanitized = linkify_for_telegraph(sanitized)
         else:
             sanitized = md_to_html(text_value)
-            sanitized = linkify_for_telegraph(sanitized)
         sanitized = re.sub(r"<(\/?)h[12](\b)", r"<\1h3\2", sanitized, flags=re.IGNORECASE)
         sanitized = re.sub(r"<br\s*/?>", "<br/>", sanitized, flags=re.IGNORECASE)
         sanitized = sanitize_telegram_html(sanitized)
@@ -14361,7 +14855,6 @@ async def build_source_page_content(
 
     if html_text:
         html_text = strip_title(html_text)
-        html_text = normalize_hashtag_dates(html_text)
         html_text = html_text.replace("\r\n", "\n")
         html_text = sanitize_telegram_html(html_text)
         # Replace internal <hr> tags with visual spacers to prevent apply_month_nav
@@ -14373,7 +14866,6 @@ async def build_source_page_content(
         paragraphs = _editor_html_blocks(html_text)
     else:
         clean_text = strip_title(text)
-        clean_text = normalize_hashtag_dates(clean_text)
         tg_emoji_cleaned = len(emoji_pat.findall(clean_text))
         tg_spoiler_unwrapped = len(spoiler_pat.findall(clean_text))
         # Custom Telegram emoji (<tg-emoji>) is not portable to Telegraph; strip it fully.
@@ -14381,16 +14873,118 @@ async def build_source_page_content(
         clean_text = spoiler_pat.sub(r"\1", clean_text)
         for k, v in CUSTOM_EMOJI_MAP.items():
             clean_text = clean_text.replace(k, v)
-        for line in clean_text.splitlines():
-            escaped = html.escape(line)
+
+        # Event Telegraph pages use Smart Update outputs. As a final safety-net, strip
+        # low-signal noise that sometimes leaks from Telegram multi-event posts.
+        if event_summary is not None and clean_text:
+            sched_line_re = re.compile(
+                r"(?m)^[ \t]*\d{1,2}[./]\d{1,2}[ \t]*(?:\\||[-–—])[ \t]*.+$"
+            )
+            drop_prefix_re = re.compile(r"(?im)^[ \t]*(?:текст\\s+дополнен:).*$")
+            title_line = (title or "").strip()
+            kept_lines: list[str] = []
+            for raw_line in clean_text.replace("\r", "\n").split("\n"):
+                line = (raw_line or "").strip()
+                if not line:
+                    kept_lines.append(raw_line)
+                    continue
+                if title_line and line == title_line:
+                    # duplicate H1 in body
+                    continue
+                if sched_line_re.match(line):
+                    # e.g. "12.02 | Фигаро" — redundant on a single event page
+                    continue
+                if drop_prefix_re.match(line):
+                    # internal operator log marker must not leak to the public page
+                    continue
+                # If date/time are already in the summary block, avoid standalone repeats.
+                if (
+                    getattr(event_summary, "time", None)
+                    and re.search(r"(?i)\\bпредставлени[ея]\\s+состо\\w+\\b", line)
+                    and re.search(r"\\b\\d{1,2}[:.]\\d{2}\\b", line)
+                ):
+                    continue
+                kept_lines.append(raw_line)
+            clean_text = "\n".join(kept_lines).strip()
+
+        # Smart Update may store event.description as markdown/plaintext with lightweight
+        # markup (e.g. **bold**). Prefer rendering that through our md->html pipeline,
+        # but keep the old "plain text" behavior for typical Telegram texts.
+        def _looks_like_markdown(value: str) -> bool:
+            if not value:
+                return False
+            if re.search(r"\*\*[^\n]+?\*\*", value):
+                return True
+            if re.search(r"__[^\n]+?__", value):
+                return True
+            if re.search(r"\[[^\]]+\]\(https?://", value):
+                return True
+            if re.search(r"(?m)^#{1,6}\s+\S", value):
+                return True
+            if re.search(r"(?m)^\s*[-*]\s+\S", value):
+                return True
+            if re.search(r"(?m)^>\s+\S", value):
+                return True
+            return False
+
+        if _looks_like_markdown(clean_text):
+            paragraphs = _editor_html_blocks(clean_text)
+        else:
+            # Keep human-friendly formatting for plain text:
+            # - blank line => paragraph break
+            # - single newline => <br/>
+            escaped = html.escape(clean_text)
             linked = linkify_for_telegraph(escaped)
-            if linked.strip():
-                paragraphs.append(f"<p>{linked}</p>")
-            else:
-                paragraphs.append(BODY_SPACER_HTML)
+            paragraphs = _wrap_plain_chunks(linked)
     if paragraphs:
-        if summary_added:
-            html_content += BODY_SPACER_HTML
+        # If a quote marker leaked as plain text ("> ..."), render it as a true
+        # Telegraph quote. This is important for Smart Update: it may emit
+        # Markdown-style quotes, but some inputs still go through the plain-text
+        # pipeline and end up as "&gt; ..." inside <p>.
+        def _p_gt_to_blockquote(block: str) -> str:
+            b = (block or "").strip()
+            m = re.match(r"(?is)^<p[^>]*>\\s*&gt;\\s*(.*?)\\s*</p>$", b)
+            if not m:
+                return block
+            inner = (m.group(1) or "").strip()
+            if not inner:
+                return block
+            # Guardrail: don't turn long/logistics-heavy fragments into a quote block.
+            inner_text = html.unescape(re.sub(r"<[^>]+>", " ", inner))
+            if (
+                len(inner_text) > 240
+                or re.search(
+                    r"(?i)\\b(билеты|контакт|телефон|локаци|адрес|стоимост|регистрац)\\b",
+                    inner_text,
+                )
+            ):
+                return f"<p>{inner}</p>"
+            return f"<blockquote>{inner}</blockquote>"
+
+        paragraphs = [_p_gt_to_blockquote(b) for b in paragraphs]
+        # Another guardrail: if markdown parsing produced an overly broad quote block,
+        # unwrap it back to normal paragraphs to avoid misleading "quoted" logistics.
+        def _sanitize_blockquote(block: str) -> str:
+            b = (block or "").strip()
+            m = re.match(r"(?is)^<blockquote>(.*?)</blockquote>$", b)
+            if not m:
+                return block
+            inner = (m.group(1) or "").strip()
+            inner_text = html.unescape(re.sub(r"<[^>]+>", " ", inner))
+            if (
+                len(inner_text) > 320
+                or re.search(
+                    r"(?i)\\b(билеты|контакт|телефон|локаци|адрес|стоимост|регистрац)\\b",
+                    inner_text,
+                )
+            ):
+                inner_low = inner.lstrip().lower()
+                if inner_low.startswith("<p") and inner_low.rstrip().endswith("</p>"):
+                    return inner
+                return f"<p>{inner}</p>"
+            return block
+
+        paragraphs = [_sanitize_blockquote(b) for b in paragraphs]
         normalized_paragraphs: list[str] = []
         for block in paragraphs:
             block_stripped = block.strip()
@@ -14399,6 +14993,15 @@ async def build_source_page_content(
             else:
                 normalized_paragraphs.append(block)
         paragraphs = normalized_paragraphs
+        while paragraphs and paragraphs[0] == BODY_SPACER_HTML:
+            paragraphs.pop(0)
+        while paragraphs and paragraphs[-1] == BODY_SPACER_HTML:
+            paragraphs.pop()
+        if summary_added and paragraphs:
+            first_block = paragraphs[0].strip().lower()
+            # Avoid an extra blank line before heading/quote-led texts.
+            if not re.match(r"^<(h[1-6]|blockquote|figure|img)\b", first_block):
+                html_content += BODY_SPACER_HTML
     inline_used = 0
     if page_mode == "history" and paragraphs:
         anchor_re = re.compile(r"<a\b[^>]*href=(['\"])(.*?)\1[^>]*>(.*?)</a>", re.IGNORECASE | re.DOTALL)
@@ -14706,11 +15309,49 @@ def create_app() -> web.Application:
     # In dev mode, we'll skip webhook setup
 
     from main import IPv4AiohttpSession, set_bot
+    from llm_context import reset_operator_chat_id, set_operator_chat_id
+    from aiogram.dispatcher.middlewares.base import BaseMiddleware
+    from aiogram.types import Update
     session = IPv4AiohttpSession(timeout=ClientTimeout(total=HTTP_TIMEOUT))
     bot = SafeBot(token, session=session)
     logging.info("DB_PATH=%s", DB_PATH)
     logging.info("FOUR_O_TOKEN found: %s", bool(os.getenv("FOUR_O_TOKEN")))
     dp = Dispatcher()
+
+    class _LLMOperatorChatMiddleware(BaseMiddleware):
+        """Attach operator chat_id to contextvars for the duration of update handling."""
+
+        async def __call__(self, handler, event: Update, data):  # type: ignore[override]
+            chat_id = None
+            try:
+                if getattr(event, "message", None):
+                    chat_id = int(event.message.chat.id)  # type: ignore[union-attr]
+                elif getattr(event, "callback_query", None) and getattr(event.callback_query, "message", None):
+                    chat_id = int(event.callback_query.message.chat.id)  # type: ignore[union-attr]
+                elif getattr(event, "channel_post", None):
+                    chat_id = int(event.channel_post.chat.id)  # type: ignore[union-attr]
+                elif getattr(event, "edited_channel_post", None):
+                    chat_id = int(event.edited_channel_post.chat.id)  # type: ignore[union-attr]
+            except Exception:
+                chat_id = None
+
+            token = None
+            if chat_id is not None:
+                try:
+                    token = set_operator_chat_id(chat_id)
+                except Exception:
+                    token = None
+            try:
+                return await handler(event, data)
+            finally:
+                if token is not None:
+                    try:
+                        reset_operator_chat_id(token)
+                    except Exception:
+                        pass
+
+    # Ensure LLM incidents are routed back to the operator chat when actions are UI-triggered.
+    dp.update.outer_middleware(_LLMOperatorChatMiddleware())
     dp.include_router(ik_poster_router)
     from handlers.channel_nav import channel_nav_router
     dp.include_router(channel_nav_router)
@@ -14777,6 +15418,15 @@ def create_app() -> web.Application:
 
     async def list_events_wrapper(message: types.Message):
         await handle_events(message, db, bot)
+
+    async def edit_event_wrapper(message: types.Message):
+        await handle_edit_command(message, db, bot)
+
+    async def log_event_wrapper(message: types.Message):
+        await handle_log_command(message, db, bot)
+
+    async def rebuild_event_wrapper(message: types.Message):
+        await handle_rebuild_event_command(message, db, bot)
 
     async def set_channel_wrapper(message: types.Message):
         await handle_set_channel(message, db, bot)
@@ -15152,6 +15802,12 @@ def create_app() -> web.Application:
     async def vk_queue_wrapper(message: types.Message):
         await handle_vk_queue(message, db, bot)
 
+    async def vk_auto_import_wrapper(message: types.Message):
+        await handle_vk_auto_import(message, db, bot)
+
+    async def vk_auto_import_stop_wrapper(message: types.Message):
+        await handle_vk_auto_import_stop(message, db, bot)
+
     async def vk_requeue_imported_wrapper(message: types.Message):
         await handle_vk_requeue_imported(message, db, bot)
 
@@ -15336,6 +15992,9 @@ def create_app() -> web.Application:
     dp.message.register(add_event_raw_wrapper, Command("addevent_raw"))
     dp.message.register(ask_4o_wrapper, Command("ask4o"))
     dp.message.register(list_events_wrapper, Command("events"))
+    dp.message.register(edit_event_wrapper, Command("edit"))
+    dp.message.register(log_event_wrapper, Command("log"))
+    dp.message.register(rebuild_event_wrapper, Command("rebuild_event"))
     dp.message.register(set_channel_wrapper, Command("setchannel"))
     dp.message.register(images_wrapper, Command("images"))
     dp.message.register(vkgroup_wrapper, Command("vkgroup"))
@@ -15355,6 +16014,8 @@ def create_app() -> web.Application:
     dp.message.register(vk_cmd_wrapper, Command("vk"))
     dp.message.register(vk_crawl_now_wrapper, Command("vk_crawl_now"))
     dp.message.register(vk_queue_wrapper, Command("vk_queue"))
+    dp.message.register(vk_auto_import_wrapper, Command("vk_auto_import"))
+    dp.message.register(vk_auto_import_stop_wrapper, Command("vk_auto_import_stop"))
     dp.message.register(vk_requeue_imported_wrapper, Command("vk_requeue_imported"))
     dp.message.register(
         vk_miss_review_wrapper,

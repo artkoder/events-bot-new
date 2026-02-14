@@ -167,7 +167,10 @@ async def run_monitor_task(bot: Bot, chat_id: int):
             await bot.send_message(chat_id, "⏳ Мониторинг уже запущен, ждём завершения.")
             return
         async with _monitor_lock:
-            await run_telegram_monitor(db, bot=bot, chat_id=chat_id, send_progress=True)
+            # Prevent confusing parallel "heavy" operations in operator chat:
+            # VK auto import and Telegram monitoring share one global semaphore.
+            async with main.HEAVY_SEMAPHORE:
+                await run_telegram_monitor(db, bot=bot, chat_id=chat_id, send_progress=True)
     except Exception as e:
         logger.exception("Manual monitor run failed")
         await bot.send_message(chat_id, f"❌ Monitor run failed: {e}")

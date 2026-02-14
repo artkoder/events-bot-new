@@ -42,15 +42,23 @@
 ### Added
 - **Telegram Monitor**: `/tg` now shows live Kaggle kernel status (polling) and sends a detailed per-event report with Telegram + Telegraph links.
 - **Telegram Monitor**: Source list now includes per-channel stats (last scan/message, counts) and supports delete.
+ - **Telegram Monitor (Kaggle)**: Supabase poster uploads use short object keys (configurable prefix `TG_MONITORING_POSTERS_PREFIX`, default `p`) to minimize public URL length.
 
 ### Changed
 - **Smart Event Update**: Incoming hashtags are stripped from titles/descriptions/source text before saving and Telegraph rendering.
 - **Telegram Monitor (Kaggle)**: Extraction/ OCR now use message date context and infer missing event years relative to the message date.
 - **Telegram Monitor (Kaggle)**: Auth now supports `TELEGRAM_AUTH_BUNDLE_S22` (bundle with device params); `TG_SESSION` remains a fallback.
+ - **Telegram Monitor (Kaggle)**: Ticket giveaways are no longer auto-skipped; giveaway mechanics are stripped and event facts are still extracted/merged when present.
+ - **Telegraph**: Event pages force `preview_3d_url` to be the cover image when available.
+ - **Telegraph**: Event pages render merged `event.description` (not a single legacy `source_text`) so newly merged facts show up on the page.
+ - **Smart Event Update**: New-text detection prefers full source text (not only excerpts) and records a more “new-facts” snippet in source logs.
+ - **Smart Event Update**: Clears `preview_3d_url` when the illustration set changes so `/3di` scheduled runs can regenerate 3D previews.
 
 ### Fixed
 - **Telegram Monitor (Kaggle)**: Fallback to local rate limiting when Supabase RPC is missing (PGRST202), so extraction keeps working in dev/test.
 - **E2E Telegram Monitoring**: Added dedicated feature file and more robust step handling for async bot updates.
+ - **Source Log**: Avoids showing duplicate poster URL facts when `Афиша в источнике` equals `Добавлена афиша`.
+ - **VK**: VK source-post updates track their own hash (`vk_source_hash`) instead of reusing Telegraph `content_hash`, preventing redundant repost/edit churn.
 
 ## [1.10.0] - 2026-01-24
 ### Added

@@ -521,7 +521,9 @@ def has_admin_access(user) -> bool:
 VK_MISS_REVIEW_COMMAND = os.getenv("VK_MISS_REVIEW_COMMAND", "/vk_misses")
 VK_MISS_REVIEW_FILE = os.getenv("VK_MISS_REVIEW_FILE", "/data/vk_miss_review.md")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
+SUPABASE_KEY = SUPABASE_SERVICE_KEY or os.getenv("SUPABASE_KEY")
+SUPABASE_SCHEMA = (os.getenv("SUPABASE_SCHEMA") or "public").strip() or "public"
 SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "events-ics")
 VK_TOKEN = os.getenv("VK_TOKEN")
 VK_TOKEN_AFISHA = os.getenv("VK_TOKEN_AFISHA")  # NEW
@@ -1557,8 +1559,14 @@ async def _watch_add_event_worker(app: web.Application, db: Database, bot: Bot):
 CATBOX_ENABLED: bool = False
 # toggle for sending photos to VK
 VK_PHOTOS_ENABLED: bool = False
-# toggle for Telegraph image uploads (disabled by default)
-TELEGRAPH_IMAGE_UPLOAD: bool = os.getenv("TELEGRAPH_IMAGE_UPLOAD", "0") != "0"
+# toggle for Telegraph image uploads (disabled by default; enable via TELEGRAPH_IMAGE_UPLOAD=1)
+TELEGRAPH_IMAGE_UPLOAD: bool = (os.getenv("TELEGRAPH_IMAGE_UPLOAD", "0") or "").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+}
+TELEGRAPH_UPLOAD_MAX_BYTES = int(os.getenv("TELEGRAPH_UPLOAD_MAX_BYTES", str(5 * 1024 * 1024)))
+_telegraph_image_upload_cache: dict[str, str] = {}
 _supabase_client: "Client | None" = None  # type: ignore[name-defined]
 _normalized_supabase_url: str | None = None
 _normalized_supabase_url_source: str | None = None
@@ -1642,6 +1650,245 @@ ICS_SEMAPHORE: asyncio.Semaphore | None = None
 
 # Skip creation/update of individual event Telegraph pages
 DISABLE_EVENT_PAGE_UPDATES = False
+
+# Skip aggregation page rebuild jobs (month/week/weekend/festival nav, etc.).
+# Useful for E2E runs where only per-event Telegraph pages are validated.
+DISABLE_PAGE_JOBS = os.getenv("DISABLE_PAGE_JOBS", "").strip().lower() in ("1", "true", "yes")
+
+
+def merge_render_photos(
+    *,
+    photo_urls: list[str] | None,
+    poster_urls: list[str] | None,
+    cover_url: str | None = None,
+) -> list[str]:
+    """Build ordered images for Telegraph pages.
+
+    Telegraph hard-caps pages to 12 images. If we append Telegram posters after
+    a long site gallery, the posters can get truncated and disappear from the page.
+    Prioritize posters early to keep them visible.
+    """
+
+    out: list[str] = []
+
+    def _add(url: str | None) -> None:
+        u = (url or "").strip()
+        if u and u not in out:
+            out.append(u)
+
+    _add(cover_url)
+    for u in poster_urls or []:
+        _add(u)
+    for u in photo_urls or []:
+        _add(u)
+    return out
+
+
+def _select_eventposter_render_urls(
+    poster_rows: list[tuple[str | None, str | None, str | None, str | None, Any, str | None]],
+    *,
+    prefer_supabase: bool,
+) -> tuple[list[str], set[str]]:
+    """Select poster URLs for rendering and return URLs to exclude as duplicates.
+
+    Problem: the same logical poster can be stored multiple times under different URLs
+    (e.g. VK CDN + Catbox rehost). Exact-URL dedup is not enough, so we group "poster-like"
+    rows by OCR signature and keep the most stable URL (Catbox/Supabase).
+    """
+
+    def _norm(text: str | None) -> str:
+        value = (text or "").strip().casefold().replace("ё", "е")
+        value = re.sub(r"\s+", " ", value)
+        return value.strip()
+
+    def _compact_alnum(text: str | None) -> str:
+        value = _norm(text)
+        if not value:
+            return ""
+        return re.sub(r"[^0-9a-zа-я]+", "", value)
+
+    def _looks_generic_title(title_norm: str) -> bool:
+        if not title_norm:
+            return True
+        if len(title_norm) <= 8:
+            return True
+        return title_norm in {"описание", "афиша", "постер", "мероприятие"}
+
+    def _group_key(ocr_title: str | None, ocr_text: str | None) -> str:
+        title_norm = _norm(ocr_title)
+        if title_norm and not _looks_generic_title(title_norm) and len(title_norm) >= 12:
+            return f"title:{title_norm}"
+        text_sig = _compact_alnum(ocr_text)[:180]
+        return f"text:{title_norm}|{text_sig}"
+
+    def _url_rank(url: str) -> int:
+        u = (url or "").strip().casefold()
+        if not u:
+            return 99
+        is_catbox = "files.catbox.moe" in u
+        is_supabase = "supabase" in u or "supabase.co" in u
+        if prefer_supabase:
+            if is_supabase:
+                return 0
+            if is_catbox:
+                return 1
+            return 2
+        if is_catbox:
+            return 0
+        if is_supabase:
+            return 1
+        return 2
+
+    def _has_ocr(ocr_title: str | None, ocr_text: str | None) -> bool:
+        return bool((ocr_title or "").strip() or (ocr_text or "").strip())
+
+    def _as_ts(updated_at: Any) -> float:
+        try:
+            return float(updated_at.timestamp()) if updated_at else 0.0
+        except Exception:
+            return 0.0
+
+    # Group rows by OCR signature for poster-like images; non-poster images stay 1:1.
+    groups: dict[str, list[tuple[str | None, str | None, str | None, str | None, Any, str | None]]] = {}
+    group_has_ocr: dict[str, bool] = {}
+    group_best_ts: dict[str, float] = {}
+    for row in poster_rows or []:
+        catbox_url, supabase_url, ocr_title, ocr_text, updated_at, poster_hash = row
+        key = (
+            _group_key(ocr_title, ocr_text)
+            if _has_ocr(ocr_title, ocr_text)
+            else f"hash:{(poster_hash or '').strip() or (catbox_url or supabase_url or '').strip()}"
+        )
+        groups.setdefault(key, []).append(row)
+        group_has_ocr[key] = group_has_ocr.get(key, False) or _has_ocr(ocr_title, ocr_text)
+        ts = _as_ts(updated_at)
+        if ts > group_best_ts.get(key, 0.0):
+            group_best_ts[key] = ts
+
+    # Pick one URL per group; mark non-chosen URLs for exclusion.
+    selected: list[tuple[bool, int, float, str]] = []
+    exclude: set[str] = set()
+    for key, rows in groups.items():
+        best_url = ""
+        best_rank = 99
+        best_ts = -1.0
+        best_has_ocr = bool(group_has_ocr.get(key))
+        for catbox_url, supabase_url, _ocr_title, _ocr_text, updated_at, _poster_hash in rows:
+            candidates = [u for u in [catbox_url, supabase_url] if (u or "").strip()]
+            # Prefer stable URL among available candidates for this row.
+            row_best = ""
+            row_rank = 99
+            for u in candidates:
+                r = _url_rank(str(u))
+                if r < row_rank:
+                    row_rank = r
+                    row_best = str(u).strip()
+            ts = _as_ts(updated_at)
+            if (row_rank, -ts) < (best_rank, -best_ts):
+                best_rank = row_rank
+                best_ts = ts
+                best_url = row_best
+
+        # Exclude other URLs from the same group (both catbox and supabase variants).
+        for catbox_url, supabase_url, _ocr_title, _ocr_text, _updated_at, _poster_hash in rows:
+            for u in (catbox_url, supabase_url):
+                u2 = (u or "").strip()
+                if not u2:
+                    continue
+                if best_url and u2 != best_url:
+                    exclude.add(u2)
+
+        if best_url:
+            selected.append((best_has_ocr, best_rank, best_ts, best_url))
+
+    # Order: poster-like first; within: Catbox/Supabase before "other", then by recency.
+    selected.sort(key=lambda t: (0 if t[0] else 1, t[1], -t[2]))
+
+    poster_render_catbox: list[str] = []
+    poster_render_other: list[str] = []
+    other_catbox: list[str] = []
+    other_urls: list[str] = []
+
+    def _is_catbox(url: str) -> bool:
+        return "files.catbox.moe" in (url or "").casefold()
+
+    for has_ocr, _rank, _ts, url in selected:
+        if not url or url in poster_render_catbox or url in poster_render_other or url in other_catbox or url in other_urls:
+            continue
+        if has_ocr:
+            (poster_render_catbox if _is_catbox(url) else poster_render_other).append(url)
+        else:
+            (other_catbox if _is_catbox(url) else other_urls).append(url)
+
+    poster_render_urls = (
+        poster_render_catbox
+        + [u for u in poster_render_other if u not in poster_render_catbox]
+        + [u for u in other_catbox if u not in poster_render_catbox and u not in poster_render_other]
+        + [u for u in other_urls if u not in poster_render_catbox and u not in poster_render_other and u not in other_catbox]
+    )
+    return poster_render_urls, exclude
+
+
+def _score_eventposter_against_event(
+    *,
+    event_title: str | None,
+    event_date: str | None,
+    event_time: str | None,
+    ocr_title: str | None,
+    ocr_text: str | None,
+) -> float:
+    def _norm(text: str | None) -> str:
+        value = (text or "").strip().casefold().replace("ё", "е")
+        value = unicodedata.normalize("NFKC", value)
+        value = value.replace("\xa0", " ")
+        value = re.sub(r"\s+", " ", value).strip()
+        return value
+
+    def _tokens(text: str | None) -> set[str]:
+        raw = _norm(text)
+        if not raw:
+            return set()
+        found = re.findall(r"[a-zа-я0-9]{3,}", raw, flags=re.IGNORECASE)
+        return {t for t in found if t}
+
+    ocr_combined = " ".join(
+        x for x in [(ocr_title or "").strip(), (ocr_text or "").strip()] if x
+    ).strip()
+    if not ocr_combined:
+        return 0.0
+    ocr_norm = _norm(ocr_combined)
+
+    title_tokens = _tokens(event_title)
+    ocr_tokens = _tokens(ocr_combined)
+    overlap = len(title_tokens & ocr_tokens) if (title_tokens and ocr_tokens) else 0
+    score = float(min(10, overlap * 2))
+
+    title_norm = _norm(event_title)
+    if title_norm and len(title_norm) >= 10 and title_norm in ocr_norm:
+        score += 4.0
+
+    d_raw = (event_date or "").strip()
+    if d_raw:
+        try:
+            d_obj = date.fromisoformat(d_raw.split("..", 1)[0].strip())
+        except Exception:
+            d_obj = None
+        if d_obj is not None:
+            day = d_obj.day
+            month = d_obj.month
+            if re.search(rf"\\b0?{day}[./-]0?{month}\\b", ocr_norm):
+                score += 3.0
+
+    t_raw = (event_time or "").strip()
+    if t_raw and t_raw != "00:00":
+        hhmm = re.sub(r"\\s+", "", t_raw)
+        if re.match(r"^\\d{1,2}:\\d{2}$", hhmm):
+            hh, mm = hhmm.split(":", 1)
+            hh = hh.zfill(2)
+            if f"{hh}:{mm}" in ocr_norm or f"{hh}.{mm}" in ocr_norm:
+                score += 1.5
+
+    return score
 
 
 def get_ics_semaphore() -> asyncio.Semaphore:
@@ -1747,6 +1994,11 @@ _four_o_usage_state = {
     "models": {model: 0 for model in FOUR_O_TRACKED_MODELS},
 }
 _last_ask_4o_request_id: str | None = None
+_token_usage_log_disabled = os.getenv("DISABLE_TOKEN_USAGE_LOG", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+}
 
 
 def _reset_four_o_usage_state(today: date) -> None:
@@ -1867,6 +2119,9 @@ async def log_token_usage(
     request_id: str | None,
     meta: Mapping[str, Any] | None = None,
 ) -> None:
+    global _token_usage_log_disabled
+    if _token_usage_log_disabled:
+        return
     client = get_supabase_client()
     if client is None:
         logging.debug(
@@ -1938,6 +2193,15 @@ async def log_token_usage(
                 elapsed_ms,
             )
         except Exception as exc:  # pragma: no cover - network logging failure
+            msg = str(exc)
+            if "42501" in msg or "row-level security policy" in msg.lower():
+                _token_usage_log_disabled = True
+                logging.warning("log_token_usage disabled after RLS failure: %s", exc)
+                return
+            if "route post:/token_usage" in msg.lower() or "token_usage not found" in msg.lower():
+                _token_usage_log_disabled = True
+                logging.warning("log_token_usage disabled (token_usage route missing): %s", exc)
+                return
             logging.warning("log_token_usage failed: %s", exc, exc_info=True)
 
     await _log()
@@ -3393,6 +3657,7 @@ def get_supabase_client() -> "Client | None":  # type: ignore[name-defined]
         from supabase.client import ClientOptions
 
         options = ClientOptions()
+        options.schema = SUPABASE_SCHEMA
         options.httpx_client = httpx.Client(timeout=HTTP_TIMEOUT)
         _supabase_client = create_client(base_url, SUPABASE_KEY, options=options)
         atexit.register(close_supabase_client)
@@ -3900,6 +4165,89 @@ async def notify_superadmin(db: Database, bot: Bot, text: str):
     except Exception as e:
         logging.error("failed to notify superadmin: %s", e)
 
+
+async def notify_llm_incident(kind: str, payload: dict[str, Any]) -> None:
+    """Send LLM incident to operator chat (if available) and superadmin chat.
+
+    Operator chat is the chat where the triggering action was initiated (Telegram UI).
+    For scheduled/background tasks where no operator context exists, we only notify superadmin.
+    """
+    current_db = get_db()
+    current_bot = get_bot()
+    if not current_db or not current_bot:
+        logging.warning("notify_llm_incident skipped: db/bot unavailable kind=%s", kind)
+        return
+
+    severity = str(payload.get("severity") or "critical").upper()
+    consumer = str(payload.get("consumer") or "unknown")
+    model = str(payload.get("requested_model") or payload.get("model") or "unknown")
+    invoked_model = str(payload.get("invoked_model") or payload.get("provider_model_name") or "")
+    request_uid = str(payload.get("request_uid") or "")
+    message = str(payload.get("message") or "")
+    raw_error = str(payload.get("error") or "")
+    error_code = str(payload.get("error_code") or payload.get("blocked_reason") or "")
+    attempt_no = str(payload.get("attempt_no") or "")
+    max_retries = str(payload.get("max_retries") or "")
+    next_model = str(payload.get("next_model") or "")
+
+    lines = [
+        f"🚨 LLM INCIDENT [{severity}]",
+        f"kind={kind}",
+        f"consumer={consumer}",
+        f"model={model}",
+    ]
+    if invoked_model:
+        lines.append(f"invoked_model={invoked_model}")
+    if request_uid:
+        lines.append(f"request_uid={request_uid}")
+    if error_code:
+        lines.append(f"code={error_code}")
+    if attempt_no:
+        lines.append(f"attempt={attempt_no}/{max_retries or '?'}")
+    if next_model:
+        lines.append(f"next_model={next_model}")
+    if message:
+        lines.append(f"message={message[:400]}")
+    if raw_error:
+        lines.append(f"error={raw_error[:400]}")
+
+    text = "\n".join(lines)
+
+    # Best-effort operator notification (same chat where the action was triggered).
+    operator_chat_id = None
+    try:
+        from llm_context import get_operator_chat_id
+
+        operator_chat_id = get_operator_chat_id()
+    except Exception:
+        operator_chat_id = None
+    # Allow explicit override via payload for non-UI call sites (rare).
+    if not operator_chat_id:
+        try:
+            operator_chat_id = int(payload.get("operator_chat_id") or 0) or None
+        except Exception:
+            operator_chat_id = None
+
+    if operator_chat_id:
+        try:
+            admin_id = await get_superadmin_id(current_db)
+        except Exception:
+            admin_id = None
+        if not admin_id or int(operator_chat_id) != int(admin_id):
+            try:
+                async with span("tg-send"):
+                    await current_bot.send_message(int(operator_chat_id), text)
+            except Exception:
+                logging.warning(
+                    "notify_llm_incident: failed to notify operator chat %s kind=%s",
+                    operator_chat_id,
+                    kind,
+                    exc_info=True,
+                )
+
+    # Always notify superadmin as an operational alert.
+    await notify_superadmin(current_db, current_bot, text)
+
 def _vk_captcha_quiet_until() -> datetime | None:
     if not VK_CAPTCHA_QUIET:
         return None
@@ -4366,6 +4714,46 @@ async def upload_images(
         return [], "disabled"
 
     session = get_http_session()
+
+    async def _upload_to_telegraph(data: bytes, name: str) -> str | None:
+        """Fallback uploader: host images on telegra.ph/file/... (no token required)."""
+        if not data:
+            return None
+        if len(data) > TELEGRAPH_UPLOAD_MAX_BYTES:
+            return None
+        if not detect_image_type(data):
+            return None
+        form = FormData()
+        form.add_field("file", data, filename=name or "image.jpg")
+        try:
+            async with HTTP_SEMAPHORE:
+                async with session.post(
+                    "https://telegra.ph/upload",
+                    data=form,
+                    timeout=ClientTimeout(total=30),
+                ) as up:
+                    body = await up.text()
+                    if up.status != 200:
+                        return None
+            parsed = json.loads(body)
+            if not isinstance(parsed, list) or not parsed:
+                return None
+            src = (parsed[0] or {}).get("src")
+            if not isinstance(src, str) or not src.strip():
+                return None
+            hosted = src.strip()
+            if hosted.startswith("/"):
+                hosted = "https://telegra.ph" + hosted
+            return hosted
+        except Exception:
+            return None
+
+    telegraph_fallback_enabled = (os.getenv("UPLOAD_IMAGES_FALLBACK_TELEGRAPH", "1") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
     for data, name in images[:limit]:
         data, name = ensure_jpeg(data, name)
         logging.info("CATBOX candidate name=%s size=%d", name, len(data))
@@ -4400,13 +4788,33 @@ async def upload_images(
                             reason = f"{resp.status} {text_r}".strip()
             except Exception as e:  # pragma: no cover - network errors
                 reason = str(e)
+                # If Catbox is unreachable, avoid burning time on retries and switch to fallback.
+                if telegraph_fallback_enabled and any(
+                    s in reason.lower()
+                    for s in (
+                        "cannot connect to host catbox.moe",
+                        "name or service not known",
+                        "temporary failure in name resolution",
+                        "nodename nor servname provided",
+                    )
+                ):
+                    break
             if success:
                 break
             if attempt < 3:
                 await asyncio.sleep(delays[attempt - 1])
         if not success:
             logging.warning("catbox failed %s", reason)
-            catbox_msg += f"{name}: failed; "
+            if telegraph_fallback_enabled:
+                hosted = await _upload_to_telegraph(data, name)
+                if hosted:
+                    catbox_urls.append(hosted)
+                    catbox_msg += "telegraph_fallback; "
+                    logging.info("telegraph.upload ok %s", hosted)
+                else:
+                    catbox_msg += f"{name}: failed; "
+            else:
+                catbox_msg += f"{name}: failed; "
         catbox_msg = catbox_msg.strip("; ")
     logging.info(
         "CATBOX done uploaded=%d skipped=%d msg=%s",
@@ -4417,6 +4825,73 @@ async def upload_images(
     global LAST_CATBOX_MSG
     LAST_CATBOX_MSG = catbox_msg
     return catbox_urls, catbox_msg
+
+
+async def upload_telegraph_image_from_url(url: str | None) -> str | None:
+    """Upload external image to telegra.ph and return hosted URL.
+
+    This is used for the first event image so Telegram preview/Instant View has
+    a stable image origin. Failures are non-fatal and callers should fall back
+    to original URL.
+    """
+    raw = (url or "").strip()
+    if not raw:
+        return None
+    if raw.startswith("https://telegra.ph/file/") or raw.startswith("http://telegra.ph/file/"):
+        return raw
+    cached = _telegraph_image_upload_cache.get(raw)
+    if cached:
+        return cached
+
+    session = get_http_session()
+    try:
+        async with HTTP_SEMAPHORE:
+            async with session.get(raw, timeout=ClientTimeout(total=20)) as resp:
+                if resp.status != 200:
+                    logging.warning("telegraph.upload_image skip status=%s url=%s", resp.status, raw)
+                    return None
+                ctype = (resp.headers.get("Content-Type") or "").lower()
+                data = await resp.read()
+        if not data:
+            return None
+        if len(data) > TELEGRAPH_UPLOAD_MAX_BYTES:
+            logging.warning(
+                "telegraph.upload_image skip too_large size=%s limit=%s url=%s",
+                len(data),
+                TELEGRAPH_UPLOAD_MAX_BYTES,
+                raw,
+            )
+            return None
+        if "image/" not in ctype and not detect_image_type(data):
+            logging.warning("telegraph.upload_image skip not_image ctype=%s url=%s", ctype, raw)
+            return None
+
+        path = urlparse(raw).path or ""
+        ext = os.path.splitext(path)[1].lower()
+        filename = f"cover{ext if ext in {'.jpg', '.jpeg', '.png', '.gif', '.webp'} else '.jpg'}"
+
+        form = FormData()
+        form.add_field("file", data, filename=filename)
+        async with HTTP_SEMAPHORE:
+            async with session.post("https://telegra.ph/upload", data=form, timeout=ClientTimeout(total=30)) as up:
+                body = await up.text()
+                if up.status != 200:
+                    logging.warning("telegraph.upload_image failed status=%s body=%s", up.status, body[:200])
+                    return None
+        parsed = json.loads(body)
+        if not isinstance(parsed, list) or not parsed:
+            return None
+        src = (parsed[0] or {}).get("src")
+        if not isinstance(src, str) or not src.strip():
+            return None
+        hosted = src.strip()
+        if hosted.startswith("/"):
+            hosted = "https://telegra.ph" + hosted
+        _telegraph_image_upload_cache[raw] = hosted
+        return hosted
+    except Exception:
+        logging.warning("telegraph.upload_image failed url=%s", raw, exc_info=True)
+        return None
 
 
 def normalize_hashtag_dates(text: str) -> str:
@@ -5542,12 +6017,22 @@ async def build_month_nav_html(db: Database, current_month: str | None = None) -
             .order_by(func.substr(Event.date, 1, 7))
         )
         months = [r[0] for r in res_nav]
-        if not months:
-            return ""
-        res_pages = await session.execute(
-            select(MonthPage).where(MonthPage.month.in_(months))
-        )
-        page_map = {p.month: p for p in res_pages.scalars().all()}
+        if months:
+            res_pages = await session.execute(
+                select(MonthPage).where(MonthPage.month.in_(months))
+            )
+            page_map = {p.month: p for p in res_pages.scalars().all()}
+        else:
+            # Fallback for empty/fixture DBs: still show the latest available month page
+            # so source pages have a navigation entry point.
+            res_latest = await session.execute(
+                select(MonthPage).order_by(MonthPage.month.desc()).limit(1)
+            )
+            latest = res_latest.scalars().first()
+            if not latest or not latest.url or not latest.month:
+                return ""
+            months = [latest.month]
+            page_map = {latest.month: latest}
     links: list[str] = []
     prev_year = None
     for idx, m in enumerate(months):
@@ -6094,6 +6579,11 @@ def format_event_caption(ev: Event, *, style: str = "ics") -> tuple[str, str | N
 
 
 async def ics_publish(event_id: int, db: Database, bot: Bot, progress=None) -> bool:
+    if (os.getenv("DISABLE_ICS_JOBS") or "").strip().lower() in ("1", "true", "yes", "on"):
+        logging.info("ics_publish disabled via DISABLE_ICS_JOBS")
+        if progress:
+            progress.mark("ics_supabase", "skipped_disabled", "disabled")
+        return False
     async with get_ics_semaphore():
         async with db.get_session() as session:
             ev = await session.get(Event, event_id)
@@ -6184,6 +6674,11 @@ async def ics_publish(event_id: int, db: Database, bot: Bot, progress=None) -> b
 
 
 async def tg_ics_post(event_id: int, db: Database, bot: Bot, progress=None) -> bool:
+    if (os.getenv("DISABLE_ICS_JOBS") or "").strip().lower() in ("1", "true", "yes", "on"):
+        logging.info("tg_ics_post disabled via DISABLE_ICS_JOBS")
+        if progress:
+            progress.mark("ics_telegram", "skipped_disabled", "disabled")
+        return False
     async with get_ics_semaphore():
         async with db.get_session() as session:
             ev = await session.get(Event, event_id)
@@ -6515,14 +7010,9 @@ def _read_base_prompt() -> str:
     prompt_path = os.path.join("docs", "llm", "prompts.md")
     with open(prompt_path, "r", encoding="utf-8") as f:
         prompt = f.read()
-    loc_path = os.path.join("docs", "reference", "locations.md")
-    if os.path.exists(loc_path):
-        with open(loc_path, "r", encoding="utf-8") as f:
-            locations = [
-                line.strip() for line in f if line.strip() and not line.startswith("#")
-            ]
-        if locations:
-            prompt += "\nKnown venues:\n" + "\n".join(locations)
+    locations = _read_known_venues_lines()
+    if locations:
+        prompt += "\nKnown venues:\n" + "\n".join(locations)
 
     holidays, _, _ = _read_holidays()
     if holidays:
@@ -6536,6 +7026,188 @@ def _read_base_prompt() -> str:
             )
         prompt += "\nKnown holidays:\n" + "\n".join(entries)
     return prompt
+
+
+@lru_cache(maxsize=1)
+def _read_known_venues_lines() -> tuple[str, ...]:
+    loc_path = os.path.join("docs", "reference", "locations.md")
+    if not os.path.exists(loc_path):
+        return ()
+    try:
+        with open(loc_path, "r", encoding="utf-8") as f:
+            locations = [
+                line.strip()
+                for line in f
+                if line.strip() and not line.lstrip().startswith("#")
+            ]
+    except Exception:
+        return ()
+    return tuple(locations)
+
+
+_LOCATION_NOISE_PREFIXES_RE = re.compile(
+    r"^(?:"
+    r"кинотеатр|"
+    r"арт[- ]?пространство|"
+    r"пространство|"
+    r"арт[- ]?площадка|"
+    r"культурн(?:ый|ое) центр|"
+    r"центр|"
+    r"площадка|"
+    r"клуб"
+    r")\s+",
+    re.IGNORECASE,
+)
+
+
+def _normalize_venue_key(value: str | None) -> str:
+    if not value:
+        return ""
+    text = str(value).strip()
+    if not text:
+        return ""
+    text = (
+        text.replace("\u00ab", " ")
+        .replace("\u00bb", " ")
+        .replace("\u201c", " ")
+        .replace("\u201d", " ")
+        .replace("\u201e", " ")
+        .replace("\u2019", " ")
+        .replace('"', " ")
+        .replace("'", " ")
+        .replace("`", " ")
+    )
+    text = _LOCATION_NOISE_PREFIXES_RE.sub("", text).strip()
+    text = text.casefold().replace("ё", "е")
+    text = re.sub(r"[^\w\s]+", " ", text, flags=re.UNICODE)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+@dataclass(frozen=True)
+class _KnownVenue:
+    canonical_line: str
+    name: str
+    address: str
+    city: str
+    name_key: str
+    line_key: str
+
+
+@lru_cache(maxsize=1)
+def _read_known_venues() -> tuple[_KnownVenue, ...]:
+    venues: list[_KnownVenue] = []
+    for line in _read_known_venues_lines():
+        parts = [p.strip() for p in line.split(",") if p.strip()]
+        if not parts:
+            continue
+        name = parts[0]
+        city = parts[-1] if len(parts) >= 2 else ""
+        address = ", ".join(parts[1:-1]).strip() if len(parts) >= 3 else ""
+        city_clean = city.lstrip("#").strip()
+        venues.append(
+            _KnownVenue(
+                canonical_line=line,
+                name=name,
+                address=address,
+                city=city_clean,
+                name_key=_normalize_venue_key(name),
+                line_key=_normalize_venue_key(line),
+            )
+        )
+    return tuple(venues)
+
+
+def _match_known_venue(value: str | None) -> _KnownVenue | None:
+    key = _normalize_venue_key(value)
+    if not key:
+        return None
+    venues = _read_known_venues()
+    if not venues:
+        return None
+
+    for venue in venues:
+        if key == venue.line_key or key == venue.name_key:
+            return venue
+
+    matches = [
+        venue
+        for venue in venues
+        if venue.name_key and (key == venue.name_key or key in venue.name_key or venue.name_key in key)
+    ]
+    if len(matches) == 1:
+        return matches[0]
+
+    try:
+        from difflib import SequenceMatcher
+    except Exception:
+        return None
+
+    scored: list[tuple[float, _KnownVenue]] = []
+    for venue in venues:
+        if not venue.name_key:
+            continue
+        ratio = SequenceMatcher(None, key, venue.name_key).ratio()
+        scored.append((ratio, venue))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    if not scored:
+        return None
+    best_score, best_venue = scored[0]
+    second = scored[1][0] if len(scored) > 1 else 0.0
+    if best_score >= 0.92 and (best_score - second) >= 0.05:
+        return best_venue
+    return None
+
+
+def _normalize_known_venue_mentions(
+    text: str | None, *, location_name: str | None
+) -> str | None:
+    """Best-effort fix for venue naming inside generated descriptions.
+
+    Product requirement: when a venue is known (docs/reference/locations.md),
+    prefer its canonical name even if the source/LLM text uses a noisy prefix
+    like "кинотеатр <name>" for a non-cinema venue.
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return text
+    venue = _match_known_venue(location_name)
+    if venue is None or not (venue.name or "").strip():
+        return text
+    canonical = venue.name.strip()
+    # If the canonical name itself is a cinema (e.g. "Люмен кинотеатр"), keep "кинотеатр".
+    if canonical.casefold().startswith("кинотеатр "):
+        return text
+    base = re.sub(r"\s*\([^)]*\)\s*$", "", canonical).strip()
+    if not base:
+        return text
+    # Replace only the specific "<prefix> <base>" mentions, keep the rest of the text intact.
+    prefixes = (
+        "кинотеатр",
+        "арт-пространство",
+        "арт пространство",
+        "пространство",
+    )
+    updated = raw
+    for prefix in prefixes:
+        pat = re.compile(
+            rf"(?i)\b{re.escape(prefix)}\s+[«\"']?{re.escape(base)}[»\"']?\b"
+        )
+        updated = pat.sub(canonical, updated)
+    return updated
+
+
+def _normalise_event_location_from_reference(event_obj: dict[str, Any]) -> None:
+    if not isinstance(event_obj, dict):
+        return
+    venue = _match_known_venue(event_obj.get("location_name"))
+    if venue is None:
+        return
+    event_obj["location_name"] = venue.canonical_line
+    if venue.address and not (str(event_obj.get("location_address") or "").strip()):
+        event_obj["location_address"] = venue.address
+    if venue.city and not (str(event_obj.get("city") or "").strip()):
+        event_obj["city"] = venue.city
 
 
 @lru_cache(maxsize=8)
@@ -6589,6 +7261,174 @@ class ParsedEvents(list):
         self.festival = festival
 
 
+@lru_cache(maxsize=1)
+def _get_event_parse_gemma_client():
+    try:
+        from google_ai import GoogleAIClient, SecretsProvider
+    except Exception as exc:  # pragma: no cover - optional dependency
+        logger.warning("event_parse: gemma client unavailable: %s", exc)
+        return None
+    supabase = get_supabase_client()
+    return GoogleAIClient(
+        supabase_client=supabase,
+        secrets_provider=SecretsProvider(),
+        consumer="event_parse",
+        incident_notifier=notify_llm_incident,
+    )
+
+
+def _event_parse_strip_code_fences(text: str) -> str:
+    if not text:
+        return ""
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```[a-zA-Z0-9_-]*\n", "", cleaned)
+        cleaned = cleaned.replace("```", "")
+    return cleaned.strip()
+
+
+def _event_parse_extract_json(text: str) -> Any | None:
+    if not text:
+        return None
+    cleaned = _event_parse_strip_code_fences(text)
+    try:
+        return json.loads(cleaned)
+    except Exception:
+        pass
+    # Best-effort JSON recovery: grab the outermost {} or [] block.
+    obj_start = cleaned.find("{")
+    obj_end = cleaned.rfind("}")
+    arr_start = cleaned.find("[")
+    arr_end = cleaned.rfind("]")
+    if arr_start != -1 and arr_end != -1 and (obj_start == -1 or arr_start < obj_start):
+        if arr_end > arr_start:
+            try:
+                return json.loads(cleaned[arr_start : arr_end + 1])
+            except Exception:
+                return None
+    if obj_start != -1 and obj_end != -1 and obj_end > obj_start:
+        try:
+            return json.loads(cleaned[obj_start : obj_end + 1])
+        except Exception:
+            return None
+    return None
+
+
+def _event_parse_normalize_parsed_events(data: Any) -> ParsedEvents:
+    festival = None
+    if isinstance(data, dict):
+        festival = data.get("festival")
+        fest = None
+        if isinstance(festival, str):
+            fest = {"name": festival}
+        elif isinstance(festival, dict):
+            fest = festival.copy()
+        for k in (
+            "start_date",
+            "end_date",
+            "city",
+            "location_name",
+            "location_address",
+            "full_name",
+            "program_url",
+            "website_url",
+        ):
+            if k in data and fest is not None and fest.get(k) in (None, ""):
+                fest[k] = data[k]
+        if "events" in data and isinstance(data["events"], list):
+            for obj in data["events"]:
+                if isinstance(obj, dict):
+                    _normalise_event_location_from_reference(obj)
+            return ParsedEvents(data["events"], festival=fest)
+        _normalise_event_location_from_reference(data)
+        return ParsedEvents([data], festival=fest)
+    if isinstance(data, list):
+        for obj in data:
+            if isinstance(obj, dict):
+                _normalise_event_location_from_reference(obj)
+        return ParsedEvents(data)
+    logging.error("Unexpected parse format: %s", data)
+    raise RuntimeError("bad parse response")
+
+
+async def _parse_event_via_gemma(
+    text: str,
+    source_channel: str | None = None,
+    *,
+    festival_names: Sequence[str] | None = None,
+    festival_alias_pairs: Sequence[tuple[str, int]] | None = None,
+    poster_texts: Sequence[str] | None = None,
+    poster_summary: str | None = None,
+    **extra: str | None,
+) -> ParsedEvents:
+    client = _get_event_parse_gemma_client()
+    if client is None:
+        raise RuntimeError("Gemma client unavailable for event_parse")
+
+    prompt = _build_prompt(festival_names, festival_alias_pairs)
+    if poster_summary:
+        prompt = f"{prompt}\nPoster summary:\n{poster_summary.strip()}"
+
+    if not source_channel:
+        source_channel = extra.get("channel_title")
+    today = datetime.now(LOCAL_TZ).date().isoformat()
+    user_msg_parts = [f"Today is {today}. "]
+    if source_channel:
+        user_msg_parts.append(f"Channel: {source_channel}. ")
+    user_msg = "".join(user_msg_parts)
+
+    poster_lines: list[str] = []
+    if poster_texts:
+        poster_lines.append(
+            "Poster OCR may contain recognition mistakes; cross-check with the main text."
+        )
+        poster_lines.append("Poster OCR:")
+        for idx, block in enumerate(poster_texts, start=1):
+            poster_lines.append(f"[{idx}] {block.strip()}")
+        poster_lines.append("")
+    if poster_lines:
+        user_msg += "\n" + "\n".join(poster_lines)
+    user_msg += text
+
+    full_prompt = (
+        prompt
+        + "\n\n"
+        + "Return ONLY valid JSON. No explanations. No markdown.\n\n"
+        + user_msg
+    )
+    model = (os.getenv("EVENT_PARSE_GEMMA_MODEL", "gemma-3-27b-it") or "").strip() or "gemma-3-27b-it"
+    max_tokens = int(os.getenv("EVENT_PARSE_GEMMA_MAX_TOKENS", "2200") or "2200")
+    max_tokens = max(400, min(max_tokens, 6000))
+
+    raw, usage = await client.generate_content_async(
+        model=model,
+        prompt=full_prompt,
+        generation_config={"temperature": 0},
+        max_output_tokens=max_tokens,
+    )
+    try:
+        await log_token_usage(
+            BOT_CODE,
+            model,
+            {
+                "input_tokens": int(getattr(usage, "input_tokens", 0) or 0),
+                "output_tokens": int(getattr(usage, "output_tokens", 0) or 0),
+                "total_tokens": int(getattr(usage, "total_tokens", 0) or 0),
+            },
+            endpoint="google_ai.generate_content",
+            request_id=None,
+            meta={k: extra[k] for k in ("feature", "version") if extra.get(k) is not None} or None,
+        )
+    except Exception:
+        # Token logging must not fail parsing.
+        pass
+    data = _event_parse_extract_json(raw or "")
+    if data is None:
+        logging.error("Invalid JSON from Gemma parse: %s", (raw or "")[:2000])
+        raise RuntimeError("bad gemma parse response")
+    return _event_parse_normalize_parsed_events(data)
+
+
 async def parse_event_via_4o(
     text: str,
     source_channel: str | None = None,
@@ -6599,6 +7439,17 @@ async def parse_event_via_4o(
     poster_summary: str | None = None,
     **extra: str | None,
 ) -> ParsedEvents:
+    backend = (os.getenv("EVENT_PARSE_LLM", "4o") or "4o").strip().lower()
+    if backend in {"gemma", "google", "google_ai"}:
+        return await _parse_event_via_gemma(
+            text,
+            source_channel,
+            festival_names=festival_names,
+            festival_alias_pairs=festival_alias_pairs,
+            poster_texts=poster_texts,
+            poster_summary=poster_summary,
+            **extra,
+        )
     token = os.getenv("FOUR_O_TOKEN")
     if not token:
         raise RuntimeError("FOUR_O_TOKEN is missing")
@@ -6712,33 +7563,7 @@ async def parse_event_via_4o(
     except json.JSONDecodeError:
         logging.error("Invalid JSON from 4o: %s", content)
         raise
-    festival = None
-    if isinstance(data, dict):
-        festival = data.get("festival")
-        fest = None
-        if isinstance(festival, str):
-            fest = {"name": festival}
-        elif isinstance(festival, dict):
-            fest = festival.copy()
-        for k in (
-            "start_date",
-            "end_date",
-            "city",
-            "location_name",
-            "location_address",
-            "full_name",
-            "program_url",
-            "website_url",
-        ):
-            if k in data and fest is not None and fest.get(k) in (None, ""):
-                fest[k] = data[k]
-        if "events" in data and isinstance(data["events"], list):
-            return ParsedEvents(data["events"], festival=fest)
-        return ParsedEvents([data], festival=fest)
-    if isinstance(data, list):
-        return ParsedEvents(data)
-    logging.error("Unexpected 4o format: %s", data)
-    raise RuntimeError("bad 4o response")
+    return _event_parse_normalize_parsed_events(data)
 
 
 FOUR_O_EDITOR_PROMPT = textwrap.dedent(
@@ -7397,6 +8222,7 @@ def _get_event_topics_gemma_client():
         supabase_client=supabase,
         secrets_provider=SecretsProvider(),
         consumer="event_topics",
+        incident_notifier=notify_llm_incident,
     )
 
 
@@ -7793,6 +8619,26 @@ async def send_main_menu(bot: Bot, user: User | None, chat_id: int) -> None:
 
 
 async def handle_start(message: types.Message, db: Database, bot: Bot):
+    # Deep-link support: https://t.me/<bot>?start=log_<event_id>
+    # Telegram will send "/start log_<event_id>".
+    try:
+        raw = (message.text or "").strip()
+        parts = [p for p in raw.split(maxsplit=1) if p.strip()]
+        if len(parts) == 2 and parts[0].startswith("/start"):
+            arg = parts[1].strip()
+            # Some Telegram clients include trailing punctuation in the payload when the URL is
+            # embedded in parentheses, e.g. "/start log_2600)". Be permissive.
+            m = re.search(r"\blog_(\d+)\b", arg)
+            if m:
+                event_id = int(m.group(1))
+                # Delegate to /log implementation (auth checks included there).
+                message.text = f"/log {event_id}"
+                await handle_log_command(message, db, bot)
+                return
+    except Exception:
+        # Fall back to default start behavior.
+        pass
+
     async with span("db-query"):
         async with db.get_session() as session:
             result = await session.execute(select(User))
@@ -10556,14 +11402,25 @@ async def schedule_event_update_tasks(
     eid = ev.id
     results: dict[JobTask, str] = {}
     ics_dep: str | None = None
-    if ev.time and "ics_publish" in JOB_HANDLERS:
+    disable_ics_jobs = (os.getenv("DISABLE_ICS_JOBS") or "").strip().lower() in ("1", "true", "yes", "on")
+    if getattr(ev, "lifecycle_status", "active") != "active":
+        # Cancelled/postponed events must not be announced or published as ICS.
+        disable_ics_jobs = True
+        skip_vk_sync = True
+    if getattr(ev, "silent", False):
+        # Silent events are hidden from digests/announcements. Do not publish ICS or post
+        # calendar messages for them (but keep Telegraph/page rebuilds so they disappear
+        # from aggregated pages and the operator can still inspect the record if needed).
+        disable_ics_jobs = True
+        skip_vk_sync = True
+    if (not disable_ics_jobs) and ev.time and "ics_publish" in JOB_HANDLERS:
         ics_dep = await enqueue_job(db, eid, JobTask.ics_publish, depends_on=None)
         results[JobTask.ics_publish] = ics_dep
     telegraph_dep = [ics_dep] if ics_dep else None
     results[JobTask.telegraph_build] = await enqueue_job(
         db, eid, JobTask.telegraph_build, depends_on=telegraph_dep
     )
-    if "tg_ics_post" in JOB_HANDLERS:
+    if (not disable_ics_jobs) and "tg_ics_post" in JOB_HANDLERS:
         tg_ics_deps = [results[JobTask.telegraph_build]]
         if ics_dep:
             tg_ics_deps.append(ics_dep)
@@ -10574,168 +11431,101 @@ async def schedule_event_update_tasks(
     if ics_dep:
         page_deps.append(ics_dep)
     
-    # Deferred page rebuilds: откладываем month_pages и weekend_pages на 15 минут
-    deferred_time = datetime.now(timezone.utc) + timedelta(minutes=15)
-    
-    # month_pages — отложенный запуск
-    month = ev.date.split("..", 1)[0][:7]
-    if os.getenv("EVENT_UPDATE_SYNC"):
-        logging.info("EVENT_UPDATE_SYNC set, triggering sync_month_page immediately")
-        await sync_month_page(db, month)
-        results[JobTask.month_pages] = "sync_executed"
-    else:
-        results[JobTask.month_pages] = await enqueue_job(
-            db, eid, JobTask.month_pages, depends_on=page_deps, next_run_at=deferred_time
-        )
-        await mark_pages_dirty(db, month)
-    
-    # Check if this month exists in MonthPage. If not, we found a new month!
-    # Trigger full nav rebuild so ALL existing pages get the link to this new month.
-    # We do a quick check here.
-    async with db.get_session() as session:
-        # Use execute directly to avoid session object overhead logic if unnecessary, or select scalar
-        res_mp = await session.execute(
-            select(MonthPage.month).where(MonthPage.month == month)
-        )
-        existing_mp = res_mp.first()
-        if not existing_mp:
-             # New month detected! Enqueue nav refresh.
-             # We can't call refresh_month_nav directly easily if it needs to run as a job,
-             # but refresh_month_nav is async function.
-             # Better to run it as a job or just execute it if it's fast? 
-             # It iterates all months and calls sync_month_page(force=True), which creates jobs.
-             # So it is safe to call. But `schedule_event_update_tasks` is often called in loop.
-             # We don't want to spam it.
-             # Ideally we have a job task for "refresh_nav".
-             # For now, let's call it directly in background task or just await?
-             # await refresh_month_nav(db) might be slowish (50ms?).
-             # Let's add it to job queue? No, no separate handler for that yet.
-             # Let's just create a job for "month_pages:NAV_REFRESH"? No.
-             
-             # User mentioned "refresh_month_nav" exists.
-             # Let's just run it. It only queues jobs effectively.
-             # But wait, `refresh_month_nav` calls `sync_month_page(force=True)` which DOES API calls?
-             # Let's check `sync_month_page`.
-             
-             # Re-reading `refresh_month_nav`...
-             # It loops months and calls `sync_month_page`...
-             # `sync_month_page` calls `enqueue_job`?
-             # No, `sync_month_page` builds HTML and `telegraph.create_page`.
-             # So `refresh_month_nav` is EXPENSIVE (network calls).
-             # We shouldn't await it here.
-             
-             # Strategy: Enqueue a special job or use fire-and-forget?
-             # Or just allow `month_pages` job for THIS month to run, and THEN trigger nav update?
-             # But we need OTHER months to update.
-             
-             # Correct approach:
-             # When `JobTask.month_pages` runs for a NEW month, IT should trigger others?
-             # Or we simply enqueue `month_pages` for ALL active months?
-             
-             # Let's invoke `enqueue_job` for all known months to force them rebuild nav.
-             # That's cleaner than `refresh_month_nav` which does synchronous updates.
-             pass
-             
-    # Actually, simpler fix for now compliant with existing "deferred" architecture:
-    # We already marked `month` dirty and scheduled `month_pages`.
-    # When `month_pages` RUNS (the consumer), it will create the page.
-    # AFTER the page is created, the Navigation set changes.
-    # So `month_pages` handler should detect "hey I created a new page" and trigger global refresh?
-    # BUT `month_pages` is complex.
-    
-    # Alternative: Just check here. If month is new, enqueue `month_pages` for ALL months.
-    # This ensures they will all rebuild with new footer.
-    # We can fetch all months from DB.
-    
-    async with db.get_session() as session:
-        mp_check = await session.execute(select(MonthPage.month))
-        all_months = [r for r in mp_check.scalars().all()]
-        
-        if month not in all_months:
-             # New month!
-             # Schedule update for all other months too.
-             # We give same deferred time.
-             for m_other in all_months:
-                 await enqueue_job(db, ev.id, JobTask.month_pages, payload=None, coalesce_key=f"month_pages:{m_other}", next_run_at=deferred_time) # EventID is dummy here?
-                 await mark_pages_dirty(db, m_other)
-                 
-    # Slight issue: `enqueue_job` takes event_id. `month_pages` task usually ignores event_id?
-    # No, `month_pages` job usually aggregates.
-    # Let's see `handle_month_pages` implementation (via grep or logic).
-    # It probably just takes the month from the key or payload if provided?
-    # Actually `enqueue_job` for `month_pages` uses `event` to derive month usually.
-    # But here we want to schedule for OTHER months.
-    # If we pass `coalesce_key=month_pages:MM-YYYY`, the consumer should pick it up.
-    
-    # Wait, `enqueue_job` has `coalesce_key`.
-    # And `month_pages` task... how does it know which month?
-    # Usually `schedule_event_update_tasks` calculates `month` from ev.date.
-    
-    # If we want to schedule for Jan 2026, we need a job with `coalesce_key=month_pages:2026-01`.
-    # Does the worker use the key?
-    # I'll check `worker.py` or where handlers are.
-    # But based on `schedule_event_update_tasks` logic:
-    # `results[JobTask.month_pages] = await enqueue_job(..., JobTask.month_pages, ...)`
-    # It relies on `enqueue_job` internal logic or defaults.
-    
-    # To be safe, I'll stick to the plan:
-    # Modify `schedule_event_update_tasks` to check NEW month, and if so,
-    # just enqueue `refresh_month_nav` if such task existed, OR
-    # iterate and enqueue `month_pages` for others.
-    
-    # Let's inspect `enqueue_job` quickly to see how it handles keys.
-    # But effectively:
-    # If month is new, we need to mark ALL OTHER months dirty.
-    # Because their footer is now stale.
-    # `mark_pages_dirty(db, m_other)` is crucial.
-    # And we also need to kick the job runner to pick them up.
-    
-    # Let's implement the loop over all_months.
-    
-    async with db.get_session() as session:
-        res_months = await session.execute(select(MonthPage.month))
-        existing_months = set(res_months.scalars().all())
-    
-    # Filter existing_months to only include current and future months
-    today = datetime.now(timezone.utc).date()
-    current_month = today.strftime("%Y-%m")
-    future_months = {m for m in existing_months if m >= current_month}
-    
-    if month not in existing_months:
-        logging.info("New month %s detected! Marking other months dirty for deferred rebuild.", month)
-        # For new month: mark all FUTURE existing months dirty for deferred rebuild
-        # They will be picked up by the job worker when next_run_at arrives
-        for m_other in future_months:
-            await mark_pages_dirty(db, m_other)
-            # Enqueue deferred job for each month
-            await enqueue_job(
-                db, ev.id, JobTask.month_pages,
-                payload=None,
-                coalesce_key=f"month_pages:{m_other}",
-                next_run_at=deferred_time
+    if not DISABLE_PAGE_JOBS:
+        # Deferred page rebuilds: откладываем month_pages и weekend_pages на 15 минут
+        deferred_time = datetime.now(timezone.utc) + timedelta(minutes=15)
+
+        # month_pages — отложенный запуск
+        month = ev.date.split("..", 1)[0][:7]
+        event_update_sync = (os.getenv("EVENT_UPDATE_SYNC") or "").strip().lower() in {"1", "true", "yes"}
+        if event_update_sync:
+            logging.info("EVENT_UPDATE_SYNC set, triggering sync_month_page immediately")
+            await sync_month_page(db, month)
+            results[JobTask.month_pages] = "sync_executed"
+        else:
+            results[JobTask.month_pages] = await enqueue_job(
+                db, eid, JobTask.month_pages, depends_on=page_deps, next_run_at=deferred_time
             )
-    
-    d = parse_iso_date(ev.date)
-    if d:
-        results[JobTask.week_pages] = await enqueue_job(
-            db, eid, JobTask.week_pages, depends_on=page_deps
-        )
-        w_start = weekend_start_for_date(d)
-        if w_start:
-            # weekend_pages — отложенный запуск
-            if os.getenv("EVENT_UPDATE_SYNC"):
-                logging.info("EVENT_UPDATE_SYNC set, triggering sync_weekend_page immediately")
-                await sync_weekend_page(db, w_start.isoformat())
-                results[JobTask.weekend_pages] = "sync_executed"
-            else:
-                results[JobTask.weekend_pages] = await enqueue_job(
-                    db, eid, JobTask.weekend_pages, depends_on=page_deps, next_run_at=deferred_time
+            await mark_pages_dirty(db, month)
+
+        # Check if this month exists in MonthPage. If not, we found a new month!
+        async with db.get_session() as session:
+            res_mp = await session.execute(
+                select(MonthPage.month).where(MonthPage.month == month)
+            )
+            existing_mp = res_mp.first()
+            if not existing_mp:
+                # New month detected; kept as no-op for now (see historical comments below).
+                pass
+
+        async with db.get_session() as session:
+            mp_check = await session.execute(select(MonthPage.month))
+            all_months = [r for r in mp_check.scalars().all()]
+
+            if month not in all_months:
+                for m_other in all_months:
+                    await enqueue_job(
+                        db,
+                        ev.id,
+                        JobTask.month_pages,
+                        payload=None,
+                        coalesce_key=f"month_pages:{m_other}",
+                        next_run_at=deferred_time,
+                    )
+                    await mark_pages_dirty(db, m_other)
+
+        async with db.get_session() as session:
+            res_months = await session.execute(select(MonthPage.month))
+            existing_months = set(res_months.scalars().all())
+
+        today = datetime.now(timezone.utc).date()
+        current_month = today.strftime("%Y-%m")
+        future_months = {m for m in existing_months if m >= current_month}
+
+        if month not in existing_months:
+            logging.info(
+                "New month %s detected! Marking other months dirty for deferred rebuild.",
+                month,
+            )
+            for m_other in future_months:
+                await mark_pages_dirty(db, m_other)
+                await enqueue_job(
+                    db,
+                    ev.id,
+                    JobTask.month_pages,
+                    payload=None,
+                    coalesce_key=f"month_pages:{m_other}",
+                    next_run_at=deferred_time,
                 )
-                await mark_pages_dirty(db, f"weekend:{w_start.isoformat()}")
-    if ev.festival:
-        results[JobTask.festival_pages] = await enqueue_job(
-            db, eid, JobTask.festival_pages
-        )
+
+        d = parse_iso_date(ev.date)
+        if d:
+            results[JobTask.week_pages] = await enqueue_job(
+                db, eid, JobTask.week_pages, depends_on=page_deps
+            )
+            w_start = weekend_start_for_date(d)
+            if w_start:
+                if os.getenv("EVENT_UPDATE_SYNC"):
+                    logging.info(
+                        "EVENT_UPDATE_SYNC set, triggering sync_weekend_page immediately"
+                    )
+                    await sync_weekend_page(db, w_start.isoformat())
+                    results[JobTask.weekend_pages] = "sync_executed"
+                else:
+                    results[JobTask.weekend_pages] = await enqueue_job(
+                        db,
+                        eid,
+                        JobTask.weekend_pages,
+                        depends_on=page_deps,
+                        next_run_at=deferred_time,
+                    )
+                    await mark_pages_dirty(db, f"weekend:{w_start.isoformat()}")
+        if ev.festival:
+            results[JobTask.festival_pages] = await enqueue_job(
+                db, eid, JobTask.festival_pages
+            )
+    else:
+        logging.info("page jobs disabled via DISABLE_PAGE_JOBS")
     if not skip_vk_sync:
         if not (is_vk_wall_url(ev.source_post_url) or ev.source_vk_post_url):
             results[JobTask.vk_sync] = await enqueue_job(db, eid, JobTask.vk_sync)
@@ -10867,6 +11657,11 @@ async def _drain_nav_tasks(db: Database, event_id: int, timeout: float = 90.0) -
                 try:
                     task = JobTask(task_name)
                 except Exception:
+                    continue
+                # Month/weekend pages are shared and already debounced/coalesced.
+                # Creating per-event follow-up keys here leads to duplicate rebuilds + notifications.
+                if task in {JobTask.month_pages, JobTask.weekend_pages}:
+                    del merged[key]
                     continue
                 # Fix: Check if deferred task already exists for this event_id
                 # If so, skip follow-up creation to preserve deferred behavior
@@ -11360,7 +12155,7 @@ async def add_events_from_text(
 
         # Prepare search_digest before creating Event
         from digest_helper import clean_search_digest
-        raw_digest = (data.get("search_digest") or "").strip()
+        raw_digest = (data.get("search_digest") or data.get("search_description") or "").strip()
         final_digest = clean_search_digest(raw_digest) or None
 
         base_event = Event(
@@ -11585,7 +12380,13 @@ async def add_events_from_text(
             if saved.festival:
                 lines.append(f"festival: {saved.festival}")
             if saved.description:
-                lines.append(f"description: {saved.description}")
+                # Keep Telegram replies safe: full description is published on Telegraph.
+                preview_limit = int(os.getenv("EVENT_DESCRIPTION_TELEGRAM_PREVIEW_CHARS", "900"))
+                preview_limit = max(120, min(3000, preview_limit))
+                desc = saved.description.strip()
+                if len(desc) > preview_limit:
+                    desc = desc[: preview_limit - 3].rstrip() + "..."
+                lines.append(f"description: {desc}")
             if saved.search_digest:
                 lines.append(f"search_digest: {saved.search_digest}")
             if saved.event_type:
@@ -11638,6 +12439,17 @@ async def add_events_from_text(
 
 
 def _event_lines(ev: Event) -> list[str]:
+    def _preview(value: str | None) -> str:
+        """Keep Telegram replies safe: description can be long, but send_message is capped at 4096 chars."""
+        if not value:
+            return ""
+        limit = int(os.getenv("EVENT_DESCRIPTION_TELEGRAM_PREVIEW_CHARS", "900"))
+        limit = max(120, min(3000, limit))
+        raw = value.strip()
+        if len(raw) <= limit:
+            return raw
+        return raw[: limit - 3].rstrip() + "..."
+
     lines = [
         f"title: {ev.title}",
         f"date: {ev.date}",
@@ -11651,7 +12463,7 @@ def _event_lines(ev: Event) -> list[str]:
     if ev.festival:
         lines.append(f"festival: {ev.festival}")
     if ev.description:
-        lines.append(f"description: {ev.description}")
+        lines.append(f"description: {_preview(ev.description)}")
     if ev.search_digest:
         lines.append(f"search_digest: {ev.search_digest}")
     if ev.event_type:
@@ -12708,6 +13520,7 @@ async def run_event_update_jobs(
     *,
     notify_chat_id: int | None = None,
     event_id: int | None = None,
+    allowed_tasks: set["JobTask"] | None = None,
 ) -> None:
     async def notifier(
         task: JobTask,
@@ -12739,7 +13552,11 @@ async def run_event_update_jobs(
             await bot.send_message(notify_chat_id, text)
 
     while await _run_due_jobs_once(
-        db, bot, notifier if notify_chat_id is not None else None, event_id
+        db,
+        bot,
+        notifier if notify_chat_id is not None else None,
+        event_id,
+        allowed_tasks=allowed_tasks,
     ):
         await asyncio.sleep(0)
 
@@ -12825,11 +13642,13 @@ async def update_telegraph_event_page(
         except Exception:
             logging.warning("telegraph: legacy event_source backfill failed for %s", event_id, exc_info=True)
         display_link = False if ev.source_post_url else True
+        lifecycle_status = getattr(ev, "lifecycle_status", None)
         summary = SourcePageEventSummary(
             date=getattr(ev, "date", None),
             end_date=getattr(ev, "end_date", None),
             time=getattr(ev, "time", None),
             event_type=getattr(ev, "event_type", None),
+            lifecycle_status=str(lifecycle_status) if lifecycle_status is not None else None,
             location_name=(ev.location_name or None),
             location_address=(ev.location_address or None),
             city=(ev.city or None),
@@ -12840,56 +13659,83 @@ async def update_telegraph_event_page(
             ticket_status=getattr(ev, "ticket_status", None),
         )
         photos = list(ev.photo_urls or [])
-        # Keep Telegraph pages resilient: some ingestion paths populate EventPoster rows
-        # but don't keep Event.photo_urls fully in sync.
-        try:
-            poster_urls = (
-                await session.execute(
-                    select(EventPoster.catbox_url).where(
-                        EventPoster.event_id == event_id, EventPoster.catbox_url.is_not(None)
-                    )
-                )
-            ).scalars().all()
-        except Exception:
-            poster_urls = []
-        merged_photo_urls = False
-        for url in poster_urls:
-            if url and url not in photos:
-                photos.append(url)
-                merged_photo_urls = True
-        if merged_photo_urls:
-            ev.photo_urls = list(photos)
-            ev.photo_count = len(ev.photo_urls)
         # For rendering (Telegraph + Telegram cached previews), prefer Catbox.
         # Supabase is used strictly as a fallback to avoid exhausting a small Storage quota.
-        render_photos = list(photos)
         try:
             poster_rows = (
                 await session.execute(
-                    select(EventPoster.catbox_url, EventPoster.supabase_url).where(
-                        EventPoster.event_id == event_id
-                    )
+                    select(
+                        EventPoster.catbox_url,
+                        EventPoster.supabase_url,
+                        EventPoster.ocr_title,
+                        EventPoster.ocr_text,
+                        EventPoster.updated_at,
+                        EventPoster.poster_hash,
+                    ).where(EventPoster.event_id == event_id)
                 )
             ).all()
         except Exception:
             poster_rows = []
         prefer_supabase = (os.getenv("TELEGRAPH_PREFER_SUPABASE") or "").strip() in {"1", "true", "yes"}
-        poster_render_urls: list[str] = []
-        for catbox_url, supabase_url in poster_rows:
-            if prefer_supabase and supabase_url:
-                url = supabase_url
-            else:
-                url = catbox_url or supabase_url
-            if url:
-                url_s = str(url)
-                if url_s not in poster_render_urls:
-                    poster_render_urls.append(url_s)
-        for url in poster_render_urls:
-            if url not in render_photos:
-                render_photos.append(url)
+        poster_render_urls, exclude_urls = _select_eventposter_render_urls(
+            list(poster_rows or []), prefer_supabase=prefer_supabase
+        )
+        # If multiple posters are present (common for a single VK post that describes
+        # several events), prioritize the poster that best matches the event's title/date/time.
+        # This reduces cases where a wrong poster becomes the Telegraph cover.
+        if len(poster_render_urls) > 1 and poster_rows:
+            try:
+                url_to_ocr: dict[str, tuple[str | None, str | None]] = {}
+                for catbox_url, supabase_url, ocr_title, ocr_text, _updated_at, _hash in list(poster_rows or []):
+                    for u in (catbox_url, supabase_url):
+                        u2 = (u or "").strip()
+                        if not u2:
+                            continue
+                        url_to_ocr[u2] = (ocr_title, ocr_text)
 
-        if ev.preview_3d_url and len(render_photos) >= 2:
-            render_photos.insert(0, ev.preview_3d_url)
+                scored_urls: list[tuple[float, int, str]] = []
+                for idx, url in enumerate(poster_render_urls):
+                    ocr_title, ocr_text = url_to_ocr.get(str(url).strip(), (None, None))
+                    score = _score_eventposter_against_event(
+                        event_title=getattr(ev, "title", None),
+                        event_date=getattr(ev, "date", None),
+                        event_time=getattr(ev, "time", None),
+                        ocr_title=ocr_title,
+                        ocr_text=ocr_text,
+                    )
+                    scored_urls.append((float(score), idx, str(url).strip()))
+
+                scored_urls.sort(key=lambda t: (-t[0], t[1]))
+                best_score = scored_urls[0][0] if scored_urls else 0.0
+                # If we have at least one confident match, drop very low-scoring posters.
+                if best_score >= 4.0:
+                    filtered = [u for s, _i, u in scored_urls if s >= 2.0 and s >= (best_score - 2.0)]
+                    if filtered:
+                        poster_render_urls = filtered
+                    else:
+                        poster_render_urls = [scored_urls[0][2]]
+                else:
+                    poster_render_urls = [u for _s, _i, u in scored_urls]
+            except Exception:
+                logging.warning("telegraph: failed to score poster relevance", exc_info=True)
+        if exclude_urls:
+            photos = [u for u in photos if (u or "").strip() and str(u).strip() not in exclude_urls]
+        # Keep Event.photo_urls resilient: ensure selected poster URLs are present (without duplicates)
+        merged_photo_urls = False
+        for url in poster_render_urls:
+            if url and url not in photos:
+                photos.append(url)
+                merged_photo_urls = True
+        if merged_photo_urls or exclude_urls:
+            ev.photo_urls = list(photos)
+            ev.photo_count = len(ev.photo_urls)
+        cover_url = str(ev.preview_3d_url).strip() if ev.preview_3d_url else None
+        # Priority matters: posters must not get truncated by Telegraph's 12-image cap.
+        render_photos = merge_render_photos(
+            photo_urls=photos,
+            poster_urls=poster_render_urls,
+            cover_url=cover_url,
+        )
         sources_total = (
             await session.scalar(
                 select(func.count())
@@ -12922,17 +13768,68 @@ async def update_telegraph_event_page(
             + f"Последнее обновление: {html.escape(last_fact_text)}"
             + "</p>"
         )
+        # Telegraph event pages must reflect merged/rewritten description (Smart Update),
+        # not a single legacy source_text. This prevents losing newly merged facts and
+        # reduces duplication from raw source imports.
+        page_text = (getattr(ev, "description", None) or "").strip() or (ev.source_text or "")
+        page_text = _normalize_known_venue_mentions(
+            page_text, location_name=getattr(summary, "location_name", None)
+        ) or page_text
+        # Safety net: Telegraph pages already show date/time/location/tickets in the summary infoblock.
+        # If the stored description contains duplicated logistics (a common LLM failure mode),
+        # strip it for rendering to keep pages readable without requiring a DB backfill.
+        try:
+            from smart_event_update import (
+                EventCandidate as _EventCandidate,
+                _description_needs_channel_promo_strip as _needs_channel_promo_strip,
+                _description_needs_infoblock_logistics_strip as _needs_infoblock_strip,
+                _strip_infoblock_logistics_from_description as _strip_infoblock,
+            )
+
+            _cand = _EventCandidate(
+                source_type="telegraph_render",
+                source_url=getattr(ev, "source_post_url", None),
+                source_text=(ev.source_text or ""),
+                title=getattr(ev, "title", None),
+                date=getattr(ev, "date", None),
+                time=getattr(ev, "time", None),
+                end_date=getattr(ev, "end_date", None),
+                festival=getattr(ev, "festival", None),
+                location_name=getattr(ev, "location_name", None),
+                location_address=getattr(ev, "location_address", None),
+                city=getattr(ev, "city", None),
+                ticket_link=getattr(ev, "ticket_link", None),
+                ticket_price_min=getattr(ev, "ticket_price_min", None),
+                ticket_price_max=getattr(ev, "ticket_price_max", None),
+                ticket_status=getattr(ev, "ticket_status", None),
+                event_type=getattr(ev, "event_type", None),
+                is_free=bool(getattr(ev, "is_free", False)),
+            )
+            if _needs_infoblock_strip(page_text, candidate=_cand):
+                stripped = _strip_infoblock(page_text, candidate=_cand)
+                if stripped:
+                    page_text = stripped
+            try:
+                from smart_event_update import _strip_channel_promo_from_description as _strip_channel_promo
+
+                if _needs_channel_promo_strip(page_text):
+                    page_text = _strip_channel_promo(page_text) or page_text
+            except Exception:
+                pass
+        except Exception:
+            pass
         html_content, _, _ = await build_source_page_content(
             ev.title or "Event",
-            ev.source_text,
+            page_text,
             ev.source_post_url,
-            ev.source_text,
+            None,
             None,
             ev.ics_url,
             db,
             event_summary=summary,
             display_link=display_link,
             catbox_urls=render_photos,
+            force_cover_url=cover_url,
             search_digest=ev.search_digest,
             event_footer_html=event_footer_html,
         )
@@ -12940,7 +13837,14 @@ async def update_telegraph_event_page(
 
         nodes = html_to_nodes(html_content)
         new_hash = content_hash(html_content)
-        if ev.content_hash == new_hash and ev.telegraph_url:
+        verify_editable_raw = (os.getenv("TELEGRAPH_VERIFY_EDITABLE_ON_NOCHANGE") or "").strip().lower()
+        verify_editable = verify_editable_raw in {"1", "true", "yes", "on"}
+        if not verify_editable_raw and os.getenv("DEV_MODE") == "1":
+            # DEV/E2E uses prod DB snapshots that may contain Telegraph pages created under a
+            # different token. Even when content doesn't change, try editing once to detect
+            # PAGE_ACCESS_DENIED and recreate the page in this environment.
+            verify_editable = True
+        if ev.content_hash == new_hash and ev.telegraph_url and not verify_editable:
             await session.commit()
             return ev.telegraph_url
         token = get_telegraph_token()
@@ -12949,7 +13853,29 @@ async def update_telegraph_event_page(
             await session.commit()
             return ev.telegraph_url
         tg = Telegraph(access_token=token)
-        title = ev.title or "Event"
+        def _strip_status_prefix(raw: str) -> str:
+            s = (raw or "").strip()
+            # Avoid accumulating prefixes across rebuilds.
+            for prefix in (
+                "❌ ОТМЕНЕНО: ",
+                "❌ ОТМЕНЕНО ",
+                "⏸ ПЕРЕНЕСЕНО: ",
+                "⏸ ПЕРЕНЕСЕНО ",
+                "⏸ ПЕРЕНОС: ",
+                "⏸ ПЕРЕНОС ",
+            ):
+                if s.upper().startswith(prefix.upper()):
+                    return s[len(prefix) :].lstrip()
+            return s
+
+        base_title = _strip_status_prefix(ev.title or "Event")
+        lifecycle = (getattr(ev, "lifecycle_status", None) or "active").strip().casefold()
+        if lifecycle == "cancelled":
+            title = f"❌ ОТМЕНЕНО: {base_title}"
+        elif lifecycle == "postponed":
+            title = f"⏸ ПЕРЕНЕСЕНО: {base_title}"
+        else:
+            title = base_title
         if not ev.telegraph_path:
             data = await telegraph_create_page(
                 tg,
@@ -12997,32 +13923,8 @@ async def update_telegraph_event_page(
         await session.commit()
         url = ev.telegraph_url
 
-    
-    # NEW: Check if we have a deferred month_pages job for this month
-    # If so, SKIP immediate update to avoid double work.
-    skipped_immediate = False
-    if ev.date:
-        month_key = ev.date[:7]
-        async with db.get_session() as session:
-            # We look for a PENDING job with matching coalesce_key and next_run_at in future
-            stmt = (
-                select(JobOutbox)
-                .where(
-                    JobOutbox.coalesce_key.like(f"month_pages:{month_key}%"),
-                    JobOutbox.status == JobStatus.pending,
-                    JobOutbox.next_run_at > datetime.now(timezone.utc),
-                )
-                .limit(1)
-            )
-            deferred_job = (await session.execute(stmt)).scalar_one_or_none()
-            
-            if deferred_job:
-                logline("TG-EVENT", event_id, "done (immediate update skipped due to deferred job)", url=url)
-                skipped_immediate = True
-
-    if not skipped_immediate:
-        logline("TG-EVENT", event_id, "done", url=url)
-        await update_month_pages_for(event_id, db, bot)
+    # Month/weekend pages are updated via debounced JobOutbox tasks (see schedule_event_update_tasks).
+    logline("TG-EVENT", event_id, "done", url=url)
     return url
 
 
@@ -13935,7 +14837,126 @@ async def update_month_pages_for(event_id: int, db: Database, bot: Bot | None) -
     return "rebuild" if rebuild_any else changed_any
 
 
+async def _get_running_job_coalesce_key(
+    db: Database, *, event_id: int, task: JobTask
+) -> str | None:
+    """Return coalesce_key for the currently running job (best-effort)."""
+    async with db.get_session() as session:
+        key = await session.scalar(
+            select(JobOutbox.coalesce_key)
+            .where(
+                JobOutbox.event_id == event_id,
+                JobOutbox.task == task,
+                JobOutbox.status == JobStatus.running,
+            )
+            .order_by(JobOutbox.id.desc())
+            .limit(1)
+        )
+    return str(key) if key else None
+
+
+async def _remove_pages_dirty_keys(db: Database, keys: list[str]) -> None:
+    """Remove specific dirty markers from pages_dirty_state (best-effort)."""
+    if not keys:
+        return
+    import json
+
+    state = await load_pages_dirty_state(db)
+    if not state:
+        return
+    months = [m for m in (state.get("months") or []) if m not in set(keys)]
+    if not months:
+        await clear_pages_dirty_state(db)
+        return
+    state["months"] = months
+    await set_setting_value(db, PAGES_DIRTY_KEY, json.dumps(state))
+    settings_cache.pop(PAGES_DIRTY_KEY, None)
+
+
+async def job_month_pages_debounced(event_id: int, db: Database, bot: Bot | None) -> bool:
+    """Debounced month page rebuild (coalesced by month_pages:YYYY-MM).
+
+    Rebuilds the whole month page to incorporate accumulated changes across many events.
+    """
+    if DISABLE_PAGE_JOBS:
+        logging.info("month_pages disabled via DISABLE_PAGE_JOBS")
+        return False
+    key = await _get_running_job_coalesce_key(db, event_id=event_id, task=JobTask.month_pages)
+    month = None
+    if key and key.startswith("month_pages:"):
+        month = key.split(":", 1)[1].split(":", 1)[0]
+    if not month:
+        # Fallback: derive from the owner event.
+        async with db.get_session() as session:
+            ev = await session.get(Event, event_id)
+        if ev and getattr(ev, "date", None):
+            month = str(ev.date).split("..", 1)[0][:7]
+    if not month:
+        return False
+
+    await sync_month_page(db, month)
+    await _remove_pages_dirty_keys(db, [month])
+
+    if bot:
+        try:
+            async with db.get_session() as session:
+                admins = (
+                    await session.execute(select(User.user_id).where(User.is_superadmin.is_(True)))
+                ).scalars().all()
+            msg = f"🤖 Авто-обновление страниц: {month}\nСтатус: полная пересборка ✅"
+            for admin_id in admins:
+                try:
+                    await bot.send_message(admin_id, msg)
+                except Exception:
+                    pass
+        except Exception:
+            logging.warning("month_pages notify failed", exc_info=True)
+    return True
+
+
+async def job_weekend_pages_debounced(event_id: int, db: Database, bot: Bot | None) -> bool:
+    """Debounced weekend page rebuild (coalesced by weekend_pages:YYYY-MM-DD)."""
+    if DISABLE_PAGE_JOBS:
+        logging.info("weekend_pages disabled via DISABLE_PAGE_JOBS")
+        return False
+    key = await _get_running_job_coalesce_key(db, event_id=event_id, task=JobTask.weekend_pages)
+    weekend = None
+    if key and key.startswith("weekend_pages:"):
+        weekend = key.split(":", 1)[1].split(":", 1)[0]
+    if not weekend:
+        async with db.get_session() as session:
+            ev = await session.get(Event, event_id)
+        if ev and getattr(ev, "date", None):
+            d = parse_iso_date(str(ev.date).split("..", 1)[0])
+            w_start = weekend_start_for_date(d) if d else None
+            weekend = w_start.isoformat() if w_start else None
+    if not weekend:
+        return False
+
+    await sync_weekend_page(db, weekend)
+    await _remove_pages_dirty_keys(db, [f"weekend:{weekend}"])
+
+    if bot:
+        try:
+            async with db.get_session() as session:
+                admins = (
+                    await session.execute(select(User.user_id).where(User.is_superadmin.is_(True)))
+                ).scalars().all()
+            msg = f"🤖 Авто-обновление страниц: weekend:{weekend}\nСтатус: полная пересборка ✅"
+            for admin_id in admins:
+                try:
+                    await bot.send_message(admin_id, msg)
+                except Exception:
+                    pass
+        except Exception:
+            logging.warning("weekend_pages notify failed", exc_info=True)
+    return True
+
+
 async def update_weekend_pages_for(event_id: int, db: Database, bot: Bot | None) -> None:
+    if DISABLE_PAGE_JOBS:
+        logging.info("update_weekend_pages_for disabled via DISABLE_PAGE_JOBS")
+        return
     async with db.get_session() as session:
         ev = await session.get(Event, event_id)
     if not ev:
@@ -13947,6 +14968,9 @@ async def update_weekend_pages_for(event_id: int, db: Database, bot: Bot | None)
 
 
 async def update_week_pages_for(event_id: int, db: Database, bot: Bot | None) -> None:
+    if DISABLE_PAGE_JOBS:
+        logging.info("update_week_pages_for disabled via DISABLE_PAGE_JOBS")
+        return
     async with db.get_session() as session:
         ev = await session.get(Event, event_id)
     if not ev:
@@ -14415,10 +15439,12 @@ async def job_sync_vk_source_post(event_id: int, db: Database, bot: Bot | None) 
     )
     if not ev or is_vk_wall_url(ev.source_post_url):
         return
-    new_hash = content_hash(ev.source_text or "")
-    if ev.content_hash == new_hash and ev.source_vk_post_url:
+    # VK source post should track its own hash; `content_hash` is used by Telegraph (HTML).
+    text_for_vk = (getattr(ev, "description", None) or "").strip() or (ev.source_text or "")
+    new_hash = content_hash(text_for_vk)
+    if getattr(ev, "vk_source_hash", None) == new_hash and ev.source_vk_post_url:
         return
-    vk_url = await sync_vk_source_post(ev, ev.source_text, db, bot, ics_url=ev.ics_url)
+    vk_url = await sync_vk_source_post(ev, text_for_vk, db, bot, ics_url=ev.ics_url)
     partner_user: User | None = None
     event_for_notice: Event | None = None
     async with db.get_session() as session:
@@ -14426,7 +15452,7 @@ async def job_sync_vk_source_post(event_id: int, db: Database, bot: Bot | None) 
         if obj:
             if vk_url:
                 obj.source_vk_post_url = vk_url
-            obj.content_hash = new_hash
+            obj.vk_source_hash = new_hash
             session.add(obj)
             if bot and obj.creator_id:
                 partner_user = await session.get(User, obj.creator_id)
@@ -14654,9 +15680,9 @@ JOB_HANDLERS = {
     "vk_sync": job_sync_vk_source_post,
     "ics_publish": ics_publish,
     "tg_ics_post": tg_ics_post,
-    "month_pages": update_month_pages_for,
+    "month_pages": job_month_pages_debounced,
     "week_pages": update_week_pages_for,
-    "weekend_pages": update_weekend_pages_for,
+    "weekend_pages": job_weekend_pages_debounced,
     "festival_pages": update_festival_pages_for_event,
     "fest_nav:update_all": update_all_festival_nav,
 }
@@ -14791,10 +15817,12 @@ def next_month(month: str) -> str:
 
 _TG_TAG_RE = re.compile(r"</?tg-(?:emoji|spoiler)[^>]*?>", re.IGNORECASE)
 _ESCAPED_TG_TAG_RE = re.compile(r"&lt;/?tg-(?:emoji|spoiler).*?&gt;", re.IGNORECASE)
-_TG_EMOJI_BLOCK_RE = re.compile(r"<tg-emoji\b[^>]*>.*?</tg-emoji>", re.IGNORECASE | re.DOTALL)
+_TG_EMOJI_BLOCK_RE = re.compile(
+    r"<tg-emoji\b[^>]*>(.*?)</tg-emoji>", re.IGNORECASE | re.DOTALL
+)
 _TG_EMOJI_SELF_RE = re.compile(r"<tg-emoji\b[^>]*/>", re.IGNORECASE)
 _ESCAPED_TG_EMOJI_BLOCK_RE = re.compile(
-    r"&lt;tg-emoji\b[^&]*&gt;.*?&lt;/tg-emoji&gt;",
+    r"&lt;tg-emoji\b[^&]*&gt;(.*?)&lt;/tg-emoji&gt;",
     re.IGNORECASE | re.DOTALL,
 )
 _ESCAPED_TG_EMOJI_SELF_RE = re.compile(r"&lt;tg-emoji\b[^&]*/&gt;", re.IGNORECASE)
@@ -14805,7 +15833,8 @@ def sanitize_telegram_html(html: str) -> str:
 
     For Telegraph rendering we strip Telegram-only tags:
     - ``tg-spoiler``: unwrap, keep inner text.
-    - ``tg-emoji`` (custom emoji): remove entirely because Telegraph can't render it reliably.
+    - ``tg-emoji`` (custom emoji): unwrap and keep the inner unicode placeholder (if any),
+      because Telegraph can render plain emoji but not Telegram custom emoji wrappers.
 
     >>> sanitize_telegram_html("<tg-emoji e=1/>")
     ''
@@ -14824,10 +15853,29 @@ def sanitize_telegram_html(html: str) -> str:
     escaped = len(_ESCAPED_TG_TAG_RE.findall(html))
     if raw or escaped:
         logging.info("telegraph:sanitize tg-tags raw=%d escaped=%d", raw, escaped)
-    # Custom emoji breaks on Telegraph: remove it completely (including the inner placeholder).
-    cleaned = _TG_EMOJI_BLOCK_RE.sub("", html)
+    def _unwrap_tg_emoji(match: re.Match[str]) -> str:
+        inner = (match.group(1) or "").strip()
+        if not inner:
+            return ""
+        # Avoid leaking any nested HTML.
+        inner = re.sub(r"<[^>]+>", "", inner)
+        return inner
+
+    def _unwrap_escaped_tg_emoji(match: re.Match[str]) -> str:
+        inner = (match.group(1) or "").strip()
+        if not inner:
+            return ""
+        inner = html_module.unescape(inner)
+        inner = re.sub(r"<[^>]+>", "", inner)
+        return inner
+
+    # Custom emoji wrappers break on Telegraph: unwrap and keep the inner placeholder.
+    # (If inner is empty, drop the tag completely.)
+    import html as html_module
+
+    cleaned = _TG_EMOJI_BLOCK_RE.sub(_unwrap_tg_emoji, html)
     cleaned = _TG_EMOJI_SELF_RE.sub("", cleaned)
-    cleaned = _ESCAPED_TG_EMOJI_BLOCK_RE.sub("", cleaned)
+    cleaned = _ESCAPED_TG_EMOJI_BLOCK_RE.sub(_unwrap_escaped_tg_emoji, cleaned)
     cleaned = _ESCAPED_TG_EMOJI_SELF_RE.sub("", cleaned)
     # Unwrap spoiler tags (keep inner text) + remove any leftover tg-* wrappers.
     cleaned = _TG_TAG_RE.sub("", cleaned)

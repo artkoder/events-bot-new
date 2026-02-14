@@ -262,6 +262,8 @@ async def _build_digest_candidates(
             .where(
                 Event.date >= start_date,
                 Event.date <= end_date,
+                Event.lifecycle_status == "active",
+                Event.silent.is_(False),
             )
             .order_by(Event.date, Event.time)
         )
@@ -1982,5 +1984,4 @@ async def build_movies_digest_preview(
         event_kind="movies",
         candidates_builder=build_movies_digest_candidates,
     )
-
 

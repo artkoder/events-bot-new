@@ -13,13 +13,21 @@ async def test_persist_event_and_pages_sets_source_post_url_and_skips_vk_sync(tm
 
     tasks = []
 
-    async def fake_enqueue_job(db_, eid, task, depends_on=None, coalesce_key=None):
+    async def fake_enqueue_job(
+        db_, eid, task, depends_on=None, coalesce_key=None, next_run_at=None, **_kwargs
+    ):
         tasks.append(task)
         return "job"
 
     monkeypatch.setattr(main, "enqueue_job", fake_enqueue_job)
 
-    draft = vk_intake.EventDraft(title="T", date="2025-09-02", time="10:00", source_text="T")
+    draft = vk_intake.EventDraft(
+        title="T",
+        date="2025-09-02",
+        time="10:00",
+        venue="Club",
+        source_text="T",
+    )
     res = await vk_intake.persist_event_and_pages(
         draft, [], db, source_post_url="https://vk.com/wall-1_2"
     )
@@ -118,12 +126,14 @@ async def test_persist_event_and_pages_classifies_topics(tmp_path, monkeypatch):
 
     calls = {"topics": 0}
 
-    async def fake_classify(event: Event):
+    async def fake_assign(event: Event):
         calls["topics"] += 1
-        return ["HANDMADE"]
+        event.topics = ["HANDMADE"]
+        event.topics_manual = False
+        return ["HANDMADE"], 0, None, False
 
     monkeypatch.setattr(main, "schedule_event_update_tasks", fake_schedule_event_update_tasks)
-    monkeypatch.setattr(main, "classify_event_topics", fake_classify)
+    monkeypatch.setattr(main, "assign_event_topics", fake_assign)
 
     draft = vk_intake.EventDraft(
         title="T",
@@ -150,7 +160,9 @@ async def test_schedule_event_update_tasks_enqueues_and_runs_vk_sync(tmp_path, m
 
     tasks = []
 
-    async def fake_enqueue_job(db_, eid, task, depends_on=None, coalesce_key=None):
+    async def fake_enqueue_job(
+        db_, eid, task, depends_on=None, coalesce_key=None, next_run_at=None, **_kwargs
+    ):
         tasks.append(task)
         return "job"
 
@@ -183,6 +195,8 @@ async def test_schedule_event_update_tasks_enqueues_and_runs_vk_sync(tmp_path, m
     async with db.get_session() as session:
         updated = await session.get(Event, saved.id)
     assert updated.source_vk_post_url == "https://vk.com/wall-1_1"
+    assert updated.vk_source_hash
+    assert updated.content_hash is None
 
 
 @pytest.mark.asyncio

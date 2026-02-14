@@ -12,8 +12,10 @@ sections:
     commands: docs/operations/commands.md
     cron: docs/operations/cron.md
     e2e_testing: docs/operations/e2e-testing.md
+    e2e_scenarios: docs/operations/e2e-scenarios.md
     kaggle_secrets: docs/operations/kaggle-secrets.md
     prod_data: docs/operations/prod-data.md
+    sqlite_db_init: docs/operations/sqlite-db-init.md
     vk_metrics: docs/operations/vk-metrics.md
   llm:
     prompts: docs/llm/prompts.md
@@ -97,6 +99,24 @@ features:
       - smart_event_update.py
       - models.py
       - db.py
+  vk_auto_queue:
+    status: implemented
+    docs: docs/features/vk-auto-queue/README.md
+    entrypoints:
+      - vk_auto_queue.py
+      - scheduling.py
+      - main_part2.py
+      - vk_review.py
+      - vk_intake.py
+  exhibitions_smart_update:
+    status: implemented
+    docs: docs/features/exhibitions-smart-update/README.md
+    entrypoints:
+      - smart_event_update.py
+      - source_parsing/telegram/handlers.py
+      - source_parsing/handlers.py
+      - vk_intake.py
+      - main.py
 
 artifacts:
   root: artifacts/

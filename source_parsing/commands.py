@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from functools import partial
 from datetime import datetime, timezone
 from pathlib import Path
@@ -34,7 +35,16 @@ logger = logging.getLogger(__name__)
 MAX_TG_MESSAGE_LEN = 3800
 PARSE_LOCK = asyncio.Lock()
 
-SOURCE_PARSING_GUARD_PATH = Path("/data/parse_debug/source_parsing_guard.json")
+def _resolve_parse_debug_dir() -> Path:
+    env = (os.getenv("SOURCE_PARSING_DEBUG_DIR") or "").strip()
+    if env:
+        return Path(env)
+    if os.path.isdir("/data") and os.access("/data", os.W_OK):
+        return Path("/data/parse_debug")
+    return Path("artifacts/run/parse_debug")
+
+
+SOURCE_PARSING_GUARD_PATH = _resolve_parse_debug_dir() / "source_parsing_guard.json"
 SOURCE_PARSING_GUARD_URLS = {
     "dramteatr": "https://dramteatr39.ru/afisha",
     "muzteatr": "https://muzteatr39.ru/action/cat/afisha/",
@@ -214,7 +224,7 @@ async def handle_parse_command(message: types.Message, db: Database, bot: Bot) -
         await bot.send_message(message.chat.id, "Access denied")
         return
         
-    # Check for arguments (e.g. "/parse check")
+    # Check for arguments (e.g. "/parse check", "/parse dramteatr")
     args = ""
     if message.text:
         parts = message.text.split(maxsplit=1)
@@ -242,6 +252,18 @@ async def handle_parse_command(message: types.Message, db: Database, bot: Bot) -
             parse_mode="Markdown"
         )
         return
+
+    if args in {"help", "?", "h"}:
+        await bot.send_message(
+            message.chat.id,
+            "Использование:\n"
+            "- /parse — запустить парсинг всех источников\n"
+            "- /parse <source> — запустить парсинг только для одного источника\n"
+            "- /parse <source> --from YYYY-MM-DD --to YYYY-MM-DD — ограничить обработку датами (полезно для E2E)\n"
+            "Доступные источники: dramteatr, muzteatr, sobor, tretyakov, philharmonia, qtickets\n"
+            "- /parse check — диагностический режим (без сохранения в БД)",
+        )
+        return
     
     logger.info("source_parsing: starting parse for user_id=%s", message.from_user.id)
 
@@ -252,15 +274,66 @@ async def handle_parse_command(message: types.Message, db: Database, bot: Bot) -
         )
         return
     
-    await bot.send_message(
-        message.chat.id,
-        "🔄 Запуск парсинга источников (Драмтеатр, Музтеатр, Кафедральный собор, Третьяковка)..."
-    )
+    only_sources: list[str] | None = None
+    date_from: str | None = None
+    date_to: str | None = None
+    if args:
+        tokens = [t for t in re.split(r"[,\s]+", args) if t.strip()]
+        remaining: list[str] = []
+        i = 0
+        while i < len(tokens):
+            t = tokens[i]
+            if t in {"--from", "from"} and i + 1 < len(tokens):
+                date_from = tokens[i + 1]
+                i += 2
+                continue
+            if t in {"--to", "to"} and i + 1 < len(tokens):
+                date_to = tokens[i + 1]
+                i += 2
+                continue
+            if t.startswith("from="):
+                date_from = t.split("=", 1)[1].strip()
+                i += 1
+                continue
+            if t.startswith("to="):
+                date_to = t.split("=", 1)[1].strip()
+                i += 1
+                continue
+            remaining.append(t)
+            i += 1
+
+        raw = [p for p in remaining if p.strip()]
+        if raw and raw != ["all"]:
+            only_sources = raw
+
+    if only_sources:
+        await bot.send_message(
+            message.chat.id,
+            "🔄 Запуск парсинга источников (ограничено): " + ", ".join(only_sources),
+        )
+    else:
+        await bot.send_message(
+            message.chat.id,
+            "🔄 Запуск парсинга источников (Драмтеатр, Музтеатр, Кафедральный собор, Третьяковка)...",
+        )
 
     async with PARSE_LOCK:
         try:
-            result = await run_source_parsing(db, bot, chat_id=message.chat.id)
-            report = format_parsing_report(result)
+            result = await run_source_parsing(
+                db,
+                bot,
+                chat_id=message.chat.id,
+                only_sources=only_sources,
+                date_from=date_from,
+                date_to=date_to,
+            )
+            bot_username = None
+            try:
+                me = await bot.get_me()
+                bot_username = (getattr(me, "username", None) or "").strip().lstrip("@") or None
+            except Exception:
+                bot_username = None
+            report = format_parsing_report(result, bot_username=bot_username)
             
             try:
                 await bot.send_message(
@@ -360,7 +433,13 @@ async def source_parsing_scheduler(db: Database, bot: Bot, *, run_id: str | None
         # Send report to admin chat if configured
         admin_chat_id = os.getenv("ADMIN_CHAT_ID")
         if admin_chat_id and (result.stats_by_source or result.errors):
-            report = format_parsing_report(result)
+            bot_username = None
+            try:
+                me = await bot.get_me()
+                bot_username = (getattr(me, "username", None) or "").strip().lstrip("@") or None
+            except Exception:
+                bot_username = None
+            report = format_parsing_report(result, bot_username=bot_username)
             try:
                 await bot.send_message(
                     int(admin_chat_id),
@@ -409,7 +488,13 @@ async def source_parsing_scheduler_if_changed(
 
         admin_chat_id = os.getenv("ADMIN_CHAT_ID")
         if admin_chat_id and (result.stats_by_source or result.errors):
-            report = format_parsing_report(result)
+            bot_username = None
+            try:
+                me = await bot.get_me()
+                bot_username = (getattr(me, "username", None) or "").strip().lstrip("@") or None
+            except Exception:
+                bot_username = None
+            report = format_parsing_report(result, bot_username=bot_username)
             try:
                 await bot.send_message(
                     int(admin_chat_id),

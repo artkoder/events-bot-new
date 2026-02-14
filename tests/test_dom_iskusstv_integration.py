@@ -161,15 +161,16 @@ class TestIntegrationDomIskusstv:
         
         # Mock find_existing_event to return existing event
         with patch('source_parsing.dom_iskusstv.find_existing_event', return_value=(100, False)):
-            with patch('source_parsing.dom_iskusstv.update_event_ticket_status', return_value=True):
-                with patch('source_parsing.dom_iskusstv.update_linked_events', return_value=None):
-                    stats = await process_dom_iskusstv_events(
-                        mock_db,
-                        mock_bot,
-                        events,
-                        chat_id=123,
-                        skip_pages_rebuild=True,
-                    )
+            with patch('source_parsing.dom_iskusstv.event_has_parser_source', return_value=True):
+                with patch('source_parsing.dom_iskusstv.update_event_ticket_status', return_value=True):
+                    with patch('source_parsing.dom_iskusstv.update_linked_events', return_value=None):
+                        stats = await process_dom_iskusstv_events(
+                            mock_db,
+                            mock_bot,
+                            events,
+                            chat_id=123,
+                            skip_pages_rebuild=True,
+                        )
         
         assert stats.ticket_updated == 2
         assert stats.new_added == 0

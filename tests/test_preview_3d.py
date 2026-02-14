@@ -1,6 +1,7 @@
 import pytest
 from aiogram import types
 from db import Database
+import main
 from main_part2 import event_to_nodes
 from models import Event, User
 from preview_3d.handlers import handle_3di_command, update_previews_from_results
@@ -57,6 +58,43 @@ def test_event_to_nodes_falls_back_to_photo_urls():
     nodes = event_to_nodes(event, show_image=True)
     assert nodes[0]["tag"] == "figure"
     assert nodes[0]["children"][0]["attrs"]["src"] == "https://example.com/photo.jpg"
+
+
+@pytest.mark.asyncio
+async def test_build_source_page_content_swaps_webp_cover_by_default():
+    html, _, _ = await main.build_source_page_content(
+        "Title",
+        "Body",
+        None,
+        None,
+        None,
+        None,
+        None,
+        catbox_urls=[
+            "https://example.com/preview.webp",
+            "https://example.com/other.jpg",
+        ],
+    )
+    assert html.startswith('<figure><img src="https://example.com/other.jpg"/>')
+
+
+@pytest.mark.asyncio
+async def test_build_source_page_content_force_cover_keeps_webp():
+    html, _, _ = await main.build_source_page_content(
+        "Title",
+        "Body",
+        None,
+        None,
+        None,
+        None,
+        None,
+        catbox_urls=[
+            "https://example.com/preview.webp",
+            "https://example.com/other.jpg",
+        ],
+        force_cover_url="https://example.com/preview.webp",
+    )
+    assert html.startswith('<figure><img src="https://example.com/preview.webp"/>')
 
 
 @pytest.mark.asyncio
@@ -176,4 +214,3 @@ async def test_get_new_events_gap(tmp_path):
     assert len(candidates_all) == 3
     ids = sorted([e.id for e in candidates_all])
     assert ids == [1, 3, 4]
-

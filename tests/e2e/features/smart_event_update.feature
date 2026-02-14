@@ -1,9 +1,6 @@
 # language: ru
+@offline
 Функция: Smart Update — пограничные сценарии
-
-  Предыстория:
-    Дано я авторизован в клиенте Telethon
-    И я открыл чат с ботом
 
   Сценарий: Идемпотентность по source_url
     Дано в базе создано тестовое событие:
@@ -36,6 +33,22 @@
       | time          | 19:00             |
       | location_name | Тестовая площадка |
     И для события "TEST SU anchors" количество источников равно "2"
+    И я очищаю тестовые события
+
+  Сценарий: Мёрж текста добавляет новый факт и убирает дубли
+    Дано в базе создано тестовое событие:
+      | title               | date       | time  | location_name       | source_text     | description                                     | city        |
+      | TEST SU text merge  | 2026-03-05 | 19:00 | Драматический театр | Старый источник | Спектакль в драмтеатре. Премия Арлекин-2010. Премия Арлекин-2010. | Калининград |
+    И для события "TEST SU text merge" добавлен источник "test://smart-update/site/1" типа "site"
+    Когда я запускаю Smart Update на основе события "TEST SU text merge" с правками:
+      | field       | value                         |
+      | source_type | telegram                       |
+      | source_url  | test://smart-update/tg/1        |
+      | source_text | Спектакль «Лорд Фаунтлерой».\\nПрекрасный дуэт Александра Егорова и Павла Самоловова. |
+      | raw_excerpt | Спектакль «Лорд Фаунтлерой».    |
+    Тогда результат Smart Update имеет статус "merged"
+    И описание события "TEST SU text merge" содержит "дуэт"
+    И в описании события "TEST SU text merge" фрагмент "Арлекин-2010" встречается ровно "1" раз
     И я очищаю тестовые события
 
   Сценарий: Первичный импорт пишет added_facts в лог
@@ -175,4 +188,148 @@
     Тогда результат Smart Update имеет статус "merged"
     И Smart Update вернул event_id как у события "TEST SU hall match A"
     И для события "TEST SU hall match A" количество источников равно "1"
+    И я очищаю тестовые события
+
+  Сценарий: Розыгрыш билетов — мердж фактов события без «механики»
+    Когда я запускаю Smart Update с кандидатом:
+      | field         | value                                                                 |
+      | title         | TEST SU giveaway                                                       |
+      | source_type   | telegram                                                               |
+      | source_url    | test://smart-update/giveaway/1                                          |
+      | date          | 2026-03-08                                                              |
+      | time          | 19:00                                                                   |
+      | location_name | Тестовая площадка                                                       |
+      | city          | Калининград                                                             |
+      | source_text   | РОЗЫГРЫШ БИЛЕТОВ!\\n\\n08.03 в 19:00 спектакль «Тестовый».\\n\\nУсловия: подпишись, сделай репост и напиши комментарий. |
+      | raw_excerpt   | 08.03 в 19:00 спектакль «Тестовый».                                     |
+    Тогда результат Smart Update имеет статус "created"
+    И создано новое событие с заголовком "TEST SU giveaway"
+    И для события "TEST SU giveaway" лог фактов содержит "Убрана механика розыгрыша"
+    И я очищаю тестовые события
+
+  Сценарий: Выставка не дублируется при новом источнике внутри периода
+    Дано в базе создано тестовое событие:
+      | title                 | date       | end_date   | time | location_name  | source_text                     | description         | city        | event_type |
+      | TEST SU exhibition A v20260211  | 2026-01-15 | 2026-03-01 |      | Галерея TEST   | Официальный анонс выставки      | Базовое описание    | Калининград | выставка   |
+    И для события "TEST SU exhibition A v20260211" добавлен источник "test://smart-update/exhibition/base-v20260211" типа "telegram"
+    Когда я запускаю Smart Update с кандидатом:
+      | field         | value                                      |
+      | title         | TEST SU exhibition A v20260211            |
+      | source_type   | telegram                                   |
+      | source_url    | test://smart-update/exhibition/new-v20260211 |
+      | source_text   | Выставка продлена, добавлены новые работы. |
+      | raw_excerpt   | Выставка продлена.                         |
+      | date          | 2026-02-20                                 |
+      | end_date      | 2026-03-31                                 |
+      | time          |                                            |
+      | location_name | Галерея TEST                               |
+      | city          | Калининград                                |
+      | event_type    | выставка                                   |
+      | trust_level   | medium                                     |
+    Тогда результат Smart Update имеет статус "merged"
+    И Smart Update вернул event_id как у события "TEST SU exhibition A v20260211"
+    И для события "TEST SU exhibition A v20260211" количество источников равно "2"
+    И событие "TEST SU exhibition A v20260211" имеет поля:
+      | field     | value      |
+      | end_date  | 2026-03-31 |
+      | event_type| выставка   |
+    И я очищаю тестовые события
+
+  Сценарий: Выставка не принимает продление периода от источника с более низким trust
+    Дано в базе создано тестовое событие:
+      | title                    | date       | end_date   | time | location_name  | source_text                     | description         | city        | event_type |
+      | TEST SU exhibition trust v20260211 | 2026-03-01 | 2026-04-30 |      | Галерея TEST   | Официальный анонс выставки      | Базовое описание    | Калининград | выставка   |
+    И для события "TEST SU exhibition trust v20260211" добавлен источник "test://smart-update/exhibition/high-v20260211" типа "telegram"
+    Когда я запускаю Smart Update с кандидатом:
+      | field         | value                                   |
+      | title         | TEST SU exhibition trust v20260211     |
+      | source_type   | vk                                      |
+      | source_url    | test://smart-update/exhibition/low-v20260211 |
+      | source_text   | Выставка продлена до конца мая.         |
+      | raw_excerpt   | Выставка продлена.                      |
+      | date          | 2026-04-10                              |
+      | end_date      | 2026-05-31                              |
+      | time          |                                         |
+      | location_name | Галерея TEST                            |
+      | city          | Калининград                             |
+      | event_type    | выставка                                |
+      | trust_level   | low                                     |
+    Тогда результат Smart Update имеет статус "merged"
+    И событие "TEST SU exhibition trust v20260211" имеет поля:
+      | field    | value      |
+      | end_date | 2026-04-30 |
+    И для события "TEST SU exhibition trust v20260211" лог фактов содержит "Дата окончания:"
+    И я очищаю тестовые события
+
+  Сценарий: Первичный импорт выставки сохраняет тип и период
+    Когда я запускаю Smart Update с кандидатом:
+      | field         | value                                |
+      | title         | TEST SU exhibition created v20260211 |
+      | source_type   | vk                                   |
+      | source_url    | test://smart-update/exhibition/create-v20260211 |
+      | source_text   | Выставка работает до конца июня.     |
+      | raw_excerpt   | Выставка современного искусства.      |
+      | date          | 2026-04-01                           |
+      | end_date      | 2026-06-30                           |
+      | time          |                                      |
+      | location_name | E2E Выставочный зал 981              |
+      | city          | Калининград                          |
+      | event_type    | выставка                             |
+      | trust_level   | medium                               |
+    Тогда результат Smart Update имеет статус "created"
+    И создано новое событие с заголовком "TEST SU exhibition created v20260211"
+    И событие "TEST SU exhibition created v20260211" имеет поля:
+      | field      | value      |
+      | event_type | выставка   |
+      | end_date   | 2026-06-30 |
+    И для события "TEST SU exhibition created v20260211" лог фактов содержит "Тип: выставка"
+    И для события "TEST SU exhibition created v20260211" лог фактов содержит "Дата окончания: 2026-06-30"
+    И я очищаю тестовые события
+
+  Сценарий: Parser-источник может продлить период выставки
+    Дано в базе создано тестовое событие:
+      | title                     | date       | end_date   | time | location_name | source_text                | description      | city        | event_type |
+      | TEST SU exhibition parser v20260211 | 2026-03-01 | 2026-04-30 |      | Галерея TEST  | Telegram-анонс выставки    | Базовое описание | Калининград | выставка   |
+    И для события "TEST SU exhibition parser v20260211" добавлен источник "test://smart-update/exhibition/tg-v20260211" типа "telegram"
+    Когда я запускаю Smart Update с кандидатом:
+      | field         | value                                   |
+      | title         | TEST SU exhibition parser v20260211    |
+      | source_type   | parser:tretyakov                        |
+      | source_url    | test://smart-update/exhibition/parser-v20260211 |
+      | source_text   | Экспозиция продлена до конца июля.      |
+      | raw_excerpt   | Экспозиция продлена.                    |
+      | date          | 2026-04-10                              |
+      | end_date      | 2026-07-31                              |
+      | time          |                                         |
+      | location_name | Галерея TEST                            |
+      | city          | Калининград                             |
+      | event_type    | выставка                                |
+      | trust_level   | high                                    |
+    Тогда результат Smart Update имеет статус "merged"
+    И Smart Update вернул event_id как у события "TEST SU exhibition parser v20260211"
+    И событие "TEST SU exhibition parser v20260211" имеет поля:
+      | field    | value      |
+      | end_date | 2026-07-31 |
+    И я очищаю тестовые события
+
+  Сценарий: Выставка без даты окончания получает период по умолчанию 1 месяц
+    Когда я запускаю Smart Update с кандидатом:
+      | field         | value                                             |
+      | title         | TEST SU exhibition default end v20260211          |
+      | source_type   | telegram                                          |
+      | source_url    | test://smart-update/exhibition/default-end-v20260211 |
+      | source_text   | Открытие выставки современного искусства.          |
+      | raw_excerpt   | Открытие выставки.                                 |
+      | date          | 2026-04-15                                        |
+      | time          |                                                   |
+      | location_name | E2E Выставочный зал default                       |
+      | city          | Калининград                                       |
+      | event_type    | выставка                                          |
+      | trust_level   | medium                                            |
+    Тогда результат Smart Update имеет статус "created"
+    И создано новое событие с заголовком "TEST SU exhibition default end v20260211"
+    И событие "TEST SU exhibition default end v20260211" имеет поля:
+      | field    | value      |
+      | end_date | 2026-05-15 |
+    И для события "TEST SU exhibition default end v20260211" лог фактов содержит "Дата окончания: 2026-05-15"
     И я очищаю тестовые события

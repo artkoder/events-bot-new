@@ -47,6 +47,25 @@ async def test_pick_next_and_skip(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_pick_next_prefer_oldest_orders_by_publish_date(tmp_path):
+    db = Database(str(tmp_path / "db.sqlite"))
+    await db.init()
+    async with db.raw_conn() as conn:
+        future_ts = int(_time.time()) + 10_000
+        rows = [
+            (1, 1, 100, "Событие 25.12.2099", "k", 1, future_ts, "pending"),
+            (1, 2, 200, "Событие 26.12.2099", "k", 1, future_ts, "pending"),
+        ]
+        await conn.executemany(
+            "INSERT INTO vk_inbox(group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status) VALUES(?,?,?,?,?,?,?,?)",
+            rows,
+        )
+        await conn.commit()
+    post = await vk_review.pick_next(db, 10, "batch1", prefer_oldest=True)
+    assert post and post.post_id == 1  # oldest by date
+
+
+@pytest.mark.asyncio
 async def test_pick_next_rejects_outdated(tmp_path):
     db = Database(str(tmp_path / "db.sqlite"))
     await db.init()
@@ -530,9 +549,10 @@ async def test_refresh_hints_after_timezone_change(tmp_path, monkeypatch):
         )
         assert heading in lines
         heading_index = lines.index(heading)
-        assert (
-            lines[heading_index + 1]
-            == "Совпадающее событие — https://telegra.ph/test"
+        # _vkrev_show_next uses HTML message formatting and renders matched events as links.
+        assert lines[heading_index + 1] in (
+            "Совпадающее событие — https://telegra.ph/test",
+            '<a href="https://telegra.ph/test">Совпадающее событие</a>',
         )
     finally:
         main.LOCAL_TZ = original_tz

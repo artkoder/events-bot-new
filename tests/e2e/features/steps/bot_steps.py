@@ -10,11 +10,58 @@ import os
 import re
 import sqlite3
 import tempfile
-from datetime import datetime, timezone
+import time
+from html import escape, unescape
+from datetime import date, datetime, timezone
 from pathlib import Path
 from behave import given, when, then
 
 logger = logging.getLogger("e2e.steps")
+
+_RUS_STOPWORDS = {
+    "и", "в", "во", "на", "по", "с", "со", "к", "ко", "у", "о", "об", "от", "за",
+    "для", "из", "или", "а", "но", "что", "как", "это", "этот", "эта", "эти",
+    "бы", "не", "ни", "же", "ли", "мы", "вы", "он", "она", "они", "его", "ее",
+    "их", "при", "над", "под", "до", "после", "без", "через", "между", "также",
+}
+
+_TECH_FACT_PREFIXES = (
+    "добавлена афиша:",
+    "добавлено изображение:",
+    "добавлено изображение из",
+    "telegraph:",
+    "источник:",
+)
+
+_NON_TEXT_FACT_PREFIXES = (
+    "дата:",
+    "время:",
+    "локация:",
+    "location:",
+    "добавлена афиша:",
+    "добавлены афиши:",
+    "добавлено изображение:",
+    "добавлено изображение из",
+    "афиша в источнике:",
+    "источник:",
+    "telegraph:",
+    "текст дополнен:",
+)
+
+_RU_MONTH_GENITIVE = {
+    1: "января",
+    2: "февраля",
+    3: "марта",
+    4: "апреля",
+    5: "мая",
+    6: "июня",
+    7: "июля",
+    8: "августа",
+    9: "сентября",
+    10: "октября",
+    11: "ноября",
+    12: "декабря",
+}
 
 
 # =============================================================================
@@ -121,14 +168,564 @@ async def _fetch_telegraph_pages(links: list[str]) -> list[str]:
     return html_pages
 
 
+def _normalize_search_text(value: str) -> str:
+    return re.sub(r"\s+", " ", unescape(value or "").strip().lower())
+
+
+def _html_to_text(html: str) -> str:
+    if not html:
+        return ""
+    s = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", html)
+    s = re.sub(r"(?i)<br\s*/?>", "\n", s)
+    s = re.sub(r"(?is)</?(p|div|h1|h2|h3|h4|h5|h6|li|ul|ol|blockquote)[^>]*>", "\n", s)
+    s = re.sub(r"(?s)<[^>]+>", " ", s)
+    s = unescape(s)
+    s = re.sub(r"[ \t\r\f\v]+", " ", s)
+    s = re.sub(r"\n{2,}", "\n", s)
+    return s.strip()
+
+
+def _split_fact_status_marker(fact: str) -> tuple[str | None, str]:
+    """Parse status marker prefix from source-log fact line.
+
+    Source log bullets look like:
+      • ✅ <fact>        -> added
+      • ↩️ <fact>        -> duplicate (ignored)
+      • ⚠️ <fact>        -> conflict (ignored)
+      • ℹ️ <fact>        -> note (service)
+    Older logs may have no marker -> treat as added.
+    """
+    raw = (fact or "").strip()
+    if not raw:
+        return None, ""
+    # NOTE: use a single backslash in regex escapes. Double-backslashes here would
+    # make the pattern match a literal "\".
+    m = re.match(r"^(?P<icon>✅|\+|↩️|⚠️|ℹ️)\s+(?P<body>.+)$", raw)
+    if not m:
+        return None, raw
+    icon = (m.group("icon") or "").strip()
+    body = (m.group("body") or "").strip()
+    mapping = {
+        "✅": "added",
+        "+": "added",
+        "↩️": "duplicate",
+        "⚠️": "conflict",
+        "ℹ️": "note",
+    }
+    return mapping.get(icon), body
+
+
+def _extract_semantic_facts_from_log(log_text: str) -> list[str]:
+    facts: list[str] = []
+    for line in (log_text or "").splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        m = re.match(r"^[•*\-]\s+(.+)$", s)
+        if not m:
+            continue
+        raw_fact = re.sub(r"\s+", " ", m.group(1)).strip()
+        status, fact = _split_fact_status_marker(raw_fact)
+        if not fact:
+            continue
+        # Only "added" facts are expected to be reflected on Telegraph.
+        if status in {"duplicate", "conflict", "note"}:
+            continue
+        fact_l = fact.lower()
+        if any(fact_l.startswith(prefix) for prefix in _TECH_FACT_PREFIXES):
+            continue
+        if fact_l.startswith("текст дополнен:"):
+            # Keep only the meaningful payload, the prefix is an internal log label.
+            fact = fact.split(":", 1)[1].strip() if ":" in fact else fact
+            fact_l = fact.lower()
+            if not fact:
+                continue
+        if any(fact_l.startswith(prefix) for prefix in _NON_TEXT_FACT_PREFIXES):
+            # Non-textual facts are still useful in the source log, but the event page
+            # may render them in a different format (date/time/location blocks, images),
+            # so we don't assert them by substring search in Telegraph HTML.
+            continue
+        if "http://" in fact_l or "https://" in fact_l:
+            # URL-only or URL-heavy bullets are technical artifacts; body text check is not meaningful.
+            bare = re.sub(r"https?://\S+", "", fact_l).strip(" :;,.")
+            if len(bare) < 8:
+                continue
+        facts.append(fact)
+    # Preserve order, remove exact duplicates.
+    out: list[str] = []
+    seen: set[str] = set()
+    for f in facts:
+        key = _normalize_search_text(f)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(f)
+    return out
+
+
+def _is_textual_fact(fact: str) -> bool:
+    fact_norm = _normalize_search_text(fact)
+    if not fact_norm:
+        return False
+    if any(fact_norm.startswith(prefix) for prefix in _NON_TEXT_FACT_PREFIXES):
+        return False
+    if len(re.findall(r"[a-zа-яё0-9]{4,}", fact_norm, flags=re.IGNORECASE)) < 3:
+        return False
+    return True
+
+
+def _parse_source_log_sections(log_text: str) -> list[dict]:
+    """Parse operator source-log message into per-source sections."""
+    sections: list[dict] = []
+    current: dict | None = None
+    header_re = re.compile(
+        r"^\s*(?P<ts>\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}[^—]*)\s+—\s+(?P<source>[^|]+?)\s*\|\s*(?P<url>\S+)\s*$"
+    )
+    bullet_re = re.compile(r"^[•*\-]\s+(.+)$")
+    for line in (log_text or "").splitlines():
+        raw = (line or "").strip()
+        if not raw:
+            continue
+        m = header_re.match(raw)
+        if m:
+            current = {
+                "timestamp": (m.group("ts") or "").strip(),
+                "source": (m.group("source") or "").strip(),
+                "url": (m.group("url") or "").strip(),
+                "facts": [],
+            }
+            sections.append(current)
+            continue
+        b = bullet_re.match(raw)
+        if b and current is not None:
+            fact = re.sub(r"\s+", " ", (b.group(1) or "").strip())
+            if fact:
+                current["facts"].append(fact)
+    for section in sections:
+        facts = section.get("facts") or []
+        semantic = []
+        text_facts = []
+        facts_by_status: dict[str, list[str]] = {"added": [], "duplicate": [], "conflict": [], "note": []}
+        for fact in facts:
+            status, clean = _split_fact_status_marker(fact)
+            status_key = status or "added"
+            if status_key not in facts_by_status:
+                status_key = "added"
+            if clean:
+                facts_by_status[status_key].append(clean)
+            fact_norm = _normalize_search_text(clean)
+            if not fact_norm:
+                continue
+            if status in {"duplicate", "conflict", "note"}:
+                continue
+            if not any(fact_norm.startswith(prefix) for prefix in _TECH_FACT_PREFIXES):
+                semantic.append(clean)
+            if _is_textual_fact(clean):
+                text_facts.append(clean)
+        section["semantic_facts"] = semantic
+        section["text_facts"] = text_facts
+        section["facts_by_status"] = facts_by_status
+    return sections
+
+
+def _ensure_stage_snapshot_state(context) -> tuple[dict, Path]:
+    if not hasattr(context, "stage_snapshots") or not isinstance(context.stage_snapshots, dict):
+        context.stage_snapshots = {}
+    if not hasattr(context, "stage_snapshot_dir"):
+        scenario_name = "scenario"
+        if getattr(context, "scenario", None) and getattr(context.scenario, "name", None):
+            scenario_name = str(context.scenario.name)
+        slug = re.sub(r"[^a-zA-Z0-9_-]+", "_", scenario_name).strip("_").lower() or "scenario"
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        path = Path("artifacts/e2e/stage_snapshots") / f"{ts}_{slug}"
+        path.mkdir(parents=True, exist_ok=True)
+        context.stage_snapshot_dir = path
+    return context.stage_snapshots, Path(context.stage_snapshot_dir)
+
+
+def _resolve_telegraph_token_for_e2e() -> str | None:
+    candidates: list[Path] = []
+    env_path = (os.getenv("TELEGRAPH_TOKEN_FILE") or "").strip()
+    if env_path:
+        candidates.append(Path(env_path))
+    candidates.append(Path("/data/telegraph_token.txt"))
+    candidates.append(Path("artifacts/run/telegraph_token.txt"))
+
+    seen: set[str] = set()
+    for path in candidates:
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            if not path.exists():
+                continue
+            token = (path.read_text(encoding="utf-8") or "").strip()
+            if token:
+                return token
+        except Exception:
+            continue
+    return None
+
+
+def _text_to_telegraph_paragraphs(text: str, max_chars: int) -> str:
+    trimmed = (text or "").strip()
+    if not trimmed:
+        return "<p>(пустой текст)</p>"
+    trimmed = trimmed[:max_chars].strip()
+    # Telegraph text extraction often contains invisible separators (ZWSP).
+    # Normalize them so paragraph splitting works deterministically.
+    trimmed = trimmed.replace("\u200b", "").replace("\ufeff", "").replace("\u2060", "")
+    chunks = [c.strip() for c in re.split(r"\n{2,}", trimmed) if c.strip()]
+    if not chunks:
+        chunks = [trimmed]
+    html_chunks: list[str] = []
+    for chunk in chunks[:180]:
+        raw = (chunk or "").strip()
+        if not raw:
+            continue
+        # Preserve Markdown-style quotes as true Telegraph quotes in snapshot archive pages.
+        lines = [ln for ln in raw.splitlines() if ln.strip()]
+        is_quote = bool(lines) and all(ln.lstrip().startswith(">") for ln in lines)
+        if is_quote:
+            quote_lines: list[str] = []
+            for ln in lines:
+                s = ln.lstrip()
+                s = s[1:].lstrip()  # drop leading ">"
+                if s:
+                    quote_lines.append(escape(s))
+            if quote_lines:
+                html_chunks.append(f"<blockquote>{'<br/>'.join(quote_lines)}</blockquote>")
+                continue
+        html_chunks.append(f"<p>{escape(raw).replace(chr(10), '<br/>')}</p>")
+    return "".join(html_chunks)
+
+
+def _create_stage_snapshot_archive_page(
+    *,
+    label: str,
+    event_title: str,
+    source_telegraph_url: str,
+    telegraph_text: str,
+) -> str | None:
+    token = _resolve_telegraph_token_for_e2e()
+    if not token:
+        logger.warning("stage snapshot archive: telegraph token not found")
+        return None
+    try:
+        from telegraph import Telegraph
+        from telegraph.utils import html_to_nodes
+    except Exception as exc:
+        logger.warning("stage snapshot archive: telegraph package unavailable: %s", exc)
+        return None
+
+    tg = Telegraph(access_token=token)
+    title = f"E2E snapshot {label} - {(event_title or 'event')[:80]}".strip()
+    for limit in (24000, 18000, 12000, 8000):
+        try:
+            body = (
+                f"<p><strong>Snapshot:</strong> {escape(label)}</p>"
+                f"<p><strong>Event title:</strong> {escape(event_title or '')}</p>"
+                f'<p><strong>Source page:</strong> <a href="{escape(source_telegraph_url)}">'
+                f"{escape(source_telegraph_url)}</a></p>"
+                f"<hr/>"
+                f"{_text_to_telegraph_paragraphs(telegraph_text, max_chars=limit)}"
+            )
+            nodes = html_to_nodes(body)
+            page = tg.create_page(
+                title=title,
+                author_name="E2E Stage Snapshot",
+                content=nodes,
+                return_content=False,
+            )
+            url = (page.get("url") or "").strip() if isinstance(page, dict) else ""
+            if url:
+                return url
+        except Exception:
+            continue
+    logger.warning("stage snapshot archive: failed to create page for label=%s", label)
+    return None
+
+
+def _capture_stage_snapshot(context, *, label: str, event_id: int) -> dict:
+    snapshots, out_dir = _ensure_stage_snapshot_state(context)
+    safe_label = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(label or "").strip()).strip("_").lower() or "stage"
+    telegraph_url, telegraph_html = _fetch_telegraph_html_for_event(context, int(event_id))
+    telegraph_text = _html_to_text(telegraph_html)
+    log_text = _fetch_source_log_text(context, int(event_id))
+    sections = _parse_source_log_sections(log_text)
+    all_semantic_facts = _extract_semantic_facts_from_log(log_text)
+    all_text_facts = [f for f in all_semantic_facts if _is_textual_fact(f)]
+
+    with sqlite3.connect(_db_path(), timeout=30) as conn:
+        cur = conn.cursor()
+        row = cur.execute(
+            "SELECT title, date, time, location_name, telegraph_url, telegraph_path FROM event WHERE id = ?",
+            (int(event_id),),
+        ).fetchone()
+    if not row:
+        raise AssertionError(f"Событие id={event_id} не найдено для snapshot")
+
+    snapshot = {
+        "label": safe_label,
+        "captured_at_utc": datetime.now(timezone.utc).isoformat(),
+        "event": {
+            "id": int(event_id),
+            "title": row[0],
+            "date": row[1],
+            "time": row[2],
+            "location_name": row[3],
+            "telegraph_url": row[4],
+            "telegraph_path": row[5],
+        },
+        "telegraph": {
+            "url": telegraph_url,
+            "text_len": len(_normalize_search_text(telegraph_text)),
+            "html_len": len(telegraph_html or ""),
+            "catbox_urls": sorted(_extract_catbox_urls(telegraph_html)),
+        },
+        "source_log": {
+            "sections": sections,
+            "semantic_facts_total": len(all_semantic_facts),
+            "text_facts_total": len(all_text_facts),
+        },
+    }
+    snapshot_archive_url = _create_stage_snapshot_archive_page(
+        label=safe_label,
+        event_title=str(row[0] or ""),
+        source_telegraph_url=telegraph_url,
+        telegraph_text=telegraph_text,
+    )
+    snapshot["telegraph"]["snapshot_url"] = snapshot_archive_url
+    snapshots[safe_label] = snapshot
+
+    json_path = out_dir / f"{safe_label}.json"
+    log_path = out_dir / f"{safe_label}.source_log.txt"
+    telegraph_path = out_dir / f"{safe_label}.telegraph.txt"
+    json_path.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
+    log_path.write_text(log_text or "", encoding="utf-8")
+    telegraph_path.write_text(telegraph_text or "", encoding="utf-8")
+    snapshot["artifact_json"] = str(json_path)
+    snapshot["artifact_log"] = str(log_path)
+    snapshot["artifact_telegraph_text"] = str(telegraph_path)
+    return snapshot
+
+
+def _fact_matches_telegraph_text(fact: str, telegraph_text_norm: str) -> bool:
+    # Time facts: allow matching by the time token alone.
+    # Many pages display time in the summary block (🗓 ... 19:00), while the fact
+    # may be phrased as "Начало спектакля в 19:00." in the source log.
+    if fact:
+        times = re.findall(r"\b\d{1,2}[:.]\d{2}\b", fact)
+        if times:
+            for t in times:
+                cand = t.replace(".", ":")
+                if cand and cand in (telegraph_text_norm or ""):
+                    return True
+
+    def _normalize_token_stem(token: str) -> str:
+        t = (token or "").strip().lower().replace("ё", "е")
+        if len(t) <= 4:
+            return t
+        # Lightweight RU suffix stripping for paraphrase-tolerant fact checks.
+        for suf in (
+            "иями",
+            "ями",
+            "ами",
+            "иями",
+            "ости",
+            "ость",
+            "ения",
+            "ению",
+            "ением",
+            "ение",
+            "овых",
+            "евых",
+            "ого",
+            "ему",
+            "ому",
+            "ыми",
+            "ими",
+            "ым",
+            "им",
+            "иях",
+            "ах",
+            "ях",
+            "ов",
+            "ев",
+            "ей",
+            "ой",
+            "ий",
+            "ый",
+            "ая",
+            "яя",
+            "ое",
+            "ее",
+            "ые",
+            "ие",
+            "ом",
+            "ем",
+            "ам",
+            "ям",
+            "а",
+            "я",
+            "ы",
+            "и",
+            "е",
+            "о",
+            "у",
+            "ю",
+        ):
+            # Allow shorter stems for short tokens (e.g. "хитом" -> "хит").
+            min_keep = 5
+            if len(t) <= 6:
+                min_keep = 3
+            if t.endswith(suf) and len(t) - len(suf) >= min_keep:
+                return t[: -len(suf)]
+        return t
+
+    def _token_present(token: str, haystack: str) -> bool:
+        if not token:
+            return False
+        if token in haystack:
+            return True
+        stem = _normalize_token_stem(token)
+        if not stem:
+            return False
+        if len(stem) >= 5 and stem in haystack:
+            return True
+        # For short stems derived from a longer inflected token, allow a smaller threshold.
+        return len(token) >= 5 and len(stem) >= 3 and stem in haystack
+
+    fact_norm = _normalize_search_text(fact)
+    if not fact_norm:
+        return True
+    if fact_norm in telegraph_text_norm:
+        return True
+    # Date facts are often normalized differently in log vs Telegraph body
+    # (e.g. "2026-02-12" vs "12 февраля").
+    if fact_norm.startswith("дата:"):
+        m = re.search(r"(\d{4})-(\d{2})-(\d{2})", fact_norm)
+        if m:
+            y, mm, dd = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            variants = [
+                f"{y:04d}-{mm:02d}-{dd:02d}",
+                f"{dd:02d}.{mm:02d}.{y:04d}",
+                f"{dd:02d}.{mm:02d}",
+                f"{dd} {_RU_MONTH_GENITIVE.get(mm, '')} {y}".strip(),
+                f"{dd} {_RU_MONTH_GENITIVE.get(mm, '')}".strip(),
+            ]
+            for v in variants:
+                if v and _normalize_search_text(v) in telegraph_text_norm:
+                    return True
+    # Time facts may be rendered inline with date ("14 февраля в 17:00")
+    # without explicit "Время:" label.
+    if fact_norm.startswith("время:") or fact_norm.startswith("time:"):
+        m = re.search(r"([01]?\d|2[0-3])[:.\s]([0-5]\d)", fact_norm)
+        if m:
+            hh = int(m.group(1))
+            mm = int(m.group(2))
+            variants = [
+                f"{hh:02d}:{mm:02d}",
+                f"{hh}:{mm:02d}",
+                f"{hh:02d}.{mm:02d}",
+                f"{hh}.{mm:02d}",
+            ]
+            for v in variants:
+                if _normalize_search_text(v) in telegraph_text_norm:
+                    return True
+
+    # Fallback: keyword overlap for lightly paraphrased rewrite.
+    tokens = re.findall(r"[a-zа-яё0-9]{4,}", fact_norm, flags=re.IGNORECASE)
+    tokens = [t for t in tokens if t not in _RUS_STOPWORDS]
+    if not tokens:
+        return fact_norm in telegraph_text_norm
+
+    unique = list(dict.fromkeys(tokens))
+    present = sum(1 for t in unique if _token_present(t, telegraph_text_norm))
+    required = max(2, int(len(unique) * 0.4 + 0.5))
+    return present >= required
+
+
+def _resolve_event_telegraph_url(event_id: int) -> str:
+    conn = sqlite3.connect(_db_path(), timeout=30)
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT telegraph_url, telegraph_path FROM event WHERE id = ?", (int(event_id),))
+        row = cur.fetchone()
+    finally:
+        conn.close()
+    if not row:
+        raise AssertionError(f"Событие id={event_id} не найдено в таблице event")
+    telegraph_url = (row[0] or "").strip()
+    telegraph_path = (row[1] or "").strip().lstrip("/")
+    if telegraph_url:
+        return telegraph_url
+    if telegraph_path:
+        return f"https://telegra.ph/{telegraph_path}"
+    raise AssertionError(f"У события id={event_id} не заполнены telegraph_url/telegraph_path")
+
+
+def _fetch_source_log_text(context, event_id: int | None = None, limit: int = 40) -> str:
+    msg = context.last_response
+    direct = msg.text if msg and msg.text else ""
+    if direct and "Лог источников" in direct:
+        return direct
+
+    target_url = None
+    if event_id:
+        with sqlite3.connect(_db_path(), timeout=30) as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT telegraph_url, telegraph_path FROM event WHERE id = ?", (int(event_id),))
+            row = cur.fetchone()
+            if row:
+                target_url = (row[0] or "").strip() or (
+                    f"https://telegra.ph/{(row[1] or '').strip().lstrip('/')}" if (row[1] or "").strip() else None
+                )
+
+    async def _fetch():
+        messages = await context.client.client.get_messages(context.bot_entity, limit=limit)
+        if target_url:
+            for candidate in messages:
+                t = candidate.text or ""
+                if "Лог источников" in t and target_url in t:
+                    return t
+        for candidate in messages:
+            t = candidate.text or ""
+            if "Лог источников" in t:
+                return t
+        return ""
+
+    return run_async(context, _fetch())
+
+
+def _fetch_telegraph_html_for_event(context, event_id: int) -> tuple[str, str]:
+    url = _resolve_event_telegraph_url(event_id)
+
+    async def _fetch():
+        import aiohttp
+
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=20)) as resp:
+                if resp.status != 200:
+                    raise AssertionError(f"Telegraph {url} вернул статус {resp.status}")
+                return await resp.text()
+
+    html = run_async(context, _fetch())
+    return url, html
+
+
 def _db_path() -> str:
     env = os.getenv("DB_PATH")
     if env:
         return env
-    fresh = "db_prod_snapshot_2026-01-28_154329.sqlite"
-    if Path(fresh).exists():
-        return fresh
-    return "db_prod_snapshot.sqlite"
+    preferred = "db_prod_snapshot.sqlite"
+    if Path(preferred).exists():
+        return preferred
+    fallback = "db_prod_snapshot_2026-01-28_154329.sqlite"
+    if Path(fallback).exists():
+        return fallback
+    return preferred
 
 
 def _ensure_test_context(context) -> None:
@@ -345,7 +942,8 @@ def _get_smart_db(context):
     from db import Database
 
     db = Database(_db_path())
-    run_async(context, db.init())
+    if (os.getenv("E2E_SKIP_DB_INIT") or "").strip().lower() not in {"1", "true", "yes"}:
+        run_async(context, db.init())
     context.smart_db = db
     return db
 
@@ -440,11 +1038,352 @@ def _ensure_only_source(username: str) -> None:
     _ensure_sources([{"username": username}])
 
 
+def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (name,),
+    ).fetchone()
+    return row is not None
+
+
+def _purge_events_by_patterns(conn: sqlite3.Connection, *, like_patterns: list[str], location_prefixes: list[str] | None = None) -> int:
+    """Delete events (and related rows) that match given source URL patterns.
+
+    Best-effort: older prod snapshots may miss some tables, so we guard by sqlite_master checks.
+    """
+    cur = conn.cursor()
+    event_ids: set[int] = set()
+
+    if _table_exists(conn, "event_source"):
+        _ensure_event_source_table(conn)
+        for pat in like_patterns:
+            cur.execute(
+                "SELECT DISTINCT event_id FROM event_source WHERE source_url LIKE ?",
+                (pat,),
+            )
+            for (eid,) in cur.fetchall():
+                try:
+                    event_ids.add(int(eid))
+                except Exception:
+                    pass
+
+    if like_patterns:
+        for pat in like_patterns:
+            # event.source_post_url / source_vk_post_url / ticket_link are commonly populated
+            for col in ["source_post_url", "source_vk_post_url", "ticket_link"]:
+                try:
+                    cur.execute(
+                        f"SELECT id FROM event WHERE {col} LIKE ?",
+                        (pat,),
+                    )
+                except Exception:
+                    continue
+                for (eid,) in cur.fetchall():
+                    try:
+                        event_ids.add(int(eid))
+                    except Exception:
+                        pass
+
+    if location_prefixes:
+        for pref in location_prefixes:
+            try:
+                cur.execute(
+                    "SELECT id FROM event WHERE location_name LIKE ?",
+                    (f"{pref}%",),
+                )
+            except Exception:
+                continue
+            for (eid,) in cur.fetchall():
+                try:
+                    event_ids.add(int(eid))
+                except Exception:
+                    pass
+
+    ids = sorted(event_ids)
+    if not ids:
+        return 0
+
+    placeholders = ",".join("?" for _ in ids)
+    for table, col in [
+        ("event_source_fact", "event_id"),
+        ("event_source", "event_id"),
+        ("eventposter", "event_id"),
+        ("job_outbox", "event_id"),
+    ]:
+        if not _table_exists(conn, table):
+            continue
+        try:
+            cur.execute(f"DELETE FROM {table} WHERE {col} IN ({placeholders})", ids)
+        except Exception:
+            continue
+    cur.execute(f"DELETE FROM event WHERE id IN ({placeholders})", ids)
+    conn.commit()
+    return len(ids)
+
+
+@given('база очищена от событий источника "{source}"')
+def step_purge_events_for_source(context, source):
+    key = (source or "").strip().lower()
+    if not key:
+        raise AssertionError("Пустой source для очистки")
+    patterns: list[str] = []
+    location_prefixes: list[str] | None = None
+    if key in {"dramteatr", "dramteatr39", "драмтеатр"}:
+        patterns = ["%t.me/dramteatr39/%", "%dramteatr39.ru/%"]
+        location_prefixes = ["Драматический театр"]
+    elif key in {"tretyakov", "tretyakovka", "третьяков", "третьяковка"}:
+        patterns = ["%t.me/tretyakovka_kaliningrad/%", "%kaliningrad.tretyakovgallery.ru/%", "%tretyakovgallery.ru/%"]
+        location_prefixes = ["Филиал Третьяковской галереи"]
+    elif key in {"vorotagallery", "ворота", "ворота_галерея"}:
+        patterns = ["%t.me/vorotagallery/%"]
+    elif key in {"domkitoboya", "домкитобоя", "дом_китобоя"}:
+        patterns = ["%t.me/domkitoboya/%"]
+    elif key in {"kaliningradlibrary", "научнаябиблиотека", "научная_библиотека", "научная библиотека"}:
+        patterns = ["%t.me/kaliningradlibrary/%", "%vk.ru/wall-30777579_%"]
+        location_prefixes = ["Научная библиотека", "Калининградская областная научная библиотека"]
+    else:
+        # Generic fallback: treat source as Telegram username.
+        safe = re.sub(r"[^a-z0-9_]+", "", key)
+        if not safe:
+            raise AssertionError(f"Неизвестный источник для очистки: {source}")
+        patterns = [f"%t.me/{safe}/%"]
+
+    conn = sqlite3.connect(_db_path(), timeout=30)
+    try:
+        removed = _purge_events_by_patterns(conn, like_patterns=patterns, location_prefixes=location_prefixes)
+    finally:
+        conn.close()
+    logger.info("✓ Очистка БД по источнику=%s: удалено событий=%d", key, removed)
+
+
 def _run_tg_monitor(context) -> None:
     step_send_command(context, "/tg")
+    baseline_id = int(getattr(getattr(context, "last_response", None), "id", 0) or 0)
     step_click_inline_button(context, "🚀 Запустить мониторинг")
-    step_wait_for_message_text(context, "Starting Telegram Monitor")
+
+    async def _wait_start():
+        import asyncio
+
+        for _ in range(30):
+            messages = await context.client.client.get_messages(context.bot_entity, limit=10)
+            for msg in messages:
+                if int(getattr(msg, "id", 0) or 0) <= baseline_id:
+                    continue
+                txt = str(getattr(msg, "text", "") or "")
+                if "starting telegram monitor" in txt.lower():
+                    context.last_response = msg
+                    context.monitor_started_message_id = msg.id
+                    return
+            await asyncio.sleep(0.5)
+        raise AssertionError("Не найдено новое сообщение 'Starting Telegram Monitor'")
+
+    run_async(context, _wait_start())
     step_wait_long_operation(context, "Telegram Monitor")
+
+def _parse_tg_post_url(post_url: str) -> tuple[str, int]:
+    """Return (username, message_id) from https://t.me/<username>/<id>[?...]."""
+    url = (post_url or "").strip()
+    m = re.search(r"t\.me/([^/]+)/([0-9]+)", url)
+    if not m:
+        raise AssertionError(f"Некорректная ссылка на пост: {post_url}")
+    return m.group(1), int(m.group(2))
+
+
+def _extract_tg_post_urls_from_message(msg) -> list[str]:
+    """Extract canonical t.me/<channel>/<id> links from message text + URL entities."""
+    urls: list[str] = []
+    text = (getattr(msg, "raw_text", None) or getattr(msg, "text", None) or "").strip()
+    if text:
+        for m in re.finditer(r"(https?://)?t\.me/[^/\s]+/\d+(?:\?single)?", text):
+            raw = m.group(0)
+            if not raw.startswith(("http://", "https://")):
+                raw = f"https://{raw}"
+            urls.append(raw)
+
+    entities = list(getattr(msg, "entities", None) or [])
+    if entities and text:
+        try:
+            from telethon.tl.types import MessageEntityTextUrl, MessageEntityUrl
+        except Exception:
+            MessageEntityTextUrl = MessageEntityUrl = tuple()  # type: ignore[assignment]
+        for ent in entities:
+            url = None
+            if MessageEntityTextUrl and isinstance(ent, MessageEntityTextUrl):
+                url = (getattr(ent, "url", None) or "").strip()
+            elif MessageEntityUrl and isinstance(ent, MessageEntityUrl):
+                offset = int(getattr(ent, "offset", 0) or 0)
+                length = int(getattr(ent, "length", 0) or 0)
+                if length > 0:
+                    url = text[offset : offset + length].strip()
+            if not url:
+                continue
+            if "t.me/" not in url:
+                continue
+            if not url.startswith(("http://", "https://")):
+                url = f"https://{url}"
+            urls.append(url)
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in urls:
+        try:
+            username, message_id = _parse_tg_post_url(raw)
+        except Exception:
+            continue
+        canonical = f"https://t.me/{username}/{int(message_id)}"
+        key = canonical.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(canonical)
+    return out
+
+
+def _norm_url_for_compare(url: str | None) -> str:
+    """Normalize URLs to make E2E comparisons robust (strip query/signatures)."""
+    if not url:
+        return ""
+    raw = str(url).strip()
+    if not raw:
+        return ""
+    try:
+        from urllib.parse import urlsplit, urlunsplit
+
+        parts = urlsplit(raw)
+        scheme = (parts.scheme or "https").lower()
+        netloc = (parts.netloc or "").lower()
+        path = parts.path or ""
+        if path and path != "/":
+            path = path.rstrip("/")
+        return urlunsplit((scheme, netloc, path, "", ""))
+    except Exception:
+        return raw.split("?", 1)[0].split("#", 1)[0].rstrip("/")
+
+
+def _score_linked_post_candidate(msg, source_username: str, links: list[str]) -> int:
+    text = (getattr(msg, "raw_text", None) or getattr(msg, "text", None) or "").strip()
+    text_l = text.lower()
+    score = 0
+
+    same_channel_links = [u for u in links if f"/{source_username.lower()}/" in u.lower()]
+    if same_channel_links:
+        score += 5
+    elif links:
+        score += 1
+
+    if re.search(r"\b\d{1,2}[:.]\d{2}\b", text_l):
+        score += 3
+    if re.search(r"\b\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?\b", text_l):
+        score += 2
+    if re.search(r"\b\d{1,2}\s+(январ|феврал|март|апрел|мая|июн|июл|август|сентябр|октябр|ноябр|декабр)", text_l):
+        score += 2
+    if re.search(r"\b(спектакл|концерт|лекц|выставк|показ|фестиваль|экскурси|читк|мастер-класс|вечеринк)\b", text_l):
+        score += 2
+    if re.search(r"\b(билет|вход|начало|адрес|ул\.|проспект|набережн|театр|музей|клуб|бар)\b", text_l):
+        score += 1
+    if re.search(r"\b\d{1,2}[./-]\d{1,2}\s*\|", text_l):
+        score += 2
+
+    if len(text) > 120:
+        score += 1
+    if getattr(msg, "photo", None):
+        score += 1
+
+    if re.search(r"\b(розыгрыш|конкурс|giveaway|подписк|реклама|промокод|репост)\b", text_l):
+        score -= 7
+
+    msg_dt = getattr(msg, "date", None)
+    if msg_dt is not None:
+        try:
+            if msg_dt.tzinfo is None:
+                msg_dt = msg_dt.replace(tzinfo=timezone.utc)
+            age_days = (datetime.now(timezone.utc) - msg_dt).days
+            if age_days > 14:
+                score -= 5
+            elif age_days > 7:
+                score -= 2
+        except Exception:
+            pass
+
+    return score
+
+
+def _extract_posters_from_tg_results(data: dict, post_url: str) -> list[str]:
+    """Return poster URLs (catbox/supabase) for a given post_url from telegram_results.json."""
+    if not data:
+        return []
+    messages = data.get("messages") or []
+    target = None
+    for msg in messages:
+        if msg.get("source_link") == post_url:
+            target = msg
+            break
+    if not target:
+        username, message_id = _parse_tg_post_url(post_url)
+        for msg in messages:
+            if (
+                msg.get("source_username") == username
+                and int(msg.get("message_id") or 0) == int(message_id)
+            ):
+                target = msg
+                break
+    if not target:
+        return []
+    posters = list(target.get("posters") or [])
+    for ev in target.get("events") or []:
+        if isinstance(ev, dict) and ev.get("posters"):
+            posters.extend(list(ev.get("posters") or []))
+    poster_urls: list[str] = []
+    for p in posters:
+        # Prefer Catbox for rendering checks (Telegraph pages typically use Catbox,
+        # Supabase is a fallback and may be disabled in local/E2E environments).
+        for url in [p.get("catbox_url"), p.get("supabase_url")]:
+            if url and url not in poster_urls:
+                poster_urls.append(url)
+    return poster_urls
+
+
+def _find_message_in_tg_results(data: dict, post_url: str) -> dict | None:
+    if not data:
+        return None
+    messages = data.get("messages") or []
+    target_norm = _norm_url_for_compare(post_url)
+    for msg in messages:
+        src = _norm_url_for_compare(msg.get("source_link"))
+        if src and src == target_norm:
+            return msg
+    try:
+        username, message_id = _parse_tg_post_url(post_url)
+    except Exception:
+        return None
+    for msg in messages:
+        if (
+            str(msg.get("source_username") or "").strip() == username
+            and int(msg.get("message_id") or 0) == int(message_id)
+        ):
+            return msg
+    return None
+
+
+def _event_id_from_card_text(text: str | None) -> int | None:
+    if not text:
+        return None
+    m = re.search(r"^id:\\s*(\\d+)\\s*$", text, flags=re.MULTILINE)
+    if not m:
+        return None
+    return int(m.group(1))
+
+
+def _norm_event_title_key(value: str | None) -> str:
+    raw = (value or "").strip().lower().replace("ё", "е")
+    raw = re.sub(r"[^\w\s]+", " ", raw, flags=re.U)
+    return re.sub(r"\s+", " ", raw).strip()
+
+
+def _norm_location_key(value: str | None) -> str:
+    raw = (value or "").strip().lower().replace("ё", "е")
+    return re.sub(r"\s+", " ", raw).strip()
+
 
 def _find_row_buttons_for_username(message, username: str):
     """Return (toggle_btn, trust_btn, loc_btn, ticket_btn, reset_btn, delete_btn) for a username on /tg list message."""
@@ -625,8 +1564,30 @@ def step_pick_control_post(context, channel):
             source_id = int(cur.lastrowid)
         else:
             source_id = int(row[0])
-        cur.execute("DELETE FROM telegram_scanned_message WHERE source_id=?", (source_id,))
-        last_id = max(message_id - 1, 0)
+        # Ensure the "force message" table exists even on older prod snapshots.
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS telegram_source_force_message(
+                source_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (source_id, message_id)
+            )
+            """
+        )
+        # Force-scan a specific post by message_id without expanding the days-back window.
+        cur.execute("DELETE FROM telegram_source_force_message WHERE source_id=?", (source_id,))
+        cur.execute(
+            "INSERT OR REPLACE INTO telegram_source_force_message(source_id, message_id) VALUES(?,?)",
+            (source_id, int(message_id)),
+        )
+        # Ensure re-import is possible even if the post was scanned earlier.
+        cur.execute(
+            "DELETE FROM telegram_scanned_message WHERE source_id=? AND message_id=?",
+            (source_id, int(message_id)),
+        )
+        # Skip regular history scan for this source in E2E: forced post is enough.
+        last_id = 10**12
         cur.execute(
             "UPDATE telegram_source SET enabled=1, last_scanned_message_id=? WHERE id=?",
             (last_id, source_id),
@@ -635,6 +1596,555 @@ def step_pick_control_post(context, channel):
     finally:
         conn.close()
     logger.info("✓ Подготовлен источник @%s для сканирования с last_scanned_message_id=%s", username, last_id)
+
+@given('я выбираю конкретный пост "{post_url}"')
+@when('я выбираю конкретный пост "{post_url}"')
+@then('я выбираю конкретный пост "{post_url}"')
+def step_pick_specific_post(context, post_url):
+    """Pick an exact Telegram post by URL (message_id) without scanning older history."""
+    username, message_id = _parse_tg_post_url(post_url)
+    context.control_post_username = username
+    context.control_post_message_id = int(message_id)
+    context.control_post_url = f"https://t.me/{username}/{int(message_id)}"
+    logger.info("✓ Контрольный пост задан явно: %s", context.control_post_url)
+
+    conn = sqlite3.connect(_db_path(), timeout=30)
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM telegram_source WHERE username=?", (username,))
+        row = cur.fetchone()
+        if not row:
+            cur.execute(
+                "INSERT INTO telegram_source(username, enabled) VALUES(?,1)",
+                (username,),
+            )
+            source_id = int(cur.lastrowid)
+        else:
+            source_id = int(row[0])
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS telegram_source_force_message(
+                source_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (source_id, message_id)
+            )
+            """
+        )
+        cur.execute("DELETE FROM telegram_source_force_message WHERE source_id=?", (source_id,))
+        cur.execute(
+            "INSERT OR REPLACE INTO telegram_source_force_message(source_id, message_id) VALUES(?,?)",
+            (source_id, int(message_id)),
+        )
+        cur.execute(
+            "DELETE FROM telegram_scanned_message WHERE source_id=? AND message_id=?",
+            (source_id, int(message_id)),
+        )
+        last_id = 10**12
+        cur.execute(
+            "UPDATE telegram_source SET enabled=1, last_scanned_message_id=? WHERE id=?",
+            (last_id, source_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    logger.info("✓ Подготовлен источник @%s для сканирования конкретного поста: last_scanned_message_id=%s", username, last_id)
+
+
+@given('я выбираю конкретные посты "{post_urls_csv}"')
+@when('я выбираю конкретные посты "{post_urls_csv}"')
+@then('я выбираю конкретные посты "{post_urls_csv}"')
+def step_pick_specific_posts(context, post_urls_csv):
+    """Pick exact Telegram posts (comma-separated URLs) for one monitor run."""
+    raw_urls = [u.strip() for u in str(post_urls_csv or "").split(",") if u.strip()]
+    if not raw_urls:
+        raise AssertionError("Не переданы ссылки на посты")
+
+    targets_by_username: dict[str, list[int]] = {}
+    canonical_urls: list[str] = []
+    first_username = ""
+    first_message_id = 0
+    for idx, post_url in enumerate(raw_urls):
+        username, message_id = _parse_tg_post_url(post_url)
+        canonical = f"https://t.me/{username}/{int(message_id)}"
+        canonical_urls.append(canonical)
+        if idx == 0:
+            first_username = username
+            first_message_id = int(message_id)
+        bucket = targets_by_username.setdefault(username, [])
+        if int(message_id) not in bucket:
+            bucket.append(int(message_id))
+
+    if not first_username or first_message_id <= 0:
+        raise AssertionError("Не удалось распарсить ссылки на посты")
+
+    context.control_post_username = first_username
+    context.control_post_message_id = int(first_message_id)
+    context.control_post_url = canonical_urls[0]
+    context.control_post_urls = canonical_urls
+    logger.info("✓ Контрольные посты заданы явно: %s", canonical_urls)
+
+    conn = sqlite3.connect(_db_path(), timeout=30)
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS telegram_source_force_message(
+                source_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (source_id, message_id)
+            )
+            """
+        )
+
+        for username, message_ids in targets_by_username.items():
+            cur.execute("SELECT id FROM telegram_source WHERE username=?", (username,))
+            row = cur.fetchone()
+            if not row:
+                cur.execute(
+                    "INSERT INTO telegram_source(username, enabled) VALUES(?,1)",
+                    (username,),
+                )
+                source_id = int(cur.lastrowid)
+            else:
+                source_id = int(row[0])
+
+            cur.execute("DELETE FROM telegram_source_force_message WHERE source_id=?", (source_id,))
+            for message_id in message_ids:
+                cur.execute(
+                    "INSERT OR REPLACE INTO telegram_source_force_message(source_id, message_id) VALUES(?,?)",
+                    (source_id, int(message_id)),
+                )
+                cur.execute(
+                    "DELETE FROM telegram_scanned_message WHERE source_id=? AND message_id=?",
+                    (source_id, int(message_id)),
+                )
+            last_id = 10**12
+            cur.execute(
+                "UPDATE telegram_source SET enabled=1, last_scanned_message_id=? WHERE id=?",
+                (last_id, source_id),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    logger.info(
+        "✓ Подготовлены источники для массового сканирования постов: %s",
+        {k: v for k, v in targets_by_username.items()},
+    )
+
+
+@given('в VK inbox для E2E приоритетные посты "{post_ids_csv}"')
+def step_prepare_vk_inbox_priority_posts(context, post_ids_csv):
+    """Make VK queue deterministic for E2E by prioritizing a short post list."""
+    raw = [p.strip() for p in str(post_ids_csv or "").split(",")]
+    default_group_id = int((os.getenv("E2E_VK_GROUP_ID", "30777579") or "30777579").strip() or "30777579")
+    # Use a known sentinel so vk_review.pick_next() skips re-parsing event_ts_hint from text.
+    # Otherwise scenarios become time-sensitive (posts mentioning past dates get auto-rejected).
+    from vk_intake import OCR_PENDING_SENTINEL
+
+    targets: list[tuple[int, int]] = []
+    for token in raw:
+        if not token:
+            continue
+        group_id: int
+        post_id: int
+        m_pair = re.match(r"^\s*(-?\d+)\s*[:_]\s*(\d+)\s*$", token)
+        if m_pair:
+            group_id = abs(int(m_pair.group(1)))
+            post_id = int(m_pair.group(2))
+        elif token.isdigit():
+            group_id = default_group_id
+            post_id = int(token)
+        else:
+            raise AssertionError(f"Некорректный post_id: '{token}'")
+        targets.append((group_id, post_id))
+    if not targets:
+        raise AssertionError("Не переданы post_id для подготовки VK inbox")
+
+    # Deduplicate while preserving order.
+    targets = list(dict.fromkeys(targets))
+
+    conn = sqlite3.connect(_db_path(), timeout=30)
+    try:
+        cur = conn.cursor()
+        missing: list[tuple[int, int]] = []
+        for group_id, post_id in targets:
+            cur.execute(
+                "SELECT 1 FROM vk_inbox WHERE group_id=? AND post_id=? LIMIT 1",
+                (int(group_id), int(post_id)),
+            )
+            if not cur.fetchone():
+                missing.append((int(group_id), int(post_id)))
+    finally:
+        conn.close()
+
+    async def _fetch_missing_rows(
+        wanted: list[tuple[int, int]],
+    ) -> dict[tuple[int, int], tuple[int, str]]:
+        import main as main_mod
+
+        out: dict[tuple[int, int], tuple[int, str]] = {}
+        for group_id, post_id in wanted:
+            text = ""
+            ts = int(time.time())
+            try:
+                resp = await main_mod.vk_api("wall.getById", posts=f"-{int(group_id)}_{int(post_id)}")
+                raw_resp = resp
+                if isinstance(resp, dict) and "response" in resp:
+                    raw_resp = resp.get("response")
+                items = []
+                if isinstance(raw_resp, dict):
+                    maybe_items = raw_resp.get("items")
+                    if isinstance(maybe_items, list):
+                        items = [it for it in maybe_items if isinstance(it, dict)]
+                    elif any(k in raw_resp for k in ("text", "attachments", "date")):
+                        items = [raw_resp]
+                elif isinstance(raw_resp, list):
+                    items = [it for it in raw_resp if isinstance(it, dict)]
+                if items:
+                    item = items[0]
+                    text = str(item.get("text") or "").strip()
+                    post_ts = item.get("date")
+                    if isinstance(post_ts, (int, float)):
+                        ts = int(post_ts)
+            except Exception as exc:
+                logger.warning(
+                    "VK E2E seed fallback for -%s_%s (wall.getById failed): %s",
+                    group_id,
+                    post_id,
+                    exc,
+                )
+            out[(int(group_id), int(post_id))] = (int(ts), text)
+        return out
+
+    fetched_missing: dict[tuple[int, int], tuple[int, str]] = {}
+    if missing:
+        fetched_missing = run_async(context, _fetch_missing_rows(missing))
+
+    conn = sqlite3.connect(_db_path(), timeout=30)
+    try:
+        cur = conn.cursor()
+        for group_id, post_id in missing:
+            ts, text = fetched_missing.get((group_id, post_id), (int(time.time()), ""))
+            fallback = f"VK post -{int(group_id)}_{int(post_id)}"
+            body = (text or "").strip() or fallback
+            has_date = 1 if re.search(r"\b\d{1,2}[./-]\d{1,2}\b", body) else 0
+            cur.execute(
+                """
+                INSERT OR IGNORE INTO vk_inbox(
+                    group_id, post_id, date, text, matched_kw, has_date, event_ts_hint, status
+                ) VALUES(?,?,?,?,?,?,?,?)
+                """,
+                (
+                    int(group_id),
+                    int(post_id),
+                    int(ts),
+                    body,
+                    OCR_PENDING_SENTINEL,
+                    0,
+                    int(ts),
+                    "pending",
+                ),
+            )
+
+        # Keep only explicit targets in queue to avoid flaky ordering.
+        cur.execute(
+            """
+            UPDATE vk_inbox
+            SET status='skipped', locked_by=NULL, locked_at=NULL, review_batch=NULL
+            WHERE status IN ('pending', 'importing', 'locked')
+            """
+        )
+        # `vk_review.pick_next()` rejects rows with `event_ts_hint` earlier than
+        # "now + VK_REVIEW_REJECT_H hours" (defaults to 2h). For deterministic
+        # E2E we pin targets slightly in the future so they are always pickable,
+        # even if the underlying snapshot contains past `event_ts_hint`.
+        base_ts = int(time.time()) + 3 * 3600
+        for offset, (group_id, post_id) in enumerate(targets):
+            ts = base_ts - offset
+            cur.execute(
+                """
+                UPDATE vk_inbox
+                SET status='pending',
+                    locked_by=NULL,
+                    locked_at=NULL,
+                    review_batch=NULL,
+                    imported_event_id=NULL,
+                    date=?,
+                    matched_kw=?,
+                    has_date=0,
+                    event_ts_hint=?
+                WHERE group_id=? AND post_id=?
+                """,
+                (int(ts), OCR_PENDING_SENTINEL, int(ts), int(group_id), int(post_id)),
+            )
+
+        where = " OR ".join(["(group_id=? AND post_id=?)" for _ in targets])
+        params: list[int] = []
+        for group_id, post_id in targets:
+            params.extend([int(group_id), int(post_id)])
+        cur.execute(
+            f"SELECT group_id, post_id, status FROM vk_inbox WHERE {where}",
+            tuple(params),
+        )
+        rows = cur.fetchall()
+        conn.commit()
+    finally:
+        conn.close()
+
+    found_pairs = {(int(r[0]), int(r[1])) for r in rows}
+    missing_after = [f"-{gid}_{pid}" for gid, pid in targets if (gid, pid) not in found_pairs]
+    if missing_after:
+        raise AssertionError(f"Не удалось подготовить посты в vk_inbox: {missing_after}")
+
+    context.vk_priority_targets = [(int(g), int(p)) for g, p in targets]
+    logger.info(
+        "✓ VK inbox подготовлен для E2E: targets=%s rows=%s",
+        context.vk_priority_targets,
+        len(rows),
+    )
+
+
+@given("в VK inbox для E2E выбраны все активные посты очереди")
+def step_prepare_vk_inbox_all_active_targets(context):
+    """Prepare full VK queue targets for E2E, including skipped rows."""
+    conn = sqlite3.connect(_db_path(), timeout=30)
+    try:
+        cur = conn.cursor()
+        # Full queue run should include previously skipped/locked rows too.
+        cur.execute(
+            """
+            UPDATE vk_inbox
+            SET status='pending',
+                locked_by=NULL,
+                locked_at=NULL,
+                review_batch=NULL
+            WHERE status IN ('skipped', 'locked', 'importing')
+            """
+        )
+        cur.execute(
+            """
+            SELECT id, group_id, post_id
+            FROM vk_inbox
+            WHERE status IN ('pending', 'locked')
+            ORDER BY id ASC
+            """
+        )
+        rows = cur.fetchall()
+        cap_raw = (os.getenv("E2E_VK_ALL_ACTIVE_TARGETS_LIMIT") or "").strip()
+        cap = int(cap_raw) if cap_raw.isdigit() else 0
+        if cap > 0:
+            rows = list(rows)[:cap]
+            selected_ids = [int(r[0]) for r in rows]
+            placeholders = ",".join("?" for _ in selected_ids) or "NULL"
+            # Exclude the rest from this run to keep `vk_auto_import --limit=N`
+            # deterministic (otherwise remaining pending rows would prevent
+            # the "targets processed" wait condition from ever becoming true).
+            cur.execute(
+                f"""
+                UPDATE vk_inbox
+                SET status='skipped',
+                    locked_by=NULL,
+                    locked_at=NULL,
+                    review_batch=NULL
+                WHERE status IN ('pending', 'locked', 'importing')
+                  AND id NOT IN ({placeholders})
+                """,
+                tuple(selected_ids),
+            )
+            # Keep selected rows pending/unlocked.
+            cur.execute(
+                f"""
+                UPDATE vk_inbox
+                SET status='pending',
+                    locked_by=NULL,
+                    locked_at=NULL,
+                    review_batch=NULL
+                WHERE id IN ({placeholders})
+                """,
+                tuple(selected_ids),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    targets = [(int(r[1]), int(r[2])) for r in rows]
+    targets = list(dict.fromkeys(targets))
+    if not targets:
+        raise AssertionError("В vk_inbox нет активных постов (pending/locked) после подготовки очереди")
+
+    context.vk_priority_targets = targets
+    logger.info(
+        "✓ VK inbox targets=all-active count=%s",
+        len(context.vk_priority_targets),
+    )
+
+
+@given('в VK inbox для E2E выбраны первые "{n}" активных постов очереди')
+def step_prepare_vk_inbox_first_n_active_targets(context, n):
+    """Prepare VK queue targets for E2E but cap to first N pending/locked rows."""
+    raw_n = str(n or "").strip()
+    if not raw_n.isdigit():
+        raise AssertionError(f"n должно быть числом, получено: {n!r}")
+    cap = int(raw_n)
+    if cap <= 0:
+        raise AssertionError(f"n должно быть >0, получено: {cap}")
+
+    conn = sqlite3.connect(_db_path(), timeout=30)
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            UPDATE vk_inbox
+            SET status='pending',
+                locked_by=NULL,
+                locked_at=NULL,
+                review_batch=NULL
+            WHERE status IN ('skipped', 'locked', 'importing')
+            """
+        )
+        cur.execute(
+            """
+            SELECT id, group_id, post_id
+            FROM vk_inbox
+            WHERE status IN ('pending', 'locked')
+            ORDER BY id ASC
+            """
+        )
+        rows = cur.fetchall()
+        if not rows:
+            raise AssertionError("В vk_inbox нет активных постов (pending/locked) после подготовки очереди")
+
+        rows = list(rows)[:cap]
+        selected_ids = [int(r[0]) for r in rows]
+        placeholders = ",".join("?" for _ in selected_ids) or "NULL"
+        # Exclude the rest from this run to keep /vk_auto_import deterministic.
+        cur.execute(
+            f"""
+            UPDATE vk_inbox
+            SET status='skipped',
+                locked_by=NULL,
+                locked_at=NULL,
+                review_batch=NULL
+            WHERE status IN ('pending', 'locked', 'importing')
+              AND id NOT IN ({placeholders})
+            """,
+            tuple(selected_ids),
+        )
+        cur.execute(
+            f"""
+            UPDATE vk_inbox
+            SET status='pending',
+                locked_by=NULL,
+                locked_at=NULL,
+                review_batch=NULL
+            WHERE id IN ({placeholders})
+            """,
+            tuple(selected_ids),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    targets = [(int(r[1]), int(r[2])) for r in rows]
+    targets = list(dict.fromkeys(targets))
+    context.vk_priority_targets = targets
+    logger.info("✓ VK inbox targets=first-%s count=%s", cap, len(targets))
+
+
+@then("в сводке VK очереди показано количество постов")
+def step_vk_queue_summary_has_counts(context):
+    """Assert /vk queue summary contains status counters and compute total."""
+    msg = context.last_response
+    assert msg is not None, "Нет ответа от бота"
+    text = msg.text or ""
+    if not text.strip():
+        raise AssertionError("Сводка VK очереди пустая")
+
+    counts: dict[str, int] = {}
+    for key, value in re.findall(
+        r"(?im)^\s*(pending|locked|skipped|imported|rejected)\s*:\s*(\d+)\s*$",
+        text,
+    ):
+        counts[str(key).lower()] = int(value)
+
+    required_keys = ("pending", "locked", "skipped", "imported", "rejected")
+    missing = [k for k in required_keys if k not in counts]
+    if missing:
+        raise AssertionError(
+            "Не удалось распознать полную сводку VK очереди. "
+            f"Отсутствуют: {missing}. Текст:\n{text}"
+        )
+
+    total = sum(counts[k] for k in required_keys)
+    context.vk_queue_summary_counts = counts
+    context.vk_queue_summary_total = int(total)
+    logger.info("✓ VK queue summary: total=%s counts=%s", total, counts)
+
+
+@given('я выбираю в канале "{channel}" пост со ссылкой на другой telegram пост')
+def step_pick_linked_post_from_channel(context, channel):
+    username = str(channel or "").lstrip("@").strip()
+    if not username:
+        raise AssertionError("Пустой channel для linked-post сценария")
+
+    forced_primary = (os.getenv("E2E_LINKED_PRIMARY_POST_URL") or "").strip()
+    forced_linked = (os.getenv("E2E_LINKED_POST_URL") or "").strip()
+    if forced_primary:
+        logger.info(
+            "linked-post: using forced URLs primary=%s linked=%s",
+            forced_primary,
+            forced_linked or "auto",
+        )
+        primary_url = forced_primary
+        if forced_linked:
+            context.linked_post_url = forced_linked
+            step_pick_specific_post(context, primary_url)
+            return
+
+    async def _pick():
+        entity = await context.client.client.get_entity(username)
+        scan_limit = int(os.getenv("E2E_LINKED_POST_SCAN_LIMIT", "220"))
+        messages = await context.client.client.get_messages(entity, limit=scan_limit)
+        best_pair: tuple[str, str] | None = None
+        best_score = -10**9
+        for msg in messages:
+            primary_url = f"https://t.me/{username}/{int(msg.id)}"
+            links = _extract_tg_post_urls_from_message(msg)
+            links = [u for u in links if _norm_url_for_compare(u) != _norm_url_for_compare(primary_url)]
+            if not links:
+                continue
+            same_channel: list[str] = []
+            for u in links:
+                try:
+                    u_name, _u_id = _parse_tg_post_url(u)
+                except Exception:
+                    continue
+                if u_name == username:
+                    same_channel.append(u)
+            linked_url = same_channel[0] if same_channel else links[0]
+            score = _score_linked_post_candidate(msg, username, links)
+            if score > best_score:
+                best_score = score
+                best_pair = (primary_url, linked_url)
+            if best_score >= 8:
+                break
+        if best_pair:
+            logger.info("linked-post: selected score=%s", best_score)
+        return best_pair
+
+    picked = run_async(context, _pick())
+    if not picked:
+        raise AssertionError(
+            f"В @{username} не найден недавний пост со ссылкой на другой telegram пост "
+            "(увеличьте E2E_LINKED_POST_SCAN_LIMIT или выберите пост вручную)."
+        )
+    primary_url, linked_url = picked
+    context.linked_post_url = linked_url
+    logger.info("✓ Найден linked-post кейс: primary=%s linked=%s", primary_url, linked_url)
+    step_pick_specific_post(context, primary_url)
 
 @given('я знаю контрольное событие "{title}" на дату "{date}" из канала "{channel}"')
 def step_control_event(context, title, date, channel):
@@ -883,6 +2393,109 @@ def step_reset_monitor_marks(context, username):
     logger.info("✓ Сброшены отметки мониторинга для @%s (UI)", uname)
 
 
+@given('очищены отметки мониторинга для Telegram источников "{usernames_csv}"')
+def step_reset_monitor_marks_bulk_db(context, usernames_csv):
+    """Reset telegram monitoring marks in DB (fast path, without UI)."""
+    raw = [u.strip() for u in str(usernames_csv or "").split(",") if u.strip()]
+    usernames = [u.lstrip("@").strip() for u in raw if u.lstrip("@").strip()]
+    if not usernames:
+        raise AssertionError("Не переданы usernames для сброса отметок мониторинга")
+
+    conn = sqlite3.connect(_db_path(), timeout=30)
+    try:
+        cur = conn.cursor()
+        placeholders = ",".join(["?"] * len(usernames))
+        cur.execute(
+            f"SELECT id, username FROM telegram_source WHERE username IN ({placeholders})",
+            tuple(usernames),
+        )
+        existing = {str(r[1] or ""): int(r[0]) for r in cur.fetchall() or []}
+        for uname in usernames:
+            if uname not in existing:
+                cur.execute(
+                    "INSERT INTO telegram_source(username, enabled, last_scanned_message_id) VALUES(?,1,NULL)",
+                    (uname,),
+                )
+                existing[uname] = int(cur.lastrowid)
+        source_ids = [int(existing[u]) for u in usernames if u in existing]
+        if source_ids:
+            ph = ",".join(["?"] * len(source_ids))
+            # Delete per-message marks so Kaggle run can re-process history.
+            cur.execute(
+                f"DELETE FROM telegram_scanned_message WHERE source_id IN ({ph})",
+                tuple(source_ids),
+            )
+            cur.execute(
+                f"UPDATE telegram_source SET enabled=1, last_scanned_message_id=NULL WHERE id IN ({ph})",
+                tuple(source_ids),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    logger.info("✓ Сброшены отметки мониторинга (DB) для: %s", usernames)
+
+
+@then("существует событие с источниками VK и Telegram")
+def step_event_has_vk_and_telegram_sources(context):
+    """Find at least one event that has both vk and telegram sources."""
+    conn = sqlite3.connect(_db_path(), timeout=30)
+    try:
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        # event_source can be missing in very old snapshots; ensure it exists for queries.
+        try:
+            _ensure_event_source_table(conn)
+        except Exception:
+            pass
+        cur.execute(
+            """
+            SELECT
+                event_id,
+                SUM(CASE WHEN source_type='vk' THEN 1 ELSE 0 END) AS vk_cnt,
+                SUM(CASE WHEN source_type='telegram' THEN 1 ELSE 0 END) AS tg_cnt
+            FROM event_source
+            GROUP BY event_id
+            HAVING vk_cnt > 0 AND tg_cnt > 0
+            ORDER BY event_id DESC
+            LIMIT 1
+            """
+        )
+        row = cur.fetchone()
+    finally:
+        conn.close()
+    if not row:
+        raise AssertionError("Не найдено ни одного события с источниками VK и Telegram")
+    event_id = int(row["event_id"])
+    context.vk_tg_merged_event_id = event_id
+    logger.info("✓ Найдено событие с источниками VK+Telegram: event_id=%s", event_id)
+
+
+@when("я запрашиваю /log для события с источниками VK и Telegram")
+def step_request_log_for_vk_tg_merged_event(context):
+    eid = int(getattr(context, "vk_tg_merged_event_id", 0) or 0)
+    if eid <= 0:
+        raise AssertionError("Нет event_id для VK+Telegram события (сначала найдите его в БД)")
+    step_send_command(context, f"/log {eid}")
+
+
+@then("в логе источников есть источники VK и Telegram")
+def step_source_log_has_vk_and_tg(context):
+    msg = context.last_response
+    assert msg is not None, "Нет ответа от бота"
+    text = msg.text or ""
+    if not text.strip():
+        raise AssertionError("Лог источников пуст")
+    low = text.lower()
+    has_vk = ("vk.com/" in low) or ("vk.ru/" in low)
+    has_tg = ("t.me/" in low)
+    if not has_vk or not has_tg:
+        raise AssertionError(
+            "В логе источников не найдены оба типа источников (VK и Telegram).\n"
+            f"has_vk={has_vk} has_tg={has_tg}\n"
+            f"Текст:\n{text}"
+        )
+    logger.info("✓ Лог источников содержит VK и Telegram ссылки")
+
 @given("я очищаю список источников Telegram через UI")
 def step_clear_all_sources_ui(context):
     """Delete all Telegram sources using the real UI buttons."""
@@ -993,18 +2606,34 @@ def step_set_source_location_ui(context, username, location):
 def step_send_command(context, command):
     """Send command to bot using human-like behavior."""
     async def _send():
-        response = await context.client.human_send_and_wait(
-            context.bot_entity,
-            command,
-            timeout=30
-        )
-        context.last_response = response
-        logger.info(f"→ Отправлено: {command}")
-        if response and response.text:
-            preview = response.text[:100].replace('\n', ' ')
-            logger.info(f"← Ответ: {preview}...")
-        return response
-    
+        cmd = (command or "").strip()
+        timeout = float(os.getenv("E2E_COMMAND_TIMEOUT_SEC", "60"))
+        if cmd.lower() == "/start":
+            timeout = float(os.getenv("E2E_START_TIMEOUT_SEC", str(timeout)))
+        last_exc: Exception | None = None
+        for attempt in range(2):
+            try:
+                response = await context.client.human_send_and_wait(
+                    context.bot_entity,
+                    command,
+                    timeout=timeout,
+                )
+                context.last_response = response
+                logger.info(f"→ Отправлено: {command}")
+                if response and response.text:
+                    preview = response.text[:100].replace('\n', ' ')
+                    logger.info(f"← Ответ: {preview}...")
+                return response
+            except TimeoutError as exc:
+                last_exc = exc
+                if attempt == 0:
+                    logger.warning("Команда '%s' не получила ответ вовремя, ретрай...", command)
+                    await context.client._gaussian_delay(0.4, 1.0)
+                    continue
+                raise
+        if last_exc:
+            raise last_exc
+
     run_async(context, _send())
 
 
@@ -1112,9 +2741,20 @@ def step_open_event_card(context, title):
     event_id = _find_event_id_in_text(text, target_title)
     if not event_id:
         raise AssertionError(f"Событие '{target_title}' не найдено в списке")
+    context.last_event_id = int(event_id)
     btn = find_button(msg, f"✎ {event_id}")
     if not btn:
-        raise AssertionError(f"Кнопка редактирования ✎ {event_id} не найдена")
+        # /events can fall back to compact mode (no per-event buttons) when the message
+        # is too long for Telegram. Use /edit <id> as an admin shortcut.
+        step_send_command(context, f"/edit {event_id}")
+        card = context.last_response
+        card_text = (card.text or "") if card else ""
+        if f"id: {event_id}" not in card_text:
+            raise AssertionError(
+                f"Кнопка редактирования ✎ {event_id} не найдена и /edit {event_id} не открыл карточку"
+            )
+        logger.info("✓ Открыта карточка события через /edit: id=%s title=%s", event_id, target_title)
+        return
 
     async def _click():
         await context.client._gaussian_delay(0.5, 1.5)
@@ -1146,42 +2786,81 @@ def step_open_event_card_from_selected_post(context):
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
         _ensure_event_source_table(conn)
+        event_ids: list[int] = []
+
         cur.execute(
-            "SELECT event_id FROM event_source WHERE source_url = ? ORDER BY imported_at DESC LIMIT 1",
+            "SELECT event_id FROM event_source WHERE source_url = ? ORDER BY imported_at DESC",
             (post_url,),
         )
-        row = cur.fetchone()
-        if not row:
+        event_ids = [int(r["event_id"]) if isinstance(r, sqlite3.Row) else int(r[0]) for r in cur.fetchall()]
+        if not event_ids:
             cur.execute(
                 """
                 SELECT event_id FROM event_source
                 WHERE source_chat_username = ? AND source_message_id = ?
                 ORDER BY imported_at DESC
-                LIMIT 1
                 """,
                 (username, int(message_id)),
             )
-            row = cur.fetchone()
-        if not row:
+            event_ids = [int(r["event_id"]) if isinstance(r, sqlite3.Row) else int(r[0]) for r in cur.fetchall()]
+        if not event_ids:
             cur.execute(
-                "SELECT event_id FROM event_source WHERE source_url LIKE ? ORDER BY imported_at DESC LIMIT 1",
+                "SELECT event_id FROM event_source WHERE source_url LIKE ? ORDER BY imported_at DESC",
                 (f"%t.me/{username}/{int(message_id)}%",),
             )
-            row = cur.fetchone()
-        if not row:
+            event_ids = [int(r["event_id"]) if isinstance(r, sqlite3.Row) else int(r[0]) for r in cur.fetchall()]
+        if not event_ids:
             raise AssertionError(f"Не найден event_source для контрольного поста: {post_url}")
-        event_id = int(row["event_id"]) if isinstance(row, sqlite3.Row) else int(row[0])
-        cur.execute("SELECT date FROM event WHERE id = ?", (event_id,))
-        date_row = cur.fetchone()
-        if not date_row:
-            raise AssertionError(f"Событие id={event_id} не найдено в таблице event")
-        raw_date = str(date_row[0] or "")
+
+        # For schedule-like posts with multiple events, pick the nearest future event.
+        # This keeps telegram-first checks stable and avoids coupling to insert order.
+        from datetime import date as _date
+
+        today = _date.today()
+        picked = None
+        for eid in event_ids:
+            cur.execute("SELECT date FROM event WHERE id = ?", (eid,))
+            date_row = cur.fetchone()
+            if not date_row:
+                continue
+            raw = str((date_row["date"] if isinstance(date_row, sqlite3.Row) else date_row[0]) or "")
+            iso = raw.split("..", 1)[0].strip()
+            parsed = None
+            try:
+                parsed = _date.fromisoformat(iso)
+            except Exception:
+                parsed = None
+
+            if parsed is not None and parsed >= today:
+                key = (0, (parsed - today).days, eid)
+            elif parsed is not None:
+                key = (1, abs((today - parsed).days), eid)
+            else:
+                key = (2, 10**9, eid)
+
+            if picked is None or key < picked[0]:
+                picked = (key, eid, raw)
+
+        if picked is None:
+            # Fallback to the most recently imported event id.
+            event_id = int(event_ids[0])
+            cur.execute("SELECT date FROM event WHERE id = ?", (event_id,))
+            date_row = cur.fetchone()
+            if not date_row:
+                raise AssertionError(f"Событие id={event_id} не найдено в таблице event")
+            raw_date = str((date_row["date"] if isinstance(date_row, sqlite3.Row) else date_row[0]) or "")
+        else:
+            _, event_id, raw_date = picked
+
         event_date = raw_date.split("..", 1)[0].strip()
     finally:
         conn.close()
 
     context.control_event_id = event_id
     context.control_event_date = event_date
+    # Keep generic fallback used by many checks when card text is truncated
+    # and no longer contains explicit "id: N" marker.
+    context.last_event_id = event_id
     logger.info("✓ Контрольное событие: id=%s date=%s url=%s", event_id, event_date, post_url)
 
     # Open via /events and click edit button by id (UI flow)
@@ -1189,8 +2868,18 @@ def step_open_event_card_from_selected_post(context):
     msg = context.last_response
     btn = find_button(msg, f"✎ {event_id}")
     if not btn:
-        available = get_all_buttons(msg)
-        raise AssertionError(f"Кнопка ✎ {event_id} не найдена в /events {event_date}. Кнопки: {available}")
+        # /events is paginated/compact for dense dates; use direct admin shortcut.
+        step_send_command(context, f"/edit {event_id}")
+        card = context.last_response
+        card_text = (card.text or "") if card else ""
+        if f"id: {event_id}" not in card_text:
+            available = get_all_buttons(msg)
+            raise AssertionError(
+                f"Кнопка ✎ {event_id} не найдена в /events {event_date}, "
+                f"и /edit {event_id} не открыл карточку. Кнопки: {available}"
+            )
+        logger.info("✓ Открыта карточка контрольного события через /edit: id=%s", event_id)
+        return
 
     async def _click():
         await context.client._gaussian_delay(0.5, 1.5)
@@ -1203,6 +2892,114 @@ def step_open_event_card_from_selected_post(context):
 
     run_async(context, _click())
     logger.info("✓ Открыта карточка контрольного события: id=%s", event_id)
+
+
+@when('я открываю карточку события из выбранного поста с заголовком содержащим "{title_hint}"')
+def step_open_event_card_from_selected_post_title_hint(context, title_hint):
+    post_url = getattr(context, "control_post_url", None)
+    username = getattr(context, "control_post_username", None)
+    message_id = getattr(context, "control_post_message_id", None)
+    if not post_url or not username or not message_id:
+        raise AssertionError("Контрольный пост не выбран (ожидались control_post_url/username/message_id)")
+
+    hint = _norm_event_title_key(title_hint)
+    if not hint:
+        raise AssertionError("Пустой title_hint для выбора события")
+
+    db_path = _db_path()
+    conn = sqlite3.connect(db_path, timeout=30)
+    try:
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        _ensure_event_source_table(conn)
+
+        cur.execute(
+            """
+            SELECT DISTINCT e.id, e.title, e.date
+            FROM event_source es
+            JOIN event e ON e.id = es.event_id
+            WHERE es.source_url = ?
+               OR (es.source_chat_username = ? AND es.source_message_id = ?)
+               OR es.source_url LIKE ?
+            ORDER BY e.id DESC
+            """,
+            (post_url, username, int(message_id), f"%t.me/{username}/{int(message_id)}%"),
+        )
+        rows = list(cur.fetchall())
+    finally:
+        conn.close()
+
+    if not rows:
+        raise AssertionError(f"Не найдено событий из выбранного поста: {post_url}")
+
+    filtered = [r for r in rows if hint in _norm_event_title_key(r["title"])]
+    if not filtered:
+        titles = [str(r["title"] or "") for r in rows[:10]]
+        raise AssertionError(
+            f"Событие с title_hint='{title_hint}' не найдено среди событий поста {post_url}. "
+            f"Кандидаты: {titles}"
+        )
+
+    today = date.today()
+    picked: tuple[tuple[int, int, int], int, str] | None = None
+    for row in filtered:
+        event_id = int(row["id"])
+        raw_date = str(row["date"] or "")
+        iso = raw_date.split("..", 1)[0].strip()
+        parsed = None
+        try:
+            parsed = date.fromisoformat(iso)
+        except Exception:
+            parsed = None
+        if parsed is not None and parsed >= today:
+            key = (0, (parsed - today).days, event_id)
+        elif parsed is not None:
+            key = (1, abs((today - parsed).days), event_id)
+        else:
+            key = (2, 10**9, event_id)
+        if picked is None or key < picked[0]:
+            picked = (key, event_id, iso)
+
+    if picked is None:
+        raise AssertionError("Не удалось выбрать событие по title_hint")
+
+    _, event_id, event_date = picked
+    context.control_event_id = int(event_id)
+    context.control_event_date = event_date
+    context.last_event_id = int(event_id)
+
+    def _is_target_card(msg) -> bool:
+        text = str(getattr(msg, "text", "") or "")
+        return f"id: {event_id}" in text
+
+    step_send_command(context, f"/edit {event_id}")
+    if not _is_target_card(getattr(context, "last_response", None)):
+        deadline = time.monotonic() + 35.0
+        found = False
+        while time.monotonic() < deadline:
+            async def _fetch():
+                return await context.client.client.get_messages(context.bot_entity, limit=15)
+
+            messages = run_async(context, _fetch())
+            for msg in messages:
+                if _is_target_card(msg):
+                    context.last_response = msg
+                    found = True
+                    break
+            if found:
+                break
+            time.sleep(1.5)
+        if not found:
+            # Last retry as explicit command in case command response got buried
+            step_send_command(context, f"/edit {event_id}")
+            if not _is_target_card(getattr(context, "last_response", None)):
+                raise AssertionError(f"/edit {event_id} не открыл карточку события")
+    logger.info(
+        "✓ Открыта карточка события из выбранного поста по title_hint: id=%s hint=%s post=%s",
+        event_id,
+        title_hint,
+        post_url,
+    )
 
 
 @then("описание события отрерайчено (не дословно)")
@@ -1244,6 +3041,569 @@ def step_description_is_rewritten(context):
     if _normalize_text(desc) == _normalize_text(src_text):
         raise AssertionError("Описание совпадает дословно с текстом источника (ожидался рерайт)")
     logger.info("✓ Описание не совпадает дословно с source_text (рерайт присутствует)")
+
+
+@then('описание открытого события содержит "{needle}"')
+def step_open_event_description_contains(context, needle):
+    event_id = _event_id_from_card_text(getattr(context.last_response, "text", None)) or getattr(
+        context, "last_event_id", None
+    )
+    if not event_id:
+        raise AssertionError("Не удалось определить event_id для проверки description")
+    conn = sqlite3.connect(_db_path(), timeout=30)
+    try:
+        cur = conn.cursor()
+        row = cur.execute("SELECT description FROM event WHERE id = ?", (int(event_id),)).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        raise AssertionError(f"Событие id={event_id} не найдено")
+    desc = (row[0] or "").strip()
+    if needle.lower() not in desc.lower():
+        raise AssertionError(f"В description события id={event_id} не найдено: {needle}")
+    logger.info("✓ Description содержит ожидаемый фрагмент: %s", needle)
+
+
+@then('у открытого события тип "{expected_type}"')
+def step_open_event_type_equals(context, expected_type):
+    event_id = _event_id_from_card_text(getattr(context.last_response, "text", None)) or getattr(
+        context, "last_event_id", None
+    )
+    if not event_id:
+        raise AssertionError("Не удалось определить event_id для проверки event_type")
+    conn = sqlite3.connect(_db_path(), timeout=30)
+    try:
+        cur = conn.cursor()
+        row = cur.execute("SELECT event_type FROM event WHERE id = ?", (int(event_id),)).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        raise AssertionError(f"Событие id={event_id} не найдено")
+    got = str(row[0] or "").strip().casefold()
+    want = str(expected_type or "").strip().casefold()
+    if got != want:
+        raise AssertionError(f"event_type mismatch для id={event_id}: expected={want!r}, got={got!r}")
+    logger.info("✓ event_type=%s для event_id=%s", got, event_id)
+
+
+@then("у открытой выставки заполнены date и end_date")
+def step_open_exhibition_has_date_range(context):
+    event_id = _event_id_from_card_text(getattr(context.last_response, "text", None)) or getattr(
+        context, "last_event_id", None
+    )
+    if not event_id:
+        raise AssertionError("Не удалось определить event_id для проверки диапазона выставки")
+    conn = sqlite3.connect(_db_path(), timeout=30)
+    try:
+        cur = conn.cursor()
+        row = cur.execute(
+            "SELECT event_type, date, end_date FROM event WHERE id = ?",
+            (int(event_id),),
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        raise AssertionError(f"Событие id={event_id} не найдено")
+    event_type, date_raw, end_raw = row
+    if str(event_type or "").strip().casefold() != "выставка":
+        raise AssertionError(f"Событие id={event_id} не выставка: event_type={event_type!r}")
+    date_iso = str(date_raw or "").split("..", 1)[0].strip()
+    end_iso = str(end_raw or "").split("..", 1)[0].strip()
+    if not date_iso:
+        raise AssertionError(f"У выставки id={event_id} не заполнено поле date")
+    if not end_iso:
+        raise AssertionError(f"У выставки id={event_id} не заполнено поле end_date")
+    try:
+        d = date.fromisoformat(date_iso)
+        e = date.fromisoformat(end_iso)
+    except Exception as exc:
+        raise AssertionError(
+            f"Некорректный date/end_date у выставки id={event_id}: date={date_iso!r}, end_date={end_iso!r}"
+        ) from exc
+    if e < d:
+        raise AssertionError(
+            f"Некорректный период у выставки id={event_id}: end_date({end_iso}) < date({date_iso})"
+        )
+    logger.info("✓ Выставка id=%s имеет валидный период: %s..%s", event_id, date_iso, end_iso)
+
+
+@then("я сохраняю открытую выставку в набор проверки /exhibitions")
+def step_save_open_exhibition_for_exhibitions_check(context):
+    event_id = _event_id_from_card_text(getattr(context.last_response, "text", None)) or getattr(
+        context, "last_event_id", None
+    )
+    if not event_id:
+        raise AssertionError("Не удалось определить event_id для сохранения выставки")
+    conn = sqlite3.connect(_db_path(), timeout=30)
+    try:
+        cur = conn.cursor()
+        row = cur.execute(
+            "SELECT title, event_type, date, end_date FROM event WHERE id = ?",
+            (int(event_id),),
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        raise AssertionError(f"Событие id={event_id} не найдено")
+    title, event_type, date_iso, end_iso = row
+    if str(event_type or "").strip().casefold() != "выставка":
+        raise AssertionError(f"Событие id={event_id} не выставка: event_type={event_type!r}")
+    saved = getattr(context, "saved_exhibitions_for_check", None)
+    if not isinstance(saved, list):
+        saved = []
+        context.saved_exhibitions_for_check = saved
+    if any(int(item.get("id", 0)) == int(event_id) for item in saved):
+        return
+    saved.append(
+        {
+            "id": int(event_id),
+            "title": str(title or "").strip(),
+            "date": str(date_iso or "").strip(),
+            "end_date": str(end_iso or "").strip(),
+        }
+    )
+    logger.info("✓ Сохранена выставка для /exhibitions: id=%s title=%s", event_id, title)
+
+
+@then("в /exhibitions отображаются все сохраненные выставки")
+def step_exhibitions_contains_saved_exhibitions(context):
+    saved = list(getattr(context, "saved_exhibitions_for_check", []) or [])
+    if not saved:
+        raise AssertionError("Нет сохранённых выставок для проверки /exhibitions")
+
+    async def _collect_recent_text() -> str:
+        messages = await context.client.client.get_messages(context.bot_entity, limit=20)
+        if not messages:
+            return ""
+        top_id = int(getattr(context.last_response, "id", 0) or messages[0].id or 0)
+        chunks: list[str] = []
+        for m in messages:
+            mid = int(getattr(m, "id", 0) or 0)
+            if top_id and mid > top_id:
+                continue
+            if top_id and mid < max(1, top_id - 12):
+                continue
+            text = (m.text or "").strip()
+            if text:
+                chunks.append(text)
+        return "\n\n".join(chunks)
+
+    combined_text = run_async(context, _collect_recent_text())
+    if not combined_text:
+        combined_text = (context.last_response.text if context.last_response else "") or ""
+    hay = _normalize_text(combined_text).replace("ё", "е")
+    missing: list[str] = []
+    for item in saved:
+        title = str(item.get("title") or "").strip()
+        if not title:
+            continue
+        title_norm = _normalize_text(title).replace("ё", "е")
+        if title_norm and title_norm in hay:
+            continue
+        # Fallback for wrapped/truncated lines: require at least 2 significant title tokens.
+        tokens = [
+            t
+            for t in re.findall(r"[a-zа-яё0-9]{4,}", title_norm, flags=re.IGNORECASE)
+            if t not in {"выставка", "калининград", "галерея"}
+        ]
+        token_hits = sum(1 for t in tokens if t in hay)
+        if token_hits >= min(2, len(tokens)) and len(tokens) > 0:
+            continue
+        missing.append(title)
+    if missing:
+        raise AssertionError(
+            "В /exhibitions не найдены сохранённые выставки:\n"
+            + "\n".join(f"- {m}" for m in missing)
+            + f"\n\nТекст /exhibitions:\n{combined_text}"
+        )
+    logger.info("✓ /exhibitions содержит все сохранённые выставки (%s)", len(saved))
+
+
+@then("описание открытого события не раздуто относительно Telegram source_text")
+def step_open_event_description_not_overexpanded(context):
+    event_id = _event_id_from_card_text(getattr(context.last_response, "text", None)) or getattr(
+        context, "last_event_id", None
+    )
+    if not event_id:
+        raise AssertionError("Не удалось определить event_id для проверки объёма описания")
+    conn = sqlite3.connect(_db_path(), timeout=30)
+    try:
+        _ensure_event_source_table(conn)
+        cur = conn.cursor()
+        row = cur.execute(
+            """
+            SELECT
+                e.description,
+                es.source_text,
+                COALESCE(e.source_texts, ''),
+                (
+                    SELECT COUNT(*)
+                    FROM event_source es2
+                    WHERE es2.event_id = e.id
+                      AND es2.source_type LIKE 'telegram%'
+                ) AS tg_sources_count
+            FROM event e
+            JOIN event_source es ON es.event_id = e.id
+            WHERE e.id = ?
+              AND es.source_type LIKE 'telegram%'
+            ORDER BY es.imported_at DESC
+            LIMIT 1
+            """,
+            (int(event_id),),
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        raise AssertionError(f"Для события id={event_id} не найден Telegram source_text")
+    desc = (row[0] or "").strip()
+    latest_src = (row[1] or "").strip()
+    aggregated_src = (row[2] or "").strip()
+    tg_sources_count = int(row[3] or 0)
+    if not desc or (not latest_src and not aggregated_src):
+        raise AssertionError("Пустой description/source_text, проверить раздувание нельзя")
+
+    # For multi-source events compare against accumulated telegram corpus.
+    # Otherwise we get false positives when the latest source text is short.
+    src_for_cap = latest_src
+    if tg_sources_count > 1 and len(aggregated_src) > len(latest_src):
+        src_for_cap = aggregated_src
+
+    src_len = len(src_for_cap)
+    max_allowed = max(260, int(src_len * 1.9) + 120)
+    if len(desc) > max_allowed:
+        raise AssertionError(
+            f"Description слишком раздуто относительно Telegram source_text: "
+            f"desc_len={len(desc)} src_len={src_len} cap={max_allowed} tg_sources={tg_sources_count}"
+        )
+    logger.info(
+        "✓ Description объём в норме: desc_len=%s src_len=%s cap=%s tg_sources=%s",
+        len(desc),
+        src_len,
+        max_allowed,
+        tg_sources_count,
+    )
+
+
+@then('в карточке события есть источник "{needle}"')
+def step_event_card_has_source_reference(context, needle):
+    msg = context.last_response
+    text = msg.text if msg and msg.text else ""
+    if not text:
+        raise AssertionError("Пустая карточка события")
+    if needle.lower() not in text.lower():
+        raise AssertionError(f"В карточке события не найден источник: {needle}")
+    logger.info("✓ В карточке события найден источник: %s", needle)
+
+
+@then('у открытого события источников минимум "{count}"')
+def step_open_event_sources_min(context, count):
+    event_id = _event_id_from_card_text(getattr(context.last_response, "text", None)) or getattr(context, "last_event_id", None)
+    if not event_id:
+        raise AssertionError("Не удалось определить event_id из карточки события")
+    conn = sqlite3.connect(_db_path(), timeout=30)
+    try:
+        _ensure_event_source_table(conn)
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM event_source WHERE event_id=?", (int(event_id),))
+        actual = int(cur.fetchone()[0] or 0)
+    finally:
+        conn.close()
+    expected = int(count)
+    if actual < expected:
+        raise AssertionError(f"Ожидали источников >= {expected}, получили {actual} (event_id={event_id})")
+    logger.info("✓ Источников у события достаточно: %s (>= %s)", actual, expected)
+
+
+@then('у открытого события источников ровно "{count}"')
+def step_open_event_sources_exact(context, count):
+    event_id = _event_id_from_card_text(getattr(context.last_response, "text", None)) or getattr(
+        context, "last_event_id", None
+    )
+    if not event_id:
+        raise AssertionError("Не удалось определить event_id из карточки события")
+    conn = sqlite3.connect(_db_path(), timeout=30)
+    try:
+        _ensure_event_source_table(conn)
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM event_source WHERE event_id=?", (int(event_id),))
+        actual = int(cur.fetchone()[0] or 0)
+    finally:
+        conn.close()
+    expected = int(count)
+    if actual != expected:
+        raise AssertionError(f"Ожидали источников ровно {expected}, получили {actual} (event_id={event_id})")
+    logger.info("✓ Источников у события ровно: %s", actual)
+
+
+@then("в карточке события есть источник выбранного связанного поста")
+def step_event_card_has_selected_linked_source(context):
+    linked_url = (getattr(context, "linked_post_url", None) or "").strip()
+    if not linked_url:
+        raise AssertionError("В context нет linked_post_url (сначала выберите linked-post кейс)")
+    event_id = _event_id_from_card_text(getattr(context.last_response, "text", None)) or getattr(
+        context, "last_event_id", None
+    )
+    if not event_id:
+        raise AssertionError("Не удалось определить event_id из карточки события")
+    conn = sqlite3.connect(_db_path(), timeout=30)
+    try:
+        _ensure_event_source_table(conn)
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT COUNT(*) FROM event_source WHERE event_id=? AND source_url=?",
+            (int(event_id), linked_url),
+        )
+        actual = int(cur.fetchone()[0] or 0)
+    finally:
+        conn.close()
+    if actual < 1:
+        raise AssertionError(f"У события id={event_id} не найден источник связанного поста: {linked_url}")
+    logger.info("✓ У события id=%s найден linked source: %s", event_id, linked_url)
+
+
+@then("primary и linked посты из @meowafisha привязаны к одному событию (без дубля)")
+def step_primary_and_linked_bound_to_single_event(context):
+    primary_url = (getattr(context, "control_post_url", None) or "").strip()
+    linked_url = (getattr(context, "linked_post_url", None) or "").strip()
+    if not primary_url or not linked_url:
+        raise AssertionError("Нет primary/linked URL в context")
+
+    event_id = _event_id_from_card_text(getattr(context.last_response, "text", None)) or getattr(
+        context, "last_event_id", None
+    )
+    if not event_id:
+        raise AssertionError("Не удалось определить event_id из карточки события")
+
+    conn = sqlite3.connect(_db_path(), timeout=30)
+    try:
+        _ensure_event_source_table(conn)
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT DISTINCT event_id FROM event_source WHERE source_url IN (?, ?)",
+            (primary_url, linked_url),
+        )
+        event_ids = [int(row[0]) for row in cur.fetchall()]
+    finally:
+        conn.close()
+    if len(event_ids) != 1:
+        raise AssertionError(
+            f"Ожидали один event_id для primary/linked постов, получили {event_ids}. "
+            f"primary={primary_url} linked={linked_url}"
+        )
+    if int(event_id) != int(event_ids[0]):
+        raise AssertionError(
+            f"Открытая карточка event_id={event_id} не совпадает с event_id связки={event_ids[0]}"
+        )
+    logger.info("✓ Primary и linked посты привязаны к одному событию: event_id=%s", event_id)
+
+
+@then("после linked-post LLM сверки у события заполнены title, location_name, date и time")
+def step_linked_post_llm_fields_are_filled(context):
+    event_id = _event_id_from_card_text(getattr(context.last_response, "text", None)) or getattr(
+        context, "last_event_id", None
+    )
+    if not event_id:
+        raise AssertionError("Не удалось определить event_id из карточки события")
+    conn = sqlite3.connect(_db_path(), timeout=30)
+    try:
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT title, location_name, date, time FROM event WHERE id=?",
+            (int(event_id),),
+        )
+        row = cur.fetchone()
+    finally:
+        conn.close()
+    if not row:
+        raise AssertionError(f"Событие id={event_id} не найдено в БД")
+
+    title = str(row["title"] or "").strip()
+    location_name = str(row["location_name"] or "").strip()
+    date_value = str(row["date"] or "").strip()
+    time_value = str(row["time"] or "").strip()
+    if not title:
+        raise AssertionError("Поле title пустое")
+    if not location_name:
+        raise AssertionError("Поле location_name пустое")
+    if not re.match(r"^\d{4}-\d{2}-\d{2}", date_value):
+        raise AssertionError(f"Поле date некорректно: {date_value!r}")
+    if time_value in {"", "00:00", "00:00:00"}:
+        raise AssertionError(f"Поле time не заполнено/плейсхолдер: {time_value!r}")
+    logger.info(
+        "✓ Linked-post якоря заполнены: title=%r location=%r date=%r time=%r",
+        title,
+        location_name,
+        date_value,
+        time_value,
+    )
+
+
+@then("не создан дубль события из-за отсутствующего времени в Telegram")
+def step_no_duplicate_due_to_missing_telegram_time(context):
+    event_id = _event_id_from_card_text(getattr(context.last_response, "text", None)) or getattr(
+        context, "last_event_id", None
+    )
+    if not event_id:
+        raise AssertionError("Не удалось определить event_id для проверки дублей")
+
+    conn = sqlite3.connect(_db_path(), timeout=30)
+    try:
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        current = cur.execute(
+            "SELECT id, title, date, time, location_name FROM event WHERE id = ?",
+            (int(event_id),),
+        ).fetchone()
+        if not current:
+            raise AssertionError(f"Событие id={event_id} не найдено в БД")
+
+        event_date = str(current["date"] or "").split("..", 1)[0].strip()
+        title_key = _norm_event_title_key(current["title"])
+        location_key = _norm_location_key(current["location_name"])
+
+        cur.execute("SELECT id, title, date, time, location_name FROM event WHERE date LIKE ?", (f"{event_date}%",))
+        candidates = []
+        for row in cur.fetchall():
+            if _norm_location_key(row["location_name"]) != location_key:
+                continue
+            if _norm_event_title_key(row["title"]) != title_key:
+                continue
+            candidates.append(row)
+    finally:
+        conn.close()
+
+    if len(candidates) <= 1:
+        logger.info("✓ Дубликатов по title/date/location нет (event_id=%s)", event_id)
+        return
+
+    placeholder_times = {"", "00:00", "00:00:00"}
+    times = [str(r["time"] or "").strip() for r in candidates]
+    has_placeholder = any(t in placeholder_times for t in times)
+    has_real = any(t not in placeholder_times for t in times)
+    if has_placeholder and has_real:
+        details = ", ".join(f"id={int(r['id'])}:time={str(r['time'] or '').strip() or '<empty>'}" for r in candidates)
+        raise AssertionError(
+            "Найден дубль события из-за различия времени (Telegram без времени vs parser с временем): "
+            f"{details}"
+        )
+
+    unique_times = {t for t in times if t}
+    if len(candidates) > 1 and len(unique_times) <= 1:
+        details = ", ".join(f"id={int(r['id'])}:time={str(r['time'] or '').strip() or '<empty>'}" for r in candidates)
+        raise AssertionError(f"Найдены дубли одного события: {details}")
+
+    logger.info("✓ Проверка дублей пройдена: matched=%s unique_times=%s", len(candidates), sorted(unique_times))
+
+
+@then('открытое событие содержит изображения из поста "{post_url}"')
+def step_open_event_has_images_from_post(context, post_url):
+    import time
+    import aiohttp
+
+    run_id = getattr(context, "last_monitor_run_id", None)
+    if not run_id:
+        raise AssertionError("Не найден run_id последнего мониторинга")
+    data = _load_tg_results(run_id)
+    if not data:
+        raise AssertionError(f"Не удалось загрузить telegram_results.json для run_id={run_id}")
+    poster_urls = _extract_posters_from_tg_results(data, post_url)
+    if not poster_urls:
+        raise AssertionError(f"Нет URL афиш (catbox_url/supabase_url) для поста {post_url}")
+
+    event_id = _event_id_from_card_text(getattr(context.last_response, "text", None)) or getattr(context, "last_event_id", None)
+    if not event_id:
+        raise AssertionError("Не удалось определить event_id из карточки события")
+
+    wait_sec = int(os.getenv("E2E_TELEGRAPH_WAIT_SEC", "240"))
+    deadline = time.time() + wait_sec
+    url = ""
+    while time.time() < deadline:
+        conn = sqlite3.connect(_db_path(), timeout=30)
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT telegraph_url FROM event WHERE id=?", (int(event_id),))
+            row = cur.fetchone()
+        finally:
+            conn.close()
+        candidate = (row[0] if row else "") if row is not None else ""
+        candidate = (candidate or "").strip()
+        if candidate.startswith("https://telegra.ph/"):
+            url = candidate
+            break
+        time.sleep(3)
+    if not url:
+        raise AssertionError(f"У события нет telegraph_url за {wait_sec}s (event_id={event_id})")
+
+    async def _fetch():
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=20)) as resp:
+                return await resp.text()
+
+    # Telegraph rebuild is async; allow it to catch up.
+    wait_images = int(os.getenv("E2E_TELEGRAPH_IMAGES_WAIT_SEC", "480"))
+    deadline = time.time() + wait_images
+    last_html = ""
+    while time.time() < deadline:
+        last_html = run_async(context, _fetch())
+        if any(p in last_html for p in poster_urls):
+            logger.info("✓ Telegraph страница содержит изображение из поста: %s", url)
+            return
+        time.sleep(12)
+    raise AssertionError(f"URL афиш из поста не найден на Telegraph странице за {wait_images}s: {url}")
+
+
+@then('в логе источников есть источник "{needle}"')
+def step_source_log_contains_source(context, needle):
+    def _event_id() -> int | None:
+        return _event_id_from_card_text(getattr(context.last_response, "text", None)) or getattr(
+            context, "last_event_id", None
+        )
+
+    def _telegraph_url_for_event(event_id: int) -> str | None:
+        import sqlite3
+
+        conn = sqlite3.connect(_db_path(), timeout=30)
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT telegraph_url, telegraph_path FROM event WHERE id=?", (int(event_id),))
+            row = cur.fetchone()
+        finally:
+            conn.close()
+        if not row:
+            return None
+        url, path = (row[0] or "").strip(), (row[1] or "").strip()
+        if url:
+            return url
+        if path:
+            return f"https://telegra.ph/{path.lstrip('/')}"
+        return None
+
+    async def _fetch_log_text(event_id: int | None) -> str:
+        messages = await context.client.client.get_messages(context.bot_entity, limit=40)
+        target_url = _telegraph_url_for_event(event_id) if event_id else None
+        for candidate in messages:
+            t = candidate.text or ""
+            if "Лог источников" not in t:
+                continue
+            if target_url and target_url not in t:
+                continue
+            return t
+        # Fallback: most recent log message (best-effort).
+        for candidate in messages:
+            t = candidate.text or ""
+            if "Лог источников" in t:
+                return t
+        return ""
+
+    text = getattr(context.last_response, "text", "") or ""
+    if not text or "Лог источников" not in text:
+        text = run_async(context, _fetch_log_text(_event_id()))
+    if not text:
+        raise AssertionError("Лог источников пуст или не получен")
+    if needle.lower() not in text.lower():
+        raise AssertionError(f"В логе источников не найдено: {needle}")
+    logger.info("✓ Лог источников содержит: %s", needle)
 
 
 @when("я закрываю карточку события")
@@ -1544,11 +3904,11 @@ def step_check_telegraph_link(context):
     
     msg = context.last_response
     text = msg.text if msg and msg.text else ""
-    
-    # Regex for Telegraph links
-    link_pattern = r"https://telegra\.ph/[a-zA-Z0-9_-]+"
-    links = re.findall(link_pattern, text)
-    
+    links = list(getattr(context, "telegraph_links", None) or [])
+    if not links:
+        # Regex for Telegraph links
+        link_pattern = r"https://telegra\.ph/[a-zA-Z0-9_-]+"
+        links = re.findall(link_pattern, text)
     assert len(links) > 0, f"Не найдено ни одной ссылки на telegra.ph в тексте:\n{text}"
     
     print("\n" + "=" * 50)
@@ -1623,6 +3983,58 @@ def step_verify_telegraph_content(context, required_text):
     logger.info(f"✓ Все {len(links)} страниц содержат: {required_items}")
 
 
+@then('каждая Telegraph страница не должна содержать "{forbidden_text}"')
+def step_verify_telegraph_content_absence(context, forbidden_text):
+    """Verify each Telegraph page does not contain forbidden content."""
+    import aiohttp
+
+    links = getattr(context, "telegraph_links", [])
+    if not links:
+        raise AssertionError("Нет сохранённых Telegraph ссылок для проверки")
+
+    forbidden_items = [item.strip() for item in forbidden_text.split(",") if item.strip()]
+    if not forbidden_items:
+        return
+
+    async def _verify_content():
+        async with aiohttp.ClientSession() as session:
+            failed_pages = []
+
+            for link in links:
+                try:
+                    async with session.get(link, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                        if resp.status != 200:
+                            failed_pages.append(f"{link}: HTTP {resp.status}")
+                            continue
+
+                        html = await resp.text()
+                        html_lower = html.lower()
+
+                        present = []
+                        for item in forbidden_items:
+                            if item.lower() in html_lower:
+                                present.append(item)
+
+                        if present:
+                            failed_pages.append(f"{link}: найдено [{', '.join(present)}]")
+                        else:
+                            logger.info(f"✓ Страница {link} не содержит запрещённых элементов: {forbidden_items}")
+
+                except Exception as e:
+                    failed_pages.append(f"{link}: ошибка {e}")
+
+            if failed_pages:
+                print("\n" + "=" * 60)
+                print("[ERROR] Проверка отсутствия контента Telegraph страниц:")
+                for fail in failed_pages:
+                    print(f"  ✗ {fail}")
+                print("=" * 60 + "\n")
+                raise AssertionError(f"На некоторых страницах найден запрещённый контент: {failed_pages}")
+
+    run_async(context, _verify_content())
+    logger.info(f"✓ Все {len(links)} страниц не содержат: {forbidden_items}")
+
+
 @then("я жду медиа-сообщения")
 def step_check_media_message(context):
     """Wait for a message with media."""
@@ -1682,6 +4094,9 @@ def step_wait_long_operation(context, text):
             # still overridable via env for faster local runs.
             timeout_sec = int(os.getenv("E2E_TG_MONITOR_TIMEOUT_SEC", str(35 * 60)))
             poll_sec = float(os.getenv("E2E_TG_MONITOR_POLL_SEC", "4"))
+        elif any(tok in text_norm for tok in ["source parsing", "парсинг", "parse"]):
+            timeout_sec = int(os.getenv("E2E_PARSE_TIMEOUT_SEC", str(35 * 60)))
+            poll_sec = float(os.getenv("E2E_PARSE_POLL_SEC", "4"))
         else:
             timeout_sec = int(os.getenv("E2E_LONG_OPERATION_TIMEOUT_SEC", str(5 * 60)))
             poll_sec = float(os.getenv("E2E_LONG_OPERATION_POLL_SEC", "2"))
@@ -1689,6 +4104,8 @@ def step_wait_long_operation(context, text):
 
         reconnect_attempts = 0
         min_id = getattr(context, "monitor_started_message_id", None)
+        if not min_id:
+            min_id = getattr(getattr(context, "last_response", None), "id", None)
         elapsed = 0.0
         messages = []
         while elapsed < timeout_sec:
@@ -1719,8 +4136,21 @@ def step_wait_long_operation(context, text):
                 if min_id and msg.id <= min_id:
                     continue
                 if msg.text and text.lower() in msg.text.lower():
-                    if text.lower() == "telegram monitor" and "run_id:" not in msg.text.lower():
-                        continue
+                    if text.lower() == "telegram monitor":
+                        msg_l = msg.text.lower()
+                        has_run_id = "run_id:" in msg_l
+                        has_completion_markers = any(
+                            marker in msg_l
+                            for marker in (
+                                "созданные события",
+                                "обновлённые события",
+                                "сообщений с событиями",
+                                "событий извлечено",
+                                "мониторинг заверш",
+                            )
+                        )
+                        if not (has_run_id or has_completion_markers):
+                            continue
                     context.last_response = msg
                     context.last_report_text = msg.text
                     run_id = _extract_run_id(msg.text)
@@ -1772,6 +4202,7 @@ def step_report_counter_increases(context, label):
     logger.info("✓ Счётчик увеличился: %s %s->%s", label, baseline, current_value)
 
 
+@when("новые события не создаются")
 @then("новые события не создаются")
 def step_no_new_events_created(context):
     """Assert report shows no newly created events."""
@@ -1781,6 +4212,592 @@ def step_no_new_events_created(context):
         raise AssertionError("Не найден счётчик 'Создано' в отчёте")
     assert created == 0, f"Ожидалось Создано: 0, получено: {created}"
     logger.info("✓ Новые события не создавались")
+
+
+@then("в отчёте мониторинга для каждого созданного события есть Telegraph, /log и ICS")
+def step_monitoring_report_has_unified_event_blocks(context):
+    """Verify operator-facing monitoring report contains actionable per-event links."""
+    async def _fetch():
+        messages = await context.client.client.get_messages(context.bot_entity, limit=60)
+        for msg in messages:
+            t = msg.text or ""
+            if "Созданные события" in t and "Telegraph:" in t:
+                return msg
+        return None
+
+    msg = run_async(context, _fetch())
+    if not msg:
+        raise AssertionError("Не найдено сообщение с блоком 'Созданные события' и 'Telegraph:'")
+    text = msg.text or ""
+
+    ids = [int(x) for x in re.findall(r"\(id=(\d+)\)", text)]
+    if not ids:
+        raise AssertionError(f"В отчёте не найдено созданных событий (id=...). Текст:\n{text}")
+
+    tele_cnt = len(re.findall(r"^Telegraph:\s+https?://\S+", text, flags=re.MULTILINE))
+    # Telethon renders entities as Markdown in msg.text (e.g. "Лог: [/log 1](https://...)").
+    log_cnt = len(re.findall(r"^Лог:\s+.*?/log\s+\d+.*$", text, flags=re.MULTILINE))
+    ics_cnt = len(re.findall(r"^ICS:\s+\S+", text, flags=re.MULTILINE))
+    if "Telegraph: ⏳" in text:
+        raise AssertionError(f"В отчёте найден 'Telegraph: ⏳ в очереди'. Текст:\n{text}")
+    if tele_cnt < len(ids):
+        raise AssertionError(
+            f"Ожидали Telegraph строк >= {len(ids)}, получили {tele_cnt}. Текст:\n{text}"
+        )
+    if log_cnt < len(ids):
+        raise AssertionError(
+            f"Ожидали Лог строк >= {len(ids)}, получили {log_cnt}. Текст:\n{text}"
+        )
+    if ics_cnt < len(ids):
+        raise AssertionError(
+            f"Ожидали ICS строк >= {len(ids)}, получили {ics_cnt}. Текст:\n{text}"
+        )
+    for eid in ids[:10]:
+        if f"/log {eid}" not in text:
+            raise AssertionError(f"В отчёте нет команды '/log {eid}'. Текст:\n{text}")
+
+    # Ensure /log is a clickable deep-link (Telegram won't include args in command click targets).
+    urls = []
+    for ent in (getattr(msg, "entities", None) or []):
+        u = getattr(ent, "url", None)
+        if u:
+            urls.append(str(u))
+    for eid in ids[:10]:
+        want = f"start=log_{eid}"
+        if not any(want in u for u in urls):
+            raise AssertionError(
+                "В отчёте нет кликабельной ссылки на лог (ожидали deep-link через start=log_<id>).\n"
+                f"event_id={eid}\n"
+                f"Текст:\n{text}"
+            )
+    logger.info(
+        "✓ Unified monitoring report: events=%s telegraph=%s log=%s ics=%s",
+        len(ids),
+        tele_cnt,
+        log_cnt,
+        ics_cnt,
+    )
+
+
+@then("я жду отчёт VK auto import с событиями и ссылками")
+def step_wait_vk_auto_report_has_unified_event_blocks(context):
+    """Wait for a per-post VK auto report block with actionable links."""
+
+    async def _wait():
+        import asyncio
+
+        timeout_sec = int(os.getenv("E2E_VK_AUTO_REPORT_TIMEOUT_SEC", str(15 * 60)))
+        poll_sec = float(os.getenv("E2E_VK_AUTO_REPORT_POLL_SEC", "3"))
+        progress_log_sec = float(os.getenv("E2E_VK_AUTO_PROGRESS_LOG_SEC", "60"))
+        baseline_id = int(getattr(getattr(context, "last_response", None), "id", 0) or 0)
+        deadline = time.monotonic() + float(timeout_sec)
+        next_progress_log = time.monotonic() + progress_log_sec
+        last_preview: list[str] = []
+        targets: list[tuple[int, int]] = list(getattr(context, "vk_priority_targets", []) or [])
+        last_target_state = ""
+        seen_report_msg_ids: set[int] = set()
+        aggregated_event_ids: list[int] = []
+        aggregated_event_ids_seen: set[int] = set()
+        aggregated_tele_links: list[str] = []
+        aggregated_tele_seen: set[str] = set()
+        log_links_seen_for_eid: set[int] = set()
+        latest_report_msg = None
+        latest_report_text = ""
+
+        def _targets_processed() -> tuple[bool, str]:
+            if not targets:
+                return True, "no-targets"
+            db_uri = f"file:{_db_path()}?mode=ro"
+            try:
+                conn = sqlite3.connect(db_uri, uri=True, timeout=1)
+            except sqlite3.OperationalError as exc:
+                if "locked" in str(exc).lower():
+                    return False, "db-locked(connect)"
+                raise
+            try:
+                conn.row_factory = sqlite3.Row
+                cur = conn.cursor()
+                where = " OR ".join(["(group_id=? AND post_id=?)" for _ in targets])
+                params: list[int] = []
+                for group_id, post_id in targets:
+                    params.extend([int(group_id), int(post_id)])
+                try:
+                    cur.execute(
+                        f"SELECT group_id, post_id, status FROM vk_inbox WHERE {where}",
+                        tuple(params),
+                    )
+                    rows = list(cur.fetchall())
+                except sqlite3.OperationalError as exc:
+                    # Writers can briefly lock DB during long VK import; keep polling.
+                    if "locked" in str(exc).lower():
+                        return False, "db-locked"
+                    raise
+            finally:
+                conn.close()
+            status_map = {(int(r["group_id"]), int(r["post_id"])): str(r["status"] or "") for r in rows}
+            states = [f"-{g}_{p}:{status_map.get((g, p), 'missing')}" for g, p in targets]
+            active = {"pending", "locked", "importing"}
+            done = all(status_map.get((g, p), "missing") not in active for g, p in targets)
+            return done, ", ".join(states)
+
+        while time.monotonic() < deadline:
+            messages = await context.client.client.get_messages(context.bot_entity, limit=80)
+            last_preview = [
+                (m.text or "").replace("\n", " ")[:140]
+                for m in messages[:8]
+            ]
+            done, last_target_state = _targets_processed()
+            now = time.monotonic()
+            if now >= next_progress_log:
+                logger.info(
+                    "VK auto wait: reports=%s events=%s log_links=%s state=%s",
+                    len(seen_report_msg_ids),
+                    len(aggregated_event_ids),
+                    len(log_links_seen_for_eid),
+                    last_target_state,
+                )
+                next_progress_log = now + progress_log_sec
+
+            # Process from older -> newer to preserve deterministic event order.
+            for msg in reversed(messages):
+                if int(getattr(msg, "id", 0) or 0) <= baseline_id:
+                    continue
+                text = msg.text or ""
+                if not text:
+                    continue
+                if "Telegraph:" not in text or "Лог:" not in text or "ICS:" not in text:
+                    continue
+                if "Smart Update (детали событий)" not in text:
+                    continue
+                if ("Созданные события" not in text) and ("Обновлённые события" not in text):
+                    continue
+
+                ids = [int(x) for x in re.findall(r"\(id=(\d+)\)", text)]
+                if not ids:
+                    continue
+                tele_links = re.findall(r"https://telegra\.ph/[a-zA-Z0-9_-]+", text)
+                if not tele_links:
+                    continue
+                if not re.search(r"^\s*ICS:\s+\S+", text, flags=re.MULTILINE):
+                    continue
+                if not re.search(r"^\s*Лог:\s+.*?/log\s+\d+.*$", text, flags=re.MULTILINE):
+                    continue
+                if not re.search(r"^\s*Факты:\s+.*Иллюстрации:\s+", text, flags=re.MULTILINE):
+                    continue
+                mid = int(getattr(msg, "id", 0) or 0)
+                latest_report_msg = msg
+                latest_report_text = text
+                if mid not in seen_report_msg_ids:
+                    seen_report_msg_ids.add(mid)
+                    for eid in ids:
+                        if eid not in aggregated_event_ids_seen:
+                            aggregated_event_ids_seen.add(eid)
+                            aggregated_event_ids.append(eid)
+                    for link in tele_links:
+                        if link not in aggregated_tele_seen:
+                            aggregated_tele_seen.add(link)
+                            aggregated_tele_links.append(link)
+                    urls = []
+                    for ent in (getattr(msg, "entities", None) or []):
+                        u = getattr(ent, "url", None)
+                        if u:
+                            urls.append(str(u))
+                    for eid in ids:
+                        want = f"start=log_{eid}"
+                        if any(want in u for u in urls):
+                            log_links_seen_for_eid.add(eid)
+
+            if done and latest_report_msg and aggregated_event_ids:
+                context.last_response = latest_report_msg
+                context.telegraph_links = aggregated_tele_links
+                context.last_vk_auto_report_event_ids = list(aggregated_event_ids)
+                context.last_vk_auto_report_text = latest_report_text
+                logger.info(
+                    "✓ VK auto report ready: report_messages=%s events=%s telegraph_links=%s",
+                    len(seen_report_msg_ids),
+                    len(aggregated_event_ids),
+                    len(aggregated_tele_links),
+                )
+                for eid in aggregated_event_ids[:10]:
+                    if eid not in log_links_seen_for_eid:
+                        raise AssertionError(
+                            "В отчётах VK auto нет кликабельной ссылки на лог "
+                            "(ожидали deep-link через start=log_<id>).\n"
+                            f"event_id={eid}"
+                        )
+                return
+
+            await asyncio.sleep(poll_sec)
+
+        raise AssertionError(
+            "Не найден валидный отчёт VK auto import с событиями и ссылками "
+            f"за {timeout_sec}с. Последние сообщения: {last_preview}. "
+            f"Состояние целевых постов: {last_target_state}"
+        )
+
+    run_async(context, _wait())
+
+
+@then("я жду первый отчёт VK auto import с событиями и ссылками")
+def step_wait_vk_auto_first_report_has_unified_event_blocks(context):
+    """Wait for the first VK auto-import report message with actionable links.
+
+    Unlike the full-step, this does NOT require the whole VK queue to finish.
+    It's intended for mass E2E scenarios where draining the queue can exceed
+    timeout limits, but we still want a "live" signal with valid report blocks.
+    """
+
+    async def _wait():
+        import asyncio
+
+        timeout_sec = int(os.getenv("E2E_VK_AUTO_FIRST_REPORT_TIMEOUT_SEC", str(12 * 60)))
+        poll_sec = float(os.getenv("E2E_VK_AUTO_REPORT_POLL_SEC", "3"))
+        baseline_id = int(getattr(getattr(context, "last_response", None), "id", 0) or 0)
+        deadline = time.monotonic() + float(timeout_sec)
+        last_preview: list[str] = []
+
+        while time.monotonic() < deadline:
+            messages = await context.client.client.get_messages(context.bot_entity, limit=80)
+            last_preview = [(m.text or "").replace("\n", " ")[:140] for m in messages[:8]]
+
+            for msg in reversed(messages):
+                if int(getattr(msg, "id", 0) or 0) <= baseline_id:
+                    continue
+                text = msg.text or ""
+                if not text:
+                    continue
+                if "Telegraph:" not in text or "Лог:" not in text or "ICS:" not in text:
+                    continue
+                if "Smart Update (детали событий)" not in text:
+                    continue
+                if ("Созданные события" not in text) and ("Обновлённые события" not in text):
+                    continue
+
+                ids = [int(x) for x in re.findall(r"\(id=(\d+)\)", text)]
+                if not ids:
+                    continue
+                tele_links = re.findall(r"https://telegra\.ph/[a-zA-Z0-9_-]+", text)
+                if not tele_links:
+                    continue
+                if not re.search(r"^\s*ICS:\s+\S+", text, flags=re.MULTILINE):
+                    continue
+                if not re.search(r"^\s*Лог:\s+.*?/log\s+\d+.*$", text, flags=re.MULTILINE):
+                    continue
+                if not re.search(r"^\s*Факты:\s+.*Иллюстрации:\s+", text, flags=re.MULTILINE):
+                    continue
+
+                # Ensure /log is a clickable deep-link (Telegram won't include args in command click targets).
+                urls = []
+                for ent in (getattr(msg, "entities", None) or []):
+                    u = getattr(ent, "url", None)
+                    if u:
+                        urls.append(str(u))
+                for eid in ids[:10]:
+                    want = f"start=log_{eid}"
+                    if not any(want in u for u in urls):
+                        raise AssertionError(
+                            "В отчёте нет кликабельной ссылки на лог "
+                            "(ожидали deep-link через start=log_<id>).\n"
+                            f"event_id={eid}"
+                        )
+
+                context.last_response = msg
+                context.last_vk_auto_report_event_ids = list(dict.fromkeys(ids))
+                context.last_vk_auto_report_text = text
+                context.telegraph_links = list(dict.fromkeys(tele_links))
+                logger.info(
+                    "✓ VK auto first report ready: events=%s telegraph_links=%s",
+                    len(context.last_vk_auto_report_event_ids),
+                    len(context.telegraph_links),
+                )
+                return
+
+            await asyncio.sleep(poll_sec)
+
+        raise AssertionError(
+            "Не найден первый валидный отчёт VK auto import с событиями и ссылками "
+            f"за {timeout_sec}с. Последние сообщения: {last_preview}"
+        )
+
+    run_async(context, _wait())
+
+
+@then("я жду сообщение прогресса VK auto import")
+def step_wait_vk_auto_progress_message(context):
+    """Wait for at least one VK auto-import progress message (e.g. '13/87')."""
+
+    async def _wait():
+        import asyncio
+
+        timeout_sec = int(os.getenv("E2E_VK_AUTO_PROGRESS_TIMEOUT_SEC", "180"))
+        poll_sec = float(os.getenv("E2E_VK_AUTO_PROGRESS_POLL_SEC", "2"))
+        baseline_id = int(getattr(getattr(context, "last_response", None), "id", 0) or 0)
+        deadline = time.monotonic() + float(timeout_sec)
+        progress_re = re.compile(r"Разбираю VK пост\s+(\d+)\s*/\s*(\d+|\?)", re.IGNORECASE)
+        last_preview: list[str] = []
+
+        while time.monotonic() < deadline:
+            messages = await context.client.client.get_messages(context.bot_entity, limit=50)
+            last_preview = [(m.text or "").replace("\n", " ")[:140] for m in messages[:8]]
+            for msg in messages:
+                if int(getattr(msg, "id", 0) or 0) <= baseline_id:
+                    continue
+                text = (msg.text or "").strip()
+                if not text:
+                    continue
+                m = progress_re.search(text)
+                if not m:
+                    continue
+                cur = int(m.group(1))
+                total_raw = m.group(2)
+                total = None if total_raw == "?" else int(total_raw)
+                if cur <= 0:
+                    continue
+                if total is not None and total <= 0:
+                    continue
+                logger.info("✓ VK auto progress: %s/%s", cur, total_raw)
+                return
+            await asyncio.sleep(poll_sec)
+
+        raise AssertionError(
+            f"Не найдено сообщение прогресса VK auto import за {timeout_sec}с. "
+            f"Последние сообщения: {last_preview}"
+        )
+
+    run_async(context, _wait())
+
+
+@then("я жду завершение VK auto import")
+def step_wait_vk_auto_finished_message(context):
+    """Wait for final completion summary of VK auto import."""
+
+    async def _wait():
+        import asyncio
+
+        timeout_sec = int(os.getenv("E2E_VK_AUTO_FINISH_TIMEOUT_SEC", str(90 * 60)))
+        poll_sec = float(os.getenv("E2E_VK_AUTO_FINISH_POLL_SEC", "2.5"))
+        baseline_id = int(getattr(getattr(context, "last_response", None), "id", 0) or 0)
+        deadline = time.monotonic() + float(timeout_sec)
+        last_preview: list[str] = []
+
+        while time.monotonic() < deadline:
+            messages = await context.client.client.get_messages(context.bot_entity, limit=60)
+            last_preview = [(m.text or "").replace("\n", " ")[:160] for m in messages[:10]]
+            for msg in messages:
+                if int(getattr(msg, "id", 0) or 0) <= baseline_id:
+                    continue
+                text = (msg.text or "").strip()
+                if not text:
+                    continue
+                if text.startswith("🏁 VK auto import завершён"):
+                    context.last_response = msg
+                    logger.info("✓ VK auto finished summary received")
+                    return
+            await asyncio.sleep(poll_sec)
+
+        raise AssertionError(
+            "Не найдено сообщение завершения VK auto import "
+            f"за {timeout_sec}с. Последние сообщения: {last_preview}"
+        )
+
+    run_async(context, _wait())
+
+
+@then("я жду унифицированный отчёт Smart Update для Telegram Monitoring")
+def step_wait_tg_smart_update_report(context):
+    """Wait for Smart Update per-event report generated by Telegram monitoring."""
+
+    async def _wait():
+        import asyncio
+
+        timeout_sec = int(os.getenv("E2E_TG_SMART_UPDATE_REPORT_TIMEOUT_SEC", str(15 * 60)))
+        poll_sec = float(os.getenv("E2E_TG_SMART_UPDATE_REPORT_POLL_SEC", "2.0"))
+        baseline_id = int(getattr(getattr(context, "last_response", None), "id", 0) or 0)
+        deadline = time.monotonic() + float(timeout_sec)
+        last_preview: list[str] = []
+
+        while time.monotonic() < deadline:
+            messages = await context.client.client.get_messages(context.bot_entity, limit=80)
+            last_preview = [(m.text or "").replace("\n", " ")[:140] for m in messages[:8]]
+            for msg in messages:
+                if int(getattr(msg, "id", 0) or 0) <= baseline_id:
+                    continue
+                text = msg.text or ""
+                if not text:
+                    continue
+                if "Smart Update (детали событий)" not in text:
+                    continue
+                if ("Созданные события" not in text) and ("Обновлённые события" not in text):
+                    continue
+                if "Telegraph:" not in text or "Лог:" not in text or "ICS:" not in text:
+                    continue
+                if not re.search(r"^\s*Факты:\s+", text, flags=re.MULTILINE):
+                    continue
+
+                ids = [int(x) for x in re.findall(r"\(id=(\d+)\)", text)]
+                if not ids:
+                    continue
+                context.last_response = msg
+                context.last_tg_su_report_text = text
+                context.last_tg_su_report_event_ids = list(dict.fromkeys(ids))
+                logger.info(
+                    "✓ TG Smart Update report ready: events=%s",
+                    len(context.last_tg_su_report_event_ids),
+                )
+                return
+            await asyncio.sleep(poll_sec)
+
+        raise AssertionError(
+            "Не найден валидный отчёт Smart Update для Telegram Monitoring "
+            f"за {timeout_sec}с. Последние сообщения: {last_preview}"
+        )
+
+    run_async(context, _wait())
+
+
+def _request_source_logs_for_event_ids(context, event_ids: list[int], *, label: str) -> None:
+    unique_ids = [int(x) for x in dict.fromkeys(int(i) for i in event_ids if int(i) > 0)]
+    if not unique_ids:
+        raise AssertionError(f"{label}: нет event_id для запроса /log")
+
+    timeout_sec = int(os.getenv("E2E_LOG_TIMEOUT_SEC", "90"))
+    poll_sec = float(os.getenv("E2E_LOG_POLL_SEC", "1.5"))
+    opened: list[int] = []
+
+    for event_id in unique_ids:
+        try:
+            target_url = _resolve_event_telegraph_url(event_id)
+        except Exception:
+            target_url = ""
+
+        baseline_id = int(getattr(getattr(context, "last_response", None), "id", 0) or 0)
+
+        async def _send():
+            await context.client.client.send_message(context.bot_entity, f"/log {event_id}")
+
+        run_async(context, _send())
+
+        async def _wait():
+            import asyncio
+
+            deadline = time.monotonic() + float(timeout_sec)
+            while time.monotonic() < deadline:
+                messages = await context.client.client.get_messages(context.bot_entity, limit=40)
+                for msg in messages:
+                    if int(getattr(msg, "id", 0) or 0) <= baseline_id:
+                        continue
+                    text = msg.text or ""
+                    if "Лог источников" not in text:
+                        continue
+                    if target_url and target_url not in text:
+                        continue
+                    context.last_response = msg
+                    return
+                await asyncio.sleep(poll_sec)
+            raise AssertionError(
+                f"{label}: не получили лог источников для event_id={event_id} "
+                f"за {timeout_sec}с"
+            )
+
+        run_async(context, _wait())
+        opened.append(event_id)
+
+    context.last_opened_log_event_ids = opened
+    logger.info("✓ %s: /log открыт для всех событий: %s", label, opened)
+
+
+@when("я запрашиваю /log для первого события из последнего VK отчёта")
+def step_request_log_for_first_vk_report_event(context):
+    report_text = getattr(context, "last_vk_auto_report_text", None) or (
+        context.last_response.text if context.last_response else ""
+    )
+    if not report_text:
+        raise AssertionError("Нет текста последнего VK отчёта")
+    ids = [int(x) for x in re.findall(r"\(id=(\d+)\)", report_text)]
+    if not ids:
+        raise AssertionError(f"В VK отчёте не найден event_id. Текст:\n{report_text}")
+    event_id = int(ids[0])
+    context.last_event_id = event_id
+    baseline_id = int(getattr(getattr(context, "last_response", None), "id", 0) or 0)
+
+    async def _send():
+        await context.client.client.send_message(context.bot_entity, f"/log {event_id}")
+
+    run_async(context, _send())
+
+    async def _wait():
+        import asyncio
+
+        timeout_sec = int(os.getenv("E2E_LOG_TIMEOUT_SEC", "60"))
+        poll_sec = float(os.getenv("E2E_LOG_POLL_SEC", "1.5"))
+        deadline = time.monotonic() + float(timeout_sec)
+        while time.monotonic() < deadline:
+            messages = await context.client.client.get_messages(context.bot_entity, limit=30)
+            for msg in messages:
+                if int(getattr(msg, "id", 0) or 0) <= baseline_id:
+                    continue
+                text = msg.text or ""
+                if "Лог источников" in text and f"/log {event_id}" not in text:
+                    context.last_response = msg
+                    return
+            await asyncio.sleep(poll_sec)
+        raise AssertionError(f"Не получили лог источников для event_id={event_id} за {timeout_sec}с")
+
+    run_async(context, _wait())
+
+
+@when("я запрашиваю /log для каждого события из последнего VK отчёта")
+def step_request_log_for_each_vk_report_event(context):
+    ids = list(getattr(context, "last_vk_auto_report_event_ids", []) or [])
+    if not ids:
+        text = getattr(context, "last_vk_auto_report_text", None) or (
+            context.last_response.text if context.last_response else ""
+        )
+        ids = [int(x) for x in re.findall(r"\(id=(\d+)\)", text)]
+    _request_source_logs_for_event_ids(context, ids, label="VK auto import")
+
+
+@when("я запрашиваю /log для каждого события из последнего Telegram отчёта")
+def step_request_log_for_each_tg_report_event(context):
+    ids = list(getattr(context, "last_tg_su_report_event_ids", []) or [])
+    if not ids:
+        text = getattr(context, "last_tg_su_report_text", None) or (
+            context.last_response.text if context.last_response else ""
+        )
+        ids = [int(x) for x in re.findall(r"\(id=(\d+)\)", text)]
+    _request_source_logs_for_event_ids(context, ids, label="Telegram monitoring")
+
+
+@then("в отчёте /parse есть Telegraph и /log для событий")
+def step_parse_report_has_unified_event_blocks(context):
+    msg = context.last_response
+    text = msg.text if msg and msg.text else ""
+    if not text or "Парсинг источников завершен" not in text:
+        raise AssertionError("Ожидали сообщение '/parse' с текстом 'Парсинг источников завершен'")
+    if "Smart Update (детали событий)" not in text:
+        raise AssertionError(f"В отчёте /parse нет секции Smart Update (детали событий). Текст:\n{text}")
+    if not re.search(r"^\s*Telegraph:\s+https?://\S+", text, flags=re.MULTILINE):
+        raise AssertionError(f"В отчёте /parse нет строки Telegraph: https://... Текст:\n{text}")
+    if not re.search(r"^\s*Источник:\s+https?://\S+", text, flags=re.MULTILINE):
+        raise AssertionError(f"В отчёте /parse нет строки Источник: https://... Текст:\n{text}")
+    if not re.search(r"^\s*Лог:\s+.*?/log\s+\d+.*$", text, flags=re.MULTILINE):
+        raise AssertionError(f"В отчёте /parse нет строки Лог: /log <id>. Текст:\n{text}")
+    if not re.search(r"^\s*ICS:\s+", text, flags=re.MULTILINE):
+        raise AssertionError(f"В отчёте /parse нет строки ICS:. Текст:\n{text}")
+    if not re.search(r"^\s*Факты:\s+", text, flags=re.MULTILINE):
+        raise AssertionError(f"В отчёте /parse нет строки Факты:. Текст:\n{text}")
+
+    urls = []
+    for ent in (getattr(msg, "entities", None) or []):
+        u = getattr(ent, "url", None)
+        if u:
+            urls.append(str(u))
+    if not any("start=log_" in u for u in urls):
+        raise AssertionError(
+            "В отчёте /parse нет кликабельной ссылки на лог (ожидали deep-link через start=log_<id>).\n"
+            f"Текст:\n{text}"
+        )
+    logger.info("✓ /parse report содержит Telegraph + /log + ICS")
 
 
 @then('событие содержит новые изображения из поста "{post_url}"')
@@ -1801,7 +4818,7 @@ def step_event_has_images_from_post(context, post_url):
             target = msg
             break
     if not target:
-        match = re.search(r"t\\.me/([^/]+)/([0-9]+)", post_url)
+        match = re.search(r"t\.me/([^/]+)/([0-9]+)", post_url)
         if match:
             username = match.group(1)
             message_id = int(match.group(2))
@@ -1948,7 +4965,7 @@ def step_source_facts_log_present(context):
         raise AssertionError("В логе нет даты и времени (формат YYYY-MM-DD HH:MM)")
 
     # Source marker: URL or source type keyword
-    if not re.search(r"(https?://|t\\.me/|telegram|vk|site|parser|manual|bot)", text, re.IGNORECASE):
+    if not re.search(r"(https?://|t\.me/|telegram|vk|site|parser|manual|bot)", text, re.IGNORECASE):
         raise AssertionError("В логе нет указания источника")
 
     # Thesis marker: bullet list
@@ -1963,6 +4980,224 @@ def step_source_log_has_poster_url_fact(context):
     msg = context.last_response
     text = msg.text if msg and msg.text else ""
 
+    event_id = _event_id_from_card_text(getattr(context.last_response, "text", None)) or getattr(
+        context, "last_event_id", None
+    )
+    if (not text) or ("Лог источников" not in text):
+        async def _fetch():
+            messages = await context.client.client.get_messages(context.bot_entity, limit=40)
+            target_url = None
+            if event_id:
+                # Match the log to the current event to avoid picking an older log message.
+                import sqlite3
+
+                conn = sqlite3.connect(_db_path(), timeout=30)
+                try:
+                    cur = conn.cursor()
+                    cur.execute("SELECT telegraph_url, telegraph_path FROM event WHERE id=?", (int(event_id),))
+                    row = cur.fetchone()
+                finally:
+                    conn.close()
+                if row:
+                    target_url = (row[0] or "").strip() or (
+                        f"https://telegra.ph/{(row[1] or '').lstrip('/')}" if (row[1] or "").strip() else None
+                    )
+            for candidate in messages:
+                t = candidate.text or ""
+                if "Лог источников" not in t:
+                    continue
+                if target_url and target_url not in t:
+                    continue
+                return t
+            for candidate in messages:
+                if candidate.text and "Лог источников" in candidate.text:
+                    return candidate.text
+            return ""
+
+        text = run_async(context, _fetch())
+
+    if not re.search(r"(?:Добавлена афиша):\s+https?://\S+", text or ""):
+        raise AssertionError("В логе источников не найден факт 'Добавлена афиша: <URL>'")
+    logger.info("✓ Лог источников содержит факт с URL афиши")
+
+
+@then('в логе источников количество фактов "{fact_prefix}" равно "{count}"')
+def step_source_log_fact_count_equals(context, fact_prefix, count):
+    msg = context.last_response
+    text = msg.text if msg and msg.text else ""
+    event_id = _event_id_from_card_text(getattr(context.last_response, "text", None)) or getattr(
+        context, "last_event_id", None
+    )
+
+    if (not text) or ("Лог источников" not in text):
+        async def _fetch():
+            messages = await context.client.client.get_messages(context.bot_entity, limit=40)
+            target_url = None
+            if event_id:
+                import sqlite3
+
+                conn = sqlite3.connect(_db_path(), timeout=30)
+                try:
+                    cur = conn.cursor()
+                    cur.execute("SELECT telegraph_url, telegraph_path FROM event WHERE id=?", (int(event_id),))
+                    row = cur.fetchone()
+                finally:
+                    conn.close()
+                if row:
+                    target_url = (row[0] or "").strip() or (
+                        f"https://telegra.ph/{(row[1] or '').lstrip('/')}" if (row[1] or "").strip() else None
+                    )
+            for candidate in messages:
+                t = candidate.text or ""
+                if "Лог источников" not in t:
+                    continue
+                if target_url and target_url not in t:
+                    continue
+                return t
+            for candidate in messages:
+                if candidate.text and "Лог источников" in candidate.text:
+                    return candidate.text
+            return ""
+
+        text = run_async(context, _fetch())
+
+    if not text:
+        raise AssertionError("Лог источников пуст или не получен")
+    prefix = (fact_prefix or "").strip()
+    if not prefix:
+        raise AssertionError("Пустой fact_prefix")
+
+    actual = len(re.findall(re.escape(prefix), text, flags=re.IGNORECASE))
+    expected = int(count)
+    if actual != expected:
+        raise AssertionError(
+            f"Ожидали фактов '{prefix}' = {expected}, получили {actual}. Текст лога:\n{text}"
+        )
+    logger.info("✓ Количество фактов '%s' = %s", prefix, expected)
+
+
+@then('в логе источников для источника "{source_url}" количество фактов "{fact_prefix}" минимум "{count}"')
+def step_source_log_fact_count_min_for_source(context, source_url, fact_prefix, count):
+    want = int(count)
+    event_id = _event_id_from_card_text(getattr(context.last_response, "text", None)) or getattr(
+        context, "last_event_id", None
+    )
+    text = _fetch_source_log_text(context, int(event_id) if event_id else None, limit=60)
+    if not text or "Лог источников" not in text:
+        raise AssertionError("Лог источников пуст или не получен")
+
+    url = (source_url or "").strip()
+    if not url:
+        raise AssertionError("source_url пуст")
+    prefix = (fact_prefix or "").strip()
+    if not prefix:
+        raise AssertionError("fact_prefix пуст")
+
+    lines = (text or "").splitlines()
+    start = None
+    for i, line in enumerate(lines):
+        if url in line:
+            start = i
+            break
+    if start is None:
+        raise AssertionError(f"В логе источников не найден блок для источника: {url}")
+
+    block = []
+    for line in lines[start + 1 :]:
+        if re.match(r"^\\d{4}-\\d{2}-\\d{2}\\s+\\d{2}:\\d{2}\\b", line.strip()):
+            break
+        block.append(line)
+
+    got = 0
+    for l in block:
+        ll = l.strip()
+        if not ll.startswith("•"):
+            continue
+        if prefix.lower() in ll.lower():
+            got += 1
+    if got < want:
+        sample = "\n".join(block[:120])
+        raise AssertionError(
+            f"Ожидали минимум {want} фактов '{prefix}' для источника {url}, получили {got}.\n"
+            f"Блок:\n{sample}"
+        )
+    logger.info("✓ В логе источников для источника %s фактов '%s' >= %s (got=%s)", url, prefix, want, got)
+
+
+@then('в базе у открытого события количество афиш равно "{count}"')
+def step_db_open_event_poster_count_equals(context, count):
+    event_id = getattr(context, "last_event_id", None) or _event_id_from_card_text(
+        getattr(getattr(context, "last_response", None), "text", None)
+    )
+    if not event_id:
+        raise AssertionError("Не удалось определить event_id для проверки eventposter")
+    db_path = _db_path()
+    import sqlite3
+
+    conn = sqlite3.connect(db_path, timeout=30)
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM eventposter WHERE event_id = ?", (int(event_id),))
+        actual = int(cur.fetchone()[0])
+    finally:
+        conn.close()
+    expected = int(count)
+    if actual != expected:
+        raise AssertionError(f"Ожидали eventposter для event_id={event_id}: {expected}, получили {actual}")
+    logger.info("✓ eventposter count=%s для event_id=%s", expected, event_id)
+
+
+@then('в базе у открытого события количество афиш из поста "{post_url}" равно "{count}"')
+def step_db_open_event_poster_count_from_post_equals(context, post_url, count):
+    run_id = getattr(context, "last_monitor_run_id", None)
+    if not run_id:
+        raise AssertionError("Не найден run_id последнего мониторинга (нужен для сопоставления афиш)")
+    data = _load_tg_results(run_id)
+    if not data:
+        raise AssertionError(f"Не удалось загрузить telegram_results.json для run_id={run_id}")
+    poster_urls = {_norm_url_for_compare(u) for u in _extract_posters_from_tg_results(data, post_url) if _norm_url_for_compare(u)}
+    if not poster_urls:
+        raise AssertionError(f"Не найдены афиши в telegram_results.json для поста {post_url}")
+
+    event_id = getattr(context, "last_event_id", None) or _event_id_from_card_text(
+        getattr(getattr(context, "last_response", None), "text", None)
+    )
+    if not event_id:
+        raise AssertionError("Не удалось определить event_id для проверки eventposter")
+
+    db_path = _db_path()
+    import sqlite3
+
+    conn = sqlite3.connect(db_path, timeout=30)
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT catbox_url, supabase_url FROM eventposter WHERE event_id = ?",
+            (int(event_id),),
+        )
+        urls: set[str] = set()
+        for catbox_url, supabase_url in cur.fetchall():
+            if catbox_url:
+                urls.add(_norm_url_for_compare(str(catbox_url)))
+            if supabase_url:
+                urls.add(_norm_url_for_compare(str(supabase_url)))
+        actual = len(urls & poster_urls)
+    finally:
+        conn.close()
+
+    expected = int(count)
+    if actual != expected:
+        raise AssertionError(
+            f"Ожидали eventposter(match post={post_url}) для event_id={event_id}: {expected}, получили {actual}"
+        )
+    logger.info("✓ eventposter from post count=%s для event_id=%s", expected, event_id)
+
+
+@then("в логе источников есть ссылка на Telegraph")
+def step_source_log_has_telegraph_link(context):
+    msg = context.last_response
+    text = msg.text if msg and msg.text else ""
+
     if not text or "Лог источников" not in text:
         async def _fetch():
             messages = await context.client.client.get_messages(context.bot_entity, limit=20)
@@ -1973,9 +5208,1001 @@ def step_source_log_has_poster_url_fact(context):
 
         text = run_async(context, _fetch())
 
-    if not re.search(r"(?:Добавлена афиша|Афиша в источнике):\s+https?://\S+", text or ""):
-        raise AssertionError("В логе источников не найден факт с URL афиши")
-    logger.info("✓ Лог источников содержит факт с URL афиши")
+    if not re.search(r"^\s*(?:📄\s*)?Telegraph:\s+https?://\S+", text, flags=re.MULTILINE):
+        raise AssertionError("В логе источников не найдена ссылка на Telegraph (ожидали '📄 Telegraph: https://...')")
+    logger.info("✓ Лог источников содержит ссылку на Telegraph")
+
+
+@then("я дожидаюсь выполнения задач обновления Telegraph для событий из последнего VK отчёта")
+def step_drain_telegraph_jobs_for_last_vk_report(context):
+    ids = list(getattr(context, "last_vk_auto_report_event_ids", []) or [])
+    if not ids:
+        text = getattr(context, "last_vk_auto_report_text", None) or (
+            context.last_response.text if context.last_response else ""
+        )
+        ids = [int(x) for x in re.findall(r"\(id=(\d+)\)", text or "")]
+    if not ids:
+        raise AssertionError("Не удалось определить event_id из последнего VK отчёта")
+
+    async def _drain():
+        import main as main_mod
+        from db import Database
+        from main import JobTask
+
+        class _NoopBot:
+            async def send_message(self, *_args, **_kwargs):
+                return None
+
+        db = Database(_db_path())
+        await db.init()
+        allowed = {JobTask.ics_publish, JobTask.telegraph_build}
+        # A few drain rounds are enough to execute dependent ics_publish -> telegraph_build.
+        for _ in range(4):
+            progressed = False
+            for eid in ids:
+                before_url = _resolve_event_telegraph_url(int(eid))
+                await main_mod.run_event_update_jobs(
+                    db,
+                    _NoopBot(),
+                    event_id=int(eid),
+                    allowed_tasks=allowed,
+                )
+                after_url = _resolve_event_telegraph_url(int(eid))
+                if after_url != before_url:
+                    progressed = True
+            if not progressed:
+                break
+
+    run_async(context, _drain())
+
+    refreshed_links: list[str] = []
+    for eid in ids:
+        try:
+            url = _resolve_event_telegraph_url(int(eid))
+        except Exception:
+            continue
+        if url and url not in refreshed_links:
+            refreshed_links.append(url)
+    if refreshed_links:
+        context.telegraph_links = refreshed_links
+    logger.info(
+        "✓ Telegraph jobs drained for VK report events=%s links=%s",
+        ids,
+        len(getattr(context, "telegraph_links", []) or []),
+    )
+
+
+@then("первая Telegraph страница содержит хотя бы одно изображение")
+def step_first_telegraph_page_contains_image(context):
+    msg = context.last_response
+    text = msg.text if msg and msg.text else ""
+    links = list(getattr(context, "telegraph_links", None) or [])
+    if not links:
+        links = re.findall(r"https://telegra\.ph/[a-zA-Z0-9_-]+", text or "")
+    if not links:
+        raise AssertionError("Не нашли ссылку на Telegraph для проверки изображений")
+    first = links[0]
+
+    async def _fetch():
+        import aiohttp
+
+        async with aiohttp.ClientSession() as session:
+            async with session.get(first, timeout=aiohttp.ClientTimeout(total=20)) as resp:
+                if resp.status != 200:
+                    raise AssertionError(f"Telegraph {first} вернул статус {resp.status}")
+                return await resp.text()
+
+    html = run_async(context, _fetch())
+    if not re.search(r"<img\b", html or "", flags=re.IGNORECASE):
+        raise AssertionError(f"На странице {first} не найдено изображений (<img>)")
+    logger.info("✓ Telegraph содержит изображение: %s", first)
+
+
+@then('первая Telegraph страница содержит блок "{marker}"')
+def step_first_telegraph_page_contains_marker(context, marker):
+    msg = context.last_response
+    text = msg.text if msg and msg.text else ""
+    links = list(getattr(context, "telegraph_links", None) or [])
+    if not links:
+        links = re.findall(r"https://telegra\.ph/[a-zA-Z0-9_-]+", text or "")
+    if not links:
+        raise AssertionError("Не нашли ссылку на Telegraph для проверки блока")
+    first = links[0]
+
+    async def _fetch():
+        import aiohttp
+
+        async with aiohttp.ClientSession() as session:
+            async with session.get(first, timeout=aiohttp.ClientTimeout(total=20)) as resp:
+                if resp.status != 200:
+                    raise AssertionError(f"Telegraph {first} вернул статус {resp.status}")
+                return await resp.text()
+
+    html = run_async(context, _fetch())
+    marker_norm = _normalize_search_text(marker)
+    body_norm = _normalize_search_text(_html_to_text(html))
+    if marker_norm not in body_norm:
+        raise AssertionError(f"На странице {first} не найден блок '{marker}'")
+    logger.info("✓ Telegraph содержит блок '%s': %s", marker, first)
+
+
+@then('каждая Telegraph страница из последнего VK отчёта содержит блок "{marker}"')
+def step_each_vk_report_telegraph_page_contains_marker(context, marker):
+    """Assert every Telegraph page referenced by last VK report has marker."""
+    ids = list(getattr(context, "last_vk_auto_report_event_ids", []) or [])
+    if not ids:
+        text = getattr(context, "last_vk_auto_report_text", None) or (
+            context.last_response.text if context.last_response else ""
+        )
+        ids = [int(x) for x in re.findall(r"\(id=(\d+)\)", text or "")]
+    if not ids:
+        raise AssertionError("Не удалось определить event_id из последнего VK отчёта")
+
+    urls: list[str] = []
+    conn = sqlite3.connect(_db_path(), timeout=30)
+    try:
+        cur = conn.cursor()
+        for eid in ids:
+            row = cur.execute(
+                "SELECT telegraph_url, telegraph_path FROM event WHERE id = ?",
+                (int(eid),),
+            ).fetchone()
+            if not row:
+                raise AssertionError(f"Событие id={eid} не найдено в БД")
+            url = (row[0] or "").strip()
+            if not url:
+                path = (row[1] or "").strip().lstrip("/")
+                if not path:
+                    raise AssertionError(f"У события id={eid} не заполнены telegraph_url/telegraph_path")
+                url = f"https://telegra.ph/{path}"
+            if url not in urls:
+                urls.append(url)
+    finally:
+        conn.close()
+
+    async def _verify():
+        html_pages = await _fetch_telegraph_pages(urls)
+        missing: list[str] = []
+        needle = _normalize_search_text(marker)
+        for url, html in zip(urls, html_pages):
+            body_norm = _normalize_search_text(_html_to_text(html))
+            if needle not in body_norm:
+                missing.append(url)
+        if missing:
+            sample = "\n".join(missing[:20])
+            raise AssertionError(
+                f"Маркер '{marker}' не найден на Telegraph страницах из VK отчёта ({len(missing)} шт):\n{sample}"
+            )
+
+    run_async(context, _verify())
+    logger.info("✓ Все Telegraph страницы VK отчёта содержат блок '%s' (count=%s)", marker, len(urls))
+
+
+@then("для событий из последнего VK отчёта с афишами Telegraph содержит изображения")
+def step_vk_report_events_with_posters_have_images(context):
+    """If event has posters in DB, corresponding Telegraph page must contain <img>."""
+    ids = list(getattr(context, "last_vk_auto_report_event_ids", []) or [])
+    if not ids:
+        text = getattr(context, "last_vk_auto_report_text", None) or (
+            context.last_response.text if context.last_response else ""
+        )
+        ids = [int(x) for x in re.findall(r"\(id=(\d+)\)", text or "")]
+    if not ids:
+        raise AssertionError("Не удалось определить event_id из последнего VK отчёта")
+
+    check_items: list[tuple[int, str, int]] = []
+    conn = sqlite3.connect(_db_path(), timeout=30)
+    try:
+        cur = conn.cursor()
+        for eid in ids:
+            poster_count = int(
+                cur.execute(
+                    "SELECT COUNT(*) FROM eventposter WHERE event_id = ?",
+                    (int(eid),),
+                ).fetchone()[0]
+            )
+            if poster_count <= 0:
+                continue
+            row = cur.execute(
+                "SELECT telegraph_url, telegraph_path FROM event WHERE id = ?",
+                (int(eid),),
+            ).fetchone()
+            if not row:
+                raise AssertionError(f"Событие id={eid} не найдено в БД")
+            url = (row[0] or "").strip()
+            if not url:
+                path = (row[1] or "").strip().lstrip("/")
+                if not path:
+                    raise AssertionError(f"У события id={eid} не заполнены telegraph_url/telegraph_path")
+                url = f"https://telegra.ph/{path}"
+            check_items.append((int(eid), url, poster_count))
+    finally:
+        conn.close()
+
+    if not check_items:
+        logger.info("✓ В VK отчёте нет событий с афишами, проверка <img> пропущена")
+        return
+
+    async def _verify():
+        import aiohttp
+
+        missing: list[str] = []
+        async with aiohttp.ClientSession() as session:
+            for eid, url, poster_count in check_items:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=20)) as resp:
+                    if resp.status != 200:
+                        missing.append(f"id={eid} status={resp.status} url={url}")
+                        continue
+                    html = await resp.text()
+                if not re.search(r"<img\b", html or "", flags=re.IGNORECASE):
+                    missing.append(f"id={eid} posters={poster_count} url={url}")
+        if missing:
+            sample = "\n".join(missing[:20])
+            raise AssertionError(
+                "События с афишами опубликованы без изображений на Telegraph:\n"
+                f"{sample}"
+            )
+
+    run_async(context, _verify())
+    logger.info("✓ Для событий VK отчёта с афишами Telegraph содержит изображения (count=%s)", len(check_items))
+
+
+@when('я фиксирую снимок состояния события как "{label}"')
+@then('я фиксирую снимок состояния события как "{label}"')
+def step_capture_event_stage_snapshot(context, label):
+    event_id = _event_id_from_card_text(getattr(context.last_response, "text", None)) or getattr(
+        context, "last_event_id", None
+    )
+    if not event_id:
+        raise AssertionError("Не удалось определить event_id для фиксации snapshot")
+    snap = _capture_stage_snapshot(context, label=label, event_id=int(event_id))
+    logger.info(
+        "✓ Снимок этапа '%s' сохранён: sources=%s semantic_facts=%s text_facts=%s file=%s",
+        snap.get("label"),
+        len((snap.get("source_log") or {}).get("sections") or []),
+        int((snap.get("source_log") or {}).get("semantic_facts_total") or 0),
+        int((snap.get("source_log") or {}).get("text_facts_total") or 0),
+        snap.get("artifact_json"),
+    )
+
+
+@then('в снимке "{label}" у источника "{source_hint}" минимум "{count}" текстовых тезисов')
+def step_snapshot_source_has_min_text_facts(context, label, source_hint, count):
+    snapshots = getattr(context, "stage_snapshots", None) or {}
+    key = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(label or "").strip()).strip("_").lower() or "stage"
+    snap = snapshots.get(key)
+    if not snap:
+        raise AssertionError(f"Snapshot '{label}' не найден. Сначала выполните шаг фиксации snapshot.")
+    hint = _normalize_search_text(source_hint)
+    sections = (snap.get("source_log") or {}).get("sections") or []
+    matched = []
+    for sec in sections:
+        src = _normalize_search_text((sec.get("source") or "") + " " + (sec.get("url") or ""))
+        if hint and hint not in src:
+            continue
+        matched.append(sec)
+    if not matched:
+        raise AssertionError(
+            f"В snapshot '{label}' не найден источник '{source_hint}'. "
+            f"Секции: {[s.get('source') for s in sections]}"
+        )
+    actual = sum(len(sec.get("text_facts") or []) for sec in matched)
+    expected = int(count)
+    if actual < expected:
+        raise AssertionError(
+            f"В snapshot '{label}' у источника '{source_hint}' текстовых тезисов {actual}, ожидали >= {expected}. "
+            f"artifact={snap.get('artifact_json')}"
+        )
+    logger.info("✓ Snapshot '%s': у источника '%s' текстовых тезисов=%s (>= %s)", label, source_hint, actual, expected)
+
+
+@then('в снимке "{label}" есть архивная Telegraph ссылка')
+def step_snapshot_has_archive_link(context, label):
+    snapshots = getattr(context, "stage_snapshots", None) or {}
+    key = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(label or "").strip()).strip("_").lower() or "stage"
+    snap = snapshots.get(key)
+    if not snap:
+        raise AssertionError(f"Snapshot '{label}' не найден")
+    url = str((((snap.get("telegraph") or {}).get("snapshot_url")) or "")).strip()
+    if not url.startswith("https://telegra.ph/"):
+        raise AssertionError(
+            f"В snapshot '{label}' нет архивной telegra.ph ссылки. artifact={snap.get('artifact_json')}"
+        )
+    logger.info("✓ Snapshot '%s' содержит архивную Telegraph ссылку: %s", label, url)
+
+
+@then("из выбранного поста созданы все будущие события как отдельные события без дублей")
+def step_selected_post_future_events_created_without_duplicates(context):
+    post_url = (getattr(context, "control_post_url", None) or "").strip()
+    username = (getattr(context, "control_post_username", None) or "").strip()
+    message_id = int(getattr(context, "control_post_message_id", 0) or 0)
+    if not post_url or not username or not message_id:
+        raise AssertionError("Контрольный пост не выбран")
+
+    run_id = getattr(context, "last_monitor_run_id", None)
+    if not run_id:
+        raise AssertionError("Не найден run_id последнего мониторинга")
+    data = _load_tg_results(run_id)
+    if not data:
+        raise AssertionError(f"Не удалось загрузить telegram_results.json для run_id={run_id}")
+    msg = _find_message_in_tg_results(data, post_url)
+    if not msg:
+        raise AssertionError(f"Пост {post_url} не найден в telegram_results.json")
+
+    all_events = [ev for ev in (msg.get("events") or []) if isinstance(ev, dict)]
+    if not all_events:
+        raise AssertionError(f"В сообщении {post_url} нет events в telegram_results.json")
+
+    conn = sqlite3.connect(_db_path(), timeout=30)
+    try:
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT default_location FROM telegram_source WHERE username = ?",
+            (username,),
+        )
+        row = cur.fetchone()
+        default_location = str((row["default_location"] if row else "") or "").strip()
+
+        cur.execute(
+            """
+            SELECT DISTINCT e.id, e.title, e.date, e.time, e.location_name
+            FROM event_source es
+            JOIN event e ON e.id = es.event_id
+            WHERE es.source_url = ?
+               OR (es.source_chat_username = ? AND es.source_message_id = ?)
+               OR es.source_url LIKE ?
+            ORDER BY e.id
+            """,
+            (post_url, username, int(message_id), f"%t.me/{username}/{int(message_id)}%"),
+        )
+        imported_rows = list(cur.fetchall())
+    finally:
+        conn.close()
+
+    if not imported_rows:
+        raise AssertionError(f"Не найдено импортированных событий из поста {post_url}")
+
+    today = date.today()
+    future_candidates: list[dict] = []
+    past_candidates: list[dict] = []
+    for ev in all_events:
+        raw_date = str(ev.get("date") or "").split("..", 1)[0].strip()
+        if not raw_date:
+            continue
+        try:
+            parsed_date = date.fromisoformat(raw_date)
+        except Exception:
+            continue
+        title = str(ev.get("title") or "").strip()
+        location_name = str(ev.get("location_name") or "").strip() or default_location
+        item = {
+            "title": title,
+            "date": raw_date,
+            "location_name": location_name,
+        }
+        if parsed_date >= today:
+            future_candidates.append(item)
+        else:
+            past_candidates.append(item)
+
+    if not future_candidates:
+        raise AssertionError(
+            f"В посте {post_url} не найдено будущих событий для проверки (today={today.isoformat()})"
+        )
+
+    def _row_matches_candidate(row: sqlite3.Row, cand: dict) -> bool:
+        row_date = str(row["date"] or "").split("..", 1)[0].strip()
+        if row_date != str(cand["date"]):
+            return False
+        row_title = _norm_event_title_key(str(row["title"] or ""))
+        cand_title = _norm_event_title_key(str(cand["title"] or ""))
+        if not (row_title == cand_title or row_title in cand_title or cand_title in row_title):
+            return False
+        row_loc = _norm_location_key(str(row["location_name"] or ""))
+        cand_loc = _norm_location_key(str(cand.get("location_name") or ""))
+        if cand_loc and row_loc and cand_loc != row_loc and cand_loc not in row_loc and row_loc not in cand_loc:
+            return False
+        return True
+
+    missing: list[str] = []
+    duplicate_matches: list[str] = []
+    matched_event_ids: set[int] = set()
+    for cand in future_candidates:
+        matches = [row for row in imported_rows if _row_matches_candidate(row, cand)]
+        if not matches:
+            missing.append(f"{cand['date']} | {cand['title']}")
+            continue
+        ids = {int(m["id"]) for m in matches}
+        if len(ids) > 1:
+            duplicate_matches.append(
+                f"{cand['date']} | {cand['title']} -> ids={sorted(ids)}"
+            )
+        matched_event_ids.update(ids)
+
+    if missing:
+        raise AssertionError(
+            "Не все будущие события из multi-event поста созданы отдельно:\n"
+            + "\n".join(f"- {line}" for line in missing[:12])
+        )
+    if duplicate_matches:
+        raise AssertionError(
+            "Обнаружены дубли по будущим событиям из multi-event поста:\n"
+            + "\n".join(f"- {line}" for line in duplicate_matches[:12])
+        )
+
+    imported_past: list[str] = []
+    for cand in past_candidates:
+        if any(_row_matches_candidate(row, cand) for row in imported_rows):
+            imported_past.append(f"{cand['date']} | {cand['title']}")
+    if imported_past:
+        raise AssertionError(
+            "Из multi-event поста импортированы события с прошедшими датами:\n"
+            + "\n".join(f"- {line}" for line in imported_past[:12])
+        )
+
+    grouped: dict[tuple[str, str, str], list[int]] = {}
+    for row in imported_rows:
+        row_date = str(row["date"] or "").split("..", 1)[0].strip()
+        key = (
+            _norm_event_title_key(str(row["title"] or "")),
+            row_date,
+            _norm_location_key(str(row["location_name"] or "")),
+        )
+        grouped.setdefault(key, []).append(int(row["id"]))
+    structural_duplicates = {k: v for k, v in grouped.items() if len(set(v)) > 1}
+    if structural_duplicates:
+        lines = []
+        for (title_k, row_date, loc_k), ids in list(structural_duplicates.items())[:12]:
+            lines.append(f"{row_date} | {title_k} | {loc_k} -> ids={sorted(set(ids))}")
+        raise AssertionError("Найдены структурные дубли событий:\n" + "\n".join(f"- {ln}" for ln in lines))
+
+    logger.info(
+        "✓ Multi-event post проверен: future_created=%s unique_events=%s past_skipped=%s post=%s",
+        len(future_candidates),
+        len(matched_event_ids),
+        len(past_candidates),
+        post_url,
+    )
+
+
+def _vk_wall_token_from_url(post_url: str) -> str:
+    raw = (post_url or "").strip()
+    match = re.search(r"(wall-?\d+_\d+)", raw)
+    if not match:
+        raise AssertionError(f"Некорректная VK ссылка поста: {post_url}")
+    return match.group(1)
+
+
+def _select_events_by_vk_post(
+    post_url: str,
+    *,
+    date_value: str | None = None,
+    time_value: str | None = None,
+    location_hint: str | None = None,
+) -> list[sqlite3.Row]:
+    token = _vk_wall_token_from_url(post_url)
+    conn = sqlite3.connect(_db_path(), timeout=30)
+    try:
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT e.id, e.title, e.date, e.time, e.location_name, es.source_url
+            FROM event_source es
+            JOIN event e ON e.id = es.event_id
+            WHERE es.source_url LIKE ?
+            ORDER BY es.imported_at DESC, e.id DESC
+            """,
+            (f"%{token}%",),
+        )
+        rows = list(cur.fetchall())
+    finally:
+        conn.close()
+
+    out: list[sqlite3.Row] = []
+    want_date = str(date_value or "").split("..", 1)[0].strip() or None
+    want_time = (time_value or "").strip() or None
+    want_loc = _norm_location_key(location_hint) if location_hint else ""
+    for row in rows:
+        row_date = str((row["date"] or "")).split("..", 1)[0].strip()
+        row_time = str(row["time"] or "").strip()
+        row_loc = _norm_location_key(str(row["location_name"] or ""))
+        if want_date and row_date != want_date:
+            continue
+        if want_time and row_time != want_time:
+            continue
+        if want_loc and want_loc not in row_loc:
+            continue
+        out.append(row)
+    return out
+
+
+@then('из VK поста "{post_url}" создано событие с заголовком содержащим "{title_hint}" на дату "{date}" и время "{time}"')
+def step_vk_post_created_expected_event(context, post_url, title_hint, date, time):
+    rows = _select_events_by_vk_post(post_url, date_value=date, time_value=time)
+    if not rows:
+        raise AssertionError(
+            f"Не найдено событий из VK поста {post_url} на {date} {time}"
+        )
+    hint_norm = _normalize_search_text(title_hint)
+    matched = []
+    for row in rows:
+        title_norm = _normalize_search_text(str(row["title"] or ""))
+        if hint_norm and hint_norm not in title_norm:
+            continue
+        matched.append(row)
+    if not matched:
+        preview = [
+            f"id={int(r['id'])} title={r['title']!r} date={r['date']} time={r['time']}"
+            for r in rows[:8]
+        ]
+        raise AssertionError(
+            f"Для VK поста {post_url} не найдено событие с title_hint='{title_hint}'.\n"
+            f"Кандидаты: {preview}"
+        )
+    logger.info(
+        "✓ VK post %s -> event id=%s title=%s",
+        post_url,
+        int(matched[0]["id"]),
+        matched[0]["title"],
+    )
+
+
+@then('из VK постов "{post_a}" и "{post_b}" созданы разные события в "{location}" на дату "{date}" и время "{time}"')
+def step_vk_posts_create_distinct_parallel_events(context, post_a, post_b, location, date, time):
+    a_rows = _select_events_by_vk_post(
+        post_a, date_value=date, time_value=time, location_hint=location
+    )
+    b_rows = _select_events_by_vk_post(
+        post_b, date_value=date, time_value=time, location_hint=location
+    )
+    if not a_rows:
+        raise AssertionError(
+            f"Не найдено событий из поста {post_a} для {location} {date} {time}"
+        )
+    if not b_rows:
+        raise AssertionError(
+            f"Не найдено событий из поста {post_b} для {location} {date} {time}"
+        )
+    ids_a = {int(r["id"]) for r in a_rows}
+    ids_b = {int(r["id"]) for r in b_rows}
+    if ids_a & ids_b:
+        raise AssertionError(
+            "Посты библиотеки склеились в одно событие, ожидались разные события.\n"
+            f"post_a={post_a} ids={sorted(ids_a)}\n"
+            f"post_b={post_b} ids={sorted(ids_b)}"
+        )
+    logger.info(
+        "✓ VK parallel posts kept separate: post_a_ids=%s post_b_ids=%s",
+        sorted(ids_a),
+        sorted(ids_b),
+    )
+
+
+@then('в снимке "{after_label}" источников больше чем в "{before_label}"')
+def step_snapshot_sources_grew(context, after_label, before_label):
+    snapshots = getattr(context, "stage_snapshots", None) or {}
+    after_key = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(after_label or "").strip()).strip("_").lower() or "after"
+    before_key = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(before_label or "").strip()).strip("_").lower() or "before"
+    after = snapshots.get(after_key)
+    before = snapshots.get(before_key)
+    if not after or not before:
+        raise AssertionError("Не найдены snapshot для сравнения источников")
+    after_n = len((after.get("source_log") or {}).get("sections") or [])
+    before_n = len((before.get("source_log") or {}).get("sections") or [])
+    if after_n <= before_n:
+        raise AssertionError(
+            f"Ожидали рост числа источников: before={before_n}, after={after_n}. "
+            f"after_artifact={after.get('artifact_json')}"
+        )
+    logger.info("✓ Источники выросли: %s -> %s", before_n, after_n)
+
+
+@then('в снимке "{after_label}" текст Telegraph не короче чем в "{before_label}"')
+def step_snapshot_telegraph_not_shorter(context, after_label, before_label):
+    snapshots = getattr(context, "stage_snapshots", None) or {}
+    after_key = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(after_label or "").strip()).strip("_").lower() or "after"
+    before_key = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(before_label or "").strip()).strip("_").lower() or "before"
+    after = snapshots.get(after_key)
+    before = snapshots.get(before_key)
+    if not after or not before:
+        raise AssertionError("Не найдены snapshot для сравнения длины Telegraph текста")
+    after_len = int(((after.get("telegraph") or {}).get("text_len")) or 0)
+    before_len = int(((before.get("telegraph") or {}).get("text_len")) or 0)
+    if after_len < before_len:
+        raise AssertionError(
+            f"После /parse текст Telegraph стал короче: before={before_len}, after={after_len}. "
+            f"before={before.get('artifact_telegraph_text')} after={after.get('artifact_telegraph_text')}"
+        )
+    logger.info("✓ Telegraph текст не сократился: %s -> %s", before_len, after_len)
+
+
+@then("все смысловые факты из лога источников есть на странице Telegraph события")
+@then("на странице Telegraph события отражены все смысловые факты из лога источников")
+@then("количество уникальных добавленных фактов из лога источников совпадает с количеством найденных на странице Telegraph")
+def step_source_facts_are_present_on_telegraph(context):
+    event_id = _event_id_from_card_text(getattr(context.last_response, "text", None)) or getattr(
+        context, "last_event_id", None
+    )
+    if not event_id:
+        raise AssertionError("Не удалось определить event_id для проверки фактов на Telegraph")
+
+    log_text = _fetch_source_log_text(context, int(event_id))
+    if not log_text or "Лог источников" not in log_text:
+        raise AssertionError("Не удалось получить сообщение 'Лог источников' для проверки фактов")
+
+    facts = _extract_semantic_facts_from_log(log_text)
+    if not facts:
+        raise AssertionError("В логе источников не найдено смысловых фактов для сверки с Telegraph")
+
+    telegraph_url, html = _fetch_telegraph_html_for_event(context, int(event_id))
+    telegraph_text_norm = _normalize_search_text(_html_to_text(html))
+    if not telegraph_text_norm:
+        raise AssertionError(f"Telegraph страница пуста: {telegraph_url}")
+
+    missing: list[str] = []
+    for fact in facts:
+        if not _fact_matches_telegraph_text(fact, telegraph_text_norm):
+            missing.append(fact)
+
+    if missing:
+        sample = "\n".join(f"- {m}" for m in missing[:8])
+        raise AssertionError(
+            "Несовпадение факт-покрытия между логом источников и Telegraph.\n"
+            f"Фактов (✅, уникальных) в логе: {len(facts)}\n"
+            f"Найдено фактов на Telegraph (по поиску): {len(facts) - len(missing)}\n"
+            f"Отсутствуют на Telegraph:\n{sample}\n"
+            f"Telegraph: {telegraph_url}"
+        )
+
+    context.last_telegraph_url = telegraph_url
+    context.last_telegraph_html = html
+    context.last_telegraph_text = _html_to_text(html)
+    logger.info(
+        "✓ Fact coverage: log_unique_added=%s telegraph_matched=%s",
+        len(facts),
+        len(facts) - len(missing),
+    )
+
+
+def _get_telegraph_text_quality_context(context) -> tuple[int, str, str, str, list[str], int]:
+    event_id = _event_id_from_card_text(getattr(context.last_response, "text", None)) or getattr(
+        context, "last_event_id", None
+    )
+    if not event_id:
+        raise AssertionError("Не удалось определить event_id для проверки качества текста Telegraph")
+
+    html = getattr(context, "last_telegraph_html", None)
+    url = getattr(context, "last_telegraph_url", None)
+    if not html:
+        url, html = _fetch_telegraph_html_for_event(context, int(event_id))
+    text = _html_to_text(html)
+    text_norm = _normalize_search_text(text)
+    if len(text_norm) < 300:
+        raise AssertionError(f"Текст Telegraph слишком короткий (<300 символов): {url}")
+
+    paragraph_chunks = re.findall(
+        r"(?is)<(?:p|h1|h2|h3|h4|li|blockquote)[^>]*>(.*?)</(?:p|h1|h2|h3|h4|li|blockquote)>",
+        html,
+    )
+    paragraphs = []
+    for chunk in paragraph_chunks:
+        cleaned = _html_to_text(chunk).strip()
+        if cleaned:
+            paragraphs.append(cleaned)
+    if len(paragraphs) < 3:
+        # Fallback for malformed HTML: split by blank lines in plain text.
+        fallback = [p.strip() for p in re.split(r"\n{2,}", text) if p.strip()]
+        paragraphs = fallback
+
+    if len(paragraphs) < 3:
+        raise AssertionError(f"Текст не разбит на небольшие абзацы (нашли {len(paragraphs)}): {url}")
+
+    longest = max(len(p) for p in paragraphs)
+    if longest > 900:
+        raise AssertionError(f"Есть слишком длинный абзац ({longest} символов), текст тяжело читать: {url}")
+    return int(event_id), (url or ""), html, text, paragraphs, longest
+
+
+@then("текст Telegraph страницы события читабелен и форматирован")
+@then("текст Telegraph структурирован в короткие абзацы и содержит форматирование")
+def step_telegraph_text_is_readable_and_formatted(context):
+    _event_id, url, html, _text, paragraphs, longest = _get_telegraph_text_quality_context(context)
+
+    formatting_patterns = [
+        r"(?is)<strong\b",
+        r"(?is)<b\b",
+        r"(?is)<em\b",
+        r"(?is)<i\b",
+        r"(?is)<h1\b",
+        r"(?is)<h2\b",
+        r"(?is)<h3\b",
+        r"(?is)<h4\b",
+        r"(?is)<ul\b",
+        r"(?is)<ol\b",
+        r"(?is)<li\b",
+        r"(?is)<blockquote\b",
+    ]
+    if not any(re.search(p, html) for p in formatting_patterns):
+        raise AssertionError(f"На странице нет выразимого форматирования (заголовки/выделения/списки): {url}")
+
+    logger.info(
+        "✓ Telegraph текст структурирован: абзацев=%s, max_paragraph=%s, есть форматирование",
+        len(paragraphs),
+        longest,
+    )
+
+
+@then("в тексте Telegraph нет нейросетевых клише")
+def step_telegraph_text_no_neural_cliches(context):
+    _event_id, url, _html, text, _paragraphs, _longest = _get_telegraph_text_quality_context(context)
+    text_norm = _normalize_search_text(text)
+    patterns = [
+        r"\\bобеща\\w+\\s+стать\\b",
+        r"\\bярк\\w+\\s+событ\\w+\\b",
+        r"\\bзаметн\\w+\\s+событ\\w+\\b",
+        r"\\bкультурн\\w+\\s+жизн\\w+\\b",
+        r"\\bне\\s+остав\\w+\\s+равнодуш\\w+\\b",
+        r"\\bнезабываем\\w+\\b",
+        r"\\bуникальн\\w+\\s+возможн\\w+\\b",
+    ]
+    hits = [p for p in patterns if re.search(p, text_norm)]
+    if hits:
+        raise AssertionError(f"В Telegraph тексте найдены нейросетевые клише (patterns={hits}): {url}")
+    logger.info("✓ В Telegraph тексте нет нейросетевых клише")
+
+
+@then('в тексте Telegraph не разрывается "{needle}" на разные абзацы')
+def step_telegraph_text_no_broken_phrase_split(context, needle):
+    _event_id, url, html, _text, _paragraphs, _longest = _get_telegraph_text_quality_context(context)
+    n = (needle or "").strip()
+    if not n:
+        raise AssertionError("needle пуст")
+    parts = n.split()
+    if len(parts) >= 2:
+        a = re.escape(" ".join(parts[:-1]))
+        b = re.escape(parts[-1])
+        if re.search(rf"(?is){a}\\s*</p>\\s*<p[^>]*>\\s*{b}", html):
+            raise AssertionError(f"Фраза разорвана между абзацами: '{n}' ({url})")
+    logger.info("✓ В Telegraph тексте нет разрыва фразы '%s' между абзацами", n)
+
+
+@then("стиль Telegraph текста нейтрально-профессиональный и без агрессивной рекламы")
+def step_telegraph_text_style_neutral_and_professional(context):
+    _event_id, url, _html, text, _paragraphs, _longest = _get_telegraph_text_quality_context(context)
+    text_norm = _normalize_search_text(text)
+    aggressive_patterns = [
+        r"\bкупи\b",
+        r"\bпокупай\b",
+        r"\bуспей\b",
+        r"\bжми\b",
+        r"\bподписывайся\b",
+        r"\bрозыгрыш\b",
+        r"\bскидк",
+        r"\bтолько сегодня\b",
+    ]
+    promo_hits = sum(1 for p in aggressive_patterns if re.search(p, text_norm))
+    exclamation_count = text.count("!")
+    if promo_hits >= 2 or exclamation_count > 6:
+        raise AssertionError(
+            f"Текст выглядит избыточно рекламным/агрессивным (promo_hits={promo_hits}, '!': {exclamation_count}): {url}"
+        )
+    logger.info(
+        "✓ Telegraph стиль нейтрально-профессиональный: promo_hits=%s, exclamations=%s",
+        promo_hits,
+        exclamation_count,
+    )
+
+
+@then("в тексте Telegraph нет строк расписания других событий")
+def step_telegraph_text_has_no_foreign_schedule_lines(context):
+    event_id = _event_id_from_card_text(getattr(context.last_response, "text", None)) or getattr(
+        context, "last_event_id", None
+    )
+    if not event_id:
+        raise AssertionError("Не удалось определить event_id для проверки чужих строк расписания")
+
+    conn = sqlite3.connect(_db_path(), timeout=30)
+    try:
+        cur = conn.cursor()
+        row = cur.execute("SELECT title, date, end_date FROM event WHERE id = ?", (int(event_id),)).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        raise AssertionError(f"Событие id={event_id} не найдено")
+    title = str(row[0] or "")
+    event_date = str((row[1] or "")).split("..", 1)[0].strip()
+    end_date = str((row[2] or "")).split("..", 1)[0].strip()
+
+    text = getattr(context, "last_telegraph_text", None)
+    if not text:
+        _url, html = _fetch_telegraph_html_for_event(context, int(event_id))
+        text = _html_to_text(html)
+
+    allowed_tokens = set()
+    for raw in [event_date, end_date]:
+        if not raw:
+            continue
+        m = re.match(r"^\s*(\d{4})-(\d{2})-(\d{2})", raw)
+        if not m:
+            continue
+        dd = int(m.group(3))
+        mm = int(m.group(2))
+        allowed_tokens.add(f"{dd:02d}.{mm:02d}")
+        allowed_tokens.add(f"{dd}.{mm}")
+
+    title_tokens = [w for w in re.findall(r"[A-Za-zА-Яа-яЁё]{4,}", title.lower().replace("ё", "е")) if len(w) >= 4]
+    bad_lines: list[str] = []
+    sched_re = re.compile(r"^\s*(\d{1,2})[./](\d{1,2})\s*\|\s*(.+)$")
+    for line in (text or "").splitlines():
+        s = (line or "").strip()
+        if not s:
+            continue
+        m = sched_re.match(s)
+        if not m:
+            continue
+        token = f"{int(m.group(1)):02d}.{int(m.group(2)):02d}"
+        if allowed_tokens and token not in allowed_tokens:
+            bad_lines.append(s)
+            continue
+        rhs = (m.group(3) or "").lower().replace("ё", "е")
+        if title_tokens and not any(t in rhs for t in title_tokens[:5]):
+            bad_lines.append(s)
+
+    if bad_lines:
+        sample = "\n".join(f"- {ln}" for ln in bad_lines[:8])
+        raise AssertionError(
+            "В Telegraph тексте найдены строки расписания, похожие на чужие события:\n"
+            f"{sample}"
+        )
+    logger.info("✓ В Telegraph тексте нет строк расписания других событий")
+
+
+@then('в логе источников для источника "{source_url}" факт про режиссёра помечен как дубль')
+def step_source_log_director_fact_marked_duplicate(context, source_url):
+    event_id = _event_id_from_card_text(getattr(context.last_response, "text", None)) or getattr(
+        context, "last_event_id", None
+    )
+    if not event_id:
+        raise AssertionError("Не удалось определить event_id для проверки дубля факта про режиссёра")
+
+    log_text = _fetch_source_log_text(context, int(event_id))
+    sections = _parse_source_log_sections(log_text)
+    url = (source_url or "").strip()
+    if not url:
+        raise AssertionError("source_url пустой")
+
+    section = None
+    for s in sections:
+        if str(s.get("url") or "").strip() == url:
+            section = s
+            break
+    if section is None:
+        # Fallback: substring match (some sources may normalize trailing slashes).
+        for s in sections:
+            if url in str(s.get("url") or ""):
+                section = s
+                break
+    if section is None:
+        raise AssertionError(f"Не найден раздел лога для источника: {url}")
+
+    facts_by_status = section.get("facts_by_status") or {}
+    added = [str(x or "") for x in (facts_by_status.get("added") or [])]
+    dup = [str(x or "") for x in (facts_by_status.get("duplicate") or [])]
+
+    def _norm(v: str) -> str:
+        return _normalize_search_text(v).replace("ё", "е")
+
+    added_norm = "\n".join(_norm(x) for x in added)
+    dup_norm = "\n".join(_norm(x) for x in dup)
+
+    needle = "равинск"
+    if needle not in dup_norm:
+        raise AssertionError(
+            "Ожидали, что факт про режиссёра (Равинский) помечен как дубль (↩️) в секции источника.\n"
+            f"source={url}\n"
+            f"duplicate_facts={dup}\n"
+            f"added_facts={added}"
+        )
+    if needle in added_norm:
+        raise AssertionError(
+            "Факт про режиссёра (Равинский) ошибочно помечен как добавленный (✅), ожидали ↩️.\n"
+            f"source={url}\n"
+            f"added_facts={added}\n"
+            f"duplicate_facts={dup}"
+        )
+    logger.info("✓ Факт про режиссёра помечен как дубль: source=%s", url)
+
+
+@then("в тексте Telegraph нет утверждений о премьере")
+def step_telegraph_text_has_no_premiere_claim(context):
+    html = getattr(context, "last_telegraph_html", None)
+    url = getattr(context, "last_telegraph_url", None)
+    if not html:
+        event_id = _event_id_from_card_text(getattr(context.last_response, "text", None)) or getattr(
+            context, "last_event_id", None
+        )
+        if not event_id:
+            raise AssertionError("Не удалось определить event_id для проверки Telegraph текста")
+        url, html = _fetch_telegraph_html_for_event(context, int(event_id))
+    text_norm = _normalize_search_text(_html_to_text(html)).replace("ё", "е")
+    if re.search(r"\bпремьер", text_norm):
+        raise AssertionError(f"В тексте Telegraph найдено утверждение о премьере: {url}")
+    logger.info("✓ В Telegraph тексте нет утверждений о премьере")
+
+
+@then("в тексте Telegraph есть цитата режиссёра (blockquote)")
+def step_telegraph_text_has_director_quote_blockquote(context):
+    event_id = _event_id_from_card_text(getattr(context.last_response, "text", None)) or getattr(
+        context, "last_event_id", None
+    )
+    if not event_id:
+        raise AssertionError("Не удалось определить event_id для проверки цитаты в Telegraph")
+
+    # Telegraph edits can be eventually consistent; keep this check strict but retry briefly.
+    timeout_sec = int(os.getenv("E2E_TELEGRAPH_BLOCKQUOTE_TIMEOUT_SEC", "90"))
+    pause_sec = float(os.getenv("E2E_TELEGRAPH_BLOCKQUOTE_RETRY_PAUSE_SEC", "3"))
+    deadline = time.monotonic() + max(1, timeout_sec)
+    last_url = None
+    last_html = None
+
+    while True:
+        url, html = _fetch_telegraph_html_for_event(context, int(event_id))
+        last_url, last_html = url, html
+        context.last_telegraph_url = url
+        context.last_telegraph_html = html
+
+        blocks = re.findall(r"(?is)<blockquote\b[^>]*>(.*?)</blockquote>", html or "")
+        if blocks:
+            for b in blocks:
+                txt = _normalize_search_text(_html_to_text(b)).replace("ё", "е")
+                if "равинск" in txt or "егор" in txt:
+                    logger.info("✓ В Telegraph тексте есть цитата режиссёра (blockquote)")
+                    return
+
+        if time.monotonic() >= deadline:
+            if not blocks:
+                raise AssertionError(f"На странице нет blockquote (ожидали цитату): {last_url}")
+            sample = "\\n".join(_html_to_text(b).strip() for b in blocks[:3])
+            raise AssertionError(
+                "На странице есть blockquote, но не нашли атрибуцию режиссёра (Равинский/Егор).\n"
+                f"url={last_url}\n"
+                f"sample_blockquotes:\\n{sample}"
+            )
+        time.sleep(max(0.1, pause_sec))
+
+
+@then("для страницы события Telegraph доступен telegram web preview (cached_page + photo)")
+def step_event_telegraph_preview_ready(context):
+    event_id = _event_id_from_card_text(getattr(context.last_response, "text", None)) or getattr(
+        context, "last_event_id", None
+    )
+    if not event_id:
+        raise AssertionError("Не удалось определить event_id для проверки Telegram preview")
+    url = _resolve_event_telegraph_url(int(event_id))
+    timeout_sec = int(os.getenv("E2E_WEB_PREVIEW_READY_TIMEOUT_SEC", "180"))
+    retry_pause_sec = float(os.getenv("E2E_WEB_PREVIEW_RETRY_PAUSE_SEC", "5"))
+    deadline = time.monotonic() + max(1, timeout_sec)
+    last_state = "preview not requested yet"
+    while True:
+        step_check_telegram_web_preview(context, url)
+        webpage = getattr(context, "last_webpage_preview", None)
+        has_cached = bool(getattr(webpage, "cached_page", None)) if webpage else False
+        has_photo = bool(getattr(webpage, "photo", None)) if webpage else False
+        if has_cached and has_photo:
+            break
+        title = getattr(webpage, "title", None) if webpage else None
+        last_state = f"title={title!r} photo={has_photo} cached_page={has_cached}"
+        if time.monotonic() >= deadline:
+            raise AssertionError(
+                f"Telegram preview не стал полным за {timeout_sec}s: {last_state}"
+            )
+        logger.info("⏳ Ожидание полного Telegram preview: %s", last_state)
+        time.sleep(max(0.5, retry_pause_sec))
+    step_web_preview_has_cached_page(context)
+    step_web_preview_has_photo(context)
+    logger.info("✓ Telegram preview готов для страницы события: %s", url)
 
 
 @then("в карточке события отображается блок OCR")
@@ -2014,7 +6241,8 @@ def step_check_telegram_web_preview(context, url):
     async def _check():
         sent = await context.client.client.send_message("me", url)
         # web preview metadata may arrive slightly later
-        for _ in range(10):
+        attach_wait_sec = int(os.getenv("E2E_WEB_PREVIEW_ATTACH_TIMEOUT_SEC", "20"))
+        for _ in range(max(1, attach_wait_sec)):
             msg = await context.client.client.get_messages("me", ids=sent.id)
             media = getattr(msg, "media", None)
             if isinstance(media, MessageMediaWebPage):
@@ -2285,6 +6513,44 @@ def step_event_fields(context, title):
             continue
         if str(actual) != str(expected):
             raise AssertionError(f"{field}: ожидали '{expected}', получили '{actual}'")
+
+
+@then('описание события "{title}" содержит "{needle}"')
+def step_event_description_contains(context, title, needle):
+    event_id = _fetch_event_id(context, title)
+    if not event_id:
+        raise AssertionError(f"Событие '{title}' не найдено для проверки описания")
+    conn = sqlite3.connect(_db_path(), timeout=30)
+    try:
+        row = conn.execute("SELECT description FROM event WHERE id = ?", (event_id,)).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        raise AssertionError(f"Событие '{title}' не найдено в БД")
+    desc = (row[0] or "").strip()
+    if needle.lower() not in desc.lower():
+        raise AssertionError(f"Фрагмент '{needle}' не найден в описании события '{title}'")
+
+
+@then('в описании события "{title}" фрагмент "{needle}" встречается ровно "{count}" раз')
+def step_event_description_fragment_count(context, title, needle, count):
+    event_id = _fetch_event_id(context, title)
+    if not event_id:
+        raise AssertionError(f"Событие '{title}' не найдено для проверки описания")
+    conn = sqlite3.connect(_db_path(), timeout=30)
+    try:
+        row = conn.execute("SELECT description FROM event WHERE id = ?", (event_id,)).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        raise AssertionError(f"Событие '{title}' не найдено в БД")
+    desc = row[0] or ""
+    actual = desc.lower().count((needle or "").lower())
+    expected = int(count)
+    if actual != expected:
+        raise AssertionError(
+            f"Ожидалось, что '{needle}' встречается {expected} раз, но встречается {actual} раз"
+        )
 
 
 @then('для события "{title}" лог фактов содержит "{text}"')

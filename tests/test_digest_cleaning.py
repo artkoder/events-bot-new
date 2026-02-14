@@ -15,6 +15,10 @@ def test_clean_search_digest_normalization():
     assert clean_search_digest(None) is None
     assert clean_search_digest("   12:00   ") is None
 
+def test_clean_search_digest_rejects_truncated():
+    assert clean_search_digest("Something…") is None
+    assert clean_search_digest("Something...") is None
+
 def test_clean_search_digest_complex():
     input_str = "Лекция о  искусстве  начало в 18:30, вход свободный"
     expected = "Лекция о искусстве начало в , вход свободный"
