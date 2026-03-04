@@ -29,7 +29,7 @@ city              - city name only; do not duplicate it in `location_address`
 ticket_price_min  - minimum ticket price as integer or null
 ticket_price_max  - maximum ticket price as integer or null
 ticket_link       - URL for purchasing tickets **or** registration form if present; ignore map service links such as https://yandex.ru/maps/
-is_free           - true if explicitly stated the event is free
+is_free           - true if explicitly stated the event is free. Exception: blood donation actions (“День донора”, “донорская акция”, “сдача крови”, “станция переливания крови”) are free-to-attend — set `is_free=true` even if “бесплатно” is not written.
 pushkin_card     - true if the event accepts the Пушкинская карта
 event_type       - one of: спектакль, выставка, концерт, ярмарка, лекция, встреча, мастер-класс, кинопоказ, спорт
 emoji            - an optional emoji representing the event
@@ -37,6 +37,11 @@ end_date         - end date for multi-day events or null
 search_digest    - search summary text (see guidelines below)
 When a range is provided, put the start date in `date` and the end date in `end_date`.
 Always put the emoji at the start of `title` so headings are easily scannable.
+
+**Money / ticket price rules (important):**
+- `ticket_price_min/max` must describe the **cost to attend** (tickets/entry/participation fee).
+- Do NOT treat money paid **to participants** as a ticket price: `компенсация`, `вознаграждение`, `выплата`, `гонорар`, `приз`, `подарок`, cashback/кэшбэк.
+- For blood donation actions, donor compensation amounts (e.g. “компенсация 1063 руб.”) are NOT tickets: keep `ticket_price_min/max=null` and set `is_free=true`.
 
 **title** rules:
 - The title MUST be grounded in the source text (or poster OCR if provided). Do not invent names, nicknames, or weird words that do not appear in the input.

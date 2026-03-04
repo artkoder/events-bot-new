@@ -20,3 +20,21 @@ def test_has_price_evidence_rejects_when_numbers_without_context() -> None:
     text = "Начало в 19:00, 24 апреля."
     assert su._has_price_evidence(text, 1500) is False
 
+
+def test_has_price_evidence_rejects_compensation_amounts() -> None:
+    text = "Донор получает компенсацию 1063 руб. после сдачи крови."
+    assert su._has_price_evidence(text, 1063) is False
+
+
+def test_looks_like_blood_donation_event_detects_donor_day() -> None:
+    assert (
+        su._looks_like_blood_donation_event(
+            "День донора",
+            "Донорская акция: сдача крови и плазмы.",
+        )
+        is True
+    )
+
+
+def test_looks_like_blood_donation_event_rejects_unrelated_posts() -> None:
+    assert su._looks_like_blood_donation_event("Концерт", "Билеты: 1500 ₽.") is False

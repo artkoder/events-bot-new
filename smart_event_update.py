@@ -2966,6 +2966,46 @@ _PRICE_CONTEXT_RE = re.compile(
     r")"
 )
 _PRICE_NUMBER_RE = re.compile(r"(?u)\b\d{2,6}\b")
+_NON_TICKET_MONEY_CONTEXT_RE = re.compile(
+    r"(?iu)\b("
+    r"компенсац\w*|"
+    r"вознагражден\w*|"
+    r"выплат\w*|"
+    r"гонорар\w*|"
+    r"стипенди\w*|"
+    r"зарплат\w*|"
+    r"оклад\w*|"
+    r"преми\w*|"
+    r"приз\w*|"
+    r"подар\w*|"
+    r"к[эе]шб[эе]к|"
+    r"cashback"
+    r")\b"
+)
+_TICKET_PRICE_CONTEXT_RE = re.compile(
+    r"(?iu)\b("
+    r"билет\w*|"
+    r"вход\w*|"
+    r"стоимост\w*|"
+    r"цена|"
+    r"взнос\w*|"
+    r"донат\w*|"
+    r"платн\w*"
+    r")\b"
+)
+_BLOOD_DONATION_CONTEXT_RE = re.compile(
+    r"(?iu)\b("
+    r"день\s+донора|"
+    r"донорск\w*\s+акци\w*|"
+    r"донор\w*\s+(?:кров\w*|плазм\w*|тромбоцит\w*|костн\w*\s+мозг\w*)|"
+    r"донорств\w*\s+(?:кров\w*|плазм\w*|тромбоцит\w*|костн\w*\s+мозг\w*)|"
+    r"сдач\w*\s+(?:кров\w*|плазм\w*|тромбоцит\w*)|"
+    r"станц\w*\s+перелив\w*\s+кров\w*|"
+    r"центр\w*\s+кров\w*|"
+    r"служб\w*\s+кров\w*|"
+    r"кроводач\w*"
+    r")\b"
+)
 _EVENT_INVITE_RE = re.compile(
     r"(?i)\b("
     r"состо(ится|ятся)|"
@@ -3252,10 +3292,28 @@ def _has_price_evidence(text: str | None, *values: int | None) -> bool:
     if not nums:
         return True
     for n in nums:
-        if re.search(rf"(?u)\b{re.escape(str(n))}\b", raw):
+        # Allow optional whitespace between digits: "1500" vs "1 500" vs "1 500".
+        digits = str(n)
+        pattern = r"\s*".join(re.escape(ch) for ch in digits)
+        for m in re.finditer(rf"(?u)\b{pattern}\b", raw):
+            window_raw = raw[max(0, m.start() - 70) : min(len(raw), m.end() + 70)]
+            # Money in a "compensation/payout/reward" context is not a ticket price.
+            # Exception: if the same window also contains explicit ticket/entry words, keep it.
+            if _NON_TICKET_MONEY_CONTEXT_RE.search(window_raw) and not _TICKET_PRICE_CONTEXT_RE.search(
+                window_raw
+            ):
+                continue
             return True
-    # If we have price context but none of the specific values appear, treat as unsupported.
+    # If we have price-like context but none of the specific values appear as ticket-price-like,
+    # treat as unsupported.
     return False
+
+
+def _looks_like_blood_donation_event(title: str | None, text: str | None) -> bool:
+    combined = "\n".join([str(title or ""), str(text or "")]).strip()
+    if not combined:
+        return False
+    return bool(_BLOOD_DONATION_CONTEXT_RE.search(combined))
 
 
 _UTILITY_OUTAGE_RE = re.compile(
@@ -8556,6 +8614,24 @@ async def _smart_event_update_impl(
                 before_min,
                 before_max,
             )
+
+    # Blood donation actions are free-to-attend; mentions of money are typically about
+    # donor compensation, not an entrance fee. If no ticket price survived grounding,
+    # mark as free so Telegraph/VK summaries don't show it as "paid tickets".
+    if (
+        source_type_clean in {"vk", "telegram", "tg"}
+        and candidate.is_free is not True
+        and candidate.ticket_price_min is None
+        and candidate.ticket_price_max is None
+    ):
+        free_probe = "\n".join(
+            [clean_title, clean_source_text or "", clean_raw_excerpt or ""]
+        ).strip()
+        if _looks_like_blood_donation_event(clean_title, free_probe):
+            candidate.is_free = True
+            note = "Помечено как бесплатное: донорская акция"
+            if note not in text_filter_facts:
+                text_filter_facts.append(note)
 
     # Best-effort: if the source contains festival context (festival post OR event within a festival),
     # enqueue it into the festival queue so operators can later run `/fest_queue` and build/update
